@@ -7113,14 +7113,13 @@ def _agent_timeout_seconds(reason: str) -> float | None:
 
 
 def _positive_token_count(value: Any) -> int | None:
-    """Return a positive whole token count, or None for anything else (never bool)."""
+    """Return a positive whole token count the run record can hold, or None for anything else (never bool)."""
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
-    try:
-        if not math.isfinite(value) or value < 1 or value != int(value):
-            return None
-    except OverflowError:
-        # JSON integers can exceed the float range used to check finiteness.
+    # The range checks come first: they compare big JSON integers without a
+    # float conversion that could overflow, and generated JSON refuses any
+    # count past the browser-safe integer range.
+    if value < 1 or value > _MAX_JSON_SAFE_INTEGER or not math.isfinite(value) or value != int(value):
         return None
     return int(value)
 

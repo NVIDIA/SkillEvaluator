@@ -2287,8 +2287,8 @@ def test_catalog_summary_same_second_rerun_overwrites_json(monkeypatch) -> None:
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="missing author",
+            check_name="frontmatter_format",
+            message="missing frontmatter",
             file_path="SKILL.md",
         ),
         is_error=True,
@@ -2517,10 +2517,10 @@ def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatc
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="Author not specified in metadata",
+            check_name="frontmatter_format",
+            message="SKILL.md must have YAML frontmatter between --- markers",
             file_path="SKILL.md",
-            suggestion="Add 'metadata.author' with format 'Name <email@example.com>'",
+            suggestion="Add frontmatter block: start with '---', add YAML content, end with '---'",
         ),
         is_error=True,
     )

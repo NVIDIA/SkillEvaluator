@@ -45,7 +45,12 @@ DEFAULT_PROFILE_NAME = "default"
 PROFILE_ENV_VAR = "SKILLEVALUATOR_PROFILE"
 
 # Stable, profile-agnostic email-shape pattern: "Name <local@domain>".
-_AUTHOR_SHAPE_PATTERN = re.compile(r"\S[^<>\n]* <[^<>@\s]+@[^<>\s]+>")
+AUTHOR_SHAPE_PATTERN = re.compile(r"\S[^<>\n]* <[^<>@\s]+@[^<>\s]+>")
+
+#: Whether a profile ignores, recommends, or requires ``metadata.id``. A present
+#: ID is validated in every mode; the mode decides only how absence is reported.
+METADATA_ID_REQUIREMENTS = ("ignore", "recommend", "require")
+DEFAULT_METADATA_ID_REQUIREMENT = "ignore"
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,10 @@ class ValidationPolicy:
         severity_overrides: Mapping ``"CATEGORY.check_name"`` or
             ``"CATEGORY.*"`` -> :class:`Severity`. Overrides the default
             severity that the validator would otherwise emit.
+        metadata_id_requirement: ``ignore``, ``recommend`` or ``require``.
+            Decides how a missing ``metadata.id`` is reported and the default
+            severity of invalid or duplicate IDs (blocking only under
+            ``require``).
         source: Path to the YAML file the policy was loaded from (for
             diagnostics). ``None`` for programmatically constructed policies.
     """
@@ -69,6 +78,7 @@ class ValidationPolicy:
     audience: str = "all"
     author_email_regex: re.Pattern[str] | None = None
     severity_overrides: dict[str, Severity] = field(default_factory=dict)
+    metadata_id_requirement: str = DEFAULT_METADATA_ID_REQUIREMENT
     source: Path | None = None
 
     @property
@@ -79,6 +89,7 @@ class ValidationPolicy:
             "audience": self.audience,
             "author_email_regex": self.author_email_regex.pattern if self.author_email_regex else None,
             "severity_overrides": {key: value.value for key, value in sorted(self.severity_overrides.items())},
+            "metadata_id_requirement": self.metadata_id_requirement,
         }
         canonical = json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
         return f"sha256:{hashlib.sha256(canonical).hexdigest()}"
@@ -86,7 +97,7 @@ class ValidationPolicy:
     @property
     def author_shape_regex(self) -> re.Pattern[str]:
         """Profile-agnostic ``Name <email>`` shape pattern."""
-        return _AUTHOR_SHAPE_PATTERN
+        return AUTHOR_SHAPE_PATTERN
 
     def severity_for(
         self,
@@ -120,6 +131,7 @@ class ValidationPolicy:
             "digest": self.digest,
             "author_email_regex": (self.author_email_regex.pattern if self.author_email_regex else None),
             "severity_overrides": {k: v.value for k, v in self.severity_overrides.items()},
+            "metadata_id_requirement": self.metadata_id_requirement,
             "source": str(self.source) if self.source else None,
         }
 
@@ -158,7 +170,23 @@ def _coerce_email_regex(value: Any, source: str) -> re.Pattern[str] | None:
 
 
 _KNOWN_TOP_LEVEL_KEYS = {"profile", "identity", "severity_overrides"}
-_KNOWN_IDENTITY_KEYS = {"author_email_regex"}
+_KNOWN_IDENTITY_KEYS = {"author_email_regex", "metadata_id_requirement"}
+
+
+def _coerce_metadata_id_requirement(value: Any, source: str) -> str:
+    """Return a supported ``metadata_id_requirement``; reject anything else.
+
+    Unlike an unknown severity, a misspelled requirement is an error: silently
+    ignoring ``requre`` would let a registry believe it requires IDs.
+    """
+    if value is None:
+        return DEFAULT_METADATA_ID_REQUIREMENT
+    if not isinstance(value, str) or value not in METADATA_ID_REQUIREMENTS:
+        raise ValueError(
+            f"Invalid identity.metadata_id_requirement {value!r} in {source} "
+            f"(expected one of: {', '.join(METADATA_ID_REQUIREMENTS)})"
+        )
+    return value
 
 
 def _load_policy_yaml(path: Path) -> Any:
@@ -202,6 +230,7 @@ def _policy_from_data(
         _warn_unknown_keys(identity, _KNOWN_IDENTITY_KEYS, "identity", source_str)
 
     author_email_regex = _coerce_email_regex(identity.get("author_email_regex"), source_str)
+    metadata_id_requirement = _coerce_metadata_id_requirement(identity.get("metadata_id_requirement"), source_str)
 
     overrides_raw = data.get("severity_overrides") or {}
     severity_overrides: dict[str, Severity] = {}
@@ -225,12 +254,15 @@ def _policy_from_data(
         audience="all",
         author_email_regex=author_email_regex,
         severity_overrides=severity_overrides,
+        metadata_id_requirement=metadata_id_requirement,
         source=source,
     )
 
 
 def load_profile(name: str = DEFAULT_PROFILE_NAME) -> ValidationPolicy:
-    """Load a bundled policy; ``external`` is a compatibility alias for ``default``.
+    """Load a bundled policy (``default`` or ``registry``).
+
+    ``external`` is a compatibility alias for ``default``.
 
     Raises:
         FileNotFoundError: when no YAML exists for the requested profile.
@@ -275,12 +307,16 @@ def load_policy_file(
     if not isinstance(identity_block, dict):
         identity_block = {}
     overlay_sets_email_regex = "author_email_regex" in identity_block
+    overlay_sets_id_requirement = "metadata_id_requirement" in identity_block
 
     return ValidationPolicy(
         profile=custom.profile,
         audience=base.audience,
         author_email_regex=(custom.author_email_regex if overlay_sets_email_regex else base.author_email_regex),
         severity_overrides=merged_overrides,
+        metadata_id_requirement=(
+            custom.metadata_id_requirement if overlay_sets_id_requirement else base.metadata_id_requirement
+        ),
         source=path,
     )
 
@@ -295,8 +331,10 @@ def default_policy() -> ValidationPolicy:
             profile=DEFAULT_PROFILE_NAME,
             author_email_regex=None,
             severity_overrides={
-                "SCHEMA.author_missing": Severity.HIGH,
+                "SCHEMA.author_missing": Severity.LOW,
+                "SCHEMA.author_without_email": Severity.INFO,
                 "SCHEMA.author_format": Severity.HIGH,
+                "WORKFLOWS.author_format": Severity.HIGH,
                 "LICENSE.*": Severity.CRITICAL,
                 "LICENSE.frontmatter_license_mismatch": Severity.CRITICAL,
             },

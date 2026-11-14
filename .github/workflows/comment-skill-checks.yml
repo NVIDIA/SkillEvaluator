@@ -1,0 +1,98 @@
+name: Comment on skill checks
+on:
+  workflow_call:
+    inputs:
+      tools-ref:
+        description: Reviewed immutable evaluator commit containing the report tools
+        type: string
+        required: true
+      tools-repository:
+        description: Repository supplying the reviewed reusable workflows and report tools
+        type: string
+        default: NVIDIA/SkillEvaluator
+      run-id:
+        type: string
+        required: true
+      run-attempt:
+        description: Completed scan attempt that triggered this publication
+        type: string
+        required: true
+      trusted-evaluator-shas:
+        description: Approved immutable evaluator revisions; required unless delegated-evaluator-wrapper is set
+        type: string
+        default: ''
+      trusted-caller-blobs:
+        description: Approved Git blobs for the consumer scan workflow, separated by commas or newlines
+        type: string
+        required: true
+      trusted-wrapper-workflows:
+        description: Approved exact wrapper workflow paths at full SHAs or tags, separated by commas or newlines
+        type: string
+        default: ''
+      delegated-evaluator-wrapper:
+        description: Optional approved root wrapper allowed to select pinned evaluator revisions; requires a sole caller job
+        type: string
+        default: ''
+permissions: {}
+jobs:
+  comment:
+    if: >-
+      (github.event_name == 'workflow_dispatch' ||
+      (github.event_name == 'workflow_run' && github.event.workflow_run.status == 'completed' &&
+      github.event.workflow_run.event == 'pull_request' &&
+      github.event.workflow_run.head_repository.full_name == github.repository)) &&
+      github.ref == format('refs/heads/{0}', github.event.repository.default_branch)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    concurrency:
+      group: skill-report-comment-${{ github.repository }}
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Validate trusted tool identity
+        env:
+          TOOLS_REF: ${{ inputs.tools-ref }}
+          TOOLS_REPOSITORY: ${{ inputs.tools-repository }}
+        run: |
+          python3 - <<'PY'
+          import os, re
+          if not re.fullmatch(r"[0-9a-f]{40}", os.environ["TOOLS_REF"]):
+              raise SystemExit("tools-ref must be a reviewed full commit SHA")
+          if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", os.environ["TOOLS_REPOSITORY"]):
+              raise SystemExit("tools-repository must be an owner/repository")
+          PY
+      - name: Checkout trusted report tools
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          repository: ${{ inputs.tools-repository }}
+          ref: ${{ inputs.tools-ref }}
+          path: publisher
+          persist-credentials: false
+          # Cone mode also keeps every root file, including the package build inputs.
+          sparse-checkout: |
+            ci
+            src
+      - name: Install the trusted native report renderer
+        working-directory: publisher
+        # No dependency cache is restored: other default-branch workflows can write
+        # this job's cache scope, and uv does not recheck files from its cache.
+        run: |
+          python3 -m venv "$RUNNER_TEMP/uv"
+          "$RUNNER_TEMP/uv/bin/python" -m pip install --disable-pip-version-check \
+            --require-hashes --no-deps --only-binary :all: -r ci/requirements/uv.txt
+          "$RUNNER_TEMP/uv/bin/uv" sync --frozen --no-dev --no-editable --extra publisher
+      - name: Verify evidence and update the native PR comment
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPORT_RUN_ID: ${{ inputs.run-id }}
+          REPORT_RUN_ATTEMPT: ${{ inputs.run-attempt }}
+          TRUSTED_EVALUATOR_SHA: ${{ inputs.trusted-evaluator-shas }}
+          TRUSTED_CALLER_BLOBS: ${{ inputs.trusted-caller-blobs }}
+          TRUSTED_WRAPPER_WORKFLOWS: ${{ inputs.trusted-wrapper-workflows }}
+          DELEGATED_EVALUATOR_WRAPPER: ${{ inputs.delegated-evaluator-wrapper }}
+          EVALUATOR_REPOSITORY: ${{ inputs.tools-repository }}
+        run: publisher/.venv/bin/python publisher/ci/prepare_comments.py

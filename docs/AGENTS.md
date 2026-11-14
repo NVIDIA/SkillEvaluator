@@ -24,6 +24,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
 - `custom-graders.mdx` — bring-your-own graders and native Harbor tasks
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
+- `metrics-reference.mdx` — every metric's formula, range, units, evidence, and validation status
 - `performance-dashboard.mdx` — compare saved Tier 3 scores and resource use
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `github-actions.mdx` — skill check workflow setup and optional hosted PR feedback

@@ -1,0 +1,14 @@
+harness: openclaw
+display_name: OpenClaw
+verified: {version: 2026.10.9, source: "v2026.10.9 @ 88a19e0d8677", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [skills, .agents/skills]
+  user: [~/.agents/skills, ~/.openclaw/skills]
+limits: {max_skills_in_prompt: 150, max_prompt_chars: 18000, compact_desc_chars: 220, max_skill_file_bytes: 256000, read_budget: "16,000-64,000 weighted chars of the skills_read result by model context"}
+rules:
+  - {id: OW-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "OpenClaw reads skills/, .agents/skills, ~/.agents/skills and ~/.openclaw/skills.", fix: "Install it under skills/ or .agents/skills in the workspace, or ~/.openclaw/skills."}
+  - {id: OW-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, outcome: rejected, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", fix: "Use spaces, not tabs, and remove duplicate keys."}
+notes:
+  - "Precedence: workspace skills/ > .agents/skills > ~/.agents/skills > managed > bundled > extra dirs (project wins, 3/3)."
+  - "Description given as a YAML list is stringified and listed. BOM, CRLF, bare colons tolerated."
+  - "New skills listed next turn in `openclaw chat`; files re-read from disk."

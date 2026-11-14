@@ -1,0 +1,15 @@
+harness: copilot-cli
+display_name: GitHub Copilot CLI
+verified: {version: 1.0.105, source: closed (cli-main.js inspected), date: 2026-11-01, method: proxy-captured canary probes x3 (BYOK), os: linux}
+roots:
+  project: [.github/skills, .agents/skills, .claude/skills]
+  user: [~/.copilot/skills, ~/.agents/skills]
+rules:
+  - {id: CP-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Copilot reads .github/.agents/.claude skills (project) and ~/.copilot or ~/.agents skills (user).", fix: "Install it under .github/skills, .agents/skills or .claude/skills."}
+  - {id: CP-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys or description_type not in ['str', 'none']", effect: not_loaded, message: "Skill dropped: Copilot's YAML parsing is strict.", fix: "Use spaces, not tabs, remove duplicate keys, and make the description a string."}
+  - {id: CP-NO-FRONTMATTER, when: "frontmatter_missing", effect: not_loaded, outcome: not found, message: "Skill dropped: a SKILL.md with no front matter, or an unclosed one, is not registered ('Skill not found'; canary pair 3/3, drift NOCLOSE canary in 4 releases, Trial I 2/2).", fix: "Add front matter with a name and a description."}
+  - {id: CP-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body."}
+notes:
+  - "Docs say skills only in immediate subfolders; runtime finds them 3 grouping levels deep."
+  - "Follows symlinks inside and outside the checkout (SDK docs say inside only)."
+  - "Project copy wins on duplicate names (3/3); missing name falls back to the folder name."

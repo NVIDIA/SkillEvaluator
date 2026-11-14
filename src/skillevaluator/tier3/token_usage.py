@@ -17,6 +17,12 @@ metric, dimension, overall score, verdict or gate.
   or ``unavailable`` (none were), and the totals cover only measured attempts.
 - An attempt that failed before it was scored still used tokens. It is counted
   here as an unscored attempt and nowhere else: scores never include it.
+- Case rows are validated against the evaluation dataset's own case IDs. Every
+  row uses one of them at most once, and an attempt whose only name is Harbor's
+  32-character cut of a case name is attributed to that case, so its missing
+  telemetry stays with the canonical case. A row that cannot be matched is a
+  report-integrity problem: it keeps its recorded name, is marked, and
+  ``case_id_validation`` names it, so no report shows it as a dataset case.
 - A change (with skill minus baseline) needs complete counts in both arms for
   the same cases and attempts, and both arms must have succeeded: the report
   withholds the scores of an arm that failed or has no known run status.
@@ -30,7 +36,7 @@ from __future__ import annotations
 
 import re
 from collections import Counter
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
 
@@ -155,7 +161,11 @@ def _stop_on_pass_case(trial_id: str, case: str) -> bool:
 
 
 def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
-    """Map an unscored attempt to its case when exactly one case matches.
+    """Map an attempt to its case when exactly one case matches.
+
+    Every attempt is resolved against the dataset's IDs, scored or not: a
+    scored attempt whose ``entry_id`` fell back to Harbor's cut of the case
+    name needs the same canonicalization as an unscored one.
 
     ``label`` is the case directory the attempt's Harbor result names, or its
     trial name without Harbor's ``__<id>`` suffix. Without a known case of that
@@ -177,27 +187,50 @@ def _pass_at_k_branch(agent: Mapping[str, Any], condition: str) -> Mapping[str, 
     return _mapping(_mapping(agent.get("pass_at_k")).get(condition))
 
 
-def _agent_attempts(agent: Mapping[str, Any]) -> dict[str, list[_Attempt]]:
-    known_cases = {_case_label(trial) for _arm, _condition, key, _usage in _ARMS for trial in _rows(agent.get(key))}
+def _known_cases(agent: Mapping[str, Any], dataset_cases: frozenset[str]) -> set[str]:
+    """Return the case names an attempt may be matched to.
+
+    The evaluation dataset decides when the report knows it: its IDs are the
+    only canonical ones, and an attempt whose arm died before it was scored
+    carries Harbor's cut trial name, which no recorded trial has to spell out.
+    Without a dataset the recorded trials and pass@k cases stand in, as before.
+    """
+    if dataset_cases:
+        return set(dataset_cases)
+    known = {_case_label(trial) for _arm, _condition, key, _usage in _ARMS for trial in _rows(agent.get(key))}
     for _arm, condition, _key, usage_key in _ARMS:
-        known_cases.update(str(case) for case in _mapping(_pass_at_k_branch(agent, condition).get("cases")))
-        known_cases.update(_case_label(row) for row in _rows(agent.get(usage_key)) if row.get("scored") is True)
+        known.update(str(case) for case in _mapping(_pass_at_k_branch(agent, condition).get("cases")))
+        known.update(_case_label(row) for row in _rows(agent.get(usage_key)) if row.get("scored") is True)
+    return known
+
+
+def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str, list[_Attempt]]:
     attempts: dict[str, list[_Attempt]] = {}
     for arm, _condition, key, usage_key in _ARMS:
-        attempts[arm] = [
-            _Attempt(_case_label(trial), normalize_token_counts(trial.get("tokens")), True)
-            for trial in _rows(agent.get(key))
-        ]
+        attempts[arm] = []
+        for trial in _rows(agent.get(key)):
+            trial_id = trial.get("trial_id")
+            attempts[arm].append(
+                _Attempt(
+                    _matching_case(_case_label(trial), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    normalize_token_counts(trial.get("tokens")),
+                    True,
+                )
+            )
         for row in _rows(agent.get(usage_key)):
             scored = row.get("scored") is True
-            # A scored attempt names its case; an unscored one has its task directory or trial name.
+            # Scored or not, the name an attempt carries is its case directory,
+            # its recorded entry_id or its trial name, and any of the three may
+            # be Harbor's cut of the case name, so every one is resolved
+            # against the dataset's IDs.
             trial_id = row.get("trial_id")
-            case = (
-                _case_label(row)
-                if scored
-                else _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases)
+            attempts[arm].append(
+                _Attempt(
+                    _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    normalize_token_counts(row.get("tokens")),
+                    scored,
+                )
             )
-            attempts[arm].append(_Attempt(case, normalize_token_counts(row.get("tokens")), scored))
     return attempts
 
 
@@ -238,10 +271,37 @@ def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> in
     return max(observed, expected + (_count(record.get("recovered_attempts_total")) or 0))
 
 
-def _case_expected(agent: Mapping[str, Any], condition: str, case: str, observed: int) -> int:
+def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[str]) -> dict[str, Mapping[str, Any]]:
+    """Return an arm's pass@k record per case, under the case names the rows use.
+
+    Two keys can canonicalize onto one case, Harbor's cut of a name beside the
+    full name. Today's collector lists a dataset ID before an unmatched cut
+    name, so keeping the first would keep the canonical record, but that
+    ordering belongs to a neighbouring module and holds only while it has
+    expected case IDs. The merge here does not depend on it: a key that is
+    already a dataset ID wins, and otherwise the larger ``attempts_skipped``
+    does, so the merged row cannot claim attempts that never had to run.
+    """
+    ranked: dict[str, tuple[tuple[int, int], Mapping[str, Any]]] = {}
+    for case, record in _mapping(_pass_at_k_branch(agent, condition).get("cases")).items():
+        name = _matching_case(str(case), "", known_cases)
+        fields = _mapping(record)
+        rank = (int(str(case) in known_cases), _count(fields.get("attempts_skipped")) or 0)
+        if name not in ranked or rank > ranked[name][0]:
+            ranked[name] = (rank, fields)
+    return {name: fields for name, (_rank, fields) in ranked.items()}
+
+
+def _case_expected(
+    agent: Mapping[str, Any],
+    condition: str,
+    case: str,
+    observed: int,
+    pass_at_k_cases: Mapping[str, Mapping[str, Any]],
+) -> int:
     """Return the attempts a case should have run, from pass@k: ``k`` minus attempts skipped after a pass."""
     branch = _pass_at_k_branch(agent, condition)
-    record = _mapping(_mapping(branch.get("cases")).get(case))
+    record = _mapping(pass_at_k_cases.get(case))
     k = _count(branch.get("k"))
     if not record or k is None:
         return observed
@@ -401,8 +461,12 @@ def _withheld_arm_blockers(agent: Mapping[str, Any], arms: Mapping[str, Mapping[
     return blockers
 
 
-def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[str, Any] | None:
-    attempts = _agent_attempts(agent)
+def _agent_usage(
+    agent: Mapping[str, Any], unexecuted: frozenset[str], dataset_cases: frozenset[str]
+) -> dict[str, Any] | None:
+    known_cases = _known_cases(agent, dataset_cases)
+    attempts = _agent_attempts(agent, known_cases)
+    pass_at_k = {condition: _pass_at_k_cases(agent, condition, known_cases) for _a, condition, _k, _u in _ARMS}
     arms: dict[str, dict[str, Any]] = {}
     for arm, condition, _key, _unscored in _ARMS:
         not_run = _condition_not_run(
@@ -427,11 +491,7 @@ def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[s
     case_rows = []
     for case in sorted(
         {*cases_by_arm["with_skill"], *cases_by_arm["baseline"]}
-        | {
-            str(case)
-            for _a, condition, _k, _u in _ARMS
-            for case in _mapping(_pass_at_k_branch(agent, condition).get("cases"))
-        }
+        | {case for cases in pass_at_k.values() for case in cases}
     ):
         case_arms = {}
         for arm, condition, _key, _unscored in _ARMS:
@@ -440,16 +500,19 @@ def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[s
                 case_attempts,
                 expected=0
                 if arms[arm]["coverage"]["status"] == "not_run"
-                else _case_expected(agent, condition, case, len(case_attempts)),
+                else _case_expected(agent, condition, case, len(case_attempts), pass_at_k[condition]),
                 not_run=arms[arm]["coverage"]["status"] == "not_run",
             )
-        case_rows.append(
-            {
-                "entry_id": case,
-                **case_arms,
-                "delta": _delta(case_arms["with_skill"], case_arms["baseline"], blockers=withheld),
-            }
-        )
+        row = {
+            "entry_id": case,
+            **case_arms,
+            "delta": _delta(case_arms["with_skill"], case_arms["baseline"], blockers=withheld),
+        }
+        # A row the dataset does not name is a report-integrity problem, not a
+        # case: every renderer marks it instead of showing it as coverage.
+        if dataset_cases and case not in dataset_cases:
+            row["case_id_in_dataset"] = False
+        case_rows.append(row)
     return {
         **arms,
         "delta": _delta(arms["with_skill"], arms["baseline"], blockers=[*withheld, *scope]),
@@ -458,7 +521,11 @@ def _agent_usage(agent: Mapping[str, Any], unexecuted: frozenset[str]) -> dict[s
 
 
 def build_token_usage(
-    agents: Mapping[str, Mapping[str, Any]], *, mode: str = "both", baseline_reused: bool = False
+    agents: Mapping[str, Mapping[str, Any]],
+    *,
+    mode: str = "both",
+    baseline_reused: bool = False,
+    dataset_case_ids: Sequence[str] | None = None,
 ) -> dict[str, Any] | None:
     """Return token usage per case, per agent and over all agents, or ``None`` when no attempt was measured.
 
@@ -470,11 +537,20 @@ def build_token_usage(
     ``baseline_reused`` marks a run that reused an earlier run's baseline
     (``--reuse-baseline``): its baseline counts are that run's usage, so the
     result says so with ``baseline_reused``.
+
+    ``dataset_case_ids`` are the evaluation dataset's canonical case IDs. Given
+    them, every case row uses one of those IDs, each at most once: an attempt
+    whose only name is Harbor's 32-character cut of a case name is attributed
+    to that case, so its missing telemetry stays with the canonical case
+    instead of becoming a row of its own. A row that still cannot be matched
+    keeps its recorded name and is marked ``case_id_in_dataset`` false, and
+    ``case_id_validation`` names it, so no report shows it as a dataset case.
     """
+    dataset_cases = frozenset(case for case in dataset_case_ids or () if isinstance(case, str) and case)
     unexecuted = _UNEXECUTED_CONDITIONS.get(mode, frozenset())
     usage: dict[str, dict[str, Any]] = {}
     for name in sorted(agents):
-        agent_usage = _agent_usage(_mapping(agents[name]), unexecuted)
+        agent_usage = _agent_usage(_mapping(agents[name]), unexecuted, dataset_cases)
         if agent_usage is not None:
             usage[name] = agent_usage
     if not any(
@@ -496,11 +572,39 @@ def build_token_usage(
         "scored": False,
         "accounting": dict(_ACCOUNTING),
         **({"baseline_reused": True} if baseline_reused else {}),
+        **_case_id_validation(usage, dataset_cases),
         "agents": usage,
         "dataset": {
             **dataset,
             "delta": _delta(dataset["with_skill"], dataset["baseline"], blockers=agents_without_change),
         },
+    }
+
+
+def _case_id_validation(
+    usage: Mapping[str, Mapping[str, Any]], dataset_cases: frozenset[str]
+) -> dict[str, dict[str, Any]]:
+    """Say whether every case row names a canonical dataset case, and name the rows that do not.
+
+    Nothing is recorded without a dataset to check against: the report then
+    cannot tell a canonical case ID from a trial name, and says nothing either way.
+    """
+    if not dataset_cases:
+        return {}
+    unmatched = sorted(
+        {
+            str(row.get("entry_id"))
+            for agent in usage.values()
+            for row in agent.get("cases", [])
+            if isinstance(row, Mapping) and row.get("case_id_in_dataset") is False
+        }
+    )
+    return {
+        "case_id_validation": {
+            "status": "unverified_case_ids" if unmatched else "validated",
+            "dataset_case_ids": len(dataset_cases),
+            "unmatched_case_ids": unmatched,
+        }
     }
 
 

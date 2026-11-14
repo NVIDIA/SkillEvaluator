@@ -536,3 +536,170 @@ def test_html_overview_renders_budget_warning():
     html = HTMLReporter(include_timestamp=False).render_all([result])
     assert "Budget exhausted (agent tokens 1,000 of 1,000): 2 of 3 attempts not run; results are partial" in html
     assert 'class="warning"' in html
+
+
+def test_final_attempt_overrun_is_reported_without_changing_admission_status():
+    # Retained A2 shape: all four attempts finished, but no fifth admission
+    # happened to update the admission status after usage exceeded 32,000.
+    budget = BudgetController(max_agent_tokens=32_000, max_judge_calls=12, max_attempts_total=4, planned=4)
+    for attempt, tokens in enumerate([10_000, 10_000, 10_000, 15_236], start=1):
+        assert budget.admit(agent="a", arm="with", case_id="c", attempt=attempt)
+        budget.record_usage({"total_tokens": tokens, "judge_calls": 3})
+
+    metadata = budget.metadata()
+    assert metadata["status"] == "ok"
+    assert metadata["partial"] is False
+    assert metadata["exhausted_limit"] is None
+    assert metadata["attempts_not_run"] == 0
+    assert metadata["observed_overruns"] == {
+        "agent_tokens": {"used": 45_236, "limit": 32_000, "excess": 13_236},
+    }
+    assert budget_line(metadata) == "Budget overrun observed (agent tokens 45,236 of 32,000)"
+
+
+@pytest.mark.parametrize("cached", [None, {}, {"agent_tokens": {"used": 1, "limit": 0, "excess": 1}}])
+def test_legacy_summary_derives_overruns_from_usage_instead_of_cached_fields(cached):
+    metadata = {
+        "status": "ok",
+        "limits": {"max_agent_tokens": 32_000},
+        "used": {"agent_tokens": 45_236},
+        "observed_overruns": cached,
+    }
+    assert budget_line(metadata) == "Budget overrun observed (agent tokens 45,236 of 32,000)"
+    metadata["used"]["agent_tokens"] = 32_000
+    assert budget_line(metadata) == "Budget: within configured limits"
+
+
+@pytest.mark.parametrize("cap,used", [(0, 0), (10, 10), (10, 9)])
+def test_measured_usage_at_or_below_cap_has_no_overrun(cap, used):
+    budget = BudgetController(max_agent_tokens=cap)
+    budget.record_usage({"total_tokens": used})
+    assert budget.metadata()["observed_overruns"] == {}
+    assert budget_line(budget.metadata()) == "Budget: within configured limits"
+
+
+def test_multiple_overruns_include_partial_measurements_and_not_run_state():
+    prices = PriceBook({"model": Price(1.0, 2.0)})
+    budget = BudgetController(max_agent_tokens=10, max_judge_calls=1, max_cost_usd=0.01, price_book=prices, planned=3)
+    assert budget.admit(agent="a", arm="with", case_id="c", attempt=1)
+    budget.record_usage({"total_tokens": 12, "judge_calls": 2, "cost_usd": 0.02})
+    budget.record_usage({})
+    assert not budget.admit(agent="a", arm="with", case_id="c", attempt=3)
+    metadata = budget.metadata()
+    assert metadata["observed_overruns"] == {
+        "agent_tokens": {"used": 12, "limit": 10, "excess": 2},
+        "judge_calls": {"used": 2, "limit": 1, "excess": 1},
+        "cost_usd": {"used": 0.02, "limit": 0.01, "excess": 0.01},
+    }
+    line = budget_line(metadata)
+    assert "Budget exhausted (agent tokens 12 of 10): 1 of 3 attempts not run; results are partial" in line
+    assert "overrun observed (agent tokens 12 of 10; judge calls 2 of 1; cost $0.02 of $0.01)" in line
+    assert "usage partially measured" in line
+
+
+@pytest.mark.parametrize("usage", [None, {}, {"total_tokens": 5}])
+def test_bounded_unmeasured_or_partial_usage_is_not_claimed_within_limits(usage):
+    budget = BudgetController(max_agent_tokens=10)
+    budget.record_usage(usage)
+    budget.record_usage({})
+    line = budget_line(budget.metadata())
+    assert "within configured limits" not in line
+    assert "not fully verified" in line
+    assert ("partially measured" if usage else "not measured") in line
+
+
+def test_unconfigured_usage_does_not_imply_a_budget_verification():
+    budget = BudgetController()
+    budget.record_usage({"total_tokens": 100})
+    assert budget.metadata()["observed_overruns"] == {}
+    assert budget_line(budget.metadata()) == "Budget: no limits configured"
+
+
+@pytest.mark.parametrize(
+    "key,cap,value,expected",
+    [
+        ("agent_tokens", 0, 1, "agent tokens 1 of 0"),
+        ("judge_calls", 0, 1, "judge calls 1 of 0"),
+        ("cost_usd", 0.00001, 0.00002, "cost $2e-05 of $1e-05"),
+        ("attempts", 1, 2, "attempts 2 of 1"),
+    ],
+)
+def test_legacy_overrun_boundaries_include_zero_and_subcent_costs(key, cap, value, expected):
+    limit = {
+        "agent_tokens": "max_agent_tokens",
+        "judge_calls": "max_judge_calls",
+        "cost_usd": "max_cost_usd",
+        "attempts": "max_attempts_total",
+    }[key]
+    metadata = {"limits": {limit: cap}, "used": {key: value}, "started_attempts": value}
+    assert budget_line(metadata) == f"Budget overrun observed ({expected})"
+
+
+@pytest.mark.parametrize("invalid", [True, False, -1, "[bold]bad[/bold]", float("nan"), float("inf"), [], {}])
+@pytest.mark.parametrize("field", ["used", "limits", "unmeasured_attempts"])
+def test_malformed_bounded_metadata_never_claims_verified_usage_or_breaks_rich(invalid, field):
+    metadata = {"limits": {"max_agent_tokens": 10}, "used": {"agent_tokens": 5}}
+    metadata[field] = {"max_agent_tokens" if field == "limits" else "agent_tokens": invalid}
+    line = budget_line(metadata)
+    output = Console(record=True, force_terminal=False)
+    output.print(line)
+    assert "within configured limits" not in output.export_text()
+    assert "not fully verified" in line
+
+
+@pytest.mark.parametrize("invalid", [None, True, float("inf"), "[bold]bad[/bold]", []])
+def test_sparse_or_malformed_exhausted_metadata_is_safe_to_render(invalid):
+    metadata = {
+        "status": "exhausted",
+        "exhausted_limit": invalid,
+        "limits": invalid,
+        "used": invalid,
+        "planned_attempts": invalid,
+        "attempts_not_run": invalid,
+    }
+    output = Console(record=True, force_terminal=False)
+    output.print(budget_line(metadata))
+    assert "Budget exhausted" in output.export_text()
+    assert "[bold]" not in output.export_text()
+    assert "results are partial" not in output.export_text()
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_completed_budget_overrun_reaches_terminal_html_and_json_summary(legacy):
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting import HTMLReporter, JSONReporter
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+    from skillevaluator.tier3.result_display import render_evaluation_result
+
+    budget = BudgetController(max_agent_tokens=32_000, planned=4)
+    budget.record_usage({"total_tokens": 45_236})
+    metadata = budget.metadata()
+    if legacy:
+        metadata.pop("observed_overruns", None)
+    payload = build_agent_eval_payload(
+        "budget-fixture",
+        {
+            "a": {
+                "execution_status": "succeeded",
+                "expected_attempts": 1,
+                "scored_attempts": 1,
+                "with_skill": dict.fromkeys(DEFAULT_METRICS, 1.0),
+            }
+        },
+        run_config={"budget": metadata},
+        use_llm_judge=False,
+    )
+    assert payload is not None
+    expected = "Budget overrun observed (agent tokens 45,236 of 32,000)"
+    assert payload["budget_summary"] == expected
+    assert payload["summary"]["execution_status"] == "succeeded"
+    result = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+    result.metadata["agent_eval"] = payload
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    assert f'<p class="warning">{expected}</p>' in html
+    report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert report["tier3"]["budget_summary"] == expected
+    output = Console(record=True, force_terminal=False, width=160)
+    render_evaluation_result({"execution_status": "succeeded", "budget": metadata}, console=output)
+    assert expected in output.export_text()

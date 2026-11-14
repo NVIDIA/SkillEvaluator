@@ -302,7 +302,10 @@ a skill. To exercise a caller change with providers before merging, set
 `scan-mode: all` in the caller on that PR and read the results in the run's
 artifact; that PR gets no automatic comment, because the listener approves only
 the default branch's caller. Before merging, restore `auto` and then refresh
-`trusted-caller-blobs` for the final caller.
+`trusted-caller-blobs` for the final caller. `ci demo` cannot exercise an unmerged
+setup: it requires the all-tier scan caller on the default branch and rejects a
+setup that has not merged, and its skill-change PR branches from the default
+branch. Use `ci demo` after the setup merges.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not

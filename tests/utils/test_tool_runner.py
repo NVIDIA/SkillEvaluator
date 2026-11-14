@@ -414,21 +414,23 @@ class TestExternalTool:
 
         assert (
             tool.get_install_hint() == "Install with: uv tool install "
-            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.3/skillspector-2.13.3-py3-none-any.whl"
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.4/skillspector-2.13.4-py3-none-any.whl"
         )
         assert "[security]" not in tool.get_install_hint()
 
-    def test_bundled_scanner_hints_point_at_security_extra(self):
-        """Scanners shipped via the security extra hint at reinstalling with extras.
+    def test_bundled_scanner_hints_point_at_reinstalling_skillevaluator(self):
+        """Bundled scanners hint at reinstalling SkillEvaluator, not a bare pip install.
 
-        Bare ``pip install <scanner>`` is misleading for the documented
-        install paths (uv tool / pipx), where the fix is reinstalling
-        skillevaluator with the extras enabled.
+        Bandit is a core dependency, so the fix needs no extra; pip-audit
+        ships with the security extra.
         """
         with patch("shutil.which", return_value=None):
-            for command in ("bandit", "pip-audit"):
-                hint = ExternalTool(command, command).get_install_hint()
-                assert "[all]" in hint or "[security]" in hint, f"{command}: {hint}"
+            bandit_hint = ExternalTool("bandit", "bandit").get_install_hint()
+            pip_audit_hint = ExternalTool("pip-audit", "pip-audit").get_install_hint()
+
+        assert "uv tool install --reinstall" in bandit_hint
+        assert "[security]" not in bandit_hint and "[all]" not in bandit_hint
+        assert "[all]" in pip_audit_hint or "[security]" in pip_audit_hint
 
     def test_semgrep_hint_uses_a_separate_tool_install(self):
         with patch("shutil.which", return_value=None):

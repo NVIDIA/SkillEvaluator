@@ -160,7 +160,7 @@ def test_tier1_scanner_failure_does_not_hide_other_scanners(scanners, monkeypatc
     assert status == "fail"
     assert "secret-canary" not in detail
     expected = {
-        "missing": "not installed. Bundled with the security extra",
+        "missing": "not installed. Bundled with SkillEvaluator",
         "malformed override": "SKILLEVALUATOR_BANDIT_PATH must name an absolute executable file",
         "timeout": "Bandit timed out after 4 seconds",
         "exit status": "version probe exited with status 2",

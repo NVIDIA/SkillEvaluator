@@ -21,11 +21,13 @@ import posixpath
 import re
 import stat
 from collections import Counter, deque
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     RUBRIC_CRITERIA,
     RUBRIC_MAX_TOKENS,
     RUBRIC_MIN_SCORE,
@@ -49,8 +51,17 @@ logger = get_logger(__name__)
 _IMPORTANCE_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 _CRITERION_PASS_SCORE = 7
 _MAX_SKILL_CONTENT_BYTES = 1024 * 1024
+# Optional previews are summaries, so each one stays small and may be truncated. Required linked
+# guidance is not a preview: it is bounded only by the whole supplement budget below, and a
+# document that does not fit stops the evaluation instead of reaching the judge in part.
 _MAX_SUPPLEMENTARY_FILE_BYTES = 3000
-_MAX_SUPPLEMENTARY_TOTAL_BYTES = 30000
+# A real linked guide graph runs to tens of kilobytes, so the stock budget matches the mebibyte
+# already allowed for the manifest itself. The budget bounds how many bytes are collected, never
+# which paths may be read: every reference is still confined to the skill's own declared root by
+# the secure reader below.
+_DEFAULT_SUPPLEMENTARY_TOTAL_BYTES = 1024 * 1024
+_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES = 8 * 1024 * 1024
+_SUPPLEMENTARY_TOTAL_BYTES_ENV = "SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES"
 _MAX_LINKED_MARKDOWN_FILES = 256
 # A rejected judge reply's problem text kept in the log line and retry note.
 # 500 characters hold every missing and some unexpected criterion ids.
@@ -319,7 +330,7 @@ class RubricJudge(LLMClient):
                     for name, content in linked_markdown.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if scripts:
-                    extra += "\nScripts (from scripts/ directory):\n"
+                    extra += "\nScripts (from scripts/ and tools/ directories):\n"
                     for name, content in scripts.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if references:
@@ -436,16 +447,52 @@ def _extract_json(content: str) -> dict:
     raise json.JSONDecodeError(msg, content[:200], 0)
 
 
+def supplementary_total_bytes(environ: Mapping[str, str] | None = None) -> int:
+    """Return the configured supplement budget, which never widens the declared root.
+
+    The operator may raise or lower how many bytes of skill-owned guidance are collected. A
+    reference is still read only from the skill's own root, so a larger budget never reaches a
+    path a smaller one could not.
+    """
+    source = os.environ if environ is None else environ
+    raw = source.get(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+    try:
+        budget: int | None = int(raw)
+    except ValueError:
+        budget = None
+    if budget is None or budget <= 0:
+        logger.warning(
+            "Ignoring %s=%r: expected a positive integer number of bytes; using %s",
+            _SUPPLEMENTARY_TOTAL_BYTES_ENV,
+            raw,
+            _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES,
+        )
+        return _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+    if budget > _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES:
+        logger.warning(
+            "Capping %s=%r at %s bytes",
+            _SUPPLEMENTARY_TOTAL_BYTES_ENV,
+            raw,
+            _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES,
+        )
+        return _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES
+    return budget
+
+
 def _collect_supplementary_content(
     skill_path: Path,
     max_bytes_per_file: int = _MAX_SUPPLEMENTARY_FILE_BYTES,
-    max_total_bytes: int = _MAX_SUPPLEMENTARY_TOTAL_BYTES,
+    max_total_bytes: int | None = None,
     *,
     manifest: Path | None = None,
     skill_content: str | None = None,
 ) -> dict[str, dict[str, str]]:
     """Collect complete linked Markdown before optional bounded previews."""
     result: dict[str, dict[str, str]] = {"scripts": {}, "references": {}}
+    if max_total_bytes is None:
+        max_total_bytes = supplementary_total_bytes()
     total = 0
     try:
         resolved_root = skill_path.resolve(strict=True)
@@ -499,9 +546,9 @@ def _collect_supplementary_content(
                         metadata = (resolved_root / relative).lstat()
                         identity = (metadata.st_dev, metadata.st_ino)
                         cached = seen_payloads.get(identity) if metadata.st_ino else None
-                        read_limit = (
-                            len(cached) if cached is not None else min(max_bytes_per_file, max_total_bytes - total)
-                        )
+                        # Required guidance is never truncated, so the only bound is what is left of
+                        # the supplement budget: a document that does not fit stops the collection.
+                        read_limit = len(cached) if cached is not None else max_total_bytes - total
                         payload, _ = reader.read_bytes(Path(relative), read_limit, expected=metadata)
                         seen.add(relative)
                         if cached is not None:
@@ -521,7 +568,13 @@ def _collect_supplementary_content(
         if linked:
             result["linked_markdown"] = linked
 
-    for subdir, exts in [("scripts", ("*.py", "*.sh")), ("references", ("*.md",))]:
+    # ``tools/`` is the agentskills.io name for ``scripts/``; its files are listed
+    # under their directory so they cannot collide with a script of the same name.
+    for subdir, bucket, exts in [
+        ("scripts", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("tools", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("references", "references", ("*.md",)),
+    ]:
         d = skill_path / subdir
         if not os.path.lexists(d):
             continue
@@ -549,7 +602,7 @@ def _collect_supplementary_content(
                     max_bytes=read_limit,
                     truncate=True,
                 )
-                result[subdir][f.name] = text
+                result[bucket][f.name if subdir != "tools" else f"tools/{f.name}"] = text
                 total += bytes_read
 
     return result

@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  # Hosted reports/PR comments: uncomment this, then refresh trusted-caller-blobs.
+  # PR comments or hosted reports: uncomment this, then refresh trusted-caller-blobs.
   # id-token: write
 jobs:
   skills:

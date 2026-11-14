@@ -103,6 +103,16 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
 .severity-filter-btn.active.critical-btn,.severity-filter-btn.active.high-btn { color:#fff; }
 [data-theme=dark] .severity-filter-btn.active.critical-btn,[data-theme=dark] .severity-filter-btn.active.high-btn { color:#0c111b; }
 
+/* New text links follow the theme; native lime actions need a dark foreground. */
+@media screen {
+:root { --report-link-color:#245d00; }
+[data-theme=dark] { --report-link-color:#a3e635; }
+.tab-content a:not([class]) { color:var(--report-link-color);text-decoration:underline;text-underline-offset:2px; }
+/* Detailed tables retain whole words/numbers and use their bounded scroll owner. */
+.table-scroll th,.table-scroll td { overflow-wrap:normal;word-break:normal; }
+}
+.tab-content .t3-link-btn { color:#0c111b; }
+
 /* Each retained baseline warning remains a separate readable notice. */
 .t3-overview-lead .tolerated-baseline { display:block; margin-top:.5rem; }
 
@@ -144,6 +154,7 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
  .agent-hero .tier-card-title { font-size:.8rem;line-height:1.3; }
  .agent-hero .tier-card-stats,.agent-hero .tier-card-sev { display:none; }
  .t3-primary-metrics { grid-template-columns:repeat(3,minmax(0,1fr));gap:.5rem; }
+ .t3-primary-metrics>.dashboard-card:only-child { grid-column:1/-1; }
  .t3-primary-metrics .dashboard-card { padding:.65rem; }
  .t3-primary-metrics .dashboard-card-value { font-size:1.5rem; }
  .t3-primary-metrics .t3-coverage-value { font-size:1rem; }

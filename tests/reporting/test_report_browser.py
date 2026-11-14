@@ -1032,3 +1032,139 @@ def test_global_search_reveals_dataset_attempt_body_matches_and_preserves_user_d
     _tier(page, "tier1")
     search.fill("")
     assert page.locator("#t3-dataset-list details").evaluate_all("nodes=>nodes.map(node=>node.open)") == initial_state
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width", [1440, 390])
+def test_overview_text_links_and_insights_action_have_readable_contrast(page, reports, theme, width):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, "incomplete")
+    page.locator("html").evaluate("(node, theme)=>node.dataset.theme=theme", theme)
+    _tier(page, "tier3")
+    overview = page.locator("#tier3-page-overview")
+    links = overview.locator("a:visible")
+    assert links.count() >= 3
+    for link in links.all():
+        colors = link.evaluate("""node=>{
+            const foreground=getComputedStyle(node).color;
+            let parent=node,background;
+            while(parent){
+                background=getComputedStyle(parent).backgroundColor;
+                if(background!=='rgba(0, 0, 0, 0)'&&background!=='transparent')break;
+                parent=parent.parentElement;
+            }
+            return {foreground,background,label:node.textContent.trim()};
+        }""")
+
+        def luminance(color):
+            channels = [int(value) / 255 for value in re.findall(r"[0-9]+", color)[:3]]
+            linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+            return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
+
+        values = sorted((luminance(colors["foreground"]), luminance(colors["background"])))
+        ratio = (values[1] + 0.05) / (values[0] + 0.05)
+        assert ratio >= 4.5, (theme, width, colors, ratio)
+
+
+def test_sole_mobile_coverage_metric_uses_the_available_grid_width(page, reports):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": 390, "height": 1000})
+    _open(page, directory, "incomplete")
+    _tier(page, "tier3")
+    grid = page.locator(".t3-primary-metrics")
+    cards = grid.locator(".dashboard-card")
+    assert cards.count() == 1
+    assert cards.first.bounding_box()["width"] >= grid.bounding_box()["width"] - 2
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+
+def test_print_wraps_unbroken_retained_table_cells_within_the_page(page, tmp_path):
+    result = ValidationResult(validator_name="Schema Check")
+    result.add_success("schema_valid", "Synthetic static check")
+    snapshot = {
+        "schema_version": 1,
+        "name": "synthetic-print",
+        "status": "passed",
+        "truncated": False,
+        "sections": [
+            {
+                "key": "components",
+                "title": "Component inventory",
+                "columns": ["Recorded observation"],
+                "rows": [["x" * 280]],
+                "total": 1,
+                "omitted": 0,
+                "notes": [],
+            }
+        ],
+    }
+    (tmp_path / "print-table.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([result], plugin_static=snapshot), encoding="utf-8"
+    )
+    page.set_viewport_size({"width": 794, "height": 1123})
+    _open(page, tmp_path, "print-table")
+    page.evaluate("dispatchEvent(new Event('beforeprint'))")
+    page.emulate_media(media="print")
+    bounds = page.locator("#plugin-static-components table").evaluate("""node=>({
+        table:node.getBoundingClientRect().width,
+        owner:node.closest('.table-scroll').getBoundingClientRect().width
+    })""")
+    assert bounds["table"] <= bounds["owner"] + 2, bounds
+    page.emulate_media(media="screen")
+    page.evaluate("dispatchEvent(new Event('afterprint'))")
+
+
+@pytest.mark.parametrize("width", [1440, 390])
+@pytest.mark.parametrize(
+    "fixture,tab,selector",
+    [
+        ("full", "overview", "#tier3-dimension-table"),
+        ("native-telemetry", "trials", "#tier3-token-usage table,#tier3-latency-metrics table"),
+    ],
+)
+def test_detailed_tables_keep_short_words_and_numbers_intact_with_bounded_scrolling(
+    page, reports, width, fixture, tab, selector
+):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, directory, fixture)
+    _tier(page, "tier3")
+    _subtab(page, tab)
+    tables = page.locator(selector)
+    assert tables.count() > 0
+    tables.evaluate_all("""nodes=>nodes.forEach(node=>{
+        for(let parent=node.parentElement;parent;parent=parent.parentElement)
+            if(parent.tagName==='DETAILS')parent.open=true;
+    })""")
+    broken = tables.evaluate_all(r"""tables=>{
+        const broken=[];
+        for(const table of tables){
+            const walker=document.createTreeWalker(table,NodeFilter.SHOW_TEXT);
+            while(walker.nextNode()){
+                const node=walker.currentNode;
+                if(node.parentElement.closest('code'))continue; // Long recorded identifiers may wrap.
+                for(const match of node.textContent.matchAll(/[A-Za-z]{2,}|\d[\d,]*(?:\.\d+)?/g)){
+                    const range=document.createRange();
+                    range.setStart(node,match.index);range.setEnd(node,match.index+match[0].length);
+                    const lines=new Set([...range.getClientRects()].map(rect=>Math.round(rect.top)));
+                    if(lines.size>1)broken.push(match[0]);
+                }
+            }
+        }
+        return broken;
+    }""")
+    assert not broken, (fixture, width, broken)
+    for table in tables.all():
+        bounds = table.evaluate("""node=>{
+            const wrapper=node.closest('.table-scroll');
+            return {width:wrapper.getBoundingClientRect().width,scroll:wrapper.scrollWidth,
+                client:wrapper.clientWidth,overflow:getComputedStyle(wrapper).overflowX};
+        }""")
+        assert bounds["width"] <= width
+        if bounds["scroll"] > bounds["client"]:
+            assert bounds["overflow"] == "auto"
+            assert table.evaluate(
+                "node=>{const parent=node.closest('.table-scroll');parent.scrollLeft=100;return parent.scrollLeft>0}"
+            )
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")

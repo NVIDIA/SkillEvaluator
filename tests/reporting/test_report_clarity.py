@@ -149,6 +149,25 @@ def test_tier2_missing_catalog_metadata_does_not_make_unavailable_tile_grid():
     assert '<p class="dashboard-card-value">Unavailable</p>' not in html
 
 
+def test_tier_navigation_has_one_headline_and_tier1_owns_severity_detail():
+    static = ValidationResult(validator_name="Schema Check")
+    static.add_error("Recorded static failure")
+    similarity = ValidationResult(validator_name="Similarity Check")
+    similarity.add_success("catalog_compared", "Compared catalog entries")
+    html = HTMLReporter(include_timestamp=False).render_all([static, similarity, _result()])
+    navigation = html.split('aria-label="Tier navigation"', 1)[1].split("</nav>", 1)[0]
+    headlines = re.findall(r'<div class="tier-card-stats">(.*?)</div>', navigation, re.DOTALL)
+    assert len(headlines) == 3
+    assert all(len(re.findall(r"<span(?:\s[^>]*)?>", headline)) == 1 for headline in headlines)
+    assert "tier-card-sev" not in navigation
+    assert "Best agent score" not in navigation
+    tier1 = html.split('id="tab-tier1"', 1)[1].split('id="tab-tier2"', 1)[0]
+    dashboard = tier1.split('class="dashboard"', 1)[1].split("</div>\n            <details", 1)[0]
+    assert ">Findings</h3>" in dashboard
+    assert ">Tier 1 Status</h3>" not in dashboard
+    assert "Each check with its results and the evidence behind them." not in html
+
+
 def test_overview_coverage_names_both_planned_and_unscored_attempts():
     result = _result("incomplete")
     result.metadata["agent_eval"]["agents"] = {

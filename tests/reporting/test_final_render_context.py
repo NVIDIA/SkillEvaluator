@@ -204,7 +204,7 @@ def test_html_coverage_uses_full_raw_counts_and_preserves_payload():
     original = copy.deepcopy(source)
     html = HTMLReporter().render(source)
     assert "188 scored trials: 101 with skill, 87 baseline" in html
-    assert "Best agent score" in html
+    assert "188 of 240 scored" in html
     assert source == original
 
 

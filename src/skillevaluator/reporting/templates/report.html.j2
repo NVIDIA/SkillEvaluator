@@ -1786,19 +1786,12 @@
                     <p class="tier-card-title">Security &amp; Static Validation</p>
                     <div class="tier-card-stats">
                         {% if not single_tier %}
-                        <span><strong>{{ ui_t1_pass }}</strong> of {{ ui_t1_executed }} checks passed</span>{% if ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>{% endif %}
-                        {% if tier1_summary.skipped_count %}<span><strong>{{ tier1_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> finding{{ 's' if tier1_summary.issue_count != 1 else '' }}</span>{% endif %}
+                        {% if tier1_summary.issue_count %}<span><strong>{{ tier1_summary.issue_count }}</strong> finding{{ 's' if tier1_summary.issue_count != 1 else '' }}</span>
+                        {% elif ui_t1_executed %}<span><strong>{{ ui_t1_pass }}</strong> of {{ ui_t1_executed }} checks passed</span>
+                        {% elif ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>
+                        {% else %}<span>No checks ran</span>{% endif %}
                         {% endif %}
                     </div>
-                    {% if not single_tier and (tier1_summary.critical or tier1_summary.high or tier1_summary.medium or tier1_summary.low) %}
-                    <div class="tier-card-sev">
-                        {% if tier1_summary.critical %}<span class="tier-card-sev-pill crit">{{ tier1_summary.critical }} critical</span>{% endif %}
-                        {% if tier1_summary.high %}<span class="tier-card-sev-pill high">{{ tier1_summary.high }} high</span>{% endif %}
-                        {% if tier1_summary.medium %}<span class="tier-card-sev-pill med">{{ tier1_summary.medium }} medium</span>{% endif %}
-                        {% if tier1_summary.low %}<span class="tier-card-sev-pill low">{{ tier1_summary.low }} low</span>{% endif %}
-                    </div>
-                    {% endif %}
                 </div>
                 {% elif presentation.tiers[1].displayed %}{{ absent_tier_tile(1, presentation.tiers[1]) }}
                 {% endif %}
@@ -1820,10 +1813,10 @@
                     </div>
                     <p class="tier-card-title">Deduplication</p>
                     <div class="tier-card-stats">
-                        <span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
-                        {% if tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>{% endif %}
-                        {% if tier2_summary.skipped_count %}<span><strong>{{ tier2_summary.skipped_count }}</strong> skipped</span>{% endif %}
-                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>{% endif %}
+                        {% if tier2_summary.issue_count %}<span><strong>{{ tier2_summary.issue_count }}</strong> finding(s)</span>
+                        {% elif tier2_summary.executed_count %}<span><strong>{{ tier2_summary.passed_count }}</strong> of {{ tier2_summary.executed_count }} checks passed</span>
+                        {% elif tier2_summary.not_applicable_count %}<span><strong>{{ tier2_summary.not_applicable_count }}</strong> not applicable</span>
+                        {% else %}<span>No checks ran</span>{% endif %}
                     </div>
                 </div>
                 {% elif presentation.tiers[2].displayed %}{{ absent_tier_tile(2, presentation.tiers[2]) }}
@@ -1851,9 +1844,7 @@
                         {% if tier3_is_skipped %}
                         <span>{{ tier3_skip_message }}</span>
                         {% else %}
-                        <span>Best agent score <strong>{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}</strong></span>
-                        {% if tier3.get('overall_lift') is not none %}<span>lift <strong>{{ "%+.2f" | format(tier3.get('overall_lift')) }}</strong></span>{% endif %}
-                        <span class="trial-coverage">{{ hero_trials }}</span>
+                        <span class="trial-coverage">{% if overview_coverage.known %}<strong>{{ overview_coverage.scored }}</strong> of {{ overview_coverage.expected }} attempts scored{% else %}{{ hero_trials }}{% endif %}</span>
                         {% endif %}
                     </div>
 
@@ -1863,7 +1854,7 @@
 
             </nav>
         </section>
-        <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2><p>Each check with its results and the evidence behind them.</p></div>
+        <div id="report-evidence" class="workspace-heading" tabindex="-1"><h2>Findings &amp; evidence</h2></div>
         {% set workspace_tabs = [] %}
         {% for number, tier in presentation.tiers.items() %}
             {% set existing_tab = tabs | selectattr('id', 'equalto', 'tier' ~ number) | list %}
@@ -1899,8 +1890,8 @@
             <div class="dashboard">
                 <div class="dashboard-card"><h3 class="dashboard-card-title">Validators Run</h3><p class="dashboard-card-value">{{ total_validators }}</p><p class="dashboard-card-subtitle">{{ skipped_count }} skipped · {{ ui_t1_na }} not applicable</p></div>
                 <div class="dashboard-card success"><h3 class="dashboard-card-title">Passed</h3><p class="dashboard-card-value">{{ passed_count }}</p><p class="dashboard-card-subtitle">{{ pass_percentage ~ '% success rate' if total_validators else 'No executed checks' }}</p></div>
-                <div class="dashboard-card danger"><h3 class="dashboard-card-title">Failed</h3><p class="dashboard-card-value">{{ failed_count }}</p><p class="dashboard-card-subtitle">{{ incomplete_count }} incomplete · {{ tier1_summary.issue_count }} findings</p></div>
-                <div class="dashboard-card"><h3 class="dashboard-card-title">Tier 1 Status</h3><p class="dashboard-card-value"><span class="status-badge {{ t1_class }}">{{ verdict_words[t1_key] }}</span></p><p class="dashboard-card-subtitle">{{ tier1_summary.issue_detail or 'Static validation evidence' }}</p></div>
+                <div class="dashboard-card danger"><h3 class="dashboard-card-title">Failed</h3><p class="dashboard-card-value">{{ failed_count }}</p><p class="dashboard-card-subtitle">{{ incomplete_count }} incomplete</p></div>
+                <div class="dashboard-card"><h3 class="dashboard-card-title">Findings</h3><p class="dashboard-card-value">{{ tier1_summary.issue_count or 0 }}</p><p class="dashboard-card-subtitle">{% set severity_separator = joiner(' · ') %}{% for level in ['critical', 'high', 'medium', 'low'] %}{% if tier1_summary[level] %}{{ severity_separator() }}{{ tier1_summary[level] }} {{ level }}{% endif %}{% endfor %}{% if not tier1_summary.issue_count %}None reported{% endif %}</p></div>
             </div>
             <details class="t3-details"><summary>Tier 1 result and next steps</summary>
             <section class="exec-summary {{ t1_class }}" aria-labelledby="exec-summary-title">

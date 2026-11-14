@@ -249,6 +249,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Hermes Docker runs with NVIDIA Build now validate `NVIDIA_API_KEY` during
+  Harbor preflight, matching the credential used by the runtime instead of
+  inheriting an OpenAI key requirement. Unrelated provider keys do not satisfy
+  the check.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

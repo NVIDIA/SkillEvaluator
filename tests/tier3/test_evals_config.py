@@ -406,6 +406,31 @@ def test_load_evals_config_rejects_config_in_symlinked_evals_directory(tmp_path)
         load_evals_config(skill)
 
 
+@pytest.mark.parametrize(
+    ("link_target", "skill_path"),
+    [
+        pytest.param("real", "link", id="symlinked-skill"),
+        pytest.param(
+            "real/sub",
+            "link/..",
+            id="parent-of-link",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Windows folds '..' before it follows a link"),
+        ),
+    ],
+)
+def test_load_evals_config_reads_config_through_links_in_the_skill_path(tmp_path, link_target, skill_path):
+    real = tmp_path / "real"
+    (real / "sub").mkdir(parents=True)
+    (real / "evals").mkdir()
+    (real / "evals" / "config.yml").write_text("schema_version: 1\nharbor:\n  n_attempts: 3\n", encoding="utf-8")
+    _link_or_skip(tmp_path / "link", tmp_path / link_target, target_is_directory=True)
+
+    config, config_path = load_evals_config(tmp_path / skill_path)
+
+    assert config["harbor"]["n_attempts"] == 3
+    assert config_path is not None and config_path.name == "config.yml"
+
+
 def test_load_evals_config_rejects_hard_linked_config(tmp_path):
     outside = tmp_path / "outside.yml"
     outside.write_text("schema_version: 1\n", encoding="utf-8")

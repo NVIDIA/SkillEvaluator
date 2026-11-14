@@ -946,6 +946,12 @@ _RENAMING_VERBS = ("reads", "opens", "loads", "consults", "follows")
 _RENAMING_HEDGE = "otherwise points at the skill's own skill.md as a prompt tier3 validate"
 _KEEPING_PLACES = ("in", "of", "from", "under", "inside")
 _OTHER_PLACES = ("at", "within")
+_FORMAT_NOUNS = ("files", "format", "spec", "template")
+_STILL_SKILL_FILES = (
+    "Keeps release-review/SKILL.md in sync with the docs.",
+    "Keeps skills/release-review in sync with the docs.",
+    "Reads SKILL.md and uses the installed skill to report errors.",
+)
 _MY_SKILL_MD_ENTRY = "The eval dataset docs now say that a template prompt calls a `SKILL.md`"
 
 
@@ -996,6 +1002,21 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
         assert _renames_skill_md(description), description
     for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
         assert not _renames_skill_md(description), description
+    # Reading another SKILL.md or the file format does not count: "a SKILL.md",
+    # "the following SKILL.md", or a format noun right after it or one word later.
+    for description in (
+        *(f"Reads SKILL.md {noun} and reports errors." for noun in _FORMAT_NOUNS),
+        "Follows the SKILL.md frontmatter format for new skills.",
+        "Reads a SKILL.md and reports errors.",
+        "Reads the following SKILL.md and reports errors.",
+    ):
+        assert not _renames_skill_md(description), description
+    # A description that still points at the skill's files after the rename
+    # gives the generic task, not "my SKILL.md".
+    for description in _STILL_SKILL_FILES:
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert case["question"] == "Use release-review to handle a typical request", description
+        assert case["ground_truth"] == "A correct, complete result for the request", description
 
     wording = _my_skill_md_wording()
     for where, text in wording.items():
@@ -1005,11 +1026,22 @@ def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
             sentence = _sentence_at(text, start)
             assert _listed(_RENAMING_VERBS) in sentence, (where, sentence)
             assert _RENAMING_HEDGE in sentence, (where, sentence)
+        # Each names a format noun case and the generic task for <name>/SKILL.md.
+        assert '"reads skill.md files"' in text, where
+        assert "<name>/skill.md" in text and '"handle a typical request"' in text, where
+    for where in ("docs/eval-datasets.mdx", "_template_task"):
+        text = wording[where]
+        assert f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or one word later" in text, where
+        assert '"a skill.md", "the following skill.md"' in text, where
+        rule = text.find("still points at the skill's files after the rename")
+        assert rule >= 0, where
+        for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
+            assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
     # The docs name the hedge's examples, and the next sentence still names the
     # command whose LLM prompts it means.
     docs = wording["docs/eval-datasets.mdx"]
     assert '(such as cat skill.md or "uses the skill\'s skill.md")' in docs
-    assert "keeps it too. create-eval-dataset's llm prompts ask for outcome checks." in docs
+    assert "the graded text is generic. create-eval-dataset's llm prompts ask for outcome checks." in docs
 
 
 def test_docs_say_only_another_place_keeps_a_description_s_skill_md():

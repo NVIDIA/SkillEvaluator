@@ -375,21 +375,27 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """The task template prompts ask for, and the outcome their graded text quotes.
 
     Both come from the description. When it reads, opens, loads, consults or
-    follows a SKILL.md, or otherwise points at the skill's own SKILL.md as a
-    prompt `tier3 validate` flags would ("cat SKILL.md", "uses the skill's
-    SKILL.md"), each bare SKILL.md in it becomes "my SKILL.md", so the prompt
-    names the user's file rather than the skill's. It keeps its SKILL.md when
-    in, of, from, under or inside another place comes right after it ("in
-    ./pdf-tools"). Other place words, such as at or within, do not count:
-    "reads SKILL.md at ./pdf-tools" is still renamed. A description that only
-    names SKILL.md another way ("validates SKILL.md frontmatter", "SKILL.md
-    files") keeps it too. A description that still points at the skill's
-    files (skills/<name>, <name>/SKILL.md) gives a generic task. The outcome
-    is None, and graded text generic, when quoting the task would grade skill
-    use or name one of the skill's scripts: "The release-review skill checks
-    manifests" grades skill use, and "Checks manifests with review.py" names a
-    script the no-skill baseline does not have, which is graded on the
-    expected output and assertions too.
+    follows SKILL.md with no path before it, or otherwise points at the
+    skill's own SKILL.md as a prompt `tier3 validate` flags would ("cat
+    SKILL.md", "uses the skill's SKILL.md"), each bare SKILL.md in it becomes
+    "my SKILL.md", so the prompt names the user's file rather than the
+    skill's. Reading SKILL.md does not count when the wording means another
+    SKILL.md or the file format: "a SKILL.md", "the following SKILL.md", or a
+    format noun such as files, format, spec or template right after it or one
+    word later ("reads SKILL.md files", "follows the SKILL.md frontmatter
+    format"). Nor does it when in, of, from, under or inside another place
+    comes right after it ("in ./pdf-tools"). Other place words, such as at or
+    within, do not count: "reads SKILL.md at ./pdf-tools" is still renamed. A
+    description that only names SKILL.md without reading it ("validates
+    SKILL.md frontmatter") keeps it too. When the description still points at
+    the skill's files after the rename (<name>/SKILL.md, skills/<name>, "uses
+    the installed skill"), the task is the generic "handle a typical request"
+    and the outcome is None. The outcome is also None, and graded text
+    generic, when quoting the task would grade skill use or name one of the
+    skill's scripts: "The release-review skill checks manifests" grades skill
+    use, and "Checks manifests with review.py" names a script the no-skill
+    baseline does not have, which is graded on the expected output and
+    assertions too.
     """
     name = skill["name"]
     task = _description_lower(skill)

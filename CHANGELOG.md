@@ -252,8 +252,10 @@ All notable changes to SkillEvaluator are documented in this file.
   keeps its `SKILL.md` when `in`, `of`, `from`, `under` or `inside` another
   place comes right after it, such as `in ./pdf-tools`. Other place words,
   such as `at` or `within`, do not count. The docs said any `SKILL.md` in the
-  description was renamed, but "Validates `SKILL.md` frontmatter fields" keeps
-  its `SKILL.md`.
+  description was renamed, but "Validates `SKILL.md` frontmatter fields" and
+  "Reads `SKILL.md` files" keep their `SKILL.md`, and "Keeps
+  `<name>/SKILL.md` in sync" gets the generic task "handle a typical
+  request".
 
 ### Fixed
 

@@ -472,7 +472,7 @@ def test_keyword_rule_evidence_skips_the_sourced_file(check_security) -> None:
     assert [f["evidence"] for f in result["findings"] if f["type"] == "sensitive_file_write"] == ["/etc/profile"]
 
 
-def test_keyword_rule_reads_many_sourced_files_in_one_pass() -> None:
+def test_keyword_rule_with_many_sourced_files() -> None:
     sourced = "; . ~/.bashrc" * 10_000
 
     assert eval_core_checks._keyword_rule_entry(sourced + " > x") is None

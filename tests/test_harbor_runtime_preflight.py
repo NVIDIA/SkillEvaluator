@@ -2338,10 +2338,9 @@ def test_bedrock_model_probe_classifies_real_invalid_region_as_fatal(
         region="not a region",
     )
 
-    # Real SDK initialization counts against the probe deadline. The invalid region
-    # is rejected before any request is sent, so allow the same setup budget as the
-    # other real-SDK classification tests instead of measuring one-second throughput.
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    # Cold SDK model loading can exceed one second on a busy CI worker.
+    # Exercise classification with the default budget; deadline tests cover timing.
+    result = runtime_preflight.probe_model(provider)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"

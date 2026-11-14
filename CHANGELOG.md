@@ -574,6 +574,23 @@ All notable changes to SkillEvaluator are documented in this file.
   ownership key, for example from containers that each start with a fresh
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
+- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison
+  catalog, and names every such skill. When the configured skill roots hold
+  more than one skill, CI builds the catalog from all of them, including skills
+  that did not change. One `SKILL.md` among them whose frontmatter is not a
+  valid YAML mapping with a non-empty string `name` and `description` stops it
+  before any embedding request, and Tier 2 then checks no skill and is
+  incomplete. This includes a value that is not a string, such as
+  `name: 2048`, `name: yes`, or `description: [Draft]`, which Tier 2 commands
+  such as `similarity-check` converted to text before 0.9.0. With one skill
+  there is no catalog, and such frontmatter does not stop Tier 2. The Tier 2
+  reason pointed at provider and embedding configuration; it now says that a
+  skill's frontmatter is the cause, and the retained catalog log under
+  `tier2/catalog/diagnostics/` names every such skill by its path in the
+  repository. Quote such a value, as in `name: "2048"`. Frontmatter over a
+  structure or length limit in any skill still gets the reason that points at
+  provider and embedding configuration, and the log then names no skill, not
+  even one whose frontmatter is invalid.
 
 ## 0.9.0 - 2026-11-13
 

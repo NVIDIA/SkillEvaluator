@@ -104,6 +104,102 @@ def test_build_explicit_paths_rejects_outside_root_before_embedding(tmp_path: Pa
     client.embed.assert_not_called()
 
 
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "name: 2048\ndescription: Play the game.",
+        "name: yes\ndescription: Play the game.",
+        "name: game\ndescription: [Draft]",
+        "name: game\ndescription: Use when: debugging logs",
+        "- name: game",
+    ],
+)
+def test_build_explicit_paths_names_a_skill_without_valid_frontmatter(
+    tmp_path: Path, write_skill, frontmatter: str
+) -> None:
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    game = tmp_path / "skills" / "game"
+    game.mkdir()
+    (game / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# Game\n".encode())
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(ValueError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, [alpha, game])
+
+    assert str(caught.value) == (
+        "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
+        "with a non-empty string name and description: skills/game"
+    )
+    assert isinstance(caught.value, registry_module.InvalidExplicitSkillError)
+    assert str(tmp_path) not in str(caught.value)
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
+def test_build_explicit_paths_names_every_skill_without_valid_frontmatter(tmp_path: Path, write_skill) -> None:
+    # One error names every such skill, so CI needs one run to find them all.
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    skills = [alpha]
+    for name, frontmatter in (
+        ("zeta", "name: zeta\ndescription: [Draft]"),
+        ("game", "name: 2048\ndescription: Play the game."),
+        ("quiz", "name: yes\ndescription: Answer questions."),
+    ):
+        skill = tmp_path / "skills" / name
+        skill.mkdir()
+        (skill / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# {name}\n".encode())
+        skills.append(skill)
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(registry_module.InvalidExplicitSkillError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, skills)
+
+    assert str(caught.value) == (
+        "Each explicit skill requires a root SKILL.md whose frontmatter is a valid YAML mapping "
+        "with a non-empty string name and description: skills/game, skills/quiz, skills/zeta"
+    )
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    ("frontmatter", "message"),
+    [
+        pytest.param(
+            "name: " + "x" * 16_385 + "\ndescription: Play the game.",
+            "Manifest frontmatter name exceeds the 16384-character limit: game/SKILL.md",
+            id="name-over-length-limit",
+        ),
+        pytest.param(
+            "name: game\ndescription: Play the game.\nextra: " + "[" * 1_500 + "safe" + "]" * 1_500,
+            "Manifest structured-data complexity limit exceeded: game/SKILL.md",
+            id="frontmatter-over-structure-limit",
+        ),
+    ],
+)
+def test_build_explicit_paths_keeps_frontmatter_limit_errors_generic(
+    tmp_path: Path, write_skill, frontmatter: str, message: str
+) -> None:
+    # Callers treat InvalidExplicitSkillError as a frontmatter shape problem;
+    # a limit error stays a plain ValueError with the extractor's message.
+    alpha = write_skill(tmp_path / "skills", "alpha", description="First fixture")
+    game = tmp_path / "skills" / "game"
+    game.mkdir()
+    (game / "SKILL.md").write_bytes(f"---\n{frontmatter}\n---\n\n# Game\n".encode())
+    client = _make_mock_client([[1.0, 0.0], [0.0, 1.0]])
+
+    with pytest.raises(ValueError) as caught:
+        EmbeddingRegistry(client).build_from_paths(tmp_path, [alpha, game])
+
+    assert str(caught.value) == message
+    assert type(caught.value) is ValueError
+    client.embed.assert_not_called()
+    client.embed_single.assert_not_called()
+    client.embed_chunked.assert_not_called()
+
+
 class TestBuildFromDirectory:
     def test_empty_collection_debug_logs_use_label_without_host_path(self, tmp_path: Path, monkeypatch) -> None:
         collection = tmp_path / "nested" / "external-skills"

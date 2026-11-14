@@ -216,6 +216,133 @@ def test_behavior_pool():
     assert all(r["observed"] == "error" for r in gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[1:])
 
 
+@pytest.fixture
+def unchecked_behavior():
+    case = {"id": "baseline", "expected": {"overall": "fail", "metrics": {"behavior_check": [False, True]}}}
+    reward = {
+        "overall": 0.4,
+        "behavior_check": 0.5,
+        "details": {
+            "behavior_check": {
+                "score": 0.5,
+                "reason": "The numeric answer was returned, but instruction reading cannot be verified.",
+                "results": [
+                    {"step": 1, "passed": None, "reason": "Tool execution details are not provided."},
+                    {"step": 2, "passed": True, "reason": "The final response was only the number 14."},
+                ],
+                "expectations": [
+                    {
+                        "step": 1,
+                        "requirement": "Read calculator instructions before running calc.py.",
+                        "status": "not_checked",
+                        "reason": "Tool execution details are not provided.",
+                    },
+                    {
+                        "step": 2,
+                        "requirement": "Return only the numeric answer.",
+                        "status": "met",
+                        "reason": "The final response was only the number 14.",
+                    },
+                ],
+            }
+        },
+    }
+    return case, reward
+
+
+@pytest.mark.parametrize("reverse_expectations", [False, True])
+def test_unchecked_behavior_step_projects_insufficient_evidence(unchecked_behavior, reverse_expectations):
+    case, reward = unchecked_behavior
+    if reverse_expectations:
+        reward["details"]["behavior_check"]["expectations"].reverse()
+    original = copy.deepcopy(reward)
+    rows = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)
+    assert [(r["metric"], r["expected"], r["observed"], r["score"]) for r in rows] == [
+        ("overall", "fail", "fail", 0.4),
+        ("behavior_check", "fail", "fail", 0.5),
+        ("behavior_steps", "fail", "insufficient_evidence", None),
+        ("behavior_steps", "pass", "pass", 1),
+    ]
+    assert reward == original
+    summary = gv.summarize([r for r in rows if r["metric"] == "behavior_steps"])
+    assert summary["errors"] == 0
+    assert summary["insufficient_evidence"] == 1
+    assert summary["confusion_matrix"]["fail"]["insufficient_evidence"] == 1
+    assert summary["unjudgeable_rate"]["numerator"] == 1
+    assert summary["unjudgeable_rate"]["denominator"] == 2
+    without_status = copy.deepcopy(reward)
+    without_status["details"]["behavior_check"].pop("expectations")
+    error_summary = gv.summarize(
+        [r for r in gv.observations(case, without_status, gv.DEFAULT_THRESHOLDS) if r["metric"] == "behavior_steps"]
+    )
+    assert error_summary["errors"] == 1
+    assert error_summary["insufficient_evidence"] == 0
+    assert summary["unjudgeable_rate"] == error_summary["unjudgeable_rate"]
+
+
+@pytest.mark.parametrize(
+    "expectations",
+    [
+        None,
+        {},
+        [],
+        [None],
+        [{"status": "not_checked"}],
+        [{"step": 2, "status": "not_checked"}],
+        [{"step": "1", "status": "not_checked"}],
+        [{"step": True, "status": "not_checked"}],
+        [{"step": 1.0, "status": "not_checked"}],
+        [{"step": 1}],
+        *[{"step": 1, "status": status} for status in (None, "met", "unmet", "error", "unknown", [], {})],
+    ],
+)
+def test_null_behavior_step_without_valid_matching_status_is_error(unchecked_behavior, expectations):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["expectations"] = expectations
+    steps = [r for r in gv.observations(case, reward, gv.DEFAULT_THRESHOLDS) if r["metric"] == "behavior_steps"]
+    assert [(r["observed"], r["score"]) for r in steps] == [("error", None), ("pass", 1)]
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"step": 1},
+        {"step": 2, "passed": None},
+        {"step": "1", "passed": None},
+        {"step": True, "passed": None},
+        {"step": 1.0, "passed": None},
+        *[{"step": 1, "passed": passed} for passed in ("true", 1, 0, {}, [])],
+    ],
+)
+def test_malformed_behavior_result_cannot_abstain(unchecked_behavior, result):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["results"][0] = result
+    first = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[2]
+    assert (first["observed"], first["score"]) == ("error", None)
+
+
+@pytest.mark.parametrize("passed", [False, True])
+def test_boolean_behavior_result_keeps_verdict_with_not_checked_status(unchecked_behavior, passed):
+    case, reward = unchecked_behavior
+    reward["details"]["behavior_check"]["results"][0]["passed"] = passed
+    first = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)[2]
+    assert (first["observed"], first["score"]) == ("pass" if passed else "fail", int(passed))
+
+
+@pytest.mark.parametrize("failure", ["status", "process", "score"])
+def test_aggregate_behavior_error_overrides_not_checked_step(unchecked_behavior, failure):
+    case, reward = unchecked_behavior
+    if failure == "status":
+        reward["details"]["behavior_check"]["status"] = "error"
+    elif failure == "process":
+        reward["_process_error"] = True
+    else:
+        reward.pop("behavior_check")
+    rows = gv.observations(case, reward, gv.DEFAULT_THRESHOLDS)
+    assert [r["observed"] for r in rows[1:]] == ["error", "error", "error"]
+
+
 def test_behavior_expected_class_uses_suite_threshold():
     case = {"id": "mixed", "expected": {"overall": "fail", "metrics": {"behavior_check": [True, False]}}}
     reward = {
@@ -493,6 +620,8 @@ def test_verifier_provenance_preserves_relative_hashes_through_source_alias(
         name: hashlib.sha256(content).hexdigest() for name, content in contents.items()
     }
     assert report["provenance"]["verifier_sha256"] == expected_digest.hexdigest()
+    assert report["provenance"]["verifier_git_commit"] is None
+    assert report["provenance"]["verifier_git_dirty"] is None
     assert json.loads((output / "grader-validation.json").read_text())["provenance"] == report["provenance"]
 
 
@@ -640,3 +769,350 @@ def test_real_judge_failure_is_unscored(judge_server, tmp_path):
     assert report["metrics"]["accuracy"]["false_fail_rate"]["denominator"] == 0
     assert report["metrics"]["overall"]["errors"] == 1
     assert report["metrics"]["security"]["confusion_matrix"]["pass"]["pass"] == 1
+
+
+@pytest.fixture
+def qualification_policy(tmp_path):
+    path = tmp_path / "policy.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema": "skillevaluator.grader-qualification-policy/v1",
+                "policy_id": "test-overall-v1",
+                "required_metrics": ["overall"],
+                "min_class_cases": {"pass": 1, "fail": 1},
+                "min_category_cases": {},
+                "max_rates": {"false_pass_rate": 0.1, "false_fail_rate": 0.1, "unjudgeable_rate": 0.05},
+            }
+        )
+    )
+    return path
+
+
+def test_policy_offline_readiness_no_provider_or_output(monkeypatch, qualification_policy, tmp_path):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    output = tmp_path / "not-written"
+    runner = CliRunner()
+    ready = runner.invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--check-suite",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert ready.exit_code == 0, ready.output
+    assert json.loads(ready.output)["qualification"]["status"] == "ready"
+    insufficient = runner.invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--check-suite",
+            "--case",
+            "arithmetic",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert insufficient.exit_code == 1, insufficient.output
+    assert json.loads(insufficient.output)["qualification"]["status"] == "insufficient_evidence"
+    assert not output.exists()
+
+
+def test_policy_insufficient_preflight_retains_not_run_receipt(monkeypatch, qualification_policy, tmp_path):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    output = tmp_path / "preflight"
+    args = [
+        "tier3",
+        "validate-grader",
+        "--qualification-policy",
+        str(qualification_policy),
+        "--case",
+        "arithmetic",
+        "--json",
+        "-o",
+        str(output),
+    ]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.output)
+    assert report["attempts"] == []
+    assert report["execution_status"] == "not_run"
+    assert report["qualification"]["phase"] == "preflight"
+    assert report["qualification"]["status"] == "insufficient_evidence"
+    assert report["provenance"]["case_ids"] == ["arithmetic"]
+    assert report["provenance"]["provider"] is None
+    assert json.loads((output / "grader-validation.json").read_text()) == report
+    assert len(list(output.iterdir())) == 1
+    assert CliRunner().invoke(cli, args).exit_code == 2
+
+
+def test_policy_human_coverage_reason(monkeypatch, qualification_policy, tmp_path):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--case",
+            "arithmetic",
+            "-o",
+            str(tmp_path / "human"),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    assert "overall" in result.output and "fail" in result.output and "coverage" in result.output
+
+
+@pytest.mark.parametrize("args", [["--split", "tuning"], ["--split", "all"]])
+def test_policy_assessment_only(monkeypatch, qualification_policy, args):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    result = CliRunner().invoke(
+        cli, ["tier3", "validate-grader", "--qualification-policy", str(qualification_policy), "--check-suite", *args]
+    )
+    assert result.exit_code == 2
+    assert "assessment" in result.output
+
+
+def test_malformed_policy_before_provider(monkeypatch, qualification_policy, tmp_path):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    qualification_policy.write_text('{"schema":"wrong"}')
+    output = tmp_path / "never-written"
+    result = CliRunner().invoke(
+        cli, ["tier3", "validate-grader", "--qualification-policy", str(qualification_policy), "-o", str(output)]
+    )
+    assert result.exit_code == 2
+    assert not output.exists()
+
+
+def test_policy_real_template_decision_equals_receipt(judge_server, qualification_policy, tmp_path):
+    output = tmp_path / "policy-live"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--case",
+            "arithmetic",
+            "--case",
+            "wrong-answer",
+            "--repeats",
+            "1",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 1, result.output
+    report = json.loads(result.output)
+    assert report["qualification"]["phase"] == "evaluated"
+    assert report["qualification"]["status"] == "failed"
+    assert report["qualification"]["metrics"]["overall"]["scored_class_counts"] == {"pass": 1, "fail": 1}
+    assert report["qualification"]["metrics"]["overall"]["rate_checks"]["false_pass_rate"]["measurement"]["rate"] == 1
+    assert report == json.loads((output / "grader-validation.json").read_text())
+    assert report["provenance"]["verifier_git_commit"] is not None
+    assert report["provenance"]["verifier_git_dirty"] is False
+
+
+def test_verifier_git_identity_requires_tracked_files(tmp_path):
+    import subprocess
+
+    repository = tmp_path / "repository"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repository), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init")
+    tracked = repository / "verifier.py"
+    tracked.write_text("original\n")
+    git("add", "verifier.py")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "test",
+    )
+    expected = git("rev-parse", "HEAD")
+    assert gv._verifier_git_provenance([tracked]) == {"verifier_git_commit": expected, "verifier_git_dirty": False}
+    tracked.write_text("changed\n")
+    assert gv._verifier_git_provenance([tracked]) == {"verifier_git_commit": expected, "verifier_git_dirty": True}
+    untracked = repository / "site-packages" / "verifier.py"
+    untracked.parent.mkdir()
+    untracked.write_text("installed\n")
+    unknown = {"verifier_git_commit": None, "verifier_git_dirty": None}
+    assert gv._verifier_git_provenance([untracked]) == unknown
+    assert gv._verifier_git_provenance([tracked, untracked]) == unknown
+    assert gv._verifier_git_provenance([tmp_path / "outside.py"]) == unknown
+
+
+@pytest.mark.parametrize("judge_error", [False, True])
+def test_policy_live_pass_or_insufficient(judge_server, qualification_policy, tmp_path, judge_error):
+    value = json.loads(qualification_policy.read_text())
+    value["max_rates"] = dict.fromkeys(value["max_rates"], 1.0)
+    qualification_policy.write_text(json.dumps(value))
+    judge_server["fail"] = judge_error
+    output = tmp_path / "live"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--case",
+            "arithmetic",
+            "--case",
+            "wrong-answer",
+            "--repeats",
+            "1",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert result.exit_code == int(judge_error), result.output
+    report = json.loads(result.output)
+    assert report["qualification"]["status"] == ("insufficient_evidence" if judge_error else "passed")
+    assert report == json.loads((output / "grader-validation.json").read_text())
+
+
+def test_verifier_git_ignores_unrelated_dirty_files_and_git_environment(tmp_path, monkeypatch):
+    import subprocess
+
+    repository = tmp_path / "source"
+    repository.mkdir()
+
+    def git(*args):
+        return subprocess.run(
+            ["git", "-C", str(repository), *args], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    git("init")
+    verifier = repository / "verifier.py"
+    verifier.write_text("source\n")
+    unrelated = repository / "other.py"
+    unrelated.write_text("clean\n")
+    git("add", ".")
+    git(
+        "-c",
+        "user.name=Test",
+        "-c",
+        "user.email=test@example.com",
+        "-c",
+        "commit.gpgsign=false",
+        "commit",
+        "-m",
+        "test",
+    )
+    expected = git("rev-parse", "HEAD")
+    unrelated.write_text("dirty\n")
+    monkeypatch.setenv("GIT_DIR", str(tmp_path / "does-not-exist"))
+    assert gv._verifier_git_provenance([verifier]) == {"verifier_git_commit": expected, "verifier_git_dirty": False}
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["--timeout", "nan"],
+        ["--timeout", "inf"],
+        ["--max-false-pass-rate", "nan"],
+        ["--max-false-fail-rate", "nan"],
+        ["--max-unjudgeable-rate", "nan"],
+    ],
+)
+def test_nonfinite_options_rejected_before_provider(monkeypatch, args):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    result = CliRunner().invoke(cli, ["tier3", "validate-grader", *args])
+    assert result.exit_code == 2, result.output
+    assert "finite" in result.output
+
+
+def test_policy_cli_without_platform_nonblocking_flag(monkeypatch, qualification_policy):
+    monkeypatch.delattr(gv.os, "O_NONBLOCK", raising=False)
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "validate-grader", "--qualification-policy", str(qualification_policy), "--check-suite", "--json"],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.output)["qualification"]["status"] == "ready"
+
+
+def test_live_correct_unavailable_case_meets_observed_category_only(judge_server, qualification_policy, tmp_path):
+    value = json.loads(qualification_policy.read_text())
+    value["min_category_cases"] = {"unavailable_evidence": 1}
+    value["max_rates"] = dict.fromkeys(value["max_rates"], 1)
+    qualification_policy.write_text(json.dumps(value))
+    output = tmp_path / "observed-category"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            "--qualification-policy",
+            str(qualification_policy),
+            "--case",
+            "arithmetic",
+            "--case",
+            "wrong-answer",
+            "--case",
+            "missing",
+            "--repeats",
+            "1",
+            "--json",
+            "-o",
+            str(output),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    receipt = json.loads(result.output)
+    decision = receipt["qualification"]
+    assert decision["status"] == "passed"
+    assert decision["categories"]["unavailable_evidence"]["observed_cases"] == 1
+    assert decision["categories"]["unavailable_evidence"]["observed_met"] is True
+    assert decision["metrics"]["overall"]["scored_class_counts"] == {"pass": 1, "fail": 1}
+    assert receipt == json.loads((output / "grader-validation.json").read_text())
+
+
+@pytest.mark.parametrize("flag", ["--max-false-pass-rate", "--max-false-fail-rate", "--max-unjudgeable-rate"])
+@pytest.mark.parametrize("offline", [True, False])
+def test_policy_rejects_legacy_gate_flags_before_provider(monkeypatch, qualification_policy, tmp_path, flag, offline):
+    monkeypatch.setattr(gv, "resolve_llm_provider", lambda: pytest.fail("provider accessed"))
+    output = tmp_path / "not-written"
+    args = [
+        "tier3",
+        "validate-grader",
+        "--qualification-policy",
+        str(qualification_policy),
+        flag,
+        "0",
+        "-o",
+        str(output),
+    ]
+    if offline:
+        args.append("--check-suite")
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 2, result.output
+    assert "cannot combine" in result.output
+    assert not output.exists()

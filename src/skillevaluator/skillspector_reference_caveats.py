@@ -11,7 +11,7 @@ adapter must still validate findings, risk, inventory and requested LLM work.
 from collections.abc import Mapping, Set
 from pathlib import PurePosixPath
 
-_COMPLETENESS_FIELDS = frozenset(
+REFERENCE_COMPLETENESS_FIELDS = frozenset(
     {
         "total_components",
         "scanned_components",
@@ -66,7 +66,7 @@ def reference_caveat_metadata(
     completeness = data.get("analysis_completeness")
     if (
         not isinstance(completeness, dict)
-        or set(completeness) != _COMPLETENESS_FIELDS
+        or set(completeness) != REFERENCE_COMPLETENESS_FIELDS
         or data.get("execution_successful") is not True
         or completeness.get("execution_successful") is not True
         or completeness.get("status") != "partial"

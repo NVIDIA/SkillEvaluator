@@ -128,9 +128,9 @@ jobs:
       min-score: ${{ inputs.min-score }}
       security-baselines: ${{ inputs.security-baselines }}
       scan-mode: ${{ needs.eligibility.outputs.scan-mode || inputs.scan-mode }}
-      # Keep an unconditional keyless baseline. Eligible opt-in runs use the
-      # protected enriched job's canonical evidence for the required gate.
-      artifact-name: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && 'skill-evaluator-tier1-baseline' || 'skill-evaluator-tier1' }}
+      # Keep an unconditional keyless baseline. Eligible opt-in runs that change
+      # a skill use the protected enriched job's canonical evidence for the gate.
+      artifact-name: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' && 'skill-evaluator-tier1-baseline' || 'skill-evaluator-tier1' }}
       llm: false
   eligibility:
     runs-on: ubuntu-24.04
@@ -140,6 +140,7 @@ jobs:
     outputs:
       allowed: ${{ steps.check.outputs.allowed }}
       scan-mode: ${{ steps.check.outputs.scan-mode }}
+      skills-changed: ${{ steps.check.outputs.skills-changed }}
     steps:
       - name: Check immutable configuration and current same-repository PR head
         id: check
@@ -150,9 +151,11 @@ jobs:
           ENV_MODE: ${{ inputs.env-mode }}
           TIERS: ${{ inputs.tiers }}
           SCAN_MODE: ${{ inputs.scan-mode }}
+          SKILL_PATHS: ${{ inputs.paths }}
         run: |
           python3 -I - <<'PY'
           import json, os, re, urllib.parse, urllib.request
+          from pathlib import PurePosixPath
           if not re.fullmatch(r'[0-9a-f]{40}', os.environ['TOOLS_REF']):
               raise SystemExit('tools-ref must be a reviewed immutable 40-character commit')
           if os.environ['ENV_MODE'] not in ('docker', 'local'):
@@ -175,26 +178,39 @@ jobs:
           actor_allowed = permission.get('permission') in ('write', 'maintain', 'admin')
           allowed = False
           scan_mode = os.environ['SCAN_MODE']
+          roots = [PurePosixPath(line.strip()) for line in os.environ.get('SKILL_PATHS', '').splitlines() if line.strip()]
+          # The paid jobs (LLM Tier 1, Tier 2 and Tier 3) need a changed file
+          # under a skill root, unless the caller asked for full scans.
+          # Setup-only changes keep the keyless scan of every skill as the gate.
+          # Pushes, manual runs and fork PRs (never listed) stay true.
+          skills_changed = True
           if pr and pr['head']['repo'] and pr['head']['repo']['full_name'] == repo:
+              skills_changed = scan_mode == 'all'
               url = os.environ['API_URL'] + '/repos/' + repo + '/pulls/' + str(pr['number'])
               request = urllib.request.Request(url, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
               with urllib.request.urlopen(request, timeout=30) as response:
                   current = json.load(response)
               allowed = actor_allowed and current['state'] == 'open' and current['head']['sha'] == pr['head']['sha'] and current['head']['repo'] and current['head']['repo']['full_name'] == repo
-              # A setup/configuration PR must exercise every selected skill. This
-              # predicate equals select_changed_skills.setup_changed (tests check it).
+              # A setup/configuration PR must exercise every selected skill. These
+              # predicates equal select_changed_skills.setup_changed and
+              # skill_root_changed (tests check them).
+              setup = False
               for page in range(1, 31):
                   files_url = url + '/files?per_page=100&page=' + str(page)
                   request = urllib.request.Request(files_url, headers={'Authorization':'Bearer '+os.environ['GH_TOKEN'], 'Accept':'application/vnd.github+json'})
                   with urllib.request.urlopen(request, timeout=30) as response:
                       files = json.load(response)
-                  if any(path.startswith(('.github/', '.gitlab/', '.skillevaluator/ci')) or path == '.gitlab-ci.yml' for item in files for path in (item['filename'], item.get('previous_filename', ''))):
-                      scan_mode = 'all'
-                      break
-                  if len(files) < 100:
+                  paths = [path for item in files for path in (item['filename'], item.get('previous_filename', '')) if path]
+                  if any(path.startswith(('.github/', '.gitlab/', '.skillevaluator/ci')) or path == '.gitlab-ci.yml' for path in paths):
+                      setup = True
+                  if any(PurePosixPath(path).is_relative_to(root) for path in paths for root in roots):
+                      skills_changed = True
+                  if (setup and skills_changed) or len(files) < 100:
                       break
               else:
-                  scan_mode = 'all'  # Bounded discovery cannot certify a partial list.
+                  setup = skills_changed = True  # Bounded discovery cannot certify a partial list.
+              if setup:
+                  scan_mode = 'all'
           elif not pr and os.environ['GITHUB_EVENT_NAME'] in ('push', 'workflow_dispatch'):
               repository = read_api('')
               default = repository.get('default_branch')
@@ -204,11 +220,15 @@ jobs:
           with open(os.environ['GITHUB_OUTPUT'], 'a') as output:
               output.write('allowed=' + str(allowed).lower() + '\n')
               output.write('scan-mode=' + scan_mode + '\n')
+              output.write('skills-changed=' + str(skills_changed).lower() + '\n')
           print('Provider jobs eligible' if allowed else 'Provider jobs withheld; Tier 1 remains available')
+          if allowed and not skills_changed:
+              print('No changed skill: the LLM Tier 1, Tier 2 and Tier 3 jobs are skipped; the keyless Tier 1 scan is the gate')
           PY
   paid-tiers:
     needs: eligibility
-    if: ${{ needs.eligibility.outputs.allowed == 'true' }}
+    # A PR that changes no skill skips the paid tiers; the aggregate records them as skipped.
+    if: ${{ needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' }}
     runs-on: ${{ inputs.runner }}
     environment: ${{ inputs.environment }}
     permissions:
@@ -347,7 +367,7 @@ jobs:
           retention-days: 14
   tier1-llm:
     needs: eligibility
-    if: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && contains(format(',{0},', inputs.tiers), ',1,') }}
+    if: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' && contains(format(',{0},', inputs.tiers), ',1,') }}
     # Match the keyless image job even when native Tier 3 uses a local runner.
     runs-on: ubuntu-24.04
     environment: ${{ inputs.environment }}
@@ -409,7 +429,7 @@ jobs:
           if-no-files-found: warn
           retention-days: 14
   aggregate:
-    needs: [tier1, tier1-llm, paid-tiers]
+    needs: [eligibility, tier1, tier1-llm, paid-tiers]
     if: ${{ always() }}
     runs-on: ubuntu-24.04
     permissions:
@@ -418,6 +438,8 @@ jobs:
       id-token: write
     env:
       SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
+      # Only an exact "false" records missing Tier 2/3 evidence as skipped.
+      SKILL_EVAL_SKILLS_CHANGED: ${{ needs.eligibility.outputs.skills-changed }}
       DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
       REPORT_COMMIT: ${{ github.event.pull_request.head.sha || github.sha }}
       REPORT_REPOSITORY: ${{ github.repository }}

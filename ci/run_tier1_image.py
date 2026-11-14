@@ -23,10 +23,17 @@ if not __package__:
 
 try:
     from model_config import PROVIDER_KEYS, model_environment
-    from select_changed_skills import _git, _paths, setup_changed, skill_roots
+    from select_changed_skills import _git, changed_paths, pull_request, setup_changed, skill_root_changed, skill_roots
 except ModuleNotFoundError:
     from ci.model_config import PROVIDER_KEYS, model_environment
-    from ci.select_changed_skills import _git, _paths, setup_changed, skill_roots
+    from ci.select_changed_skills import (
+        _git,
+        changed_paths,
+        pull_request,
+        setup_changed,
+        skill_root_changed,
+        skill_roots,
+    )
 
 IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[0-9a-f]{64}")
 SHA = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
@@ -45,6 +52,10 @@ CONTEXT = frozenset(
 # Transport settings are only for Docker itself; no ambient credentials or
 # user Docker configuration are inherited. Model keys never reach the pull.
 HOST_ENV = frozenset({"PATH", "LANG", "LC_ALL", "LC_CTYPE", "SYSTEMROOT"})
+
+
+class NoSkillChanges(Exception):
+    """An automatic PR/MR scan changed no file under a configured skill root."""
 
 
 def _paths_safe(workspace: Path, reports: Path) -> tuple[Path, Path]:
@@ -80,17 +91,13 @@ def _environment(workspace: Path, image: str, source: dict[str, str]) -> dict[st
     mode = source.get("SKILL_EVAL_SCAN_MODE", "auto")
     if mode not in {"auto", "all"}:
         raise ValueError
-    pull_request = (
-        source.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}
-        or source.get("CI_PIPELINE_SOURCE") == "merge_request_event"
-        or bool(source.get("DIFF_BASE_SHA"))
-    )
-    mode = "changed" if mode == "auto" and pull_request else "all"
+    mode = "changed" if mode == "auto" and pull_request(source) else "all"
     if mode == "changed":
-        base = source.get("DIFF_BASE_SHA", "")
-        if not SHA.fullmatch(base):
-            raise ValueError
-        changed = _paths(_git(workspace, "diff", "--name-only", "-z", "--no-renames", f"{base}...{head}", "--"))
+        changed = changed_paths(workspace, source, head)
+        # The paid LLM pass needs a changed skill (select_changed_skills.skills_changed).
+        # A setup-only change keeps the keyless scan of every skill as the gate.
+        if not skill_root_changed(changed, configured):
+            raise NoSkillChanges
         if setup_changed(changed):
             mode = "all"
     requested_provider = source.get("SKILL_EVAL_TIER1_PROVIDER") or source.get("SKILL_EVAL_PROVIDER") or "openai"
@@ -147,7 +154,14 @@ def main(argv: list[str] | None = None) -> int:
             raise ValueError
         workspace, reports = _paths_safe(args.workspace, args.reports)
         source = dict(os.environ)
-        child = _environment(workspace, args.image, source)
+        try:
+            child = _environment(workspace, args.image, source)
+        except NoSkillChanges:
+            print(
+                "No changed file is under a configured skill root, so the LLM-enriched Tier 1 scan was skipped. "
+                "The keyless Tier 1 scan remains the gate."
+            )
+            return 0
         reports.mkdir(parents=True, exist_ok=True)
         host = {name: value for name, value in source.items() if name in HOST_ENV}
         host.setdefault("PATH", os.defpath)

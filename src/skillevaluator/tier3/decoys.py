@@ -212,7 +212,11 @@ def select_decoys(
         if stored.content_type != CONTENT_TYPE_SKILL or stored.path in exclusions:
             continue
         candidate = _selected_path(root, stored.path)
-        if _is_target_path(candidate, target) or _identity(candidate.name) in names or _identity(stored.name) in skill_names:
+        if (
+            _is_target_path(candidate, target)
+            or _identity(candidate.name) in names
+            or _identity(stored.name) in skill_names
+        ):
             continue
         entry = _skill(candidate)
         if _sha256(entry.embedding_text) != stored.content_fingerprint:

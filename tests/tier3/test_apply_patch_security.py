@@ -1112,19 +1112,22 @@ def test_shell_patch_evidence_omits_the_patch_body(run):
 
     result = run(_traj("exec_command", {"cmd": _heredoc(f"GH_TOKEN={_GITHUB_TOKEN} apply_patch", patch)}))
 
-    assert [f["type"] for f in result["findings"]] == ["destructive_command", "sensitive_path_access"]
-    for finding in result["findings"]:
-        assert finding["evidence"] == "GH_TOKEN=ghp_<redacted> apply_patch <<'EOF' [apply_patch body omitted]"
+    # The path finding names the matched entry; the command evidence omits the body.
+    assert [(f["type"], f["evidence"]) for f in result["findings"]] == [
+        ("destructive_command", "GH_TOKEN=<redacted> apply_patch <<'EOF' [apply_patch body omitted]"),
+        ("sensitive_path_access", "~/.ssh"),
+    ]
 
 
 @RUNNERS
 def test_shell_command_naming_apply_patch_without_a_patch_keeps_redacted_evidence(run):
-    command = f"GH_TOKEN={_GITHUB_TOKEN} grep -rn apply_patch ~/.ssh"
+    command = f"GH_TOKEN={_GITHUB_TOKEN} grep -rn apply_patch ~/.ssh && git reset --hard"
 
     result = run(_traj("exec_command", {"cmd": command}))
 
     assert [(f["type"], f["evidence"]) for f in result["findings"]] == [
-        ("sensitive_path_access", "GH_TOKEN=ghp_<redacted> grep -rn apply_patch ~/.ssh")
+        ("destructive_command", "GH_TOKEN=<redacted> grep -rn apply_patch ~/.ssh && git reset --hard"),
+        ("sensitive_path_access", "~/.ssh"),
     ]
 
 

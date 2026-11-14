@@ -158,8 +158,18 @@ a standardized JSON trajectory:
 | `HARBOR_REWARD_JSON` | `/logs/verifier/reward.json` | Where to write your scores |
 | `HARBOR_REWARD_TXT` | `/logs/verifier/reward.txt` | Where to write the plain-text overall score |
 | `HARBOR_LOGS_DIR` | `/logs` | Root of the log tree |
+| `HARBOR_ARTIFACTS_DIR` | `/logs/artifacts` | Files to retain as trial artifacts |
 | `HARBOR_TESTS_DIR` | `/tests` | Root of the staged test files |
 | `HARBOR_GRADER` | `/tests/grader.py` | Where your staged grader runs from |
+
+In local mode, these variables point to evaluator-owned host paths.
+`HARBOR_LOGS_DIR/artifacts` and `HARBOR_ARTIFACTS_DIR` identify the same staging
+directory. Local artifact declarations must select `/logs/artifacts` or a
+specific log role such as `/logs/agent`; transferring the whole `/logs` tree
+is unsupported and fails before changing the destination.
+Role log directories retain their host locations, so use
+`HARBOR_ARTIFACTS_DIR` or `HARBOR_LOGS_DIR/artifacts` for artifacts rather than
+deriving a parent from a role directory or writing `../artifacts` from it.
 
 Your grader reads Harbor's `trajectory.json` as written. Unlike the standard
 grader, it does not [rebuild a missing or empty trajectory](tier3-live-evaluation.mdx#the-graded-trajectory)

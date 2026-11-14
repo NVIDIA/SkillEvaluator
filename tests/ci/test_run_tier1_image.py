@@ -300,3 +300,79 @@ def test_invalid_baseline_opt_in_fails_before_credential_launch(launch, baseline
     assert not calls
     output = capsys.readouterr()
     assert "secret" not in output.err + output.out
+
+
+def _setup_only_change(env, workspace, git):
+    base = env["REPORT_COMMIT"]
+    (workspace / ".github").mkdir()
+    (workspace / ".github" / "config.yml").write_text("changed")
+    (workspace / "README.md").write_text("changed")
+    git("add", ".")
+    git("commit", "-qm", "setup only")
+    head = git("rev-parse", "HEAD")
+    env.update(DIFF_BASE_SHA=base, REPORT_COMMIT=head, DIFF_HEAD_SHA=head)
+
+
+@pytest.mark.parametrize(
+    "event", [{"GITHUB_EVENT_NAME": "pull_request"}, {"CI_PIPELINE_SOURCE": "merge_request_event"}]
+)
+def test_pr_without_a_skill_change_skips_before_credentials(launch, event, capsys):
+    """Setup-only or unrelated changes leave the keyless scan as the gate."""
+    runner, args, calls, env, workspace, reports, git = launch
+    _setup_only_change(env, workspace, git)
+    del env["ANTHROPIC_API_KEY"]  # A skip never needs, reads or exposes a key.
+    env.update(event)
+    assert runner.main(args) == 0
+    assert not calls
+    assert not reports.exists()  # No evidence or marker that could be mistaken for a result.
+    assert "keyless Tier 1 scan remains the gate" in capsys.readouterr().out
+
+
+def test_explicit_full_scan_does_not_skip_without_a_skill_change(launch):
+    runner, args, calls, env, workspace, _, git = launch
+    _setup_only_change(env, workspace, git)
+    env.update(GITHUB_EVENT_NAME="pull_request", SKILL_EVAL_SCAN_MODE="all")
+    assert runner.main(args) == 0
+    assert calls[-1][1]["env"]["SCAN_MODE"] == "all"
+
+
+def test_skills_changed_cli_matches_the_launcher_decision(launch, capsys):
+    """The GitLab aggregate and paid tiers recompute the skip with this exact command."""
+    _, _, calls, env, workspace, _, git = launch
+    selector = importlib.import_module("ci.select_changed_skills")
+    cli = ["--skills-changed", "--workspace", str(workspace)]
+    assert selector.main(cli) == 0
+    assert capsys.readouterr().out == "true\n"  # Default-branch and manual runs keep the enriched scan.
+    _setup_only_change(env, workspace, git)
+    env["CI_PIPELINE_SOURCE"] = "merge_request_event"
+    assert selector.main(cli) == 0
+    assert capsys.readouterr().out == "false\n"
+    env["SKILL_EVAL_SCAN_MODE"] = "all"
+    assert selector.main(cli) == 0
+    assert capsys.readouterr().out == "true\n"
+    del env["SKILL_EVAL_SCAN_MODE"]
+    (workspace / "skills" / "SKILL.md").write_text("changed again")
+    git("commit", "-qam", "skill")
+    env.update(REPORT_COMMIT=git("rev-parse", "HEAD"), DIFF_HEAD_SHA=git("rev-parse", "HEAD"))
+    assert selector.main(cli) == 0
+    assert capsys.readouterr().out == "true\n"
+    env["DIFF_BASE_SHA"] = "not-a-commit"
+    assert selector.main(cli) == 2
+    assert not calls
+
+
+def test_committed_submodule_ignore_cannot_hide_a_skill_change(launch, capsys):
+    """A gitlink update under a skill root still needs the enriched scan."""
+    _, _, _, env, workspace, _, git = launch
+    selector = importlib.import_module("ci.select_changed_skills")
+    base = env["REPORT_COMMIT"]
+    (workspace / ".gitmodules").write_text(
+        '[submodule "vendor"]\n\tpath = skills/vendor\n\turl = ./vendor\n\tignore = all\n'
+    )
+    git("add", ".gitmodules")
+    git("update-index", "--add", "--cacheinfo", f"160000,{'b' * 40},skills/vendor")
+    git("commit", "-qm", "vendor skill")
+    head = git("rev-parse", "HEAD")
+    env.update(CI_PIPELINE_SOURCE="merge_request_event", DIFF_BASE_SHA=base, REPORT_COMMIT=head, DIFF_HEAD_SHA=head)
+    assert selector.main(["--skills-changed", "--workspace", str(workspace)]) == 0
+    assert capsys.readouterr().out == "true\n"

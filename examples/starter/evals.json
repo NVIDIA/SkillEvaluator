@@ -8,7 +8,7 @@
       "expected_skill": "text-analyzer",
       "expected_script": "analyze_text.py",
       "assertions": [
-        "The agent reads text-analyzer/SKILL.md and runs scripts/analyze_text.py with --file and --json.",
+        "The agent reports the word, line, character and sentence counts and the most frequent word for input.txt.",
         "The returned statistics match the input fixture, including its final newline."
       ]
     }

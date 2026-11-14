@@ -24,7 +24,7 @@ skill-evaluation:
         echo "skill-evaluator-report already exists; choose a clean checkout for the report." >&2
         exit 1
       fi
-      reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
+      reports_dir="$(mktemp -d "${TMPDIR:-/tmp}/skillevaluator-reports.XXXXXX")"
       trap 'rm -rf "$reports_dir"' EXIT
       export SKILL_PATHS="$SKILL_EVAL_PATHS"
       export MIN_SCORE="$SKILL_EVAL_MIN_SCORE"

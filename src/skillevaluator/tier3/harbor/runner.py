@@ -349,6 +349,11 @@ _FINAL_RESULT_PROJECTION_SCHEMA_VERSION = "1.0"
 _FINAL_RESULT_CONTRACT_ERROR = (
     "Final Tier 3 result exceeds the 2 MiB, depth-64, or 50,000-node publication limit after artifact projection"
 )
+# Shared with the NeMo Gym backend, so both give the same advice for a skill without a dataset.
+_MISSING_EVALS_DATASET_ERROR = (
+    "No evals/evals.json found. Add task guidance in evals/EVAL.md or pass --prompt to "
+    "create-eval-dataset; add --grounding skill for an explicit skill-only starter, or author a dataset."
+)
 
 
 class _FinalResultContractError(ValueError):
@@ -5669,7 +5674,7 @@ def _run_harbor_eval_impl(
         task_source = "evals_json" if evals_exists else "native_harbor" if native_exists else ""
     if task_source == "evals_json" and not evals_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="evaluation dataset missing"))
-        return {"error": ["No evals/evals.json found. Run create-eval-dataset or add a dataset."]}
+        return {"error": [_MISSING_EVALS_DATASET_ERROR]}
     if task_source == "native_harbor" and not native_exists:
         reporter.emit(ProgressEvent(stage="with-skill-tasks", state="failed", detail="native Harbor tasks missing"))
         return {"error": ["No native Harbor task source found at evals/harbor."]}

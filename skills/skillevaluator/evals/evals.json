@@ -3,10 +3,9 @@
   "evals": [
     {
       "id": "skillevaluator-001-explicit-keyless",
-      "prompt": "Use the skillevaluator skill: I have a skill at ./skills/pdf-tools and no LLM API key. Give me the exact SkillEvaluator commands to check that it is well-formed, safe, and see its quality score, and tell me what exit code 1 versus 2 would mean.",
+      "prompt": "Use SkillEvaluator: I have a skill at ./skills/pdf-tools and no LLM API key. Give me the exact commands to check that it is well-formed, safe, and see its quality score, and tell me what exit code 1 versus 2 would mean.",
       "expected_output": "Recommends keyless commands such as `skillevaluator tier1 ./skills/pdf-tools --no-llm` and/or `skillevaluator quality-check ./skills/pdf-tools` (or `validate --tiers 1`), and explains exit 1 = a gate failed or evidence incomplete, exit 2 = usage error such as a bad flag or missing path.",
       "assertions": [
-        "Read the skillevaluator SKILL.md",
         "Recommends a keyless Tier 1 command (tier1 --no-llm, quality-check, or validate --tiers 1) on ./skills/pdf-tools",
         "Explains exit code 1 as a failed check or incomplete evidence and exit code 2 as a usage error",
         "Does not ask for or invent an API key"
@@ -41,7 +40,7 @@
     {
       "id": "skillevaluator-004-implicit-report",
       "prompt": "My skill benchmark report says 'INCONCLUSIVE: skill never activated' and the Tier 3 command exited 0. Another run says verdict FAIL but also exited 0. What do these mean and what should I change?",
-      "expected_output": "Explains that no positive with-skill trial loaded the skill, so the description or prompts should be fixed rather than the scores; explains that tier3 exits 0 on a FAIL verdict and only an incomplete run exits 1, with --block-on-agent-eval in validate to gate on Tier 3.",
+      "expected_output": "Explains the INCONCLUSIVE verdict as missing positive-trial activation, so the description or prompts should be fixed rather than the scores; explains that tier3 exits 0 on a FAIL verdict and only an incomplete run exits 1, with --block-on-agent-eval in validate to gate on Tier 3.",
       "assertions": [
         "Explains never activated means the skill was not loaded in positive trials",
         "Recommends improving the skill description or eval prompts",

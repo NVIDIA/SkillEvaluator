@@ -35,6 +35,10 @@ HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"}
 RUN_UNLESS_CANCELLED_IF = "${{ !cancelled() }}"
 FULL_LANE_IF = "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}"
 NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
+PULL_REQUEST_TESTS_IF = (
+    "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}"
+)
+MAIN_COVERAGE_IF = "${{ github.event_name != 'pull_request' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     "cancel-in-progress": "true",
@@ -139,14 +143,38 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
         "Install dependencies",
         "Scan OSS source boundary",
         "Lint",
-        "Run tests with coverage",
     }
     full_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in full_lane_step_names}
     assert set(full_lane_steps) == full_lane_step_names
     assert all(step["if"] == NOT_DOCS_ONLY_IF for step in full_lane_steps.values())
 
+    step_names = [step.get("name") for step in job["steps"]]
+    pull_request_tests = job["steps"][step_names.index("Run tests")]
+    main_tests = job["steps"][step_names.index("Run tests with coverage")]
+    # Pull requests wait on this required job, so they run it like the 3.13 and
+    # 3.14 jobs: in parallel, without a coverage report that no check reads.
+    assert pull_request_tests["if"] == PULL_REQUEST_TESTS_IF
+    assert pull_request_tests["run"] == "uv run pytest -q -n auto"
+    # Coverage is measured once per merge. It stays serial: under xdist,
+    # coverage tracing pushed the time-bound tests past their limits (#261).
+    assert main_tests["if"] == MAIN_COVERAGE_IF
+    assert main_tests["run"].split() == [
+        "uv",
+        "run",
+        "pytest",
+        "-q",
+        "--cov=skillevaluator",
+        "--cov-report=term-missing",
+        "--cov-report=xml:coverage.xml",
+    ]
+    pytest_steps = [step.get("name") for step in job["steps"] if "pytest" in step.get("run", "")]
+    assert pytest_steps == ["Run tests", "Run tests with coverage"], "exactly one pytest step runs per event"
+
     node_step = next(step for step in job["steps"] if step.get("name") == "Set up Node.js for docs")
     docs_step = next(step for step in job["steps"] if step.get("name") == "Validate Fern documentation")
+    # A failing suite must not hide a docs break, and the docs verdict should
+    # not wait for the suite.
+    assert step_names.index("Validate Fern documentation") < step_names.index("Run tests")
     assert "if" not in node_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert len(node_step["uses"].split("@", 1)[1]) == 40
     assert "if" not in docs_step, "Fern validation must run for mixed and Fern dependency PRs"

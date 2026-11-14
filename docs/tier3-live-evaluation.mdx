@@ -56,7 +56,13 @@ human-readable dimensions:
 | Efficiency | Does it route correctly and use tools productively? |
 
 In `custom_only` mode, your own grader defines the score instead — see
-[Custom Graders & Tasks](custom-graders.mdx).
+[Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
+
+For the exact formula behind every one of these numbers — each dimension, the
+Overall Score, Skill Lift and pass@k, with its range, units, the checks or
+judges that produce it, and how to recompute it from the JSON report — see the
+[Metrics Reference](/skills/skillevaluator/metrics-reference). It also states which
+values carry LLM judge variance and what the project has and has not validated.
 
 If every positive with-skill trial has a confirmed activation score of zero,
 the result is **INCONCLUSIVE: skill never activated**. Tier 3 keeps the arm
@@ -68,11 +74,99 @@ When at least one positive trial activates the skill, lift remains eligible
 subject to the comparison requirements below. This also makes activation
 failures visible with `--skip-baseline`.
 
+## Skill interaction experiments
+
+Use the opt-in `tier3 interact` command to measure whether selected skills
+produce more or less improvement together than the sum of their individual
+improvements. Choose one reviewed evaluation source before running:
+
+```bash
+skillevaluator tier3 interact ./skills/research ./skills/summarize \
+  --eval-source ./skills/research --agents codex --n-attempts 3 \
+  --results-dir ./interaction-results
+```
+
+`--eval-source` is a skill directory containing an existing valid `evals/`
+dataset or native Harbor task suite. The command never generates or refines
+tasks. It freezes that source and the selected skills once, then reuses the
+existing Harbor evaluator and skill staging to run:
+
+| Configuration | Installed skills |
+| --- | --- |
+| Baseline | None |
+| Individual | One run for each selected skill alone |
+| Combined | Every selected skill together |
+
+For two skills this is four configurations. For a group of N skills it is
+N + 2 configurations, each with the full task suite, selected agents, and the
+same `--n-attempts` budget. Early stopping is disabled, including when the source
+config enables it. Source-config companion selections, partial task suites, and
+`pre_agent_setup` are rejected before execution. Skill roots must have distinct
+names and be self-contained: runtime snapshots include each skill's files,
+while common task inputs belong in the fixed source's `evals/files/`. Results
+must be outside the selected skills and evaluation source. The output root uses
+`--results-dir`, then `SKILLEVALUATOR_RESULTS_DIR`, then `interaction-results`
+beside the source. User-home shortcuts and symlinked parents are resolved before
+checking that the output stays outside the inputs.
+
+The default outcome metric is `goal_accuracy`; `--metric accuracy` is also
+available. These compare task outcomes on the same cases instead of the
+standard overall score, whose discovery and skill-usage components differ
+between installed-skill and baseline configurations. For `custom_only` grading,
+use `--metric overall` with one shared task-outcome grader.
+
+For two skills, the interaction is:
+
+```text
+I(A, B) = P(A, B) - P(A) - P(B) + P(empty)
+```
+
+For a selected group S:
+
+```text
+I(S) = [P(S) - P(empty)] - sum(P(skill) - P(empty) for skill in S)
+```
+
+P is the mean per-case outcome, averaging the fixed number of attempts within
+each case first. A positive interaction means more than additive improvement;
+a negative interaction means less; zero means additive. For example, baseline
+0.50, individual scores 0.75 and 0.70, and combined score 0.65 yield interaction
+-0.30 and combined lift +0.15. Negative interaction does not imply performance
+below baseline. For more than two skills this is total departure from additive
+individual gains, rather than an isolated higher-order interaction.
+
+These signs describe the observed estimate, without a confidence interval or
+statistical significance test. A small interaction can reflect trial noise;
+with one attempt on ten binary-outcome cases, one outcome changing in an
+individual or combined configuration moves the interaction by 0.10. Configurations
+run sequentially: baseline, each individual, then combined. Provider changes,
+rate limiting, or timeouts during a long experiment can therefore align with
+configuration order. Repeat the experiment before interpreting a small
+interaction as a reliable effect.
+
+The terminal prints baseline, individual and combined scores, combined lift,
+and signed interaction separately for each agent/model. Add `--json` for a
+machine-readable report on stdout; each configuration's trial progress goes to
+stderr. Every experiment
+also saves `interaction.json`, its fixed evaluation source, and independent
+Tier 3 run directories containing reports, dataset snapshots, and trial
+evidence. The interaction report records original source paths, content
+identities, per-case calculations, and the reward artifacts used.
+
+Missing trials, N/A outcomes, changed cases, unequal attempt budgets, or
+different agent models, evaluator versions, or outcome scorers produce an
+explicit `incomplete` or `incomparable` result with no interaction estimate and
+exit code 1. Judge fallback to a different model is incomparable. Multiple
+retained reward rows for one logical attempt are also incomparable rather than
+being counted as extra attempts. Other completed configuration evidence remains
+available for inspection.
+
 ## Repeatable activation validation
 
 Use the existing dataset generator, runner and trusted trajectory collector to
-check activation separately from answer quality. Start with
-`skillevaluator create-eval-dataset ./my-skill --full`, review the generated
+check activation separately from answer quality. Write task requests and
+observable outcomes in `eval-guidance.md`, then run
+`skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md`, review the generated
 cases, and retain a versioned dataset with these four buckets:
 
 | Bucket | Authored expectation | What to check |
@@ -201,10 +295,10 @@ depth.
 
 | Requirement | How to check | Covered in |
 | --- | --- | --- |
-| The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](installation.mdx) |
-| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](configuration.mdx) |
-| The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
-| Docker running (the default environment) | `docker info` | [Agents & Sandboxes](agents-and-sandboxes.mdx) |
+| The `tier3` extra installed (`[all]` includes it) | `skillevaluator health-check` | [Installation](/skills/skillevaluator/installation) |
+| An evaluator LLM provider key | `skillevaluator doctor --env-mode docker` names any missing key | [Providers & Credentials](/skills/skillevaluator/configuration) |
+| The agent and its credential | Same `doctor` run, with your agents; `tier3 evaluate` re-validates before any run | [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) |
+| Docker running (the default environment) | `docker info` | [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) |
 
 ## Harbor 0.25 compatibility
 
@@ -288,7 +382,7 @@ using Harbor 0.25:
   uploaded tests. SkillEvaluator validates the verifier's Compose model against
   its environment allowlist, and rejects `docker-compose.yml` verifier
   definitions, which Harbor ignores. Standard grading modes reject separate
-  verifiers entirely; see [Custom Graders & Tasks](custom-graders.mdx).
+  verifiers entirely; see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 - Harbor 0.25 rejects a `reward.json` whose top-level values are not all
   finite numbers. SkillEvaluator's verifier and wrapped custom graders already
   write numeric rewards; a native task's own test script must do the same. When
@@ -298,7 +392,7 @@ using Harbor 0.25:
 
 ## Start with one command
 
-After the [provider setup](configuration.mdx) and runtime prerequisites above:
+After the [provider setup](/skills/skillevaluator/configuration) and runtime prerequisites above:
 
 ```bash title="Run Tier 3"
 skillevaluator tier3 ./my-skill
@@ -312,8 +406,9 @@ unchanged; invalid sources produce an error rather than being replaced.
 A generated one-case starter is a starting point, not a representative
 evaluation. Generation prints its concrete coverage gaps to stderr, such as
 the absence of a negative/non-trigger case or missing expected outcomes and
-assertions. Replace the starter with a full dataset using
-`skillevaluator create-eval-dataset ./my-skill --full --force`. `--force`
+assertions. Write task requests and observable outcomes in `eval-guidance.md`
+before replacing the starter with a full dataset using
+`skillevaluator create-eval-dataset ./my-skill --full --force --prompt eval-guidance.md`. `--force`
 overwrites the starter and discards any edits to it. Then inspect the counts
 and gaps with `skillevaluator tier3 validate ./my-skill`. Larger case counts
 do not by themselves establish representative coverage. Native Harbor task
@@ -350,13 +445,19 @@ before the measured matrix, `--agent-runtime-preflight` adds an agent-only
 execution of the first staged task. It does not invoke a separate
 standard-grader-only route before the evaluation reaches grading.
 `skillevaluator health-check` is the quicker
-CLI-and-backend variant; [Agents & Sandboxes](agents-and-sandboxes.mdx) covers
+CLI-and-backend variant; [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) covers
 both in depth.
 
 ### Generate an eval dataset
 
+Write task requests and observable outcomes in `eval-guidance.md` first; headings
+alone do not qualify. If you already ran autopilot, add `--force` to replace its
+starter, or `--refine --from-results ./saved-run` to refine from matching retained
+results. Auto leaves existing datasets unchanged without either overwrite flag.
+See [Grounding sources](/skills/skillevaluator/eval-datasets#choose-a-grounding-source).
+
 ```bash title="Write the four-bucket dataset to evals/evals.json"
-skillevaluator create-eval-dataset ./my-skill --full
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
 
 `--full` with an LLM provider generates all four buckets (explicit, implicit,
@@ -365,7 +466,7 @@ positive buckets and adds a negative case only when `evals/EVAL.md` supplies an
 off-skill prompt under a supported negative heading. Generation uses your
 configured evaluator provider by default; `--no-llm` falls back to keyless local
 templates. The dataset format, `EVAL.md` guidance, and refinement options live
-in [Eval Datasets](eval-datasets.mdx).
+in [Eval Datasets](/skills/skillevaluator/eval-datasets).
 
 ### Review the cases
 
@@ -433,6 +534,13 @@ files replaced during the read fail task generation before output mutation. On
 Windows, the selected-file handle also denies concurrent writes and deletion
 for the read.
 
+Native Harbor task `environment.mcp_servers` declarations use the same MCP
+approval policy before staging, including declarations in task-level and
+per-step verifier environments. For generated tasks,
+`evals/environment/mcp_servers.toml` accepts approved `$VAR` and `${VAR}` header
+references; generated Harbor task TOML uses the braced form required by Harbor
+0.25. Source files and the agent's MCP JSON keep their original references.
+
 `evals/environment/input/` is reserved and is not copied into generated tasks.
 Directory-level custom Docker `COPY input/` remains buildable for an empty entry
 using an empty context directory. Missing, dynamic, linked, hardlinked, aliased,
@@ -493,10 +601,10 @@ skillevaluator compare ./my-skill
 ```
 
 `view` opens the latest HTML report; `compare` summarizes stored results across
-agents and arms. [Reports & Results](reports.mdx) explains everything the run
+agents and arms. [Reports & Results](/skills/skillevaluator/reports) explains everything the run
 wrote and how to interpret it. To ask follow-up questions about one run and get
 grounded advice on skill changes, pass its run directory to
-[`tier3 feedback`](cli-reference.mdx#tier3-feedback).
+[`tier3 feedback`](/skills/skillevaluator/cli-reference#tier3-feedback).
 
 </Steps>
 
@@ -538,7 +646,7 @@ can never supply, replace, or reroute them:
 
 | Credential | Used for | How to set |
 | --- | --- | --- |
-| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key — see [Providers & Credentials](configuration.mdx) |
+| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key — see [Providers & Credentials](/skills/skillevaluator/configuration) |
 | Live agent credential | The agent actually performing the task | Export it in the host environment where you run `skillevaluator` |
 
 ```bash title="Agent credentials are host-environment exports, never config entries"
@@ -553,7 +661,7 @@ operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
 `NVIDIA_API_KEY`, the base-URL variables, `AWS_*`) fails the run with a hard
 error. This prevents a skill from swapping a credential or routing a trusted
 key to an attacker-controlled endpoint. [Providers &
-Credentials](configuration.mdx) lists every blocked name.
+Credentials](/skills/skillevaluator/configuration) lists every blocked name.
 
 `runtime_env` also cannot override host launcher, language-runtime, Docker,
 Compose, proxy, or tracing controls. Configure the selected backend in the
@@ -583,7 +691,119 @@ skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
 On cloud env-modes the bridges are
 unavailable: `opencode` still works with `NVIDIA_API_KEY` directly, but
 `codex` and `claude-code` fall back to their own native credentials and
-explicit models — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
+explicit models — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
+
+## Execution backends
+
+`--backend` chooses what executes the cases. The default is Harbor. The experimental
+NeMo Gym adapter stages the same task folders and uses the shared verifier and result
+collector, but requires a Gym interface that is not available in the checked public
+`nemo-gym==0.7.0` release.
+
+| Backend | What runs the cases |
+| --- | --- |
+| `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Public Gym 0.7.0 is incompatible and fails preflight. A public source candidate exposes the interface; independent live validation is still required. |
+
+**Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
+That release's `gym eval run` takes JSONL inputs and configured environments; it has
+neither the positional task-directory argument nor `--sandbox` used by this adapter.
+Removing that flag alone does not provide the required execution or verifier contract.
+The immutable public source candidate
+[`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
+declares the `TARGET` task-folder argument and the seven required flags. This source
+inspection establishes an interface candidate, not a supported runtime installation.
+Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs and
+input-file handling still need independent qualification. Codex, Claude Code and
+OpenCode mappings remain experimental and do not establish end-to-end agent support.
+
+```bash
+# Requires a separately verified, pinned Gym task-folder implementation.
+export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
+export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
+export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
+skillevaluator tier3 doctor --backend nemo-gym --agents codex
+skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
+```
+
+`tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
+daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
+endpoint, and the selected agents and `--env-mode`. The CLI check runs
+`gym eval run --help` with a 15-second timeout and a combined stdout/stderr limit of
+256 KiB, without policy credentials or server startup. Timeout, interruption, or output
+overflow stops its isolated process group with bounded TERM/KILL cleanup. It rejects
+missing task-folder arguments and required flags before dataset
+generation or task staging. Passing this necessary check does not certify live runtime
+compatibility. A Gym run reports
+configuration, Docker image, per-agent and collection progress.
+
+Public Gym 0.7.0 requires Python 3.13.14 or later. Gym runs as its own pinned install
+rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that
+install's `gym` executable. The run records `execution_backend` (name, Gym version,
+sandbox) in `result.json`; keep Harbor and NeMo Gym scores apart unless the model,
+harness and judge match.
+
+The adapter's required Gym contract is `gym eval run TASKS --sandbox docker`, with
+`--agent`, `--model-type openai_model`, `--model`, `--model-url`, `--output`, and
+`--concurrency`, plus Hydra overrides for repeats, credentials and cache disabling.
+Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
+`tasks_dir` or `task_folder` argument. Each rollout must identify its task and provide
+`verifier_return_code` and `verifier_logs_dir`, where the SkillEvaluator verifier's rewards and trajectory can
+be collected. The Gym implementation must execute inside Docker and resolve task
+environment templates; a host-only agent harness does not meet this contract.
+
+Subject to that unverified runtime contract, the adapter maps `codex`, `claude-code`
+and `opencode` and accepts `default`, `default_plus_custom` and `custom_only` grading
+modes. These are adapter capabilities, not independently validated live combinations.
+Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
+not supported on the NeMo Gym path and is rejected before the run starts; use
+`--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
+`harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
+`resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
+`skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
+`--agent-model` (one model per agent) apply the same way. `--timeout-multiplier` (or
+`harbor.timeout_multiplier`) scales each task's agent, verifier, and environment-build timeouts
+as on Harbor, and Gym enforces them. `harbor.agent_workdir` and `harbor.pre_agent_setup`
+(alias `setup_commands`, with-skill-only runs) work as on Harbor: Gym starts the agent in
+that working directory and runs the setup commands as the task's environment healthcheck
+before the agent. `--copy-repo` stages the whole repository under
+`/workspace/repo/` as on Harbor, and a `skill_workspace.decoy_manifest` stages the same
+verified decoy snapshot into every arm. Native `evals/harbor/` tasks (`task_source: native_harbor`, or
+`auto` without `evals/evals.json`) are staged with Harbor's own native staging and run on Gym; their verifiers may write
+`reward.json` or a numeric `reward.txt`, and `--override-cpus`/`--override-memory-mb` apply to them, as on Harbor. `harbor.base_image_mode`
+(reuse/rebuild) builds Harbor's shared eval base image that the task images start from. `--custom-dockerfile-mode` rebase and preserve
+behave as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
+Docker mode. It rejects `--stop-on-pass`,
+`--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
+`--reuse-baseline`, `--compare-to`, `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, `--price-file`, `--tolerate-baseline-timeouts`,
+and the config keys
+`resources.storage_mb`, `max_agent_tokens`, `max_judge_calls`, `max_attempts_total`,
+`max_cost_usd`, `price_file` and `tolerate_baseline_timeouts: true` under `harbor`, MCP
+servers in `evals/environment/mcp_servers.toml` or a native task's `[[environment.mcp_servers]]`, a model URL with embedded credentials, and Windows hosts,
+whether set by flag or config (a flag overrides its config key), before anything
+starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
+falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`
+references resolved from Gym's environment. Gym receives only the variables Harbor's
+Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT` and TLS settings),
+Gym's `UV_*` package-index settings and credentials, `NETRC`, and the policy and judge
+credentials; relative Docker and TLS paths are made absolute first. Judge overrides
+(`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on Harbor, and Vertex
+AI ADC tokens are refreshed before every `gym eval run`. Every agent and arm is staged
+from one skill snapshot before the first launch. A missing or failed attempt counts as a
+failed trial, and the arm keeps its other scored trials. Excess rollouts are reported
+as execution errors and scoring remains bounded by the planned attempts. Any launch
+or rollout-count failure marks the
+run, the agent's progress row and the report as failed. If Gym's process group cannot be
+confirmed stopped after a timeout or interruption, no further arm starts beside it. After a
+timeout, the run records that as an execution error, finishes as failed and keeps the scores
+of the arms that finished. After an interruption, the progress output reports it and the run
+ends. Either way, check for leftover Gym servers and Docker sandboxes before you run again.
+A finished run updates `latest`
+and records the same dataset snapshot and publication target as a Harbor run. As on
+Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
+the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under `_nemo-gym/`
+in the run folder, and the rollouts hold the raw agent responses.
 
 ## Where agents run
 
@@ -624,7 +844,7 @@ through constructor kwargs. GKE requires
 for its default ephemeral launch mode or `instance_id` with
 `launch_mode=attach`. The complete environment/extra matrix, examples, Docker
 resource tuning, local-mode safety controls, and workspace modes live in
-[Agents & Sandboxes](agents-and-sandboxes.mdx).
+[Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
 
 <Warning>
 Local mode executes the agent on your host rather than in a container. It is
@@ -660,7 +880,7 @@ skillevaluator validate ./my-skill --agents codex \
 `--grading-mode`, and the rest) to the live-eval engine whenever Tier 3 is
 enabled, which is the default for skills. `--agent-eval` remains a supported
 alias for `--tier3`; explicit tier selection and disable flags control the
-scope. See the [CLI Reference](cli-reference.mdx) for the full group.
+scope. See the [CLI Reference](/skills/skillevaluator/cli-reference) for the full group.
 </Note>
 
 ## Plan for cost
@@ -750,7 +970,7 @@ The high-signal flags, with defaults:
 | `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
 | `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
 | `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
-| `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](custom-graders.mdx) |
+| `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders) |
 | `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
 | `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
 | `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
@@ -763,6 +983,22 @@ passing score. The with-skill and without-skill arms run one after the other,
 and each uses the full `--n-concurrent` budget. For example, two agents with
 `--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
 remain.
+
+Run budgets (`--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, and priced `--max-cost-usd`) control admission between
+logical units of work. Already admitted work can take measured usage above a
+cap, including on the final unit. These are admission boundaries, so a priced
+cost budget does not guarantee a hard dollar cap.
+
+`budget.status` and `exhausted_limit` describe admission decisions;
+`budget.partial` records attempts left not run. Separately,
+`budget.observed_overruns` maps each exceeded limit to its measured `used`,
+configured `limit`, and `excess` (with attempts measured by started attempts).
+Only usage strictly above a cap is an overrun; completion exactly at a cap
+remains within it. Summaries derive these facts from usage and limits,
+including for older saved runs. Missing or partially measured bounded usage
+is reported as unverified, and unconfigured limits are not checked. An observed
+overrun alone does not change scores, execution success, or partial-run status.
 
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is
@@ -783,7 +1019,7 @@ Frames the terminal refused are dropped then, so they are never drawn over
 output printed since.
 
 Every `tier3 evaluate` flag, including resource overrides and Dockerfile
-modes, is in the [CLI Reference](cli-reference.mdx).
+modes, is in the [CLI Reference](/skills/skillevaluator/cli-reference).
 
 <Tip>
 While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
@@ -813,6 +1049,11 @@ diagnostics. Reports identify the source and timestamp when reuse succeeds.
 The new run retains its own baseline rows. Fresh execution counts and reused
 trial counts are separate; reused evidence is not another independent attempt.
 Cost savings depend on the run, including agent, judge, and environment usage.
+Baseline compatibility deliberately excludes concurrency and budget. It does
+not establish actual judge-model agreement. Reused resource measurements are
+historical observations from the source run, not fresh consumption or independent
+evidence in this run; consider these limits alongside task outcomes when
+interpreting resource differences.
 
 ### Compare skill versions
 
@@ -896,7 +1137,8 @@ the run warning names the rule that did not hold:
   tolerated. Native multi-step tasks are not covered: Harbor records their
   agent timeouts on the step rather than on the trial, so such a baseline is
   refused (`step_timeout_not_supported`).
-- Every timed-out attempt shows agent output (output tokens above zero).
+- Every timed-out attempt shows agent output (output tokens above zero; a
+  count past the JSON-safe integer range is not evidence).
 - Each timed-out attempt left an agent log, and no log shows a known provider
   overload, rate limit, quota or authentication error identifier (such as
   `rate_limit_error`, `insufficient_quota`, `Error code: 429` or a `429`
@@ -913,13 +1155,15 @@ and its baseline scores, Skill Lift, pass@k lift and security attribution are
 not reported. The reports, and the findings panel that `tier3 evaluate` prints
 with `--verbose`, rank it below every agent with a complete baseline, so the
 best agent, overall score and lift come from complete evidence. The run's
-verdict reads the same agents: a tolerated agent that passes every dimension
+verdict and the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+read the same agents: a tolerated agent that passes every dimension
 does not make the run PASS, and when every agent with a complete baseline
 never activated the skill the verdict is INCONCLUSIVE. When the best agent
 never activated the skill, the findings panel is left out rather than showing
 a tolerated agent's findings. `BENCHMARK.md` and `report.html` keep the "Needs
 attention" note and name each tolerated agent on its own line, for example
-`Baseline incomplete for opencode (1 of 2 attempts scored)`.
+`Baseline incomplete for opencode (1 of 2 attempts scored)`, also when a cost
+limit leaves the report without a completed-agent result.
 
 `result.json` records the timed-out attempts under the agent's
 `baseline_timeout_tolerance` (also written to
@@ -1072,10 +1316,40 @@ setting that cut evidence: `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
 `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Raise each setting it
 names; raising the budget does not clear a cut made by the final-response
 limit. Larger budgets send longer judge prompts and use more evaluator
-tokens. The behavior budget never falls below the final-response limit plus
-4,000 characters, so raising the limit leaves room for the tool history. Set these variables in the host environment;
+tokens. The *default* behavior budget never falls below the final-response
+limit plus 4,000 characters, so raising the limit alone leaves room for the
+tool history; a budget you set yourself is used exactly as set. Set these
+variables in the host environment;
 SkillEvaluator forwards them to the verifier. Defaults and accepted values are
-in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
+in [Judge evidence budgets](/skills/skillevaluator/environment-variables#judge-evidence-budgets).
+
+`behavior_check`'s `omitted` record carries four further keys, because
+`truncated` alone cannot say whether the judge still had what it needed:
+
+- `incomplete_sections` — the evidence sections whose complete source did not
+  reach the judge, by name: `final response`, `user request`, `file changes`,
+  `compact tool history`. Each is compared against its unclipped source, so
+  `file changes` and `compact tool history` also appear when a single write
+  body or tool result was longer than its own per-entry allowance, not only
+  when the overall budget was exceeded.
+- `required_complete` and `required_missing` — whether the *required*
+  evidence survived. Only `final response` is required: file changes and the
+  tool history grow with the run, so any finite budget shortens them on a long
+  trajectory, and their loss is reported but never withholds a score.
+- `expected_behaviors_verified` — whether the deterministic fact list already
+  settles every expected behavior, in which case the evidence that was cut
+  cannot change the judge's answer.
+
+When `required_complete` is `false`, `behavior_check` returns an evaluation
+error with no score instead of grading the evidence loss as a behavior
+failure, and **the case then has no overall score at all** — an unscored
+metric that is not "not applicable" leaves `overall_score` null, so the case
+drops out of any gate or comparison keyed on it. Raise the two settings the
+`reason` names, or shorten the case, and re-run. The one exception is
+`expected_behaviors_verified`: when every expected behavior names an artifact
+path or backtick-quoted snippet that the deterministic fact list above the
+evidence already marks observed, the missing text cannot change the answer, so
+the case is judged and scored normally.
 
 ### Judge requests and retries
 
@@ -1166,11 +1440,11 @@ in [Judge evidence budgets](environment-variables.mdx#judge-evidence-budgets).
 
 Retry counts, delays, and the per-judge budget come from the host environment
 and are forwarded to the verifier; see
-[LLM retries and judge time budget](environment-variables.mdx#llm-retries-and-judge-time-budget).
+[LLM retries and judge time budget](/skills/skillevaluator/environment-variables#llm-retries-and-judge-time-budget).
 Retries and downgrades do not change scoring formulas. A judge that still fails
 is an evaluation infrastructure failure, not a `0.0` score, and the affected
 condition publishes no scores; see
-[Tier 3 judge failure semantics](environment-variables.mdx#tier-3-judge-failure-semantics).
+[Tier 3 judge failure semantics](/skills/skillevaluator/environment-variables#tier-3-judge-failure-semantics).
 
 ### Judge fallback and retry policies
 
@@ -1382,7 +1656,7 @@ the configuration that produced it. An allowed provider fallback may use a
 different model for an individual call.
 
 This provenance does not establish that the LLM judgments are correct. The
-[grader validation workflow](grader-validation.mdx) runs the shipped verifier
+[grader validation workflow](/skills/skillevaluator/grader-validation) runs the shipped verifier
 against independently labelled cases and reports agreement, abstentions,
 errors and repeat variability. The bundled reference suite is not a published
 claim of inter-rater agreement or universal judge reliability.
@@ -1408,6 +1682,10 @@ Artifacts record this contract as
 `score_policy: skill-evaluator-dimension-mean-v1`. Legacy metric sets and
 historical partial reports retain their recorded scoring semantics instead of
 being silently reinterpreted.
+
+The [Metrics Reference](/skills/skillevaluator/metrics-reference) works through each
+sub-check behind the six evaluator scores, the arithmetic above them, and a
+worked example you can check against one trial's `reward.json`.
 
 ## Cost limits
 
@@ -1454,7 +1732,7 @@ resolved `should_trigger` label also leaves both skill metrics N/A.
 
 Skill Lift per dimension and overall uses only cases and metrics both arms
 scored; the `basis` block in `lift.json` records the shared comparison ([Skill
-Lift reporting](reports.mdx#skill-lift)). A baseline is never credited or
+Lift reporting](/skills/skillevaluator/reports#skill-lift)). A baseline is never credited or
 penalized for a skill it was not given.
 
 The Security trace check excludes plain `rm -rf` commands whose operands are
@@ -1508,7 +1786,14 @@ the finding.
 A path matches however it names the home directory: `~`, `$HOME`, `${HOME}`,
 `~user`, `/home/<user>`, `/Users/<user>` (not `/Users/Shared`), `/root`, or
 `C:\Users\<user>`. `//`, `/./`, and `dir/..` segments are resolved first, so
-`cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. A
+`cat /home/agent//.ssh/id_rsa` and `cat $HOME/.ssh/id_rsa` match `~/.ssh`. The
+spelling must start a path word. The default word of a `${VAR:-word}` or
+`${VAR-word}` that starts a path word starts one too, so
+`cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` matches `~/.ssh`, while
+`cat backup-$HOME/.netrc` and `cat backup-${X:-$HOME/.netrc}` do not match
+`~/.netrc`. The expansion is not resolved, so the whole path must lie inside
+the default word: `ls "${XDG_CONFIG_HOME:-$HOME/.config}/gcloud"`, whose path
+goes on after the closing brace, does not match `.config/gcloud`. A
 project file that only shares a name with a home file, such as
 `/home/agent/project/.bashrc` or `./project/.npmrc`, does not match.
 `.aws/credentials` and `.config/gcloud` match in any directory in commands
@@ -1526,13 +1811,16 @@ are the shell startup files `~/.bashrc`, `~/.bash_profile`, `~/.zshrc`,
 `~/.ssh/authorized_keys`; `~/.gitconfig`; and the agents' own settings
 `~/.claude/settings.json`, `~/.claude.json`, `~/.codex/config.toml`, and
 `~/.config/opencode`. A Write or Edit tool path that names one is a write, and
-so is an `apply_patch` file header. When the directory an `apply_patch` runs
-in cannot be resolved, as after `cd "$REPO"`, a relative header such as
-`.bashrc` or `.aws/credentials` may still name a home file, but `.npmrc`,
-`.gitconfig`, `.claude/settings.json`, and the other files added to these
-lists with the home spellings count only from a known directory, because
-projects often have them too. A shell command is a write in either of two
-cases:
+so is an `apply_patch` file header. The `view` command of a text editor tool
+(`str_replace_editor` or `str_replace_based_edit_tool`) reads its file, so it
+is checked like a Read: a view of `/root/.bashrc` is not a write, and a view
+of `~/.netrc` is still a `sensitive_path_access`. When the directory an
+`apply_patch` runs in cannot be resolved, as after `cd "$REPO"`, a relative
+header such as `.bashrc` or `.aws/credentials` may still name a home file, but
+`.npmrc`, `.gitconfig`, `.claude/settings.json`, and the other files added to
+these lists with the home spellings count only from a known directory,
+because projects often have them too. A shell command is a write in either
+of two cases:
 
 - It names `~/.bashrc`, `~/.zshrc`, `~/.profile`, `/root/.bashrc`,
   `/root/.zshrc`, `/etc/profile`, `/etc/profile.d`, `/etc/sudoers`, or
@@ -1560,9 +1848,18 @@ cases:
 The second case reads the command text as written, as the earlier rule does.
 A redirection, `tee`, or `sed` inside a quoted string counts, and its target
 ends with that string: `sudo sh -c "echo x >> /home/agent/.profile"` receives
-the finding, and `echo "Step 1 -> check"; cat "$HOME/.zshrc"` does not. A
+the finding, and `echo "Step 1 -> check"; cat "$HOME/.zshrc"` does not. The
+commands after the string are still read, so
+`echo "Step 1 -> check"; echo x >> "$HOME/.zprofile"` receives the finding. A
 double quote escaped with a backslash does not end the string, so
-`bash -c "echo x >> \"$HOME/.zprofile\""` receives the finding too. So
+`bash -c "echo x >> \"$HOME/.zprofile\""` receives the finding too. Quoted
+strings are found as the shell finds them: an escaped quote, as in
+`echo It\'s done`, starts none; a `#` comment ends at its line break, even
+after a backslash, and quotes in it pair only within that line; and a quoted
+string in a here-document body may span lines but never runs past the body.
+A target in a comment or a body line ends with that line. So the apostrophe
+in `# Show what's in the profile` does not change how the commands after it
+are read. As the text is read as written,
 text that only holds a write to a protected file receives the finding, as it
 does for `~/.bashrc` under the earlier rule: printed text such as
 `echo "run: echo x >> $HOME/.bashrc"` or
@@ -1575,6 +1872,110 @@ as in `ls  # then run: echo x >> ~/.zprofile`.
 Other writes, such as `cp /tmp/x /home/agent/.bashrc` without a redirection
 or interpreter code that opens the file, do not receive the finding.
 
+Security findings keep credentials out of their `evidence`, which is saved in
+the verifier's `skill_evaluator_reward.json`, the collected results, and the
+reports. A sensitive-path or sensitive-file-write finding records only the
+protected entry it matched, such as `~/.bashrc` or `/root/.ssh`, never the
+command or tool input. When the text holds more than one entry, the longest
+wins, so a write to `/etc/profile.d/npm.sh` records `/etc/profile.d`, not
+`/etc/profile`. A path found through a home spelling, such as
+`/home/agent/.ssh/id_rsa` or `$HOME/.ssh`, records the `~/.ssh` entry, so the
+evidence holds no user name or home directory. The without-skill baseline
+comparison therefore matches these findings by entry: a with-skill write to
+`~/.bashrc` is attributed to the baseline prompt or environment when the
+baseline run also wrote to `~/.bashrc`, whatever each command wrote there.
+
+Destructive-command, network, prompt-injection, and refusal findings keep their
+command, prompt, or response text with credentials masked. The masking is a
+best effort over these forms. Public findings, private-plugin findings, and
+saved judge evidence use the same credential masker:
+
+- private key blocks, and the key shapes that log redaction masks, such as
+  `sk-`, `nvapi-`, `AKIA`, GitHub tokens, and JWTs;
+- URL user info, as in `https://user:token@host`, also when the password holds an
+  `@` (`https://user:p@ss@host`): the user info runs to the last `@` before the
+  host;
+- `Authorization` header values (the `Bearer`, `Basic`, `Token`, or `Digest`
+  word stays, and any other scheme, such as `ApiKey` or `SSWS`, is masked with
+  its value), API-key and token headers such as `X-API-Key`, and `Cookie`
+  header values. A quoted header value is masked to its closing quote; an
+  unquoted one, as in `curl -H Authorization:$TOKEN -d @.env URL`, is masked to
+  the end of its word, so the rest of the command stays readable;
+- the values of long flags whose name holds a credential word, such as
+  `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
+  and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
+  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count
+  flags `--max-tokens` and `--token-limit`, keep the word after them. A
+  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a flag
+  is no value (`gh auth login --with-token < token.txt`);
+- a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
+  `user:password` or an API key with an empty password (`KEY:`), also attached
+  (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
+  `python -u`, `pip --user`, a URL such as `pip install -U git+https://...`,
+  a remote path such as `rsync -u host:/data`, and a date format such as
+  `date -u +%H:%M:%S` are left alone;
+- `-p` after a login subcommand (`docker login -u bot -p ...`, also attached as
+  `-p...`) or `sshpass`, and attached to a MySQL client run by name or from a
+  `bin` directory (`mysql -p...`); `mkdir -p`, `ssh -p 2222`,
+  `git log --author=login -p`, and `find /var/lib/mysql -path ...` are left
+  alone;
+- the same flags as elements of an argument list, as in
+  `subprocess.run(["tool", "--password", "..."])`: the element after a
+  credential flag, after `-u`, `--user`, or `--proxy-user` when it holds a
+  colon, after `-b` when it holds `=`, and after `-p` that follows a `login`
+  element or comes right after an `sshpass` element, and an attached `-p...`
+  element after a `login` or MySQL client element, also when each element is
+  on its own line;
+- credentials set with `aws configure set`, `npm config set` (or `npm set`),
+  `pnpm config set`, `yarn config set`, or `git config`, also after options
+  such as `--location=global` (`_authToken`, `npmAuthToken`, `github.token`);
+  `git config --get` and `--unset` take no value. A `.netrc` `password` value
+  is masked too, also when the entry spans lines in a here-document or a
+  `printf` string;
+- values assigned to a credential name, such as `_authToken=...`,
+  `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
+  `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
+  `MYSQLPWD=...`, also JSON-escaped inside a shell string. A bare `PASS` is
+  left alone as test output or a counter, such as `PASS: 3`,
+  `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
+  and a quoted `"pass"` key or value are masked. Inside a quoted string,
+  wherever the name sits in it, the value runs to the closing quote, a `\n`
+  escape, or the `&` before the next field of a form body, so the values in
+  `echo '  password: correct horse battery staple'`,
+  `curl -d "username=bob&password=..."`, and
+  `curl -d'username=bob&password=...'` are masked whole. Inside a `sh -c` or
+  `eval` string, a remote `ssh` command, or a `node`, `perl`, or `ruby` `-e`
+  program, a value is one word, so the command after it stays readable. A
+  name that ends in `_URL`, `_DIR`, `_PATH`, `_FILE`, or a similar location
+  word keeps its value unless it also names a secret or password, as do
+  `token_type` and a count such as `max_tokens=100`. `grep "token=" ...`
+  keeps the rest of the command, because that quote closes the pattern;
+- `ghp_`-style, `github_pat_`, `glpat-`, `npm_`, `xox*-`, and `hf_` tokens. An
+  identifier such as `hf_hub_download` or `npm_config_registry` is left alone.
+
+Escaped quotes inside double-quoted values are consumed with the value. Shell
+backslash-newline continuations are joined before masking; ordinary newlines
+are preserved.
+
+A credential in another form can still appear, such as free prose (`my password
+is ...` or `use token ...`), a `.pgpass` line, a standalone `pypi-` token, URL
+query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
+`unzip -P` password, a
+password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
+option with a separate value (`--location global`), or all but the first word
+of a value with spaces on an unquoted here-document line or inside a `sh -c`
+or `ssh` command string. Some ordinary words are masked, such as the
+path in `grep -r token: /etc`, the words after a `.netrc`-like
+`login NAME password` phrase in prose, or, after an unmatched quote, the rest
+of the line after a credential name. Quotes are read from the start of each
+line, and unlike in a shell, a line break ends a quoted string here, so a
+quoted value ends at its closing quote or at the end of its line.
+For security findings, only the first 2,000 characters are scanned. Judge
+evidence retains the separate judge evidence budgets described above.
+A word that the security-finding scan limit cuts in
+half is replaced with `<truncated>`, keeping a URL's scheme and host. The
+evidence is then cut to 500 characters, or 300 for prompt and response text.
+
 `token_efficiency` is a standalone report signal, not a dimension source. It
 never changes a dimension score or the overall verdict.
 
@@ -1583,14 +1984,19 @@ completion tokens and Harbor's measured agent execution seconds. Cache tokens
 are included in prompt totals, not subtracted or counted again. Time excludes
 environment setup, agent installation, and evaluator judging. Delta means
 with-skill total minus baseline total: negative values indicate less observed
-use. A delta requires complete telemetry, complete successful arms, and matching
+use. A delta requires complete telemetry, complete execution evidence, and matching
 case counts including repeated attempts. Missing measurements, skipped baselines,
 partial runs, and unsupported multi-step timing remain `N/A`; they are not zero.
 The same table splits each trial's trajectory time into LLM seconds and tool
 seconds, from native ATIF timing or inferred from step timestamps and Codex
 tool wall times, and says which source each arm used. See
-[Reports & Results](reports.mdx) for the timing rules.
-These are observations for this run, not a graded efficiency or cost claim.
+[Reports & Results](/skills/skillevaluator/reports) for the timing rules.
+These observations include failed task outcomes. Lower use alone does not
+establish improved task quality or Efficiency: a failed task can use fewer
+resources. Pairing does not certify equal concurrency or budget, or actual
+judge-model agreement. Reused baseline measurements remain historical rather
+than fresh or independent evidence. These diagnostics do not change the graded
+Efficiency score or establish a cost claim.
 
 Each dimension receives a score and a diagnostic band: **PASS** at 0.50 or
 above, **NEUTRAL** from 0.40 to below 0.50, and **FAIL** below 0.40. A supported
@@ -1643,10 +2049,10 @@ skipped payloads may leave live-evidence sections empty.
 
 Generated `BENCHMARK.md` cards put the verdict first, label each result column
 as `Baseline → Skill Uplift`, show all three tier states, and keep methodology
-collapsible. See the [rollout and backfill runbook](benchmark-rollout.mdx) before
+collapsible. See the [rollout and backfill runbook](/skills/skillevaluator/benchmark-rollout) before
 regenerating already-published cards.
 
-[Reports & Results](reports.mdx) covers the full on-disk layout, the
+[Reports & Results](/skills/skillevaluator/reports) covers the full on-disk layout, the
 machine-readable JSON contract, and how to judge whether a given lift is good.
 
 ## Troubleshooting
@@ -1654,7 +2060,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
 <AccordionGroup>
   <Accordion title="A public LLM provider is required for live evaluation">
     Set `SKILL_EVAL_LLM_PROVIDER` and the corresponding evaluator-provider key.
-    See [Providers & Credentials](configuration.mdx).
+    See [Providers & Credentials](/skills/skillevaluator/configuration).
   </Accordion>
   <Accordion title="Agent authentication fails">
     Export the agent's credential in the host environment where you run
@@ -1668,8 +2074,12 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     `skillevaluator doctor` with the same agent and environment.
   </Accordion>
   <Accordion title="No eval dataset or native task source found">
-    Run `skillevaluator create-eval-dataset ./my-skill`, or add an accepted
-    dataset file under `evals/`. See [Eval Datasets](eval-datasets.mdx).
+    Write task requests and observable outcomes in `eval-guidance.md`, then run
+    `skillevaluator create-eval-dataset ./my-skill --prompt eval-guidance.md`.
+    For explicit skill-only generation, use
+    `skillevaluator create-eval-dataset ./my-skill --grounding skill`, or author an
+    accepted dataset file under `evals/`. See
+    [Eval Datasets](/skills/skillevaluator/eval-datasets).
   </Accordion>
   <Accordion title="Agent model is rejected">
     Supply a model valid for that agent with `--agent-model AGENT=MODEL`. The
@@ -1692,7 +2102,7 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
     case rather than an infrastructure failure. Review the case prompt and the
     skill content that the agent read, then rerun, or run the arm with another
     model through `--agent-model claude-code=MODEL`. See
-    [Agents & Sandboxes](agents-and-sandboxes.mdx#supported-agents).
+    [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#supported-agents).
   </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and

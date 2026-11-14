@@ -1,0 +1,5 @@
+{
+  "name": "bundled-script-hooks",
+  "version": "0.1.0",
+  "description": "A contained plugin fixture whose hooks run bundled scripts that keep hook input on the host."
+}

@@ -13,6 +13,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from skillevaluator.constants import (
+    QUALITY_CHARS_PER_TOKEN,
     QUALITY_GRADE_THRESHOLDS,
     QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_SCORE_WEIGHTS,
@@ -159,6 +160,8 @@ class QualityScoreResult:
             },
             "metrics": {
                 "total_tokens": self.total_tokens,
+                "estimated_tokens": self.total_tokens,
+                "estimate_method": f"characters/{QUALITY_CHARS_PER_TOKEN}",
                 "recommended_max_tokens": QUALITY_RECOMMENDED_MAX_TOKENS,
                 "frontmatter_tokens": self.frontmatter_tokens,
                 "instructions_tokens": self.instructions_tokens,

@@ -75,11 +75,11 @@ def test_cli_formats_dataset_option_dependency_failure(
 
     result = CliRunner().invoke(
         cli,
-        ["create-eval-dataset", str(skill), "--no-llm", dependent_option, str(results)],
+        ["create-eval-dataset", str(skill), "--no-llm", "--grounding", "skill", dependent_option, str(results)],
     )
 
     assert result.exit_code == 1
-    assert result.output == f"Error: {dependent_option} requires --grounding trace or --refine\n"
+    assert result.output == f"Error: {dependent_option} requires --grounding auto, --grounding trace or --refine\n"
 
 
 def test_options_fields_match_engine_signature() -> None:

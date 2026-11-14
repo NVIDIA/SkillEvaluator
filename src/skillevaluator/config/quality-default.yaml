@@ -20,3 +20,26 @@ expected_headers:
     points: 5
     message: "No troubleshooting section documented"
     suggestion: "Add '## Troubleshooting' with Error/Cause/Solution patterns"
+
+# Reliability error-handling rules. A custom file may set any subset of these;
+# omitted blocks and keys keep the values below. Set points to 0 to turn a rule off.
+error_handling:
+  # SKILL.md mentions none of the terms (whole word, any case).
+  mentioned:
+    points: 10
+    message: "No mention of error handling or validation"
+    suggestion: "Document expected errors and how to handle them"
+    terms: [error, errors, exception, exceptions, invalid, fail, fails, failed, failure, failures, failing,
+            validate, validates, validated, validating, validation, validations]
+  # A script has neither try/except nor any marker (case-sensitive substring).
+  scripts:
+    points: 5
+    message: "Scripts may lack error handling"
+    suggestion: "Scripts should handle errors explicitly"
+    markers: ["if not ", "if error", "raise", "assert", "ValueError", "FileNotFoundError"]
+  # A lib module has neither try/except nor any marker (case-sensitive substring).
+  lib:
+    points: 5
+    message: "Lib modules may lack error handling"
+    suggestion: "Library code should handle errors explicitly with try/except or raise"
+    markers: ["raise", "assert", "ValueError", "TypeError", "RuntimeError"]

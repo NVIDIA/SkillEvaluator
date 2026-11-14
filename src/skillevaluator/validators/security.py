@@ -14,8 +14,10 @@ from __future__ import annotations
 
 import bisect
 import contextlib
+import functools
 import getpass
 import hashlib
+import html
 import io
 import itertools
 import json
@@ -23,6 +25,7 @@ import math
 import os
 import re
 import shutil
+import stat
 import struct
 import tempfile
 import tokenize
@@ -31,6 +34,7 @@ import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from pathlib import Path, PurePosixPath
+from urllib.parse import unquote
 
 import yaml
 from yaml.events import ScalarEvent
@@ -52,12 +56,29 @@ from skillevaluator.provider_config import (
     resolve_llm_provider,
     skillspector_reasoning_effort,
 )
+from skillevaluator.skillspector_diagnostics import completeness_record, merge_completeness
 from skillevaluator.skillspector_provenance import SKILLSPECTOR_LLM_ANALYZERS, sanitize_skillspector_llm_provenance
-from skillevaluator.skillspector_reference_caveats import reference_caveat_metadata
+from skillevaluator.skillspector_reference_caveats import REFERENCE_COMPLETENESS_FIELDS, reference_caveat_metadata
+from skillevaluator.skillspector_references import (
+    AE1_PATTERN,
+    AE1_RULE_ID,
+    REFERENCE_SUMMARY_KEY,
+    ReportNormalizer,
+    combine_reference_summaries,
+    index_legacy_reference_reasons,
+    issue_diagnostics,
+    reference_suggestion,
+    reference_summary,
+)
 from skillevaluator.spdx import is_spdx_only_html_comment
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.secure_fs import (
+    MAX_SECURE_DIRECTORY_DEPTH,
+    SecurePathError,
+    SecureRoot,
+    stat_is_link_or_reparse,
+)
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -66,6 +87,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.pii_ownership import ownership_email_spans
 from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
 from skillevaluator.validators.skillspector_scope import (
     IssueScope,
@@ -99,6 +121,9 @@ _SKILLSPECTOR_STATUSLESS_COMPLETENESS_VERSIONS = {(2, 9, 5), (2, 9, 6)}
 _SKILLSPECTOR_FINDING_IDENTITY_VERSION = (2, 11, 1)
 _SKILLSPECTOR_COMPLETENESS_SCHEMA_VERSION = (2, 10, 0)
 _SKILLSPECTOR_DOCS_ONLY_APPLICABILITY_VERSION = (2, 11, 2)
+# SkillSpector 2.13.4 reports an analysis whose only gaps are missing references
+# as ``complete_with_caveats`` instead of ``partial``; earlier releases never do.
+_SKILLSPECTOR_CAVEATS_STATUS_VERSION = (2, 13, 4)
 _SKILLSPECTOR_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = frozenset(
     {
         "behavioral_ast",
@@ -504,6 +529,18 @@ def _skillspector_provider_retry_row(row: object) -> bool:
     )
 
 
+def _skillspector_flags_truncation(container: Mapping[str, object]) -> bool:
+    """Return whether a report object has a ``*_truncated`` key that is neither ``false`` nor ``null``.
+
+    SkillSpector flags a list it cut short this way, as in
+    ``ledger_exceptions_truncated``, and what it left out may be a different gap.
+    """
+    return any(
+        isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
+        for key, value in container.items()
+    )
+
+
 def _skillspector_provider_retries_exhausted(data: object) -> bool:
     """Return whether a failed LLM-stage report shows only an LLM provider outage.
 
@@ -535,10 +572,7 @@ def _skillspector_provider_retries_exhausted(data: object) -> bool:
         if any(container.get(key) for key in _SKILLSPECTOR_REPORT_FAILURE_MARKERS):
             return False
         # A truncated list may hide a different cause.
-        if any(
-            isinstance(key, str) and key.endswith("_truncated") and value is not False and value is not None
-            for key, value in container.items()
-        ):
+        if _skillspector_flags_truncation(container):
             return False
 
     rows = completeness.get("ledger_exceptions")
@@ -1056,6 +1090,23 @@ def _combine_skillspector_applicability(blocks: list[dict]) -> dict:
     }
 
 
+def _record_skillspector_reference_summary(result: ValidationResult) -> None:
+    """Count the referenced artifacts behind *result*'s AE1 evidence in its metadata.
+
+    The counts come from the findings
+    (:func:`~skillevaluator.skillspector_references.reference_summary`), so a
+    second call after the ``--llm`` stage is merged replaces the first count.
+    They are not added to the result's messages: reporters list a passing
+    result's messages as passed checks, and they show the counts only for a
+    failed result.
+    """
+    summary = reference_summary(result.findings)
+    if summary is None:
+        result.metadata.pop(REFERENCE_SUMMARY_KEY, None)
+        return
+    result.metadata[REFERENCE_SUMMARY_KEY] = summary
+
+
 def _issue_field(issue: dict):
     """Return a getter that retrieves a field from *issue*, treating None as empty string."""
 
@@ -1181,6 +1232,12 @@ def _skillspector_runtime_limit_hint(ledger_exceptions: Iterable[Mapping[str, ob
     return " ".join(hints) or None
 
 
+_SKILLSPECTOR_REFERENCE_REJECTION_HINT = (
+    "Missing references require a standalone target with complete, matching reference and scan evidence. "
+    "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
+)
+
+
 def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:
     """Describe a partial SkillSpector analysis with example gaps and, for runtime limits, a remedy."""
     message = f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}')"
@@ -1196,6 +1253,8 @@ def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list
             )
     message = f"{message}; security scan did not complete"
     hint = _skillspector_runtime_limit_hint(ledger_exceptions)
+    if not hint and ledger_exceptions and all(row.get("phase") == "reference_resolution" for row in ledger_exceptions):
+        hint = _SKILLSPECTOR_REFERENCE_REJECTION_HINT
     return f"{message}. {hint}" if hint else message
 
 
@@ -1549,6 +1608,1238 @@ def _skillspector_passive_raster_note(
     )
 
 
+# SkillSpector 2.12.0 split ``reference_unresolved``: a path-like reference that
+# matches no bundled file became ``reference_missing``, and ``reference_unresolved``
+# now means a reference that matches several bundled files.
+_SKILLSPECTOR_REFERENCE_MISSING_VERSION = (2, 12, 0)
+# SkillSpector inspects at most 1,000,000 bytes of a file, so a larger file
+# holding a reference is never fully inspected and is not accepted.
+_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES = 1_000_000
+# Entries listed under the skill, and characters of a reference's line, beyond
+# which a missing reference is no longer accepted.
+_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES = 50_000
+_SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS = 10_000
+# Markdown escapes of ASCII punctuation, and shell-escaped spaces, can hide
+# a path's spelling. SkillSpector itself removes only ``\\``, ``\(``, ``\)``,
+# ``\<`` and ``\>``.
+_SKILLSPECTOR_MARKDOWN_ESCAPE_RE = re.compile(r"\\([ !-/:-@\[-`{-~])")
+# Removing Markdown escapes, resolving HTML character references and decoding
+# percent-escapes can each reveal another; a reference's line is also read
+# after up to this many of them, in any order.
+_SKILLSPECTOR_REFERENCE_LINE_DECODINGS = 3
+# Characters that continue a file name in SkillSpector's reference grammar.
+_SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
+# A word of a reference's line: text between whitespace and the Markdown or
+# shell delimiters around a path.
+_SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
+# Stands for any text where a shell group or range was read in a line
+# (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
+# never taken for a list marker.
+_SKILLSPECTOR_SHELL_ANY = "\x00"
+# Follows the one character of a zsh pattern ``x#`` that is a whole path
+# part, such as ``C#``, which matches only names made of that character
+# (:func:`_skillspector_zsh_pattern`, :func:`_skillspector_glob_matcher`).
+_SKILLSPECTOR_ZSH_REPEAT = "\x01"
+# Characters with which a shell, cmd.exe or Windows expands, quotes or escapes
+# a word, so that it can open a file that the word does not spell out.
+_SKILLSPECTOR_SHELL_SYNTAX = frozenset("*?[{$\"'\\^%!#~" + _SKILLSPECTOR_SHELL_ANY)
+# A parameter expansion such as ``$name`` or ``$1``, which may stand for any text.
+_SKILLSPECTOR_SHELL_PARAMETER_RE = re.compile(r"\$[\w@*#?!$-]*")
+_SKILLSPECTOR_SHELL_QUOTE_RE = re.compile(r"[\"'\\]")
+# The quotes and the ``^`` escape that cmd.exe or PowerShell remove.
+_SKILLSPECTOR_CMD_QUOTE_RE = re.compile(r"[\"'^]")
+# cmd.exe expansions: a batch parameter such as ``%1``, ``%*`` or ``%~dp0``, a
+# variable such as ``%DIR%`` and, with delayed expansion, ``!DIR!``.
+_SKILLSPECTOR_CMD_VARIABLE_RE = re.compile(r"%~[^%/]*?[0-9*]|%[0-9*]|%[^%]*%|![^!]*!")
+# A zsh numeric range such as ``<1-10>`` or ``<->``, which matches any number.
+_SKILLSPECTOR_SHELL_RANGE_RE = re.compile(r"<\d*-\d*>")
+# A character that opens, closes or splits a shell group, or a run of
+# characters that end a word.
+_SKILLSPECTOR_SHELL_GROUP_TOKEN_RE = re.compile(r"[()|]|[\s/`<>;&]+")
+# Characters that make the group after them a bash or ksh extended glob.
+_SKILLSPECTOR_EXTGLOB_OPERATORS = frozenset("@!+?*")
+# A zsh EXTENDED_GLOB globbing flag group, such as ``(#i)``, ``(#a2)``,
+# ``(#c1,2)``, ``(#s)`` or ``(#q.)``, which changes how the rest of its word
+# matches; ``(#1)`` or ``(#setup)`` is not one. A run of characters other than
+# whitespace that holds one is a word that may stand for any text.
+_SKILLSPECTOR_ZSH_FLAGS_RE = re.compile(r"\(#(?:q|[se]\)|c\d*(?:,\d*)?\)|(?:[ilIbBmMuU]|a\d+)+\))")
+_SKILLSPECTOR_NON_SPACE_RUN_RE = re.compile(r"\S+")
+_SKILLSPECTOR_GLOB_SYNTAX = frozenset("*?[" + _SKILLSPECTOR_ZSH_REPEAT)
+_SKILLSPECTOR_PATH_PART_SEPARATOR_RE = re.compile(r"[=:,]")
+# Work that checking the lines of one report's missing references may take, in
+# units of about one character compared: decoding a line and reading its shell
+# groups and words costs 9,000 per character, each search of a decoded line
+# for a name 100 plus the line's length, and each pattern 20,000 plus 1,000 per
+# character and 300 plus the name's length for each name matched against it.
+# Beyond the budget the lines are not accepted, which bounds the time that a
+# skill built to slow the check can cost.
+_SKILLSPECTOR_REFERENCE_MATCH_BUDGET = 1_000_000_000
+
+
+# The files and directories that Git itself writes at the top of a ".git"
+# directory (gitrepository-layout(5), and the state files of merge, rebase,
+# cherry-pick, revert and bisect), with the lock files Git takes on them.
+_SKILLSPECTOR_GIT_FILE_RE = re.compile(
+    r"(?:HEAD|[A-Z_]+_HEAD|config|config\.worktree|description|index|packed-refs|shallow|commondir|"
+    r"COMMIT_EDITMSG|TAG_EDITMSG|SQUASH_MSG|AUTO_MERGE|MERGE_(?:MSG|MODE|RR)|BISECT_[A-Z_]+|"
+    r"gitk\.cache|sharedindex\.[0-9a-f]+)(?:\.lock)?"
+)
+_SKILLSPECTOR_GIT_DIRECTORIES = frozenset(
+    {
+        "branches",
+        "common",
+        "info",
+        "logs",
+        "modules",
+        "objects",
+        "rebase-apply",
+        "rebase-merge",
+        "refs",
+        "remotes",
+        "rr-cache",
+        "sequencer",
+        "worktrees",
+    }
+)
+
+
+def _skillspector_report_path_key(path: object) -> str | None:
+    """A SkillSpector report *path* that is relative POSIX text, else ``None``.
+
+    The path must be text that is safe to pass to OS path APIs, with no
+    backslash, no empty, ``.`` or ``..`` part and no anchor. Other spellings
+    of the same file are not normalized, so they match nothing.
+    """
+    if (
+        not isinstance(path, str)
+        or "\\" in path
+        or not _is_filesystem_safe_path_text(path)
+        or any(part in {"", ".", ".."} or Path(part).anchor for part in path.split("/"))
+    ):
+        return None
+    return path
+
+
+def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
+    """The bytes of the scanned file a SkillSpector report *path* names, else ``None``.
+
+    The path must pass :func:`_skillspector_report_path_key`, and exactly one
+    ``components`` entry must carry it. Under a directory *scanned_root* it
+    must name a regular, single-link file of at most
+    :data:`_SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES` bytes, reached without
+    following a link at any component (:class:`SecureRoot`); a single-file
+    *scanned_root* matches only its own name. Without a root nothing is
+    accepted.
+    """
+    if scanned_root is None or not isinstance(path, str) or not isinstance(components, list):
+        return None
+    parts = path.split("/")
+    if (
+        _skillspector_report_path_key(path) is None
+        or [component.get("path") for component in components if isinstance(component, dict)].count(path) != 1
+    ):
+        return None
+    try:
+        root_metadata = scanned_root.lstat()
+        if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
+            if path != scanned_root.name:
+                return None
+            directory, relative = scanned_root.parent, Path(path)
+        else:
+            directory, relative = scanned_root, Path(*parts)
+        with SecureRoot(directory) as root:
+            data, _metadata = root.read_bytes(relative, _SKILLSPECTOR_REFERENCE_SOURCE_MAX_BYTES)
+    except (OSError, SecurePathError):
+        return None
+    return data
+
+
+def _skillspector_report_path_is_bundled_file(path: object, components: object, scanned_root: Path | None) -> bool:
+    """Whether a SkillSpector report *path* names one scanned component that is a regular file.
+
+    The rules are those of :func:`_skillspector_bundled_file_bytes`.
+    """
+    return _skillspector_bundled_file_bytes(path, components, scanned_root) is not None
+
+
+def _skillspector_reference_row_is_advisory(
+    row: Mapping[str, object],
+    skillspector_version: tuple[int, int, int] | None,
+    references: object,
+) -> bool:
+    """Whether a ledger row only records a reference to a file the skill does not bundle.
+
+    The row must be a nonfatal ``partial`` row in phase ``reference_resolution``
+    that names no analyzer and no error class and covers one line. SkillSpector
+    2.12.0 and later report such a reference as ``reference_missing``; there
+    ``reference_unresolved`` means a reference that matches several bundled
+    files, which is not advisory. Earlier releases report both cases as
+    ``reference_unresolved``. Either way the report's ``references`` list must
+    corroborate the row: it records at least one reference on the row's line,
+    and every unresolved reference there is ``missing``, none ``ambiguous``.
+    """
+    if (
+        row.get("fatal") is not False
+        or row.get("outcome") != "partial"
+        or row.get("phase") != "reference_resolution"
+        or row.get("analyzers") not in (None, [])
+        or row.get("error_class") is not None
+    ):
+        return False
+    reason = row.get("reason_code")
+    if reason != "reference_missing" and (
+        reason != "reference_unresolved"
+        or skillspector_version is None
+        or skillspector_version >= _SKILLSPECTOR_REFERENCE_MISSING_VERSION
+    ):
+        return False
+    line = row.get("start_line")
+    end_line = row.get("end_line")
+    if (
+        not isinstance(references, list)
+        or isinstance(line, bool)
+        or not isinstance(line, int)
+        or isinstance(end_line, bool)
+        or end_line != line
+    ):
+        return False
+    statuses = {
+        reference.get("status")
+        for reference in _skillspector_references_on_line(references, row.get("path"), line)
+        if reference.get("status") in {"missing", "ambiguous"}
+    }
+    return statuses == {"missing"}
+
+
+def _skillspector_references_on_line(references: list, path: object, line: int) -> list[dict]:
+    """The entries of a report's ``references`` list for line *line* of *path*."""
+    return [
+        reference
+        for reference in references
+        if isinstance(reference, dict)
+        and reference.get("source_path") == path
+        and not isinstance(reference.get("line"), bool)
+        and reference.get("line") == line
+    ]
+
+
+def _skillspector_unscanned_paths(scanned_root: Path, components: object) -> set[str] | None:
+    """Relative paths of entries that SkillSpector did not inspect, else ``None``.
+
+    An entry is uninspected when it is a link, a junction or another
+    non-regular file, a regular file that no ``components`` entry lists, or a
+    directory that holds no listed file, such as an artifact directory left out
+    of a staged scan, with everything inside it. Links are not followed.
+
+    A ``.git`` directory that holds no listed file counts by its own name, by
+    every entry outside Git's own layout (:data:`_SKILLSPECTOR_GIT_FILE_RE`,
+    :data:`_SKILLSPECTOR_GIT_DIRECTORIES`) with everything inside it, and by
+    the entries of its ``hooks`` directory other than regular ``*.sample``
+    files, which Git never runs. Git writes its layout, and names such as
+    ``config``, ``HEAD`` or a branch name such as ``main`` are common words, so
+    those files and what Git's directories hold do not count.
+
+    SkillSpector scans a single-file *scanned_root* on its own, so every other
+    entry of the directory that holds it is uninspected.
+
+    ``None`` means the tree could not be listed within
+    :data:`_SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES` entries and
+    :data:`MAX_SECURE_DIRECTORY_DEPTH` levels.
+    """
+    if not isinstance(components, list):
+        return None
+    listed = {
+        component["path"]
+        for component in components
+        if isinstance(component, dict) and isinstance(component.get("path"), str)
+    }
+    try:
+        root_metadata = scanned_root.lstat()
+    except OSError:
+        return None
+    if stat.S_ISREG(root_metadata.st_mode) and not stat_is_link_or_reparse(root_metadata):
+        listed &= {scanned_root.name}
+        scanned_root = scanned_root.parent
+    ancestors = {
+        "/".join(parts[:index]) for parts in (path.split("/") for path in listed) for index in range(1, len(parts))
+    }
+    uninspected: set[str] = set()
+    # Each pending directory carries its path relative to the root, whether it
+    # holds a listed file, and whether it is a left-out ".git" or its "hooks".
+    pending: list[tuple[Path, str, bool, str]] = [(scanned_root, "", True, "")]
+    seen = 0
+    while pending:
+        directory, prefix, holds_listed, git_part = pending.pop()
+        if prefix.count("/") > MAX_SECURE_DIRECTORY_DEPTH:
+            return None
+        try:
+            with os.scandir(directory) as entries:
+                for entry in entries:
+                    seen += 1
+                    if seen > _SKILLSPECTOR_REFERENCE_TREE_MAX_ENTRIES:
+                        return None
+                    relative = prefix + entry.name
+                    metadata = entry.stat(follow_symlinks=False)
+                    linked = stat_is_link_or_reparse(metadata)
+                    is_directory = stat.S_ISDIR(metadata.st_mode) and not linked
+                    is_file = stat.S_ISREG(metadata.st_mode) and not linked
+                    if git_part == ".git":
+                        if entry.name == "hooks" and is_directory:
+                            pending.append((Path(entry.path), relative + "/", False, "hooks"))
+                            continue
+                        if (is_directory and entry.name in _SKILLSPECTOR_GIT_DIRECTORIES) or (
+                            is_file and _SKILLSPECTOR_GIT_FILE_RE.fullmatch(entry.name)
+                        ):
+                            continue
+                    if git_part == "hooks" and is_file and entry.name.endswith(".sample"):
+                        continue
+                    if is_directory:
+                        holds = holds_listed and relative in ancestors
+                        if not holds:
+                            uninspected.add(relative)
+                        git_root = not holds and entry.name == ".git"
+                        pending.append((Path(entry.path), relative + "/", holds, ".git" if git_root else ""))
+                    elif not is_file or relative not in listed:
+                        uninspected.add(relative)
+        except OSError:
+            return None
+    return uninspected
+
+
+def _skillspector_unscanned_names(scanned_root: Path, components: object) -> set[str] | None:
+    """Every path part of an uninspected entry, or ``None`` when the bounded walk fails.
+
+    A directory that holds an uninspected entry is named even when it also
+    holds listed files. The paths come from :func:`_skillspector_unscanned_paths`.
+    """
+    paths = _skillspector_unscanned_paths(scanned_root, components)
+    return None if paths is None else {part for relative in paths for part in relative.split("/")}
+
+
+def _skillspector_name_keys(names: Iterable[str]) -> frozenset[str]:
+    """Case-folded forms of *names*, as written and in NFC, for :func:`_skillspector_reference_line_avoids`."""
+    return frozenset(
+        form for name in names for form in (name.casefold(), unicodedata.normalize("NFC", name).casefold())
+    )
+
+
+class _SkillspectorMatchBudget:
+    """The work left for checking the lines of one report's missing references."""
+
+    __slots__ = ("remaining",)
+
+    def __init__(self, remaining: int | None = None) -> None:
+        self.remaining = _SKILLSPECTOR_REFERENCE_MATCH_BUDGET if remaining is None else remaining
+
+    def spend(self, cost: int) -> bool:
+        """Take *cost* from the budget; ``False`` once it is overdrawn."""
+        self.remaining -= cost
+        return self.remaining >= 0
+
+
+@functools.lru_cache(maxsize=8)
+def _skillspector_key_kinds(keys: frozenset[str]) -> tuple[Mapping[str, int], tuple[str, ...], int, int]:
+    """*keys* split into plain name runs and other names, with their total and longest length.
+
+    Each name run is given by its text before any trailing dots, mapped to the
+    fewest trailing dots of a key with that text.
+    """
+    runs: dict[str, int] = {}
+    others: list[str] = []
+    for key in keys:
+        if _SKILLSPECTOR_NAME_RUN_RE.fullmatch(key):
+            base = key.rstrip(".")
+            dots = len(key) - len(base)
+            runs[base] = min(dots, runs.get(base, dots))
+        else:
+            others.append(key)
+    return runs, tuple(sorted(others)), sum(len(key) for key in keys), max(map(len, keys), default=0)
+
+
+def _skillspector_glob_matcher(pattern: str, longest: int) -> Callable[[str], object] | None:
+    """Match the names of at most *longest* characters that the shell glob *pattern* may match, else ``None``.
+
+    ``*`` matches any text and ``?`` one character. A bracket expression
+    matches any one character, whatever it lists, and a ``]`` outside one
+    matches any text, so a class such as ``[[:alpha:]]`` is covered too; the
+    matcher may accept more names than the shell would, never fewer. ``None``
+    means that no name that short can match. The work is linear in the length
+    of *pattern*, and the regex never backtracks over more than one ``*``.
+
+    A character followed by :data:`_SKILLSPECTOR_ZSH_REPEAT`, the whole
+    pattern, matches only names made of that character, as zsh ``C#`` does.
+    """
+    size = len(pattern)
+    if size == 2 and pattern[1] == _SKILLSPECTOR_ZSH_REPEAT:
+        return re.compile(f"(?s:{re.escape(pattern[0])}*)\\Z").match
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    segments: list[list[str]] = [[]]
+    index = 0
+    while index < size:
+        char = pattern[index]
+        index += 1
+        if char in "*]":
+            segments.append([])
+            continue
+        if char == "[":
+            start = index + 1 if index < size and pattern[index] in "!^" else index
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                segments[-1].append(".")
+                index = closes[start] + 1
+                continue
+        segments[-1].append("." if char == "?" else re.escape(char))
+    if sum(len(segment) for segment in segments) > longest:
+        return None
+    first, *rest = ("".join(segment) for segment in segments)
+    if rest:
+        *middle, last = rest
+        first += "".join(f"(?>.*?{segment})" for segment in middle if segment) + f".*{last}"
+    return re.compile(f"(?s:{first})\\Z").match
+
+
+def _skillspector_shell_groups(text: str) -> str:
+    """*text* with the shell groups and ranges inside its words read as patterns, in time linear in its length.
+
+    zsh reads ``(a)`` inside a word as ``a`` and ``(a|b)`` as either
+    alternative, bash and ksh read ``@(...)``, ``!(...)``, ``+(...)``,
+    ``?(...)`` and ``*(...)`` as extended globs, and zsh reads ``<1-10>`` as
+    any number in that range. A group with ``|`` at its own level, an extended
+    glob and a range become :data:`_SKILLSPECTOR_SHELL_ANY`, and so does each
+    run of characters other than whitespace that holds a zsh globbing flag
+    group (:data:`_SKILLSPECTOR_ZSH_FLAGS_RE`), such as ``(#a2)``, since the
+    flag changes how the rest of the word matches, across ``/`` too. Any other
+    group loses its parentheses, also after ``]``, so ``[v](e)rsions`` reads
+    as ``[v]ersions``; the line as written, with a Markdown link destination in
+    its parentheses, is read as well. Parentheses around whitespace, ``/``, a
+    backtick, ``<``, ``>``, ``;`` or ``&`` do not form a group and still end a
+    word.
+    """
+    text = _SKILLSPECTOR_SHELL_RANGE_RE.sub(_SKILLSPECTOR_SHELL_ANY, text)
+    if "(" not in text:
+        return text
+    text = _SKILLSPECTOR_NON_SPACE_RUN_RE.sub(
+        lambda run: _SKILLSPECTOR_SHELL_ANY if _SKILLSPECTOR_ZSH_FLAGS_RE.search(run.group()) else run.group(), text
+    )
+    pieces: list[str] = []
+    # Each open group: the index of its "(" in pieces, whether "|" splits it,
+    # and the character before it.
+    groups: list[tuple[int, list[bool], str]] = []
+    last = 0
+    for match in _SKILLSPECTOR_SHELL_GROUP_TOKEN_RE.finditer(text):
+        index = match.start()
+        char = match.group()
+        pieces.append(text[last:index])
+        last = match.end()
+        if char == "(":
+            groups.append((len(pieces), [False], text[index - 1 : index]))
+            pieces.append(char)
+        elif char == "|" and groups:
+            groups[-1][1][0] = True
+            pieces.append(char)
+        elif char == ")" and groups:
+            start, alternation, before = groups.pop()
+            if alternation[0] or before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                del pieces[start:]
+                if before in _SKILLSPECTOR_EXTGLOB_OPERATORS:
+                    pieces[-1] = pieces[-1][:-1]
+                pieces.append(_SKILLSPECTOR_SHELL_ANY)
+            else:
+                pieces[start] = ""
+        else:
+            if char not in "|)":
+                groups.clear()
+            pieces.append(char)
+    pieces.append(text[last:])
+    return "".join(pieces)
+
+
+def _skillspector_shell_expansions(word: str) -> str:
+    """*word* with its brace and parameter expansions read as ``*``, in time linear in its length.
+
+    Everything from the first ``${`` to the last ``}`` after it (or to the
+    end), everything from the first ``{`` to the last ``}`` when a ``,`` or
+    ``..`` lies between them (brace expansion), and each other parameter
+    expansion such as ``$name`` becomes ``*``, so nested expansions are covered
+    too.
+    """
+    while (start := word.find("${")) >= 0:
+        end = word.rfind("}")
+        word = word[:start] + "*" + (word[end + 1 :] if end > start else "")
+    start, end = word.find("{"), word.rfind("}")
+    if 0 <= start < end and ("," in word[start:end] or ".." in word[start:end]):
+        word = word[:start] + "*" + word[end + 1 :]
+    return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
+
+
+def _skillspector_shell_word(word: str) -> tuple[str, str]:
+    """*word* as glob patterns for what a POSIX shell, and cmd.exe or PowerShell, may expand it to.
+
+    The work is linear in the length of *word*, and a group or range read in
+    the line (:data:`_SKILLSPECTOR_SHELL_ANY`) is ``*`` in both readings.
+
+    - A POSIX shell: quotes and backslashes are removed, then the expansions
+      (:func:`_skillspector_shell_expansions`) become ``*``.
+    - cmd.exe or PowerShell: ``"``, ``'`` and the ``^`` escape are removed; a
+      batch parameter such as ``%1`` or ``%~dp0``, a variable such as
+      ``%DIR%`` or ``!DIR!``, and the expansions become ``*``; and ``\\``
+      separates directories as ``/`` does.
+
+    ``*``, ``?`` and ``[...]`` keep their meaning, and so does ``~``
+    (:func:`_skillspector_tilde_forms`).
+    """
+    word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
+    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
+    windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
+    windows = _skillspector_shell_expansions(windows).replace("\\", "/")
+    return posix, windows
+
+
+def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
+    """Patterns for what the path part *part* may name when it has a ``~`` after its start.
+
+    *part* itself is one. zsh ``EXTENDED_GLOB`` reads ``a~b`` as what ``a``
+    matches except what ``b`` matches, so the text before the first ``~`` is
+    another. With text after the ``~``, the part may also be a Windows short
+    (8.3) name such as ``NODE_M~1`` or ``CONFIG~1.YAM``, or a name that a Samba
+    share mangles, which stand for a longer name. Each keeps the first
+    character of that name after the dots and spaces Windows drops, or ``_``
+    for one it cannot keep, so ``*``, that character and ``*`` is a pattern
+    too, and ``*`` when the character is ``_`` or glob syntax. A ``~`` at the
+    start of the first part of a word (*first*) is a home directory and is
+    skipped; one at the start of any other part makes the part ``*``.
+    """
+    tilde = part.find("~", 1 if first and part.startswith("~") else 0)
+    if tilde < 0:
+        return {part}
+    if tilde == 0:
+        return {"*"}
+    base = part[:tilde]
+    forms = {part, base}
+    if tilde + 1 < len(part):
+        lead = (base[1:] if first and base.startswith("~") else base).lstrip(". ")[:1]
+        forms.add(f"*{lead}*" if lead and lead not in "_*?[]\\" else "*")
+    return forms
+
+
+def _skillspector_zsh_pattern(pattern: str) -> str:
+    """*pattern* with the zsh ``EXTENDED_GLOB`` operators ``^`` and ``#`` read, in time linear in its length.
+
+    Outside a bracket expression, ``^`` negates the rest of the pattern, which
+    then becomes ``*``; that also covers ``^`` as the cmd.exe escape. ``x#``
+    and ``x##`` repeat the character or bracket expression ``x`` and become
+    ``*``. When they make up the whole pattern, as in ``C#``, they match only
+    names made of ``x``: a character becomes ``x`` and
+    :data:`_SKILLSPECTOR_ZSH_REPEAT`, and another ``x``, such as a bracket
+    expression, ``x*``. A ``#`` that starts the pattern or follows a literal
+    ``#``, as in a Markdown heading, is literal.
+    """
+    if "^" not in pattern and "#" not in pattern:
+        return pattern
+    size = len(pattern)
+    closes = [size] * (size + 1)
+    for index in range(size - 1, -1, -1):
+        closes[index] = index if pattern[index] == "]" else closes[index + 1]
+    elements: list[str] = []
+    index = 0
+    while index < size:
+        char = pattern[index]
+        if char == "[":
+            start = index + 1
+            start += 1 if start < size and pattern[start] in "!^" else 0
+            start += 1 if start < size and pattern[start] == "]" else 0
+            if closes[start] < size:
+                elements.append(pattern[index : closes[start] + 1])
+                index = closes[start] + 1
+                continue
+        elif char == "^":
+            elements.append("*")
+            break
+        elif char == "#" and elements and elements[-1] != "#":
+            while index < size and pattern[index] == "#":
+                index += 1
+            if len(elements) == 1 and index == size:
+                plain = len(elements[0]) == 1 and elements[0] not in "*?"
+                elements[0] += _SKILLSPECTOR_ZSH_REPEAT if plain else "*"
+            else:
+                elements[-1] = "*"
+            continue
+        elements.append(char)
+        index += 1
+    return "".join(elements)
+
+
+def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
+    """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
+
+    A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
+    ``~``, a quote, a backslash or a group read in the line is read as a POSIX shell and as
+    cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
+    between ``/`` is a pattern, and so is each piece of it between ``=``,
+    ``:`` and ``,``, as written and without the dots and punctuation that end
+    a sentence after it, with what a ``~`` in it may stand for
+    (:func:`_skillspector_tilde_forms`), each read with the zsh
+    ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
+    """
+    # Ignore only a leading Markdown bullet. A standalone wildcard elsewhere
+    # (for example ``bash *``) can name every uninspected file.
+    words = {
+        word
+        for text in texts
+        for word in _SKILLSPECTOR_LINE_WORD_RE.findall(re.sub(r"^[ \t]*\*(?=[ \t])", "", text, count=1))
+    }
+    patterns: set[str] = set()
+    for word in words:
+        if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word):
+            continue
+        for reading in _skillspector_shell_word(word):
+            for index, part in enumerate(reading.split("/")):
+                for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)}:
+                    patterns.update(
+                        _skillspector_zsh_pattern(form)
+                        for candidate in (piece, piece.rstrip(".,;:!?"))
+                        if candidate
+                        for form in _skillspector_tilde_forms(candidate, first=index == 0)
+                    )
+    return patterns
+
+
+def _skillspector_reference_line_avoids(
+    source: bytes,
+    row: Mapping[str, object],
+    references: list,
+    keys: frozenset[str],
+    budget: _SkillspectorMatchBudget | None = None,
+) -> bool:
+    """Whether the line of a missing-reference *row* names no entry whose name key is in *keys*.
+
+    The line is taken from *source* as SkillSpector numbers it: UTF-8 with
+    replacement, split at ``\\n``. Every ``missing`` entry of *references* on
+    that line must quote part of it as ``evidence``, which confirms the line.
+    SkillSpector resolves a reference by its path, or by its file name alone
+    when it has no ``/``, so the line must not name an uninspected entry. A
+    name counts when no letter, digit, ``_``, ``-`` or ``.`` adjoins it, after
+    any dots that follow it, which Windows drops when it opens a file. It is
+    compared case-folded (:func:`_skillspector_name_keys`), as written and in
+    NFC, in the line as written and as a Markdown renderer or a file path
+    reader may read it: with backslash escapes of ASCII punctuation removed,
+    HTML character references resolved and percent-escapes decoded, up to
+    :data:`_SKILLSPECTOR_REFERENCE_LINE_DECODINGS` of these steps in any order,
+    and then also with its shell groups and ranges read
+    (:func:`_skillspector_shell_groups`), with and without its backticks. A
+    word that a shell, cmd.exe, PowerShell or Windows would expand or unquote
+    is read as a pattern (:func:`_skillspector_shell_patterns`), and no name
+    may match it.
+
+    Only this line is read, and no command in it is run: a span between
+    backticks is read as text, as Markdown shows it, not as the output of a
+    command. So a name on another line, or one that a command prints, such as
+    ``printf`` in backticks, a pipe into ``xargs`` or ``find -exec``, is not
+    detected.
+
+    The check takes work from *budget*, by default a fresh
+    :data:`_SKILLSPECTOR_REFERENCE_MATCH_BUDGET`, and names the line as
+    uninspected when it would overdraw it.
+    """
+    line_number = row.get("start_line")
+    lines = source.decode("utf-8", errors="replace").split("\n")
+    if isinstance(line_number, bool) or not isinstance(line_number, int) or not 1 <= line_number <= len(lines):
+        return False
+    line = lines[line_number - 1]
+    cleaned = " ".join(line.split())
+    evidence = [
+        reference.get("evidence")
+        for reference in _skillspector_references_on_line(references, row.get("path"), line_number)
+        if reference.get("status") == "missing"
+    ]
+    if (
+        len(line) > _SKILLSPECTOR_REFERENCE_LINE_MAX_CHARS
+        or not evidence
+        or any(not isinstance(text, str) or not text or text not in cleaned for text in evidence)
+    ):
+        return False
+    if not keys:
+        return True
+    budget = budget or _SkillspectorMatchBudget()
+    if not budget.spend(len(line) * 9_000):
+        return False
+    decodings: tuple[Callable[[str], str], ...] = (
+        lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),
+        html.unescape,
+        unquote,
+    )
+    variants = {line}
+    for _step in range(_SKILLSPECTOR_REFERENCE_LINE_DECODINGS):
+        variants |= {decode(text) for text in variants for decode in decodings}
+    # Shell groups and ranges, and backticks, which PowerShell reads as an
+    # escape, may join the text around them.
+    variants |= {_skillspector_shell_groups(form) for text in variants for form in {text, text.replace("`", "")}}
+    texts = {text.casefold() for text in variants} | {
+        unicodedata.normalize("NFC", text).casefold() for text in variants
+    }
+    run_keys, other_keys, key_chars, longest = _skillspector_key_kinds(keys)
+    patterns = _skillspector_shell_patterns(texts)
+    globs = [pattern for pattern in patterns if not _SKILLSPECTOR_GLOB_SYNTAX.isdisjoint(pattern)]
+    searches = len(texts) * len(other_keys)
+    cost = searches * 100 + sum(len(text) for text in texts) * len(other_keys)
+    cost += sum(20_000 + 1_000 * len(pattern) + 300 * len(keys) + key_chars for pattern in globs)
+    if not budget.spend(cost):
+        return False
+    # A key made only of name characters matches a whole run of them, less any trailing dots.
+    runs: dict[str, int] = {}
+    for run in {run for text in texts for run in _SKILLSPECTOR_NAME_RUN_RE.findall(text)}:
+        base = run.rstrip(".")
+        runs[base] = max(len(run) - len(base), runs.get(base, 0))
+    if any(base in run_keys and run_keys[base] <= dots for base, dots in runs.items()):
+        return False
+    if not patterns.isdisjoint(keys):
+        return False
+    if any(_skillspector_text_names(text, key) for key in other_keys for text in texts):
+        return False
+    for pattern in globs:
+        matches = _skillspector_glob_matcher(pattern, longest)
+        if matches is not None and any(matches(key) for key in keys):
+            return False
+    return True
+
+
+def _skillspector_text_names(text: str, name: str) -> bool:
+    """Whether *name* appears in *text* with no name character around it, after any trailing dots."""
+    start = text.find(name)
+    while start >= 0:
+        end = start + len(name)
+        while end < len(text) and text[end] == ".":
+            end += 1
+        if (start == 0 or not _SKILLSPECTOR_NAME_RUN_RE.fullmatch(text[start - 1])) and (
+            end == len(text) or not _SKILLSPECTOR_NAME_RUN_RE.fullmatch(text[end])
+        ):
+            return True
+        start = text.find(name, start + 1)
+    return False
+
+
+def _skillspector_missing_reference_warning(rows: list[Mapping[str, object]]) -> str:
+    """Describe accepted missing-reference ledger rows, naming the file and line of up to three of them."""
+    shown = rows[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    labels = "; ".join(_skillspector_ledger_exception_label(row) for row in shown)
+    if len(rows) > len(shown):
+        labels = f"{labels}; and {len(rows) - len(shown)} more"
+    return (
+        f"SkillSpector reported {len(rows)} reference(s) to files the skill does not bundle ({labels}); "
+        "SkillSpector reported no other gap for them, and those lines name no file left out of the scan, "
+        "so they do not mark the scan incomplete. Files not in the scan, including any outside the scanned "
+        "path, were not inspected"
+    )
+
+
+def _skillspector_missing_references_have_rows(references: list, rows: list[Mapping[str, object]]) -> bool:
+    """Whether *references* holds only objects, none ``ambiguous``, each ``missing`` one on the line of a row in *rows*.
+
+    Only the line of a row is read for the names it holds
+    (:func:`_skillspector_reference_line_avoids`), so a ``missing`` entry on
+    any other line, which SkillSpector reported without a row, would never be.
+    """
+    locations = {(row.get("path"), row.get("start_line")) for row in rows}
+    for reference in references:
+        if not isinstance(reference, dict) or reference.get("status") == "ambiguous":
+            return False
+        if reference.get("status") == "missing":
+            path, line = reference.get("source_path"), reference.get("line")
+            if not isinstance(path, str) or type(line) is not int or (path, line) not in locations:
+                return False
+    return True
+
+
+def _skillspector_reference_evidence_unmatched(completeness: Mapping[str, object]) -> bool:
+    """Whether a report whose ledger has no missing-reference row lists a gap that nothing reads.
+
+    SkillSpector gives every ``missing`` or ``ambiguous`` reference a ledger
+    row, so with none, such an entry in the ``references`` of *completeness*
+    names a line that no check reads, and a ``*_truncated`` flag means a row
+    may have been cut off. The report is then not accepted on the strength of
+    its other gaps, such as a referenced image.
+    """
+    references = completeness.get("references")
+    return _skillspector_flags_truncation(completeness) or (
+        isinstance(references, list) and not _skillspector_missing_references_have_rows(references, [])
+    )
+
+
+def _skillspector_missing_reference_notes(
+    ledger_exceptions: list[dict],
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+    components: object,
+    scanned_root: Path | None,
+    *,
+    references: object,
+    skillspector_version: tuple[int, int, int] | None,
+    reference_root: Path | None,
+    analysis_completeness: Mapping[str, object],
+) -> list[str] | None:
+    """Warnings for a ``partial`` analysis whose gaps are references to files not bundled, else ``None``.
+
+    SkillSpector records a path-like reference in the skill's instructions that
+    matches no file it scanned, such as a file the skill writes at run time or
+    a repository source, as a nonfatal ``reference_resolution`` ledger row and
+    reports the analysis as ``partial``, although every file it scanned was
+    inspected.
+
+    That gap is accepted only when every ``reference_resolution`` row passes
+    :func:`_skillspector_reference_row_is_advisory` and names a bundled file
+    (:func:`_skillspector_bundled_file_bytes`) whose line names no entry of the
+    skill that SkillSpector did not inspect (:func:`_skillspector_unscanned_names`,
+    :func:`_skillspector_reference_line_avoids`, with one work budget for all
+    of the report's lines), such as a link or a file in an artifact directory
+    left out of a staged scan, and there is no fatal scope exclusion.
+    Every missing reference must have an accepted ledger row at its source
+    location, and no reference may be ambiguous. Unknown completeness fields,
+    including truncation markers, are not accepted. Nonfatal scope exclusions
+    must name actual uninspected paths. Any other ledger rows must be referenced
+    images that :func:`_skillspector_passive_raster_note` accepts, which then accounts for
+    the counts, analyzers and limitations, and its note follows. Without them,
+    no file is partially or entirely uninspected, no finding was filtered out,
+    there is no limitation, every analyzer is ``completed``, ``not_applicable``
+    or ``disabled``, and each universal analyzer completed one work item per
+    component. Anything else keeps the scan INCOMPLETE.
+
+    *reference_root* is the root of the artifact that the scan belongs to,
+    and the gap is accepted only when it is *scanned_root* itself. Another
+    root, such as a plugin around the bundled skill that was scanned or a
+    folder whose skills are scanned one by one, means that instructions may
+    name files of the artifact beside the scanned directory, which this scan
+    did not inspect. Without a root it is not known what the scan left out.
+
+    SkillSpector 2.13.4 and later report such an analysis as
+    ``complete_with_caveats`` instead; :func:`_skillspector_reference_caveat_notes`
+    applies the same rules to it.
+    """
+    # A bounded subset cannot establish that every reference was checked.
+    # Keep unknown evidence fields (including truncation markers) outside the
+    # same report contract used by the report-only reference-caveat gate.
+    if set(analysis_completeness) != REFERENCE_COMPLETENESS_FIELDS:
+        return None
+    reference_rows = [row for row in ledger_exceptions if row.get("phase") == "reference_resolution"]
+    other_rows = [row for row in ledger_exceptions if row.get("phase") != "reference_resolution"]
+    if (
+        scanned_root is None
+        or reference_root != scanned_root
+        or not reference_rows
+        or not isinstance(scope_exclusions, list)
+        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+        or not isinstance(references, list)
+    ):
+        return None
+    for row in reference_rows:
+        if not isinstance(row.get("path"), str) or not _skillspector_reference_row_is_advisory(
+            row, skillspector_version, references
+        ):
+            return None
+
+    if not _skillspector_missing_references_have_rows(references, reference_rows):
+        return None
+
+    notes = [_skillspector_missing_reference_warning(reference_rows)]
+    if other_rows:
+        image_note = _skillspector_passive_raster_note(
+            other_rows, analyzer_statuses, counts, limitations, scope_exclusions, components, scanned_root
+        )
+        if image_note is None:
+            return None
+        notes.append(image_note)
+    elif (
+        limitations
+        or counts["partially_inspected_files"]
+        or counts["entirely_uninspected_files"]
+        or counts["findings_before_filtering"] != counts["findings_after_filtering"]
+        or not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"])
+    ):
+        return None
+    unscanned_paths = _skillspector_unscanned_paths(scanned_root, components)
+    if unscanned_paths is None or any(
+        not isinstance(row.get("path"), str) or row["path"] not in unscanned_paths for row in scope_exclusions
+    ):
+        return None
+    keys = _skillspector_name_keys(part for path in unscanned_paths for part in path.split("/"))
+    budget = _SkillspectorMatchBudget()
+    sources: dict[str, bytes] = {}
+    checked: set[tuple[str, object]] = set()
+    for row in reference_rows:
+        path = row["path"]
+        if (path, row.get("start_line")) in checked:
+            continue
+        if path not in sources:
+            source = _skillspector_bundled_file_bytes(path, components, scanned_root)
+            if source is None:
+                return None
+            sources[path] = source
+        if not _skillspector_reference_line_avoids(sources[path], row, references, keys, budget):
+            return None
+        checked.add((path, row.get("start_line")))
+    return notes
+
+
+def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], total: int) -> bool:
+    """Whether each universal analyzer completed one work item per component and no other analyzer degraded."""
+    universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
+    accounted: set[str] = set()
+    for status in analyzer_statuses:
+        analyzer_id = status.get("analyzer_id")
+        state = status.get("status")
+        if analyzer_id not in universal:
+            if state not in {"completed", "not_applicable", "disabled"}:
+                return False
+            continue
+        if (
+            analyzer_id in accounted
+            or state != "completed"
+            or status.get("planned_work") != total
+            or status.get("completed") != total
+        ):
+            return False
+        accounted.add(analyzer_id)
+    return accounted == universal
+
+
+def _skillspector_row_is_reference_caveat(row: Mapping[str, object]) -> bool:
+    """Whether a ledger row is a missing reference, the only caveat of a ``complete_with_caveats`` analysis."""
+    return row.get("reason_code") == "reference_missing" and row.get("phase") == "reference_resolution"
+
+
+def _skillspector_rows_are_reference_caveats(ledger_exceptions: list[dict]) -> bool:
+    """Whether a ``complete_with_caveats`` ledger has caveats and every one is a missing reference.
+
+    SkillSpector 2.13.4 and later give that status only when every ledger row
+    is a nonfatal ``reference_missing`` row, which they record in phase
+    ``reference_resolution``; any other row makes the analysis ``partial`` or
+    ``failed``. A report that fails this contradicts its own status.
+    """
+    return bool(ledger_exceptions) and all(_skillspector_row_is_reference_caveat(row) for row in ledger_exceptions)
+
+
+def _skillspector_reference_caveat_notes(
+    ledger_exceptions: list[dict],
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+    components: object,
+    scanned_root: Path | None,
+    *,
+    references: object,
+    skillspector_version: tuple[int, int, int] | None,
+    reference_root: Path | None,
+    analysis_completeness: Mapping[str, object],
+) -> list[str] | None:
+    """Warnings for a ``complete_with_caveats`` analysis, else ``None``.
+
+    SkillSpector 2.13.4 and later report an analysis whose only gaps are
+    nonfatal ``reference_missing`` rows as ``complete_with_caveats``, where
+    earlier releases report it as ``partial``. Its caveats are accepted only
+    when there is at least one, every one is a ``reference_missing`` row in
+    phase ``reference_resolution``, and together they pass
+    :func:`_skillspector_missing_reference_notes`, the rule for the same rows
+    in a ``partial`` report. A caveat of any other kind is not one SkillSpector
+    emits with this status, so it keeps the scan INCOMPLETE.
+    """
+    if not _skillspector_rows_are_reference_caveats(ledger_exceptions):
+        return None
+    return _skillspector_missing_reference_notes(
+        ledger_exceptions,
+        analyzer_statuses,
+        counts,
+        limitations,
+        scope_exclusions,
+        components,
+        scanned_root,
+        references=references,
+        skillspector_version=skillspector_version,
+        reference_root=reference_root,
+        analysis_completeness=analysis_completeness,
+    )
+
+
+def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
+    """Describe a ``complete_with_caveats`` analysis whose caveats were not accepted, naming up to three.
+
+    When some caveats are not missing references, which contradicts the
+    status, only those are named.
+    """
+    if not ledger_exceptions:
+        return (
+            "skillspector JSON field 'analysis_completeness' reports status 'complete_with_caveats' "
+            "without a caveat; security scan did not complete"
+        )
+    rows = [row for row in ledger_exceptions if not _skillspector_row_is_reference_caveat(row)]
+    only_missing_references = not rows
+    description = "caveats other than missing references"
+    if not rows:
+        rows = ledger_exceptions
+        description = "caveats that SkillEvaluator does not accept"
+    shown = rows[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    message = (
+        f"skillspector JSON field 'analysis_completeness' reports {description} "
+        f"(status 'complete_with_caveats'): {'; '.join(_skillspector_ledger_exception_label(row) for row in shown)}"
+    )
+    if len(rows) > len(shown):
+        message = f"{message}; and {len(rows) - len(shown)} more"
+    message = f"{message}; security scan did not complete"
+    return f"{message}. {_SKILLSPECTOR_REFERENCE_REJECTION_HINT}" if only_missing_references else message
+
+
+# SkillSpector 2.12.0 and later record a nonfatal ``partial`` ``opaque_content``
+# row from ``bundled_execution_surface`` on a hook manifest whenever they cannot
+# model what a hook does with hook input (NVIDIA/SkillSpector#573). That is every
+# command or HTTP hook unless SkillSpector recognizes each one in the manifest as
+# sending hook content to a remote host (BH2). The scan itself completed, but its
+# findings cannot show that the hooks are safe, so the manifest gets a Critical
+# gate failure instead of an incomplete scan.
+_SKILLSPECTOR_HOOK_ANALYZER = "bundled_execution_surface"
+_SKILLSPECTOR_HOOK_LIMITATION = f"Analyzer {_SKILLSPECTOR_HOOK_ANALYZER} status: degraded."
+_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
+# SkillSpector reads at most this many hook, permission and settings records
+# from one manifest (``_MAX_DECLARATIONS`` in bundled_execution_surface.py).
+_SKILLSPECTOR_HOOK_DECLARATION_LIMIT = 2048
+# Findings that are facts about the scan, not judgments an LLM verifier can
+# overturn: the hook gate failure, and the reference-caveat note, which reports
+# scanner coverage, not a vulnerability. They keep their evidence unchanged.
+_LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, "skillspector_reference_caveats"})
+_SKILLSPECTOR_HOOK_COUNT_FIELDS = (
+    "total_components",
+    "partially_inspected_files",
+    "entirely_uninspected_files",
+    "findings_before_filtering",
+    "findings_after_filtering",
+)
+
+
+def _is_count(value: object) -> bool:
+    """Whether *value* is a JSON integer, not a boolean."""
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def _skillspector_unmodeled_hook_manifests(issues: object) -> dict[str, int]:
+    """The manifests whose BH1 finding says SkillSpector parsed hooks but could not model their payload.
+
+    Each manifest is the BH1 location's path when it passes
+    :func:`_skillspector_report_path_key`, mapped to the BH1
+    ``declaration_count``, which must be a positive count. A manifest whose
+    BH1 findings give different counts is left out.
+    """
+    if not isinstance(issues, list):
+        return {}
+    manifests: dict[str, int] = {}
+    conflicting: set[str] = set()
+    for issue in issues:
+        if not isinstance(issue, dict) or issue.get("id") != "BH1":
+            continue
+        evidence = issue.get("evidence")
+        location = issue.get("location")
+        if not (
+            isinstance(evidence, dict)
+            and evidence.get("payload_analysis_level") == "unmodeled"
+            and isinstance(location, dict)
+            and (manifest := _skillspector_report_path_key(location.get("file"))) is not None
+        ):
+            continue
+        declarations = evidence.get("declaration_count")
+        if (
+            not _is_count(declarations)
+            or declarations < 1
+            or manifests.setdefault(manifest, declarations) != declarations
+        ):
+            conflicting.add(manifest)
+    return {manifest: count for manifest, count in manifests.items() if manifest not in conflicting}
+
+
+def _skillspector_ledger_exception_is_hook_surface_limitation(
+    exception: Mapping[str, object], unmodeled_manifests: Mapping[str, int]
+) -> bool:
+    """Whether a ledger row is SkillSpector's limitation for hooks it parsed but could not model.
+
+    The row must be a nonfatal, whole-file ``partial`` ``opaque_content`` row
+    in phase ``static`` that names only ``bundled_execution_surface`` and no
+    error class, on a manifest in *unmodeled_manifests*
+    (:func:`_skillspector_unmodeled_hook_manifests`).
+
+    SkillSpector records the same row when it could not parse part of the
+    manifest or read only its first 2,048 hook, permission and settings
+    records. When the row carries ``observed_records`` and ``limit_records``
+    (SkillSpector 2.13.4), ``observed_records`` must equal the BH1
+    ``declaration_count`` and not exceed ``limit_records``: a skipped handler,
+    a permission or settings record, or a truncated manifest makes them
+    differ. Without them (SkillSpector 2.13.3 and 2.14.0), the BH1 must count
+    fewer than 2,048 declarations. Other partial parses cannot be told apart
+    from unmodeled hooks and get the same Critical.
+    """
+    manifest = _skillspector_report_path_key(exception.get("path"))
+    declarations = unmodeled_manifests.get(manifest) if manifest is not None else None
+    if declarations is None:
+        return False
+    if "observed_records" in exception or "limit_records" in exception:
+        observed = exception.get("observed_records")
+        limit = exception.get("limit_records")
+        counted = _is_count(observed) and _is_count(limit) and observed == declarations and observed <= limit
+    else:
+        counted = declarations < _SKILLSPECTOR_HOOK_DECLARATION_LIMIT
+    return (
+        counted
+        and exception.get("outcome") == "partial"
+        and exception.get("fatal") is False
+        and exception.get("phase") == "static"
+        and exception.get("reason_code") == "opaque_content"
+        and exception.get("analyzers") == [_SKILLSPECTOR_HOOK_ANALYZER]
+        and exception.get("error_class") is None
+        and exception.get("start_line") is None
+        and exception.get("end_line") is None
+    )
+
+
+def _skillspector_without_hook_surface(
+    data: Mapping[str, object],
+) -> tuple[list[dict], list[dict], list[dict], dict[str, int], list[str]] | None:
+    """A ``partial`` report's gaps without the rows for hooks SkillSpector could not model, else ``None``.
+
+    Returns the hook rows (:func:`_skillspector_ledger_exception_is_hook_surface_limitation`)
+    and the report's other ledger rows, analyzer statuses, counts and
+    limitations as they would be without the hook rows. BH1 findings are read
+    from both ``issues`` and ``suppressed``, because a baseline suppresses the
+    finding but not the row.
+
+    The hook rows are taken out only when they account exactly for their part
+    of the report: one row per manifest; one ``bundled_execution_surface``
+    status, ``degraded`` by one ``partial`` work item per hook row with nothing
+    failed or skipped, which then counts as completed; its ``Analyzer
+    bundled_execution_surface status: degraded.`` limitation, which is
+    dropped; and one partially inspected file for each manifest that no other
+    row names. Anything else returns ``None``, and the report is judged with
+    every row.
+    """
+    completeness = data.get("analysis_completeness")
+    if (
+        not isinstance(completeness, dict)
+        or completeness.get("status") != "partial"
+        or completeness.get("is_complete") is not False
+    ):
+        return None
+    ledger_exceptions = completeness.get("ledger_exceptions")
+    analyzer_statuses = completeness.get("analyzer_statuses")
+    limitations = completeness.get("limitations")
+    counts = {field: completeness.get(field) for field in _SKILLSPECTOR_HOOK_COUNT_FIELDS}
+    if (
+        not isinstance(ledger_exceptions, list)
+        or not all(isinstance(row, dict) for row in ledger_exceptions)
+        or not isinstance(analyzer_statuses, list)
+        or not all(isinstance(status, dict) for status in analyzer_statuses)
+        or not isinstance(limitations, list)
+        or not all(isinstance(limitation, str) for limitation in limitations)
+        or not all(_is_count(value) for value in counts.values())
+    ):
+        return None
+    issues: list[object] = []
+    for field in ("issues", "suppressed"):
+        found = data.get(field)
+        if isinstance(found, list):
+            issues.extend(found)
+    manifests = _skillspector_unmodeled_hook_manifests(issues)
+    hook_rows: list[dict] = []
+    other_rows: list[dict] = []
+    for row in ledger_exceptions:
+        if _skillspector_ledger_exception_is_hook_surface_limitation(row, manifests):
+            hook_rows.append(row)
+        else:
+            other_rows.append(row)
+    hook_paths = {row["path"] for row in hook_rows}
+    surface = [status for status in analyzer_statuses if status.get("analyzer_id") == _SKILLSPECTOR_HOOK_ANALYZER]
+    if not hook_rows or len(hook_paths) != len(hook_rows) or len(surface) != 1:
+        return None
+    [status] = surface
+    completed = status.get("completed")
+    if (
+        status.get("status") != "degraded"
+        or not _is_count(completed)
+        or not _is_count(status.get("partial"))
+        or status.get("partial") != len(hook_rows)
+        or any(not _is_count(status.get(field)) or status.get(field) != 0 for field in ("skipped", "failed"))
+        or _SKILLSPECTOR_HOOK_LIMITATION not in limitations
+    ):
+        return None
+    other_paths = {path for row in other_rows if isinstance(path := row.get("path"), str)}
+    partially_inspected = counts["partially_inspected_files"] - len(hook_paths - other_paths)
+    if partially_inspected < 0:
+        return None
+    remaining_limitations = list(limitations)
+    remaining_limitations.remove(_SKILLSPECTOR_HOOK_LIMITATION)
+    completed_status = {**status, "status": "completed", "completed": completed + len(hook_rows), "partial": 0}
+    return (
+        hook_rows,
+        other_rows,
+        [completed_status if item is status else item for item in analyzer_statuses],
+        {**counts, "partially_inspected_files": partially_inspected},
+        remaining_limitations,
+    )
+
+
+def _skillspector_gaps_without_rows(
+    analyzer_statuses: list[dict],
+    counts: Mapping[str, int],
+    limitations: list[str],
+    scope_exclusions: object,
+) -> list[str]:
+    """Describe the gaps a report without its hook rows (:func:`_skillspector_without_hook_surface`) shows outside its rows.
+
+    A gap is a limitation, a partially or entirely uninspected file, a fatal
+    scope exclusion, a finding count that changed in filtering, or analyzer
+    work that did not finish: each universal analyzer must complete one work
+    item per component, and every other analyzer must complete or be not
+    applicable or disabled. No gap gives an empty list.
+    """
+    gaps = [
+        f"limitation '{_skillspector_report_text(limitation) or ''}'"
+        for limitation in limitations[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    ]
+    if len(limitations) > _SKILLSPECTOR_INCOMPLETE_EXAMPLES:
+        gaps.append(f"{len(limitations) - _SKILLSPECTOR_INCOMPLETE_EXAMPLES} more limitation(s)")
+    if counts["partially_inspected_files"]:
+        gaps.append(f"{counts['partially_inspected_files']} partially inspected file(s)")
+    if counts["entirely_uninspected_files"]:
+        gaps.append(f"{counts['entirely_uninspected_files']} uninspected file(s)")
+    if not isinstance(scope_exclusions, list):
+        gaps.append("unreadable scope exclusions")
+    elif fatal := sum(not (isinstance(row, dict) and row.get("fatal") is False) for row in scope_exclusions):
+        gaps.append(f"{fatal} fatal scope exclusion(s)")
+    if counts["findings_before_filtering"] != counts["findings_after_filtering"]:
+        gaps.append(
+            f"{counts['findings_before_filtering']} finding(s) before filtering and "
+            f"{counts['findings_after_filtering']} after"
+        )
+    if not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"]):
+        unfinished = [
+            f"{_skillspector_report_text(status.get('analyzer_id')) or 'unknown'} "
+            f"{_skillspector_report_text(status.get('status')) or 'unknown'}"
+            for status in analyzer_statuses
+            if status.get("status") not in {"completed", "not_applicable", "disabled"}
+        ]
+        gaps.append(
+            f"analyzer status {', '.join(unfinished[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES])}"
+            if unfinished
+            else "analyzer work that does not cover every component"
+        )
+    return gaps
+
+
+def _skillspector_gaps_without_rows_error(status: str, gaps: list[str]) -> str:
+    """Describe a partial analysis whose only gaps outside the hook rows have no ledger row."""
+    return (
+        f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}'): "
+        f"{'; '.join(gaps)}; security scan did not complete"
+    )
+
+
 class SecurityValidator(ValidatorBase):
     """Scans skills for security vulnerabilities and PII leakage.
 
@@ -1563,6 +2854,9 @@ class SecurityValidator(ValidatorBase):
     ``SecurityValidator`` per request (or pass an explicit ``submitter_usernames``).
     """
 
+    # A skill's unmodeled hooks say nothing about the next skill in a folder.
+    _FAIL_FAST_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK})
+
     def __init__(
         self,
         use_llm: bool = False,
@@ -1572,6 +2866,7 @@ class SecurityValidator(ValidatorBase):
         content_type: str | None = None,
         skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
+        target_root: Path | str | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -1596,10 +2891,24 @@ class SecurityValidator(ValidatorBase):
                 scanned directory, such as a plugin around its bundled skills.
                 References written relative to it still count as agent
                 references. Defaults to the scanned directory.
+                :func:`_skillspector_missing_reference_notes` accepts missing
+                references only in a scan of this root, or without it, of
+                *target_root* or else the whole target of :meth:`validate` or
+                :meth:`validate_security_only`. A scan outside those methods
+                without this root has no reference root, so that rule accepts
+                none there; a 2.13.3 report that
+                :func:`reference_caveat_metadata` accepts still passes as its
+                caveat.
             skillspector_baseline: Audited SkillSpector YAML/JSON suppression
                 baseline. Matching findings are removed by SkillSpector before
                 scoring. Baselines are only applied when passed explicitly; one
                 shipped inside the scanned skill is never picked up on its own.
+            target_root: Root of the whole target when this validator is given
+                only part of it, such as one skill of a folder that
+                ``validate`` checks skill by skill. It replaces the target of
+                :meth:`validate` or :meth:`validate_security_only` as the root
+                that missing references are judged against, so a skill inside
+                it accepts none. Finding scoping is unchanged.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -1618,6 +2927,10 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_reference_root = (
             Path(skillspector_reference_root).resolve() if skillspector_reference_root is not None else None
         )
+        self.target_root = Path(target_root).resolve() if target_root is not None else None
+        # The resolved target of the scan in progress, or target_root; set only
+        # while _validate_with_applicability() walks it.
+        self._scan_target_root: Path | None = None
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
         )
@@ -1810,20 +3123,48 @@ class SecurityValidator(ValidatorBase):
         """Validate each discovered skill and total their SkillSpector applicability counters.
 
         The folder walker does not merge per-skill metadata, so the counters
-        are collected as each skill finishes.
+        are collected as each skill finishes. The counts of referenced
+        artifacts that SkillSpector did not completely inspect are totaled like
+        the applicability counters.
+
+        Without a configured ``skillspector_reference_root``, the target is the
+        reference root of every scan of the walk
+        (:func:`_skillspector_missing_reference_notes`). When *skill_path* is a
+        directory but not a skill, each skill found in it is scanned on its
+        own, and its instructions may name files elsewhere in the folder that
+        its scan does not inspect, so their missing references are not
+        accepted. A configured ``target_root`` replaces the target, such as
+        the folder of skills that a skill passed here belongs to. In a scan
+        run outside this walk, :func:`_skillspector_missing_reference_notes`
+        accepts missing references only when the configured
+        ``skillspector_reference_root`` is the scanned root. Otherwise, as for
+        the per-partition scans of ``tier1/plugin_checks.py``, that rule
+        accepts none. Such a scan without a configured root has no known
+        target, so a 2.13.3 report that :func:`reference_caveat_metadata`
+        accepts still passes as its caveat.
         """
         blocks: list[dict] = []
+        reference_summaries: list[object] = []
 
         def validate_one(path: Path) -> ValidationResult:
             child = single_skill_validator(path)
             block = child.metadata.get("skillspector_applicability")
             if isinstance(block, dict):
                 blocks.append(block)
+            if REFERENCE_SUMMARY_KEY in child.metadata:
+                reference_summaries.append(child.metadata[REFERENCE_SUMMARY_KEY])
             return child
 
-        result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        target_root = self.target_root or skill_path.resolve()
+        previous_target_root, self._scan_target_root = self._scan_target_root, target_root
+        try:
+            result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+        finally:
+            self._scan_target_root = previous_target_root
         if blocks:
             result.metadata["skillspector_applicability"] = _combine_skillspector_applicability(blocks)
+        if (references := combine_reference_summaries(reference_summaries)) is not None:
+            result.metadata[REFERENCE_SUMMARY_KEY] = references
         return result
 
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
@@ -1928,6 +3269,7 @@ class SecurityValidator(ValidatorBase):
                 # suppressed; keep its block and record the LLM stage's apart.
                 static_applicability = result.metadata.get("skillspector_applicability")
                 llm_applicability = enrichment.metadata.pop("skillspector_applicability", None)
+                self._drop_repeated_hook_reports(result, enrichment)
                 result.merge(enrichment)
                 if static_applicability is not None:
                     result.metadata["skillspector_applicability"] = static_applicability
@@ -1935,6 +3277,8 @@ class SecurityValidator(ValidatorBase):
                     result.metadata["skillspector_llm_applicability"] = llm_applicability
                 if not enrichment.is_incomplete:
                     self._deduplicate_skillspector_findings(result)
+                # Count each reference line once across both stages.
+                _record_skillspector_reference_summary(result)
             if baseline_state is not None:
                 result.metadata["skillspector_baseline"] = baseline_state
                 self._report_skillspector_baseline(
@@ -2066,6 +3410,7 @@ class SecurityValidator(ValidatorBase):
             result,
             baseline_requested=baseline is not None,
             scanned_root=original_root if original_root is not None else scan_root,
+            reference_root=self.skillspector_reference_root or self._scan_target_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -2092,8 +3437,56 @@ class SecurityValidator(ValidatorBase):
                 seen.add(key)
                 unique.append(finding)
         if len(unique) != len(result.findings):
+            errors = result.independent_errors()
+            warnings = result.independent_warnings()
             result.findings = unique
             result.recalculate_from_findings()
+            for error in errors:
+                if error not in result.errors:
+                    result.add_error(error)
+            for warning in warnings:
+                if warning not in result.warnings:
+                    result.add_warning(warning)
+
+    @staticmethod
+    def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
+        """Drop the hook Criticals and gate failures of *enrichment* that the static stage's *result* already holds.
+
+        Both stages run the same static analyzers, so each reports the same
+        manifests (:meth:`_report_unverified_hooks`). They are dropped before
+        the merge whether or not the enrichment stage completed:
+        :meth:`_deduplicate_skillspector_findings` runs only after a complete
+        stage, because its rebuild would drop an incomplete stage's error.
+        """
+        reported = {
+            (finding.file_path, finding.message)
+            for finding in result.findings
+            if finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+        }
+        kept: list[Finding] = []
+        for finding in enrichment.findings:
+            legacy = finding.to_legacy_string()
+            if (
+                finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+                and finding.severity == Severity.CRITICAL
+                and (finding.file_path, finding.message) in reported
+                and legacy in enrichment.errors
+            ):
+                enrichment.errors.remove(legacy)
+                enrichment.summary.errors -= 1
+                enrichment.summary.critical_count -= 1
+            else:
+                kept.append(finding)
+        enrichment.findings = kept
+        repeated = [message for message in enrichment.gate_failures if message in result.gate_failures]
+        for message in repeated:
+            if message in enrichment.errors:
+                enrichment.errors.remove(message)
+                enrichment.summary.errors -= 1
+        if repeated:
+            enrichment.metadata["gate_failures"] = [
+                message for message in enrichment.gate_failures if message not in repeated
+            ]
 
     @staticmethod
     def _validate_skillspector_report(
@@ -2105,6 +3498,7 @@ class SecurityValidator(ValidatorBase):
         *,
         baseline_requested: bool = False,
         scanned_root: Path | None = None,
+        reference_root: Path | None = None,
     ) -> bool:
         """Return whether JSON is a trustworthy SkillSpector findings report.
 
@@ -2112,12 +3506,54 @@ class SecurityValidator(ValidatorBase):
         explicit baseline, and that report must then account for them.
 
         A ``partial`` analysis makes the scan INCOMPLETE unless its only gaps are
-        verified passive images or missing-reference caveats with complete
-        bundled-file inspection. Those remain visible warnings, not claims that
-        referenced targets were inspected or that the scanner reported SAFE.
-        *scanned_root* is the directory the report's relative paths start from.
+        missing-reference caveats in a fully inspected SkillSpector 2.13.3 or
+        later 2.x report (:func:`reference_caveat_metadata`), references to
+        files the skill does not bundle
+        (:func:`_skillspector_missing_reference_notes`), referenced PNG or JPEG
+        images (:func:`_skillspector_passive_raster_note`), or both of the last
+        two, each confirmed by the files under *scanned_root*. Each kind of gap
+        is then a visible warning, not a claim that referenced targets were
+        inspected or that the scanner reported SAFE. *scanned_root* is the
+        directory the report's relative paths start from. *reference_root* is
+        the root of the artifact that contains it: the validator's
+        ``skillspector_reference_root``, or else its ``target_root`` or the
+        target of the scan in progress. Missing references are accepted by
+        :func:`_skillspector_missing_reference_notes` only when it is
+        *scanned_root*. When *reference_root* is given, a caveat that
+        :func:`reference_caveat_metadata` accepts must also pass
+        :func:`_skillspector_missing_reference_notes`; without it, that rule
+        alone decides.
+
+        Rows for hooks SkillSpector parsed but could not model are judged
+        apart: when they account exactly for their part of the report
+        (:func:`_skillspector_without_hook_surface`), the rest of the report
+        decides whether the scan is complete, and
+        :meth:`_process_skillspector_cli_result` reports a Critical gate
+        failure for each manifest instead. :func:`reference_caveat_metadata`
+        reads the whole report, hook rows included, so its report-only
+        missing-reference caveat does not apply beside the hooks: without a
+        *reference_root*, a missing reference there records the scan as
+        incomplete next to the Critical.
+
+        From SkillSpector 2.13.4, an analysis whose only gaps are missing
+        references is ``complete_with_caveats`` instead of ``partial``. Its
+        caveats get the warning of :func:`_skillspector_missing_reference_notes`
+        when they pass its rules (:func:`_skillspector_reference_caveat_notes`)
+        and the rest of the report is accepted. Otherwise the scan is
+        INCOMPLETE and, as for a ``partial`` report, the report's findings are
+        still checked and kept. :func:`reference_caveat_metadata` reads only
+        ``partial`` reports, so it never accepts these caveats, even without a
+        *reference_root*. A report with that status and no caveat, or with a
+        caveat that is not a missing reference, contradicts itself and is not
+        trusted, and neither is the status from an earlier release.
         """
         partial_reported = False
+        # Rejected caveats mark the scan INCOMPLETE below, but SkillSpector still
+        # keeps a LOW complete_with_caveats report SAFE, so the recommendation
+        # check reads the state the result had on entry.
+        incomplete_before = result.is_incomplete
+        # Accepted caveats are reported only once every later check has passed.
+        caveat_warnings: list[str] = []
         accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
@@ -2258,11 +3694,10 @@ class SecurityValidator(ValidatorBase):
                     return False
                 if uses_completeness_schema:
                     completeness_status = analysis_completeness.get("status")
-                    if not isinstance(completeness_status, str) or completeness_status not in {
-                        "complete",
-                        "partial",
-                        "failed",
-                    }:
+                    recognized_statuses = {"complete", "partial", "failed"}
+                    if skillspector_version >= _SKILLSPECTOR_CAVEATS_STATUS_VERSION:
+                        recognized_statuses.add("complete_with_caveats")
+                    if not isinstance(completeness_status, str) or completeness_status not in recognized_statuses:
                         result.add_error(
                             "skillspector JSON field 'analysis_completeness.status' is not recognized; "
                             "security scan did not complete"
@@ -2571,7 +4006,11 @@ class SecurityValidator(ValidatorBase):
                     )
                     return False
 
-                if uses_completeness_schema and is_complete is not (completeness_status == "complete"):
+                if uses_completeness_schema and is_complete is not (
+                    completeness_status in {"complete", "complete_with_caveats"}
+                ):
+                    # SkillSpector rewrites a truncated complete_with_caveats
+                    # report to partial, so only "complete" can keep its status.
                     has_report_stage_truncation = any(
                         limitation.startswith("Transitive traversal truncated: ")
                         for limitation in limitations
@@ -2626,10 +4065,11 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
                 elif is_complete:
+                    with_caveats = completeness_status == "complete_with_caveats"
                     if (
                         counts["partially_inspected_files"] != 0
                         or counts["entirely_uninspected_files"] != 0
-                        or ledger_exceptions
+                        or (ledger_exceptions and not with_caveats)
                         or limitations
                     ):
                         result.add_error(
@@ -2637,6 +4077,33 @@ class SecurityValidator(ValidatorBase):
                             "security scan did not complete"
                         )
                         return False
+                    if with_caveats:
+                        # Caveats do not make the analysis partial: SkillSpector
+                        # keeps a LOW report SAFE, so partial_reported stays False.
+                        if not _skillspector_rows_are_reference_caveats(ledger_exceptions):
+                            # SkillSpector reports any other gap as partial or failed.
+                            result.add_error(_skillspector_reference_caveat_error(ledger_exceptions))
+                            return False
+                        caveat_notes = _skillspector_reference_caveat_notes(
+                            ledger_exceptions,
+                            analyzer_statuses,
+                            counts,
+                            limitations,
+                            analysis_completeness.get("scope_exclusions", []),
+                            data.get("components"),
+                            scanned_root,
+                            references=analysis_completeness.get("references"),
+                            skillspector_version=skillspector_version,
+                            reference_root=reference_root,
+                            analysis_completeness=analysis_completeness,
+                        )
+                        if caveat_notes is None:
+                            # As for a partial report's gaps, the findings are
+                            # still checked and kept.
+                            result.add_error(_skillspector_reference_caveat_error(ledger_exceptions))
+                            result.mark_scan_incomplete(stage_name)
+                        else:
+                            caveat_warnings = caveat_notes
                 elif not complete_by_applicability:
                     if not (
                         counts["partially_inspected_files"]
@@ -2650,25 +4117,86 @@ class SecurityValidator(ValidatorBase):
                         )
                         return False
                     partial_reported = True
-                    raster_note = _skillspector_passive_raster_note(
-                        ledger_exceptions,
-                        analyzer_statuses,
-                        counts,
-                        limitations,
+                    # Hooks SkillSpector parsed but could not model get a
+                    # Critical in _report_unverified_hooks; only the rest of
+                    # the report decides whether the scan is complete.
+                    without_hooks = _skillspector_without_hook_surface(data)
+                    gap_rows, gap_statuses, gap_counts, gap_limitations = (
+                        (ledger_exceptions, analyzer_statuses, counts, limitations)
+                        if without_hooks is None
+                        else without_hooks[1:]
+                    )
+                    gap_notes = _skillspector_missing_reference_notes(
+                        gap_rows,
+                        gap_statuses,
+                        gap_counts,
+                        gap_limitations,
                         analysis_completeness.get("scope_exclusions", []),
                         data.get("components"),
                         scanned_root,
+                        references=analysis_completeness.get("references"),
+                        skillspector_version=skillspector_version,
+                        reference_root=reference_root,
+                        analysis_completeness=analysis_completeness,
                     )
+                    if accepted_reference_caveats is not None and reference_root is not None and gap_notes is None:
+                        # reference_caveat_metadata reads only the report. When
+                        # the scan's reference root is known, its missing
+                        # references must also meet the conditions above, so a
+                        # line that names a file left out of the scan, or a
+                        # skill scanned inside a larger artifact, stays
+                        # incomplete.
+                        accepted_reference_caveats = None
+                    if gap_notes is None:
+                        raster_note = (
+                            None
+                            if _skillspector_reference_evidence_unmatched(analysis_completeness)
+                            else _skillspector_passive_raster_note(
+                                gap_rows,
+                                gap_statuses,
+                                gap_counts,
+                                gap_limitations,
+                                analysis_completeness.get("scope_exclusions", []),
+                                data.get("components"),
+                                scanned_root,
+                            )
+                        )
+                        gap_notes = None if raster_note is None else [raster_note]
+                    other_gaps: list[str] = []
+                    if gap_notes is None and without_hooks is not None and not gap_rows:
+                        other_gaps = _skillspector_gaps_without_rows(
+                            gap_statuses,
+                            gap_counts,
+                            gap_limitations,
+                            analysis_completeness.get("scope_exclusions", []),
+                        )
+                        if not other_gaps:
+                            gap_notes = []
                     if accepted_reference_caveats is not None:
                         # Add the warning only after all inventory, finding and
                         # risk-accounting checks below have accepted the report.
                         pass
-                    elif raster_note is not None:
-                        result.add_warning(raster_note)
+                    elif gap_notes is not None:
+                        for note in gap_notes:
+                            result.add_warning(note)
                     else:
-                        result.add_error(
-                            _skillspector_incomplete_analysis_error(completeness_status, ledger_exceptions)
+                        # The hook surface has its own confirmed Critical; only
+                        # residual gaps belong in incomplete-scan diagnostics.
+                        diagnostic = completeness_record(
+                            {"ledger_exceptions": gap_rows, "limitations": gap_limitations}, stage_name
                         )
+                        result.metadata["skillspector_completeness"] = merge_completeness(
+                            result.metadata.get("skillspector_completeness"), {"records": [diagnostic]}
+                        )
+                        message = (
+                            _skillspector_gaps_without_rows_error(completeness_status, other_gaps)
+                            if other_gaps
+                            else _skillspector_incomplete_analysis_error(completeness_status, gap_rows)
+                        )
+                        if not gap_rows and not other_gaps and diagnostic["limitations"]:
+                            # No incomplete file to name: the limitation is the only stated reason.
+                            message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 
         status = data.get("status")
@@ -2736,7 +4264,7 @@ class SecurityValidator(ValidatorBase):
             return False
         recommendation = risk.get("recommendation")
         expected_recommendation = _SKILLSPECTOR_RECOMMENDATION_BY_SEVERITY[severity]
-        if (result.is_incomplete or partial_reported) and severity == "LOW":
+        if (incomplete_before or partial_reported) and severity == "LOW":
             expected_recommendation = "CAUTION"
         if not isinstance(recommendation, str) or recommendation != expected_recommendation:
             result.add_error(
@@ -3031,6 +4559,8 @@ class SecurityValidator(ValidatorBase):
             )
             return False
 
+        for note in caveat_warnings:
+            result.add_warning(note)
         if accepted_reference_caveats is not None:
             result.metadata["skillspector_reference_caveats"] = accepted_reference_caveats
             locations = ", ".join(
@@ -3445,6 +4975,8 @@ class SecurityValidator(ValidatorBase):
         With a ``content_type``, issues outside agent control paths are
         suppressed and excluded from the aggregate risk score (see
         :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
+        Each manifest whose hooks SkillSpector could not model gets a Critical
+        gate failure (:meth:`_report_unverified_hooks`), whatever the scoping.
         """
         self._store_skillspector_metadata(data, result, score_message=False)
 
@@ -3490,6 +5022,15 @@ class SecurityValidator(ValidatorBase):
         skipped_inapplicable = 0
         skipped_by_role: Counter[str] = Counter()
         has_critical_or_high = False
+        completeness = data.get("analysis_completeness")
+        # One normalizer per report: each distinct path and text is redacted once.
+        normalizer = ReportNormalizer(source_root)
+        legacy_reason_index = index_legacy_reference_reasons(
+            candidate_issues,
+            normalize_path=normalizer.path,
+            completeness=completeness,
+            text=normalizer.text,
+        )
         for issue, scope in zip(candidate_issues, scopes, strict=True):
             if scope is not None and not scope.applicable:
                 removed_issues.append(issue)
@@ -3497,7 +5038,12 @@ class SecurityValidator(ValidatorBase):
                 skipped_by_role[scope.file_role] += 1
                 continue
             scanned_issues.append(issue)
-            finding, is_error = self._convert_skillspector_issue(issue)
+            finding, is_error = self._convert_skillspector_issue(
+                issue,
+                completeness=completeness,
+                legacy_reason_index=legacy_reason_index,
+                normalizer=normalizer,
+            )
             if scope is not None:
                 finding.metadata.update(
                     {
@@ -3509,6 +5055,7 @@ class SecurityValidator(ValidatorBase):
             if is_error:
                 has_critical_or_high = True
             result.add_structured_finding(finding, is_error=is_error)
+        _record_skillspector_reference_summary(result)
 
         if skipped_generated:
             result.add_message(f"skillspector ignored {skipped_generated} generated artifact issue(s)")
@@ -3600,13 +5147,78 @@ class SecurityValidator(ValidatorBase):
             )
             has_critical_or_high = True
 
+        without_hooks = _skillspector_without_hook_surface(data)
+        unverified_hooks = self._report_unverified_hooks(
+            without_hooks[0] if without_hooks is not None else [],
+            result,
+            report_components,
+            source_root,
+        )
+
         if not result.is_incomplete:
+            # Each manifest's Critical counts as an issue, so the summary never
+            # reports a clean scan beside it.
             self._summarize_skillspector_results(
-                scanned_issues,
-                has_critical_or_high,
+                [*scanned_issues, *unverified_hooks],
+                has_critical_or_high or bool(unverified_hooks),
                 result,
                 suppressed_inapplicable_issues=skipped_inapplicable,
             )
+
+    @staticmethod
+    def _report_unverified_hooks(
+        hook_rows: list[dict],
+        result: ValidationResult,
+        components: object,
+        source_root: Path | None,
+    ) -> list[str]:
+        """Fail the gate for each manifest whose hooks SkillSpector could not model, and return the manifests.
+
+        *hook_rows* come from :func:`_skillspector_without_hook_surface`. The
+        scan completed, but the absence of findings does not show that such
+        hooks are safe: a hook script that sends its input over a socket gets
+        no blocking SkillSpector finding. Each manifest gets a Critical and a
+        gate failure, so neither a ``--policy`` severity override nor
+        ``--llm-verify`` can clear it; SkillEvaluator has no way to record a
+        review of the hooks, so only removing them passes the check. The
+        Critical does not stop a folder scan at this skill
+        (:attr:`_FAIL_FAST_EXEMPT_CHECKS`). The finding records the manifest's
+        SHA-256 when it is a bundled file
+        (:func:`_skillspector_bundled_file_bytes`), else ``None``.
+        """
+        manifests: list[str] = []
+        for row in hook_rows:
+            manifest = row["path"]
+            manifest_bytes = _skillspector_bundled_file_bytes(manifest, components, source_root)
+            result.add_structured_finding(
+                Finding(
+                    category="SECURITY",
+                    severity=Severity.CRITICAL,
+                    check_name=_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK,
+                    message=(
+                        f"SkillSpector could not fully model the hooks in {manifest} (analyzer "
+                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input), so this "
+                        "check cannot pass while these hooks are present."
+                    ),
+                    file_path=manifest,
+                    suggestion=(
+                        f"Review {manifest} and every file its hooks run. Only removing the hooks lets this check "
+                        "pass: neither a --policy severity override nor --llm-verify clears it."
+                    ),
+                    metadata={
+                        "ledger_exceptions": [dict(row)],
+                        "manifest_sha256": (
+                            hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None
+                        ),
+                    },
+                ),
+                is_error=True,
+            )
+            result.fail_gate(
+                f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
+            )
+            manifests.append(manifest)
+        return manifests
 
     def _skillspector_issue_scopes(
         self,
@@ -3932,10 +5544,27 @@ class SecurityValidator(ValidatorBase):
         report("no_matches", f"SkillSpector baseline loaded but matched no findings ({counts}).", problem=False)
 
     @staticmethod
-    def _convert_skillspector_issue(issue: dict) -> tuple[Finding, bool]:
+    def _convert_skillspector_issue(
+        issue: dict,
+        *,
+        completeness: object = None,
+        scan_root: Path | None = None,
+        legacy_reason_index: Mapping[str, list[dict]] | None = None,
+        normalizer: ReportNormalizer | None = None,
+    ) -> tuple[Finding, bool]:
         """Convert a single skillspector issue dict into a Finding.
 
         Returns (Finding, is_error) where is_error is True for CRITICAL/HIGH.
+
+        An ``AE1`` (incomplete referenced artifact analysis) finding is named
+        by its rule when SkillSpector leaves ``pattern`` empty, as releases
+        before v2.12.0 do. When SkillSpector says which file it did not
+        completely inspect and why, its metadata and suggestion carry that
+        (:func:`~skillevaluator.skillspector_references.issue_diagnostics`),
+        with the reasons of earlier releases read from *completeness* or
+        *legacy_reason_index*. Paths count only inside *scan_root*. A
+        *normalizer* shared by a report's issues replaces *scan_root*, so each
+        distinct path and text is redacted once per report.
         """
         g = _issue_field(issue)
         issue_sev = str(g("severity", "UNKNOWN")).upper()
@@ -3944,19 +5573,35 @@ class SecurityValidator(ValidatorBase):
         suggestion = f"{explanation} {remediation}".strip() or None
         code_snippet = g("code_snippet")
         file_path, line_number = SecurityValidator._parse_issue_location(issue)
+        raw_pattern = issue.get("pattern")
+        if issue.get("id") == AE1_RULE_ID and not (isinstance(raw_pattern, str) and raw_pattern.strip()):
+            pattern = AE1_PATTERN
+        else:
+            pattern = g("pattern", "Unknown")
+        metadata = SecurityValidator._build_issue_metadata(issue)
+        normalizer = normalizer or ReportNormalizer(scan_root)
+        metadata.update(
+            issue_diagnostics(
+                issue,
+                normalize_path=normalizer.path,
+                completeness=completeness,
+                legacy_reason_index=legacy_reason_index,
+                text=normalizer.text,
+            )
+        )
+        if evidence := metadata.get("skillspector_evidence"):
+            suggestion = reference_suggestion(evidence, remediation, text=normalizer.text)
 
         finding = Finding(
             category="SECURITY",
             severity=issue_sev,
-            check_name=f"{g('pattern', 'Unknown')} ({g('id', '?')})",
-            message=SecurityValidator._build_issue_message(
-                g("category"), g("finding"), explanation, g("pattern", "Unknown")
-            ),
+            check_name=f"{pattern} ({g('id', '?')})",
+            message=SecurityValidator._build_issue_message(g("category"), g("finding"), explanation, pattern),
             file_path=file_path,
             line_number=line_number,
             line_content=code_snippet[:200] if code_snippet else None,
             suggestion=suggestion,
-            metadata=SecurityValidator._build_issue_metadata(issue),
+            metadata=metadata,
         )
         return finding, issue_sev in ("CRITICAL", "HIGH")
 
@@ -4088,7 +5733,9 @@ class SecurityValidator(ValidatorBase):
                 relative_path = file_path.name
 
             waive = waivers.matcher(file_path) if waivers is not None else None
-            for finding_data in self._scan_file_for_pii(file_path, protected_usernames, waive=waive):
+            for finding_data in self._scan_file_for_pii(
+                file_path, protected_usernames, skill_root=skill_path, waive=waive
+            ):
                 pii_found = True
                 value = finding_data.get("matched_value")
                 key: object = (
@@ -4685,6 +6332,7 @@ class SecurityValidator(ValidatorBase):
         self,
         file_path: Path,
         protected_usernames: set[str] | None = None,
+        skill_root: Path | None = None,
         *,
         waive: Callable[[str, int, str], bool] | None = None,
     ) -> list[dict]:
@@ -4695,6 +6343,10 @@ class SecurityValidator(ValidatorBase):
         directory so the method stays usable standalone. ``waive`` returns
         whether a PII waiver covers a candidate (category, line, value); a
         waived candidate is skipped as if it did not match.
+
+        ``skill_root`` is the directory being scanned. Only the manifest sitting
+        directly in it may declare ownership contacts; a ``SKILL.md`` nested
+        deeper in the tree is ordinary content. It defaults to the file's parent.
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
@@ -4707,6 +6359,9 @@ class SecurityValidator(ValidatorBase):
 
         lines = content.split("\n")
         author_emails = self._frontmatter_author_emails(file_path, lines)
+        skill_root = file_path.parent if skill_root is None else skill_root
+        is_root_manifest = skill_root in (file_path.parent, file_path)
+        ownership_spans = ownership_email_spans(file_path, content) if is_root_manifest else {}
         comment_lines = _comment_line_numbers(file_path, lines)
         global_exceptions = self.pii_patterns.get("exceptions", {}).get("allowed_paths", [])
         compiled = self._compile_pii_patterns(global_exceptions)
@@ -4724,6 +6379,7 @@ class SecurityValidator(ValidatorBase):
                 protected_usernames,
                 author_emails,
                 comment_lines,
+                ownership_spans,
                 waive=waive,
             )
         return findings
@@ -4781,6 +6437,7 @@ class SecurityValidator(ValidatorBase):
         protected_usernames: set[str] | None = None,
         author_emails: dict[int, str] | None = None,
         comment_lines: frozenset[int] | None = None,
+        ownership_spans: dict[int, list[tuple[int, int]]] | None = None,
         *,
         waive: Callable[[str, int, str], bool] | None = None,
     ) -> None:
@@ -4794,6 +6451,7 @@ class SecurityValidator(ValidatorBase):
         """
         protected_usernames = protected_usernames or set()
         author_emails = author_emails or {}
+        ownership_spans = ownership_spans or {}
         comment_lines = comment_lines if comment_lines is not None else _comment_line_numbers(file_path, lines)
         line_exceptions = exceptions
         excepted_card_digits: frozenset[str] = frozenset()
@@ -4810,7 +6468,11 @@ class SecurityValidator(ValidatorBase):
 
             scan_line = line
             if category == "emails" and (author_email := author_emails.get(line_num)):
-                scan_line = re.sub(re.escape(author_email), "author@example.com", line, count=1, flags=re.IGNORECASE)
+                # Keep source offsets intact for adjacent ownership contacts in
+                # flow YAML; substituting a different-length address shifts them.
+                scan_line = re.sub(
+                    re.escape(author_email), lambda match: " " * len(match.group()), line, count=1, flags=re.IGNORECASE
+                )
 
             matches = list(regex.finditer(scan_line))
             if excepted_card_digits:
@@ -4863,19 +6525,39 @@ class SecurityValidator(ValidatorBase):
             if category == "gps_coordinates" and self._is_near_zero_gps(line):
                 confidence = "low"
 
-            findings.append(
-                {
+            # Preserve the first occurrence of each email class on a line.
+            # An ownership contact must not hide an ordinary address beside it.
+            candidates = [(category, match)]
+            if category == "emails":
+                classes = {}
+                for candidate in matches:
+                    check = (
+                        "ownership_emails"
+                        if candidate.span() in ownership_spans.get(line_num, [])
+                        else "emails"
+                    )
+                    classes.setdefault(check, candidate)
+                candidates = list(classes.items())
+            for check, candidate in candidates:
+                finding = {
                     "file": file_path.name,
                     "line": line_num,
                     "line_content": line,
                     "severity": pattern_def.get("severity", "medium"),
                     "description": pattern_def.get("description", category),
                     "suggestion": pattern_def.get("suggestion"),
-                    "category": category,
+                    "category": check,
                     "confidence": confidence,
-                    "matched_value": self._reported_value(match),
+                    "matched_value": self._reported_value(candidate),
                 }
-            )
+                if check == "ownership_emails":
+                    finding["description"] = "Ownership contact email in skill metadata"
+                    finding["suggestion"] = (
+                        "Review whether ownership contacts are permitted for this repository. "
+                        "If approved, set PII.ownership_emails to info in an explicit --policy file; "
+                        "otherwise remove the address or use a placeholder."
+                    )
+                findings.append(finding)
 
     @staticmethod
     def _reported_value(match: re.Match) -> str:
@@ -4898,17 +6580,16 @@ class SecurityValidator(ValidatorBase):
         """Run LLM second-pass verification on security findings.
 
         Findings the LLM classifies as false_positive with high confidence
-        are downgraded to INFO severity and annotated in metadata.
+        are downgraded to INFO severity and annotated in metadata. Findings of
+        checks in :data:`_LLM_VERIFY_EXEMPT_CHECKS` are not sent to the
+        verifier: they keep their severity and get no verdict.
         """
-        # This diagnostic reports scanner coverage, not a vulnerability whose
-        # truth can be adjudicated by the model. Keep its evidence unchanged.
-        findings = [
-            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
-        ]
+        findings = [finding for finding in result.findings if finding.check_name not in _LLM_VERIFY_EXEMPT_CHECKS]
         if not findings:
             return
 
         from skillevaluator.inference import FindingVerifier
+        from skillevaluator.inference.diagnostics import safe_llm_labels
 
         logger.info(f"Running LLM verification on {len(findings)} finding(s)")
         verifier = FindingVerifier()
@@ -4919,6 +6600,13 @@ class SecurityValidator(ValidatorBase):
             cause = f": {verifier.last_failure}" if verifier.last_failure else ""
             result.add_message(f"LLM finding verification was skipped (no verdicts returned{cause})")
             return
+
+        # The provider and model that gave the verdicts: the configured model,
+        # or a server-side fallback model that answered in its place.
+        model_labels: dict[str, str] = {}
+        if verifier.model_used is not None:
+            provider, model = safe_llm_labels(verifier.provider, verifier.model_used)
+            model_labels = {"llm_provider": provider, "llm_model_used": model}
 
         suppressed = 0
         verified = 0
@@ -4944,6 +6632,7 @@ class SecurityValidator(ValidatorBase):
             finding.metadata["llm_verdict"] = verdict
             finding.metadata["llm_confidence"] = confidence
             finding.metadata["llm_reasoning"] = reasoning
+            finding.metadata.update(model_labels)
 
             if finding_verification_policy.should_downgrade(verdict, confidence):
                 finding.severity = finding_verification_policy.DOWNGRADE_SEVERITY

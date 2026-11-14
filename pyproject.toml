@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "0.8.0"
+version = "0.9.0"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -38,6 +38,8 @@ license-files = [
 # Base install is static-validation capable (Tier 1) and must NOT pull Harbor
 # or LLM clients. Those live behind the extras below.
 dependencies = [
+    # Tier 1 Code Risk Analysis scanner, which validate runs by default.
+    "bandit>=1.9.4",
     "click>=8.3.3,<9",
     "idna>=3.10,<4",
     "jinja2>=3.1",
@@ -75,9 +77,8 @@ tier3 = [
     # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
     "python-dotenv>=1.2.0",
 ]
-# Static security scanners (floors raised to the established release baseline).
+# Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
-    "bandit>=1.9.4",
     "pip-audit>=2.10.0",
 ]
 # Verify GitHub-signed execution receipts for the optional CI report publisher.
@@ -125,6 +126,7 @@ include = ["skillevaluator*"]
 "skillevaluator.tier3" = ["grader_reference/*.json", "grader_reference/trajectories/*.json"]
 "skillevaluator" = ["ci-release.json", "ci-release-all-tiers.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
+"skillevaluator.harness" = ["profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]
 "skillevaluator.tier3.harbor" = [
     "templates/*.py",

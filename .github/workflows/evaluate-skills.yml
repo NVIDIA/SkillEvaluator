@@ -20,6 +20,10 @@ on:
         description: Minimum Tier 1 quality score from 0 to 100
         type: number
         default: 70
+      enforcement-mode:
+        description: strict fails on non-passing Tier 1 results; advisory uploads evidence without blocking on verdict
+        type: string
+        default: strict
       llm:
         description: Enable additional LLM security, verification, and rubric checks
         type: boolean
@@ -61,6 +65,16 @@ jobs:
     env:
       SCAN_MODE: ${{ inputs.scan-mode == 'auto' && (github.event_name == 'pull_request' && 'changed' || 'all') || inputs.scan-mode }}
     steps:
+      - name: Validate enforcement mode
+        env:
+          ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
+        run: |
+          python3 -I - <<'PY'
+          import os
+          mode = os.environ["ENFORCEMENT_MODE"]
+          if mode not in {"strict", "advisory"}:
+              raise SystemExit("enforcement-mode must be strict or advisory")
+          PY
       - name: Capture the optional hosted-report execution receipt
         id: provenance
         continue-on-error: true
@@ -132,6 +146,7 @@ jobs:
           docker --config "$RUNNER_TEMP/anonymous-docker-config" pull "$IMAGE"
       - name: Evaluate selected skills
         env:
+          ENFORCEMENT_MODE: ${{ inputs.enforcement-mode }}
           IMAGE: ${{ inputs.image }}
           DIFF_BASE_SHA: ${{ github.event.pull_request.base.sha }}
           DIFF_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -160,6 +175,10 @@ jobs:
           if [ "$LLM_ENABLED" = true ]; then
             llm_secret_args=(--env LLM_API_KEY)
           fi
+          enforcement_args=()
+          if [ "$ENFORCEMENT_MODE" = advisory ]; then
+            enforcement_args=(--enforcement-mode advisory)
+          fi
           docker run --rm --user "$(id -u):$(id -g)" \
             --read-only --tmpfs /tmp:rw,nosuid,noexec,size=1g \
             --tmpfs /audit-tmp:rw,nosuid,noexec,mode=1777,size=1g --env TMPDIR=/audit-tmp \
@@ -171,7 +190,7 @@ jobs:
             --env SECURITY_BASELINES --env POLICY_SOURCE_SHA \
             --env CALLER_WORKFLOW_SHA \
             --env GITHUB_ACTIONS --env REPORT_IMAGE --env REPORT_URL --env REPORT_RUN_URL --env REPORT_COMMIT \
-            "$IMAGE"
+            "$IMAGE" "${enforcement_args[@]}"
       - name: Add the result to the workflow summary
         if: always()
         run: |

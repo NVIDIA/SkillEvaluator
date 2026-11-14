@@ -441,6 +441,37 @@ def test_benchmark_requires_tier3_by_default() -> None:
     assert "- Environment: not recorded (legacy or non-live result)" in rendered
 
 
+def test_benchmark_records_the_writer_version_when_no_tier3_version_is_recorded() -> None:
+    rendered = BenchmarkReporter(
+        include_timestamp=False,
+        skill_name="demo-skill",
+        evaluator_version="1.2.3",
+    ).render_all(_deterministic_results())
+
+    assert "- Skill: `demo-skill`" in rendered
+    assert "- Evaluator version: `1.2.3`" in rendered
+    assert "- Evaluation date: not recorded (legacy or non-live result)" in rendered
+
+
+def test_benchmark_keeps_the_recorded_tier3_evaluator_version() -> None:
+    rendered = BenchmarkReporter(include_timestamp=False, evaluator_version="9.9.9").render_all(
+        [*_deterministic_results(), _live_tier3_result()]
+    )
+
+    assert "- Evaluator version: `0.8.2`" in rendered
+    assert "9.9.9" not in rendered
+
+
+@pytest.mark.parametrize("retired_identity", ["SkillsEval", "SkillsE\u0301val"])
+def test_benchmark_writer_version_is_normalized_like_a_recorded_one(retired_identity: str) -> None:
+    rendered = BenchmarkReporter(include_timestamp=False, evaluator_version=retired_identity).render_all(
+        _deterministic_results()
+    )
+
+    assert retired_identity not in rendered
+    assert "- Evaluator version: `SkillEvaluator`" in rendered
+
+
 def test_tier1_only_cli_result_cannot_publish_without_tier3() -> None:
     rendered = BenchmarkReporter(include_timestamp=False).render_all([_deterministic_results()[0]])
 

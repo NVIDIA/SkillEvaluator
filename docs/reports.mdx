@@ -406,10 +406,11 @@ same evaluator container publish cards whose only recorded revision is the share
 container tag, and a reader cannot tell which version of a skill was evaluated or
 whether the card has gone stale.
 
-The identity is supplied by the orchestration input and carried through the
-evaluation-result contract unchanged. It is never inferred from repository state
-while rendering, because the tree that renders a card is the evaluator checkout
-rather than the evaluated skill's source. The supported seams are:
+The evaluated source identity is supplied by the orchestration input and carried
+through the evaluation-result contract unchanged. It is never inferred from
+repository state while rendering, because the tree that renders a card is the
+evaluator checkout rather than the evaluated skill's source. The supported seams
+are:
 
 - `--evaluated-source-repository`, `--evaluated-source-revision` and
   `--evaluator-container-revision`, accepted by both `validate` and
@@ -442,6 +443,12 @@ published PASS additionally requires the digest, or a full implementation
 revision, because a tag can be repointed after the card is published. Fields
 the orchestration did not supply render as
 `not recorded (not supplied by the orchestration input)`.
+
+Unlike the evaluated source identity, `Evaluator version` names the evaluator
+build. It is the version recorded in the Tier 3 result, because that build ran
+the live evaluation. When the run has no Tier 3 result that records one, as in
+`validate --tiers 1`, `validate` writes its own version there instead of
+`not recorded`.
 
 Keep the file with the skill and refresh it whenever the skill, eval dataset,
 agent/model, evaluator version, scoring policy, attempt policy, or execution
@@ -553,7 +560,12 @@ completed run directly:
   fit the [evidence budget](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets) or, for
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
-  record's `reason` names each setting that applied.
+  record's `reason` names each setting that applied, and
+  `incomplete_sections`, `required_complete` and `required_missing` say which
+  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence is incomplete is reported as an evaluation error with no score,
+  which also leaves the trial's `overall_score` null; see
+  [evidence budgets](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets).
 - **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
   kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
   the agent execution timeout. `result.json` carries the same record as
@@ -724,7 +736,10 @@ cap. The artifact is bounded for browser loading, not a complete evidence archiv
 ### The five dimensions
 
 With `default` or `default_plus_custom` grading, reports lead with five
-dimensions, each answering one question:
+dimensions, each answering one question. The
+[Metrics Reference](/skills/skillevaluator/metrics-reference) gives each one's exact
+formula, range, units and evidence source, and shows how to recompute it from
+the files on this page:
 
 | Dimension | Question answered | Signals and source |
 | --- | --- | --- |
@@ -970,8 +985,9 @@ unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
 
 An arm that ran but failed, for example because one baseline attempt hit the
-agent timeout, fails the agent and the run, and the other arm keeps its
-scores. Reports describe such an arm by how many of its attempts scored,
+agent timeout, fails the agent and the run unless `--tolerate-baseline-timeouts`
+keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)),
+and the other arm keeps its scores. Reports describe such an arm by how many of its attempts scored,
 never as not run. In `BENCHMARK.md`, the agent's Overall and dimension cells
 read `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
 `baseline unavailable` when no baseline attempt scored. They read
@@ -1021,6 +1037,20 @@ Routing/tool-productivity efficiency remains a separate score. Missing counters
 and incomplete arms produce null totals or deltas (`N/A` in HTML). Resource
 deltas require matching case counts and complete measurements in both arms;
 they do not measure evaluator tokens, setup time, price, or statistical savings.
+
+`resources.scope` includes failed task outcomes when execution evidence is
+complete. `resources.interpretation` explains the limits of these observed
+consumption diagnostics: lower use alone does not establish improved task
+quality or Efficiency. A task failure can consume fewer resources than a
+successful outcome. Matching case counts does not certify equal concurrency
+or budget, or actual judge-model agreement. Review task outcomes and run
+conditions alongside the raw differences before making an improvement claim.
+
+Baseline reuse checks configuration and evidence compatibility but deliberately
+excludes concurrency and budget from its identity. Reused baseline measurements
+remain historical observations from the source run, not fresh consumption or
+independent evidence in the current run. Reports retain the source and timestamp;
+see [Reuse a baseline](/skills/skillevaluator/tier3-live-evaluation#reuse-a-baseline).
 
 | Measurement | Meaning |
 | --- | --- |
@@ -1102,6 +1132,21 @@ or gate.
   `case_scope_mismatch` (both arms ran attempts, for different cases or
   numbers of attempts per case), or `agent_scope_mismatch` for the sum over all
   agents.
+- Case rows are validated against the evaluation dataset. Every case row uses
+  one of the dataset's own case IDs, each at most once. An attempt whose only
+  name is Harbor's 32-character cut of a case name is attributed to that case,
+  so its missing telemetry stays with the canonical case instead of becoming a
+  row of its own. `case_id_validation` records the check: `status` is
+  `validated` or `unverified_case_ids`, `dataset_case_ids` counts the dataset's
+  IDs, and `unmatched_case_ids` names the rows that could not be matched — for
+  example a name that two dataset IDs cut to alike, which is never guessed.
+  Such a row keeps its recorded name, is marked `case_id_in_dataset: false`,
+  and every report shows it as an unverified case ID rather than as coverage
+  of a dataset case. A table that renders no such row — the terminal table,
+  which shows no case rows, or one whose row caps or payload pruning dropped
+  them — names the unmatched case IDs instead of explaining a mark it does not
+  carry. A run with no dataset to check against carries no
+  `case_id_validation` and claims nothing about its case IDs.
 - A run that reused an earlier run's baseline
   (`tier3 evaluate --reuse-baseline`) has `baseline_reused: true`. Its baseline
   counts come from the trajectories copied from that run: they are the tokens

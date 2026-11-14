@@ -1258,13 +1258,17 @@ class TestIdentityReachesTheRunArtifact:
         than the ``null`` a dropped option leaves behind.
         """
         import json
+        import subprocess
 
         from skillevaluator.provider_config import ProviderConfig
         from skillevaluator.tier3 import commands as tier3_commands
         from skillevaluator.tier3.harbor import runner, runtime_preflight
 
-        skill = tmp_path / "demo"
+        skill = tmp_path / "fixture-repo" / "demo"
         (skill / "evals").mkdir(parents=True)
+        # An explicit repository keeps ambient parent checkouts out of provenance checks.
+        # The autouse fixture's private key remains outside this repository.
+        subprocess.run(["git", "init", "-q", str(skill.parent)], check=True)
         (skill / "evals" / "evals.json").write_text("[]\n", encoding="utf-8")
         provider = ProviderConfig(
             provider="nv_build",
@@ -1341,6 +1345,7 @@ class TestIdentityReachesTheRunArtifact:
             evaluated_source=identity,
         )
 
+        assert "run_dir" in result, result.get("error")
         run_config_path = Path(result["run_dir"]) / "run_config.json"
         persisted = json.loads(run_config_path.read_text(encoding="utf-8"))
         assert persisted["evaluated_source"] == identity

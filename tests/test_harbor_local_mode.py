@@ -115,6 +115,7 @@ def _local_environment(
         {
             "trial_dir": tmp_path / "trial",
             "agent_dir": tmp_path / "trial" / "agent",
+            "user_agent_dir": tmp_path / "trial" / "user-agent",
             "verifier_dir": tmp_path / "trial" / "verifier",
             "artifacts_dir": tmp_path / "trial" / "artifacts",
             "reward_json_path": tmp_path / "trial" / "verifier" / "reward.json",

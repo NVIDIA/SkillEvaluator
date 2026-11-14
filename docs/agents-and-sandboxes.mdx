@@ -624,6 +624,17 @@ When a skill ships its own `evals/environment/Dockerfile`,
 | `rebase` (built-in default) | Swaps your `FROM` line onto the eval base image, keeping the rest of your Dockerfile. |
 | `preserve` | Keeps your `FROM` exactly as written and appends the eval dependencies on top. |
 
+With either value, SkillEvaluator appends a `python -m pip install` of the eval
+dependencies after your instructions. It then checks that `python3 -I` can
+import the packages the verifier uses, because the verifier runs as
+`python3 -I`. `-I` ignores `PYTHONPATH` and the user site, so make sure those
+packages land in the system or virtual environment site-packages that
+`python3` uses. In a custom image, `python` and `python3` must use the same
+interpreter so the install and verifier see the same packages. Do not use
+`ENV PIP_USER=1`, `PIP_TARGET` or a `PYTHONPATH` entry for them. If the check fails, the image build stops with
+`ModuleNotFoundError`. `custom_only` grading never runs that verifier, so it
+skips the check.
+
 Environment rules — size limits, auto-generated fallbacks, and sidecar
 containers — are part of the `evals/` contract in
 [Eval Datasets](eval-datasets.mdx).

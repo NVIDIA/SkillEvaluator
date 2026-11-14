@@ -98,7 +98,11 @@ from skillevaluator.reporting.presentation import (
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.tier2_views import tier2_scope_views
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
 from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
@@ -1966,8 +1970,11 @@ class HTMLReporter(ReporterBase):
         reporters with different options can share it. Jinja environments are
         safe to share between threads once they are configured.
         """
+        from skillevaluator.skillspector_references import reference_summary_message
+
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
+        environment.filters["skillspector_reference_summary"] = reference_summary_message
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
@@ -2043,7 +2050,9 @@ class HTMLReporter(ReporterBase):
         if self.target_path:
             tp = Path(self.target_path)
             if (tp / "SKILL.md").exists() or (tp / "skill.md").exists():
-                return tp.name
+                # ``.`` and ``..`` (``tier1 .`` from inside the skill folder) have
+                # no folder name of their own; the folder they open does.
+                return (tp.resolve().name if tp.name in {"", ".", ".."} else tp.name) or None
 
         return None
 
@@ -3544,6 +3553,7 @@ class HTMLReporter(ReporterBase):
             report_scope=self.report_scope,
             presentation=context,
             completed_agent=completed_agent,
+            tolerated_baselines=tolerated_baseline_agents(tier3_data),
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,

@@ -131,6 +131,29 @@ def test_failed_compound_shell_read_keeps_credit(grader, command) -> None:
     assert scorer.check_routing([read], "demo-skill")["score"] == 1.0
 
 
+@pytest.mark.parametrize(
+    "command",
+    (
+        "/bin/bash -lc 'cat /skills/demo-skill/SKILL.md'",
+        "bash -c 'cat /skills/demo-skill/SKILL.md'",
+    ),
+)
+def test_failed_wrapped_shell_read_is_not_activation(grader, command) -> None:
+    _, scorer = grader
+    read = {
+        "action": "Bash",
+        "action_input": {"command": command},
+        "observation": "cat: /skills/demo-skill/SKILL.md: No such file or directory",
+        "is_error": True,
+    }
+    execute = {"action": "Bash", "action_input": {"command": "python scripts/run.py"}, "observation": "ok"}
+    assert scorer.check_activation([read], "demo-skill")["score"] == 0.0
+    assert scorer.check_routing([read], "demo-skill")["score"] == 0.0
+    assert scorer.check_workflow_order([read, execute], expected_skill="demo-skill")["score"] == 0.0
+    wrapped_compound = {**read, "action_input": {"command": "bash -lc 'cat /skills/demo-skill/SKILL.md && ls'"}}
+    assert scorer.check_activation([wrapped_compound], "demo-skill")["score"] == 0.75
+
+
 def test_failed_native_skill_call_is_not_activation(grader) -> None:
     extractor, scorer = grader
     trajectory = {

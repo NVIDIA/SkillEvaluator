@@ -26,9 +26,14 @@ Unknown keys fail the load. CLI flags override config values.
 
 ## Run sequence
 
+Write task requests and observable outcomes in `<skill-dir>/evals/EVAL.md`
+before generation; a file containing only headings does not qualify. For an
+existing dataset, use `--refine` with matching retained results to refine it,
+or `--force` to replace it after reviewing a `--dry-run` preview.
+
 ```bash
 skillevaluator doctor --env-mode docker --verify-models
-skillevaluator create-eval-dataset <skill-dir> --full
+skillevaluator create-eval-dataset <skill-dir> --full --prompt <skill-dir>/evals/EVAL.md
 skillevaluator tier3 validate <skill-dir> --strict
 skillevaluator tier3 evaluate <skill-dir> -a opencode --max-cases 1   # smoke
 skillevaluator tier3 evaluate <skill-dir> -a opencode --n-attempts 3

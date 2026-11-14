@@ -58,7 +58,7 @@ emails:
   - pattern: '(?<![A-Za-z0-9._%+-])[A-Za-z0-9._%+-]+@(?!(?:[a-z0-9-]+\.)*(?:example\.(?:com|net|org)|test\.com|test|example|invalid|localhost)\.*(?![a-z0-9.-])|odata\.)[A-Za-z0-9.-]+\.[A-Za-z]{2,}'
     severity: high
     description: Non-placeholder email address
-    suggestion: "Keep required metadata.author attribution. Replace other contact addresses with a handle, a contact-directory link, or user@example.com; use a reviewed --pii-waivers entry if the address is required."
+    suggestion: "Keep the metadata.author attribution. Replace other contact addresses with a handle, a contact-directory link, or user@example.com; use a reviewed --pii-waivers entry if the address is required."
     exceptions:
       # Third-party license attributions (copyright notices are legitimate)
       - "Copyright"

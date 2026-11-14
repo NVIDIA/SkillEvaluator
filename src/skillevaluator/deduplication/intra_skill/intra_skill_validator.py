@@ -37,7 +37,7 @@ from skillevaluator.deduplication.utils.chunker import ContentChunk, chunk_file
 from skillevaluator.deduplication.utils.skill_collector import CollectedFile, SkillCollectionError, collect_files
 from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError, validate_embedding_vector
 from skillevaluator.inference import LLMClient, LLMClientError, LLMClientRefusedError
-from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels, safe_llm_model
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
 from skillevaluator.validators.base import ValidatorBase
@@ -422,6 +422,17 @@ class IntraSkillValidator(ValidatorBase):
             "clusters_failed": failed_count,
             "failures": [{"count": count, "diagnostic": diagnostic} for diagnostic, count in sorted(failures.items())],
         }
+        # "model" above stays the configured model. A server-side fallback can
+        # answer some clusters in its place, so name every model that answered.
+        models_used = sorted(
+            {
+                safe_llm_model(verdict.model)
+                for _, verdict, _ in cluster_results
+                if verdict is not None and verdict.model is not None
+            }
+        )
+        if models_used:
+            result.metadata["llm_analysis"]["models_used"] = models_used
         if refused_count:
             logger.warning(
                 "LLM declined to classify %d of %d content clusters (provider: %s; model: %s); "
@@ -496,6 +507,13 @@ class IntraSkillValidator(ValidatorBase):
                         "reasoning": verdict.reasoning,
                         "confidence": verdict.confidence,
                         "source_files": distinct_files,
+                        # The model that gave this verdict, which can be a
+                        # server-side fallback rather than the configured model.
+                        **(
+                            {"llm_provider": provider, "llm_model_used": safe_llm_model(verdict.model)}
+                            if verdict.model is not None
+                            else {}
+                        ),
                     },
                 )
             )

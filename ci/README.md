@@ -34,9 +34,10 @@ policy label. Profile names do not control network access or report visibility.
 | `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
 | `llm` | `false`; static checks require no model key |
-| `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
+| `artifact-name` | Keep `skill-evaluator-tier1` for PR comments or the optional hosted publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
+| `enforcement-mode` | `strict` (default) blocks on failed verdicts; `advisory` keeps complete policy/score failures non-blocking but still blocks runtime/evidence/incomplete failures |
 | `security-baselines` | `false`; explicitly apply reviewed per-skill SkillSpector baselines as described below |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
@@ -74,8 +75,8 @@ The short `summary.md` is the Actions landing view. `details.md`, original
 per-skill JSON, native HTML, SARIF and scanner logs retain detailed evidence in
 the scan artifact, named `skill-evaluator-tier1-attempt-N` for attempt `N`.
 A second, small artifact, `skill-evaluator-tier1-evidence-attempt-N`, holds
-only `summary.json` and each skill's `skillevaluator-tier1.json`. The optional
-publisher downloads only that one. Artifacts expire after the configured retention period;
+only `summary.json` and each skill's `skillevaluator-tier1.json`. The comment and
+hosted publishing workflows download only that one. Artifacts expire after the configured retention period;
 hosted history is an optional separate surface. Quality scores are not scanner
 pass percentages or proof of useful live-agent behavior.
 
@@ -147,11 +148,57 @@ digest in `skills[].security_baseline`. The skill's native report records whethe
 the baseline applied and what it suppressed. Policy files receive the same
 credential preflight and report redaction as skill content.
 
+## PR comments without hosted reports
+
+Use the canonical
+[`comment-skill-checks.yml`](../.github/workflows/comment-skill-checks.yml) reusable
+workflow to update the existing scored Tier 1 PR comment without deploying a
+report site. It uses the same signed execution receipt, caller and evaluator
+approvals, artifact validation, report renderer and bot comment updater as the
+hosted publisher. The comment shows counts, status, quality score and grade, and
+the first action for each affected skill. The workflow run links to downloadable
+reports. No Pages settings, site history branch or report URL are needed.
+
+This is a source capability for a future release bundle. Existing archived
+bundles and the released `skillevaluator ci init` still configure hosted
+publication. Use a reviewed immutable revision containing the new workflow and
+helpers; do not add its filename to an older release pin.
+
+1. Keep `.github/workflows/skill-checks.yml` named **Skill checks**, with one
+   reusable scan job and the default **skill-evaluator-tier1** artifact name.
+   Enable `id-token: write` alongside `contents: read` for signed execution
+   receipts. Keep the reviewed evaluator workflow and image pins.
+2. Copy [`comment-skill-checks.yml`](templates/comment-skill-checks.yml) into
+   `.github/workflows/`. Pin its `uses:` and `tools-ref` to the reviewed comment
+   workflow revision. Set `trusted-evaluator-shas` to the approved scanner
+   revision; this may differ from the comment tools revision.
+3. After all scan-file edits, run
+   `git hash-object .github/workflows/skill-checks.yml` and set
+   `trusted-caller-blobs` to that exact value. Review and refresh the blob after
+   every later scan-file edit. For shared wrappers, keep the
+   [same wrapper approvals and delegation](#calling-through-a-shared-workflow).
+4. Merge both files into the default branch and open a PR changing a skill.
+   The comment workflow grants only `contents: read`, `actions: read` and
+   `pull-requests: write`. Organization policy must allow these permissions and
+   the referenced actions. Choose this workflow or the hosted publisher for PR
+   feedback; both update the same bot comment.
+
+The second workflow runs after **Skill checks** completes, including failed
+scans. Its manual trigger requires the completed `run-id` and `run-attempt`.
+It comments only on an open, current-head PR from the same repository. Failed
+scans with valid retained native evidence receive the standard failure comment;
+failures before evidence upload do not produce a synthetic result. No affected
+skills uses the existing **No skills changed** result. Fork PRs, superseded
+results, stale PR heads, expired artifacts and unverifiable evidence do not
+receive a comment. The signed token's expiry alone does not invalidate a
+historical receipt; its signing key and the attempt's artifacts must still be
+available.
+
 ## Optional hosted reports and PR feedback
 
 This is additional setup, not a `comment: true` switch in the basic scan file.
-The current implementation couples comments to successful hosted deployment;
-Pages is not an inherent requirement for GitHub PR comments.
+This publisher couples comments to successful hosted deployment. To use the
+same comment without hosting, follow the [comments-only setup](#pr-comments-without-hosted-reports).
 
 1. Decide where reports can live. **Pages sites are public unless explicitly
    configured as private, even when the repository is private.** Private Pages
@@ -201,7 +248,7 @@ Pages is not an inherent requirement for GitHub PR comments.
 7. The publisher caller must grant `contents: write`, `actions: read`,
    `pages: write`, `id-token: write` and `pull-requests: write`. Reusable jobs
    narrow these to history preparation, Pages deployment and PR feedback. The
-   scan uses `contents: read`, plus `id-token: write` only when hosting is enabled.
+   scan uses `contents: read`, plus `id-token: write` when PR comments or hosting are enabled.
    The automatic GitHub token is sufficient;
    no personal access token or model credential is required for publication.
 
@@ -227,10 +274,15 @@ failed deploy still publishes and comments.
 A publication skipped because its PR closed or moved after the scan neither
 deploys nor comments.
 Fork PR scans can run without provider secrets; fork PR bot comments and current
-PR aliases are not enabled. Comment-only operation and hosting alongside an
-arbitrary existing Pages deployment need further integration work.
+PR aliases are not enabled. Hosting alongside an arbitrary existing Pages
+deployment needs further integration work.
 
 ### Calling through a shared workflow
+
+The comments-only workflow accepts the same `trusted-wrapper-workflows` and
+`delegated-evaluator-wrapper` inputs below, with the same signed receipts and
+caller blob approvals. Its wrapper continues to forward scan settings and pins;
+the standard comment renderer stays in SkillEvaluator.
 
 Direct consumers need no wrapper configuration. If the scan calls a shared
 workflow that then calls SkillEvaluator, use a reviewed publisher revision that
@@ -321,11 +373,17 @@ workflow and GitHub artifact metadata also remain required.
 The generated `skill-checks-llm.yml` is a separate trusted manual run. Set
 `paths`, choose `llm-provider` (`openai`, `anthropic` or `nv_build`), optionally
 set `llm-model`, and explicitly map the repository secret `LLM_API_KEY`. Missing
-credentials fail explicitly. Avoid passing secrets to untrusted PR content;
+credentials fail explicitly. When `llm-model` is empty the provider's default model
+is used, and that model may not be callable with every key (for example, an NVIDIA
+Build key can list a model that still answers HTTP 404). If the LLM checks report
+"Model or endpoint unavailable", set `llm-model` to a model your key can call. Avoid passing secrets to untrusted PR content;
 the basic PR workflow remains keyless. Provider billing and content transmission
 apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 
 ## Maintainer release procedure
+
+Start with the [product release checklist](../RELEASING.md), which covers when
+to rebuild the image, refresh templates and CLI pins, and publish through Kitmaker.
 
 Release publication is deliberate and manual. Consumer files become usable
 after the official image is published and verified; source templates contain

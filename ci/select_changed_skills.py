@@ -10,11 +10,14 @@ is an error; removing the entire skill is recorded as a deletion, not a pass.
 
 from __future__ import annotations
 
+import argparse
 import os
 import re
 import selectors
 import subprocess
+import sys
 import time
+from collections.abc import Mapping
 from pathlib import Path, PurePosixPath
 
 MAX_GIT_BYTES = 16 * 1024 * 1024
@@ -25,10 +28,11 @@ MAX_ROOTS = 100
 MAX_ROOTS_TEXT = 16384
 GIT_TIMEOUT = 30
 _SHA = re.compile(r"(?:[0-9a-fA-F]{40}|[0-9a-fA-F]{64})")
-# A pull request that changes CI setup evaluates every skill in every tier, so
-# the setup change is exercised. run_tiers uses this predicate directly; the
-# GitHub eligibility script and the GitLab Tier 1 job keep inline copies that
-# tests hold equal to these values.
+# A pull request that changes CI setup evaluates every skill in every tier that
+# runs, so the setup change is exercised. Tier 2/3 and the LLM Tier 1 pass run
+# only when a skill-root file also changed (skill_root_changed). run_tiers uses
+# this predicate directly; the GitHub eligibility script and the GitLab Tier 1
+# job keep inline copies that tests hold equal to these values.
 SETUP_PREFIXES = (".github/", ".gitlab/", ".skillevaluator/ci")
 SETUP_FILES = frozenset({".gitlab-ci.yml"})
 
@@ -36,6 +40,16 @@ SETUP_FILES = frozenset({".gitlab-ci.yml"})
 def setup_changed(paths: list[str]) -> bool:
     """Return whether any changed path (both sides of a rename) is CI setup."""
     return any(path.startswith(SETUP_PREFIXES) or path in SETUP_FILES for path in paths)
+
+
+def skill_root_changed(paths: list[str], roots: list[str]) -> bool:
+    """Return whether any changed path (both sides of a rename) is inside a skill root.
+
+    The paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3) run on a pull or
+    merge request only for such changes. The GitHub eligibility script keeps an
+    inline copy that tests hold equal to this one.
+    """
+    return any(PurePosixPath(path).is_relative_to(root) for path in paths if path for root in roots)
 
 
 class SelectionError(ValueError):
@@ -277,3 +291,78 @@ def select_changed_skills(workspace: Path, roots: str, base: str, head: str) -> 
     if len(selected) > MAX_SELECTED_SKILLS:
         raise SelectionError("The CI integration supports at most 100 selected skills per run.", selection=selection)
     return [workspace / directory for directory in selected], selection
+
+
+_COMMIT = re.compile(r"(?:[0-9a-f]{40}|[0-9a-f]{64})")
+
+
+def pull_request(environ: Mapping[str, str]) -> bool:
+    """Return whether the CI event evaluates a pull or merge request diff."""
+    return (
+        environ.get("GITHUB_EVENT_NAME") in {"pull_request", "pull_request_target"}
+        or environ.get("CI_PIPELINE_SOURCE") == "merge_request_event"
+        or bool(environ.get("DIFF_BASE_SHA"))
+    )
+
+
+def changed_paths(workspace: Path, environ: Mapping[str, str], head: str) -> list[str]:
+    """Return both sides of every path changed from the DIFF_BASE_SHA merge base to head."""
+    base = environ.get("DIFF_BASE_SHA", "")
+    if not _COMMIT.fullmatch(base) or not _COMMIT.fullmatch(head):
+        raise SelectionError("Changed paths require exact base and head commits.")
+    # A committed .gitmodules "ignore" setting must not hide a changed gitlink
+    # under a skill root and so skip the paid jobs.
+    return _paths(
+        _git(
+            workspace,
+            "diff",
+            "--name-only",
+            "-z",
+            "--no-renames",
+            "--ignore-submodules=none",
+            f"{base}...{head}",
+            "--",
+        )
+    )
+
+
+def skills_changed(workspace: Path, environ: Mapping[str, str]) -> bool:
+    """Return False only when a pull or merge request changes no file under a skill root.
+
+    The paid jobs then skip and the keyless Tier 1 scan is the gate. Each CI
+    consumer recomputes this from the checkout with the pinned tools; none
+    trusts an artifact or a file in the checkout.
+    """
+    head = environ.get("REPORT_COMMIT") or environ.get("DIFF_HEAD_SHA", "")
+    if not _COMMIT.fullmatch(head):
+        raise SelectionError("The evaluated commit must be exact.")
+    mode = environ.get("SKILL_EVAL_SCAN_MODE", "auto")
+    if mode not in {"auto", "changed", "all"}:
+        raise SelectionError("SKILL_EVAL_SCAN_MODE must be auto, changed or all.")
+    if mode == "all" or not pull_request(environ):
+        return True
+    roots = skill_roots(workspace, environ.get("SKILL_EVAL_PATHS", "skills"))
+    return skill_root_changed(changed_paths(workspace, environ, head), roots)
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Print ``true`` when the paid jobs must run, or ``false`` when no skill changed."""
+    parser = argparse.ArgumentParser(description=main.__doc__)
+    parser.add_argument("--skills-changed", action="store_true", help="the only supported query")
+    parser.add_argument("--workspace", required=True, type=Path)
+    args = parser.parse_args(argv)
+    if not args.skills_changed:
+        parser.error("--skills-changed is required")
+    try:
+        workspace = args.workspace.resolve(strict=True)
+        if not workspace.is_dir():
+            raise SelectionError("The workspace must be a directory.")
+        print("true" if skills_changed(workspace, os.environ) else "false")  # noqa: T201
+    except (OSError, ValueError):
+        print("Could not determine whether a skill changed.", file=sys.stderr)  # noqa: T201
+        return 2
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

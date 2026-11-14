@@ -50,6 +50,13 @@ DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
 # SkillEvaluator name; ``tools/`` is the agentskills.io name.
 EXECUTABLE_SKILL_DIRS = ("scripts", "tools")
 
+# File patterns that count as skill scripts under ``EXECUTABLE_SKILL_DIRS``.
+# Script lint parses Python only; Node scripts are recognised for skill-type
+# detection and the script-based checks but are reported as not linted.
+PYTHON_SCRIPT_PATTERNS = ("*.py",)
+NODE_SCRIPT_PATTERNS = ("*.mjs", "*.cjs", "*.js")
+EXECUTABLE_SCRIPT_PATTERNS = (*PYTHON_SCRIPT_PATTERNS, "*.sh", *NODE_SCRIPT_PATTERNS)
+
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.
 # ``SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS="data,fixtures"``. Names are added to,
@@ -386,6 +393,8 @@ QUALITY_SCORE_WEIGHTS = {
 QUALITY_GRADE_THRESHOLDS = [(90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F")]
 QUALITY_DEFAULT_MIN_SCORE = 70
 QUALITY_RECOMMENDED_MAX_TOKENS = 5000
+# Tier 1 estimates tokens as characters / QUALITY_CHARS_PER_TOKEN; it does not run a tokenizer.
+QUALITY_CHARS_PER_TOKEN = 4
 QUALITY_MAX_BODY_LINES = 500
 
 QUALITY_RESERVED_NAMES = ["anthropic", "claude"]

@@ -529,7 +529,9 @@ class LLMClient:
         request for a Claude 5.5 or later model, which asks for server-side
         fallback, also reads the reply's top-level ``model`` when there is no
         block. Otherwise it is the configured model. ``None`` before a call
-        succeeds and after a call fails.
+        succeeds and after a call fails, except that :meth:`process` names the
+        model that wrote a reply cut off at the output-token limit when it
+        keeps that reply's complete entries.
         """
         return getattr(self._call_state, "model_used", None)
 
@@ -832,7 +834,13 @@ class LLMClient:
                     raise
             return _extract_choice_content(response)
 
-        content = retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        try:
+            content = retry_call_with_backoff(_invoke_provider, config=self._retry_config)
+        except LLMClientTruncatedError as exc:
+            # The partial reply still came from a known model; a caller that
+            # keeps its complete entries can name that model.
+            exc.model_used = answered_by
+            raise
         self._call_state.model_used = answered_by
         return content
 
@@ -883,6 +891,10 @@ class LLMClient:
         """Parse the raw LLM response text.  Override in subclasses."""
         raise NotImplementedError("Subclasses must implement parse_response for template-method usage")
 
+    def _parse_truncated_response(self, response_text: str, **kwargs: Any) -> Any:
+        """Parse kept partial evidence; subclasses can reject unusable salvage."""
+        return self.parse_response(response_text, **kwargs)
+
     def get_fallback_response(self, **kwargs: Any) -> Any:
         """Return a safe fallback result.  Override in subclasses."""
         raise NotImplementedError("Subclasses must implement get_fallback_response for template-method usage")
@@ -896,7 +908,8 @@ class LLMClient:
         receive a usable result, and ``last_failure`` records a bounded
         diagnostic of the cause. When ``salvage_truncated_response`` is set,
         a reply cut off at the token limit is parsed for its complete entries
-        instead, and ``last_failure`` still records the truncation.
+        instead, ``last_failure`` still records the truncation, and
+        :attr:`model_used` names the model that wrote the reply.
         """
         self.last_failure = None
         try:
@@ -914,11 +927,16 @@ class LLMClient:
         except Exception as exc:
             self.last_failure = llm_failure_diagnostic(exc)
             if isinstance(exc, LLMClientTruncatedError) and exc.content and self.salvage_truncated_response:
-                logger.warning("LLM reply was truncated (%s) - keeping its complete entries", self.last_failure)
+                logger.warning("LLM reply was truncated (%s) - trying to keep its complete entries", self.last_failure)
                 try:
-                    return self.parse_response(exc.content, **kwargs)
+                    salvaged = self._parse_truncated_response(exc.content, **kwargs)
                 except Exception:
                     pass
+                else:
+                    # The kept entries came from this model, which can be a
+                    # server-side fallback rather than the configured model.
+                    self._call_state.model_used = exc.model_used
+                    return salvaged
             logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
             return self.get_fallback_response(**kwargs)
 

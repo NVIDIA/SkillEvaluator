@@ -20,7 +20,6 @@ from fnmatch import fnmatchcase
 from fnmatch import translate as _fnmatch_translate
 from itertools import islice
 from pathlib import Path
-from typing import Any
 
 if __package__:
     from skillevaluator.tier3.eval_core import checks as _current_checks
@@ -43,7 +42,6 @@ _extract_path = _current_checks._extract_path
 _is_apply_patch_action = _current_checks._is_apply_patch_action
 _is_network_exfiltration_command = _current_checks._is_network_exfiltration_command
 _looks_like_refusal = _current_checks._looks_like_refusal
-_redact_network_evidence = _current_checks._redact_network_evidence
 _security_finding = _current_checks._security_finding
 _string_argument = _current_checks._string_argument
 _tool_mentions_any_skill = _current_checks._tool_mentions_any_skill
@@ -105,42 +103,8 @@ _SENSITIVE_WRITE_PATHS = [
     "~/.gitconfig",
 ]
 
-_FINDING_EVIDENCE_SCAN_CHARS = 2000
-
-_URL_USERINFO_RE = re.compile(r"(\b[a-z][a-z0-9+.-]*://)[^/\s@'\"`]+@", re.IGNORECASE)
-
-_AUTH_HEADER_RE = re.compile(r"(\bauthorization\s*[:=]\s*)(?:(?:bearer|basic|token)\s+)?[^\s'\"`]+", re.IGNORECASE)
-
-_CREDENTIAL_FLAG_RE = re.compile(r"((?<!\S)(?:-u|--user|--password|--token)(?:\s+|=))[^\s'\"`]+", re.IGNORECASE)
-
-_CREDENTIAL_ASSIGNMENT_RE = re.compile(
-    r"((?<![\w.-])[\w.-]*?(?:token|secret|passw(?:or)?d|passphrase|api[_-]?key|access[_-]?key|private[_-]?key"
-    r"|credential|auth)[\w.-]*[\"']?\s*[=:]\s*)(?:\"[^\"]*\"|'[^']*'|[^\s'\"`;|&]+)",
-    re.IGNORECASE,
-)
-
-_TOKEN_PREFIX_RE = re.compile(
-    r"(?<![A-Za-z0-9_-])(?:gh[pousr]_|github_pat_|glpat-|npm_|xox[abeoprs]-|hf_)[A-Za-z0-9_-]{8,}"
-)
-
-
-def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
-    """Return *text* as finding evidence with credentials masked, cut to *limit* characters."""
-    full = str(text)
-    raw = full[:_FINDING_EVIDENCE_SCAN_CHARS]
-    if len(full) > len(raw) and not full[len(raw)].isspace():
-        # The budget may have cut a credential in half, which no recognizer can
-        # mask. Drop the incomplete trailing span and any unterminated quote.
-        raw = re.sub(r"\S+\Z", "", raw)
-    for quote in "\"'":
-        if len(full) > len(raw) and raw.count(quote) % 2:
-            raw = raw[: raw.rindex(quote)]
-    redacted = _redact_network_evidence(raw)
-    redacted = _URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
-    redacted = _AUTH_HEADER_RE.sub(r"\1<redacted>", redacted)
-    redacted = _CREDENTIAL_FLAG_RE.sub(r"\1<redacted>", redacted)
-    redacted = _CREDENTIAL_ASSIGNMENT_RE.sub(r"\1<redacted>", redacted)
-    return _TOKEN_PREFIX_RE.sub("<redacted>", redacted)[:limit]
+_FINDING_EVIDENCE_SCAN_CHARS = _current_checks._FINDING_EVIDENCE_SCAN_CHARS
+_redact_finding_evidence = _current_checks._redact_finding_evidence
 
 
 # ── Canary exfiltration (begin shared block) ─────────────────────────────────

@@ -395,10 +395,15 @@ class TestShellReadsAgainstTheScoredCheck:
 
     @pytest.mark.parametrize(
         "command",
-        ["sudo cat skills/alpha/SKILL.md", "bash -lc 'cat skills/alpha/SKILL.md'", "tac skills/alpha/SKILL.md"],
+        ["sudo cat skills/alpha/SKILL.md", "tac skills/alpha/SKILL.md"],
     )
     def test_lenient_reads_credit_the_member_but_not_the_score(self, command: str) -> None:
         assert not checks._cmd_reads_skill_md(command)
+        assert self._credited(command) == ["alpha"]
+
+    def test_shell_wrapped_reads_credit_the_member_and_the_score(self) -> None:
+        command = "bash -lc 'cat skills/alpha/SKILL.md'"
+        assert checks._cmd_reads_skill_md(command)
         assert self._credited(command) == ["alpha"]
 
     def test_shell_variables_are_expanded_only_by_the_scored_check(self) -> None:

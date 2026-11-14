@@ -52,6 +52,7 @@ def test_generation_announces_provider_and_handoff_on_stderr(generation_skill):
     assert "One-case starter: a starting point, not a representative evaluation" in result.stderr
     assert "no negative case that should not trigger the skill" in result.stderr
     assert f"skillevaluator create-eval-dataset {generation_skill} --full --force" in result.stderr
+    assert "Add author guidance in evals/EVAL.md or pass --prompt before replacing the starter." in result.stderr
     assert "`--force` overwrites the starter and discards any edits to it." in result.stderr
     assert f"skillevaluator tier3 validate {generation_skill}" in result.stderr
     assert (generation_skill / "evals" / "evals.json").exists()

@@ -737,10 +737,10 @@ def _doc_block(name: str, lead: str) -> str:
 
 def test_docs_and_changelog_say_when_each_no_lift_note_applies() -> None:
     """A card with no lift says nothing comparable remains only when no attempt fed the lift."""
-    entry = _doc_block("CHANGELOG.md", "- Tier 3 HTML evaluator cards now say when a judge metric's lift left out")
+    entry = _doc_block("CHANGELOG.md", "- A Tier 3 HTML evaluator card with no lift for a judge metric no longer says")
     assert (
         "A card with no lift says that no comparable result remains when the loaded results show that no attempt "
-        "fed the lift, and otherwise that the loaded results cannot confirm the comparison."
+        "fed the lift, and otherwise that the loaded results cannot confirm the comparison"
     ) in entry
     docs = _doc_block("docs/reports.mdx", "For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`)")
     assert (

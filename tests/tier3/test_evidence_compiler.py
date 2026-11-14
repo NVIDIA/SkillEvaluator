@@ -83,7 +83,8 @@ def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:
     budgets = atif_helpers._bundle_budgets()
     assert budgets["accuracy"] == 8000
     assert budgets["goal_accuracy"] == 12000
-    assert budgets["behavior_check"] == 8000
+    # 8000 final-response allowance reconciled with the 4000 tool-history headroom
+    assert budgets["behavior_check"] == 12000
 
     # Non-integer / invalid fallback across all 4 budget/limit env vars
     for invalid_val in ("invalid", "   ", "3.14", ""):
@@ -93,8 +94,8 @@ def test_bundle_budgets_defaults_and_env_overrides(monkeypatch) -> None:
         monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", invalid_val)
         assert atif_helpers._accuracy_budget() == 8000
         assert atif_helpers._goal_accuracy_budget() == 12000
-        assert atif_helpers._behavior_final_response_limit() == 800
-        assert atif_helpers._behavior_check_budget() == 8000
+        assert atif_helpers._behavior_final_response_limit() == 8000
+        assert atif_helpers._behavior_check_budget() == 12000
 
     # Non-positive integer clamping and headroom reconciliation
     for non_positive in ("0", "-10", "-500"):
@@ -377,7 +378,7 @@ def test_behavior_bundle_reports_final_response_cap_loss() -> None:
     # compare two renderings that shared the cap, so the loss was reported
     # as truncated=False.
     marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
-    answer = "A" * 2000 + marker + "B" * 2000
+    answer = "A" * 8000 + marker + "B" * 8000
     traj = {"steps": [{"source": "agent", "message": answer}]}
 
     for module in (atif_helpers, _load_harbor_template_module()):
@@ -386,6 +387,84 @@ def test_behavior_bundle_reports_final_response_cap_loss() -> None:
         assert bundle["omitted"]["truncated"] is True
         assert bundle["omitted"]["count"] >= 1
         assert bundle["omitted"]["reason"]
+
+
+def test_behavior_bundle_keeps_a_realistic_final_answer_at_the_default_limit() -> None:
+    # Issue #234's own repro: at the raised default the marker in the middle
+    # of a 4,000-character answer reaches the judge, and the accounting says
+    # the required evidence is complete.
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker in bundle["prompt_evidence"]
+        assert bundle["omitted"]["truncated"] is False
+        assert bundle["omitted"]["required_complete"] is True
+        assert bundle["omitted"]["required_missing"] == []
+        assert bundle["omitted"]["incomplete_sections"] == []
+
+
+def test_behavior_bundle_reports_sections_cut_by_their_own_per_entry_caps() -> None:
+    # FILE CHANGES clips each write body to 1,800 characters and each tool
+    # result to 500, and the compact tool history clips arguments, results and
+    # agent messages, all before any budget applies. Completeness is compared
+    # against the unclipped rendering, so content those caps dropped is
+    # reported rather than counted as having reached the judge.
+    content = "HEAD_MARK " + "a" * 2000 + " MIDDLE_MARK " + "b" * 2000 + " TAIL_MARK"
+    assert len(content) > 1800
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": "/workspace/output/x.txt", "content": content},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, wrote the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Write x")["behavior_check"]
+        evidence = bundle["prompt_evidence"]
+        assert "HEAD_MARK" in evidence
+        assert "MIDDLE_MARK" not in evidence
+        assert "file changes" in bundle["omitted"]["incomplete_sections"]
+        # Only the final response withholds a score, so a per-entry cap is a
+        # diagnostic, not a gate: the answer itself still arrived whole.
+        assert bundle["omitted"]["required_complete"] is True
+        assert bundle["omitted"]["required_missing"] == []
+
+
+def test_behavior_bundle_completeness_follows_the_final_response_limit_env_var(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The same answer is complete at the default and incomplete once the limit
+    # is lowered, so the env var still steers both the evidence and the
+    # completeness metadata the judge gates on.
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 2000 + marker + "B" * 2000
+    traj = {"steps": [{"source": "agent", "message": answer}]}
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "800")
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker not in bundle["prompt_evidence"]
+        assert bundle["omitted"]["required_complete"] is False
+        assert bundle["omitted"]["required_missing"] == ["final response"]
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "16000")
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundle = module.build_metric_evidence_bundles(traj, "Explain the migration.")["behavior_check"]
+        assert marker in bundle["prompt_evidence"]
+        assert bundle["omitted"]["required_complete"] is True
 
 
 def test_behavior_bundle_complete_evidence_is_not_reported_truncated() -> None:
@@ -424,7 +503,7 @@ def test_behavior_bundle_final_answer_past_history_repeat_is_truncated() -> None
     # missing from the evidence, and the reason names the setting that
     # applied so users know which limit to raise.
     marker = "DEEP_ANSWER_COVERAGE_TOKEN"
-    answer = "A" * 2000 + marker + "B" * 2000
+    answer = "A" * 8000 + marker + "B" * 8000
     traj = {"steps": [{"source": "agent", "message": answer}]}
 
     for module in (atif_helpers, _load_harbor_template_module()):
@@ -433,6 +512,8 @@ def test_behavior_bundle_final_answer_past_history_repeat_is_truncated() -> None
         assert bundle["omitted"]["truncated"] is True
         assert bundle["omitted"]["count"] >= 1
         assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in bundle["omitted"]["reason"]
+        assert bundle["omitted"]["required_complete"] is False
+        assert bundle["omitted"]["required_missing"] == ["final response"]
 
 
 _BUDGET_REASON = "behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET"
@@ -448,14 +529,18 @@ def _distinct_text(length: int) -> str:
 @pytest.mark.parametrize("cut_char", [" ", "-"], ids=["space-at-cut", "text-at-cut"])
 @pytest.mark.parametrize(("length", "truncated"), [(1501, False), (1640, False), (1755, False), (1756, True)])
 def test_behavior_bundle_final_answer_split_across_history_and_section(
-    length: int, truncated: bool, cut_char: str
+    monkeypatch: pytest.MonkeyPatch, length: int, truncated: bool, cut_char: str
 ) -> None:
     # The compact history repeats the first 1,500 characters of a text-only
-    # final answer, and at the default limit the final-response section keeps
-    # its last 255. Together they carry an answer of up to 1,755 characters
-    # in full, although no single piece holds all of it. The history drops
-    # trailing whitespace, so cover a cut that falls on a space and one that
-    # falls on text.
+    # final answer, and the final-response section keeps its last 255 when the
+    # section limit is 800. Together they carry an answer of up to 1,755
+    # characters in full, although no single piece holds all of it. The
+    # history drops trailing whitespace, so cover a cut that falls on a space
+    # and one that falls on text. The limit is pinned to the pre-#234 800 so
+    # the split is exercised at all: at the 8,000 default the section alone
+    # holds every answer this short, and the env var still overriding it is
+    # part of what this asserts.
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "800")
     answer = _distinct_text(length)
     answer = answer[:1499] + cut_char + answer[1500:]
     traj = {"steps": [{"source": "agent", "message": answer}]}
@@ -470,23 +555,24 @@ def test_behavior_bundle_final_answer_split_across_history_and_section(
 
 
 @pytest.mark.parametrize(
-    ("env", "reason"),
+    ("env", "reason", "incomplete"),
     [
-        ({}, f"{_BUDGET_REASON}; {_LIMIT_REASON}"),
-        ({"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000"}, _LIMIT_REASON),
-        ({"SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "3000"}, _BUDGET_REASON),
+        ({}, f"{_BUDGET_REASON}; {_LIMIT_REASON}", ["final response", "compact tool history"]),
+        ({"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000"}, _LIMIT_REASON, ["final response", "compact tool history"]),
+        ({"SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "20000"}, _BUDGET_REASON, ["compact tool history"]),
         (
-            {"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "3000"},
+            {"SKILL_EVAL_BEHAVIOR_CHECK_BUDGET": "100000", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT": "20000"},
             "",
+            [],
         ),
     ],
     ids=["both", "limit-only", "budget-only", "neither"],
 )
 def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
-    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reason: str
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], reason: str, incomplete: list[str]
 ) -> None:
     # A long tool history overflows the default behavior budget, and a final
-    # answer past 1,755 characters also loses its middle to the default
+    # answer past the 8,000-character default also loses its middle to the
     # final-response limit. The reason must name every setting that applied,
     # so raising only the budget is not mistaken for a fix.
     for name in ("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT"):
@@ -504,7 +590,7 @@ def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
             }],
             "observation": {"results": [{"source_call_id": f"list-{idx}", "content": f"step {idx:02d} " + "z" * 292}]},
         })
-    answer = _distinct_text(2000)
+    answer = _distinct_text(12000)
     steps.append({"source": "agent", "message": answer})
 
     for module in (atif_helpers, _load_harbor_template_module()):
@@ -512,4 +598,11 @@ def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
         assert bundle["omitted"]["truncated"] is bool(reason)
         assert bundle["omitted"]["count"] == (1 if reason else 0)
         assert bundle["omitted"]["reason"] == reason
-        assert (answer in bundle["prompt_evidence"]) is (_LIMIT_REASON not in reason)
+        # The answer can reach the judge split between the compact history and
+        # the final-response section, so completeness is the coverage check,
+        # not a contiguous substring. Only the final-response limit loses it.
+        assert bundle["omitted"]["required_complete"] is (_LIMIT_REASON not in reason)
+        # incomplete_sections is the diagnostic half of the same accounting and
+        # reports non-required losses too, so the budget-only case names the
+        # tool history while the required evidence is still complete.
+        assert bundle["omitted"]["incomplete_sections"] == incomplete

@@ -281,18 +281,41 @@ contains only a secret name, never the key itself. The caller resolves
 `secrets[vars.SKILL_EVAL_GATEWAY_SECRET]` into the reusable workflow's generic
 `LLM_API_KEY`; other repositories can select their own gateway and secret names
 during local onboarding. Missing
-prerequisites remain visible in the reports. A passing Tier 1 gate is not an
+prerequisites remain visible in the reports of runs that start the provider-backed
+jobs (see below for which PRs skip them). A passing Tier 1 gate is not an
 all-tier evaluation pass. Forks retain keyless Tier 1 checks. On PRs, ordinary software changes
 select no skills, skill changes select the affected skills, and CI configuration
 changes select the collection. Pushes to `main` and manual runs scan the collection.
+With `scan-mode: auto`, the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3)
+run on a PR only when it changes a file under a configured skill root. A
+same-repository configuration-only PR runs the keyless Tier 1 scan of every
+skill, and its report lists Tier 2 and Tier 3 as skipped because no skill
+changed. Fork PRs never run the paid tiers, so their reports keep the existing
+Tier 2 and Tier 3 reason.
+
+Because the generated caller only starts on skill or caller changes, the
+same-repository PRs that now skip the paid jobs are the setup PRs: onboarding,
+pin bumps, and model, secret or gateway changes to the caller. Such a PR no
+longer shows a wrong model or a missing key. The first provider-backed run is the push to the
+default branch after it merges, a manual run there, or the next PR that changes
+a skill. To exercise a caller change with providers before merging, set
+`scan-mode: all` in the caller on that PR and read the results in the run's
+artifact; that PR gets no automatic comment, because the listener approves only
+the default branch's caller. Before merging, restore `auto` and then refresh
+`trusted-caller-blobs` for the final caller. `ci demo` cannot exercise an unmerged
+setup: it requires the all-tier scan caller on the default branch and rejects a
+setup that has not merged, and its skill-change PR branches from the default
+branch. Use `ci demo` after the setup merges.
 
 If a provider returns HTTP 404, verify that the selected model accepts chat
 requests with your account. Presence in the public model catalog alone does not
 prove serving availability. Change the caller's `model` input to an accessible
 model and refresh `trusted-caller-blobs` before retrying; do not change global
-provider defaults to troubleshoot one repository.
+provider defaults to troubleshoot one repository. A PR that only changes the
+caller skips the provider-backed jobs, so the new model is first exercised by the
+push after it merges, unless that PR temporarily uses `scan-mode: all` as described above.
 
-The setup PR can exercise checks, but its first automatic comment requires
+The setup PR runs the keyless Tier 1 scan of every skill, but its first automatic comment requires
 the consumer feedback listener on `main` and a subsequent PR run. Repository
 maintainers configure branch protection separately if they want the Tier 1
 aggregate check to block merges.
@@ -363,6 +386,11 @@ with LLM security, SkillSpector semantic findings, verification and rubric
 checks. An unconditional keyless baseline remains available for forks and
 denied admission. For an authorized LLM run, missing or failed enriched evidence
 fails the required Tier 1 gate; it is never replaced with a passing static scan.
+With the default `scan-mode: auto`, a PR runs the enriched job only when it
+changes a file under a configured skill root. CI configuration or unrelated
+changes skip it, and the keyless scan, which covers every skill for a setup
+change, remains the Tier 1 gate. Pushes to the default branch, manual runs and
+`scan-mode: all` keep the enriched job.
 The image supports OpenAI, Anthropic and NVIDIA Build at their native endpoints.
 
 Tier 2 chat/embeddings can use one provider while Tier 3 uses an
@@ -478,7 +506,11 @@ enriched evidence determines the Tier 1 gate for an eligible run; missing
 evidence cannot fall back to a passing static baseline. Default-branch enrichment
 is limited to `push` and `web` pipelines, matching provider admission. Scheduled,
 API, trigger and downstream default-branch pipelines retain the keyless Tier 1
-baseline, as do forks.
+baseline, as do forks. With `SKILL_EVAL_SCAN_MODE: auto`, an MR that changes no
+file under a configured skill root skips the paid jobs (enriched Tier 1, Tier 2
+and Tier 3) before reading a provider key. The aggregate recomputes that decision
+from the checkout with the pinned tools, never from an artifact. It then keeps
+the keyless report as the Tier 1 gate and records Tier 2 and Tier 3 as skipped.
 
 Use `SKILL_EVAL_TIER3_PROVIDER`, `SKILL_EVAL_TIER3_BASE_URL` and
 `SKILL_EVAL_TIER3_MODEL` for a separate live-agent/judge route, and
@@ -678,11 +710,15 @@ configuration-only scope notices are excluded. Incomplete or missing evidence
 shows an unknown count; it cannot imply zero findings or a completed check.
 The Tier 1 gate and each advisory tier's status stay separate, so this example
 can pass the required CI gate while still needing review of Tier 2 and Tier 3.
-Every tier selects the same skills: the changed skills, or every skill when
-the pull request changes CI setup under `.github/`, `.gitlab/`,
+Every tier that runs selects the same skills: the changed skills, or every
+skill when the pull request changes CI setup under `.github/`, `.gitlab/`,
 `.skillevaluator/ci` or `.gitlab-ci.yml` (on GitHub, also when it changes more
 files than the API can list). A cell for a skill that its tier did not select
-reads `Skipped · issues unknown · Not selected for this tier`.
+reads `Skipped · issues unknown · Not selected for this tier`. With
+`scan-mode: auto`, a merge request or same-repository pull request that changes
+no file under a configured skill root skips Tier 2 and Tier 3. Only Tier 1 then
+scans, covering every skill for a setup change, and the Tier 2 and Tier 3 cells read
+`Skipped · issues unknown · No file under a configured skill root changed; this paid tier did not run.`
 
 ```text
 ci-results.json

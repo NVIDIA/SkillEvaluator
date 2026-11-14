@@ -35,7 +35,7 @@ Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
 Those advanced setups are covered below.
 
-For the exhaustive variable-by-variable inventory, see [Environment Variables](environment-variables.mdx).
+For the exhaustive variable-by-variable inventory, see [Environment Variables](/skills/skillevaluator/environment-variables).
 
 Tier 3 executes trials through
 [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
@@ -54,8 +54,14 @@ contact package and vulnerability services.
 | `quality-check`, `security-scan`, `pii-scan`, `lint-scripts` | `tier1 PATH` automatically enables LLM stages when configured; `validate --llm` / `security-scan --llm` — deeper LLM security analysis |
 | `doctor`, `health-check` (offline readiness probes by default; missing credentials are reported as not ready) | `--llm-verify` on `validate`, `security-scan`, `pii-scan` — LLM false-positive suppression |
 | | All Tier 2 commands — embeddings API; `context-optimization-check` and `dedup-scan` also use a chat LLM (`similarity-check` is embeddings-only). A local OpenAI-compatible server works too — see [Fully local setup](#fully-local-setup) |
-| Tier 3 scaffolding and inspection: `create-eval-dataset --no-llm`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
+| Tier 3 scaffolding and inspection: `create-eval-dataset PATH --no-llm --grounding skill`, `init-custom-grader`, `init-harbor-task`, `tier3 validate`, `view`, `harbor-view`, and `compare` | Tier 3 LLM dataset generation needs a provider key; `tier3 evaluate` needs a provider key plus a credential the selected live agent can use — with NVIDIA Build in `--env-mode docker` or `local`, one `NVIDIA_API_KEY` covers both roles |
 | | `models` and `doctor --verify-models` — provider-catalog reachability and membership checks; public catalogs do not prove that an inference key works. `doctor --tier 2 --verify-models` sends one embedding and one chat request |
+
+Standalone dataset generation defaults to substantive author guidance in
+`evals/EVAL.md` or `--prompt`, then usable matching retained traces from a completed
+skill-scoped run. Headings alone do not qualify. The table's explicit
+`--grounding skill` opts into skill-only templates; see
+[Eval Datasets](/skills/skillevaluator/eval-datasets#generate-a-dataset).
 
 `validate PATH` runs all three tiers for skills and needs the provider and
 Tier 3 runtime setup. Use `--tiers 1` for keyless static checks. `--no-dedup`
@@ -261,7 +267,7 @@ harbor:
       model: gpt-6.1-sol
 ```
 
-You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) for the full run workflow.
+You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) for the full run workflow.
 
 In Docker mode, credential values are never rendered on the `docker compose exec` command line — the bridge receives them through a mode-0600 file inside the container that is consumed and removed before the agent starts.
 
@@ -315,7 +321,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded. Your SkillSpector model settings (`SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY`, `SKILLSPECTOR_REASONING_EFFORT`) pass through too; `SKILLSPECTOR_TEMPERATURE` does not.
 
-SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. On Anthropic and Bedrock it stays on Claude Opus 5 while the chat default is Claude Opus 5.5. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.13.3 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](environment-variables.mdx#skillspector-bridge) for the defaults.
+SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. On Anthropic and Bedrock it stays on Claude Opus 5 while the chat default is Claude Opus 5.5. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.13.3 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](/skills/skillevaluator/environment-variables#skillspector-bridge) for the defaults.
 
 Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name a supported public provider (`openai`, `anthropic`, or `bedrock` — or `nv_build` to force the Build mapping); anything else fails closed and the subprocess receives no credential.
 

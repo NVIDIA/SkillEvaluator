@@ -234,9 +234,10 @@ def next_steps(
                 f"only {len(skill_cases)} skill case(s) were evaluated, so one case moves the pass rate by "
                 f"{100 / max(len(skill_cases), 1):.0f} pp",
                 _listed(skill_cases),
-                "Add realistic requests the skill should handle to evals/evals.json, covering inputs and "
-                "phrasings the current cases miss (`skillevaluator create-eval-dataset <skill> --full --dry-run` "
-                "previews drafts); keep the existing cases and their expectations.",
+                "Write realistic requests and observable outcomes in <skill-dir>/evals/EVAL.md, covering "
+                "inputs and phrasings the current cases miss. Preview drafts with "
+                "`skillevaluator create-eval-dataset <skill-dir> --full --force --dry-run`, then add reviewed "
+                "cases to <skill-dir>/evals/evals.json; keep the existing cases and their expectations.",
                 f"With {_MIN_SKILL_CASES} or more skill cases the verdict keeps its direction.",
                 observed,
             )

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import ast
 import json
 import os
 import shutil
@@ -574,6 +575,165 @@ def test_native_tasks_reject_unstaged_parent_env_templates_in_every_harbor_scope
             tmp_path / f"native-host-env-{source_name.lower()}",
             grading_mode="custom_only",
         )
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        "environment",
+        "verifier.environment",
+        "steps.verifier.environment",
+    ],
+)
+@pytest.mark.parametrize(
+    "header",
+    ["Bearer ${OPENAI_API_KEY}", "Bearer ${DEDICATED_MCP_TOKEN}", "plainPrivateCredential2024"],
+)
+def test_native_task_mcp_policy_is_checked_before_publication(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, scope: str, header: str
+) -> None:
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", raising=False)
+    monkeypatch.delenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", raising=False)
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    step = '\n[[steps]]\nname = "step-one"\n' if scope.startswith("steps.") else ""
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + step
+        + f'\n[[{scope}.mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        + 'url = "https://mcp.example.test/mcp"\n'
+        + f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-mcp-output"
+    output.mkdir()
+    (output / "previous.txt").write_text("previous publication", encoding="utf-8")
+
+    with pytest.raises(ValueError, match=r"MCP|mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+
+    assert "plainPrivateCredential2024" not in str(error.value)
+    assert task_toml.read_text(encoding="utf-8") == original
+    assert [path.name for path in output.iterdir()] == ["previous.txt"]
+    assert (output / "previous.txt").read_text(encoding="utf-8") == "previous publication"
+
+
+@pytest.mark.parametrize("header", ["Bearer $DEDICATED_MCP_TOKEN", "Bearer ${DEDICATED_MCP_TOKEN}"])
+def test_generated_mcp_headers_parse_in_pinned_harbor_without_changing_rich_json(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    source = target / "evals" / "environment" / "mcp_servers.toml"
+    original = (
+        '[[mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        'url = "https://mcp.example.test/mcp"\n'
+        f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+
+    [staged] = generate_harbor_tasks(target, tmp_path / "generated-mcp")
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    assert config.environment.mcp_servers[0].headers == {"Authorization": "Bearer ${DEDICATED_MCP_TOKEN}"}
+    rich_servers = json.loads((staged / "mcp_servers.json").read_text(encoding="utf-8"))
+    assert rich_servers[0]["headers"] == {"Authorization": header}
+    assert source.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "authored_config",
+    [
+        'mcp_servers = { name = "remote-mcp" }\n',
+        'mcp_servers = ["private-malformed-value"]\n',
+        '[[environment.mcp_servers]]\nname = "remote-mcp"\nurl = "https://mcp.example.test/mcp"\n'
+        'headers = "private-malformed-value"\n',
+        '[[environment.mcp_servers]]\nname = "remote-mcp"\nurl = "https://mcp.example.test/mcp"\n'
+        'unsupported_field = "private-malformed-value"\n',
+    ],
+)
+def test_native_tasks_reject_malformed_or_unsupported_mcp_without_echoing_values(
+    tmp_path: Path, authored_config: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    original = task_toml.read_text(encoding="utf-8") + authored_config
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-invalid-mcp"
+
+    with pytest.raises(ValueError, match="mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+
+    assert "private-malformed-value" not in str(error.value)
+    assert task_toml.read_text(encoding="utf-8") == original
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("transport", ["streamable-http", "stdio"])
+def test_native_tasks_preserve_approved_mcp_and_safe_runtime_references(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, transport: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    if transport == "streamable-http":
+        monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+        monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+        declaration = (
+            'url = "https://mcp.example.test/mcp"\nheaders = { Authorization = "Bearer ${DEDICATED_MCP_TOKEN}" }\n'
+        )
+    else:
+        declaration = 'command = "python3"\nargs = ["--flag", "${SAFE_FLAG}"]\n'
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + f'[[environment.mcp_servers]]\nname = "fixture-mcp"\ntransport = "{transport}"\n'
+        + declaration
+    )
+    task_toml.write_text(original, encoding="utf-8")
+
+    [staged] = stage_native_harbor_tasks(target, tmp_path / "native-approved-mcp", runtime_env={"SAFE_FLAG": "yes"})
+
+    config = TaskConfig.model_validate_toml((staged / "task.toml").read_text(encoding="utf-8"))
+    server = config.environment.mcp_servers[0]
+    if transport == "streamable-http":
+        assert server.headers == {"Authorization": "Bearer ${DEDICATED_MCP_TOKEN}"}
+    else:
+        assert server.args == ["--flag", "${SAFE_FLAG}"]
+    assert task_toml.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        "Bearer $${DEDICATED_MCP_TOKEN}",
+        "Bearer $$DEDICATED_MCP_TOKEN",
+        "Bearer ${DEDICATED_MCP_TOKEN:-private-fallback}",
+        "Bearer ${DEDICATED_MCP_TOKEN",
+    ],
+)
+def test_generated_mcp_header_normalization_keeps_escaped_and_malformed_templates_rejected(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, header: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "DEDICATED_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    source = target / "evals" / "environment" / "mcp_servers.toml"
+    original = (
+        '[[mcp_servers]]\nname = "remote-mcp"\ntransport = "streamable-http"\n'
+        'url = "https://mcp.example.test/mcp"\n'
+        f"headers = {{ Authorization = {json.dumps(header)} }}\n"
+    )
+    source.write_text(original, encoding="utf-8")
+    output = tmp_path / "generated-invalid-mcp"
+
+    with pytest.raises(ValueError, match="MCP"):
+        generate_harbor_tasks(target, output)
+
+    assert source.read_text(encoding="utf-8") == original
+    assert not output.exists()
 
 
 def test_native_tasks_allow_only_role_staged_host_env_templates(tmp_path: Path) -> None:
@@ -4094,6 +4254,164 @@ def test_rebase_reasserts_verifier_constraint_after_authored_dependencies(tmp_pa
     assert dockerfile.rfind("from ragas.llms.base import llm_factory") > dockerfile.find("langchain-community>=0.4.2")
 
 
+_FAKE_VERIFIER_MODULES = {
+    "boto3/__init__.py": "",
+    "idna/__init__.py": "",
+    "openai/__init__.py": "class AsyncOpenAI:\n    pass\n",
+    "ragas/__init__.py": "",
+    "ragas/llms/__init__.py": "",
+    "ragas/llms/base.py": "def llm_factory(*args, **kwargs):\n    return None\n",
+    "ragas/messages.py": "class AIMessage:\n    pass\n\n\nclass HumanMessage:\n    pass\n",
+    "ragas/metrics/__init__.py": "",
+    "ragas/metrics/collections.py": "class AgentGoalAccuracyWithReference:\n    pass\n",
+}
+
+
+def _write_fake_verifier_modules(root: Path) -> None:
+    for relative, source in _FAKE_VERIFIER_MODULES.items():
+        path = root / relative
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(source, encoding="utf-8")
+
+
+def _third_party_imports(source: str) -> set[str]:
+    names: set[str] = set()
+    for node in ast.walk(ast.parse(source)):
+        if isinstance(node, ast.Import):
+            names.update(alias.name.split(".")[0] for alias in node.names)
+        elif isinstance(node, ast.ImportFrom) and node.level == 0 and node.module:
+            names.add(node.module.split(".")[0])
+    return {name for name in names if name not in sys.stdlib_module_names and name != "__future__"}
+
+
+def _verifier_smoke_command(dockerfile: str) -> list[str] | None:
+    lines = [line for line in dockerfile.splitlines() if adapter_module._VERIFIER_IMPORT_SMOKE in line]
+    if not lines:
+        return None
+    assert len(lines) == 1
+    argv = json.loads(lines[0].removeprefix("RUN "))
+    assert argv[:4] == ["/bin/sh", "-c", adapter_module._MANAGED_PATH_SHELL, "skillevaluator"]
+    return argv
+
+
+def test_verifier_dependency_smoke_covers_every_verifier_third_party_import() -> None:
+    bundled = {path.stem for path in adapter_module._VERIFIER_FILES}
+    imported = set().union(
+        *(_third_party_imports(path.read_text(encoding="utf-8")) for path in adapter_module._VERIFIER_FILES)
+    )
+    # The verifier works without these: google.auth falls back to the metadata
+    # server and gcloud, skillevaluator to the bundled siblings, and boto3
+    # imports botocore.
+    optional = {"botocore", "google", "skillevaluator"}
+    expected = imported - bundled - optional
+
+    assert expected == _third_party_imports(adapter_module._VERIFIER_IMPORT_SMOKE)
+    installed = {
+        requirement.split("~")[0].split(">")[0].split("<")[0] for requirement in adapter_module._VERIFIER_DEPS.split()
+    }
+    assert expected <= installed
+
+
+def test_shared_eval_base_image_keeps_verifier_dependency_smoke(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _, target, references_dir, _ = _write_projection_fixture(tmp_path)
+    built: list[str] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> subprocess.CompletedProcess[str]:
+        if cmd[:3] == ["docker", "image", "inspect"]:
+            return subprocess.CompletedProcess(cmd, 1, "", "")
+        assert cmd[:2] == ["docker", "build"]
+        built.append((Path(cmd[-1]) / "Dockerfile").read_text(encoding="utf-8"))
+        return subprocess.CompletedProcess(cmd, 0, "", "")
+
+    monkeypatch.setattr(adapter_module.subprocess, "run", fake_run)
+
+    # The shared image serves every grading mode, so it keeps the check.
+    assert adapter_module.build_eval_base_image(target, references_dir)
+    assert len(built) == 1
+    argv = _verifier_smoke_command(built[0])
+    assert argv is not None
+    assert argv[4:7] == ["python3", "-I", "-c"]
+
+
+@pytest.mark.parametrize("grading_mode", ["default", "custom_only"])
+@pytest.mark.parametrize("mode", ["generated", "preserve", "rebase"])
+def test_verifier_dependency_smoke_runs_like_the_verifier(tmp_path: Path, mode: str, grading_mode: str) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    options: dict[str, str] = {}
+    if mode != "generated":
+        (target / "evals" / "environment" / "Dockerfile").write_text(
+            "FROM python:3.12-slim\nENV PIP_USER=1\n",
+            encoding="utf-8",
+        )
+    if mode == "rebase":
+        options = {"base_image": "skillevaluator-base:test", "custom_dockerfile_mode": "rebase"}
+
+    task = generate_harbor_tasks(
+        target,
+        tmp_path / f"verifier-smoke-{mode}-{grading_mode}",
+        grading_mode=grading_mode,
+        **options,
+    )[0]
+
+    dockerfile = (task / "environment" / "Dockerfile").read_text(encoding="utf-8")
+    test_sh = (task / "tests" / "test.sh").read_text(encoding="utf-8")
+    argv = _verifier_smoke_command(dockerfile)
+    assert dockerfile.count('"pip", "install"') == 1
+    if grading_mode == "custom_only":
+        # test.sh never runs eval.py, so its imports are not a build requirement.
+        assert "/eval.py" not in test_sh
+        assert argv is None
+        return
+    assert argv is not None
+    command = argv[4:]
+    verifier = next(line for line in test_sh.splitlines() if line.endswith('/eval.py"'))
+    assert command[:3] == ["python3", "-I", "-c"]
+    assert verifier.split()[:2] == command[:2]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="the exec-form RUN starts /bin/sh")
+def test_verifier_dependency_smoke_fails_when_isolated_verifier_cannot_import(tmp_path: Path) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    task = generate_harbor_tasks(target, tmp_path / "verifier-smoke-behavior")[0]
+    argv = _verifier_smoke_command((task / "environment" / "Dockerfile").read_text(encoding="utf-8"))
+    assert argv is not None
+
+    image = tmp_path / "image"
+    subprocess.run([sys.executable, "-m", "venv", "--without-pip", str(image)], check=True)
+    site_packages = Path(
+        subprocess.run(
+            [str(image / "bin" / "python3"), "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+    )
+    path = os.pathsep.join([str(image / "bin"), "/usr/bin", "/bin"])
+
+    def smoke(**env: str) -> subprocess.CompletedProcess[str]:
+        return subprocess.run(argv, env={"PATH": path, **env}, capture_output=True, text=True, timeout=60)
+
+    # A PIP_TARGET-style install that only PYTHONPATH reaches is invisible to `python3 -I`.
+    pythonpath = tmp_path / "pythonpath"
+    _write_fake_verifier_modules(pythonpath)
+    hidden = smoke(PYTHONPATH=str(pythonpath))
+    assert hidden.returncode != 0
+    assert "ModuleNotFoundError" in hidden.stderr
+
+    _write_fake_verifier_modules(site_packages)
+    installed = smoke()
+    assert installed.returncode == 0, installed.stderr
+
+    for package in sorted({relative.split("/")[0] for relative in _FAKE_VERIFIER_MODULES}):
+        shutil.rmtree(site_packages / package)
+        missing = smoke()
+        assert missing.returncode != 0, package
+        assert f"No module named '{package}'" in missing.stderr
+        _write_fake_verifier_modules(site_packages)
+
+
 def test_baseline_rejects_target_manifest_payload_with_appended_comment(tmp_path: Path) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     environment = target / "evals" / "environment"
@@ -4987,3 +5305,91 @@ def test_runtime_projection_skips_linked_generated_entries(tmp_path: Path, link_
     assert (staged / "SKILL.md").is_file()
     assert (staged / "scripts" / "run.sh").is_file()
     assert not os.path.lexists(staged / link_name)
+
+
+@pytest.mark.parametrize("scope", ["verifier.environment", "steps.verifier.environment"])
+@pytest.mark.parametrize("grant", ["runtime_only", "verifier_only"])
+def test_native_verifier_mcp_references_use_the_verifier_environment_grants(
+    tmp_path: Path, scope: str, grant: str
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    name = "AGENT_FLAG" if grant == "runtime_only" else "VERIFIER_FLAG"
+    step = '\n[[steps]]\nname = "step-one"\n' if scope.startswith("steps.") else ""
+    original = (
+        task_toml.read_text(encoding="utf-8")
+        + step
+        + f'\n[[{scope}.mcp_servers]]\nname = "fixture-mcp"\ntransport = "stdio"\n'
+        + f'command = "python3"\nargs = ["--flag", "${{{name}}}"]\n'
+    )
+    task_toml.write_text(original, encoding="utf-8")
+    output = tmp_path / "native-verifier-mcp-grants"
+    options = {"runtime_env": {"AGENT_FLAG": "agent-value"}, "verifier_env": {"VERIFIER_FLAG": "verifier-value"}}
+    if grant == "runtime_only":
+        with pytest.raises(ValueError, match=r"MCP|runtime|environment"):
+            stage_native_harbor_tasks(target, output, grading_mode="custom_only", **options)
+        assert not output.exists()
+    else:
+        [staged] = stage_native_harbor_tasks(target, output, grading_mode="custom_only", **options)
+        assert "${VERIFIER_FLAG}" in (staged / "task.toml").read_text(encoding="utf-8")
+    assert task_toml.read_text(encoding="utf-8") == original
+
+
+@pytest.mark.parametrize(
+    ("scope", "verifier_env"),
+    [("environment", None), ("verifier.environment", None), ("environment", {"VERIFIER_FLAG": "verifier"})],
+)
+def test_native_mcp_keeps_agent_grants_and_legacy_verifier_defaults(
+    tmp_path: Path, scope: str, verifier_env: dict[str, str] | None
+) -> None:
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + f'\n[[{scope}.mcp_servers]]\nname = "fixture-mcp"\ntransport = "stdio"\n'
+        + 'command = "python3"\nargs = ["--flag", "${SAFE_FLAG}"]\n',
+        encoding="utf-8",
+    )
+    [staged] = stage_native_harbor_tasks(
+        target,
+        tmp_path / "legacy-native-mcp-grants",
+        grading_mode="custom_only",
+        runtime_env={"SAFE_FLAG": "safe"},
+        verifier_env=verifier_env,
+    )
+    assert "${SAFE_FLAG}" in (staged / "task.toml").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("declaration", "hint"),
+    [
+        ('headers = { Authorization = "Bearer $SAFE_MCP_TOKEN" }\n', "${VAR}"),
+        ('headers = "CANARY_INVALID_SHAPE"\n', "field types"),
+        ('private_unsupported_field = "CANARY_INVALID_SHAPE"\n', "supported MCP field names"),
+    ],
+)
+def test_native_mcp_validation_hints_do_not_echo_authored_values(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, declaration: str, hint: str
+) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_HOSTS", "mcp.example.test")
+    monkeypatch.setenv("SKILLEVALUATOR_ALLOWED_MCP_SECRETS", "SAFE_MCP_TOKEN")
+    _, target, _, _ = _write_projection_fixture(tmp_path)
+    _write_minimal_native_task(target)
+    task_toml = target / "evals" / "harbor" / "case-001" / "task.toml"
+    task_toml.write_text(
+        task_toml.read_text(encoding="utf-8")
+        + '\n[[environment.mcp_servers]]\nname = "fixture-mcp"\ntransport = "streamable-http"\n'
+        + 'url = "https://mcp.example.test/mcp"\n'
+        + declaration,
+        encoding="utf-8",
+    )
+    output = tmp_path / "native-mcp-safe-hints"
+    with pytest.raises(ValueError, match=r"MCP|mcp_servers") as error:
+        stage_native_harbor_tasks(target, output, grading_mode="custom_only")
+    message = str(error.value)
+    assert hint in message
+    assert "CANARY_INVALID_SHAPE" not in message
+    assert "private_unsupported_field" not in message
+    assert not output.exists()

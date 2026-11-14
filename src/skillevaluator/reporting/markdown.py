@@ -583,6 +583,8 @@ class MarkdownReporter(ReporterBase):
                 lines.append(f"| {dname.title()} | {ddata.get('score', 0):.1f} | {ddata.get('weight', 0) * 100:.0f}% |")
             lines.append("")
 
+        self._render_reference_summary(result, lines)
+
         if result.is_incomplete:
             self._render_incomplete(result, lines)
         elif clean_skip:
@@ -671,6 +673,16 @@ class MarkdownReporter(ReporterBase):
                 lines.append("")
 
             lines.append("</details>")
+            lines.append("")
+
+    @staticmethod
+    def _render_reference_summary(result: ValidationResult, lines: list[str]) -> None:
+        """List how many referenced artifacts SkillSpector did not completely inspect in a failed result."""
+        from skillevaluator.skillspector_references import reference_summary_message
+
+        summary = reference_summary_message(result.metadata.get("skillspector_reference_summary"))
+        if summary and not result.passed:
+            lines.append(f"- {summary}")
             lines.append("")
 
     def _render_incomplete(self, result: ValidationResult, lines: list[str]) -> None:

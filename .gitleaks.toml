@@ -11,6 +11,13 @@ regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
 
 [[allowlists]]
+description = "Synthetic policy key used by NeMo Gym rollout redaction tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^gw-policy-0a1b2c3d4e5f6789$''']
+paths = ['''^tests/test_nemo_gym_backend\.py$''']
+
+[[allowlists]]
 description = "Synthetic curl basic-auth credential used by judge evidence redaction tests"
 condition = "AND"
 targetRules = ["curl-auth-user"]

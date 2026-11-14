@@ -29,6 +29,8 @@ from skillevaluator.tier3.eval_core.checks import (
         "less skills/x/SKILL.md",
         "F=skills/x/SKILL.md; cat $F",
         "cat ./SKILL.md && echo done",
+        "/bin/bash -lc 'cat /root/.agents/skills/x/SKILL.md'",  # NeMo Gym Codex records the shell wrapper
+        "bash -c 'head -5 skills/x/SKILL.md'",
     ],
 )
 def test_recognizes_shell_reads_of_skill_md(cmd: str):
@@ -44,6 +46,7 @@ def test_recognizes_shell_reads_of_skill_md(cmd: str):
         "cat config.json",  # reads a non-SKILL file
         "echo SKILL.md > out.txt",  # output redirect, not a read
         "rg SKILL .",
+        "bash -lc 'grep SKILL config.json'",
     ],
 )
 def test_ignores_non_reads_and_searches(cmd: str):

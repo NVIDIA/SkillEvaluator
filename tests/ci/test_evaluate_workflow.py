@@ -53,8 +53,57 @@ def test_pr_history_mode_and_attempt_artifact_wiring():
     assert int(job["timeout-minutes"]) > 50
 
 
+def test_enforcement_mode_defaults_to_strict():
+    workflow = _workflow()
+    mode = workflow["on"]["workflow_call"]["inputs"]["enforcement-mode"]
+    assert (mode["type"], mode["default"]) == ("string", "strict")
+    validate = next(step for step in _job()["steps"] if step.get("name") == "Validate enforcement mode")
+    assert validate["env"]["ENFORCEMENT_MODE"] == "${{ inputs.enforcement-mode }}"
+    scan = next(step for step in _job()["steps"] if step.get("name") == "Evaluate selected skills")
+    assert scan.get("continue-on-error", "false") == "false"
+
+
+@pytest.mark.parametrize("mode,expected", [("strict", 0), ("advisory", 0), ("bogus", 1), ("Advisory", 1), ("", 1)])
+def test_enforcement_mode_validation_executes_before_setup(tmp_path, mode, expected):
+    step = _job()["steps"][0]
+    assert step["name"] == "Validate enforcement mode"
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", step["run"]],
+        cwd=tmp_path,
+        env={**os.environ, "ENFORCEMENT_MODE": mode},
+        capture_output=True,
+    )
+    assert result.returncode == expected
+
+
+@pytest.mark.parametrize("mode", ["strict", "advisory"])
+@pytest.mark.parametrize("exit_code", [1, 125, 126, 127, 137])
+def test_scan_shell_preserves_container_failures(tmp_path, mode, exit_code):
+    binary = tmp_path / "docker"
+    binary.write_text(f"#!/bin/sh\nexit {exit_code}\n")
+    binary.chmod(0o755)
+    scan = next(step for step in _job()["steps"] if step.get("name") == "Evaluate selected skills")
+    result = subprocess.run(
+        ["bash", "-e", "-o", "pipefail", "-c", scan["run"]],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "RUNNER_TEMP": str(tmp_path),
+            "GITHUB_WORKSPACE": str(tmp_path / "checkout"),
+            "IMAGE": "ghcr.io/example/scanner@sha256:" + "a" * 64,
+            "REPORT_BASE_URL": "",
+            "LLM_ENABLED": "false",
+            "ENFORCEMENT_MODE": mode,
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == exit_code
+
+
+@pytest.mark.parametrize("mode", ["strict", "advisory"])
 @pytest.mark.parametrize("llm", ["true", "false"])
-def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(tmp_path, llm):
+def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(tmp_path, llm, mode):
     scan = next(step for step in _job()["steps"] if step.get("name") == "Evaluate selected skills")
     binary = tmp_path / "docker"
     # Test double captures argv of the actual workflow shell, not a reimplementation.
@@ -72,10 +121,13 @@ def test_real_workflow_shell_preserves_container_boundary_and_secret_selection(t
         "IMAGE": "ghcr.io/example/scanner@sha256:" + "a" * 64,
         "REPORT_BASE_URL": "",
         "LLM_ENABLED": llm,
+        "ENFORCEMENT_MODE": mode,
         "LLM_API_KEY": "dummy-do-not-pass-in-static-mode",
     }
     subprocess.run(["bash", "-e", "-o", "pipefail", "-c", scan["run"]], env=env, check=True, capture_output=True)
     args = json.loads(captured.read_text())
+    image_index = args.index(env["IMAGE"])
+    assert args[image_index + 1 :] == (["--enforcement-mode", "advisory"] if mode == "advisory" else [])
     passed_environment = [args[index + 1] for index, arg in enumerate(args) if arg == "--env"]
     assert {
         "SCAN_MODE",
@@ -147,7 +199,7 @@ def test_basic_scan_does_not_require_identity_credentials(tmp_path):
     workflow = yaml.load((ROOT / ".github/workflows/evaluate-skills.yml").read_text(), Loader=yaml.BaseLoader)
     job = workflow["jobs"]["tier1"]
     assert "permissions" not in workflow and "permissions" not in job
-    step = job["steps"][0]
+    step = next(step for step in job["steps"] if step.get("id") == "provenance")
     assert step["id"] == "provenance"
     # Run the actual trusted step from a consumer checkout containing shadow modules.
     for module in ("re", "json", "tempfile"):

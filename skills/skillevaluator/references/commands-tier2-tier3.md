@@ -15,7 +15,7 @@
 | --- | --- |
 | `tier3 evaluate PATH` | Live A/B run; add `--autopilot` to generate a missing case |
 | `tier3 validate PATH` | Check `<skill-dir>/evals/` (`--strict`, `--json`, `--harbor-contract`) |
-| `create-eval-dataset PATH` | Write `<skill-dir>/evals/evals.json` (`--full`, `--no-llm`, `--dry-run`, `--force`, `--prompt`, `--refine`) |
+| `create-eval-dataset PATH` | Write `<skill-dir>/evals/evals.json` (`--grounding auto` requires substantive author guidance or usable matching retained traces; existing datasets need `--force` or `--refine`; opt in to `--grounding skill` for skill-only generation; `--full`, `--no-llm`, `--dry-run`, `--force`, `--prompt`, `--refine`) |
 | `init-custom-grader PATH` | BYOG starter (`--mode`, `--language`) |
 | `init-harbor-task PATH` | BYOT starter (`--case-id`, `--with-config`) |
 | `tier3 select-decoys PATH` | Save neighbor skills for group workspaces |

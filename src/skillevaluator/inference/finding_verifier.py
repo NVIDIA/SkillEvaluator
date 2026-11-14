@@ -72,6 +72,13 @@ class FindingVerifier(LLMClient):
         """Parse newline-delimited JSON verdicts from the LLM response."""
         return self._parse_verdicts(response_text)
 
+    def _parse_truncated_response(self, response_text: str, **kwargs: Any) -> dict[int, Verdict]:
+        """Keep a truncated reply only when at least one complete verdict survived."""
+        verdicts = self.parse_response(response_text, **kwargs)
+        if not verdicts:
+            raise ValueError("Truncated verifier reply contains no complete verdicts")
+        return verdicts
+
     def get_fallback_response(self, **_kwargs: Any) -> dict[int, Verdict]:
         """When LLM is unavailable, return an empty dict (no verdicts)."""
         return {}

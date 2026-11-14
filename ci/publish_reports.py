@@ -937,6 +937,37 @@ def _validate_pages_privacy(api, repository: str, base_url: str) -> None:
         )
 
 
+def load_report_evidence(api, repository: str, run_id: int, run_attempt: int, *, image="") -> dict:
+    """Load the signed, bounded JSON evidence for one completed scan attempt."""
+    if not REPO_PATTERN.fullmatch(repository) or not _integer(run_id, 1) or not _integer(run_attempt, 1):
+        raise PublicationError("Repository and report run ID must be explicit valid identities.")
+    run = api.get(f"/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}")
+    _validate_run(run, repository, run_id)
+    if run["run_attempt"] != run_attempt:
+        raise PublicationError("GitHub returned a different workflow attempt from the requested one.")
+    provenance = _validate_workflow_provenance(api, repository, run)
+    artifact = _select_artifact(api, repository, run)
+    summary, reports = read_artifact(api.download_artifact(artifact["id"]))
+    successful = summary["overall_passed"] or summary["overall_status"] == "skipped" or advisory_downgraded(summary)
+    if (run["conclusion"] == "success") != successful:
+        raise PublicationError("The workflow conclusion contradicts the report artifact verdict.")
+    if summary["overall_status"] == "skipped" and summary["selection"]["head"] != run["head_sha"]:
+        raise PublicationError("The no-change selection does not match the workflow revision.")
+    selected_image = _recorded_image(summary, image)
+    recorded_llm = summary.get("execution", {}).get("llm_enabled")
+    if recorded_llm is not None and type(recorded_llm) is not bool:
+        raise PublicationError("The recorded LLM setting must be a boolean when present.")
+    return {
+        "run": run,
+        "provenance": provenance,
+        "artifact": artifact,
+        "summary": summary,
+        "reports": reports,
+        "image": selected_image,
+        "llm_enabled": recorded_llm,
+    }
+
+
 def publish(
     api,
     repository: str,
@@ -967,22 +998,10 @@ def publish(
         raise PublicationError("The site and output directories must not be symlinks.")
     site.mkdir(parents=True, exist_ok=True)
     output.mkdir(parents=True, exist_ok=True)
-    run = api.get(f"/repos/{repository}/actions/runs/{run_id}/attempts/{run_attempt}")
-    _validate_run(run, repository, run_id)
-    if run["run_attempt"] != run_attempt:
-        raise PublicationError("GitHub returned a different workflow attempt from the requested one.")
-    provenance = _validate_workflow_provenance(api, repository, run)
-    artifact = _select_artifact(api, repository, run)
-    summary, reports = read_artifact(api.download_artifact(artifact["id"]))
-    successful = summary["overall_passed"] or summary["overall_status"] == "skipped" or advisory_downgraded(summary)
-    if (run["conclusion"] == "success") != successful:
-        raise PublicationError("The workflow conclusion contradicts the report artifact verdict.")
-    if summary["overall_status"] == "skipped" and summary["selection"]["head"] != run["head_sha"]:
-        raise PublicationError("The no-change selection does not match the workflow revision.")
-    selected_image = _recorded_image(summary, image)
-    recorded_llm = summary.get("execution", {}).get("llm_enabled")
-    if recorded_llm is not None and type(recorded_llm) is not bool:
-        raise PublicationError("The recorded LLM setting must be a boolean when present.")
+    evidence = load_report_evidence(api, repository, run_id, run_attempt, image=image)
+    run, provenance, artifact = evidence["run"], evidence["provenance"], evidence["artifact"]
+    summary, reports = evidence["summary"], evidence["reports"]
+    selected_image, recorded_llm = evidence["image"], evidence["llm_enabled"]
     attempt = run["run_attempt"]
     relative = f"runs/{run_id}/{attempt}"
     report_url = f"{base_url.rstrip('/')}/{relative}/"

@@ -273,7 +273,7 @@ def mark_no_skill_script_checks(
     if has_skill is not False or skill_metrics_on or not evaluated_skill or not isinstance(checks, list):
         return results
     skill_root = (Path("/workspace/skills") / evaluated_skill).resolve(strict=False)
-    for check, result in zip(checks, results, strict=False):
+    for check, result in zip(checks, results):  # noqa: B905 -- zip(strict=) needs Python 3.10
         if (
             not isinstance(check, dict)
             or check.get("type") not in {"script_invoked", "command_succeeded"}

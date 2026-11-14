@@ -41,6 +41,13 @@ def test_skip_whole_check_records_skipped_result():
     assert "unicode" in missing_tier1_publication_checks(results)
 
 
+def test_skip_harness_records_skipped_result():
+    with patch("skillevaluator.validators.harness.HarnessValidator.validate") as validate:
+        results = run_validation(SKILL, checks="schema,harness", skip="harness")
+    validate.assert_not_called()
+    assert is_cleanly_skipped(_by_name(results)["Harness Compatibility"])
+
+
 def test_skipped_check_is_visible_in_tier1_summary():
     results = run_validation(SKILL, checks="unicode,schema", skip="unicode")
     _ok, rows = summarize_tier1(results, lineup=["schema", "unicode"])

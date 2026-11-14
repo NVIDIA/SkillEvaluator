@@ -108,7 +108,7 @@ def evaluate_plugin(profile: dict[str, Any], facts: dict[str, Any]) -> HarnessRe
         if not _Rule.evaluate(str(rule["when"]), {**facts, "always": True}):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "outcome"):
+        for key in ("fix", "versions", "outcome"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)

@@ -650,7 +650,8 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     """Resolve the user's setup for one profile: ``context_tokens`` (0 = unknown), ``custom_provider`` and
     ``explicit_invocation`` (skills are activated by an explicit mention rather than opened by the model) and
     ``headless`` (a non-interactive run, e.g. ``claude -p``, with default permissions) and ``native_root``
-    (evaluate as if installed in each harness's own skills root, so root rules are skipped).
+    (evaluate as if installed in each harness's own skills root, so root rules are skipped). ``harness_versions``
+    maps a harness to the release the user runs; a release other than the profile's verified one adds an advisory.
 
     An unknown window falls back to the profile's ``config_defaults`` for a custom provider when one is set.
     """
@@ -662,7 +663,9 @@ def model_config(profile: dict[str, Any], config: dict[str, Any] | None = None) 
     explicit = bool(config.get("explicit_invocation", False))
     headless = bool(config.get("headless", False))
     native_root = bool(config.get("native_root", False))
+    versions = config.get("harness_versions") or {}
     return {
+        "harness_version": str(versions.get(profile["harness"], "")),
         "context_tokens": tokens,
         "custom_provider": custom,
         "explicit_invocation": explicit,
@@ -706,13 +709,23 @@ def evaluate_profile(
         if expression != "always" and not _Rule.evaluate(expression, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
-        for key in ("fix", "outcome"):
+        for key in ("fix", "versions", "outcome"):
             if rule.get(key):
                 finding[key] = _fill(rule[key], facts)
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     status = "not_loaded" if worst == 2 else "degraded" if worst == 1 else "loads"
     verified = profile.get("verified", {})
+    declared, checked = setup["harness_version"], str(verified.get("version", ""))
+    if declared and declared != checked and not checked.startswith(f"{declared} "):
+        findings.append(
+            {
+                "id": "VERSION-UNVERIFIED",
+                "effect": "advisory",
+                "message": f"Profile verified on {checked}; you run {declared}, so its rules may not hold.",
+                "fix": "Check the findings on that release, or run the version the profile was verified on.",
+            }
+        )
     return HarnessResult(
         harness=profile["harness"],
         display_name=profile.get("display_name", profile["harness"]),

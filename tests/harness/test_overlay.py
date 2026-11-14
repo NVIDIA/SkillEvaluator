@@ -840,6 +840,24 @@ def test_copilot_drops_skill_without_front_matter(tmp_path: Path):
     assert "CP-NO-FRONTMATTER" not in _rule_ids(_skill(tmp_path), "copilot-cli")
 
 
+def test_version_outside_profile_adds_advisory(tmp_path: Path):
+    skill = _skill(tmp_path)
+
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.166.0"}})
+    assert "VERSION-UNVERIFIED" in _rule_ids(skill, "codex", {"harness_versions": {"codex": "0.170.0"}})
+    assert "VERSION-UNVERIFIED" not in _rule_ids(skill, "codex", {"harness_versions": {"claude-code": "9.9.9"}})
+
+
+def test_cli_harness_version_flag(tmp_path: Path):
+    skill = _skill(tmp_path)
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "codex", "--harness-version", "codex=0.170.0", "-v"]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "0.170.0" in result.output
+
+
 def test_harness_note_names_the_skill_not_the_harness():
     block = {
         "a": [{"harness": "codex", "status": "not_loaded"}, {"harness": "hermes", "status": "degraded"}],

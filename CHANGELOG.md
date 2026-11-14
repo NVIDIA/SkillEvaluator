@@ -444,9 +444,9 @@ All notable changes to SkillEvaluator are documented in this file.
   file `setup helper.sh` and keep the scan `INCOMPLETE`. With
   `validate --workers` above 1, a skill of a folder that is also a plugin is
   judged against the folder, as with one worker, so a line naming a file
-  elsewhere in the folder keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops
-  the accepted missing-reference warning, or the error that says why a scan is
-  `INCOMPLETE`.
+  elsewhere in the folder keeps it `INCOMPLETE`. An `--llm-verify` downgrade no
+  longer drops the accepted missing-reference warning, or the error that says
+  why a scan is `INCOMPLETE`.
 
 ## 0.9.0 - 2026-11-13
 

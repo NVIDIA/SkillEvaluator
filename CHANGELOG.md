@@ -219,6 +219,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The README's Tier 1 row now covers harness compatibility and links to the
+  `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists

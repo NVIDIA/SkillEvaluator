@@ -86,6 +86,12 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 
+HTML reports use a shared NVIDIA presentation across all three tiers, with
+numbered Insights cards, expandable findings, and tables alongside charts.
+Reports containing Tier 3 open in dark mode; other reports open in light mode.
+An explicit theme choice is remembered when browser storage is available.
+Reports, including charts, work without a network connection.
+
 ```bash title="One run, four report files"
 skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
 ```
@@ -127,8 +133,8 @@ payloads are unchanged.
 
 ### Tier 2 comparison scopes and evidence
 
-The HTML Tier 2 view separates **Within this skill** (redundant content among
-its files) from **Across skills** (catalog or collection comparisons). Each
+The HTML Tier 2 view separates **Intra-Skill** (redundant content among
+its files) from **Inter-Skill** (catalog or collection comparisons). Each
 scope shows Checks completed, Duplicate findings, Affected files or skills,
 and Catalog entries compared. Completion uses recorded comparison
 evidence; a completed check can still fail its gate because it found duplicates.
@@ -155,6 +161,28 @@ Tier 3 Diagnostics. Missing values remain unavailable. These views use existing
 report data and do not read the source tree or contact providers while rendering.
 Full downloads and preview omission counts remain available; with-skill token
 charts are labeled separately from the resource table's two-arm comparisons.
+
+### Insights, diagnostics, and JSON downloads
+
+Overview and Insights show the same recorded conclusions and recommended
+actions. An incomplete evaluation leads with scored-attempt coverage and the
+next diagnostic step. Full execution errors remain in Diagnostics; they are
+not repeated as recommendations. Rendering a saved run does not invoke a
+judge or change its scores.
+
+**Download Full Tier 3 Payload** returns the retained Tier 3 object, including
+unavailable values and its recorded verdict. The visible validation outcome
+can be stricter because it also accounts for execution failures and required
+checks. Presentation defaults do not replace the retained object.
+
+The HTML header's JSON export is a report snapshot, with supplied plugin
+static/runtime projections included. Its envelope differs from the CLI's
+`-r json` format. A CI report configured with a canonical JSON artifact links
+directly to that retained file instead of embedding another report snapshot.
+
+Plugin evidence appears within its relevant tier. Bounds notices distinguish
+omitted rows from shortened text. A shortened historical snapshot cannot
+recover the original text; use recorded evidence artifacts when available.
 
 ### Dataset generation provenance
 

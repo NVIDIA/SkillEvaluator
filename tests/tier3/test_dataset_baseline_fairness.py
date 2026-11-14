@@ -1238,6 +1238,32 @@ def test_autopilot_llm_case_does_not_grade_skill_use(tmp_path: Path, llm_reply):
     assert result.exit_code == 0, result.output
 
 
+def test_autopilot_llm_case_replaces_skill_use_with_text_that_names_no_skill_script(tmp_path: Path, llm_reply):
+    # The template outcome that replaces graded skill use does not quote a description that names a script.
+    skill = _write_skill(tmp_path, _SCRIPT_NAMING_DESCRIPTIONS[0], scripts=_SCRIPT_FILES)
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is release.yaml ready to ship?",
+                    "expected_skill": "release-review",
+                    "expected_script": "review.py",
+                    "ground_truth": "The agent ran review.py on release.yaml and listed the blockers",
+                    "expected_behavior": ["The agent ran review.py on release.yaml"],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["expected_output"] == "A correct, complete result for the request"
+    assert case["assertions"] == generate_dataset._outcome_behaviors(None, [])
+    assert not _graded_names_a_skill_script(case["expected_output"], case["assertions"]), case
+
+
 def test_autopilot_llm_case_with_only_skill_use_checks_gets_outcome_checks(tmp_path: Path, llm_reply):
     skill = _write_skill(tmp_path, "Reviews release manifests for policy problems.")
     llm_reply.append(

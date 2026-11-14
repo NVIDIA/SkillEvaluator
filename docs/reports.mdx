@@ -354,7 +354,8 @@ renamed. The root `evals/` directory holds Tier 3 inputs. The Tier 1 file-walk
 checks skip it by design, while the Gitleaks secret scan and SkillSpector read
 its authored files. Both still skip generated output such as `evals/results`.
 Gitleaks also skips every file under a `tests/`, `examples/`, `fixtures/`, or
-`mocks/` folder, such as a Harbor task grader in `evals/harbor/<case>/tests/`.
+`mocks/` folder, or the singular form, such as a Harbor task grader in
+`evals/harbor/<case>/tests/`.
 Split-job results must match this identity exactly. Tier 3 runs that stage any
 linked/full repository context or external reference/workspace skills, or task
 inputs and custom environments that carry `.git`, `.venv`, `__pycache__`, or

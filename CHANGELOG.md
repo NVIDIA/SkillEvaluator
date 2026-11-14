@@ -294,8 +294,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `evals/evals.json`, graders such as `evals/grader.py`, and `evals/files`
   inputs, so a credential committed there is reported. Generated Tier 3 output
   in `evals/results` is still skipped, and so is every file under a `tests/`,
-  `examples/`, `fixtures/`, or `mocks/` folder, such as a Harbor task grader
-  in `evals/harbor/<case>/tests/`. To keep an intentional test token, add a
+  `examples/`, `fixtures/`, or `mocks/` folder, or the singular form, such as
+  a Harbor task grader in `evals/harbor/<case>/tests/`. To keep an intentional test token, add a
   `gitleaks:allow` comment on its line or list the finding in a
   `.gitleaksignore` file at the skill root.
 - Tier 3 reads the native Codex wrapper that runs a literal command array

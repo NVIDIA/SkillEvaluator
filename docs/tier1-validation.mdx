@@ -294,6 +294,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Invocation rules: `disable-model-invocation` (ignored by Codex, Hermes and OpenCode), Codex's `agents/openai.yaml` implicit-invocation policy (Codex only), `allowed-tools`, Claude Code-only fields, and Hermes project trust.
 
     Gate rules: Hermes `platforms` and OpenClaw `metadata.openclaw.requires` hide the skill on hosts that don't match.
+
+    `harness-check` on a plugin folder also shows a plugin panel: which plugin formats each harness accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes `plugin.yaml`), and an empty plugin.
   </Accordion>
 
   <Accordion title="security — vulnerability scanning">

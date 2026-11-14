@@ -18,6 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
+from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts
 from skillevaluator.reporting.console_ui import AMBER, BRIGHT, FAINT, GREEN, MUTED, RED, SPIN, TEXT, WIDTH
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValidator
 
@@ -250,6 +251,19 @@ def run_harness_check(
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
     width = max(60, min(WIDTH, console.width))
     block: Block = {}
+    if is_plugin_root(target):
+        facts = plugin_facts(target)
+        rows = [evaluate_plugin(profile, facts).to_dict() for profile in profiles]
+        console.print(
+            harness_panel(
+                {str(target): rows},
+                title=f"Plugin compatibility · {facts['plugin_name']}",
+                verbose=verbose,
+                width=width,
+            )
+        )
+        console.print()
+        block[f"{target} (plugin)"] = rows
     all_facts = facts_for(skills)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]

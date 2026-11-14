@@ -28,3 +28,6 @@ notes:
   - "Explicit $skill injects the whole SKILL.md (145 KB tested)."
   - "Follows symlinked skill folders (inside or outside the root)."
   - "New skills are listed next turn; files are re-read from disk."
+plugin:
+  rules:
+    - {id: CX-PLUGIN-FORMAT, when: "not (fmt_codex or fmt_claude or fmt_cursor or fmt_agent_v1)", effect: not_loaded, outcome: rejected, message: "Codex installs .codex-plugin, .claude-plugin, .cursor-plugin and Agent Plugins v1 bundles; this one has none of them.", fix: "Add .codex-plugin/plugin.json."}

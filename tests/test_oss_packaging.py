@@ -457,6 +457,27 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert "IDNA (BSD-3-Clause)" in notices
 
 
+def test_uv_is_a_base_dependency_so_plain_pip_can_provision_skillspector() -> None:
+    project = _project()
+    dependencies = [Requirement(raw) for raw in project["project"]["dependencies"]]
+    extras = [Requirement(raw) for values in project["project"]["optional-dependencies"].values() for raw in values]
+    uv_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "uv"]
+    lock_names = {package["name"] for package in _lock()["package"]}
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    installation = (REPO_ROOT / "docs" / "installation.mdx").read_text(encoding="utf-8")
+
+    assert len(uv_requirements) == 1
+    assert str(uv_requirements[0].specifier) == ">=0.11.27"
+    assert uv_requirements[0].marker is None
+    assert "uv" in lock_names
+    assert "uv (Apache-2.0 or MIT)" in notices
+    # uv runs SkillSpector in its own environment; SkillSpector itself stays out of the dependency set.
+    assert not any(canonicalize_name(requirement.name) == "skillspector" for requirement in [*dependencies, *extras])
+    assert "skillspector" not in lock_names
+    assert "uv is installed with SkillEvaluator" in installation
+    assert "The first run needs uv" not in installation
+
+
 def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
     tier3 = [Requirement(raw) for raw in _project()["project"]["optional-dependencies"]["tier3"]]
     direct_packages = {

@@ -417,6 +417,7 @@ def test_native_custom_only_preserves_authored_judge_controls_in_verifier_env(
         "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
         "LLM_JUDGE_FALLBACK_POLICY",
         "LLM_JUDGE_RETRY_POLICY",
+        "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL",
     ],
 )
 def test_native_standard_grading_rejects_task_owned_judge_controls(
@@ -458,6 +459,7 @@ def test_native_standard_grading_rejects_task_owned_judge_controls(
         "LLM_JUDGE_FALLBACK_MODELS",
         "LLM_JUDGE_FALLBACK_POLICY",
         "LLM_JUDGE_RETRY_POLICY",
+        "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL",
     ],
 )
 def test_native_standard_grading_allows_exact_operator_staged_control_placeholders(
@@ -505,7 +507,7 @@ def test_native_standard_grading_injects_operator_staged_judge_fallback(tmp_path
 def test_native_standard_grading_injects_operator_staged_judge_policies(tmp_path: Path) -> None:
     _, target, _, _ = _write_projection_fixture(tmp_path)
     _write_minimal_native_task(target)
-    names = ("LLM_JUDGE_FALLBACK_POLICY", "LLM_JUDGE_RETRY_POLICY")
+    names = ("LLM_JUDGE_FALLBACK_POLICY", "LLM_JUDGE_RETRY_POLICY", "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL")
 
     [staged] = stage_native_harbor_tasks(
         target,

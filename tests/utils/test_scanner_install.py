@@ -113,7 +113,7 @@ class TestSkillSpectorWheel:
         found = {"uv": "/opt/uv", "skillspector": "/usr/bin/skillspector"}
         with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
             tool = ExternalTool("skillspector", "skillspector", managed=True)
-        with patch("subprocess.run", return_value=CompletedProcess([], 0, "", "")) as run:
+        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.4", "")) as run:
             tool.run(["--version"])
         assert run.call_args.args[0] == ["/usr/bin/skillspector", "--version"]
 
@@ -131,7 +131,10 @@ class TestSkillSpectorWheel:
     @pytest.mark.parametrize("managed", [True, False])
     def test_unavailable_without_uv_or_when_unmanaged(self, managed):
         found = {} if managed else {"uv": "/opt/uv"}
-        with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
+        with (
+            patch.object(tool_runner, "resolve_tool_path", _resolver(found)),
+            patch.object(tool_runner, "_packaged_uv", return_value=None),
+        ):
             assert not ExternalTool("skillspector", "skillspector", managed=managed).is_available
 
     def test_invalid_override_never_falls_back(self, monkeypatch):

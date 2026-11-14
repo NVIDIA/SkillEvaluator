@@ -677,6 +677,8 @@ JUDGE_REASONING_EFFORT = "medium"
 REASONING_MAX_COMPLETION_TOKENS = 32768
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV = "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL"
+_REFUSAL_FALLBACK_DISABLED_VALUES = frozenset({"none", "off", "disabled", "false", "0"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
 _ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -969,6 +971,21 @@ def _strict_judge_replies():
         return _judge_retry_policy() == "strict"
     except ValueError:
         return True
+
+
+def _refusal_fallback_target(model):
+    """Return the refusal fallback target for ``model``, or None for no fallback.
+
+    SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL replaces the built-in target; ``none``,
+    ``off``, ``disabled``, ``false`` or ``0`` turns it off. An empty value counts
+    as unset, and a target equal to ``model`` is never sent. Mirrors
+    ``provider_config.anthropic_refusal_fallback_model``.
+    """
+    value = os.environ.get(ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, "").strip()
+    if value.casefold() in _REFUSAL_FALLBACK_DISABLED_VALUES:
+        return None
+    target = value or ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    return None if target == str(model or "").strip() else target
 
 
 def _builtin_refusal_fallback_allowed():
@@ -1953,9 +1970,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
     server_side_fallback = (
-        _is_claude_5_5_or_later(model)
+        _refusal_fallback_target(model)
+        if _is_claude_5_5_or_later(model)
         and urlparse(target_url).hostname == "api.anthropic.com"
         and _builtin_refusal_fallback_allowed()
+        else None
     )
 
     def _build_request(include_schema):
@@ -1978,7 +1997,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
             "anthropic-version": "2023-06-01",
         }
         if server_side_fallback:
-            payload["fallbacks"] = [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]
+            payload["fallbacks"] = [{"model": server_side_fallback}]
             headers["anthropic-beta"] = ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
         return urllib.request.Request(target_url, data=json.dumps(payload).encode(), headers=headers)
 
@@ -2076,12 +2095,25 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+
+
 def _bedrock_refusal_fallback_model(model):
-    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
-    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    """Return the Bedrock refusal fallback ID for a Claude 5.5 or later model, else None.
+
+    A bare name such as ``claude-opus-4-8`` gets the request model's geography
+    prefix. A value that is already a Bedrock ID (``us.anthropic.``,
+    ``global.anthropic.``, ``anthropic.``) is used as given.
+    """
+    prefix = _BEDROCK_ANTHROPIC_PREFIX_RE.match(str(model or ""))
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
-    return prefix.group(0) + ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    target = _refusal_fallback_target(model)
+    if not target:
+        return None
+    bedrock_target = target if _BEDROCK_ANTHROPIC_PREFIX_RE.match(target) else prefix.group(0) + target
+    # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
+    return None if bedrock_target == str(model).strip() else bedrock_target
 
 
 def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):

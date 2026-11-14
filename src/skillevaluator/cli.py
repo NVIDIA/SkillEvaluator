@@ -544,6 +544,15 @@ def _path_is_within(candidate: Path, root: Path) -> bool:
         current = parent
 
 
+def _default_report_output_error(directory: Path, cause: BaseException) -> click.ClickException:
+    """Say why the default report directory was refused and how to choose another."""
+    reason = str(cause).removesuffix(f": {directory}").strip() or type(cause).__name__
+    return click.ClickException(
+        f"Cannot safely reserve default report output directory: {directory} ({reason}). "
+        "Choose a report directory with -o/--output-dir."
+    )
+
+
 def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path:
     """Keep report writes outside the source tree whose identity they describe."""
     if not target_path.is_dir():
@@ -592,7 +601,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
+            raise _default_report_output_error(output_dir, exc) from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -603,7 +612,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
                 mark_generated_output_root(relocated)
                 return relocated
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {relocated}") from exc
+            raise _default_report_output_error(relocated, exc) from exc
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )
@@ -3122,19 +3131,69 @@ validate.help_group_descriptions = {
     default=None,
     help="Also write the harness_compatibility block to this JSON file.",
 )
+@click.option(
+    "--context-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Context window of your model in tokens; some loader limits depend on it (0 = unknown, assume the smallest).",
+)
+@click.option(
+    "--custom-provider",
+    is_flag=True,
+    help="Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for.",
+)
+@click.option(
+    "--explicit-invocation",
+    is_flag=True,
+    help="Skills are activated by an explicit mention (e.g. Codex $skill), not opened by the model.",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="The harness runs non-interactively (e.g. claude -p in CI) with default permissions.",
+)
+@click.option(
+    "--harness-version",
+    "harness_versions",
+    multiple=True,
+    metavar="HARNESS=VERSION",
+    help="The release you run, e.g. codex=0.170.0; a release other than the profile's verified one is flagged.",
+)
 def harness_check(
     target_path: Path,
     harness: str,
     harness_profiles: Path | None,
     verbose: bool,
     json_path: Path | None,
+    context_tokens: int,
+    custom_provider: bool,
+    explicit_invocation: bool,
+    headless: bool,
+    harness_versions: tuple[str, ...],
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
+    from skillevaluator.harness.overlay import profile_names
     from skillevaluator.harness.report import run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
     try:
-        block = run_harness_check(target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose)
+        config = {
+            "context_tokens": context_tokens,
+            "custom_provider": custom_provider,
+            "explicit_invocation": explicit_invocation,
+            "headless": headless,
+            "harness_versions": dict(_split_harness_version(v) for v in harness_versions),
+        }
+        # A version may be given for any harness by its ``harness:`` name; a profile that won't parse can't fail this.
+        known = set(profile_names(harness_profiles))
+        if unknown := sorted(set(config["harness_versions"]) - known):
+            raise click.BadParameter(
+                f"unknown harness {', '.join(unknown)}; choose from {', '.join(sorted(known))}",
+                param_hint="--harness-version",
+            )
+        block = run_harness_check(
+            target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
+        )
     except ValueError as exc:
         raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if not block:
@@ -3150,6 +3209,13 @@ def harness_check(
             )
     if json_path is not None:
         json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
+
+
+def _split_harness_version(value: str) -> tuple[str, str]:
+    name, sep, version = value.partition("=")
+    if not sep or not name.strip() or not version.strip():
+        raise click.BadParameter(f"expected HARNESS=VERSION, got {value!r}", param_hint="--harness-version")
+    return name.strip(), version.strip()
 
 
 @cli.command("quality-check")

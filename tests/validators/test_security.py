@@ -10744,6 +10744,30 @@ class TestSkillspectorMissingReferences:
             ("Run `sh my' 't*/run.sh` now.", "my tools", True),
             ("Run `sh setup\\ z*.sh` to prepare.", "setup helper.sh", False),
             ("Don't overwrite the user's notes in `output/notes.md`.", "evals", False),
+            # A part that holds whitespace is not a Windows short name, so prose
+            # that a shell would join at quotes or apostrophes adds none.
+            ('Keep the summary "roughly ~200 words" in `output/notes.md`.', "results", False),
+            ('Title the summary "Release notes ~v2" in `output/notes.md`.', "results", False),
+            ("Don't exceed ~200 words in the user's `output/notes.md`.", "node_modules", False),
+            ("It's ~5 lines; don't pad `output/notes.md`.", ".git", False),
+            ("It's ~5 lines; don't pad `output/notes.md`.", "install.sh", False),
+            ('Say "it\'s ~3 steps" in `output/notes.md`.', ".git", False),
+            ("Don't exceed ~200 words; it's a summary in `output/notes.md`.", "node_modules", False),
+            ('Say "approx ~10 lines" in `output/notes.md`.', "install.sh", False),
+            ('Say "note: ~5 lines" in `output/notes.md`.', "evals", False),
+            ("Say approx~10 lines in `output/notes.md`.", "install.sh", True),
+            ('Run `sh "NODE_M~1/setup helper.sh"` now.', "node_modules", True),
+            ("Run `sh my' 'NODE_M~1/x` now.", "node_modules", True),
+            # Other expansions in a joined word keep their meaning: "! Bye!" is
+            # a cmd.exe variable, so the word stands for names that start with "hi".
+            ('Say "Hi! Bye!" in `output/notes.md`.', "history.sh", True),
+            ('Say "Hi! Bye!" in `output/notes.md`.', "evals", False),
+            # Each word of a label is a pattern of its own.
+            ("**Step 1:** write `output/notes.md`.", "steps", False),
+            ("**Step 1:** write `output/notes.md`.", "1x", False),
+            ("**Step 1:** write `output/notes.md`.", "nextstep", True),
+            ("**Step 1:** write `output/notes.md`.", "1:x", True),
+            ("**Run the tests:** write `output/notes.md`.", "xrun", True),
             # zsh groups and ranges, bash extended globs, cmd.exe escapes and
             # variables, PowerShell escapes, Windows 8.3 short names and
             # separators, and zsh EXTENDED_GLOB operators.
@@ -10817,6 +10841,22 @@ class TestSkillspectorMissingReferences:
         avoids = _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, references, keys)
 
         assert avoids is not named
+
+    @pytest.mark.parametrize(
+        ("part", "forms"),
+        [
+            ("NODE_M~1", {"NODE_M~1", "NODE_M", "*N*"}),
+            ("_X~1", {"_X~1", "_X", "*"}),
+            ("roughly ~200 words", {"roughly ~200 words", "roughly "}),
+            (" ~5 lines", {" ~5 lines", " "}),
+            ("it\ts~5", {"it\ts~5", "it\ts"}),
+        ],
+    )
+    def test_only_a_part_without_whitespace_may_be_a_short_name(self, part: str, forms: set[str]) -> None:
+        """A Windows short or Samba mangled name never holds whitespace."""
+        from skillevaluator.validators.security import _skillspector_tilde_forms
+
+        assert _skillspector_tilde_forms(part, first=True) == forms
 
     @pytest.mark.parametrize(
         ("pattern", "name", "matches"),

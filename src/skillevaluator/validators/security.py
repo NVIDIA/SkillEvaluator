@@ -2123,9 +2123,11 @@ def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
     share mangles, which stand for a longer name. Each keeps the first
     character of that name after the dots and spaces Windows drops, or ``_``
     for one it cannot keep, so ``*``, that character and ``*`` is a pattern
-    too, and ``*`` when the character is ``_`` or glob syntax. A ``~`` at the
-    start of the first part of a word (*first*) is a home directory and is
-    skipped; one at the start of any other part makes the part ``*``.
+    too, and ``*`` when the character is ``_`` or glob syntax. Such a name
+    never holds whitespace, so a part that does, as a shell reads
+    ``"roughly ~200 words"`` or ``It's ~5 lines; don't``, is not one. A ``~``
+    at the start of the first part of a word (*first*) is a home directory and
+    is skipped; one at the start of any other part makes the part ``*``.
     """
     tilde = part.find("~", 1 if first and part.startswith("~") else 0)
     if tilde < 0:
@@ -2134,7 +2136,7 @@ def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
         return {"*"}
     base = part[:tilde]
     forms = {part, base}
-    if tilde + 1 < len(part):
+    if tilde + 1 < len(part) and _SKILLSPECTOR_NON_SPACE_RUN_RE.fullmatch(part):
         lead = (base[1:] if first and base.startswith("~") else base).lstrip(". ")[:1]
         forms.add(f"*{lead}*" if lead and lead not in "_*?[]\\" else "*")
     return forms
@@ -2248,10 +2250,11 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     Markdown and a shell prompt are read first: a leading list marker ``*``
     is skipped, and so is a ``$`` before whitespace or the end of the line,
     which a shell keeps as written. A bold or italic label outside code, such
-    as ``**Note:**``, is read as its text, and its words with their ``*`` are
-    also read without the split at ``=``, ``:`` and ``,``
-    (:func:`_skillspector_markdown_labels`), so ``**Note:**`` stands only for
-    names that hold ``note:``. Any other wildcard keeps its meaning, so
+    as ``**Note:**``, is read as its text, and each of its words, with its
+    ``*``, is also a pattern that is not split at ``=``, ``:`` or ``,``
+    (:func:`_skillspector_markdown_labels`). So ``**Note:**`` stands only for
+    names that hold ``note:``, and ``**Step 1:**`` for names that end in
+    ``step`` or start with ``1:``. Any other wildcard keeps its meaning, so
     ``bash *`` or ``--include=*`` may name every uninspected file.
     """
     split_words: set[str] = set()

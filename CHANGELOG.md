@@ -247,6 +247,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
+  calls. Codex passes its patch as a single `input` argument, which the write
+  evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
+  entry and its contents survived only in the compact tool history -- the
+  section budgeted last, and so the first dropped when the bundle is trimmed.
+  The helpers now take the changed paths from the patch's `Add File`,
+  `Update File` and `Delete File` headers, naming every file a multi-file patch
+  touches rather than letting the first stand for the rest, and keep the patch
+  text itself as the write body. A headerless or malformed `input` is left
+  alone, so a shell source string is not reported as a file change.
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider

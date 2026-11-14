@@ -414,9 +414,12 @@ def test_narrowed_tier1_lineup_declaration_cannot_waive_checks(tmp_path: Path, d
 
 def test_publication_tier1_lineup_matches_the_default_validation_run() -> None:
     from skillevaluator.publication_evidence import TIER1_PUBLICATION_CORE_CHECKS, TIER1_PUBLICATION_SKILL_CHECKS
-    from skillevaluator.tier1.commands import DEFAULT_CHECKS
+    from skillevaluator.tier1.commands import ADVISORY_CHECKS, DEFAULT_CHECKS
 
-    assert frozenset(DEFAULT_CHECKS) == TIER1_PUBLICATION_CORE_CHECKS | TIER1_PUBLICATION_SKILL_CHECKS
+    assert (
+        frozenset(DEFAULT_CHECKS) - frozenset(ADVISORY_CHECKS)
+        == TIER1_PUBLICATION_CORE_CHECKS | TIER1_PUBLICATION_SKILL_CHECKS
+    )
 
 
 def test_scan_gap_detection_reports_certified_paths_that_tier1_skips(tmp_path: Path) -> None:

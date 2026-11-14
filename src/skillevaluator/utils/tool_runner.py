@@ -237,6 +237,10 @@ class ExternalTool:
         if self._configuration_error:
             return self._configuration_error
         bundled_scanner_hint = (
+            "Bundled with SkillEvaluator — reinstall with: "
+            'uv tool install --reinstall "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
+        )
+        security_extra_hint = (
             "Bundled with the security extra — reinstall with: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
@@ -244,7 +248,7 @@ class ExternalTool:
             "gitleaks": (
                 "Install with: brew install gitleaks (macOS) or go install github.com/gitleaks/gitleaks/v8@latest"
             ),
-            "pip-audit": bundled_scanner_hint,
+            "pip-audit": security_extra_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
             "semgrep": "Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep",

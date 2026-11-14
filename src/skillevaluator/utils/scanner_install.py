@@ -23,12 +23,12 @@ import urllib.request
 from pathlib import Path
 from types import MappingProxyType
 
-SKILLSPECTOR_VERSION = "2.13.3"
+SKILLSPECTOR_VERSION = "2.13.4"
 SKILLSPECTOR_WHEEL = f"skillspector-{SKILLSPECTOR_VERSION}-py3-none-any.whl"
 SKILLSPECTOR_WHEEL_URL = (
     f"https://github.com/NVIDIA/SkillSpector/releases/download/v{SKILLSPECTOR_VERSION}/{SKILLSPECTOR_WHEEL}"
 )
-SKILLSPECTOR_WHEEL_SHA256 = "a421dffba5e0f966bf1baf8acd77f4750a8ece0afc5520ecf49252b4004a8577"
+SKILLSPECTOR_WHEEL_SHA256 = "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0"
 GITLEAKS_VERSION = "8.30.0"
 
 _GITLEAKS_SHA256 = MappingProxyType(

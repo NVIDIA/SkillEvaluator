@@ -6,17 +6,27 @@
 # Shared by public and private repositories. This policy governs finding
 # severity and author validation, not repository visibility or report hosting.
 # The CLI accepts "external" as a compatibility alias for this same policy.
+#
+# The Agent Skills baseline requires only `name` and `description`, so author
+# attribution and a stable `metadata.id` are advisory here. Registries with a
+# publication contract can use the bundled `registry` profile or an overlay.
 
 profile: default
 
 identity:
-  # Disable domain restriction. The author shape (Name <email@host>) is
-  # still validated by the schema validator, independent of this regex.
+  # Disable domain restriction. A present author value is still checked for a
+  # well-formed shape, independent of this regex.
   author_email_regex: null
+  # ignore | recommend | require. A present metadata.id is validated in every
+  # mode; invalid or duplicate IDs block only under `require`.
+  metadata_id_requirement: ignore
 
 severity_overrides:
-  # Schema / repository governance
-  SCHEMA.author_missing: high
+  # Schema / repository governance. A missing author, or a person, team, or
+  # organization name without an email address, is advisory. A malformed or
+  # unsafe value (for example a bare email or stray angle brackets) blocks.
+  SCHEMA.author_missing: low
+  SCHEMA.author_without_email: info
   SCHEMA.author_format: high
 
   # Workflows

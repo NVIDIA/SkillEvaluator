@@ -295,7 +295,7 @@ def test_template_no_reference_main_writes_numeric_reward_and_rich_na(tmp_path, 
         "load_trajectory_with_fallback",
         lambda *_args: ({"steps": [{"source": "agent", "message": "done"}]}, {"source": "trajectory.json"}),
     )
-    monkeypatch.setattr(verifier, "check_security", lambda *_a: {"score": 1.0})
+    monkeypatch.setattr(verifier, "check_security", lambda *_a, **_k: {"score": 1.0})
     monkeypatch.setattr(verifier, "REWARD_JSON", tmp_path / "reward.json")
     monkeypatch.setattr(verifier, "REWARD_TXT", tmp_path / "reward.txt")
     monkeypatch.setattr(verifier, "SKILL_EVALUATOR_REWARD_JSON", tmp_path / "skill_evaluator_reward.json")
@@ -320,7 +320,7 @@ def _template_verifier(tmp_path, monkeypatch, entry, *, trajectory=True, judges=
     )
     monkeypatch.setattr(verifier, "ENTRY_PATH", entry_path)
     monkeypatch.setattr(verifier, "load_trajectory_with_fallback", lambda *_args: loaded)
-    monkeypatch.setattr(verifier, "check_security", lambda *_a: {"score": 1.0})
+    monkeypatch.setattr(verifier, "check_security", lambda *_a, **_k: {"score": 1.0})
     monkeypatch.setattr(verifier, "REWARD_JSON", tmp_path / "reward.json")
     monkeypatch.setattr(verifier, "REWARD_TXT", tmp_path / "reward.txt")
     monkeypatch.setattr(verifier, "SKILL_EVALUATOR_REWARD_JSON", tmp_path / "skill_evaluator_reward.json")

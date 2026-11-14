@@ -346,6 +346,48 @@ class ValidationSummary:
         }
 
 
+
+
+def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = None) -> Finding:
+    """Copy *finding* with *prefix* applied to every location it names.
+
+    Used when a sub-result is folded into a parent result (a skill inside a
+    collection, a rule inside a rules file) so a reader can still tell which
+    member each finding came from. *extra_metadata* is merged on top, for a
+    caller that can also name the member in a machine-readable field.
+    """
+    metadata = finding.metadata
+    for key in ("occurrences", "skillspector_occurrences"):
+        listed = metadata.get(key) if isinstance(metadata, dict) else None
+        if not isinstance(listed, list):
+            continue
+        # A check that folds repeats (the PII scan) lists each location
+        # in metadata, and a SkillSpector AE1 finding lists the lines
+        # that name its file; prefix those like file_path so the
+        # finding's own location still matches its first listed one.
+        metadata = {
+            **metadata,
+            key: [
+                {**item, "file": f"[{prefix}] {item['file']}"}
+                if isinstance(item, dict) and isinstance(item.get("file"), str)
+                else item
+                for item in listed
+            ],
+        }
+    if extra_metadata:
+        metadata = {**metadata, **extra_metadata} if isinstance(metadata, dict) else dict(extra_metadata)
+    return Finding(
+        category=finding.category,
+        severity=finding.severity,
+        check_name=finding.check_name,
+        message=finding.message,
+        file_path=f"[{prefix}] {finding.file_path}",
+        line_number=finding.line_number,
+        line_content=finding.line_content,
+        suggestion=finding.suggestion,
+        metadata=metadata,
+    )
+
 @dataclass
 class ValidationResult:
     """Aggregates validation outcomes from a validator.
@@ -691,36 +733,7 @@ class ValidationResult:
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
-            metadata = finding.metadata
-            for key in ("occurrences", "skillspector_occurrences"):
-                listed = metadata.get(key) if isinstance(metadata, dict) else None
-                if not isinstance(listed, list):
-                    continue
-                # A check that folds repeats (the PII scan) lists each location
-                # in metadata, and a SkillSpector AE1 finding lists the lines
-                # that name its file; prefix those like file_path so the
-                # finding's own location still matches its first listed one.
-                metadata = {
-                    **metadata,
-                    key: [
-                        {**item, "file": f"[{prefix}] {item['file']}"}
-                        if isinstance(item, dict) and isinstance(item.get("file"), str)
-                        else item
-                        for item in listed
-                    ],
-                }
-            prefixed_finding = Finding(
-                category=finding.category,
-                severity=finding.severity,
-                check_name=finding.check_name,
-                message=finding.message,
-                file_path=f"[{prefix}] {finding.file_path}",
-                line_number=finding.line_number,
-                line_content=finding.line_content,
-                suggestion=finding.suggestion,
-                metadata=metadata,
-            )
-            self.findings.append(prefixed_finding)
+            self.findings.append(prefix_finding(finding, prefix))
 
         # Carry over success_details (prefixed) so contributor info is preserved
         for detail in other.success_details:
@@ -739,9 +752,45 @@ class ValidationResult:
             self.metadata["gate_failures"] = gate_failures
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
+        # Keep each skill's unparsed files, prefixed like errors and findings so
+        # skills stay distinguishable when a folder holds several.
+        unparsed = other.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed, list) and unparsed:
+            carried = self.metadata.get("semgrep_unparsed_files")
+            self.metadata["semgrep_unparsed_files"] = [
+                *(carried if isinstance(carried, list) else []),
+                *(f"[{prefix}] {path}" for path in unparsed if isinstance(path, str)),
+            ]
+        omitted = other.metadata.get("semgrep_unparsed_files_omitted")
+        if type(omitted) is int and omitted > 0:
+            carried_omitted = self.metadata.get("semgrep_unparsed_files_omitted")
+            self.metadata["semgrep_unparsed_files_omitted"] = omitted + (
+                carried_omitted if type(carried_omitted) is int else 0
+            )
 
         # Merge summary
         self.summary.errors += other.summary.errors
+        self.summary.warnings += other.summary.warnings
+
+    def merge_advisories_with_prefix(self, other: ValidationResult, prefix: str) -> None:
+        """Carry a *passing* sub-result's nonblocking findings into this one.
+
+        ``merge_with_prefix`` is for a sub-result that failed. A member can
+        pass and still report advisories (INFO/LOW/MEDIUM findings such as
+        ``author_without_email`` or ``metadata_id_format``), and those are
+        exactly what a collection run is expected to surface.
+
+        This never touches ``passed``: an advisory from a passing member stays
+        advisory and cannot fail the collection. The member is named both in
+        the finding's location and in ``metadata.collection_skill``, so a
+        consumer does not have to parse the ``[prefix]`` location to tell
+        where the finding came from.
+        """
+        for finding in other.findings:
+            self.findings.append(prefix_finding(finding, prefix, {"collection_skill": prefix}))
+            self.summary.tally_severity(finding.severity)
+        for warning in other.warnings:
+            self.warnings.append(f"[{prefix}] {warning}")
         self.summary.warnings += other.summary.warnings
 
     def to_dict(self) -> dict:

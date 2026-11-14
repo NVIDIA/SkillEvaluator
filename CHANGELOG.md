@@ -12,6 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
   comment helpers, and needs no Pages configuration or history branch. Future
   generated bundles include the template; archived bundles and the released
   onboarding CLI retain their existing hosted publisher setup.
+- `harness` rules for harness gates: Hermes `platforms` and OpenClaw
+  `metadata.openclaw.requires`.
 - `harness` rules for invocation fields: `disable-model-invocation`, Codex's
   `agents/openai.yaml` policy, `allowed-tools`, Claude Code-only fields and Hermes
   project trust. Tier 1 `schema` now reports fields outside the agentskills.io

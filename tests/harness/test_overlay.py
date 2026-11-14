@@ -858,6 +858,41 @@ def test_cli_harness_version_flag(tmp_path: Path):
     assert "0.170.0" in result.output
 
 
+def test_harness_check_ignores_a_malformed_profile_for_an_unselected_harness(tmp_path: Path):
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "codex.yaml").write_text((PROFILES_DIR / "codex.yaml").read_text(encoding="utf-8"), encoding="utf-8")
+    (profiles / "custom.yaml").write_text("harness: [unclosed\n", encoding="utf-8")
+    skill = _skill(tmp_path)
+
+    result = CliRunner().invoke(
+        cli,
+        ["harness-check", str(skill), "--harness", "codex", "--harness-profiles", str(profiles)],
+    )
+    assert result.exit_code == 0, result.output
+
+    # A version for the unselected-but-present harness is still accepted; a made-up name is still a usage error.
+    ok = CliRunner().invoke(
+        cli,
+        [
+            "harness-check",
+            str(skill),
+            "--harness",
+            "codex",
+            "--harness-profiles",
+            str(profiles),
+            "--harness-version",
+            "custom=1.0",
+        ],
+    )
+    assert ok.exit_code == 0, ok.output
+    bad = CliRunner().invoke(
+        cli,
+        ["harness-check", str(skill), "--harness", "nope", "--harness-profiles", str(profiles)],
+    )
+    assert bad.exit_code == 2 and "Unknown harness: nope" in bad.output
+
+
 def test_harness_note_names_the_skill_not_the_harness():
     block = {
         "a": [{"harness": "codex", "status": "not_loaded"}, {"harness": "hermes", "status": "degraded"}],

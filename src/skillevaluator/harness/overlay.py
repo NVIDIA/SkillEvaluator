@@ -102,6 +102,11 @@ class HarnessResult:
         }
 
 
+def profile_names(profiles_dir: Path | None = None) -> list[str]:
+    """Names of the profiles in a directory, without parsing any of them."""
+    return [p.stem for p in sorted((profiles_dir or PROFILES_DIR).glob("*.yaml"))]
+
+
 def load_profiles(names: str | list[str] = "all", profiles_dir: Path | None = None) -> list[dict[str, Any]]:
     """Load profiles by name (comma list or ``all``); unknown names raise ``ValueError``."""
     directory = profiles_dir or PROFILES_DIR

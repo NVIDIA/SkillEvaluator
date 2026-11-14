@@ -3147,7 +3147,7 @@ def harness_check(
     harness_versions: tuple[str, ...],
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
-    from skillevaluator.harness import load_profiles
+    from skillevaluator.harness.overlay import profile_names
     from skillevaluator.harness.report import run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
@@ -3159,7 +3159,8 @@ def harness_check(
             "headless": headless,
             "harness_versions": dict(_split_harness_version(v) for v in harness_versions),
         }
-        known = {p["harness"] for p in load_profiles("all", harness_profiles)}
+        # Names only: a version may be given for any harness, but only the selected profiles get parsed.
+        known = set(profile_names(harness_profiles))
         if unknown := sorted(set(config["harness_versions"]) - known):
             raise click.BadParameter(
                 f"unknown harness {', '.join(unknown)}; choose from {', '.join(sorted(known))}",

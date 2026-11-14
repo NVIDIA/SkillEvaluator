@@ -92,8 +92,9 @@ def test_default_autopilot_receives_skill_directory_for_file_input(monkeypatch, 
     marker = skill / "SKILL.md"
     marker.write_text("---\nname: file-input\ndescription: Test skill\n---\n")
     calls = []
-    monkeypatch.setattr(cli_module, "run_validation", lambda *_a, **_kw: [])
-    monkeypatch.setattr(cli_module, "_run_dedup_or_skip", lambda *_a, **_kw: [])
+    # Every tier receives the skill directory, not the SKILL.md argument.
+    monkeypatch.setattr(cli_module, "run_validation", lambda path, **_kw: calls.append(path) or [])
+    monkeypatch.setattr(cli_module, "_run_dedup_or_skip", lambda path: calls.append(path) or [])
     monkeypatch.setattr(cli_module, "_ensure_autopilot_dataset", lambda path, **_kw: calls.append(path))
 
     def evaluate(path, **kwargs):
@@ -113,7 +114,7 @@ def test_default_autopilot_receives_skill_directory_for_file_input(monkeypatch, 
         cli_module.cli, ["validate", str(marker), "-r", "json", "-o", str(tmp_path / "reports")]
     )
     assert result.exit_code == 0, result.output
-    assert calls == [skill, skill]
+    assert calls == [skill, skill, skill, skill]
     report = json.loads(next((tmp_path / "reports").glob("*.json")).read_text())
     assert report["tier3_applicability"]["source_kind"] == "native_harbor"
 

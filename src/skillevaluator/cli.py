@@ -2573,6 +2573,7 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    requested_path = target_path
     if harness:
         from skillevaluator.harness import load_profiles
 
@@ -2622,6 +2623,21 @@ def validate(
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as it already
+    # does for Tier 3, so every tier, the report names, and the default report location
+    # match the directory form. Take the folder from the path as given: resolving first
+    # would move a linked manifest to the folder its link points into. That folder is
+    # now the Tier 2 root, so refuse a linked one as the directory form does.
+    from skillevaluator.constants import SKILL_MANIFEST_FILE, WORKFLOWS_MANIFEST_FILE
+
+    if target_path.is_file() and (
+        (resolved_type == CONTENT_TYPE_SKILL and requested_path.name.upper() == SKILL_MANIFEST_FILE.upper())
+        or (resolved_type == CONTENT_TYPE_WORKFLOWS and requested_path.name == WORKFLOWS_MANIFEST_FILE)
+    ):
+        if dedup:
+            _reject_linked_tier2_root(requested_path.absolute().parent)
+        target_path = requested_path.absolute().parent.resolve()
+        publication_name = publication_target_name(target_path) or target_path.name
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still

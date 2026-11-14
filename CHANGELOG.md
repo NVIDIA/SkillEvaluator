@@ -71,10 +71,12 @@ All notable changes to SkillEvaluator are documented in this file.
   SkillSpector gives, such as
   `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
   and the finding's metadata records them under `skillspector_evidence` and
-  `skillspector_occurrences`. The suggestion leaves out the run time and the
-  time budget (`observed_seconds`, `limit_seconds`), which differ from run to
-  run, so a finding keeps its `finding_id` from run to run; because the
-  suggestion text is new, each AE1 `finding_id` changes once with this release.
+  `skillspector_occurrences`, whose reference lines name the skill's
+  directory in a plugin, like the finding's own path. The suggestion leaves out
+  the run time and the time budget (`observed_seconds`, `limit_seconds`),
+  which differ from run to run, so a finding keeps its `finding_id` from run
+  to run; because the suggestion text is new, each AE1 `finding_id` changes
+  once with this release.
   Before, the finding said only
   `Referenced artifact was not completely inspected`, and its reason had to be
   matched by hand against the incomplete-analysis error, which lists at most
@@ -387,10 +389,12 @@ All notable changes to SkillEvaluator are documented in this file.
   folder or plugin, still records the SkillSpector scan as incomplete
   (`incomplete_scans` in the JSON report, and publication eligibility
   `Incomplete`), with an error that names only that gap. The check itself is
-  reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed
-  failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
-  a `static_parse_limit` row on the manifest, so that scan is recorded as
-  incomplete in the same way.
+  reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate
+  failure are a confirmed failure, also when a `--policy` override lowers the
+  Critical, and the final line of the compact `validate` view says that the
+  check failed, not that it didn't run. With SkillSpector v2.13.4, a hook with
+  a `"timeout"` key also gets a `static_parse_limit` row on the manifest, so
+  that scan is recorded as incomplete in the same way.
 
 - `validate` no longer repeats its header box in short terminal windows or
   when a log warning prints mid-run. Only the tier that is still running is

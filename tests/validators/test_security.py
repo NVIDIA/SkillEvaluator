@@ -23,6 +23,7 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.schema import SchemaValidator
 from skillevaluator.validators.security import (
     SecurityValidator,
@@ -11190,6 +11191,26 @@ def _high_checks(result: ValidationResult) -> list[str]:
     return sorted(finding.check_name for finding in result.findings if finding.severity == Severity.HIGH)
 
 
+def _override_notes_report(version: str) -> dict:
+    """The captured 2.13.4 report of the override notes skill; other versions report it as ``partial``."""
+    payload = _reference_report("2.13.4", "instruction-override-and-missing")
+    if version != "2.13.4":
+        payload["metadata"]["skillspector_version"] = version
+        payload["analysis_completeness"].update({"status": "partial", "is_complete": False})
+    return payload
+
+
+def _override_notes_folder_error(version: str) -> str:
+    """The error that says why the override notes skill in a folder is ``INCOMPLETE``."""
+    labels = "SKILL.md:12 [reference_resolution; reference_missing]"
+    if version == "2.13.4":
+        return f"[override-notes] {_caveat_error(labels)}"
+    return (
+        "[override-notes] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+        f"(status 'partial'): {labels}; security scan did not complete" + _REFERENCE_REJECTION_HELP
+    )
+
+
 class TestSkillspectorCompleteWithCaveats:
     """SkillSpector 2.13.4 reports an analysis whose only gaps are missing references as ``complete_with_caveats``."""
 
@@ -11736,10 +11757,6 @@ class TestSkillspectorCompleteWithCaveats:
         skill = _write_skill(
             root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
         )
-        payload = _reference_report("2.13.4", "instruction-override-and-missing")
-        if version != "2.13.4":
-            payload["metadata"]["skillspector_version"] = version
-            payload["analysis_completeness"].update({"status": "partial", "is_complete": False})
         verdict = {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
 
         with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
@@ -11749,7 +11766,7 @@ class TestSkillspectorCompleteWithCaveats:
             result = _validate_skillspector_payload(
                 mock_tools,
                 skill if target == "skill" else root,
-                payload,
+                _override_notes_report(version),
                 exit_code=1,
                 validator=SecurityValidator(use_llm=False, verify_llm=True),
             )
@@ -11764,15 +11781,43 @@ class TestSkillspectorCompleteWithCaveats:
         else:
             assert result.status == "incomplete"
             assert result.incomplete_scans == ["skillspector"]
-            labels = "SKILL.md:12 [reference_resolution; reference_missing]"
-            if version == "2.13.4":
-                error = _caveat_error(labels)
-            else:
-                error = (
-                    "skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-                    f"(status 'partial'): {labels}; security scan did not complete" + _REFERENCE_REJECTION_HELP
-                )
-            assert result.errors == [f"[override-notes] {error}"]
+            assert result.errors == [_override_notes_folder_error(version)]
+
+    @pytest.mark.parametrize("target", ["skill", "folder"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_policy_override_keeps_the_messages_no_finding_repeats(
+        self, mock_tools, tmp_path: Path, version: str, target: str
+    ) -> None:
+        """A severity override rebuilds the result from its findings, as an ``--llm-verify`` downgrade does.
+
+        The accepted missing-reference warning of a skill, and the error that
+        says why the same skill in a folder is ``INCOMPLETE``, both stay. The
+        ``partial`` error of 2.12.0 is a gate failure, which the rebuild keeps
+        on its own; it is still listed once.
+        """
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
+        )
+        result = _validate_skillspector_payload(
+            mock_tools, skill if target == "skill" else root, _override_notes_report(version), exit_code=1
+        )
+        assert len(_high_checks(result)) == 3
+
+        apply_policy([result], ValidationPolicy(severity_overrides={"SECURITY.*": Severity.LOW}))
+
+        assert not _high_checks(result)
+        if target == "skill":
+            assert result.status == "passed"
+            assert result.errors == []
+            warning = _missing_reference_warning("SKILL.md:12 [reference_resolution; reference_missing]")
+            assert result.warnings.count(warning) == 1
+        else:
+            assert result.status == "incomplete"
+            assert result.incomplete_scans == ["skillspector"]
+            assert result.errors == [_override_notes_folder_error(version)]
+            assert result.summary.errors == 1
 
     @pytest.mark.parametrize(
         ("case", "labels"),

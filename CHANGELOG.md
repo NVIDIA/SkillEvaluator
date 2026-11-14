@@ -546,7 +546,8 @@ All notable changes to SkillEvaluator are documented in this file.
   also a plugin is judged against the folder, as with one worker, so a line
   naming a file elsewhere in the folder keeps it `INCOMPLETE`. An
   `--llm-verify` downgrade no longer drops the accepted missing-reference
-  warning, or the error that says why a scan is `INCOMPLETE`.
+  warning, or the error that says why a scan is `INCOMPLETE`. A severity
+  override from `--policy` or `--profile` no longer drops that error either.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded

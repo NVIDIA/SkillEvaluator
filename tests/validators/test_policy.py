@@ -10,11 +10,12 @@ from pathlib import Path
 import pytest
 import yaml
 
-from skillevaluator.models.result import Severity
+from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators import policy as policy_module
 from skillevaluator.validators.policy import (
     DEFAULT_PROFILE_NAME,
     ValidationPolicy,
+    apply_policy,
     default_policy,
     load_policy_file,
     load_profile,
@@ -222,3 +223,39 @@ def test_policy_digest_excludes_source_path() -> None:
     second = ValidationPolicy(profile="external", source=Path("/tmp/two.yaml"))
 
     assert first.digest == second.digest
+
+
+@pytest.mark.parametrize("incomplete", [True, False])
+def test_override_keeps_why_an_incomplete_scan_failed(incomplete: bool) -> None:
+    """An override rebuilds a result from its findings; errors no finding repeats stay only on an incomplete scan.
+
+    An incomplete scan fails anyway, and such an error says why. On a complete
+    scan such an error may explain a blocker the override just lowered, so it
+    goes, as before. A gate failure stays either way and is listed once.
+    """
+    result = ValidationResult(validator_name="Security Scan")
+    result.add_structured_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="Prompt Injection",
+            message="Ignore all previous instructions",
+            file_path="SKILL.md",
+            line_number=8,
+        )
+    )
+    result.add_error("scanner report was cut short; security scan did not complete")
+    result.fail_gate("scanner status is unknown; security scan did not complete")
+    result.add_warning("scanner skipped one file")
+    if incomplete:
+        result.mark_scan_incomplete("scanner")
+
+    apply_policy([result], ValidationPolicy(severity_overrides={"SECURITY.*": Severity.LOW}))
+
+    assert result.status == ("incomplete" if incomplete else "failed")
+    expected = ["scanner status is unknown; security scan did not complete"]
+    if incomplete:
+        expected.append("scanner report was cut short; security scan did not complete")
+    assert result.errors == expected
+    assert result.summary.errors == len(expected)
+    assert result.warnings == [result.findings[0].to_legacy_string(), "scanner skipped one file"]

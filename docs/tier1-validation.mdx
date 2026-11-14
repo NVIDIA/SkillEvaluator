@@ -203,7 +203,8 @@ Precedence, highest to lowest: `--policy` overlay, `--profile` flag, `SKILLEVALU
 
   Severity overrides change how findings gate a run; they do not change the
   quality score or waive its `--min-score` requirement. Even an override of
-  `QUALITY.*: info` leaves a below-minimum quality score failing.
+  `QUALITY.*: info` leaves a below-minimum quality score failing. Nor do they
+  complete an `INCOMPLETE` scan, whose report keeps the error that says why.
 </Accordion>
 
 <Accordion title="Permit reviewed ownership contacts without allowing other email addresses">

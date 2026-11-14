@@ -159,6 +159,58 @@ def test_normalized_gym_jobs_are_read_by_shared_collector(tmp_path: Path) -> Non
     assert agent["scored_attempts"]
 
 
+def test_an_unscored_gym_attempt_of_a_native_task_counts_its_tokens_in_its_case(tmp_path: Path) -> None:
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.tier3.harbor.report_data import load_agent_data
+
+    # The native task ``login-task`` sets its own ``[metadata] entry_id``.
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    for arm in ("with", "without"):
+        task = out / "_harbor-tasks" / "codex" / arm / "login-task"
+        task.mkdir(parents=True)
+        (task / "task.toml").write_text(
+            f'[task]\nname = "nvidia/login-task-{arm}-skill"\n\n[metadata]\nentry_id = "auth-login"\n',
+            encoding="utf-8",
+        )
+        rows = [_rollout(tmp_path / arm, "login-task", 1, 0.8), _rollout(tmp_path / arm, "login-task", 2, None)]
+        for row, (prompt, completion) in zip(rows, ((1000, 100), (14000, 100)), strict=True):
+            trajectory = {
+                "schema_version": "ATIF-v1.4",
+                "session_id": "session-1",
+                "agent": {"name": "codex", "version": "1"},
+                "steps": [{"step_id": 1, "source": "user", "message": "Fix the login."}],
+                "final_metrics": {"total_prompt_tokens": prompt, "total_completion_tokens": completion},
+            }
+            (Path(row["verifier_logs_dir"]) / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+        write_job_from_rollouts(
+            rows,
+            jobs / f"demo-codex-{arm}",
+            eval_name="codex__m",
+            task_case_ids={"login-task": "auth-login"},
+            n_attempts=2,
+        )
+
+    collect_harbor_results(
+        "demo",
+        ["codex"],
+        out,
+        jobs,
+        n_attempts=2,
+        expected_cases=1,
+        expected_case_ids=["auth-login"],
+        expected_trials=2,
+    )
+
+    for variant in ("with-skill", "without-skill"):
+        failure_file = out / "codex" / variant / "trials" / "login-task__gym002" / "failure.json"
+        assert json.loads(failure_file.read_text(encoding="utf-8"))["entry_id"] == "auth-login"
+    usage = build_agent_eval_payload("demo", load_agent_data(out), use_llm_judge=False)["token_usage"]
+    [case] = usage["agents"]["codex"]["cases"]
+    assert case["entry_id"] == "auth-login"
+    for arm in ("with_skill", "baseline"):
+        assert (case[arm]["totals"]["total_tokens"], case[arm]["coverage"]["unscored_attempts"]) == (15200, 1)
+
+
 def _evaluate(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, **overrides):
     from skillevaluator.provider_config import ProviderConfig
     from skillevaluator.tier3 import commands as tier3_commands

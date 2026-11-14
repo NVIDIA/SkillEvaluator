@@ -264,6 +264,16 @@ All notable changes to SkillEvaluator are documented in this file.
   of exporting display defaults. Plugin evidence accompanies standalone HTML
   JSON snapshots, and retained optional-skip metadata survives JSON round trips.
 
+- The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
+  calls. Codex passes its patch as a single `input` argument, which the write
+  evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
+  entry and its contents survived only in the compact tool history -- the
+  section budgeted last, and so the first dropped when the bundle is trimmed.
+  The helpers now take the changed paths from the patch's `Add File`,
+  `Update File` and `Delete File` headers, naming every file a multi-file patch
+  touches rather than letting the first stand for the rest, and keep the patch
+  text itself as the write body. A headerless or malformed `input` is left
+  alone, so a shell source string is not reported as a file change.
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider
@@ -357,6 +367,22 @@ All notable changes to SkillEvaluator are documented in this file.
   user-request section when it is set below 2,000, and that a check budget too
   small to hold the final response beside some tool history is logged as a
   warning rather than quietly raised — lower the final-response limit with it.
+- `judge_attempts.json` now masks `Cookie` header values, credential flag values
+  (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
+  `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
+  replies. A line break there is the two characters `\n`, and these values were
+  saved in clear after it or after an escaped tab (`\t`). That includes the
+  value on a line whose flag or header name was masked together with an unquoted
+  credential value that ends the line before and reads on through the escape
+  (`--password ...\n--token ...`). Only that value is masked; other copies of it
+  in the text stay as they were. Judge and security finding evidence also masks
+  a double-quoted `-u user:password`, MySQL `-p` or `.netrc` password value, and
+  the value in an argv list such as `["tool", "--password", "..."]`, when JSON
+  escapes the quotes (`\"...\"`), as in the tool-call arguments every judge
+  prompt holds; these were saved in clear.
+  A RAGAS `replied` entry for a reply with no text and no tool call, such as a
+  refusal or a content-filter stop, now saves the whole reply body instead of an
+  empty reply.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -386,6 +412,20 @@ All notable changes to SkillEvaluator are documented in this file.
   case names receive the same Markdown escaping, publication-label masking and
   terminal secret redaction as visible rows, before their displayed length is
   bounded.
+- Tier 3 token usage per case, per agent and over all agents now counts each
+  attempt in the case it belongs to. An unscored attempt of a native task whose
+  `[metadata] entry_id` differs from its directory joins that case's row
+  instead of a row of its own; the collector records the case in the attempt's
+  `failure.json`. A scored attempt whose trajectory recorded an invalid cache
+  counter is no longer counted with 0 cached tokens: it adds no tokens, and
+  the trial names the counter in `invalid_token_counters`. A case that a run
+  budget cut short expects only the attempts the budget admitted, so its row
+  is no longer partial with missing attempts. `tier3 evaluate` prints the
+  agent token sums for a run whose arms all failed, and once the report
+  payload left the case rows out, the terminal tables say that no report has
+  them instead of naming the report files. `tier3 evaluate` names only the
+  reports the run wrote, so a NeMo Gym run no longer points at a
+  `tier3-benchmark.md` it never writes.
 - The Tier 3 security scan no longer scores an agent clearing its own output
   directory as a destructive command. One literal, recursive and forced `rm` of
   a path inside `/workspace/output` or an output directory established by the
@@ -591,6 +631,27 @@ All notable changes to SkillEvaluator are documented in this file.
   ownership key, for example from containers that each start with a fresh
   home directory. The refusal itself is unchanged, and `docs/reports.mdx`
   explains it.
+- When the terminal refuses one of the plan lines printed before the
+  interactive Tier 3 progress view's table first appears, such as a write that
+  would block, a line now says that the run continues, as when drawing the
+  table fails. When the terminal still refuses writes then, the line saying
+  that the run went on is printed instead, when the run ends, so only one of
+  the two appears. When the terminal takes the writes before that line and
+  refuses only the line itself, a stream that keeps what the terminal refused,
+  as standard error does, sends that line when the run ends in place of the
+  later one. Before, progress turned off with no notice, and the refused line
+  was printed again with the next run's plan. After a refused table update,
+  standard error printed both lines when the terminal then refused the line
+  saying that the run continues. The view also no longer keeps its own copy of
+  output the terminal still refuses when the run ends, such as the final
+  table, and sends it with the next run on the same reporter, where it could
+  erase the lines printed between the runs. A stream that keeps what the
+  terminal refused, as standard error does, can still send it later, and a
+  final table sent then can still erase those lines. A running stage's spinner
+  in that view now moves on one frame with each redraw, at least once a second
+  by default, instead of staying on its first frame. These follow the 0.9.0
+  Fixed entry that starts "The interactive Tier 3 progress view
+  (`--progress rich`, or `auto` in a terminal) now keeps one height".
 
 ## 0.9.0 - 2026-11-13
 

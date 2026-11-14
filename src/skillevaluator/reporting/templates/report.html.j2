@@ -57,6 +57,10 @@
                                         <span class="t3-insight-source insight-source-{{ source }}">{{ source }}</span>
                                     </div>
                                     <div class="t3-sug-body">{{ reco.message }}</div>
+                                    {% if reco.problem %}
+                                    {% if reco.problem_in_diagnostics %}<a class="t3-evidence-link" href="#tier3-execution-errors">Recorded problem in Diagnostics</a>
+                                    {% else %}<details class="t3-eval-evidence"><summary>Recorded problem</summary><p class="t3-dim-hint">{{ reco.problem }}</p></details>{% endif %}
+                                    {% endif %}
                                     {% if reco.check %}<p class="t3-dim-hint">Check: {{ reco.check }}</p>{% endif %}
                                     {% if reco.insight_kind == 'execution_action' %}<p class="t3-dim-hint">Scope: {{ reco.metric or 'evaluation' }}{% if reco.agent %} · Agent: {{ reco.agent }}{% endif %}{% if reco.case_id or reco.case %} · Case: {{ reco.case_id or reco.case }}{% endif %}{% if reco.condition %} · Condition: {{ reco.condition }}{% endif %}{% if reco.strength %} · Strength: {{ reco.strength }}{% endif %}</p>{% endif %}
                                     {{ insight_plain_evidence(reco.evidence_text) }}

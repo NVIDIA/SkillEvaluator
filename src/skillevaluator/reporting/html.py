@@ -1416,7 +1416,7 @@ def _unrepresented_insight_steps(view: dict[str, Any], *, failed: bool) -> list[
         target = step.get("target") or "agent_eval"
         if target != card.get("metric"):
             return False
-        for field in ("check", "strength", "agent", "case", "case_id", "condition"):
+        for field in ("problem", "check", "strength", "agent", "case", "case_id", "condition"):
             if (step.get(field) or "") != (card.get(field) or ""):
                 return False
         return (step.get("evidence") or "") == (card.get("evidence_text") or card.get("evidence") or "")

@@ -219,9 +219,12 @@ def build_insights_view(payload: dict) -> dict:
             "metric": step.get("target") or "agent_eval",
             "insight_kind": "execution_action",
         }
-        for key in ("agent", "case", "case_id", "condition", "check", "strength"):
+        for key in ("problem", "agent", "case", "case_id", "condition", "check", "strength"):
             if key in step:
                 recommendation[key] = step[key]
+        if _matches_error_sequence(step.get("problem"), view["execution_errors"]):
+            # Keep the exact problem in card identity, with its prose owned by Diagnostics.
+            recommendation["problem_in_diagnostics"] = True
         if step.get("evidence"):
             key = "evidence" if isinstance(step["evidence"], dict) else "evidence_text"
             recommendation[key] = step["evidence"]

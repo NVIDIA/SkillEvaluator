@@ -216,6 +216,36 @@ def test_structured_action_keeps_its_evidence_and_verification_check():
     [card] = _project(payload)["recommendations"]
     assert card["evidence_text"] == "agent-a/case-a (with-skill)"
     assert card["check"] == "Every planned attempt is scored."
+    assert card["problem"] == "3 attempts missing"
+
+
+def test_identical_actions_with_distinct_authored_problems_remain_distinct_and_independent():
+    payload = _failed_payload()
+    step = payload["next_steps"][0]
+    payload["next_steps"] = [
+        {**step, "problem": "Runner exited; the first diagnosis stays complete."},
+        {**step, "problem": "Judge stopped; the second diagnosis stays complete."},
+    ]
+    before = copy.deepcopy(payload)
+    first = _project(payload)
+    assert [card.get("problem") for card in first["recommendations"]] == [
+        "Runner exited; the first diagnosis stays complete.",
+        "Judge stopped; the second diagnosis stays complete.",
+    ]
+    assert _project({**payload, **first}) == first
+    first["recommendations"][0]["problem"] = "changed"
+    assert payload == before
+
+
+def test_problem_without_a_run_diagnostics_copy_keeps_its_card_disclosure():
+    payload = _failed_payload()
+    payload["execution_errors"] = []
+    payload["recommendations"] = []
+    payload["agents"]["agent-a"]["execution_errors"] = ["RunnerError: retained agent-only cause"]
+    payload["next_steps"][0]["problem"] = "RunnerError: retained agent-only cause"
+    [card] = _project(payload)["recommendations"]
+    assert card["problem"] == "RunnerError: retained agent-only cause"
+    assert not card.get("problem_in_diagnostics")
 
 
 def test_render_time_error_append_does_not_hide_a_recognizable_legacy_blob_copy():

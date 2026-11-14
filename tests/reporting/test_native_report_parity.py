@@ -133,11 +133,13 @@ def test_failed_execution_actions_do_not_repeat_next_steps_or_expand_long_eviden
             "strength": "hypothesis",
         }
     ]
+    original = deepcopy(payload)
     result.add_error("Runner failed")
     html = HTMLReporter(include_timestamp=False).render_all([result])
     overview = html.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
     assert re.sub(r"<[^>]+>", "", overview).count("Restore the runner and repeat the retained cases") == 1
     assert payload["next_steps"][0]["evidence"] not in overview
+    assert payload["next_steps"][0]["problem"] not in overview
     for name, end in (("suggestions", "provenance"),):
         section = html.split(f'id="tier3-page-{name}"', 1)[1].split(f'id="tier3-page-{end}"', 1)[0]
         assert re.sub(r"<[^>]+>", "", section).count("Restore the runner and repeat the retained cases") == 1
@@ -151,6 +153,15 @@ def test_failed_execution_actions_do_not_repeat_next_steps_or_expand_long_eviden
         )
         assert disclosure and "open" not in disclosure[1]
         assert payload["next_steps"][0]["evidence"] in disclosure[2]
+        problem = re.search(
+            r'<details class="t3-eval-evidence"([^>]*)>\s*<summary>Recorded problem</summary>(.*?)</details>',
+            section,
+            re.DOTALL,
+        )
+        assert problem and "open" not in problem[1]
+        assert payload["next_steps"][0]["problem"] in problem[2]
+    assert _embedded_payload(html) == original
+    assert payload == original
 
 
 def test_only_fully_represented_failed_steps_are_suppressed():
@@ -167,7 +178,8 @@ def test_only_fully_represented_failed_steps_are_suppressed():
     different_evidence = {**represented, "evidence": "case-b"}
     different_scope = {**represented, "target": "dataset"}
     different_agent = {**represented, "agent": "b"}
-    steps = [represented, different_evidence, different_scope, different_agent]
+    different_problem = {**represented, "problem": "A distinct authored diagnosis"}
+    steps = [represented, different_evidence, different_scope, different_agent, different_problem]
     view = {
         "next_steps": steps,
         "recommendations": [
@@ -184,6 +196,52 @@ def test_only_fully_represented_failed_steps_are_suppressed():
     }
     assert html_module._unrepresented_insight_steps(view, failed=True) == steps[1:]
     assert html_module._unrepresented_insight_steps(view, failed=False) == steps
+
+
+def test_failed_cards_preserve_distinct_problem_text_with_the_same_action_and_evidence():
+    result = _agent_result()
+    payload = result.metadata["agent_eval"]
+    payload.update(execution_status="failed", verdict="fail")
+    common = {
+        "action": "Rerun the same case",
+        "target": "evaluation",
+        "check": "Every planned attempt is scored",
+        "evidence": {"url": "https://example.test/shared-trace"},
+        "agent": "agent",
+        "case_id": "case-one",
+        "condition": "with_skill",
+    }
+    problems = ["Runner exited; inspect <first> & retain the rest.", "Judge stopped; inspect the second cause."]
+    payload["next_steps"] = [{**common, "problem": problem} for problem in problems]
+    original = deepcopy(payload)
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    section = html.split('id="tier3-page-suggestions"', 1)[1].split('id="tier3-page-provenance"', 1)[0]
+    from html import escape
+
+    for problem in problems:
+        assert escape(problem) in section
+    assert "<first>" not in section
+    assert section.count("<summary>Recorded problem</summary>") == 2
+    assert section.count("https://example.test/shared-trace") == 2
+    assert "Next steps for the run:" not in section
+    assert _embedded_payload(html) == original
+    assert payload == original
+
+
+def test_historical_error_blob_problem_stays_in_diagnostics():
+    result = _agent_result()
+    payload = result.metadata["agent_eval"]
+    errors = ["RunnerError: complete historical detail; retain semicolon", "JudgeError: complete cause"]
+    payload.update(execution_status="failed", verdict="fail", execution_errors=errors)
+    payload["next_steps"] = [{"action": "Rerun", "problem": "; ".join(errors)}]
+    original = deepcopy(payload)
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+    insights = html.split('id="tier3-page-suggestions"', 1)[1].split('id="tier3-page-provenance"', 1)[0]
+    for error in errors:
+        assert error not in insights
+        assert error in html.split('id="tier3-execution-errors"', 1)[1]
+    assert 'href="#tier3-execution-errors"' in insights
+    assert _embedded_payload(html) == original
 
 
 def test_failed_next_steps_keep_distinct_agent_case_and_condition_in_rendered_cards():

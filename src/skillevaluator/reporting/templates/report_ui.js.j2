@@ -39,7 +39,7 @@ function applyReportSearch() {
     let evidenceMatches = 0;
     let firstEvidenceMatch = null;
     if (query) {
-        document.querySelectorAll('details[id^="plugin-"],.t3-eval-evidence,.t3-ds-card').forEach(detail => {
+        document.querySelectorAll('details[id^="plugin-"],.t3-eval-evidence,.t3-ds-card,.t3-ds-card details').forEach(detail => {
             if (!detail.textContent.toLocaleLowerCase().includes(query)) return;
             evidenceMatches++;
             if (!firstEvidenceMatch) firstEvidenceMatch = detail;

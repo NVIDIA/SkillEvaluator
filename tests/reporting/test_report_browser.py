@@ -212,6 +212,9 @@ def reports(tmp_path_factory):
     (directory / "incomplete.html").write_text(
         HTMLReporter(include_timestamp=False).render_all([result]), encoding="utf-8"
     )
+    (directory / "incomplete-full.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([*_tier1_results(), result]), encoding="utf-8"
+    )
     clean = ValidationResult(validator_name="Schema Check")
     clean.add_success("schema", "Valid schema")
     (directory / "tier1.html").write_text(HTMLReporter(include_timestamp=False).render_all([clean]), encoding="utf-8")
@@ -991,3 +994,41 @@ def test_search_reveals_hidden_runtime_and_nested_dataset_evidence_then_restores
     assert "No matched trial" in later_case.inner_text()
     search.fill("")
     assert later_case.get_attribute("open") is None
+
+
+def test_global_search_reveals_dataset_attempt_body_matches_and_preserves_user_disclosures(page, reports):
+    directory, _, _ = reports
+    _open(page, directory, "incomplete-full")
+    _tier(page, "tier3")
+    _subtab(page, "dataset")
+    cases = page.locator("#t3-dataset-list > details")
+    attempts = cases.locator("details.t3-details")
+    assert attempts.count() == 8
+    # Keep a user-opened case and attempt, while later cases remain folded.
+    assert cases.nth(0).get_attribute("open") is not None
+    attempts.nth(0).locator("summary").click()
+    initial_state = page.locator("#t3-dataset-list details").evaluate_all("nodes=>nodes.map(node=>node.open)")
+    query = "No retained trial result could be matched to this case"
+    assert all(query not in summary for summary in attempts.locator("summary").all_text_contents())
+    assert not attempts.nth(1).locator(".t3-details-body").is_visible()
+
+    _tier(page, "tier1")
+    search = page.locator("#report-search")
+    search.fill(query)
+    assert page.locator("#tier3-page-dataset").is_visible()
+    assert "evidence sections matched" in page.locator("#report-search-count").inner_text()
+    assert not page.locator("#report-no-matches").is_visible()
+    for index in range(attempts.count()):
+        body = attempts.nth(index).locator(".t3-details-body")
+        assert body.is_visible()
+        assert query in body.inner_text()
+
+    # A changed query also restores only what the previous search opened.
+    _tier(page, "tier1")
+    search.fill("a query with no matching evidence")
+    assert page.locator("#t3-dataset-list details").evaluate_all("nodes=>nodes.map(node=>node.open)") == initial_state
+    search.fill(query)
+    assert attempts.nth(1).get_attribute("open") is not None
+    _tier(page, "tier1")
+    search.fill("")
+    assert page.locator("#t3-dataset-list details").evaluate_all("nodes=>nodes.map(node=>node.open)") == initial_state

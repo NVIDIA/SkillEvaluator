@@ -307,7 +307,8 @@ def observations(case, reward, thresholds):
                     "score": score,
                 }
             )
-            steps = reward.get("details", {}).get(metric, {}).get("results", [])
+            detail = reward.get("details", {}).get(metric, {})
+            steps = detail.get("results", [])
             for index, passed in enumerate(expected):
                 verdict = observed
                 step_score = None
@@ -315,6 +316,21 @@ def observations(case, reward, thresholds):
                     step = next((s for s in steps if s.get("step") == index + 1), {})
                     step_score = step.get("passed")
                     verdict = ("pass" if step_score else "fail") if type(step_score) is bool else "error"
+                    expectations = detail.get("expectations", [])
+                    if (
+                        "passed" in step
+                        and step_score is None
+                        and type(step.get("step")) is int
+                        and isinstance(expectations, list)
+                        and any(
+                            isinstance(item, dict)
+                            and type(item.get("step")) is int
+                            and item["step"] == index + 1
+                            and item.get("status") == "not_checked"
+                            for item in expectations
+                        )
+                    ):
+                        verdict = "insufficient_evidence"
                 result.append(
                     {
                         "metric": "behavior_steps",

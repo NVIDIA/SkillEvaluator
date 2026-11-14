@@ -77,6 +77,9 @@ navigation:
       - page: Reports & Results
         path: ../docs/reports.mdx
         slug: reports
+      - page: Metrics Reference
+        path: ../docs/metrics-reference.mdx
+        slug: metrics-reference
       - page: Performance Dashboard
         path: ../docs/performance-dashboard.mdx
         slug: performance-dashboard

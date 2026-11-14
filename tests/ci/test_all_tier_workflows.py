@@ -528,6 +528,18 @@ def test_gitlab_feedback_pipeline_guard_is_offered_and_documented():
     assert "keep `test` in any `stages` list" in onboarding
 
 
+def test_pre_merge_paid_tier_advice_does_not_route_through_ci_demo():
+    # `ci demo` needs the scan caller on the default branch (the onboarding tests
+    # cover the rejection), so the docs must not offer it for an unmerged setup.
+    docs = " ".join((ROOT / "ci/templates/all-tiers/README.md").read_text().split())
+    assert "(`ci demo` opens one)" not in docs
+    assert "`ci demo` cannot exercise an unmerged setup" in docs
+    assert "rejects a setup that has not merged" in docs
+    assert "Use `ci demo` after the setup merges." in docs
+    advanced = " ".join((ROOT / "docs/advanced-ci.mdx").read_text().split())
+    assert "`skillevaluator ci demo` works only after the setup has merged." in advanced
+
+
 def _heredoc(script, marker):
     return script.split(f"<<'{marker}'\n", 1)[1].split(f"\n{marker}\n", 1)[0] + "\n"
 

@@ -1,0 +1,16 @@
+harness: codex
+display_name: OpenAI Codex CLI
+verified: {version: 0.166.0, source: "rust-v0.166.0 @ 593389380740", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.agents/skills, .codex/skills]
+  user: [~/.agents/skills, ~/.codex/skills]
+limits: {scan_depth: 6, skips_hidden_dirs: true, catalog_desc_codepoints: 1024, list_budget: "2% of context, 8,000 chars if unknown, max 10,000 tokens"}
+listing: {cut: 1024}
+rules:
+  - {id: CX-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Codex reads .agents/skills and .codex/skills (project and user).", fix: "Install it under .agents/skills or .codex/skills."}
+  - {id: CX-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", fix: "Use spaces, not tabs, and remove duplicate keys."}
+  - {id: CX-BOM, when: "frontmatter_bom", effect: not_loaded, outcome: rejected, message: "Skill dropped: SKILL.md starts with a UTF-8 BOM.", fix: "Save SKILL.md as UTF-8 without a BOM."}
+notes:
+  - "Explicit $skill injects the whole SKILL.md (145 KB tested)."
+  - "Follows symlinked skill folders (inside or outside the root)."
+  - "New skills are listed next turn; files are re-read from disk."

@@ -2354,6 +2354,7 @@ def _write_entry_json(
     grading_mode: str = "default",
     custom_grader: bool = False,
     evaluated_skill: str | None = None,
+    agent_workdir: str | None = "/workspace",
 ) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
@@ -2370,6 +2371,9 @@ def _write_entry_json(
         "workspace_skill_names": workspace_skill_names or [],
         "grading_mode": grading_mode,
         "custom_grader": custom_grader,
+        # Runtime configuration, unlike a case-authored field or tool-call cwd,
+        # determines the security check's immutable output-directory scope.
+        "agent_workdir": _validated_agent_workdir(agent_workdir),
     }
     (tests_dir / "entry.json").write_text(json.dumps(entry_with_flag, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -5946,6 +5950,7 @@ def _stage_native_harbor_tasks_into(
                 grading_mode=grading_mode,
                 custom_grader=custom_grader,
                 evaluated_skill=skill_path.name,
+                agent_workdir=native_agent_workdir,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
         elif custom_grader:
@@ -5963,6 +5968,7 @@ def _stage_native_harbor_tasks_into(
                 workspace_skill_names=workspace_skill_names,
                 grading_mode=grading_mode,
                 custom_grader=True,
+                agent_workdir=native_agent_workdir,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=True)
         elif not authored_custom_tests_complete:
@@ -6319,6 +6325,7 @@ def _generate_harbor_tasks_into(
             grading_mode=grading_mode,
             custom_grader=custom_grader,
             evaluated_skill=(skill_path.name if grading_mode in ("default", "default_plus_custom") else None),
+            agent_workdir=agent_workdir or "/workspace",
         )
         _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
 

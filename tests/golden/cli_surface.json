@@ -1281,6 +1281,55 @@
         }
       ]
     },
+    "harness-check": {
+      "params": [
+        {
+          "name": "target_path",
+          "opts": [
+            "target_path"
+          ],
+          "param_type": "argument",
+          "required": true,
+          "type": "path"
+        },
+        {
+          "default": "all",
+          "name": "harness",
+          "opts": [
+            "--harness"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "harness_profiles",
+          "opts": [
+            "--harness-profiles"
+          ],
+          "param_type": "option",
+          "type": "directory"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "verbose",
+          "opts": [
+            "--verbose",
+            "-v"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "name": "json_path",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "file"
+        }
+      ]
+    },
     "health-check": {
       "params": [
         {
@@ -4712,6 +4761,22 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "name": "harness",
+          "opts": [
+            "--harness"
+          ],
+          "param_type": "option",
+          "type": "text"
+        },
+        {
+          "name": "harness_profiles",
+          "opts": [
+            "--harness-profiles"
+          ],
+          "param_type": "option",
+          "type": "directory"
         },
         {
           "name": "skip",

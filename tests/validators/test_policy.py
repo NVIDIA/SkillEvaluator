@@ -23,15 +23,19 @@ from skillevaluator.validators.policy import (
 
 
 @pytest.mark.parametrize("name", ["default", "external"])
-def test_default_and_legacy_names_resolve_one_policy_without_weakening_rules(name: str) -> None:
+def test_default_and_legacy_names_resolve_one_policy(name: str) -> None:
     policy = resolve_policy(profile=name)
 
     assert policy.profile == "default"
     assert policy.audience == "all"
     assert policy.is_author_email_acceptable("Author <author@nvidia.com>")
     assert policy.is_author_email_acceptable("Author <author@example.com>")
-    assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
+    # Author attribution is optional in the Agent Skills baseline: advisory here.
+    assert policy.severity_for("SCHEMA", "author_missing", Severity.HIGH) == Severity.LOW
+    assert policy.severity_for("SCHEMA", "author_without_email", Severity.HIGH) == Severity.INFO
+    # Malformed or unsafe author values still block.
     assert policy.severity_for("SCHEMA", "author_format", Severity.LOW) == Severity.HIGH
+    assert policy.metadata_id_requirement == "ignore"
     assert policy.severity_for("WORKFLOWS", "author_format", Severity.LOW) == Severity.HIGH
     assert policy.severity_for("LICENSE", "blocked_license", Severity.LOW) == Severity.CRITICAL
     assert policy.severity_for("PII", "email", Severity.HIGH) == Severity.HIGH
@@ -57,7 +61,7 @@ def test_default_profile_is_the_public_profile() -> None:
     assert policy.profile == "default"
     assert policy.author_email_regex is None
     assert policy.is_author_email_acceptable("Jane Doe <jane@example.com>")
-    assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("SCHEMA", "author_missing", Severity.HIGH) == Severity.LOW
     assert policy.severity_for("LICENSE", "missing", Severity.LOW) == Severity.CRITICAL
 
 
@@ -73,7 +77,54 @@ def test_custom_policy_overlays_the_public_profile(tmp_path: Path) -> None:
     assert policy.profile == "team-strict"
     assert policy.author_email_regex is None
     assert policy.severity_for("SCHEMA", "author_format", Severity.LOW) == Severity.CRITICAL
-    assert policy.severity_for("SCHEMA", "author_missing", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("SCHEMA", "author_missing", Severity.HIGH) == Severity.LOW
+    assert policy.metadata_id_requirement == "ignore"
+
+
+def test_registry_profile_requires_contact_author_and_metadata_id() -> None:
+    policy = load_profile("registry")
+
+    assert policy.profile == "registry"
+    assert policy.author_email_regex is None
+    assert policy.metadata_id_requirement == "require"
+    for check in ("author_missing", "author_without_email", "author_format"):
+        assert policy.severity_for("SCHEMA", check, Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("WORKFLOWS", "author_format", Severity.LOW) == Severity.HIGH
+    assert policy.severity_for("LICENSE", "blocked_license", Severity.LOW) == Severity.CRITICAL
+    assert policy.to_dict()["metadata_id_requirement"] == "require"
+    assert policy.digest != default_policy().digest
+
+
+def test_policy_overlay_sets_or_inherits_metadata_id_requirement(tmp_path: Path) -> None:
+    require = tmp_path / "require.yaml"
+    require.write_text("profile: my-registry\nidentity:\n  metadata_id_requirement: require\n", encoding="utf-8")
+    bare_identity = tmp_path / "bare.yaml"
+    bare_identity.write_text("profile: team\nidentity:\n  author_email_regex: '@example\\.org>'\n", encoding="utf-8")
+
+    assert load_policy_file(require).metadata_id_requirement == "require"
+    # An overlay that does not name the key keeps the base profile's mode.
+    assert load_policy_file(bare_identity).metadata_id_requirement == "ignore"
+    assert load_policy_file(bare_identity, base_profile="registry").metadata_id_requirement == "require"
+    assert load_policy_file(require).digest != load_policy_file(bare_identity).digest
+
+
+@pytest.mark.parametrize("value", ["requre", "REQUIRE", "true", "1"])
+def test_policy_rejects_unknown_metadata_id_requirement(tmp_path: Path, value: str) -> None:
+    custom = tmp_path / "typo.yaml"
+    custom.write_text(f"identity:\n  metadata_id_requirement: {value}\n", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="metadata_id_requirement"):
+        load_policy_file(custom)
+
+
+def test_in_memory_default_policy_matches_bundled_author_rules(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    bundled = default_policy()
+    monkeypatch.setattr(policy_module, "PROFILES_DIR", tmp_path)
+    fallback = default_policy()
+
+    assert fallback.metadata_id_requirement == bundled.metadata_id_requirement
+    for key in ("SCHEMA.author_missing", "SCHEMA.author_without_email", "SCHEMA.author_format", "LICENSE.*"):
+        assert fallback.severity_overrides[key] == bundled.severity_overrides[key]
 
 
 def test_custom_policy_wraps_malformed_yaml(tmp_path: Path) -> None:

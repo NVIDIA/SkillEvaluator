@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: INP001, T201 -- standalone trusted workflow entrypoint with fixed diagnostics.
 
-"""Upsert verified current-head PR feedback after a trusted Pages deployment.
+"""Upsert verified current-head PR feedback from trusted scan evidence.
 
 Only the configured bot's marked comments are eligible for update. This helper
 does not check out PR code, execute artifacts, or print the comment body.
@@ -63,6 +63,30 @@ def _positive(value) -> int:
 
 def run_marker(run_id: int, attempt: int) -> str:
     return f"<!-- skillevaluator-tier1-run:{run_id}:{attempt} -->"
+
+
+def _verify_run(api, repository: str, run_id: int, attempt: int, sha: str | None = None) -> str | None:
+    """Reject superseded attempts, including reruns started while rendering feedback."""
+    run = api.get(f"/repos/{repository}/actions/runs/{run_id}")
+    if (
+        not isinstance(run, dict)
+        or type(run.get("id")) is not int
+        or run["id"] != run_id
+        or not isinstance(run.get("repository"), dict)
+        or run["repository"].get("full_name") != repository
+        or not isinstance(run.get("head_sha"), str)
+        or SHA_PATTERN.fullmatch(run["head_sha"]) is None
+        or (sha is not None and run["head_sha"] != sha)
+        or type(run.get("run_attempt")) is not int
+        or run["run_attempt"] < attempt
+        or run.get("status") not in {"completed", "queued", "in_progress", "waiting", "pending", "requested"}
+    ):
+        raise FeedbackError("The source run lacks trustworthy repository, revision, or attempt metadata.")
+    if run["run_attempt"] != attempt:
+        return "A newer scan attempt exists."
+    if run["status"] != "completed":
+        return "The scan attempt is not completed."
+    return None
 
 
 def _verify_pr(api, repository: str, number: int, sha: str) -> str | None:
@@ -172,7 +196,7 @@ def comment_report(api, repository: str, run_id: int, feedback_dir: Path, actor_
     )
     if len(body.encode("utf-8")) > MAX_BODY_BYTES:
         raise FeedbackError("The complete feedback comment exceeds the 60000-byte limit.")
-    reason = _verify_pr(api, repository, number, sha)
+    reason = _verify_run(api, repository, run_id, attempt, sha) or _verify_pr(api, repository, number, sha)
     if reason:
         return {"comment_action": "skipped", "comment_reason": reason}
     owned = _owned_comments(api, repository, number, actor_bot_login)
@@ -180,7 +204,7 @@ def comment_report(api, repository: str, run_id: int, feedback_dir: Path, actor_
         return {"comment_action": "skipped", "comment_reason": "A newer report comment already exists."}
     canonical = max(owned, key=lambda item: item["id"]) if owned else None
     # Recheck immediately before mutation after pagination and receipt validation.
-    reason = _verify_pr(api, repository, number, sha)
+    reason = _verify_run(api, repository, run_id, attempt, sha) or _verify_pr(api, repository, number, sha)
     if reason:
         return {"comment_action": "skipped", "comment_reason": reason}
     if canonical is not None and canonical["body"] == body:

@@ -23,8 +23,8 @@ This project will download and install additional third-party open source softwa
 - Python 3.12, 3.13, or 3.14. `uv tool install`, `uv run`, and `uv sync` provision a supported interpreter automatically when passed `--python 3.13` (or `--python 3.14`); only the plain-pip path needs one on PATH.
 - Git for installs from the repository and for the bundled-example checkout.
 - Docker, only for the container install and Tier 3 Docker-mode evaluation.
-- No API key is needed for deterministic Tier 1 checks. Full default scanner
-  coverage requires the `security` extra; Tier 1 provisions SkillSpector and
+- No API key is needed for deterministic Tier 1 checks. The base package
+  includes Bandit; Tier 1 provisions SkillSpector and
   Gitleaks itself, and Semgrep is optional (see [System tools](#system-tools)). LLM-backed checks and Tiers 2–3 use a configured provider — see
   [Providers & Credentials](configuration.mdx).
 
@@ -161,7 +161,7 @@ The image does not bundle the external Semgrep, SkillSpector, or Gitleaks execut
 
 ## Choosing extras
 
-The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own. `quality-check` needs no scanner setup. When you run the full static suite, scanner-backed checks report INCOMPLETE until the `security` extra and the required external scanner executables are installed. Running without an LLM or API key does not remove those scanner requirements. Everything else lives behind an extra:
+The base package completes the schema, PII, license, quality, Unicode, script-lint, and hygiene checks on its own. `quality-check` needs no scanner setup. When you run the full static suite, the base package also runs Bandit, and scanner-backed checks report INCOMPLETE until the required external scanners are available (see [System tools](#system-tools)). Running without an LLM or API key does not remove those scanner requirements. Everything else lives behind an extra:
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework that the `tier3` extra installs for live task execution
@@ -172,7 +172,7 @@ and environment backends.
 | `llm` | Shared LLM and embedding clients used by LLM-backed checks, Tier 2, and Tier 3 |
 | `tier2` | Intra-skill deduplication and local-catalog inter-skill similarity; includes `llm` |
 | `tier3` | Docker, local, and cloud live-agent evaluation through Harbor (pins `harbor==0.25.0` and requires `python-dotenv>=1.2.0`); includes `llm` |
-| `security` | Bandit and pip-audit |
+| `security` | pip-audit, for the opt-in dependency audit (Bandit is in the base package) |
 | `all` | `tier2`, `tier3`, and `security` in one bundle |
 | `dashboard` | Local Streamlit tables for comparing saved reports and retained runs (`skillevaluator dashboard`); not included in `all` |
 | `dev` | Build, test, coverage, and formatting tools for contributors |
@@ -186,7 +186,7 @@ and environment backends.
 <Note>
 Tier 1 provisions the external security scanners in their own environments, so their dependency stacks do not constrain the SkillEvaluator distribution:
 
-- **SkillSpector:** when no executable is found, Tier 1 downloads the 2.13.3 release wheel once into the SkillEvaluator runtime folder, verifies its SHA-256 checksum, and runs it with `uv tool run`. The first run needs uv and network access; later runs use the uv cache.
+- **SkillSpector:** when no executable is found, Tier 1 downloads the 2.13.4 release wheel once into the SkillEvaluator runtime folder, verifies its SHA-256 checksum, and runs it with `uv tool run`. The first run needs uv and network access; later runs use the uv cache.
 - **Semgrep:** optional. When it is installed, Code Risk Analysis adds its rules to Bandit; when it is not, the check notes it was skipped. Set `SKILLEVALUATOR_REQUIRE_SEMGREP=1` to report a missing Semgrep as `INCOMPLETE` (the Tier 1 CI image does).
 - **Gitleaks:** on first use, SkillEvaluator downloads the pinned 8.30.0 release into its runtime folder and verifies its SHA-256 checksum. There is no prompt, so CI runs install it too. Linux and macOS only.
 
@@ -194,7 +194,7 @@ Installed executables take precedence. To use your own, put them on `PATH` or se
 
 ```bash title="Optional: preinstall the scanners"
 uv tool install semgrep
-uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.3
+uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
 brew install gitleaks          # or a binary from https://github.com/gitleaks/gitleaks/releases
 ```
 
@@ -202,6 +202,10 @@ Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their 
 
 `skillevaluator health-check --tier 1` reports the path and version of each installed scanner and exits non-zero when one is missing, misconfigured, or older than the supported release. Add `--checks security,code-integrity,dependency` to include pip-audit.
 </Note>
+
+SkillSpector 2.13.4 can report JSON files containing a `timeout` key as partial
+analysis. SkillEvaluator keeps these scans incomplete; inspect the scanner
+diagnostics before treating the skill as validated.
 
 ## Verify your install
 

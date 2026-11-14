@@ -17,32 +17,65 @@ Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
 the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
-## Bring skill evaluation to your repository
+## Get started
 
-Check changed skills in GitHub or GitLab with quality checks, SkillSpector
-security scanning and reports. Choose folders and thresholds.
+Three ways in, one CLI, same results.
 
-**GitHub guided setup:** run inside your checked-out repository:
+<table>
+<tr>
+<th width="33%">1. Run the CLI directly</th>
+<th width="33%">2. Add it to your repo via CI</th>
+<th width="33%">3. Wire it to your agent</th>
+</tr>
+<tr valign="top">
+<td>
+
+Install (or `uv tool install`):
 
 ```bash
-pip install --upgrade skillevaluator
+pip install skillevaluator
+```
+
+Run all Tier 1 checks, no API key:
+
+```bash
+skillevaluator validate \
+  ./my-skill --tiers 1
+```
+
+Or run from a clone: [Quickstart](#quickstart).
+
+</td>
+<td>
+
+Check changed skills on every pull request. On GitHub, run:
+
+```bash
 skillevaluator ci init
 ```
 
-Choose checks and optional hosted feedback, then review the setup PR.
-[CLI setup guide](docs/cli-onboarding.mdx).
+It opens a setup PR. On GitLab, copy the [CI template](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.9.0).
 
-**Manual setup:** copy a filled-in template from
-[CI templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.9.0). No local CLI needed.
+</td>
+<td>
 
-| Your repository | Ready-to-use template | Copy destination |
-| --- | --- | --- |
-| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.9.0/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.9.0/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/0.9.0/publish-skill-reports.yml) | Second workflow; complete publisher setup |
+Add the [SkillEvaluator skill](skills/skillevaluator/) to Claude Code, Codex or any skill-aware agent:
 
-See [GitHub](docs/github-actions.mdx) and [GitLab](docs/gitlab-ci.mdx) setup,
-[template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
+```bash
+npx skills add \
+  NVIDIA/SkillEvaluator
+```
+
+Then ask: *"Is my skill any good?"* No Node.js? [Copy the folder](docs/agent-skill.mdx#install).
+
+</td>
+</tr>
+</table>
+
+Guides: [installation](https://docs.nvidia.com/skills/skillevaluator/installation),
+[CI setup](docs/cli-onboarding.mdx) ([GitHub](docs/github-actions.mdx),
+[GitLab](docs/gitlab-ci.mdx), [report examples](ci/examples/README.md)) and
+[agent skill](docs/agent-skill.mdx).
 
 ## Quickstart
 
@@ -113,7 +146,7 @@ Each tier is independent. Add its extra to your command:
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
-| Tier 1: Validation | Is the skill safe and well-formed? | `uv run --extra security skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
+| Tier 1: Validation | Is the skill safe and well-formed? | `uv run skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `uv run --extra tier2 skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Evaluation | Does the skill help the agent? | `uv run --extra tier3 skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
@@ -175,8 +208,7 @@ Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cf
 
 See [the documentation](https://docs.nvidia.com/skills/skillevaluator/) for
 setup, tier guides, reports, CI integration, CLI reference, and
-[performance dashboard](docs/reports.mdx#performance-dashboard). To let an agent run
-SkillEvaluator, install [`skills/skillevaluator/`](skills/skillevaluator/).
+[performance dashboard](docs/reports.mdx#performance-dashboard).
 
 ## Installation and third-party software
 

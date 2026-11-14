@@ -48,9 +48,18 @@ class FakeAPI:
         self.sha, self.state, self.head_repo = sha, state, head_repo
         self.calls = []
         self.readback = None
+        self.run = {
+            "id": 123,
+            "repository": {"full_name": REPOSITORY},
+            "head_sha": SHA,
+            "run_attempt": 1,
+            "status": "completed",
+        }
 
     def get(self, path):
         self.calls.append(("GET", path))
+        if path.endswith("/actions/runs/123"):
+            return self.run
         if path.endswith("/pulls/1"):
             return {
                 "state": self.state,
@@ -220,3 +229,44 @@ def test_oversized_comment_and_symlinked_feedback_are_rejected(tmp_path):
     (tmp_path / "pr-comment.md").symlink_to(tmp_path / "publication.json")
     with pytest.raises(feedback.FeedbackError):
         invoke(FakeAPI(), tmp_path)
+
+
+@pytest.mark.parametrize("changes", [{"run_attempt": 2}, {"status": "in_progress"}, {"status": "queued"}])
+@pytest.mark.parametrize("during_listing", [False, True])
+def test_superseded_or_unfinished_run_never_posts(tmp_path, changes, during_listing):
+    prepare(tmp_path)
+
+    class ChangingRunAPI(FakeAPI):
+        def get(self, path):
+            response = super().get(path)
+            if "/comments?" in path:
+                self.run.update(changes)
+            return response
+
+    api = ChangingRunAPI()
+    if not during_listing:
+        api.run.update(changes)
+    assert invoke(api, tmp_path)["comment_action"] == "skipped"
+    assert not any(call[0] in {"POST", "PATCH"} for call in api.calls)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"id": 124},
+        {"repository": {"full_name": "other/repository"}},
+        {"head_sha": "b" * 40},
+        {"head_sha": "bad"},
+        {"run_attempt": True},
+        {"run_attempt": 0},
+        {"status": "unknown"},
+        {"repository": None},
+    ],
+)
+def test_malformed_or_mismatched_source_run_fails_closed(tmp_path, changes):
+    prepare(tmp_path)
+    api = FakeAPI()
+    api.run.update(changes)
+    with pytest.raises(feedback.FeedbackError, match="source run"):
+        invoke(api, tmp_path)
+    assert not any(call[0] in {"POST", "PATCH"} for call in api.calls)

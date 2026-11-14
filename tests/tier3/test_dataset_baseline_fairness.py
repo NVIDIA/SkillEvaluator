@@ -714,6 +714,17 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         "Reads SKILL.md from the installed skill",
         "Did not ask questions, and read SKILL.md first",
         "Reads SKILL.md and files under references/",
+        # "at" and "within" name a location only before a path or URL.
+        "Reads SKILL.md at the start, then checks the manifest",
+        "Reads SKILL.md at release-review/ before checking the manifest",
+        "Reads the SKILL.md located in the skill directory",
+        "Reads SKILL.md within the installed skill",
+        "The agent read SKILL.md within its first two tool calls",
+        # A path that ends in the skill's name is the skill's own directory.
+        "Reads SKILL.md at ./release-review before checking the manifest",
+        "Reads SKILL.md in ./release-review before checking the manifest",
+        "Reads SKILL.md within /workspace/skills-copy/release-review/",
+        "Reads SKILL.md at C:\\agent\\release-review before checking the manifest",
     ],
 )
 def test_skill_md_in_the_skill_itself_still_warns(assertion):
@@ -722,6 +733,126 @@ def test_skill_md_in_the_skill_itself_still_warns(assertion):
     (warning,) = _baseline_fairness_warnings(entry)
 
     assert warning.startswith("assertions grades skill use")
+
+
+# A SKILL.md the task names a location for, as a skill that reviews other skills does.
+_LOCATED_SKILL_MD_PROMPTS = [
+    "Read the SKILL.md at /workspace/input/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at ./pdf-tools and report every missing frontmatter field.",
+    "Open the SKILL.md located at /workspace/input/pdf-tools and fix its description field.",
+    "Read the SKILL.md located in ./pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md within ../pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at C:\\work\\pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at C:/work/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at pdf-tools\\SKILL.md and list its frontmatter errors.",
+    "Read the SKILL.md at https://github.com/org/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md at $HOME/pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md within %USERPROFILE%\\pdf-tools and list its frontmatter errors.",
+    "Read the SKILL.md in ./skill-reviewer-fixtures and list its frontmatter errors.",
+]
+
+
+@pytest.mark.parametrize("text", _LOCATED_SKILL_MD_PROMPTS)
+def test_skill_md_the_task_locates_does_not_warn(text):
+    entry = _case("skill-reviewer", prompt=text, expected_output=text, assertions=[text])
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+@pytest.mark.parametrize("prompt", _LOCATED_SKILL_MD_PROMPTS[:5])
+def test_tier3_validate_strict_passes_a_prompt_that_locates_another_skill_md(tmp_path: Path, prompt):
+    skill = tmp_path / "skill-reviewer"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: skill-reviewer\ndescription: Review agent skills\n---\n", encoding="utf-8"
+    )
+    case = {"id": "skill-reviewer-001", "prompt": prompt, "expected_output": "Lists each frontmatter error"}
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "skill-reviewer", "evals": [case]}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize(
+    "graded",
+    [
+        {"expected_output": "The lookup-code skill should not be triggered for plain arithmetic."},
+        {"expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic."},
+        {"expected_output": "323", "assertions": ["The lookup-code skill is left unused for plain arithmetic"]},
+    ],
+    ids=["not-triggered", "not-needed", "left-unused"],
+)
+def test_negative_case_that_names_the_skill_does_not_warn(graded):
+    # A should_trigger: false case grades the skill going unused, which the
+    # baseline meets however the text words it. The agentskills loader still
+    # copies the top-level skill_name into the entry.
+    entry = _case("lookup-code", prompt="What is 17 times 19?", should_trigger=False, **graded)
+
+    assert entry["expected_skill"] == "lookup-code"
+    assert _baseline_fairness_warnings(entry) == []
+
+
+def test_legacy_negative_case_that_names_the_skill_does_not_warn():
+    entry = _entry(
+        expected_skill="lookup-code",
+        should_trigger=False,
+        question="What is 17 times 19?",
+        ground_truth="323; the lookup-code skill is not needed for arithmetic",
+    )
+
+    assert _baseline_fairness_warnings(entry) == []
+
+
+def test_positive_case_with_the_same_text_still_warns():
+    entry = _case(
+        "lookup-code",
+        prompt="What is 17 times 19?",
+        should_trigger=True,
+        expected_output="17 times 19 is 323; the lookup-code skill is not needed for arithmetic.",
+    )
+
+    (warning,) = _baseline_fairness_warnings(entry)
+
+    assert warning.startswith("expected_output grades skill use")
+
+
+def test_negative_case_prompt_that_points_at_the_skill_files_still_warns():
+    entry = _case("lookup-code", prompt="Read skills/lookup-code/SKILL.md, then add 2 and 2", should_trigger=False)
+
+    (warning,) = _baseline_fairness_warnings(entry)
+
+    assert warning.startswith("prompt points at the skill's files")
+
+
+def test_tier3_validate_strict_passes_a_negative_case_that_names_the_skill(tmp_path: Path):
+    skill = tmp_path / "lookup-code"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: lookup-code\ndescription: Look up codes\n---\n", encoding="utf-8")
+    cases = [
+        {
+            "id": "lookup-code-001",
+            "prompt": "Which country uses the dialing code 351?",
+            "expected_output": "Portugal",
+            "assertions": ["Names Portugal as the country for code 351"],
+        },
+        {
+            "id": "lookup-code-neg-001",
+            "should_trigger": False,
+            "prompt": "What is 17 times 19?",
+            "expected_output": "17 times 19 is 323; the lookup-code skill is not needed for arithmetic.",
+            "assertions": ["Answers 323"],
+        },
+    ]
+    (skill / "evals" / "evals.json").write_text(
+        json.dumps({"skill_name": "lookup-code", "evals": cases}), encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
+
+    assert result.exit_code == 0, result.output
 
 
 @pytest.mark.parametrize(
@@ -895,6 +1026,63 @@ def test_template_prompt_names_a_skill_md_in_the_description_as_the_users_file(d
     assert case["ground_truth"] == f"A correct, complete result for: {task}"
 
 
+# Descriptions that name one of the skill's scripts without saying it is run.
+_SCRIPT_NAMING_DESCRIPTIONS = [
+    "Checks release manifests with review.py and reports blockers.",
+    "Checks release manifests via review.py.",
+    "Checks release manifests with the bundled review.sh script.",
+    "A wrapper around review.py for release manifests.",
+    "Checks release manifests; review.sh does the parsing.",
+]
+
+
+@pytest.mark.parametrize("description", _SCRIPT_NAMING_DESCRIPTIONS)
+@pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
+def test_template_graded_text_does_not_quote_a_description_that_names_a_skill_script(generate, description):
+    # The no-skill baseline does not have the script, so the graded text stays generic.
+    skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
+
+    cases = generate(skill)
+
+    assert cases[0]["question"] == f"Use release-review to {description.lower().rstrip('.')}"
+    for case in cases:
+        graded = json.dumps([case["ground_truth"], case["expected_behavior"]])
+        assert not re.search(r"review\.(?:py|sh)", graded), graded
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["Checks setup.py files for unpinned versions.", "Checks preview.py and review.python.txt for typos."],
+)
+def test_template_cases_still_quote_a_description_that_names_other_files(description):
+    (case,) = generate_dataset._generate_simple(_skill(description=description, script_files=_SCRIPT_FILES))
+
+    assert case["ground_truth"] == f"A correct, complete result for: {description.lower().rstrip('.')}"
+
+
+def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
+    # Only a SKILL.md the description reads, opens, loads, consults or follows,
+    # as a prompt `tier3 validate` flags would, is renamed.
+    for verb in ("reads", "opens", "loads", "consults", "follows"):
+        (case,) = generate_dataset._generate_simple(_skill(description=f"{verb.title()} SKILL.md and reports errors."))
+        assert f"{verb} my SKILL.md" in case["question"], case["question"]
+    for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert "my SKILL.md" not in case["question"], case["question"]
+
+    claim = "reads, opens, loads, consults or follows"
+    sources = {
+        "docs/eval-datasets.mdx": (_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8"),
+        "_template_task": generate_dataset._template_task.__doc__ or "",
+    }
+    for where, text in sources.items():
+        text = " ".join(text.split())
+        mentions = [match.start() for match in re.finditer(r"my SKILL\.md", text)]
+        assert mentions, where
+        for start in mentions:
+            assert claim in text[max(0, start - 200) : start], (where, text[max(0, start - 200) : start])
+
+
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():
     skill = _skill(description="Keeps skills/release-review/SKILL.md in sync with the docs")
 
@@ -930,6 +1118,17 @@ def test_starter_case_passes_strict_validate(tmp_path: Path, description):
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
 
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("description", _SCRIPT_NAMING_DESCRIPTIONS[:3:2])
+def test_starter_case_does_not_quote_a_description_that_names_a_skill_script(tmp_path: Path, description):
+    skill = _write_skill(tmp_path, description, scripts=_SCRIPT_FILES)
+
+    output = generate_dataset.generate_one_case(skill, use_llm=False)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    graded = json.dumps([case["expected_output"], case["assertions"]])
+    assert not re.search(r"review\.(?:py|sh)", graded), graded
 
 
 @pytest.fixture

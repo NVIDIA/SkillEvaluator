@@ -190,6 +190,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
+- The eval dataset docs now say that a template prompt calls a `SKILL.md`
+  `my SKILL.md` only when the skill's description reads, opens, loads,
+  consults or follows it without saying where it is. They said any `SKILL.md`
+  in the description was renamed, but "Validates `SKILL.md` frontmatter
+  fields" keeps its `SKILL.md`.
+
 ### Fixed
 
 - The behavior evidence gate no longer keeps a score for an expectation that
@@ -434,6 +440,28 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
+
+- `tier3 validate` no longer checks the expected output and assertions of a
+  `should_trigger: false` case for skill use. Such a case grades the skill
+  going unused, which the no-skill baseline meets, but text such as "the
+  lookup-code skill is not needed for arithmetic" failed `--strict`. The
+  prompt of such a case is still checked.
+
+- `tier3 validate` no longer reads "the `SKILL.md` at
+  /workspace/input/pdf-tools", "within ./pdf-tools" or "located in
+  ./pdf-tools" as the skill's own `SKILL.md`, so a skill that reviews other
+  skills can pass `--strict`. "at" and "within" now name a location before a
+  path or URL, as "in" already did; "read `SKILL.md` at the start" still
+  warns. A path that ends in the skill's own name, such as "at
+  ./release-review" or "in ./release-review", is the skill's own directory,
+  so reading `SKILL.md` there now warns too.
+
+- Template cases from `create-eval-dataset` and the autopilot starter case no
+  longer quote a skill description that names one of the skill's scripts
+  without running it, such as "Checks release manifests with review.py and
+  reports blockers", in the expected output and first assertion. The no-skill
+  baseline does not have the script. The graded text is now the generic
+  outcome; the prompt still quotes the description.
 
 ## 0.9.0 - 2026-11-13
 

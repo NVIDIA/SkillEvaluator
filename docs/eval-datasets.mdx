@@ -102,7 +102,10 @@ script, or used the skill, cannot be met by the baseline and inflates lift.
 `skill_execution` scores skill use separately (see
 [How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
 Template cases from `create-eval-dataset` are outcome-only; when the skill's
-description mentions `SKILL.md`, the template prompt calls it `my SKILL.md`.
+description reads, opens, loads, consults or follows a `SKILL.md` without
+saying where it is, the template prompt calls it `my SKILL.md`. A description
+that only names `SKILL.md` another way, such as "validates `SKILL.md`
+frontmatter", keeps it.
 Its LLM prompts ask for outcome checks. It prints a warning for each generated
 case that still grades skill use, and the autopilot starter case leaves such
 text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
@@ -111,7 +114,8 @@ its scripts. It also checks strings in nested prompts, expected outputs and
 assertions for skill use, using the skill's directory and frontmatter names
 as well as the dataset's declared alias. Fields with more than 1,000 values
 or cyclic references warn that checking is incomplete. It is a wording heuristic: it skips
-immediately negated checks such as "did not read `SKILL.md`", normalizes
+immediately negated checks such as "did not read `SKILL.md`" and the expected
+output and assertions of `should_trigger: false` cases, normalizes
 compatibility spellings and invisible format characters, and can miss other
 wording or lookalike letters from another alphabet. The warnings fail
 `tier3 validate --strict` and the strict dataset check that all-tier CI runs

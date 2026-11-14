@@ -27,6 +27,7 @@ from typing import Any
 
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.utils.redaction import redact_printable_text
 
 logger = logging.getLogger(__name__)
@@ -709,6 +710,9 @@ _SKILL_NAME_MARKER = "\x00name\x00"
 _MATCH_EXCERPT_CHARS = 80
 _MAX_FIELD_VALUES = 1000
 _MARKDOWN_LINK_RE = re.compile(r"\[([^\[\]\n]+)\]\([^()\n]*\)")
+# The start of a path or URL: ./x, ../x, /x, ~/x, $HOME/x, %USERPROFILE%\x,
+# \\server\share, C:\x or C:/x, https://..., or a relative dir/ or dir\.
+_PATH_START_RE = r"(?:[./~$%\\]|[A-Za-z]:[\\/]|[A-Za-z][\w+.-]*://|[\w-]+[\\/])"
 
 
 def _skill_files_re(skill_name: str | None) -> str:
@@ -721,9 +725,17 @@ def _skill_files_re(skill_name: str | None) -> str:
         qualifier = rf"(?:{_SKILL_MD_QUALIFIER_RE}|{name}(?:['\u2019]s)?)"
         skill_place = rf"(?:skill|{name})"
         alternatives += [rf"\bskills/{name}(?![\w-])", rf"(?<![\w-]){name}/SKILL\.md\b"]
-    # "SKILL.md in ./my-skill" names another skill's file; "in the skill
-    # directory" or "from the installed skill" is still this skill's own.
-    elsewhere = rf"\s+(?:in|of|from|under|inside)\s+(?!(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-]))"
+    # "SKILL.md in ./my-skill" or "located at /workspace/input/pdf-tools" names
+    # another skill's file; "in the skill directory", "from the installed
+    # skill" or "at ./<name>" is still this skill's own. "at" and "within" name
+    # a place only before a path or URL: "read SKILL.md at the start" or
+    # "within its first two tool calls" is still this skill's own.
+    path_target = rf"(?=\s+[`'\"]?{_PATH_START_RE})"
+    preposition = rf"(?:in|of|from|under|inside|(?:at|within){path_target})"
+    own_place = rf"(?:the\s+|its\s+|this\s+)?(?:installed\s+|own\s+)?{skill_place}(?![\w-])"
+    if skill_name:
+        own_place = rf"(?:{own_place}|[`'\"]?(?:[^\s`'\"\\/]*[\\/])+{name}(?![\w.-]))"
+    elsewhere = rf"(?:\s+located)?\s+{preposition}\s+(?!{own_place})"
     alternatives.append(
         rf"\b{_READ_VERB_RE}(?:\s+{qualifier})*\s+(?:(?:the\s+)?contents\s+of\s+)?[`'\"*_\[]*SKILL\.md\b"
         rf"(?![`'\"*_\]]*(?:{elsewhere}|\s+{_SKILL_MD_GENERIC_NOUN_RE}))"
@@ -965,7 +977,9 @@ def _baseline_fairness_warnings(
     ``entry`` is a normalized dataset entry; ``skill_scripts`` are the file
     names of the skill's own scripts. This is a wording heuristic, so it can
     miss skill use phrased another way and can flag task text that shares the
-    skill's name.
+    skill's name. The expected output and assertions of a case labelled
+    ``should_trigger: false`` are not checked: they grade the skill going
+    unused, which the baseline meets however the text words it.
     """
     warnings = []
     prompt = entry.get("question")
@@ -1006,6 +1020,10 @@ def _baseline_fairness_warnings(
                 "skill_execution measures whether the skill was used."
             )
             break
+    # Only an explicit label: an entry whose expected_skill is null is still
+    # checked against the skill's own names.
+    if "should_trigger" in entry and resolve_should_trigger(entry) is False:
+        return warnings
     texts = read(_authored_field(entry, "ground_truth", "expected_output"), entry.get("ground_truth"))
     texts += read(_authored_field(entry, "expected_behavior", "assertions"), entry.get("expected_behavior"))
     for field_name, text in texts:

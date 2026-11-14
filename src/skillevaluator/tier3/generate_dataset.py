@@ -374,13 +374,18 @@ _BARE_SKILL_MD_RE = re.compile(
 def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """The task template prompts ask for, and the outcome their graded text quotes.
 
-    Both come from the description. A bare SKILL.md in it becomes "my SKILL.md",
-    so the prompt names the user's file rather than the skill's; a description
-    that still points at the skill's files (skills/<name>, <name>/SKILL.md)
-    gives a generic task. The outcome is None, and graded text generic, when
-    quoting the task would grade skill use: "The release-review skill checks
-    manifests" or "Runs review.py on ..." names the skill or its script, and
-    the no-skill baseline is graded on the expected output and assertions too.
+    Both come from the description. When it reads, opens, loads, consults or
+    follows a SKILL.md without saying where it is, as a prompt `tier3 validate`
+    flags would, each bare SKILL.md in it becomes "my SKILL.md", so the prompt
+    names the user's file rather than the skill's. A description that only
+    names SKILL.md another way ("validates SKILL.md frontmatter", "SKILL.md
+    files") keeps it. A description that still points at the skill's files
+    (skills/<name>, <name>/SKILL.md) gives a generic task. The outcome is None,
+    and graded text generic, when quoting the task would grade skill use or
+    name one of the skill's scripts: "The release-review skill checks
+    manifests" grades skill use, and "Checks manifests with review.py" names a
+    script the no-skill baseline does not have, which is graded on the
+    expected output and assertions too.
     """
     name = skill["name"]
     task = _description_lower(skill)
@@ -389,9 +394,14 @@ def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
         task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
         if evals_spec._prompt_skill_files_match(task, name, script_names):
             return _GENERIC_TASK, None
-    if evals_spec._skill_use_match(task, name, _script_file_names(skill)):
+    if evals_spec._skill_use_match(task, name, script_names) or _names_skill_script(task, script_names):
         return task, None
     return task, task
+
+
+def _names_skill_script(text: str, scripts: Sequence[str]) -> bool:
+    """Whether text names one of the skill's script files, run or not ("checks manifests with review.py")."""
+    return any(re.search(rf"(?<![\w.-]){re.escape(script)}(?![\w-]|\.\w)", text, re.IGNORECASE) for script in scripts)
 
 
 def _outcome_ground_truth(outcome: str | None) -> str:

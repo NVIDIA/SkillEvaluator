@@ -110,6 +110,9 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
 .tab-content a:not([class]) { color:var(--report-link-color);text-decoration:underline;text-underline-offset:2px; }
 /* Detailed tables retain whole words/numbers and use their bounded scroll owner. */
 .table-scroll th,.table-scroll td { overflow-wrap:normal;word-break:normal; }
+/* Tier 1 has its own scroll owner; long finding/category/skill evidence still wraps. */
+.top-issues-table th { overflow-wrap:normal;word-break:normal; }
+.top-issues-table .quality-pill,.top-issues-table .count-badge { white-space:nowrap;flex-shrink:0; }
 }
 .tab-content .t3-link-btn { color:#0c111b; }
 

@@ -1116,6 +1116,71 @@ def test_print_wraps_unbroken_retained_table_cells_within_the_page(page, tmp_pat
 
 
 @pytest.mark.parametrize("width", [1440, 390])
+def test_tier1_top_issue_labels_stay_intact_while_long_evidence_wraps(page, tmp_path, width):
+    result = ValidationResult(validator_name="Synthetic Plugin Schema")
+    token = "recorded-command-" + "x" * 280
+    message = (
+        "A recorded hook command refers outside the synthetic plugin root; "
+        "review its retained target before accepting this component: " + token
+    )
+    result.add_finding(
+        Finding(
+            category="PLUGIN_SCHEMA",
+            severity="medium",
+            check_name="hook_target",
+            message=message,
+            file_path="hooks/synthetic.json",
+        )
+    )
+    (tmp_path / "tier1-long-evidence.html").write_text(
+        HTMLReporter(
+            include_timestamp=False, explicit_skill_name="synthetic-component-evidence-and-catalog-search"
+        ).render_all([result]),
+        encoding="utf-8",
+    )
+    page.set_viewport_size({"width": width, "height": 1000})
+    _open(page, tmp_path, "tier1-long-evidence")
+    table = page.locator(".top-issues-table").first
+    assert table.is_visible()
+    assert table.locator(".quality-pill").count() == 1
+    broken = table.locator("th,.quality-pill,.severity-tag,.count-badge").evaluate_all(r"""nodes=>{
+        const broken=[];
+        for(const element of nodes){
+            const walker=document.createTreeWalker(element,NodeFilter.SHOW_TEXT);
+            while(walker.nextNode()){
+                const node=walker.currentNode;
+                for(const match of node.textContent.matchAll(/[A-Za-z]{2,}|\d+/g)){
+                    const range=document.createRange();
+                    range.setStart(node,match.index);range.setEnd(node,match.index+match[0].length);
+                    if(new Set([...range.getClientRects()].map(rect=>Math.round(rect.top))).size>1)
+                        broken.push(match[0]);
+                }
+            }
+        }
+        return broken;
+    }""")
+    assert not broken, (width, broken)
+    pill = table.locator(".quality-pill")
+    assert pill.evaluate("node=>node.scrollWidth<=node.clientWidth+1")
+    evidence = table.locator("tbody td").first
+    assert evidence.inner_text() == message
+    assert evidence.evaluate(
+        """(node,token)=>{
+        const text=node.firstChild,range=document.createRange(),start=text.textContent.indexOf(token);
+        range.setStart(text,start);range.setEnd(text,start+token.length);
+        return new Set([...range.getClientRects()].map(rect=>Math.round(rect.top))).size>1;
+    }""",
+        token,
+    )
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    page.set_viewport_size({"width": 794, "height": 1123})
+    page.emulate_media(media="print")
+    assert table.evaluate(
+        "node=>node.getBoundingClientRect().width<=node.parentElement.getBoundingClientRect().width+2"
+    )
+
+
+@pytest.mark.parametrize("width", [1440, 390])
 @pytest.mark.parametrize(
     "fixture,tab,selector",
     [

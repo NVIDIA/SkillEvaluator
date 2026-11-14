@@ -365,3 +365,42 @@ def test_explicit_non_skipped_conditions_override_stale_single_arm_mode(mode):
     payload["expected_attempts"] = 1
     text = _project(payload)["conclusions"][0]["message"]
     assert "3 of 6 attempts scored" in text
+
+
+@pytest.mark.parametrize("error_count", [0, 1])
+@pytest.mark.parametrize("authored", [False, True])
+def test_blocking_source_preflight_preserves_feedback_without_inventing_runtime_failure(
+    tmp_path, error_count, authored
+):
+    from skillevaluator.evaluation.tier3_report import dataset_required_result
+    from skillevaluator.tier3.evals_spec import CheckResult
+
+    checks = [CheckResult("entry case-a", "error", "Missing required field: question")] if error_count else []
+    result = dataset_required_result(
+        tmp_path / "evals" / "evals.json",
+        checks,
+        blocking=True,
+        skill_name="demo",
+        source_kind="evals_json",
+    )
+    payload = result.metadata["agent_eval"]
+    conclusions = (
+        [{"title": "Coverage gap", "message": "Add the missing source fields; preserve this advice."}]
+        if authored
+        else []
+    )
+    recommendations = [{"title": "Fix the dataset", "message": "Supply a question for each case."}] if authored else []
+    if authored:
+        payload.update(conclusions=conclusions, recommendations=recommendations)
+    before = copy.deepcopy(payload)
+    view = _project(payload)
+    assert view == {
+        "conclusions": conclusions,
+        "recommendations": recommendations,
+        "next_steps": [],
+        "execution_errors": payload["execution_errors"],
+    }
+    assert payload == before
+    assert payload["suggestions"] == [
+        f"Create or fix the Tier 3 source under {tmp_path / 'evals'} and rerun validation."
+    ]

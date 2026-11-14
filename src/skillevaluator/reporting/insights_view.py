@@ -107,6 +107,13 @@ def build_insights_view(payload: dict) -> dict:
         view["execution_errors"] = deepcopy(summary.get("execution_errors") or [])
     if payload.get("execution_status", summary.get("execution_status")) != "failed":
         return view
+    provenance = payload.get("provenance") if isinstance(payload.get("provenance"), dict) else {}
+    if (
+        payload.get("reason_code", summary.get("reason_code")) == "eval_dataset_required"
+        or provenance.get("source") == "tier3_source_preflight"
+    ):
+        # A blocking source check fails publication before any agent runs.
+        return view
 
     agents = payload.get("agents") if isinstance(payload.get("agents"), dict) else {}
     error_sources = [

@@ -582,15 +582,18 @@ All notable changes to SkillEvaluator are documented in this file.
   explains it.
 
 - `tier3 validate` no longer reads "the `SKILL.md` at
-  /workspace/input/pdf-tools", "within ./pdf-tools" or "located in
+  /workspace/input/pdf-tools", "within ../pdf-tools" or "located in
   ./pdf-tools" as the skill's own `SKILL.md`, so a skill that reviews other
-  skills can pass `--strict`. "at" and "within" now name a location before a
-  path or URL, as "in" already did; "read `SKILL.md` at the start", "at
-  start/end of each phase" and "within ~2 tool calls" still warn. A path that
-  ends in the skill's own name, such as "at ./release-review" or "in
-  ./release-review.", is the skill's own directory, so reading `SKILL.md`
-  there now warns too. Extra spaces after the location word, as in "in  the
-  skill directory", no longer hide the skill's own directory.
+  skills can pass `--strict`. "at", "within" and "located in" now name a
+  location before a path or URL. "Read `SKILL.md` at the start", "within ~2
+  tool calls", a variable such as "at `$CLAUDE_SKILL_DIR`" and a path through
+  a `skill` or `skills` directory such as "at /workspace/skill/SKILL.md" still
+  warn, because they may name the skill's own install. A path that ends in or
+  passes through a directory named after the skill, such as "in
+  ./release-review" or "in ./release-review/fixtures/pdf-tools", is the
+  skill's own directory, so reading `SKILL.md` there now warns after every
+  location word. Extra spaces after the location word, as in "in  the skill
+  directory", no longer hide the skill's own directory.
 
 - Template cases from `create-eval-dataset` and the autopilot starter case no
   longer quote a skill description that names one of the skill's scripts

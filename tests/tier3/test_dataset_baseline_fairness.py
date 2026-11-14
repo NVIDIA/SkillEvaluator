@@ -723,6 +723,7 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         # A path that ends in the skill's name is the skill's own directory.
         "Reads SKILL.md at ./release-review before checking the manifest",
         "Reads SKILL.md in ./release-review before checking the manifest",
+        "Reads SKILL.md in ./release-review/fixtures/pdf-tools",
         "Reads SKILL.md within /workspace/skills-copy/release-review/",
         "Reads SKILL.md at C:\\agent\\release-review before checking the manifest",
         # A sentence's final period ends the skill's name.
@@ -746,6 +747,18 @@ def test_format_wording_and_negated_checks_do_not_warn(skill_name, text):
         "Reads SKILL.md at ... the very start",
         "Reads SKILL.md within ...the first turn",
         "Reads SKILL.md at $0 extra cost",
+        # A variable, or a path through a skill or skills directory, after
+        # "at", "within" or "located in" may name the skill's own install.
+        "Reads SKILL.md at $SKILL_DIR before checking the manifest",
+        "Reads SKILL.md within $CLAUDE_SKILL_DIR",
+        "Reads the SKILL.md located in $CLAUDE_SKILL_DIR",
+        "Reads the SKILL.md located in /workspace/skill/SKILL.md",
+        "Reads the SKILL.md at ${SKILL_ROOT}/SKILL.md first",
+        "Reads SKILL.md at $HOME/pdf-tools",
+        "Reads SKILL.md within %USERPROFILE%\\pdf-tools",
+        "Reads SKILL.md at /workspace/skill/SKILL.md",
+        "Reads SKILL.md within ~/.claude/skills/SKILL.md",
+        "Reads SKILL.md at C:\\agent\\skills\\pdf-tools",
         # Extra spaces do not hide the skill's own directory.
         "Reads SKILL.md at  ./release-review",
         "Reads SKILL.md in  the skill directory",
@@ -772,12 +785,9 @@ _LOCATED_SKILL_MD_PROMPTS = [
     "Read the SKILL.md at pdf-tools/ and list its frontmatter errors.",
     "Read the SKILL.md at input/pdf-tools/ and list its frontmatter errors.",
     "Read the SKILL.md at https://github.com/org/pdf-tools and list its frontmatter errors.",
-    "Read the SKILL.md at $HOME/pdf-tools and list its frontmatter errors.",
-    "Read the SKILL.md within %USERPROFILE%\\pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md in ./skill-reviewer-fixtures and list its frontmatter errors.",
     "Read the SKILL.md at ~/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at .fixtures/pdf-tools and list its frontmatter errors.",
-    "Read the SKILL.md at ${HOME}/pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at \\\\server\\share\\pdf-tools and list its frontmatter errors.",
     "Read the SKILL.md at input/fixtures/pdf-tools/SKILL.md and list its frontmatter errors.",
 ]
@@ -786,23 +796,6 @@ _LOCATED_SKILL_MD_PROMPTS = [
 @pytest.mark.parametrize("text", _LOCATED_SKILL_MD_PROMPTS)
 def test_skill_md_the_task_locates_does_not_warn(text):
     entry = _case("skill-reviewer", prompt=text, expected_output=text, assertions=[text])
-
-    assert _baseline_fairness_warnings(entry) == []
-
-
-@pytest.mark.parametrize(
-    "text",
-    [
-        "Read SKILL.md at $SKILL_DIR before starting.",
-        "Read SKILL.md in $SKILL_DIR before starting.",
-        "Read the SKILL.md at ${SKILL_ROOT}/SKILL.md first.",
-        "Read SKILL.md within $CLAUDE_SKILL_DIR",
-    ],
-)
-def test_skill_md_at_a_variable_reads_as_another_location_as_it_does_in_one(text):
-    # A variable may name the skill's own install, but "in $SKILL_DIR" was
-    # already read as another location, and "at" and "within" follow "in".
-    entry = _case(prompt="Check manifest.yaml", assertions=[text])
 
     assert _baseline_fairness_warnings(entry) == []
 

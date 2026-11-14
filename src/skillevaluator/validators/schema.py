@@ -29,6 +29,7 @@ from skillevaluator.constants import (
     SCHEMA_ALLOWED_DIRS_ENV,
     SKILL_MANIFEST_FILE,
     SKILL_MANIFEST_VARIANTS,
+    SKILL_MD_SIZE_THRESHOLDS,
     SKILL_NOT_SHIPPED_DIRS,
 )
 from skillevaluator.logging_config import get_logger
@@ -752,6 +753,23 @@ class SchemaValidator(ValidatorBase):
                     "Save SKILL.md as UTF-8 without BOM",
                 )
             )
+        for limit, level in SKILL_MD_SIZE_THRESHOLDS:
+            if len(raw) > limit:
+                findings.append(
+                    self._portability_finding(
+                        "manifest_size",
+                        Severity(level),
+                        f"SKILL.md is {len(raw):,} bytes (over {limit:,}); harnesses cut, refuse or skip large "
+                        "manifests (OpenClaw reads 16,000-64,000 chars and skips over 256,000 bytes; "
+                        "OpenCode cuts at 50 KiB)",
+                        file_path,
+                        "Move detail into references/ files and keep SKILL.md short",
+                        size_bytes=len(raw),
+                        limit_bytes=limit,
+                    )
+                )
+                break
+
         # Same folders the harness check skips: evals/ and versions/ are scanned like any other folder.
         nested = sorted(
             path

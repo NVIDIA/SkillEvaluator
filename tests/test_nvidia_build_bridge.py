@@ -20,7 +20,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from anthropic.types import RawMessageStreamEvent
+from anthropic.types import Message, RawMessageStreamEvent
 from openai.types.responses import ResponsesServerEvent
 from pydantic import TypeAdapter
 
@@ -2518,10 +2518,10 @@ def test_build_tool_call_emits_anthropic_tool_use_and_message_stop() -> None:
 @pytest.mark.parametrize(
     ("usage", "anthropic", "responses"),
     [
-        (None, None, None),
-        ({}, None, None),
-        ({"prompt_tokens": "bad", "completion_tokens": -1}, None, None),
-        ({"completion_tokens": 0}, {"output_tokens": 0}, {"output_tokens": 0}),
+        (None, {"input_tokens": 0, "output_tokens": 0}, None),
+        ({}, {"input_tokens": 0, "output_tokens": 0}, None),
+        ({"prompt_tokens": "bad", "completion_tokens": -1}, {"input_tokens": 0, "output_tokens": 0}, None),
+        ({"completion_tokens": 0}, {"input_tokens": 0, "output_tokens": 0}, {"output_tokens": 0}),
         (
             {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 30}},
             {"input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30},
@@ -2544,6 +2544,32 @@ def test_bridge_preserves_reported_usage(usage: object, anthropic: object, respo
     assert message["content"][0]["text"] == CHAT_TEXT_RESPONSE["choices"][0]["message"]["content"]
     response_events = list(chat_completion_to_responses_events(completion))
     assert response_events[-1]["response"]["usage"] == responses
+
+
+@pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {"input_tokens": 0, "output_tokens": 0}),
+        ({"usage": {"completion_tokens": 20}}, {"input_tokens": 0, "output_tokens": 20}),
+        (
+            {"usage": {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 30}}},
+            {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 30},
+        ),
+    ],
+)
+def test_anthropic_missing_usage_is_schema_valid(
+    completion: dict[str, object], usage_fields: dict[str, object], expected: dict[str, int]
+) -> None:
+    events = list(chat_completion_to_anthropic_events({**completion, **usage_fields}))
+    validator = TypeAdapter(RawMessageStreamEvent)
+    for event in events:
+        validator.validate_python(event, strict=True)
+    assert events[0]["message"]["usage"] == expected
+    assert events[-2]["usage"] == expected
+    message = bridge._anthropic_message_from_events(events)
+    TypeAdapter(Message).validate_python(message, strict=True)
+    assert message["usage"] == expected
 
 
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:

@@ -1371,8 +1371,10 @@ def chat_completion_to_anthropic_events(
 def _chat_usage(payload: dict[str, Any], *, anthropic: bool) -> dict[str, Any] | None:
     usage = payload.get("usage")
     if not isinstance(usage, dict):
-        return None
-    result: dict[str, Any] = {}
+        if not anthropic:
+            return None
+        usage = {}
+    result: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0} if anthropic else {}
     for source, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
         value = usage.get(source)
         if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
@@ -1383,7 +1385,7 @@ def _chat_usage(payload: dict[str, Any], *, anthropic: bool) -> dict[str, Any] |
         if anthropic:
             result["cache_read_input_tokens"] = cached
             if "input_tokens" in result:
-                result["input_tokens"] -= cached
+                result["input_tokens"] = max(0, result["input_tokens"] - cached)
         else:
             result["input_tokens_details"] = {"cached_tokens": cached}
     if not anthropic:

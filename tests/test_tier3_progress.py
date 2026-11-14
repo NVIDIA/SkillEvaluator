@@ -1863,6 +1863,79 @@ def test_a_stop_notice_kept_by_a_buffered_terminal_stream_is_not_repeated_when_t
     assert output.endswith(f"{_STOP_NOTICE}\n")
 
 
+def test_a_stop_notice_refused_after_a_refused_first_frame_is_not_taken_as_kept(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from rich.console import Console
+    from rich.live import Live
+
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+
+    class Terminal(_WouldBlockTerminal):
+        """Refuses every write while ``refusing`` is set, and the first write that carries the stop notice."""
+
+        refusing = False
+        notice_refused = False
+
+        def write(self, data: Any) -> int | None:
+            if self.refusing:
+                return None
+            if not self.notice_refused and _STOP_NOTICE.encode("utf-8") in bytes(data):
+                self.notice_refused = True
+                return None
+            return super().write(data)
+
+    terminal = Terminal(set())
+    # Shaped like standard error, with a buffer smaller than the first frame:
+    # it keeps only the start of a refused frame, whatever the Python
+    # version's default buffer size.
+    stream = io.TextIOWrapper(
+        io.BufferedWriter(terminal, buffer_size=1024), encoding="utf-8", newline="\n", line_buffering=True
+    )
+
+    class LiveOnAFullTerminal(Live):
+        def start(self, refresh: bool = False) -> None:
+            try:
+                super().start(refresh=refresh)
+            finally:
+                # The terminal takes writes again once Live gave up.
+                terminal.refusing = False
+
+        def refresh(self) -> None:
+            # The plan lines and Live's hide-cursor write went out. The
+            # terminal refuses the first frame and the stop that Live.start()
+            # runs when that frame fails, so Rich's console holds both.
+            terminal.refusing = True
+            super().refresh()
+
+    rich_reporter = progress.RichProgressReporter(stream=stream, refresh_interval=60)
+    rich_reporter._console = Console(
+        file=stream,
+        force_terminal=True,
+        legacy_windows=False,
+        width=120,
+        color_system=None,
+    )
+    rich_reporter._live_factory = LiveOnAFullTerminal
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    # The notice went out after the held frame and stop, in one write larger
+    # than the stream's buffer, and the terminal refused it. The stream kept
+    # only the start of the frame.
+    assert reporter.is_active is False
+    assert terminal.notice_refused
+    reporter.close()
+    stream.flush()
+    output = terminal.received.decode("utf-8", errors="replace")
+
+    # The notice was lost with the rest of that write, so the late notice
+    # takes its place, after the write that shows the cursor again.
+    assert output.count("Tier 3 progress display stopped after a drawing error") == 1
+    assert output.endswith(f"{_LATE_STOP_NOTICE}\n")
+    assert output.rfind("\x1b[?25h") > output.rfind("\x1b[?25l")
+
+
 @pytest.mark.parametrize("refused_from", ["first-frame", "update"], ids=["first-frame-refused", "update-refused"])
 def test_late_notice_is_written_when_the_terminal_refuses_the_cursor_as_the_run_closes(
     monkeypatch: pytest.MonkeyPatch,

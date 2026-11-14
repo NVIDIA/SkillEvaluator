@@ -550,8 +550,12 @@ class RichProgressReporter(PlainProgressReporter):
         """
         # The console holds no refused output once Live stops here, and the
         # caller drops it before Live started. Live that stopped itself when
-        # its first frame failed leaves that frame and stop held, and they go
-        # out with the notice.
+        # its first frame failed leaves that frame and stop held when the
+        # terminal refused that stop too. They then go out with the notice,
+        # and a stream's buffer may keep only part of them. Nothing here
+        # tells whether that stop went out, so after a failed first frame
+        # the run's close() writes the late notice either way, although a
+        # stream that took the stop and kept the notice sends both.
         notice_alone = live is None or bool(getattr(live, "is_started", False))
         if live is not None:
             try:
@@ -580,8 +584,10 @@ class RichProgressReporter(PlainProgressReporter):
         except Exception as error:
             logger.debug("Tier 3 progress stop notice failed", exc_info=True)
             # The flush above emptied the stream's buffer, so a buffer that
-            # keeps refused writes now holds the whole notice and sends it
-            # later. The run's close() then sends it instead of the late one.
+            # keeps refused writes now holds the notice and sends it later.
+            # The run's close() then sends it instead of the late one. A
+            # buffer smaller than the notice would keep only part of it, but
+            # standard error's buffer is many times the notice's size.
             notice_kept = notice_alone and isinstance(error, BlockingIOError) and self._stream_keeps_refused_writes()
             self._failed_stop = _FailedDisplayStop(stop_refused=False, notice_shown=False, notice_kept=notice_kept)
         else:

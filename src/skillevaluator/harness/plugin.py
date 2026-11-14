@@ -11,6 +11,7 @@ advisory and never changes Tier 1 results.
 from __future__ import annotations
 
 import json
+import stat
 from pathlib import Path
 from typing import Any
 
@@ -56,12 +57,19 @@ OUTCOME_TEXT = {
 
 
 def _skill_sizes(root: Path) -> dict[Path, int]:
-    """Size of each SKILL.md under skills/ that can be read (not a dangling or looping link, not unreadable)."""
+    """Size of each SKILL.md under skills/ that is a readable regular file.
+
+    Pipes, sockets, devices, dangling or looping links and unreadable files are skipped. Only a
+    regular file is ever opened: opening a named pipe with no writer would block forever.
+    """
     sizes: dict[Path, int] = {}
     for path in (root / "skills").rglob("SKILL.md") if (root / "skills").is_dir() else []:
         try:
+            info = path.stat()
+            if not stat.S_ISREG(info.st_mode):
+                continue
             with path.open("rb"):
-                sizes[path] = path.stat().st_size
+                sizes[path] = info.st_size
         except OSError:
             continue
     return sizes

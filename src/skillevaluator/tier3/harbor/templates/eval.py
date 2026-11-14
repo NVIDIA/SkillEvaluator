@@ -189,6 +189,7 @@ _integer_may_fail = _shared_checks._integer_may_fail
 _interpreter_operands = _shared_checks._interpreter_operands
 _interpreter_script_arg = _shared_checks._interpreter_script_arg
 _is_apply_patch_action = _shared_checks._is_apply_patch_action
+_is_editor_view = _shared_checks._is_editor_view
 _is_execution_action = _shared_checks._is_execution_action
 _is_file_read_action = _shared_checks._is_file_read_action
 _is_heredoc_redirect = _shared_checks._is_heredoc_redirect
@@ -281,7 +282,9 @@ _shell_c_payload = _shared_checks._shell_c_payload
 _shell_c_positional = _shared_checks._shell_c_positional
 _shell_executable = _shared_checks._shell_executable
 _shell_substitution_payloads = _shared_checks._shell_substitution_payloads
+_shell_text_regions = _shared_checks._shell_text_regions
 _shell_tokens = _shared_checks._shell_tokens
+_shell_write_scans = _shared_checks._shell_write_scans
 _shell_write_targets = _shared_checks._shell_write_targets
 _shell_write_texts = _shared_checks._shell_write_texts
 _skill_match_details = _shared_checks._skill_match_details
@@ -352,6 +355,7 @@ _COMMAND_INTRODUCING_WORDS = _shared_checks._COMMAND_INTRODUCING_WORDS
 _COMMAND_POSITION_LEADERS = _shared_checks._COMMAND_POSITION_LEADERS
 _COMMAND_REACHES_BUILTINS = _shared_checks._COMMAND_REACHES_BUILTINS
 _COMMAND_SUBSTITUTION_RE = _shared_checks._COMMAND_SUBSTITUTION_RE
+_COMMENT_WORD_BREAKS = _shared_checks._COMMENT_WORD_BREAKS
 _COMPOUND_CLOSERS = _shared_checks._COMPOUND_CLOSERS
 _COMPOUND_OPENERS = _shared_checks._COMPOUND_OPENERS
 _CURL_OR_WGET_WORD_RE = _shared_checks._CURL_OR_WGET_WORD_RE
@@ -381,6 +385,7 @@ _GLUED_FUNCTION_HEADER_RE = _shared_checks._GLUED_FUNCTION_HEADER_RE
 _GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
+_HEREDOC_OPERAND_RE = _shared_checks._HEREDOC_OPERAND_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
 _HOME_ANCHOR_RE = _shared_checks._HOME_ANCHOR_RE
 _HOME_CREDENTIAL_PATHS = _shared_checks._HOME_CREDENTIAL_PATHS
@@ -405,6 +410,7 @@ _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
 _MAPFILE_OPTIONS_WITH_ARG = _shared_checks._MAPFILE_OPTIONS_WITH_ARG
 _MAX_HEREDOCS_PER_LINE = _shared_checks._MAX_HEREDOCS_PER_LINE
+_MAX_HEREDOC_DEPTH = _shared_checks._MAX_HEREDOC_DEPTH
 _MAX_HEREDOC_OPERANDS = _shared_checks._MAX_HEREDOC_OPERANDS
 _MAX_LOOKUP_READINGS = _shared_checks._MAX_LOOKUP_READINGS
 _MAX_NETWORK_ACTION_CHARS = _shared_checks._MAX_NETWORK_ACTION_CHARS
@@ -450,6 +456,7 @@ _PUNCTUATION_RUN_RE = _shared_checks._PUNCTUATION_RUN_RE
 _QUOTED_NEWLINE = _shared_checks._QUOTED_NEWLINE
 _QUOTED_STRING_RE = _shared_checks._QUOTED_STRING_RE
 _QUOTED_SYNTAX_MARK = _shared_checks._QUOTED_SYNTAX_MARK
+_QUOTE_CHARS = _shared_checks._QUOTE_CHARS
 _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
 _READS_ARGV0_RE = _shared_checks._READS_ARGV0_RE
@@ -484,8 +491,10 @@ _SENSITIVE_WRITE_PATHS = _shared_checks._SENSITIVE_WRITE_PATHS
 _SHELL_ASSIGNMENT_RE = _shared_checks._SHELL_ASSIGNMENT_RE
 _SHELL_COMMAND_INTERPRETERS = _shared_checks._SHELL_COMMAND_INTERPRETERS
 _SHELL_EXPANSION_CHARS = _shared_checks._SHELL_EXPANSION_CHARS
+_SHELL_LINE_FILL_RE = _shared_checks._SHELL_LINE_FILL_RE
 _SHELL_METACHARS = _shared_checks._SHELL_METACHARS
 _SHELL_NAME_RE = _shared_checks._SHELL_NAME_RE
+_SHELL_SCAN_RE = _shared_checks._SHELL_SCAN_RE
 _SHELL_SEPARATORS = _shared_checks._SHELL_SEPARATORS
 _SHELL_VARIABLE_RE = _shared_checks._SHELL_VARIABLE_RE
 _SHELL_WORD = _shared_checks._SHELL_WORD
@@ -495,6 +504,7 @@ _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
 _STDIN_ARGV_RE = _shared_checks._STDIN_ARGV_RE
 _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
 _STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
+_STR_REPLACE_EDITORS = _shared_checks._STR_REPLACE_EDITORS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
 _TEE_OPERANDS_RE = _shared_checks._TEE_OPERANDS_RE
@@ -667,6 +677,8 @@ JUDGE_REASONING_EFFORT = "medium"
 REASONING_MAX_COMPLETION_TOKENS = 32768
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV = "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL"
+_REFUSAL_FALLBACK_DISABLED_VALUES = frozenset({"none", "off", "disabled", "false", "0"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
 _ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -959,6 +971,21 @@ def _strict_judge_replies():
         return _judge_retry_policy() == "strict"
     except ValueError:
         return True
+
+
+def _refusal_fallback_target(model):
+    """Return the refusal fallback target for ``model``, or None for no fallback.
+
+    SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL replaces the built-in target; ``none``,
+    ``off``, ``disabled``, ``false`` or ``0`` turns it off. An empty value counts
+    as unset, and a target equal to ``model`` is never sent. Mirrors
+    ``provider_config.anthropic_refusal_fallback_model``.
+    """
+    value = os.environ.get(ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, "").strip()
+    if value.casefold() in _REFUSAL_FALLBACK_DISABLED_VALUES:
+        return None
+    target = value or ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    return None if target == str(model or "").strip() else target
 
 
 def _builtin_refusal_fallback_allowed():
@@ -1943,9 +1970,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
     server_side_fallback = (
-        _is_claude_5_5_or_later(model)
+        _refusal_fallback_target(model)
+        if _is_claude_5_5_or_later(model)
         and urlparse(target_url).hostname == "api.anthropic.com"
         and _builtin_refusal_fallback_allowed()
+        else None
     )
 
     def _build_request(include_schema):
@@ -1968,7 +1997,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
             "anthropic-version": "2023-06-01",
         }
         if server_side_fallback:
-            payload["fallbacks"] = [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]
+            payload["fallbacks"] = [{"model": server_side_fallback}]
             headers["anthropic-beta"] = ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
         return urllib.request.Request(target_url, data=json.dumps(payload).encode(), headers=headers)
 
@@ -2066,12 +2095,25 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+
+
 def _bedrock_refusal_fallback_model(model):
-    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
-    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    """Return the Bedrock refusal fallback ID for a Claude 5.5 or later model, else None.
+
+    A bare name such as ``claude-opus-4-8`` gets the request model's geography
+    prefix. A value that is already a Bedrock ID (``us.anthropic.``,
+    ``global.anthropic.``, ``anthropic.``) is used as given.
+    """
+    prefix = _BEDROCK_ANTHROPIC_PREFIX_RE.match(str(model or ""))
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
-    return prefix.group(0) + ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    target = _refusal_fallback_target(model)
+    if not target:
+        return None
+    bedrock_target = target if _BEDROCK_ANTHROPIC_PREFIX_RE.match(target) else prefix.group(0) + target
+    # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
+    return None if bedrock_target == str(model).strip() else bedrock_target
 
 
 def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):

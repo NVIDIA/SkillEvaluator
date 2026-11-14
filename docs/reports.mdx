@@ -52,7 +52,14 @@ layout when the default output is safe to claim: `skillevaluator validate
 ./my-skill` writes to `./reports/` when that directory is absent, empty, or
 already authenticated as SkillEvaluator output. If `./reports/` is nonempty
 and unowned, the default relocates to `./my-skill-reports/` instead of writing
-into unrelated content.
+into unrelated content. If that sibling is nonempty and unowned too, the run
+stops before any check and asks for an explicit `-o`/`--output-dir`.
+
+Ownership is tied to a key stored in your home directory (see
+`SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` in
+[Environment Variables](environment-variables.mdx)). Report folders written
+with another key, for example by another account or by a container whose home
+directory was discarded, count as unowned. Pass `-o` in those setups.
 
 For `validate`, that compact default is a pipeline view — a per-check ticker
 plus a summary. Pass `--verbose` to get the full per-check detail stream in
@@ -983,8 +990,9 @@ unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
 
 An arm that ran but failed, for example because one baseline attempt hit the
-agent timeout, fails the agent and the run, and the other arm keeps its
-scores. Reports describe such an arm by how many of its attempts scored,
+agent timeout, fails the agent and the run unless `--tolerate-baseline-timeouts`
+keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)),
+and the other arm keeps its scores. Reports describe such an arm by how many of its attempts scored,
 never as not run. In `BENCHMARK.md`, the agent's Overall and dimension cells
 read `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
 `baseline unavailable` when no baseline attempt scored. They read

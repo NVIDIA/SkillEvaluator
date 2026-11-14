@@ -1,0 +1,37 @@
+harness: codex
+display_name: OpenAI Codex CLI
+verified: {version: 0.166.0, source: "rust-v0.166.0 @ 593389380740", date: 2026-11-01, method: proxy-captured canary probes x3 + source, os: linux}
+roots:
+  project: [.agents/skills, .codex/skills]
+  user: [~/.agents/skills, ~/.codex/skills]
+limits: {scan_depth: 6, skips_hidden_dirs: true, catalog_desc_codepoints: 1024, list_budget: "2% of context, 8,000 chars if unknown, max 10,000 tokens"}
+listing: {cut: 1024, budget: {desc_chars: 8000, chars_per_context_token: 0.08}}
+rules:
+  - {id: CX-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "Codex reads .agents/skills and .codex/skills (project and user).", fix: "Install it under .agents/skills or .codex/skills.", confidence: high}
+  - {id: CX-DESC-CUT, when: "description_codepoints > 1024", effect: degraded, outcome: listing shortened, message: "Description cut to 1,021 chars + '...' in the skill list ({description_codepoints} chars, {description_over} over 1,024).", fix: "Cut the description by at least {description_over} characters.", versions: "0.142+; 0.141 and older reject the skill (not loaded)", confidence: high}
+  - {id: CX-SHELL-READ, when: "not explicit_invocation and (skill_md_bytes > 40000 or (custom_provider and skill_md_bytes > 10000))", effect: degraded, outcome: delivery truncated, message: "SKILL.md is {skill_md_bytes} bytes (~{skill_md_tokens} tokens); when the model opens it through the shell, Codex keeps only the start and end of output over ~10K tokens (10,000 bytes on models Codex has no bundled metadata for, e.g. custom providers). An explicit $skill mention injects the whole file (--explicit-invocation).", fix: "Keep SKILL.md under ~40,000 bytes (10,000 for custom providers); move detail into references/ files.", confidence: medium}
+  - {id: CX-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: not_loaded, message: "Skill dropped: Codex requires a string description.", fix: "Add a non-empty string description.", confidence: high}
+  - {id: CX-STRICT-YAML, when: "frontmatter_tab_indent or frontmatter_duplicate_keys", effect: not_loaded, message: "Skill dropped: invalid YAML (tabs or duplicate keys).", fix: "Use spaces, not tabs, and remove duplicate keys.", confidence: high}
+  - {id: CX-BOM, when: "frontmatter_bom", effect: not_loaded, outcome: rejected, message: "Skill dropped: SKILL.md starts with a UTF-8 BOM.", fix: "Save SKILL.md as UTF-8 without a BOM.", confidence: high}
+  - {id: CX-NESTED, when: "nested_skill_md_exact", effect: degraded, message: "The nested SKILL.md is loaded as a second, separate skill.", fix: "Move the nested skill to its own folder under the skills root, or rename its SKILL.md.", confidence: high}
+  - {id: CX-DEPTH, when: "grouping_depth > 5", effect: not_loaded, outcome: not found, message: "Beyond Codex's scan depth of 6.", fix: "Install the skill at most 5 folders below the skills root.", confidence: medium}
+  - {id: CX-SYMLINK-FILE, when: "skill_md_symlink", effect: not_loaded, message: "Symlinked SKILL.md files are skipped (codex#15756).", fix: "Copy SKILL.md into the folder instead of symlinking the file (a symlinked folder works).", confidence: high}
+  - {id: CX-LIST-BUDGET, when: "catalog_desc_chars > list_budget_chars", effect: degraded, outcome: listing shortened, message: "The {catalog_size} skills in this folder have {catalog_desc_chars} description chars; Codex's skill list fits about {list_budget_chars} (2% of the context window at 4 bytes per token; 8,000 chars if unknown), so descriptions get shortened, then removed, then skills left out.", fix: "Shorten descriptions (trigger first) or install fewer skills here.", confidence: high}
+  - {id: CX-DUP-NAME, when: "duplicate_name", effect: advisory, message: "Another skill is also named '{skill_name}' ({duplicate_paths}); Codex lists both, so the model sees two.", fix: "Give each skill a unique name.", confidence: high}
+  - {id: CX-ALLOWED-TOOLS, when: "allowed_tools_shape != 'none'", effect: advisory, message: "allowed-tools is ignored by Codex.", fix: "Don't rely on allowed-tools to restrict tools; use the harness's permission settings.", confidence: high}
+  - {id: CX-CASING, when: "not manifest_name_exact", effect: not_loaded, message: "Non-canonical name (skill.md/Skill.md): never loaded, on Linux or macOS (3/3 each).", fix: "Rename the file to SKILL.md (exact casing).", confidence: high}
+  - {id: CX-DMI-IGNORED, when: "disable_model_invocation and not codex_implicit_disabled", effect: degraded, message: "disable-model-invocation is ignored: the model still sees this skill and can use it on its own.", fix: "For Codex, add agents/openai.yaml with policy: {allow_implicit_invocation: false}.", confidence: high}
+  - {id: CX-ARGUMENTS, when: "uses_arguments_placeholder", effect: degraded, message: "$ARGUMENTS is not substituted: the model sees the literal text.", fix: "Describe the expected input in words instead of $ARGUMENTS.", confidence: medium}
+  - {id: CX-SKILL-DIR, when: "uses_claude_skill_dir", effect: degraded, message: "${CLAUDE_SKILL_DIR} is not substituted: the model sees the literal text.", fix: "Use paths relative to SKILL.md.", confidence: medium}
+  - {id: CX-CLAUDE-ONLY, when: "claude_only_fields != ''", effect: advisory, message: "Ignored here (Claude Code only): {claude_only_fields}.", fix: "Fine to keep for Claude Code; don't depend on them elsewhere.", confidence: medium}
+notes:
+  - "Explicit $skill injects the whole SKILL.md (145 KB tested)."
+  - "Follows symlinked skill folders (inside or outside the root)."
+  - "New skills are listed next turn; files are re-read from disk."
+plugin:
+  rules:
+    - {id: CX-PLUGIN-FORMAT, when: "not (fmt_codex or fmt_claude or fmt_cursor or fmt_agent_v1)", effect: not_loaded, outcome: rejected, message: "Codex installs .codex-plugin, .claude-plugin, .cursor-plugin and Agent Plugins v1 bundles; this one has none of them.", fix: "Add .codex-plugin/plugin.json.", confidence: high}
+    - {id: CX-PLUGIN-NAMESPACE, when: "components.skills > 0", effect: advisory, message: "Plugin skills are named {plugin_name}:<skill>; a bare skill name does not invoke them.", fix: "Refer to plugin skills by their full {plugin_name}:<skill> name.", confidence: high}
+    - {id: CX-PLUGIN-SKILL-CAP, when: "fmt_agent_v1 and not (fmt_codex or fmt_claude or fmt_cursor) and max_skill_bytes > 8000", effect: degraded, outcome: cut, message: "Agent Plugins-format bundle with a {max_skill_bytes}-byte SKILL.md: Codex cuts plugin-skill bodies to 8,000 bytes and warns that the skill was truncated.", fix: "Keep each SKILL.md under 8,000 bytes; move detail into referenced files.", confidence: high}
+    - {id: CX-PLUGIN-AGENT-HOOKS, when: "fmt_agent_v1 and not (fmt_codex or fmt_claude or fmt_cursor) and components.hooks > 0", effect: degraded, outcome: not run, message: "Codex does not load hooks from Agent Plugins-format bundles, even with hook trust bypassed.", fix: "Add .codex-plugin/plugin.json if the hooks must run in Codex.", confidence: high}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: trust_gated, mcp: delivered, lsp: not_observed}

@@ -203,7 +203,7 @@ class Finding:
                 self._normalize_identity_text(self.suggestion),
             )
         )
-        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        digest = hashlib.sha256(identity.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:20]
         return f"SEF-{digest}"
 
     def location_occurrence_id(self, file_path: object, line_number: object, line_content: object = None) -> str:
@@ -222,7 +222,7 @@ class Finding:
                 self._normalize_identity_text(line_content),
             )
         )
-        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        digest = hashlib.sha256(identity.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:20]
         return f"SEO-{digest}"
 
     @property

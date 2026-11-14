@@ -18,6 +18,9 @@ from pydantic import ValidationError
 
 from skillevaluator.constants import (
     DEFAULT_ALLOWED_SKILL_DIRS,
+    DESCRIPTION_MAX_LENGTH,
+    DESCRIPTION_TRIGGER_PATTERN,
+    DESCRIPTION_TRIGGER_WINDOW,
     KEBAB_CASE_PATTERN,
     MAX_SKILL_MD_LINES,
     RECOMMENDED_BODY_SECTIONS,
@@ -25,6 +28,10 @@ from skillevaluator.constants import (
     SCAN_EXCLUDED_FILES,
     SCHEMA_ALLOWED_DIRS_ENV,
     SKILL_MANIFEST_FILE,
+    SKILL_MANIFEST_VARIANTS,
+    SKILL_MD_SIZE_THRESHOLDS,
+    SKILL_NOT_SHIPPED_DIRS,
+    SPEC_SKILL_FIELDS,
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
@@ -179,6 +186,39 @@ def _display_metadata_id(value: Any) -> str:
     if len(value) > _METADATA_ID_DISPLAY_LIMIT:
         return value[:_METADATA_ID_DISPLAY_LIMIT] + "…"
     return value
+
+
+_UTF8_BOM = b"\xef\xbb\xbf"
+_TRIGGER_RE = re.compile(DESCRIPTION_TRIGGER_PATTERN, re.IGNORECASE)
+
+
+def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
+    """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
+    try:
+        root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
+    except yaml.YAMLError:
+        return []
+    duplicates: list[tuple[str, int]] = []
+    stack: list[tuple[yaml.Node, str]] = [(root, "")] if root is not None else []
+    visited: set[int] = set()
+    while stack:
+        node, prefix = stack.pop()
+        if id(node) in visited:
+            continue
+        visited.add(id(node))
+        if isinstance(node, yaml.MappingNode):
+            seen: set[str] = set()
+            for key_node, value_node in node.value:
+                if not isinstance(key_node, yaml.ScalarNode) or key_node.value == "<<":
+                    continue
+                key = f"{prefix}{key_node.value}"
+                if key_node.value in seen:
+                    duplicates.append((key, key_node.start_mark.line + 2))
+                seen.add(key_node.value)
+                stack.append((value_node, f"{key}."))
+        elif isinstance(node, yaml.SequenceNode):
+            stack.extend((item, prefix) for item in node.value)
+    return sorted(duplicates, key=lambda item: item[1])
 
 
 class SchemaValidator(ValidatorBase):
@@ -354,8 +394,9 @@ class SchemaValidator(ValidatorBase):
                     message=(
                         "Skill manifest uses non-canonical name 'skill.md' — "
                         "the agentskills.io spec requires 'SKILL.md' (uppercase). "
-                        "On case-sensitive filesystems (Linux), this will not be "
-                        "recognized by spec-compliant tooling"
+                        "Codex and Hermes never load it; Claude Code, OpenCode, Copilot CLI "
+                        "and OpenClaw load it only on case-insensitive filesystems (macOS), "
+                        "so it can work locally and be missing on Linux"
                     ),
                     file_path=str(skill_md),
                     suggestion="Rename 'skill.md' to 'SKILL.md' to comply with the agentskills.io spec",
@@ -380,6 +421,7 @@ class SchemaValidator(ValidatorBase):
             result.merge(self._validate_name_matches_directory(skill_path, frontmatter))
             result.merge(self._validate_author(frontmatter, str(skill_md)))
             result.merge(self._validate_metadata_id(frontmatter, str(skill_md)))
+            result.merge(self._validate_portability(skill_path, skill_md, frontmatter))
 
         return result
 
@@ -452,6 +494,23 @@ class SchemaValidator(ValidatorBase):
                 )
             )
             return result
+
+        for key, line_number in _duplicate_frontmatter_keys(frontmatter_yaml):
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=self.policy.severity_for("SCHEMA", "duplicate_key", default=Severity.HIGH),
+                    check_name="duplicate_key",
+                    message=(
+                        f"Duplicate frontmatter key '{key}': YAML parsers disagree on it "
+                        "(Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value)"
+                    ),
+                    file_path=file_path,
+                    line_number=line_number,
+                    suggestion=f"Keep a single '{key}' entry",
+                    metadata={"key": key},
+                )
+            )
 
         try:
             frontmatter = SkillFrontmatter.model_validate(data)
@@ -641,6 +700,146 @@ class SchemaValidator(ValidatorBase):
                 message=f"Directory name matches frontmatter: '{fm_name}'",
             )
 
+        return result
+
+    def _portability_finding(
+        self,
+        check_name: str,
+        default: Severity,
+        message: str,
+        file_path: str,
+        suggestion: str,
+        **metadata: object,
+    ) -> Finding:
+        return Finding(
+            category="SCHEMA",
+            severity=self.policy.severity_for("SCHEMA", check_name, default=default),
+            check_name=check_name,
+            message=message,
+            file_path=file_path,
+            suggestion=suggestion,
+            metadata=dict(metadata),
+        )
+
+    def _validate_portability(
+        self, skill_path: Path, skill_md: Path, frontmatter: SkillFrontmatter
+    ) -> ValidationResult:
+        """Flag spec-valid patterns that common agent harnesses load differently or not at all."""
+        result = ValidationResult()
+        file_path = str(skill_md)
+        findings: list[Finding] = []
+
+        if skill_md.is_symlink():
+            findings.append(
+                self._portability_finding(
+                    "manifest_symlink",
+                    Severity.MEDIUM,
+                    "SKILL.md is a symlink; Codex, Hermes and OpenClaw do not load symlinked manifests",
+                    file_path,
+                    "Replace the symlink with a regular SKILL.md file",
+                )
+            )
+
+        try:
+            raw = skill_md.read_bytes()
+        except OSError:
+            raw = b""
+        if raw.startswith(_UTF8_BOM):
+            findings.append(
+                self._portability_finding(
+                    "manifest_bom",
+                    Severity.MEDIUM,
+                    "SKILL.md starts with a UTF-8 byte-order mark; Codex drops the skill",
+                    file_path,
+                    "Save SKILL.md as UTF-8 without BOM",
+                )
+            )
+        for limit, level in SKILL_MD_SIZE_THRESHOLDS:
+            if len(raw) > limit:
+                findings.append(
+                    self._portability_finding(
+                        "manifest_size",
+                        Severity(level),
+                        f"SKILL.md is {len(raw):,} bytes (over {limit:,}); harnesses cut, refuse or skip large "
+                        "manifests (OpenClaw reads 16,000-64,000 chars and skips over 256,000 bytes; "
+                        "OpenCode cuts at 50 KiB)",
+                        file_path,
+                        "Move detail into references/ files and keep SKILL.md short",
+                        size_bytes=len(raw),
+                        limit_bytes=limit,
+                    )
+                )
+                break
+
+        # Same folders the harness check skips: evals/ and versions/ are scanned like any other folder.
+        nested = sorted(
+            path
+            for name in SKILL_MANIFEST_VARIANTS
+            for path in skill_path.rglob(name)
+            if path.parent != skill_path
+            and not any(part in SKILL_NOT_SHIPPED_DIRS for part in path.relative_to(skill_path).parts)
+        )
+        for path in nested:
+            findings.append(
+                self._portability_finding(
+                    "nested_manifest",
+                    Severity.MEDIUM,
+                    f"Nested skill manifest '{path.relative_to(skill_path).as_posix()}' inside this skill; "
+                    "Codex, OpenCode and Hermes load it as a separate skill, others ignore it",
+                    str(path),
+                    "Rename the nested file or move it out of the skill folder",
+                )
+            )
+
+        description = frontmatter.description
+        utf16_units = len(description.encode("utf-16-le", "surrogatepass")) // 2
+        if len(description) <= DESCRIPTION_MAX_LENGTH < utf16_units:
+            findings.append(
+                self._portability_finding(
+                    "description_utf16_length",
+                    Severity.MEDIUM,
+                    f"Description is {len(description)} characters but {utf16_units} UTF-16 units; "
+                    f"Copilot CLI counts UTF-16 units and drops descriptions over {DESCRIPTION_MAX_LENGTH}",
+                    file_path,
+                    "Shorten the description or replace emoji and other non-BMP characters",
+                    utf16_units=utf16_units,
+                )
+            )
+
+        trigger = _TRIGGER_RE.search(description)
+        if trigger is None or trigger.end() > DESCRIPTION_TRIGGER_WINDOW:
+            where = (
+                "no 'Use when ...' trigger"
+                if trigger is None
+                else f"its trigger at characters {trigger.start()}-{trigger.end()}"
+            )
+            findings.append(
+                self._portability_finding(
+                    "description_trigger",
+                    Severity.LOW,
+                    f"Description has {where}; some harnesses show only the first "
+                    f"~{DESCRIPTION_TRIGGER_WINDOW} characters in their skill list",
+                    file_path,
+                    f"State when to use the skill within the first {DESCRIPTION_TRIGGER_WINDOW} characters",
+                )
+            )
+
+        unknown = sorted(set(frontmatter.model_extra or {}) - SPEC_SKILL_FIELDS)
+        if unknown:
+            findings.append(
+                self._portability_finding(
+                    "unknown_field",
+                    Severity.LOW,
+                    f"Frontmatter field(s) outside the agentskills.io spec: {', '.join(unknown)}; "
+                    "agent harnesses do not pass them to the model",
+                    file_path,
+                    "Remove them or move them under 'metadata'",
+                    fields=unknown,
+                )
+            )
+
+        for finding in findings:
+            result.add_finding(finding)
         return result
 
     def _validate_line_count(self, skill_md: Path) -> ValidationResult:

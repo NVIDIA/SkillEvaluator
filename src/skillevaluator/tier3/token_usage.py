@@ -81,29 +81,39 @@ _ACCOUNTING = {
 }
 
 
+# Each counter's payload name and its short name in a report trial's ``tokens``.
+_COUNTERS = {"prompt_tokens": "prompt", "completion_tokens": "completion", "cached_tokens": "cached"}
+
+
 def _count(value: object) -> int | None:
     """Return a non-negative whole token count; bools, strings, fractions and NaN are not counts."""
     return int(value) if _is_measurement(value) and float(value).is_integer() else None
 
 
-def normalize_token_counts(raw: object) -> dict[str, Any] | None:
+def normalize_token_counts(raw: object, *, invalid_counters: object = ()) -> dict[str, Any] | None:
     """Normalize one attempt's token counters, or return ``None`` when it recorded none.
 
     ``raw`` is a report trial's ``tokens`` object (``prompt``, ``completion``,
     ``cached``) or ATIF-style counters (``prompt_tokens`` and so on). Harbor
     omits a zero cache counter, so a missing cached count is 0 once the prompt
-    count is present. ``complete`` is ``False`` when a counter is missing or
-    invalid, or when cached exceeds prompt; ``invalid_counters`` names the
-    rejected fields, never their values.
+    count is present. ``invalid_counters`` is the trial's
+    ``invalid_token_counters``: counters its trajectory recorded with an
+    invalid value, which ``tokens`` leaves out. ``complete`` is ``False`` when
+    a counter is missing or invalid, or when cached exceeds prompt; the
+    result's ``invalid_counters`` names the rejected fields, never their values.
     """
+    names = invalid_counters if isinstance(invalid_counters, list | tuple) else ()
+    rejected = {name for name in names if isinstance(name, str) and name in _COUNTERS}
     if not isinstance(raw, Mapping):
-        return None
+        if not rejected:
+            return None
+        raw = {}
     counts: dict[str, int | None] = {}
     invalid: list[str] = []
-    for field, short in (("prompt_tokens", "prompt"), ("completion_tokens", "completion"), ("cached_tokens", "cached")):
+    for field, short in _COUNTERS.items():
         value = raw.get(short, raw.get(field))
-        counts[field] = _count(value)
-        if value is not None and counts[field] is None:
+        counts[field] = None if field in rejected else _count(value)
+        if field in rejected or (value is not None and counts[field] is None):
             invalid.append(field)
     if all(count is None for count in counts.values()) and not invalid:
         return None
@@ -183,6 +193,11 @@ def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
     return label
 
 
+def _attempt_tokens(row: Mapping[str, Any]) -> dict[str, Any] | None:
+    """Normalize a report trial's or usage-only attempt's ``tokens`` and its ``invalid_token_counters``."""
+    return normalize_token_counts(row.get("tokens"), invalid_counters=row.get("invalid_token_counters", ()))
+
+
 def _pass_at_k_branch(agent: Mapping[str, Any], condition: str) -> Mapping[str, Any]:
     return _mapping(_mapping(agent.get("pass_at_k")).get(condition))
 
@@ -213,7 +228,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
             attempts[arm].append(
                 _Attempt(
                     _matching_case(_case_label(trial), trial_id if isinstance(trial_id, str) else "", known_cases),
-                    normalize_token_counts(trial.get("tokens")),
+                    _attempt_tokens(trial),
                     True,
                 )
             )
@@ -227,7 +242,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
             attempts[arm].append(
                 _Attempt(
                     _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases),
-                    normalize_token_counts(row.get("tokens")),
+                    _attempt_tokens(row),
                     scored,
                 )
             )
@@ -299,9 +314,18 @@ def _case_expected(
     observed: int,
     pass_at_k_cases: Mapping[str, Mapping[str, Any]],
 ) -> int:
-    """Return the attempts a case should have run, from pass@k: ``k`` minus attempts skipped after a pass."""
+    """Return the attempts a case should have run, from its pass@k record.
+
+    The collector counts the case's scored, recovered and missing attempts,
+    which leave out attempts skipped after a pass and attempts a run budget
+    refused. A record without those counts gives ``k`` minus the attempts
+    skipped after a pass.
+    """
     branch = _pass_at_k_branch(agent, condition)
     record = _mapping(pass_at_k_cases.get(case))
+    used, missing = _count(record.get("attempts_used")), _count(record.get("attempts_missing"))
+    if used is not None and missing is not None:
+        return max(observed, used + (_count(record.get("attempts_recovered")) or 0) + missing)
     k = _count(branch.get("k"))
     if not record or k is None:
         return observed

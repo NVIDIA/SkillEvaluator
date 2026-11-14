@@ -1143,10 +1143,59 @@ def test_finding_evidence_redaction_masks_credentials(text: str, secrets: tuple[
         'subprocess.run(["date", "-u", "+%H:%M:%S"])',
         "go test ./... | grep -- '--- PASS: TestLogin' && rm -rf /tmp/out",
         'echo \'{"pass": true, "score": 1}\' > result.json && rm -rf /srv/app',
+        # A bare "-p" element after a MySQL client or login element, with
+        # JSON-escaped quotes as in tool-call arguments.
+        json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
+        json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
+        json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
+        # The same with the quotes escaped twice, after a plain MySQL client element.
+        'run(["mysql", "-e", "x"]); '
+        + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
     ],
 )
 def test_finding_evidence_redaction_keeps_ordinary_text(text: str) -> None:
     assert eval_core_checks._redact_finding_evidence(text) == text
+
+
+# A bare \"-p\" element keeps its escaped closing quote, so a multi-word
+# credential later in the same JSON string is still masked to its end.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["mysql", "-p"]', id="mysql-prompt"),
+        pytest.param('["docker", "login", "-u", "bot"]); run(["git", "log", "-p"]', id="git-log-after-login"),
+    ],
+)
+def test_finding_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None:
+    word = "Zq9" + "Leak"
+    text = json.dumps({"command": f"run({argv}); password: correct horse {word} staple"})
+
+    assert eval_core_checks._redact_finding_evidence(text) == json.dumps(
+        {"command": f"run({argv}); password: <redacted>"}
+    )
+
+
+_MYSQL_ARGUMENTS = json.dumps(
+    {"command": f'python -c \'import subprocess; subprocess.run(["mysql", "-uroot", "-p{_BASIC_PASSWORD}"])\''}
+)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an attached "-pVALUE" element there is escaped twice
+# (\\\"-pVALUE\\\"). After a MySQL client element it is masked with its escapes
+# intact.
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(f'Task: run subprocess.run(["mysql", "-uroot", "-p{_BASIC_PASSWORD}"]).', id="plain"),
+        pytest.param(f"Task: run subprocess.run(['mysql', '-uroot', '-p{_BASIC_PASSWORD}']).", id="single-quoted"),
+        pytest.param(f"Earlier call: {_MYSQL_ARGUMENTS}", id="json-escaped"),
+    ],
+)
+def test_finding_evidence_masks_twice_escaped_attached_password(context: str) -> None:
+    text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
+
+    assert eval_core_checks._redact_finding_evidence(text) == text.replace(_BASIC_PASSWORD, "<redacted>")
 
 
 @pytest.mark.parametrize(
@@ -1292,6 +1341,21 @@ def test_reviewer_credentials_never_reach_saved_judge_evidence(command: str) -> 
     evidence = eval_template._redact_judge_evidence(command + " && rm -rf /srv/app")
     assert "CANARY_REVIEW_SECRET" not in evidence
     assert evidence.endswith(" && rm -rf /srv/app")
+
+
+# Judge prompts render tool-call arguments with json.dumps, where the line
+# break of a continued command is a "\n" escape after an escaped backslash.
+@pytest.mark.parametrize(
+    "command", [case for case in _REVIEWER_CREDENTIAL_CASES if str(case.id).startswith("continued-")]
+)
+def test_continued_credentials_never_reach_json_escaped_judge_evidence(command: str) -> None:
+    arguments = {"command": command + " && rm -rf /srv/app"}
+    for escaped in (json.dumps(arguments), json.dumps(json.dumps(arguments))):
+        evidence = eval_template._redact_judge_evidence(escaped)
+
+        assert "CANARY_REVIEW_SECRET" not in evidence
+        assert "<redacted>" in evidence
+        assert " && rm -rf /srv/app" in evidence
 
 
 def test_judge_redaction_preserves_long_evidence_and_masks_credentials_past_finding_scan_limit() -> None:

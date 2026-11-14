@@ -12,8 +12,9 @@ from pathlib import Path
 
 import pytest
 from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
+from tests.reporting.test_unified_tier3_report import _write_summary
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 from skillevaluator.reporting.html import ADVISORY_FAIL_WORD, VERDICT_WORDS
@@ -172,8 +173,10 @@ def test_documented_labels_match_a_run_with_a_failed_peer() -> None:
     report_tier3 = json.loads(JSONReporter().render_all([result]))["tier3"]
     embedded = _embedded_tier3(raw)
     assert "The payload keeps `neutral`" not in section
+    assert "keeps `neutral` for a failed run," not in section
     assert (
-        "The Tier 3 payload of a `validate --tier3` JSON report, its `tier3` object, keeps `neutral` for a failed run"
+        "The Tier 3 payload of a `validate --tier3` JSON report, its `tier3` object, keeps `neutral` when the failed "
+        "agent's collected results record the failure"
     ) in section
     assert report_tier3["verdict"] == report_tier3["summary"]["verdict"] == "neutral"
     assert (
@@ -468,10 +471,15 @@ def test_changelog_documents_the_failed_run_verdict_label() -> None:
     assert report_tier3["verdict"] == "neutral"
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
+    assert "keeps `neutral` for a failed run" not in entry
     assert (
-        "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML "
-        "reports and the full Tier 3 payload they embed show the verdict as `fail`. The standalone Tier 3 "
-        f"`report.html` and the report of a `validate --block-on-agent-eval` run label it {VERDICT_WORDS['fail']};"
+        "The HTML reports and the full Tier 3 payload they embed show a failed run's verdict as `fail`. The "
+        f"standalone Tier 3 `report.html` and the report of a `validate --block-on-agent-eval` run label it "
+        f"{VERDICT_WORDS['fail']};"
+    ) in entry
+    assert (
+        "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` when the run's collected results "
+        "record the failure, for example when one of several agents fails."
     ) in entry
     assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in entry
 
@@ -556,7 +564,53 @@ def test_blocking_run_without_a_tier3_source_records_fail_in_both_reports(
     assert report_tier3["summary"]["verdict"] == "fail"
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
+    entry = _changelog_entry(FAILED_RUN_ENTRY)[2]
+    assert "Only a `validate --block-on-agent-eval` run" not in entry
     assert (
-        "Only a `validate --block-on-agent-eval` run without a valid Tier 3 source, which fails before any agent "
-        "runs, records `fail` in the `tier3` object too."
+        "A `validate --block-on-agent-eval` run without a valid Tier 3 source, which fails before any agent runs, "
+        "records `fail` there too."
+    ) in entry
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize(("score", "verdict"), [(1.0, "pass"), (0.2, "fail")])
+@pytest.mark.parametrize("error", ["Harbor job exited 1", "opencode: Harbor job exited 1"])
+def test_backend_failure_after_scoring_keeps_the_scored_verdict_in_the_json_report(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, score: float, verdict: str, error: str
+) -> None:
+    # The backend reports a failed run after its only agent scored, for example a
+    # Harbor job that exits with an error after its trials.
+    run_dir = tmp_path / "results" / "20260709_120005"
+    _write_summary(run_dir, score=score)
+    (tmp_path / "engine" / "demo").mkdir(parents=True)
+    engine = {"execution_status": "failed", "execution_errors": [error]}
+    result = agent_eval_result_from_directory(
+        tmp_path / "engine" / "demo", run_dir, engine_result=engine, use_llm_judge=False
+    )
+    assert result is not None
+    standalone = HTMLReporter(report_scope="tier3").render(result)
+
+    exit_code, report_tier3, raw = _validate_tier3_reports(monkeypatch, tmp_path, blocking=blocking, tier3=result)
+
+    assert exit_code == (1 if blocking else 0)
+    assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", verdict)
+    assert report_tier3["summary"]["verdict"] == verdict
+    assert report_tier3["summary"]["overall_score"] == pytest.approx(score)
+    # Only an error that begins with the agent's name marks that agent failed.
+    agent_status = report_tier3["agents"]["opencode"]["execution_status"]
+    assert agent_status == ("failed" if error.startswith("opencode:") else "succeeded")
+    assert _embedded_tier3(raw)["verdict"] == _embedded_tier3(standalone)["verdict"] == "fail"
+    assert f"Tier 3 quality: {VERDICT_WORDS['fail'] if blocking else ADVISORY_FAIL_WORD}" in _plain(raw)
+    assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(standalone)
+    assert (
+        "When the execution backend reports a failure after the agents scored, for example a Harbor job that exits "
+        "with an error after its trials, the `tier3` object keeps the verdict those scores give, such as `pass` or "
+        "`fail`."
     ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
+    assert (
+        "An execution backend error reported after every agent scored, for example a Harbor job that exits with an "
+        "error after its trials, also fails the run, and an error that begins with an agent's name marks that agent "
+        "`failed`. The payload still keeps the scores: `summary.overall_score` is set, and the `tier3` object records "
+        "the verdict those scores give, such as `pass` or `fail`. The HTML reports still show the run's verdict as "
+        "`fail`."
+    ) in _section()

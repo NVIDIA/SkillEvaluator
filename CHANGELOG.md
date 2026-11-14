@@ -253,16 +253,19 @@ All notable changes to SkillEvaluator are documented in this file.
   makes `accuracy` and `goal_accuracy` N/A.
 
 - Reports & Results said that the HTML report labels a failed Tier 3 run's
-  `neutral` verdict **Changes required**. The `tier3` object of a
-  `validate --tier3` JSON report keeps `neutral` for a failed run, but the HTML
-  reports and the full Tier 3 payload they embed show the verdict as `fail`.
-  The standalone Tier 3 `report.html` and the report of a
-  `validate --block-on-agent-eval` run label it **Changes required**; the
-  report of a default `validate --tier3` run, where Tier 3 is advisory, labels
-  it **Failed (advisory)**. Only a `validate --block-on-agent-eval` run without
-  a valid Tier 3 source, which fails before any agent runs, records `fail` in
-  the `tier3` object too. A `neutral` verdict of a successful run reads
-  **Neutral**.
+  `neutral` verdict **Changes required**. The HTML reports and the full Tier 3
+  payload they embed show a failed run's verdict as `fail`. The standalone
+  Tier 3 `report.html` and the report of a `validate --block-on-agent-eval` run
+  label it **Changes required**; the report of a default `validate --tier3`
+  run, where Tier 3 is advisory, labels it **Failed (advisory)**. The `tier3`
+  object of a `validate --tier3` JSON report keeps `neutral` when the run's
+  collected results record the failure, for example when one of several agents
+  fails. When the execution backend reports a failure after the agents scored,
+  for example a Harbor job that exits with an error after its trials, the
+  `tier3` object keeps the verdict those scores give, such as `pass` or `fail`.
+  A `validate --block-on-agent-eval` run without a valid Tier 3 source, which
+  fails before any agent runs, records `fail` there too. A `neutral` verdict of
+  a successful run reads **Neutral**.
 
 ### Fixed
 

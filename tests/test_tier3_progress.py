@@ -1845,7 +1845,11 @@ def test_late_notice_is_written_when_the_terminal_refuses_the_cursor_as_the_run_
     reporter.close()
     terminal.refusing = False
     stream.flush()
-    output = terminal.received.decode("utf-8")
+    # The stream's buffer can keep only the start of a refused frame and send
+    # it with the next write, cut inside a box-drawing character. How much it
+    # keeps depends on the Python version's buffer, so the bytes need not be
+    # valid UTF-8.
+    output = terminal.received.decode("utf-8", errors="replace")
 
     # The stream keeps the late notice with the refused show-cursor write and
     # sends both once the terminal takes writes again.

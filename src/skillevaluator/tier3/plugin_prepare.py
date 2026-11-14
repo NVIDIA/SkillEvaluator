@@ -185,8 +185,8 @@ def prepare_runtime_package(
         if member.problem is not None:
             audit.append(AuditRow(member.type, member.name, member.path, f"unresolved: {member.problem}"))
         elif member.type in {"skill", "rule"} and not member.path:
-            # A reference outside the plugin root has no content to stage. Keep
-            # it visible and never score the plugin as if it had loaded.
+            # A skill or rule reference without a bundled path has no content to
+            # stage. Keep it visible and never score the plugin as if it had loaded.
             state = member.dependency_state or "unclassified"
             audit.append(AuditRow(member.type, member.name, None, f"not staged: {state} reference"))
             incomplete.append(f"{member.type} reference '{member.name}' was not staged ({state})")

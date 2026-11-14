@@ -42,7 +42,7 @@ def _status(root: Path) -> dict[str, tuple[str, list[str]]]:
 
 def test_every_profile_has_plugin_section():
     for profile in load_profiles():
-        assert "rules" in profile["plugin"]
+        assert "rules" in profile["plugin"] and "components" in profile["plugin"]
 
 
 def test_facts_detect_formats_name_and_components(tmp_path: Path):
@@ -50,6 +50,7 @@ def test_facts_detect_formats_name_and_components(tmp_path: Path):
     facts = plugin_facts(root)
     assert is_plugin_root(root) and facts["fmt_claude"] and not facts["fmt_codex"]
     assert facts["plugin_name"] == "demo"
+    assert facts["components"] == {"skills": 1, "commands": 1, "agents": 0, "hooks": 0, "mcp": 2, "lsp": 0}
 
 
 def test_claude_format_acceptance_matrix(tmp_path: Path):
@@ -62,6 +63,7 @@ def test_claude_format_acceptance_matrix(tmp_path: Path):
         "openclaw": "loads",
         "opencode": "not_loaded",
     }
+    assert "CX-PLUGIN-NAMESPACE" in s["codex"][1]
 
 
 def test_codex_only_bundle_is_refused_by_copilot(tmp_path: Path):
@@ -72,8 +74,15 @@ def test_codex_only_bundle_is_refused_by_copilot(tmp_path: Path):
 def test_agent_v1_needs_schema_for_hermes(tmp_path: Path):
     good = _status(_plugin(tmp_path / "a", "plugin.json", {"$schema": AGENT_V1, "name": "demo", "version": "1"}))
     plain = _status(_plugin(tmp_path / "b", "plugin.json", {"name": "demo"}))
-    assert good["hermes"][0] == "loads"
+    assert good["hermes"][0] == "loads" and "HM-PLUGIN-DISABLED" in good["hermes"][1]
     assert plain["hermes"][0] == "not_loaded"
+
+
+def test_undelivered_components_degrade(tmp_path: Path):
+    s = _status(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("skills", "commands", "mcp")))
+    assert s["codex"][0] == "degraded" and "CX-PLUGIN-COMMANDS" in s["codex"][1]
+    assert s["openclaw"][0] == "degraded" and "OW-PLUGIN-MCP" in s["openclaw"][1]
+    assert s["claude-code"][0] == "loads" and "CC-PLUGIN-MCP" in s["claude-code"][1]
 
 
 def test_claude_inline_plugin_needs_default_folders(tmp_path: Path):
@@ -102,6 +111,22 @@ def test_harness_check_prints_plugin_panel(tmp_path: Path):
     assert "Plugin compatibility" in result.output and "opencode" in result.output
 
 
+def test_codex_agent_plugins_cap_and_hooks(tmp_path: Path):
+    def bundle(name: str, manifest: str, data: dict) -> Path:
+        root = _plugin(tmp_path / name, manifest, data)
+        (root / "skills/demo/SKILL.md").write_text(
+            "---\nname: demo\ndescription: Use when testing.\n---\n" + "x" * 8200
+        )
+        (root / "hooks").mkdir()
+        (root / "hooks/hooks.json").write_text(json.dumps({"hooks": {"Stop": []}}))
+        return root
+
+    agent = _status(bundle("a", "plugin.json", {"$schema": AGENT_V1, "name": "demo", "version": "1"}))["codex"]
+    codex = _status(bundle("c", ".codex-plugin/plugin.json", {"name": "demo", "version": "1"}))["codex"]
+    assert agent[0] == "degraded" and {"CX-PLUGIN-SKILL-CAP", "CX-PLUGIN-AGENT-HOOKS"} <= set(agent[1])
+    assert codex[0] == "loads" and "CX-PLUGIN-HOOKS" in codex[1] and "CX-PLUGIN-SKILL-CAP" not in codex[1]
+
+
 def test_unreadable_or_malformed_manifest_is_not_an_accepted_format(tmp_path: Path):
     from skillevaluator.harness.plugin import plugin_facts
 
@@ -109,3 +134,13 @@ def test_unreadable_or_malformed_manifest_is_not_an_accepted_format(tmp_path: Pa
     (tmp_path / ".claude-plugin" / "plugin.json").write_text("{not json", encoding="utf-8")
     facts = plugin_facts(tmp_path)
     assert facts["manifest_invalid"] and not facts["fmt_claude"] and not facts["any_manifest"]
+
+
+def test_manifest_only_plugin_is_flagged_as_adding_nothing(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": "empty"}', encoding="utf-8")
+    facts = plugin_facts(tmp_path)
+    claude = next(p for p in load_profiles() if p["harness"] == "claude-code")
+    result = evaluate_plugin(claude, facts)
+    assert result.status == "loads"
+    assert [f["id"] for f in result.findings] == ["CC-PLUGIN-NO-COMPONENTS"]

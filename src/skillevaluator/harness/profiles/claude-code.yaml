@@ -27,3 +27,4 @@ notes:
 plugin:
   rules:
     - {id: CC-PLUGIN-EMPTY, when: "not fmt_claude and not default_dirs", effect: not_loaded, outcome: not found, message: "No .claude-plugin/plugin.json and no skills/, commands/, agents/ or hooks/ folder: Claude Code finds nothing to load.", fix: "Add .claude-plugin/plugin.json or put components in the default folders."}
+  components: {skills: delivered, commands: delivered, agents: delivered, hooks: runs, mcp: deferred, lsp: runs}

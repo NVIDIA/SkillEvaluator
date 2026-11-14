@@ -36,3 +36,5 @@ notes:
 plugin:
   rules:
     - {id: OW-PLUGIN-FORMAT, when: "not (fmt_claude or fmt_codex or fmt_cursor or fmt_agent_v1 or fmt_root_json)", effect: not_loaded, outcome: rejected, message: "OpenClaw installs bundles with a JSON plugin manifest (.claude-plugin, .codex-plugin, .cursor-plugin or plugin.json); Hermes plugin.yaml plugins are not found.", fix: "Add .claude-plugin/plugin.json."}
+    - {id: OW-PLUGIN-CODEX-MCP, when: "fmt_codex and not (fmt_claude or fmt_agent_v1) and components.mcp > 0", effect: degraded, outcome: registered, message: "MCP servers of Codex-format bundles start, but their tools never reached the model.", fix: "Also ship .claude-plugin/plugin.json."}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: deferred, lsp: runs}

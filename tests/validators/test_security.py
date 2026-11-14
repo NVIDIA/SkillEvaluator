@@ -9540,6 +9540,8 @@ class TestSkillspectorMissingReferences:
             ("*Tip:* Write the summary to `output/notes.md` and keep it short.", True),
             ("**Step 1:** Write the summary to `output/notes.md` and keep it short.", True),
             ("$ python scripts/summarize.py > output/notes.md", True),
+            # A zero-padded format, whose "%05" decodes to a control character, is no exception.
+            ("$ printf '%05d' 7 > output/notes.md", True),
             # A wildcard beside a label, a label in code and any other "$" keep their meaning.
             ("**Note:** Run `bash *` then write the summary to `output/notes.md`.", False),
             ("Run `sh **Note:**` then write the summary to `output/notes.md`.", False),
@@ -9613,6 +9615,13 @@ class TestSkillspectorMissingReferences:
             ),
             ('Write each line as "{name}, {score}" to `output/notes.md`.', "helper.sh", True),
             ('Use `printf "%s %s"` to write the summary to `output/notes.md`.', "helper.sh", True),
+            # Also with zero-padded formats, whose "%02" to "%04" decode to control characters.
+            (
+                'Run `printf \'{"h": "%02d", "m": "%02d"}\' 3 4` and write the summary to `output/notes.md`.',
+                ".git/HEAD",
+                True,
+            ),
+            ('Run `printf \'{"h": "%04d", "m": "%03d"}\' 3 4` and write `output/notes.md`.', "helper.sh", True),
             # An apostrophe earlier in the line does not hide a quoted space.
             (
                 "Don't skip it: run sh setup' 'helper.sh, then write the summary to output/notes.md.",
@@ -10818,8 +10827,8 @@ class TestSkillspectorMissingReferences:
             ("Run $ROOT/setup now: $", "versions", True),
             # That "$" stays part of a word with other shell syntax, which may
             # then name a file whose name ends in "$"; after another "$" it ends
-            # the parameter "$$". A line that holds the stand-in for it reads
-            # such a "$" as an expansion.
+            # the parameter "$$". Control and private-use characters in the line,
+            # as written or decoded, do not change how it is read.
             ("Run sh *a$ now.", "xa$", True),
             ("Run sh setup?$ now.", "setupx$", True),
             ("Run `sh *a$ now` and write `output/notes.md`.", "xa$", True),
@@ -10827,7 +10836,15 @@ class TestSkillspectorMissingReferences:
             ('Run sh "a$ b*" now.', "a$ bc", True),
             ("Run sh *a$ now.", "xab", False),
             ("Run sh $$ now.", "x", True),
-            ("Run sh *a\x05$ now.", "xa\x05b", True),
+            ("Run sh *a\x05$ now.", "xa\x05$", True),
+            ("Run sh *a\x05$ now.", "xa\x05b", False),
+            ("Run sh *a%05$ now.", "xa\x05b", False),
+            ("Run sh *a$ now.", "xab", False),
+            ("$ printf '%05d' 7 > output/notes.md", ".git", False),
+            ("$ printf '%05d' 7 > output/notes.md", "evals", False),
+            ("$ echo %02 %03 %04 %05  > output/notes.md", ".git", False),
+            ("$ printf '%05d' $X > output/notes.md", ".git", True),
+            ("$ sh v*/i*.sh %05 > output/notes.md", "install.sh", True),
             # A shell keeps an escaped or quoted space in a word.
             ("Run `sh setup' 'helper.sh` to prepare.", "setup helper.sh", True),
             ('Run `sh setup" "helper.sh` to prepare.', "setup helper.sh", True),
@@ -10862,6 +10879,15 @@ class TestSkillspectorMissingReferences:
             ("Run `sh setup{' ',}helper.sh` now.", "setup helper.sh", True),
             ("Run `sh setup\\ {a,b}.sh` now.", "setup a.sh", True),
             ("Run `sh '{a,b}'.sh` now.", "x.sh", True),
+            # Also when the line holds zero-padded formats, whose "%02" to "%04"
+            # decode to control characters, or private-use characters.
+            ('Run `printf \'{"h": "%02d", "m": "%02d"}\' 3 4` and write `output/notes.md`.', ".git", False),
+            ('Run `printf \'{"h": "%03d", "m": "%03d"}\' 3 4` and write `output/notes.md`.', ".git", False),
+            ('Run `printf \'{"h": "%04d", "m": "%04d"}\' 3 4` and write `output/notes.md`.', "evals", False),
+            ('Run `jq -n \'{"a": "%02", "b": "%05"}\'` and write `output/notes.md`.', ".git", False),
+            ('Run `curl -d \'{"a": 1, "b": 2}\' x ` and write `output/notes.md`.', ".git", False),
+            ("Run `sh setup%02{' ',}helper.sh` now.", "setup\x02 helper.sh", True),
+            ("Run `sh setup\\ {a,b}%03.sh` now.", "setup b\x03.sh", True),
             # Compact JSON whose braces and commas are unquoted is brace expansion
             # to a shell, with or without a quoted space in a value.
             ('Return {"title":"My note","tags":["a"]} in `output/notes.md`.', "evals", True),
@@ -11001,8 +11027,10 @@ class TestSkillspectorMissingReferences:
             # A cmd.exe variable is read between spaces, not across them.
             ('"%s %s"', ("%s %s", "%s %s")),
             ('"%a% b"', ("%a% b", "* b")),
-            # A word that already holds a stand-in keeps the brace reading.
-            ("'{a, b}\x02'", ("*\x02", "*\x02")),
+            # Control and private-use characters in the word do not change its reading.
+            ("'{a, b}\x02'", ("{a, b}\x02", "{a, b}\x02")),
+            ("'{a,\x03 b}.\x04'", ("{a,\x03 b}.\x04", "{a,\x03 b}.\x04")),
+            ("'{a, b}'{c,d}", ("{a, b}*", "{a, b}*")),
         ],
     )
     def test_joined_word_reads_brace_and_cmd_syntax_as_a_shell_does(self, word: str, readings: tuple[str, str]) -> None:
@@ -11010,6 +11038,28 @@ class TestSkillspectorMissingReferences:
         from skillevaluator.validators.security import _skillspector_shell_word
 
         assert _skillspector_shell_word(word) == readings
+
+    def test_stand_ins_are_private_use_characters_that_the_texts_do_not_hold(self) -> None:
+        """Without a free stand-in, quoted braces and a ``$`` before a space are read as expansions, as before."""
+        from skillevaluator.validators.security import (
+            _skillspector_shell_patterns,
+            _skillspector_shell_word,
+            _skillspector_stand_ins,
+        )
+
+        assert _skillspector_stand_ins(["a\x02\x03\x04\x05", ""], 3) == ""
+        assert _skillspector_stand_ins(["x", ""], 2) == ""
+        every = "".join(
+            chr(code)
+            for first, last in ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
+            for code in range(first, last + 1)
+        )
+        assert _skillspector_stand_ins([every[:-1]], 1) == every[-1]
+        assert _skillspector_stand_ins([every[:5000], every[5000:]], 1) is None
+        assert _skillspector_shell_word(f"'{{a, b}}'{every[:-3]}") == (f"{{a, b}}{every[:-3]}",) * 2
+        assert _skillspector_shell_word(f"'{{a, b}}'{every[:-2]}") == (f"*{every[:-2]}",) * 2
+        assert "*" not in _skillspector_shell_patterns([f"{every[:-1]} $ x"])
+        assert "*" in _skillspector_shell_patterns([f"{every} $ x"])
 
     @pytest.mark.parametrize(
         ("pattern", "name", "matches"),

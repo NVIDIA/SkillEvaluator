@@ -1643,9 +1643,11 @@ _SKILLSPECTOR_PROSE_APOSTROPHE_RE = re.compile(r"(?<=[^\W\d_])'(?=[^\W\d_])")
 # A quoted string or an escaped character in a word as a POSIX shell splits
 # it; that shell reads no brace expansion in it (:func:`_skillspector_shell_word`).
 _SKILLSPECTOR_SHELL_QUOTED_RE = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""")
-# Stand-ins for a quoted ``{``, ``,`` and ``.`` while the brace expansions of
-# a word that holds a quoted or escaped space or delimiter are read.
-_SKILLSPECTOR_QUOTED_BRACE_SYNTAX = "\x02\x03\x04"
+# The private-use code points, from which the stand-ins for a quoted ``{``,
+# ``,`` and ``.`` and for a literal ``$`` are taken while a line is read
+# (:func:`_skillspector_stand_ins`). Neither whitespace nor a word character,
+# they split no word and join no parameter name.
+_SKILLSPECTOR_STAND_IN_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
 # Stands for any text where a shell group or range was read in a line
 # (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
 # never taken for a list marker.
@@ -1693,10 +1695,6 @@ _SKILLSPECTOR_BACKTICK_RUN_RE = re.compile(r"`+")
 # written, as in a prompt such as ``$ python run.py``; one after another ``$``
 # may end the parameter ``$$``.
 _SKILLSPECTOR_LITERAL_DOLLAR_RE = re.compile(r"(?<!\$)\$(?=\s|\Z)")
-# Stands for such a ``$`` while the words of a line are read as patterns
-# (:func:`_skillspector_shell_patterns`), so that it is not read as an
-# expansion; each pattern reads it as that ``$`` again.
-_SKILLSPECTOR_LITERAL_DOLLAR = "\x05"
 # Work that checking the lines of one report's missing references may take, in
 # units of about one character compared: decoding a line and reading its shell
 # groups and words costs 18,000 per character, each search of a decoded line
@@ -2105,6 +2103,25 @@ def _skillspector_shell_expansions(word: str) -> str:
     return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
 
 
+def _skillspector_stand_ins(texts: Iterable[str], count: int) -> str | None:
+    """The first *count* code points of :data:`_SKILLSPECTOR_STAND_IN_RANGES` that no text of *texts* holds.
+
+    So a stand-in for syntax in the texts being read is never also a
+    character of them, such as one that a percent-escape or a character
+    reference decodes to. Returns ``None`` when fewer are left. The work is
+    linear in the length of the texts and *count*.
+    """
+    held: set[str] = set().union(*texts)
+    found: list[str] = []
+    for first, last in _SKILLSPECTOR_STAND_IN_RANGES:
+        for code in range(first, last + 1):
+            if chr(code) not in held:
+                found.append(chr(code))
+                if len(found) == count:
+                    return "".join(found)
+    return None
+
+
 def _skillspector_shell_word(word: str) -> tuple[str, str]:
     """*word* as glob patterns for what a POSIX shell, and cmd.exe or PowerShell, may expand it to.
 
@@ -2129,18 +2146,21 @@ def _skillspector_shell_word(word: str) -> tuple[str, str]:
     still stands for ``setup*helper.sh``. A cmd.exe variable or batch
     parameter is read only within the text between spaces and delimiters, as
     in a word that holds neither, so ``"%s %s"`` or ``"Hi! Bye!"`` is read as
-    written.
+    written. The quoted syntax is read through stand-ins that the word does
+    not hold (:func:`_skillspector_stand_ins`), so any character in it, such
+    as one that ``%02`` decodes to, leaves this reading unchanged.
     """
     word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
     unmask: dict[int, str] = {}
-    if _SKILLSPECTOR_LINE_WORD_RE.fullmatch(word) is None and all(
-        char not in word for char in _SKILLSPECTOR_QUOTED_BRACE_SYNTAX
+    if (
+        _SKILLSPECTOR_LINE_WORD_RE.fullmatch(word) is None
+        and (stand_ins := _skillspector_stand_ins((word,), 3)) is not None
     ):
-        mask = str.maketrans("{,.", _SKILLSPECTOR_QUOTED_BRACE_SYNTAX)
-        unmask = str.maketrans(_SKILLSPECTOR_QUOTED_BRACE_SYNTAX, "{,.")
+        mask = str.maketrans("{,.", stand_ins)
+        unmask = str.maketrans(stand_ins, "{,.")
         word = _SKILLSPECTOR_SHELL_QUOTED_RE.sub(lambda quoted: quoted.group().translate(mask), word)
         # Parameter expansion, unlike brace expansion, also takes place inside double quotes.
-        word = word.replace("$" + _SKILLSPECTOR_QUOTED_BRACE_SYNTAX[0], "${")
+        word = word.replace("$" + stand_ins[0], "${")
     posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word)).translate(unmask)
     windows = _SKILLSPECTOR_LINE_WORD_RE.sub(
         lambda run: _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", run.group()), _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word)
@@ -2290,9 +2310,9 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     is skipped, and a ``$`` before whitespace or the end of the line, which a
     shell keeps as written, is read as a literal ``$``, not as an expansion
     (:data:`_SKILLSPECTOR_LITERAL_DOLLAR_RE`). So ``$ python run.py`` adds
-    no pattern, and ``*a$`` stands for names that end in ``a$``. In a line
-    that already holds :data:`_SKILLSPECTOR_LITERAL_DOLLAR`, such a ``$`` is
-    read as an expansion. A bold or italic label outside code, such
+    no pattern, and ``*a$`` stands for names that end in ``a$``. While the
+    words are read, such a ``$`` is a stand-in that no text of *texts* holds
+    (:func:`_skillspector_stand_ins`). A bold or italic label outside code, such
     as ``**Note:**``, is read as its text, and each of its words, with its
     ``*``, split at whitespace and as a POSIX shell splits them, is also a
     pattern that is not split at ``=``, ``:`` or ``,``
@@ -2304,11 +2324,12 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     split_words: set[str] = set()
     label_words: set[str] = set()
     texts = tuple(texts)
-    literal = all(_SKILLSPECTOR_LITERAL_DOLLAR not in text for text in texts)
+    # Without a free stand-in, such a "$" is read as an expansion.
+    literal_dollar = _skillspector_stand_ins(texts, 1)
     for text in texts:
         text = _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1)
-        if literal:
-            text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(_SKILLSPECTOR_LITERAL_DOLLAR, text)
+        if literal_dollar is not None:
+            text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(literal_dollar, text)
         text, labels = _skillspector_markdown_labels(text)
         split_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(text))
         split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
@@ -2323,8 +2344,8 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
             continue
         split = word in split_words
         for reading in _skillspector_shell_word(word):
-            if literal:
-                reading = reading.replace(_SKILLSPECTOR_LITERAL_DOLLAR, "$")
+            if literal_dollar is not None:
+                reading = reading.replace(literal_dollar, "$")
             for index, part in enumerate(reading.split("/")):
                 for piece in {part, *_SKILLSPECTOR_PATH_PART_SEPARATOR_RE.split(part)} if split else {part}:
                     patterns.update(

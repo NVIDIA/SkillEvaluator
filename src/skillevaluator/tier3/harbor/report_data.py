@@ -694,6 +694,30 @@ def _condition_status(agent_info: dict[str, Any], condition: str) -> str:
     return str(data.get("execution_status") or "unknown") if isinstance(data, dict) else "unknown"
 
 
+def _invalid_token_counters(final_metrics: dict[str, Any]) -> list[str]:
+    """Name the token counters a trajectory recorded with a value that is not a count.
+
+    ``_trajectory_token_counter`` reads such a value as ``None``, as it reads a
+    counter Harbor left out. Harbor leaves out only a zero cache counter, so
+    token usage needs these names to keep an invalid cache counter from
+    counting as 0. Only names are kept, never values.
+    """
+    return [
+        name
+        for name in _USAGE_COUNTERS
+        if (value := final_metrics.get(f"total_{name}")) is not None and _trajectory_token_counter(value) is None
+    ]
+
+
+def _token_counter_names(value: object) -> list[str]:
+    """Return the token counter names that ``value`` lists, in ``_USAGE_COUNTERS`` order.
+
+    Anything that is not such a name is dropped, so a report trial and a
+    usage-only attempt name the same counters in the same order.
+    """
+    return [name for name in _USAGE_COUNTERS if isinstance(value, list) and name in value]
+
+
 def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     """Return a report trial's ``tokens`` object, or ``None`` without prompt and completion counts."""
     prompt = _trajectory_token_counter(counters.get("prompt_tokens"))
@@ -701,14 +725,26 @@ def _usage_tokens(counters: dict[str, Any]) -> dict[str, int] | None:
     if prompt is None or completion is None:
         return None
     tokens = {"prompt": prompt, "completion": completion}
-    raw_cached = counters.get("cached_tokens")
-    cached = _trajectory_token_counter(raw_cached)
-    if raw_cached is not None and cached is None:
-        # An invalid recorded counter is not Harbor's omitted zero cache.
-        return None
+    cached = _trajectory_token_counter(counters.get("cached_tokens"))
     if cached is not None:
         tokens["cached"] = cached
     return tokens
+
+
+def _attempt_usage(counters: dict[str, Any], invalid_counters: object) -> dict[str, Any]:
+    """Return an attempt's token fields as a report trial carries them.
+
+    ``tokens`` holds the valid counters, and ``invalid_token_counters`` names
+    the counters the trajectory recorded with an invalid value. Token usage
+    leaves such an attempt unmeasured.
+    """
+    usage: dict[str, Any] = {}
+    tokens = _usage_tokens(counters)
+    if tokens is not None:
+        usage["tokens"] = tokens
+    if names := _token_counter_names(invalid_counters):
+        usage["invalid_token_counters"] = names
+    return usage
 
 
 def _harbor_task_directory(trial_dir: Path) -> str | None:
@@ -734,18 +770,35 @@ def _harbor_task_directory(trial_dir: Path) -> str | None:
     return None
 
 
+def _recorded_case_id(trial_dir: Path) -> str | None:
+    """Return the case ID the collector recorded in an unscored attempt's ``failure.json``.
+
+    Older runs have no such record. The file is optional, so an unreadable or
+    oversized one only gives ``None``.
+    """
+    path = trial_dir / "failure.json"
+    failure = _load_bounded_json(path, [], artifact="failure") if path.is_file() else None
+    entry_id = failure.get("entry_id") if isinstance(failure, dict) else None
+    return entry_id if isinstance(entry_id, str) and entry_id.strip() else None
+
+
 def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
     """Read the token counters of an attempt that has no usable reward.
 
-    The attempt is not scored, but it ran and used tokens. Its case is the task
-    directory its Harbor result or config names. Without one, it is the trial
-    name before Harbor's ``__<id>`` suffix, which never contains ``__`` while a
-    case ID may. Its trajectory is optional telemetry, so an unreadable or
-    oversized file only leaves the counters out and does not mark score
-    evidence truncated.
+    The attempt is not scored, but it ran and used tokens. Its case is the one
+    the collector recorded in its ``failure.json``, which also holds for a
+    native task whose ``entry_id`` differs from its directory. A run without
+    that record gives the task directory its Harbor result or config names, or
+    else the trial name before Harbor's ``__<id>`` suffix, which never contains
+    ``__`` while a case ID may. Its trajectory is optional telemetry, so an
+    unreadable or oversized file only leaves the counters out and does not
+    mark score evidence truncated.
     """
     attempt: dict[str, Any] = {
-        "entry_id": _harbor_task_directory(trial_dir) or trial_dir.name.rsplit("__", 1)[0] or "unknown",
+        "entry_id": _recorded_case_id(trial_dir)
+        or _harbor_task_directory(trial_dir)
+        or trial_dir.name.rsplit("__", 1)[0]
+        or "unknown",
         "trial_id": trial_dir.name,
         "scored": False,
     }
@@ -753,9 +806,8 @@ def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
     trajectory = _load_bounded_json(trajectory_file, [], artifact="trajectory") if trajectory_file.exists() else None
     final_metrics = trajectory.get("final_metrics") if isinstance(trajectory, dict) else None
     if isinstance(final_metrics, dict):
-        tokens = _usage_tokens({name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS})
-        if tokens is not None:
-            attempt["tokens"] = tokens
+        counters = {name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS}
+        attempt.update(_attempt_usage(counters, _invalid_token_counters(final_metrics)))
     return attempt
 
 
@@ -770,9 +822,8 @@ def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any
         reward = group[0]
         row: dict[str, Any] = {"entry_id": reward.get("entry_id"), "trial_id": reward.get("trial_id"), "scored": True}
         counters = reward.get("_traj")
-        tokens = _usage_tokens(counters) if len(group) == 1 and isinstance(counters, dict) else None
-        if tokens is not None:
-            row["tokens"] = tokens
+        if len(group) == 1 and isinstance(counters, dict):
+            row.update(_attempt_usage(counters, reward.get("_invalid_token_counters")))
         rows.append(row)
     return rows
 
@@ -998,6 +1049,8 @@ def load_agent_data(
                         rewards_complete = False
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
+                    # Only the trajectory read below names invalid token counters, never the reward file.
+                    reward.pop("_invalid_token_counters", None)
                     # Derive links from the bounded, admitted on-disk layout rather
                     # than accepting verifier-authored paths as provenance.
                     reward["_activation_artifacts"] = {"reward": reward_file.relative_to(results_dir).as_posix()}
@@ -1035,6 +1088,9 @@ def load_agent_data(
                                 ),
                                 "cached_tokens": _trajectory_token_counter(final_metrics.get("total_cached_tokens")),
                             }
+                            if invalid_counters := _invalid_token_counters(final_metrics):
+                                # ``_traj`` reads them as absent; token usage must not read a bad cache as 0.
+                                reward["_invalid_token_counters"] = invalid_counters
                             timing = trajectory_timing(trajectory)
                             if timing is not None:
                                 reward["_traj"]["timing"] = timing

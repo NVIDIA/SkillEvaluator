@@ -1180,11 +1180,12 @@ its bounded preview. Each table says how many more case rows are in the JSON
 payload. The full terminal report (`validate --verbose` or `-r cli`) and
 `tier3 evaluate --verbose` print the agent rows only and name the files that
 hold the case rows: the HTML, Markdown and JSON reports for `validate`, and
-`report.html` and `tier3-benchmark.md` in the run directory for
-`tier3 evaluate`. When the payload left the case rows out, they say instead
-that no report has them. `tier3 evaluate` also prints the agent rows for a run
-whose arms all failed, after the panel that says the evaluation did not
-complete.
+for `tier3 evaluate` the reports the run wrote in its run directory:
+`report.html` and `tier3-benchmark.md` for a Harbor run, `report.html` alone
+for a NeMo Gym run, and none when the report step failed. When the payload
+left the case rows out, they say instead that no report has them.
+`tier3 evaluate` also prints the agent rows for a run whose arms all failed,
+after the panel that says the evaluation did not complete.
 
 ### Failure reasons and per-trial rows
 

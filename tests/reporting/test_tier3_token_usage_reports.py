@@ -41,6 +41,7 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.dashboard_data import comparison_rows, parse_dashboard_report
 from skillevaluator.reporting.tier3_token_usage import (
     EVALUATE_CASE_POINTER,
+    EVALUATE_REPORT_CASE_POINTER,
     REUSED_BASELINE_NOTE,
     UNVERIFIED_CASE_MARK,
     UNVERIFIED_CASE_NOTE,
@@ -845,6 +846,9 @@ def test_tier3_evaluate_terminal_prints_the_agent_sums_the_report_step_recorded(
         "execution_status": "succeeded",
         "agents": {"codex": {"execution_status": "succeeded"}},
         "token_usage": recorded,
+        # As the Harbor runner records the reports it wrote.
+        "report_path": str(run / "report.html"),
+        "benchmark_path": str(run / "tier3-benchmark.md"),
     }
     output = render_result(display)
     assert "Token Usage (measured, not scored)" in output
@@ -870,8 +874,11 @@ def test_tier3_evaluate_terminal_prints_the_token_usage_of_a_run_whose_arms_all_
     }
 
     report = render_agent_eval_html_report(skill, run, engine_result=engine_result, use_llm_judge=False)
+    # Without ``include_benchmark`` only report.html is written, as in a NeMo Gym run.
+    engine_result["report_path"] = str(report)
 
     assert "Token usage by case" in report.read_text(encoding="utf-8")
+    assert not report.with_name("tier3-benchmark.md").exists()
     for verbose in (False, True):
         stream = io.StringIO()
         render_evaluation_result(
@@ -881,7 +888,40 @@ def test_tier3_evaluate_terminal_prints_the_token_usage_of_a_run_whose_arms_all_
         assert "Evaluation did not complete" in output
         assert "Token Usage (measured, not scored)" in output
         assert re.search(r"codex\s+│\s+3,300\s+│\s+50,072\s+│\s+N/A", output)
-        assert EVALUATE_CASE_POINTER in " ".join(output.split())
+        text = " ".join(output.split())
+        assert EVALUATE_REPORT_CASE_POINTER in text
+        assert EVALUATE_CASE_POINTER not in text
+
+
+@pytest.mark.parametrize("written", ["both", "report.html", "none"])
+def test_tier3_evaluate_terminal_names_only_the_reports_the_run_wrote(tmp_path: Path, written: str) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    run = _run(tmp_path)
+    engine_result: dict[str, Any] = {
+        "execution_status": "succeeded",
+        "run_dir": str(run),
+        "agents": {"codex": {"execution_status": "succeeded"}},
+    }
+    # The Harbor runner renders the benchmark too; the NeMo Gym runner renders report.html only.
+    report = render_agent_eval_html_report(
+        skill, run, engine_result=engine_result, use_llm_judge=False, include_benchmark=written == "both"
+    )
+    benchmark = report.with_name("tier3-benchmark.md")
+    assert benchmark.is_file() is (written == "both")
+    # The runners record a path only for a report they wrote; a failed report step records none.
+    if written != "none":
+        engine_result["report_path"] = str(report)
+    if benchmark.is_file():
+        engine_result["benchmark_path"] = str(benchmark)
+
+    text = " ".join(render_result(engine_result).split())
+
+    assert "Token Usage (measured, not scored)" in text
+    named = [pointer for pointer in (EVALUATE_CASE_POINTER, EVALUATE_REPORT_CASE_POINTER) if pointer in text]
+    expected = {"both": [EVALUATE_CASE_POINTER], "report.html": [EVALUATE_REPORT_CASE_POINTER], "none": []}
+    assert named == expected[written]
+    assert ("Token usage per case is in" in text) is (written != "none")
 
 
 def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(
@@ -914,6 +954,8 @@ def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(
                 "execution_status": "succeeded",
                 "agents": {"codex": {"execution_status": "succeeded"}},
                 "token_usage": recorded,
+                "report_path": str(report),
+                "benchmark_path": str(report.with_name("tier3-benchmark.md")),
             }
         ),
     }
@@ -922,6 +964,7 @@ def test_terminals_say_no_report_has_the_case_rows_the_payload_left_out(
         text = " ".join(output.split())
         assert "Token Usage (measured, not scored)" in text, name
         assert VALIDATE_CASE_POINTER not in text and EVALUATE_CASE_POINTER not in text, name
+        assert EVALUATE_REPORT_CASE_POINTER not in text, name
         assert "12 case row(s) were left out of every report" in text, name
         assert "left out of this report" not in text, name
 

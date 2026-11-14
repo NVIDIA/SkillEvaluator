@@ -1042,10 +1042,27 @@ def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_pa
 
 
 def _render_token_usage(console: Console, result: Mapping[str, Any], safe: Any) -> None:
-    """Print the per-agent token sums that the report step recorded: measured, not scored."""
-    from skillevaluator.reporting.tier3_token_usage import EVALUATE_CASE_POINTER, render_token_usage_table
+    """Print the per-agent token sums that the report step recorded: measured, not scored.
 
-    render_token_usage_table(console, result.get("token_usage"), case_pointer=EVALUATE_CASE_POINTER, text=safe)
+    The pointer to the case rows names only the reports the run recorded
+    writing: a Harbor run records ``tier3-benchmark.md`` in ``benchmark_path``
+    only when the file exists, a NeMo Gym run writes ``report.html`` alone, and
+    a run whose report step failed records neither.
+    """
+    from skillevaluator.reporting.tier3_token_usage import (
+        EVALUATE_CASE_POINTER,
+        EVALUATE_REPORT_CASE_POINTER,
+        render_token_usage_table,
+    )
+
+    pointer = (
+        EVALUATE_CASE_POINTER
+        if result.get("benchmark_path")
+        else EVALUATE_REPORT_CASE_POINTER
+        if result.get("report_path")
+        else ""
+    )
+    render_token_usage_table(console, result.get("token_usage"), case_pointer=pointer, text=safe)
 
 
 def render_evaluation_result(

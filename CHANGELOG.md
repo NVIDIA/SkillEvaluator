@@ -298,7 +298,9 @@ All notable changes to SkillEvaluator are documented in this file.
   is no longer partial with missing attempts. `tier3 evaluate` prints the
   agent token sums for a run whose arms all failed, and once the report
   payload left the case rows out, the terminal tables say that no report has
-  them instead of naming the report files.
+  them instead of naming the report files. `tier3 evaluate` names only the
+  reports the run wrote, so a NeMo Gym run no longer points at a
+  `tier3-benchmark.md` it never writes.
 - The Tier 3 security scan no longer scores an agent clearing its own output
   directory as a destructive command. One literal, recursive and forced `rm` of
   a path inside `/workspace/output` or an output directory established by the

@@ -40,8 +40,10 @@ REUSED_BASELINE_NOTE = (
 )
 #: Where ``validate``'s terminal report, which prints agent rows only, sends readers for case rows.
 VALIDATE_CASE_POINTER = "Token usage per case is in the HTML, Markdown and JSON reports (-r html, markdown or json)."
-#: Where ``tier3 evaluate``'s terminal summary sends readers for case rows.
+#: Where ``tier3 evaluate``'s terminal summary sends readers for case rows when the run wrote both reports.
 EVALUATE_CASE_POINTER = "Token usage per case is in report.html and tier3-benchmark.md in the run directory."
+#: The same pointer for a run that wrote ``report.html`` only, such as a NeMo Gym run.
+EVALUATE_REPORT_CASE_POINTER = "Token usage per case is in report.html in the run directory."
 #: Case rows per agent in the HTML table; the JSON payload keeps the rest.
 HTML_CASE_ROWS_PER_AGENT = 64
 #: Marks a case row whose ID is not one of the evaluation dataset's case IDs.
@@ -306,8 +308,8 @@ def render_token_usage_table(
     """Print one row per agent and the all-agent row, then the notes; return whether anything printed.
 
     ``case_pointer`` names the files of the calling command that hold the
-    case rows; when the payload left the case rows out, the table says that no
-    report has them instead. ``text`` makes agent names and notes safe for the
+    case rows, and is empty when the command wrote none; when the payload left
+    the case rows out, the table says that no report has them instead. ``text`` makes agent names and notes safe for the
     console, for example by redacting secrets. Cells are plain text, never
     console markup.
     """

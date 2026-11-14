@@ -195,3 +195,8 @@ def test_plugin_rows_flag_an_unverified_release(tmp_path: Path):
     codex = next(p for p in load_profiles() if p["harness"] == "codex")
     result = evaluate_plugin(codex, plugin_facts(tmp_path), {"harness_versions": {"codex": "9.9.9"}})
     assert "VERSION-UNVERIFIED" in [f["id"] for f in result.findings]
+
+
+def test_unknown_harness_version_name_is_a_usage_error(tmp_path: Path):
+    result = CliRunner().invoke(cli, ["harness-check", str(_quoted_skill(tmp_path)), "--harness-version", "codeex=1.0"])
+    assert result.exit_code == 2 and "codeex" in result.output

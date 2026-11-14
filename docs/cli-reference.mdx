@@ -460,6 +460,7 @@ skillevaluator harness-check ./my-skill --context-tokens 200000 --headless
 | `--custom-provider` | off | Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for. |
 | `--explicit-invocation` | off | Skills are activated by an explicit mention (for example Codex `$skill`), not opened by the model. |
 | `--headless` | off | The harness runs non-interactively (for example `claude -p` in CI) with default permissions. |
+| `--harness-version HARNESS=VERSION` | unset | The release you run, for example `codex=0.170.0`; repeat for each harness. A release other than the one a profile was verified on adds an advisory note. An unknown harness name is a usage error (`2`). |
 
 Without the four model-setup flags (`--context-tokens`, `--custom-provider`, `--explicit-invocation`, `--headless`), the check assumes an unknown context window, a native provider, model-initiated activation and an interactive session.
 

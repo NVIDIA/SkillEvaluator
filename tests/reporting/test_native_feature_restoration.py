@@ -15,6 +15,71 @@ from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 
+@pytest.mark.parametrize("status", ["comparable", "partial"])
+def test_comparison_table_keeps_partial_notes_without_repeating_normal_comparison_prose(status):
+    result = _agent_result("synthetic", ["first-agent", "second-agent"])
+    payload = result.metadata["agent_eval"]
+    note = "The same full-comparison note should not repeat in every measured cell."
+    dimensions = list(payload["dimensions"])
+    for agent in payload["agents"].values():
+        dimensions.extend(agent["dimensions"])
+    for dimension in dimensions:
+        dimension["comparison"] = {
+            "status": status,
+            "label": "Recorded comparison",
+            "reason": note,
+            "with_skill": 0.8,
+            "baseline": 0.6,
+            "lift": 0.15,
+        }
+    original = deepcopy(payload)
+    html = _render(result)
+    table = html.split('id="tier3-dimension-table"', 1)[1].split("</table>", 1)[0]
+    assert (note in table) is (status == "partial")
+    assert payload == original
+
+
+def test_incomplete_baseline_quality_is_not_reported_as_a_baseline_that_never_ran():
+    from test_report_clarity import _result
+
+    result = _result("incomplete")
+    payload = result.metadata["agent_eval"]
+    payload["metric_ids"] = list(DEFAULT_METRICS)
+    payload["agents"] = {
+        "agent": {
+            "execution_status": "failed",
+            "conditions": {
+                "with_skill": {"execution_status": "failed", "scored_attempts": 16, "expected_attempts": 18},
+                "without_skill": {"execution_status": "failed", "scored_attempts": 12, "expected_attempts": 18},
+            },
+        }
+    }
+    original = deepcopy(payload)
+    html = _render(result)
+    table = html.split('id="tier3-dimension-table"', 1)[1].split("</table>", 1)[0]
+    assert "baseline not run" not in table
+    assert "baseline quality unavailable" in table
+    assert "28 of 36 scored" in html
+    assert payload == original
+
+
+@pytest.mark.parametrize("arm", [None, "unknown", [], {"execution_status": "skipped"}])
+def test_baseline_quality_hint_tolerates_legacy_arm_shapes_and_keeps_explicit_skips(arm):
+    from test_report_browser import _edge_result
+
+    result = _edge_result("missing-baseline")
+    payload = result.metadata["agent_eval"]
+    next(iter(payload["agents"].values()))["conditions"]["without_skill"] = arm
+    original = deepcopy(payload)
+    html = _render(result)
+    table = html.split('id="tier3-dimension-table"', 1)[1].split("</table>", 1)[0]
+    explicit_skip = isinstance(arm, dict) and arm.get("execution_status") == "skipped"
+    assert ("baseline not run" in table) is explicit_skip
+    if not explicit_skip:
+        assert "baseline quality unavailable" in table
+    assert payload == original
+
+
 @pytest.mark.parametrize("invalid_dimension", [{}, {"id": ""}, {"id": "   "}])
 def test_custom_metrics_do_not_create_a_blank_dimension_table_from_missing_peer_ids(invalid_dimension):
     from test_report_browser import _edge_result

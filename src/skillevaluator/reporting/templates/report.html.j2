@@ -99,7 +99,7 @@
             <div class="t3-mad-score-row"><span class="t3-mad-score" style="color:{{ other_color }};">{{ "%.2f" | format(other_score) if other_score is not none else 'N/A' }}</span>{% if other_score is not none %}<div class="t3-mad-bar"><span style="width:{{ (other_score * 100) | round(0) }}%;background:{{ other_color }};"></span></div>{% endif %}</div>
             <span class="t3-mad-lift">{% if dimension.lift is not none and agent.get('skill_activation', {}).get('status') != 'never_activated' %}{{ "%+.2f" | format(dimension.lift) }} lift{% else %}{{ unavailable_lift(other_score, dimension.baseline, agent.get('skill_activation', {})) }}{% endif %}</span>
             {% if dimension.partial %}<span class="t3-pill warning">partial</span>{% endif %}
-            {% if dimension.comparison %}<span class="t3-dim-hint">{{ dimension.comparison.label }}{% if dimension.comparison.with_skill is number and dimension.comparison.baseline is number and dimension.comparison.lift is number %}: {{ "%.2f" | format(dimension.comparison.baseline) }} → {{ "%.2f" | format(dimension.comparison.with_skill) }} ({{ "%+.2f" | format(dimension.comparison.lift) }}){% endif %}{% if dimension.comparison.reason %} · {{ dimension.comparison.reason }}{% endif %}</span>{% endif %}
+            {% if dimension.comparison and dimension.comparison.status != 'comparable' %}<span class="t3-dim-hint">{{ dimension.comparison.label }}{% if dimension.comparison.with_skill is number and dimension.comparison.baseline is number and dimension.comparison.lift is number %}: {{ "%.2f" | format(dimension.comparison.baseline) }} → {{ "%.2f" | format(dimension.comparison.with_skill) }} ({{ "%+.2f" | format(dimension.comparison.lift) }}){% endif %}{% if dimension.comparison.reason %} · {{ dimension.comparison.reason }}{% endif %}</span>{% endif %}
         </div>
     {% else %}N/A{% endif %}</td>
 {%- endmacro %}
@@ -2816,6 +2816,9 @@
                     </tr></thead>
                     <tbody>
                     {% set t3_best_agent = t3_agents.get(t3_best_name, {}) %}
+                    {% set t3_baseline_coverage = presentation.coverage.agents.get(t3_best_name, {}).get('without_skill') %}
+                    {% set t3_recorded_conditions = t3_best_agent.get('conditions') %}
+                    {% set t3_recorded_baseline = t3_recorded_conditions.get('without_skill') if t3_recorded_conditions is mapping else none %}
                     {% set baseline_na_metrics = t3_best_agent.get('not_applicable_metrics', {}).get('without_skill', []) %}
                     {% for dim in tier3_display_dimensions %}
                     {% set dim_score = dim.score if dim.score is not none else dim.with_skill %}
@@ -2842,7 +2845,7 @@
                         </td>
                         <td{% if dim.id == 'discoverability' and 'skill_execution' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_execution' | not_applicable_reason }}"{% elif dim.id == 'efficiency' and 'skill_efficiency' in baseline_na_metrics %} title="No-skill baseline: {{ 'skill_efficiency' | not_applicable_reason }}"{% endif %}>
                             {% if dim.baseline is not none %}{{ "%.2f" | format(dim.baseline) }}{% else %}N/A
-                            <div class="t3-dim-hint">{{ "baseline not scored" if t3_best and t3_best.baseline is not none else "baseline not run" }}</div>{% endif %}
+                            <div class="t3-dim-hint">{{ "baseline not run" if t3_baseline_coverage and t3_baseline_coverage.status == 'skipped' and t3_recorded_baseline is mapping and t3_recorded_baseline.get('execution_status') == 'skipped' else "baseline quality unavailable" }}</div>{% endif %}
                         </td>
                         <td style="color:{{ 'var(--success-color)' if dim.lift is not none and dim.lift >= tier3_lift_pass_threshold else ('var(--danger-color)' if dim.lift is not none and dim.lift <= tier3_lift_fail_threshold else 'var(--text-secondary)') }};font-weight:600;">
                             {% if dim.lift is not none %}{{ "%+.2f" | format(dim.lift) }}{% else %}N/A
@@ -2859,7 +2862,7 @@
                             {% endfor %}
                         </td>
                         <td class="t3-reasoning">
-                            {% if dim.comparison %}<p>{% if dim.comparison.label %}<strong>{{ dim.comparison.label }}</strong>{% endif %}{% if dim.comparison.with_skill is number and dim.comparison.baseline is number and dim.comparison.lift is number %}: {{ "%.2f" | format(dim.comparison.baseline) }} → {{ "%.2f" | format(dim.comparison.with_skill) }} ({{ "%+.2f" | format(dim.comparison.lift) }} lift).{% endif %}{% if dim.comparison.reason %} {{ dim.comparison.reason }}{% endif %}</p>{% endif %}
+                            {% if dim.comparison and dim.comparison.status != 'comparable' %}<p>{% if dim.comparison.label %}<strong>{{ dim.comparison.label }}</strong>{% endif %}{% if dim.comparison.with_skill is number and dim.comparison.baseline is number and dim.comparison.lift is number %}: {{ "%.2f" | format(dim.comparison.baseline) }} → {{ "%.2f" | format(dim.comparison.with_skill) }} ({{ "%+.2f" | format(dim.comparison.lift) }} lift).{% endif %}{% if dim.comparison.reason %} {{ dim.comparison.reason }}{% endif %}</p>{% endif %}
                             {% if dim.reasoning_bullets %}
                             <ul class="t3-reasoning-list">
                                 {% for bullet in dim.reasoning_bullets %}<li>{{ bullet }}</li>{% endfor %}

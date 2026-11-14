@@ -706,7 +706,9 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
     ``ref.excerpt``).
     """
     lookup: dict[str, dict[str, Any]] = {}
-    for reward in rewards:
+    owners: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for index, reward in enumerate(rewards):
         for metric in _finding_metric_names([reward]):
             metric_detail = _detail_for_finding(reward, metric)
             if not isinstance(metric_detail, dict):
@@ -715,10 +717,20 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
                 if not isinstance(ref, dict | str):
                     continue
                 resolved = _resolve_evidence_ref(ref, {})
+                if len(rewards) > 1:
+                    scope = str(reward.get("trial_id") or reward.get("entry_id") or "")
+                    if not scope or scope not in str(resolved.get("source") or "").split("/"):
+                        continue
                 if resolved.get("source") or evidence_ref_identity(resolved):
                     key = _compact_evidence_ref(resolved)
-                    if key not in lookup:
+                    if key in ambiguous:
+                        continue
+                    if key in lookup and (owners[key] != index or lookup[key] != resolved):
+                        ambiguous.add(key)
+                        del lookup[key]
+                    elif key not in lookup:
                         lookup[key] = resolved
+                        owners[key] = index
     return lookup
 
 
@@ -818,10 +830,11 @@ def _generate_suggestions_structured(
             error = _bounded_reason_text(correction.get("error"), max_len=150)
             error_recovery_info.append(f"[{fault}] {error}")
 
+    ref_lookup = _build_evidence_ref_lookup(rewards)
     evidence_lines = []
     for f in failed_findings:
         for ref in (f.get("evidence_refs") or [])[:3]:
-            if isinstance(ref, dict):
+            if isinstance(ref, dict) and _compact_evidence_ref(ref) in ref_lookup:
                 evidence_lines.append(
                     f"  - [{f['metric']}] {ref.get('kind', '')} {_compact_evidence_ref(ref)}: "
                     f"{str(ref.get('label') or ref.get('excerpt') or '')[:120]}"
@@ -856,9 +869,6 @@ When the evidence does not establish a cause (for example, that a different mode
 Cite only evidence references listed above; references the run did not record are dropped.
 
 Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["trajectory.json#/steps/N", ...]}}, no other text."""
-
-    # Build the lookup once from all rewards' detail refs
-    ref_lookup = _build_evidence_ref_lookup(rewards)
 
     try:
         from skillevaluator.tier3.eval_core.llm_judge import _extract_json, call_public_llm

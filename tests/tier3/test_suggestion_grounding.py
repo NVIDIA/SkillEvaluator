@@ -36,6 +36,51 @@ def _reward(metric_score=0.1):
     }
 
 
+@pytest.mark.parametrize("same_excerpt", [False, True])
+def test_cross_trial_compact_refs_are_rejected_in_both_orders(same_excerpt):
+    first, second = _reward(), _reward()
+    second["entry_id"] = "different-case"
+    if not same_excerpt:
+        second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "different case evidence"
+    key = "trajectory.json#/steps/14"
+
+    for rewards in ([first, second], [second, first]):
+        lookup = report._build_evidence_ref_lookup(rewards)
+        assert report._recorded_evidence_refs([key], lookup) == []
+
+
+def test_repeated_ref_within_one_trial_remains_available():
+    reward = _reward()
+    reward["details"]["accuracy"] = reward["details"]["goal_accuracy"]
+    lookup = report._build_evidence_ref_lookup([reward])
+
+    [ref] = report._recorded_evidence_refs(["trajectory.json#/steps/14"], lookup)
+
+    assert ref["excerpt"] == "submit ..."
+
+
+def test_multi_trial_refs_require_case_qualified_sources():
+    first, second = _reward(), _reward()
+    first["trial_id"], second["trial_id"] = "case-a__one", "case-b__one"
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["json_pointer"] = "/steps/99"
+    for rewards in ([first, second], [second, first]):
+        assert report._build_evidence_ref_lookup(rewards) == {}
+    for reward in (first, second):
+        reward["details"]["goal_accuracy"]["evidence_refs"][0]["source"] = f"{reward['trial_id']}/trajectory.json"
+    forward = report._build_evidence_ref_lookup([first, second])
+    backward = report._build_evidence_ref_lookup([second, first])
+
+    assert forward == backward
+    assert len(forward) == 2
+    assert report._recorded_evidence_refs(["case-b__one/trajectory.json#/steps/99"], forward)[0]["source"] == (
+        "case-b__one/trajectory.json"
+    )
+
+
+def test_empty_evidence_lookup_rejects_unrecorded_refs():
+    assert report._recorded_evidence_refs(["trajectory.json#/steps/14"], report._build_evidence_ref_lookup([])) == []
+
+
 def _reward_multi_metric(metric_score=0.1):
     """Reward with evidence_refs on multiple metrics for lookup testing."""
     return {

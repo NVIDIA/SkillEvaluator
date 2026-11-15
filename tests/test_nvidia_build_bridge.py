@@ -38,7 +38,7 @@ from skillevaluator.tier3.harbor.nvidia_build_bridge import (
 
 CHAT_TOOL_RESPONSE = {
     "id": "chatcmpl-1",
-    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "choices": [
         {
             "index": 0,
@@ -60,7 +60,7 @@ CHAT_TOOL_RESPONSE = {
 
 CHAT_TEXT_RESPONSE = {
     "id": "chatcmpl-text-1",
-    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "Hello."}}],
 }
 
@@ -77,7 +77,7 @@ CUSTOM_EXEC_TOOL = {
 
 CHAT_CUSTOM_TOOL_RESPONSE = {
     "id": "chatcmpl-custom-1",
-    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "choices": [
         {
             "index": 0,
@@ -124,7 +124,7 @@ WEB_SEARCH_TOOL = {
 
 CHAT_NAMESPACE_TOOL_RESPONSE = {
     "id": "chatcmpl-namespace-1",
-    "model": "nvidia/nemotron-3-super-120b-a12b",
+    "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "choices": [
         {
             "index": 0,
@@ -1838,7 +1838,7 @@ def test_responses_only_server_web_search_omits_chat_tools_and_keeps_auto_or_non
 
 def test_responses_text_and_tool_schema_become_chat_request() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "instructions": "Be concise.",
         "input": "What is the weather?",
         "tools": [
@@ -1856,7 +1856,7 @@ def test_responses_text_and_tool_schema_become_chat_request() -> None:
     }
 
     assert responses_to_chat_request(request) == {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "What is the weather?"},
@@ -2197,7 +2197,7 @@ def test_responses_namespaced_function_and_custom_replay_use_flat_chat_names() -
 
 def test_responses_tool_result_becomes_chat_tool_message() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "input": [
             {"type": "function_call_output", "call_id": "call-1", "output": "42"},
         ],
@@ -2205,13 +2205,13 @@ def test_responses_tool_result_becomes_chat_tool_message() -> None:
 
     translated = responses_to_chat_request(request)
 
-    assert translated["model"] == "nvidia/nemotron-3-super-120b-a12b"
+    assert translated["model"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
     assert translated["messages"] == [{"role": "tool", "tool_call_id": "call-1", "content": "42"}]
 
 
 def test_anthropic_text_tool_and_tool_result_become_chat_request() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "system": "Be concise.",
         "messages": [
             {"role": "user", "content": "Use a tool."},
@@ -2234,7 +2234,7 @@ def test_anthropic_text_tool_and_tool_result_become_chat_request() -> None:
     }
 
     assert anthropic_to_chat_request(request) == {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [
             {"role": "system", "content": "Be concise."},
             {"role": "user", "content": "Use a tool."},
@@ -2266,7 +2266,7 @@ def test_anthropic_text_tool_and_tool_result_become_chat_request() -> None:
 
 def test_anthropic_tool_result_becomes_chat_tool_message() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [
             {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call-1", "content": "42"}]},
         ],
@@ -2279,7 +2279,7 @@ def test_anthropic_tool_result_becomes_chat_tool_message() -> None:
 
 def test_anthropic_system_message_role_used_by_claude_code_is_preserved() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [
             {"role": "user", "content": [{"type": "text", "text": "Run the task."}]},
             {"role": "system", "content": "The following skills are available."},
@@ -2296,7 +2296,7 @@ def test_anthropic_system_message_role_used_by_claude_code_is_preserved() -> Non
 
 def test_claude_code_orchestration_tools_are_omitted_but_executable_and_custom_tools_remain() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [{"role": "user", "content": "Run the task."}],
         "tools": [
             {"name": "Bash", "description": "Run shell", "input_schema": {"type": "object"}},
@@ -2330,7 +2330,7 @@ def test_responses_namespace_tools_alias_names_too_long_after_flattening() -> No
 
 def test_anthropic_required_tool_choice_rejects_an_all_filtered_tool_set() -> None:
     request = {
-        "model": "nvidia/nemotron-3-super-120b-a12b",
+        "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "messages": [{"role": "user", "content": "Search."}],
         "tools": [{"name": "WebSearch", "description": "Server-side search", "input_schema": {"type": "object"}}],
         "tool_choice": {"type": "any"},
@@ -2345,7 +2345,7 @@ def test_anthropic_forced_tool_choice_requires_a_declared_executable_tool(tool_c
     with pytest.raises(BridgePayloadError, match="declared executable tool"):
         anthropic_to_chat_request(
             {
-                "model": "nvidia/nemotron-3-super-120b-a12b",
+                "model": "nvidia/nemotron-3.5-lightning-30b-a3b",
                 "messages": [{"role": "user", "content": "Run it."}],
                 "tool_choice": tool_choice,
             }

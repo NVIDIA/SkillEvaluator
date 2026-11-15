@@ -1041,7 +1041,7 @@ def test_doctor_build_codex_ignores_native_pair_and_accepts_build_model(monkeypa
             "--agents",
             "codex",
             "--agent-model",
-            "codex=nvidia/nemotron-3-super-120b-a12b",
+            "codex=nvidia/nemotron-3.5-lightning-30b-a3b",
         ],
     )
 

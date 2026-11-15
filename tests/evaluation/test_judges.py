@@ -895,6 +895,57 @@ class TestInsightsJudgeRecommendationQuality:
         message = "Make the expected output of positive-001 explicit in evals.json."
         assert self._parse(message) == [message]
 
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Remove the expected output mismatch by deleting the positive-001 case from evals/evals.json.",
+            "Remove the assertion failure by dropping the `positive-001` case from evals/evals.json.",
+            "Remove the expected output mismatch by implementing the parser, then delete the positive-001 case.",
+            "Fix the mismatch by removing the positive-001 entry from evals/evals.json.",
+            "Remove the expected output mismatch by deleting the positive-001 test case.",
+            "Remove the failure by commenting out the positive-001 case in evals/evals.json.",
+            "Remove the mismatch by disabling the dataset entry for positive-001.",
+            "Delete the positive-001 row from the dataset.",
+            "Skip the positive-001 case in evals/evals.json.",
+            "The positive-001 case should be deleted from evals/evals.json.",
+            "The positive-001 entry in evals/evals.json should be removed.",
+            "The positive-001 test case must be dropped.",
+            "Do not remove the expectation; delete the positive-001 case from the dataset.",
+        ],
+    )
+    def test_drops_advice_that_deletes_a_dataset_case(self, message: str) -> None:
+        assert self._parse(message) == []
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Remove the expected output mismatch in positive-001 by implementing the parser in SKILL.md.",
+            "Remove the assertion failure in positive-001 by implementing the parser in SKILL.md.",
+            "Remove the `expected output` mismatch in positive-001 by implementing the parser in SKILL.md.",
+            "Remove the expected output mismatch by fixing the parser; keep the positive-001 case in evals/evals.json.",
+            "Do not delete the case; document the rounding rule that positive-001 depends on in SKILL.md.",
+            "Never remove the positive-001 entry from evals/evals.json; fix the rounding step instead.",
+            "In this case, document the rounding rule that positive-001 depends on in SKILL.md.",
+            "The edge case in positive-001 should be handled in SKILL.md.",
+            "Delete the cache entry, then document the rounding rule that positive-001 depends on in SKILL.md.",
+            "Remove temp files per case, then document the rounding rule that positive-001 depends on in SKILL.md.",
+        ],
+    )
+    def test_keeps_mismatch_fixes_negated_removals_and_ordinary_case_prose(self, message: str) -> None:
+        assert self._parse(message) == [message]
+
+    def test_drops_a_dataset_case_removal_in_the_title_even_when_the_message_is_benign(self) -> None:
+        recommendation = self._recommendation(
+            "Implement the rounding rule in SKILL.md.",
+            title="Delete the positive-001 case from evals/evals.json",
+        )
+        response = json.dumps({"conclusions": [], "recommendations": [recommendation]})
+        parsed = InsightsJudge().parse_response(
+            response,
+            canonical={"dataset": [{"id": "positive-001", "expected_skill": "calculator"}], "trials": []},
+        )
+        assert parsed["recommendations"] == []
+
     def test_keeps_negated_and_non_requirement_uses_of_weakening_verbs(self) -> None:
         messages = (
             "Do not lower the pass threshold for positive-001; fix the rounding step instead.",

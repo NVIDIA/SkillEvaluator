@@ -93,6 +93,42 @@ _PASSIVE_WEAKENING_PATTERN = re.compile(
     re.IGNORECASE,
 )
 
+# Deleting a dataset case removes the whole requirement, so it is checked separately from the requirement nouns
+# above: "fix the mismatch by deleting the case" must not pass just because its first clause names a failure.
+_CASE_REMOVAL_VERB = (
+    r"(?:remov(?:e[sd]?|ing)|delet(?:e[sd]?|ing)|drop(?:s|ped|ping)?|skip(?:s|ped|ping)?|"
+    r"disabl(?:e[sd]?|ing)|comment(?:s|ed|ing)?\s+out)"
+)
+_DATASET_LOCATION = (
+    r"(?:from|in|within|of|out\s+of)\s+(?:the\s+|this\s+|our\s+|your\s+)?"
+    r"(?:(?:[\w.-]+/)*(?<![A-Za-z])evals?(?![A-Za-z])[\w./-]*|(?:[\w.-]+/)*[\w.-]*datasets?\b[\w./-]*|"
+    r"[\w./-]+\.jsonl?\b|benchmark\b|(?:test|eval(?:uation)?)\s+(?:set|suite|file))"
+)
+# "case" alone is a dataset case. "entry", "row" and "example" are only treated as one when a dataset qualifier
+# precedes them or a dataset location follows them in the same clause ("delete the cache entry" is unrelated).
+_DATASET_CASE_NOUN = (
+    r"(?:(?:test|eval(?:uation)?|dataset|benchmark)[\s_-]*(?:cases?|entr(?:y|ies)|rows?|examples?)(?![\w-])|"
+    r"cases?(?![\w-])(?!\s+(?:of|statements?|conversions?|folding|handling|(?:in)?sensitiv\w*))|"
+    rf"(?:entr(?:y|ies)|rows?|examples?)(?![\w-])(?=[^.;!?]{{0,60}}?\b{_DATASET_LOCATION}))"
+)
+# Words that end a noun phrase, so "remove temp files per case" is not read as "remove the case".
+_CASE_QUALIFIER = (
+    r"(?!(?:in|of|on|at|by|for|to|if|as|and|or|with|without|from|after|before|when|where|that|which|than|then|but|so|"
+    r"while|is|are|was|were|be|per|during|across|within|inside|into|onto|via|using|until|upon|around)\b)"
+    r"`?[A-Za-z0-9_'-]+`?"
+)
+_CASE_REMOVAL_PATTERN = re.compile(
+    rf"\b{_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+"
+    rf"(?:{_CASE_QUALIFIER}\s+){{0,3}}{_DATASET_CASE_NOUN}",
+    re.IGNORECASE,
+)
+_PASSIVE_CASE_REMOVAL_PATTERN = re.compile(
+    rf"\b{_DATASET_CASE_NOUN}(?:\s+{_DATASET_LOCATION})?\s+(?:also\s+|then\s+)?"
+    rf"(?:is|are|was|were|be|been|being|(?:should|must|can|could|may|might|will|would)\s+be|"
+    rf"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?{_CASE_REMOVAL_VERB}\b",
+    re.IGNORECASE,
+)
+
 
 _SYSTEM_PROMPT = """\
 You are an expert Skill Quality Reviewer summarising a Tier 3 (live agent)
@@ -477,7 +513,12 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
 def _weakens_requirements(text: str) -> bool:
     # Inline-code ticks must not hide a requirement noun: "Remove the `expectation`" is still a removal.
     text = text.replace("`", "")
-    for pattern in (_WEAKENING_PATTERN, _PASSIVE_WEAKENING_PATTERN):
+    for pattern in (
+        _WEAKENING_PATTERN,
+        _PASSIVE_WEAKENING_PATTERN,
+        _CASE_REMOVAL_PATTERN,
+        _PASSIVE_CASE_REMOVAL_PATTERN,
+    ):
         for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 48) : match.start()]
             if re.search(r"\b(?:do\s+not|don't|never|avoid)(?:\s+\w+){0,2}\s*$", prefix, re.IGNORECASE):

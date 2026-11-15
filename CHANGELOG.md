@@ -296,9 +296,11 @@ All notable changes to SkillEvaluator are documented in this file.
   and a space, or after a quoted config key or one after `--`, ends at `;`,
   `|`, or `&`, as an assignment's value does. A value of such a flag or key
   that holds a credential name whose value runs past it, as in
-  `--set_secret API_TOKEN="..."`, is read as an assignment; any other value,
-  as in `--set_secret SLACK_TOKEN_URL=...` or `--db_password PASS=1234`, is
-  masked whole, as after the `-` spelling. A credential flag that takes no
+  `--set_secret API_TOKEN="..."`, or is already masked, as in
+  `--set_secret API_TOKEN=<redacted>`, is read as an assignment, so masking
+  such a value again keeps it as it is; any other value, as in
+  `--set_secret SLACK_TOKEN_URL=...` or `--db_password PASS=1234`, is masked
+  whole, as after the `-` spelling. A credential flag that takes no
   value, in either spelling, still masks the next word as its value, but no
   longer hides the password of a `mysql`, `sshpass`, `docker login`,
   `aws configure set`, config set, or `.netrc` command that starts with that

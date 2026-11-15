@@ -3416,6 +3416,10 @@ _FINDING_EVIDENCE_UNDERSCORED_FLAG_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`\\;|&])
 # the value's end up to its separator: the rest of the name, its closing quote
 # or bracket and spaces (see _FINDING_EVIDENCE_ASSIGNMENT_NAME).
 _FINDING_EVIDENCE_NAME_TAIL_RE = re.compile(r"[\w.-]*\\?[\"']?\]?[ \t]*")
+# A name whose value the flag or header rules mask (see _AssignmentValues.runs_past).
+_FINDING_EVIDENCE_FLAG_OR_HEADER_NAME_RE = re.compile(
+    r"^-|\b(?:api-key|auth-token|access-token|private-token|cookie|authorization)$", re.IGNORECASE
+)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -4250,6 +4254,17 @@ class _AssignmentValues:
         over it here may be one a rule before the assignment rule masks ("curl
         -b auth_token=VALUE", "mysql -ptoken=VALUE", "--password
         token=VALUE"), which the assignment rule then no longer reads.
+
+        A name whose value starts with a marker counts too: that is what
+        masking leaves of a value it left to the assignment rule
+        ("API_TOKEN=<redacted>", "K1,TOKEN=<redacted>", "'TOKEN='<redacted>",
+        "TOKEN=<redacted>,x"), so masking masked text again keeps the text
+        before that marker. Text masked whole and then again line by line
+        keeps such a value as the whole pass left it, so the rest of a line
+        after an earlier marker still reads as it did. A flag or header name
+        does not count: a rule before this one masks its value
+        ("K1,--token=<redacted>", "K1,api-key=<redacted>"), and the value it
+        is in is masked whole, as it was when that value was read.
         """
         text = self.text
         # A name that ends the value or follows it is read up to its separator.
@@ -4257,19 +4272,37 @@ class _AssignmentValues:
         for found in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, limit):
             if found.start() > end:
                 break
-            value_end = self.value_end(_FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start()))
+            name = _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start())
+            reading = self._value_reading(name)
+            if reading is None:
+                continue
+            if (
+                text.startswith("<redacted>", reading[1])
+                and _FINDING_EVIDENCE_FLAG_OR_HEADER_NAME_RE.search(name.group(1)) is None
+            ):
+                return True
+            value_end = self._reading_end(reading)
             if value_end is not None and value_end > end:
                 return True
         return False
 
     def value_end(self, match: re.Match[str]) -> int | None:
         """Return where the value the assignment rule masks after the name *match* ends, or None when it masks none."""
+        reading = self._value_reading(match)
+        return None if reading is None else self._reading_end(reading)
+
+    def _value_reading(self, match: re.Match[str]) -> tuple[re.Pattern[str] | None, int, re.Match[str] | None] | None:
+        """Return how the assignment rule reads the value after the name *match* (None: it masks none there).
+
+        See _assignment_value_reading.
+        """
+        if _assignment_name_is_kept(self.text, match):
+            return None
+        return _assignment_value_reading(self.text, match, self._string_open)
+
+    def _reading_end(self, reading: tuple[re.Pattern[str] | None, int, re.Match[str] | None]) -> int | None:
+        """Return where the value read as *reading* (see _value_reading) ends, or None when there is none."""
         text = self.text
-        if _assignment_name_is_kept(text, match):
-            return None
-        reading = _assignment_value_reading(text, match, self._string_open)
-        if reading is None:
-            return None
         pattern, start, _ = reading
         if pattern is _FINDING_EVIDENCE_STUCK_VALUE_RE:
             value = pattern.match(text, start)

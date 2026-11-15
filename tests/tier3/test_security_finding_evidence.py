@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import re
 import sys
 import threading
 import time
@@ -3052,3 +3053,151 @@ def test_a_long_sed_value_is_not_read_again_for_each_name_in_it(
         counts.append(names.calls)
 
     assert counts[0] == counts[1]
+
+
+# Credentials that start a line, which the whole pass of judge evidence
+# cannot read once the unquoted value that ends the line before is masked.
+_LINE_START_CREDENTIALS = [
+    pytest.param(f"mysql -u root -p{_API_TOKEN} mydb", id="mysql"),
+    pytest.param(f"sshpass -p {_API_TOKEN} ssh host", id="sshpass"),
+    pytest.param(f"--token {_API_TOKEN}", id="flag"),
+    pytest.param(f"npm config set _authToken {_API_TOKEN}", id="npm-config"),
+    pytest.param(f"aws configure set aws_secret_access_key {_API_TOKEN}", id="aws-configure"),
+    pytest.param(f"git config github.token {_API_TOKEN}", id="git-config"),
+]
+
+
+@pytest.mark.parametrize("head", _LINE_START_CREDENTIALS)
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(f'./app --api_key API_KEY="{_PASSPHRASE}"', id="flag-value-assignment"),
+        pytest.param(f'./app --set_secret API_TOKEN="{_PASSPHRASE}"', id="flag-value-token-assignment"),
+        pytest.param(f'./app --hf_token HF_TOKEN="{_PASSPHRASE}"', id="flag-value-same-name-assignment"),
+        pytest.param(f'./app --api_key K1,TOKEN="{_PASSPHRASE}"', id="flag-value-holds-an-assignment"),
+        pytest.param(f"./app --api_key 'TOKEN='\"{_PASSPHRASE}\"", id="quoted-flag-value-before-a-stuck-value"),
+        pytest.param(f'yarn config set "npmAuthToken" TOKEN="{_PASSPHRASE}"', id="quoted-key-value-assignment"),
+        pytest.param(f'./app ["--db_password", "passwd:""{_PASSPHRASE}"]', id="argv-element-before-a-stuck-value"),
+    ],
+)
+def test_a_line_start_credential_stays_masked_before_a_value_left_to_the_assignment_rule(head: str, tail: str) -> None:
+    # The whole pass masks "--password VALUE\n" together with the first word
+    # of the next line, so the line pass masks the rest of that line where
+    # the whole pass left it. That rest still holds the "_" flag value or
+    # config key value the whole pass left to the assignment rule, which
+    # masking the line again must keep as it is, or the password before it
+    # is no longer found.
+    command = f"./deploy --password {_BASIC_PASSWORD}\\n{head} && {tail}\\nls -la"
+
+    evidence = eval_template._redact_judge_evidence(command)
+
+    for secret in (_BASIC_PASSWORD, _API_TOKEN, _PASSPHRASE_TAIL):
+        assert secret not in evidence
+    assert evidence.endswith("\\nls -la")
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            f"./deploy --password {_BASIC_PASSWORD}\nmysql -u root -p{_API_TOKEN} mydb"
+            f' && ./app --api_key API_KEY="{_PASSPHRASE}"\nls -la',
+            id="mysql",
+        ),
+        pytest.param(
+            f"./deploy --api-key K1\nsshpass -p {_API_TOKEN} ssh host"
+            f' && ./app --set_secret API_TOKEN="{_PASSPHRASE}"\ndocker ps',
+            id="sshpass",
+        ),
+    ],
+)
+def test_a_line_start_credential_in_json_stays_masked_before_a_flag_value_left_to_the_assignment_rule(
+    command: str,
+) -> None:
+    # The same, with the command as a tool call's JSON arguments.
+    evidence = eval_template._redact_judge_evidence(json.dumps({"command": command}))
+
+    for secret in (_BASIC_PASSWORD, _API_TOKEN, _PASSPHRASE_TAIL):
+        assert secret not in evidence
+
+
+@pytest.mark.parametrize("head", _LINE_START_CREDENTIALS)
+@pytest.mark.parametrize(
+    "tail",
+    [
+        pytest.param(f"--client_secret token={_AWS_KEY_BODY} cat file", id="flag-value-assignment"),
+        pytest.param(f"--access_token pass={_AWS_KEY_BODY} ls -la", id="flag-value-pass-assignment"),
+        pytest.param(f"--client_secret K1,token={_AWS_KEY_BODY} cat file", id="flag-value-holds-an-assignment"),
+        pytest.param(f"-api_key x=1,token=f({_AWS_KEY_BODY}) echo", id="flag-value-holds-a-call"),
+    ],
+)
+def test_a_line_start_credential_stays_masked_before_a_flag_value_read_to_the_end_of_a_quoted_line(
+    head: str, tail: str
+) -> None:
+    # Inside the quoted command, the whole pass reads the unquoted value of
+    # the name in the "_" flag value on to the line end and leaves that flag
+    # value to the assignment rule, while the line, read on its own, is masked
+    # whole with the name. The rest of the line after the earlier marker is
+    # still found without that name.
+    command = f"./deploy --password {_BASIC_PASSWORD}\n{head} {tail}\nls"
+
+    evidence = eval_template._redact_judge_evidence(json.dumps({"cmd": command}))
+
+    for secret in (_BASIC_PASSWORD, _API_TOKEN, _AWS_KEY_BODY):
+        assert secret not in evidence
+    assert evidence.endswith('\\nls"}')
+
+
+def _parametrized_strings(value: Any) -> list[str]:
+    """Return the strings in one argument value of a parametrized test."""
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, type(pytest.param())):
+        value = value.values
+    elif isinstance(value, dict):
+        value = list(value.values())
+    if isinstance(value, (list, tuple)):
+        return [text for item in value for text in _parametrized_strings(item)]
+    return []
+
+
+# A marker that masking leaves is read again as the start of an unquoted
+# value by the assignment rule, which takes the closing brackets, commas and
+# backslashes right after it ('{"api_key": <redacted>}' loses its "}"), and
+# by the MySQL client rule, which takes backslashes. A .netrc password that
+# starts with a marker is read again on over ";" to the next marker
+# ("password <redacted>; auth=<redacted>,"). None of these shows more of a
+# credential, so those characters are left out of the comparison and such
+# text is skipped.
+_MARKER_TAIL_RE = re.compile(r"(?<=<redacted>)[)\]},\\]+")
+_MARKED_NETRC_PASSWORD_RE = re.compile(r"\bpassword[ \t]+<redacted>[ \t]*[;|&<>]")
+
+
+def test_masking_masked_text_again_changes_nothing() -> None:
+    # Judge evidence is masked whole and then line by line, so masking the
+    # text the masker returns must give the same text. Every string the
+    # parametrized tests in this module pass is masked twice, except the long
+    # texts of the flag timing test, which repeat shorter forms.
+    strings: dict[str, None] = {}
+    for name, test in list(globals().items()):
+        for mark in getattr(test, "pytestmark", []) if name.startswith("test_") else []:
+            if mark.name == "parametrize":
+                for value in mark.args[1]:
+                    strings.update(dict.fromkeys(_parametrized_strings(value)))
+    texts = [text for text in strings if len(text) <= 10_000]
+    changed = []
+    for text in texts:
+        for preserve_header_format in (False, True):
+            once = eval_core_checks._mask_finding_evidence_credentials(
+                text, preserve_header_format=preserve_header_format
+            )
+            if _MARKED_NETRC_PASSWORD_RE.search(once):
+                continue
+            twice = eval_core_checks._mask_finding_evidence_credentials(
+                once, preserve_header_format=preserve_header_format
+            )
+            if _MARKER_TAIL_RE.sub("", twice) != _MARKER_TAIL_RE.sub("", once):
+                changed.append((once[:300], twice[:300]))
+
+    assert len(texts) > 500
+    assert changed == []

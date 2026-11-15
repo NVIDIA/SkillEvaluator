@@ -2797,6 +2797,56 @@ def test_json_escaped_config_keys_keep_ordinary_text(copy: str, depth: int, comm
     assert _mask_as(copy, text) == text
 
 
+# An unquoted value runs over a JSON-escaped line break ("\n") as one word, so
+# the name that starts the next line lies inside the masked value. That name is
+# still read on its own, and its value is masked whole, whatever its form: a
+# tuple, a call, or a quoted string with spaces.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "next_line",
+    [
+        pytest.param(f'auth=("bob", "{_BASIC_PASSWORD}")', id="tuple"),
+        pytest.param(f"auth = ('bob', '{_BASIC_PASSWORD}')", id="single-quoted-tuple-after-a-separator"),
+        pytest.param(f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}")', id="attribute-call"),
+        pytest.param(f'DB_PASSWORD="{_PASSPHRASE}"', id="double-quoted-value-with-spaces"),
+        pytest.param(f"DB_PASSWORD='{_PASSPHRASE}'", id="single-quoted-value-with-spaces"),
+    ],
+)
+def test_a_credential_on_the_line_after_an_unquoted_value_is_masked(copy: str, next_line: str) -> None:
+    evidence = _mask_as(copy, f"API_TOKEN=abc\\n{next_line}\\nrm -rf /srv/app")
+
+    assert evidence == "API_TOKEN=<redacted>\\nrm -rf /srv/app"
+
+
+# The lines after an unquoted value that the whole text pass already masked,
+# and the same lines inside JSON text, where the escape ends a value.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize("as_json", [False, True])
+@pytest.mark.parametrize(
+    "next_line",
+    [
+        pytest.param(f"DB_PASSWORD={_BASIC_PASSWORD}", id="word"),
+        pytest.param(f'requests.get(u, auth=HTTPBasicAuth("bob", "{_BASIC_PASSWORD}"))', id="call-argument"),
+        pytest.param(f'auth=("bob", "{_BASIC_PASSWORD}")', id="tuple"),
+        pytest.param(f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}")', id="attribute-call"),
+        pytest.param(f'DB_PASSWORD="{_PASSPHRASE}"', id="double-quoted-value-with-spaces"),
+    ],
+)
+def test_the_lines_after_an_unquoted_value_keep_no_credential(copy: str, as_json: bool, next_line: str) -> None:
+    command = f"API_TOKEN=abc\n{next_line}\nrm -rf /srv/app"
+    evidence = _mask_as(copy, json.dumps({"command": command}) if as_json else command.replace("\n", "\\n"))
+
+    assert _BASIC_PASSWORD not in evidence
+    assert _PASSPHRASE_TAIL not in evidence
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+def test_a_name_that_is_no_credential_on_the_line_after_an_unquoted_value_is_not_read(copy: str) -> None:
+    evidence = _mask_as(copy, 'API_TOKEN=abc\\nname="correct horse"\\nrm -rf /srv/app')
+
+    assert '"correct horse"\\nrm -rf /srv/app' in evidence
+
+
 @pytest.mark.parametrize("copy", ["template", "eval_core"])
 @pytest.mark.parametrize(
     ("command", "expected"),

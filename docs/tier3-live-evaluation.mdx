@@ -1959,7 +1959,9 @@ saved judge evidence use the same credential masker:
   that name is read on its own
   (`\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
   arguments repeated as JSON, where that value runs to the end of the outer
-  string);
+  string). A credential name at the start of a line after a JSON-escaped line
+  break that an unquoted value ran over is read on its own too
+  (`API_TOKEN=a\nauth=("bob", "...")`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);

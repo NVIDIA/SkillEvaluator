@@ -3747,6 +3747,10 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
 # ("curl -d'user=bob&password=VALUE'") does. Unlike in a shell, a line break
 # ends any string here.
 _FINDING_EVIDENCE_QUOTE_CHAR_RE = re.compile(r"[\\'\"\r\n]")
+# A name that starts a line after a JSON-escaped line break or tab begins with
+# the letter of the escape ("\nauth=..." is read as the name "nauth"), because
+# a word may follow a backslash.
+_FINDING_EVIDENCE_LINE_BREAK_ESCAPES = ("\\n", "\\r", "\\t")
 # A quoted shell command holds shell assignments, whose value is one word: a
 # "-c" string ("sh -c 'TOKEN=x make deploy'"), an eval string and a remote
 # ssh command ('ssh host "TOKEN=x ./deploy.sh && rm -rf /srv/app"'). Any
@@ -4395,9 +4399,15 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # after the escaped quote ends at the next line break, but that of
             # a name further on runs to the end of the outer string). So the
             # rest of the value of a name past such a marker is masked too, as
-            # that name is read on its own (see _AssignmentValues).
+            # that name is read on its own (see _AssignmentValues). So is a
+            # name that starts a line after a JSON-escaped line break, which an
+            # unquoted value ran over as one word ("API_TOKEN=a\nauth=("bob",
+            # "...")"), whose own value may be a tuple, a call or a quoted
+            # string, and so may run past the first value.
             marker = bisect.bisect_left(markers, masked_start)
-            if marker < len(markers) and markers[marker] < match.start():
+            if (marker < len(markers) and markers[marker] < match.start()) or text.startswith(
+                _FINDING_EVIDENCE_LINE_BREAK_ESCAPES, match.start() - 1
+            ):
                 pos = max(pos, values.value_end(match) or 0)
             continue
         if _assignment_name_is_kept(text, match):

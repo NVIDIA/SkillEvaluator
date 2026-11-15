@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import math
 import threading
@@ -31,12 +32,15 @@ class Price:
 @dataclass(frozen=True)
 class PriceBook:
     prices: dict[str, Price]
+    file_name: str | None = None
+    sha256: str | None = None
 
     @classmethod
     def load(cls, path: Path) -> PriceBook:
         try:
-            raw = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            contents = path.read_bytes()
+            raw = json.loads(contents.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
             raise BudgetConfigurationError(f"{path}: invalid price file: {exc}") from exc
         if not isinstance(raw, dict) or not raw:
             raise BudgetConfigurationError(f"{path}: price file must be a non-empty object")
@@ -62,7 +66,7 @@ class PriceBook:
             ):
                 raise BudgetConfigurationError(f"{path}: {model} prices must be finite and non-negative")
             prices[model] = Price(input_price, output_price, cached_input_price)
-        return cls(prices)
+        return cls(prices, file_name=path.name, sha256=hashlib.sha256(contents).hexdigest())
 
     def price_for(self, model: str) -> Price:
         try:
@@ -114,6 +118,10 @@ class BudgetController:
     unmeasured_agent_attempts: int = 0
     unmeasured_judge_attempts: int = 0
     unmeasured_cost_attempts: int = 0
+    _cost_derivations: dict[str, int] = field(
+        default_factory=lambda: {"price_file": 0, "provider_reported": 0, "unmeasured": 0}, repr=False
+    )
+    _applied_prices: dict[str, Price] = field(default_factory=dict, repr=False)
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
     _condition: threading.Condition = field(init=False, repr=False)
     _in_flight: dict[tuple[Any, ...], None] = field(default_factory=dict, repr=False)
@@ -252,6 +260,7 @@ class BudgetController:
                 tokens = input_tokens + output_tokens
             judge_calls = _usage_number(usage, "judge_calls", "llm_call_count")
             cost = None
+            derivation = "unmeasured"
             if self.price_book is not None and model and input_tokens is not None and output_tokens is not None:
                 price = self.price_book.price_for(model)
                 cached_tokens = _usage_number(usage, "cached_input_tokens", "total_cached_tokens", "cached_tokens") or 0
@@ -265,8 +274,12 @@ class BudgetController:
                     + cached_tokens * cached_price
                     + output_tokens * price.output_per_mtok
                 ) / 1_000_000
+                self._applied_prices[model] = Price(price.input_per_mtok, price.output_per_mtok, cached_price)
+                derivation = "price_file"
             if cost is None:
                 cost = _usage_number(usage, "cost_usd", "total_cost_usd")
+                if cost is not None:
+                    derivation = "provider_reported"
             if tokens is None:
                 self.unmeasured_agent_attempts += 1
             else:
@@ -282,6 +295,7 @@ class BudgetController:
             else:
                 self.used_cost_usd = (self.used_cost_usd or 0.0) + float(cost)
                 self._cost_usage_seen = True
+            self._cost_derivations[derivation] += 1
             for dimension, value in (("agent_tokens", tokens), ("judge_calls", judge_calls), ("cost_usd", cost)):
                 if value is not None:
                     self._estimates[dimension] = max(self._estimates.get(dimension, 0), value)
@@ -324,6 +338,16 @@ class BudgetController:
                 "exhausted_basis": "estimate" if self._denied_unit_size else None,
                 "attempts_not_run": len(self.not_run),
                 "not_run": list(self.not_run),
+                "charge_coverage": {
+                    "agent_inference": "user-price-file token pricing; otherwise provider-reported cost; otherwise not measured",
+                    "attempts_by_derivation": dict(self._cost_derivations),
+                    "unmeasured_agent_cost": "not estimated or treated as zero; measured subtotal retained; stops further cost-bounded admission",
+                    "judge_inference": "not priced; bounded only by --max-judge-calls when configured",
+                    "environment_setup": "not included",
+                    "container": "not included",
+                    "backend": "not included",
+                    "infrastructure": "not included",
+                },
                 "reservation": {
                     "policy": "largest_measured_attempt",
                     "estimate_per_attempt": {
@@ -338,6 +362,22 @@ class BudgetController:
                     "denied_unit_size": self._denied_unit_size,
                 },
             }
+            if self.price_book is not None and self.price_book.file_name is not None:
+                metadata["pricing"] = {
+                    "source": "user_price_file",
+                    "file_name": self.price_book.file_name,
+                    "sha256": self.price_book.sha256,
+                    "rates_per_mtok": {
+                        model: {
+                            "input_per_mtok": price.input_per_mtok,
+                            "output_per_mtok": price.output_per_mtok,
+                            "cached_input_per_mtok": price.cached_input_per_mtok,
+                        }
+                        for model, price in self._applied_prices.items()
+                    },
+                    "currency": "as supplied by the price file (labelled USD by the --max-cost-usd flag)",
+                    "verified_against_provider_billing": False,
+                }
             metadata["observed_overruns"] = _budget_observations(metadata)[0]
             return metadata
 
@@ -477,4 +517,7 @@ def budget_line(metadata: dict[str, Any]) -> str:
         if observations or metadata.get("status") == "exhausted":
             line += "; configured limits not fully verified"
         line += f" ({'; '.join(incomplete)})"
+    limits = metadata.get("limits")
+    if isinstance(limits, dict) and limits.get("max_cost_usd") is not None:
+        line += "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
     return line

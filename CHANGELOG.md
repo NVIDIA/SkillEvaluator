@@ -254,6 +254,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- Native NeMo Gym project skill projections run after authored image instructions
+  and final workspace resets, even when an earlier layer already copied skills.
+- Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
+  so skill discovery works with Gym's isolated home and configuration directories.
+  Baseline tasks use the same layout without the target skill.
 - NeMo Gym doctor isolates its anonymous endpoint probe, honors proxy settings
   without forwarding credentials, and reports proxy authentication and gateway failures.
 - Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
@@ -449,6 +454,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
 - Tier 3 token usage rows are now validated against the evaluation dataset's own
   case IDs. Every case row uses one of those IDs at most once, and an attempt
   whose only name is Harbor's 32-character cut of a case name is attributed to

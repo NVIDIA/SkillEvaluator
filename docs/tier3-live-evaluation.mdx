@@ -1036,6 +1036,12 @@ least one bounded usage dimension still unmeasured). `estimate_denials` counts
 logical units refused after estimate-based exhaustion; `denied_unit_size`
 records the size of the unit that first caused that exhaustion.
 
+Cost summaries cover agent inference accounting only, using user-supplied
+rates with a provider-reported cost fallback, not billed spend. Judge inference,
+setup, containers, backend fees, and infrastructure charges are not included.
+Unknown agent cost is not treated as zero; measured subtotals remain visible,
+and unknown cost stops further admission when a cost limit is configured.
+
 `budget.status` and `exhausted_limit` describe admission decisions;
 `budget.partial` records attempts left not run. Separately,
 `budget.observed_overruns` maps each exceeded limit to its measured `used`,
@@ -1774,8 +1780,33 @@ tokens use the input rate. A model key must exactly match the resolved agent
 model. Relative `harbor.price_file` paths resolve from the source skill
 directory.
 
-Token and cost limits measure agent model spend only; they exclude judge
-spend, environment setup, and container time. `--max-judge-calls` counts
+The price file is user-supplied, not a verified billing rate card. Its currency
+is as supplied by the file, labelled USD by `--max-cost-usd`; no currency
+conversion or billing verification occurs. `budget.pricing` records
+`source: user_price_file`, the file name without its absolute path, the SHA-256
+of the exact loaded bytes, and `rates_per_mtok` for models whose rates actually
+derived an attempt cost (empty before any such derivation). The effective cached
+rate is recorded even when it defaults to the input rate.
+`verified_against_provider_billing` is always false.
+
+For each attempt, complete agent input/output token telemetry takes precedence
+over provider-reported cost. Cost is uncached input times the input rate, plus
+cached input times the cached rate, plus output times the output rate, divided
+by one million. Cached tokens are clamped to input tokens; missing cached counts
+are treated as uncached. If input/output telemetry is missing, reported agent
+cost is used instead; otherwise cost is unmeasured, never invented or treated as
+zero. An unknown attempt retains earlier measured subtotals and stops further
+cost-bounded admission.
+
+`budget.charge_coverage.attempts_by_derivation` counts completed accounting
+records as `price_file`, `provider_reported`, or `unmeasured`. The coverage policy
+excludes judge inference, environment setup, containers, backend fees, and
+infrastructure. Judge evidence does not supply structured token counts for
+pricing; prompt/reply character counts are not converted to tokens or money.
+Neither the computed cost nor a provider-reported fallback verifies billed
+spend, and the admission boundary is not a hard currency ceiling.
+
+Token and cost limits cover agent inference only. `--max-judge-calls` counts
 recorded judge attempts, excluding `salvage` entries, transport retries, and
 requests made internally by RAGAS. Measured usage totals are retained even
 when another attempt has no telemetry; that attempt is tracked as unmeasured.

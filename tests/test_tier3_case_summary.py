@@ -228,6 +228,143 @@ def test_run_errors_rank_after_skill_issues_and_are_not_blamed_on_the_skill(tmp_
     assert fix["evidence"] == "opencode/with-skill/trials/broken__a/failure.json"
 
 
+@pytest.mark.parametrize("should_trigger", [True, False])
+@pytest.mark.parametrize("status", ["failed", "error"])
+@pytest.mark.parametrize("record_failure", [True, False])
+def test_judge_failures_are_unscored_infrastructure_advice(
+    tmp_path: Path, should_trigger: bool, status: str, record_failure: bool
+) -> None:
+    from skillevaluator.tier3.case_summary import ERROR, _cases, _marks
+
+    _trial(
+        tmp_path,
+        "a",
+        "c__1",
+        {"overall": 0.0, "evaluation_status": status, "evaluation_errors": {"accuracy": "Judge reply was empty"}},
+    )
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "c", "should_trigger": should_trigger}]})
+    )
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["skill_activation"] = {"status": "never_activated"}
+    if record_failure:
+        agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Required judge evaluation failed"}]}
+
+    assert _marks(_cases(agent, "with_skill")["c"]) == [ERROR]
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert fix["kind"] == "run error"
+    assert fix["attempts_lost"] == 1
+    assert "judge" in fix["action"].lower()
+    assert "Not a skill problem" in fix["action"]
+    assert "scored below" not in fix["what"]
+    assert fix["evidence"].endswith("reward.json")
+
+
+def test_judge_failure_does_not_change_genuine_scored_failure_advice(tmp_path: Path) -> None:
+    _trial(
+        tmp_path,
+        "a",
+        "c__1",
+        {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": {"accuracy": "Judge unavailable"}},
+    )
+    _trial(tmp_path, "a", "c__2", {"overall": 0.2, **_reward(True, "omitted validation")})
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Required judge evaluation failed"}]}
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert [(f["kind"], f["attempts_lost"]) for f in fixes] == [("skill", 1), ("run error", 1)]
+    assert "omitted validation" in fixes[0]["action"]
+    assert "judge" in fixes[1]["action"].lower()
+
+
+@pytest.mark.parametrize(
+    ("errors", "reason", "action_text"),
+    [
+        ({"environment": "required dependency unavailable"}, "required dependency unavailable", "environment"),
+        ({"collector": "Judge sidecar could not be read; trial was not scored"}, "could not be read", "verifier"),
+    ],
+)
+def test_environment_and_collector_failures_do_not_get_judge_advice(
+    tmp_path: Path, errors: dict, reason: str, action_text: str
+) -> None:
+    _trial(tmp_path, "a", "c__1", {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": errors})
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Evaluation failed"}]}
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["kind"], fix["attempts_lost"]) == ("run error", 1)
+    assert reason in fix["what"]
+    assert "required judge evaluation failed" not in fix["what"]
+    assert fix["action"].startswith("Not a skill problem")
+    assert action_text in fix["action"]
+    assert "judge" not in fix["action"].lower() and "credentials" not in fix["action"]
+    assert fix["evidence"].endswith("c__1/reward.json")
+
+
+def test_runtime_and_judge_failures_in_one_case_keep_their_own_causes_and_remedies(tmp_path: Path) -> None:
+    _trial(
+        tmp_path,
+        "a",
+        "c__judge",
+        {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": {"accuracy": "Judge reply was empty"}},
+    )
+    timeout = tmp_path / "a" / "with-skill" / "trials" / "c__timeout"
+    timeout.mkdir(parents=True)
+    (timeout / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {
+        "with_skill": [
+            {"trial": "c__timeout", "reason": "Agent timed out"},
+            {"trial": "c__judge", "reason": "Required judge evaluation failed"},
+        ]
+    }
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert [(f["kind"], f["attempts_lost"]) for f in fixes] == [("run error", 1), ("run error", 1)]
+    timeout_fix, judge_fix = fixes
+    assert "AgentTimeoutError" in timeout_fix["what"] and "judge" not in timeout_fix["what"].lower()
+    assert "agent/gateway logs" in timeout_fix["action"]
+    assert timeout_fix["evidence"].endswith("c__timeout/failure.json")
+    assert "Judge reply was empty" in judge_fix["what"]
+    assert "judge model configuration" in judge_fix["action"]
+    assert judge_fix["evidence"].endswith("c__judge/reward.json")
+
+
+def test_run_errors_with_different_causes_stay_separate_across_agents(tmp_path: Path) -> None:
+    timeout = tmp_path / "a" / "with-skill" / "trials" / "c__timeout"
+    timeout.mkdir(parents=True)
+    (timeout / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    judge_failed = {
+        "overall": 0.0,
+        "evaluation_status": "failed",
+        "evaluation_errors": {"accuracy": "Judge unavailable"},
+    }
+    for name in ("b", "c"):
+        _trial(tmp_path, name, "c__1", judge_failed)
+    agents = {}
+    for name, trial, reason in (
+        ("a", "c__timeout", "Agent timed out"),
+        ("b", "c__1", "Required judge evaluation failed"),
+        ("c", "c__1", "Required judge evaluation failed"),
+    ):
+        agents[name] = _agent({}, {})
+        agents[name]["output_dir"] = str(tmp_path / name)
+        agents[name]["trial_failures"] = {"with_skill": [{"trial": trial, "reason": reason}]}
+
+    judge_fix, timeout_fix = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert (timeout_fix["scope"], timeout_fix["attempts_lost"]) == ("a only", 1)
+    assert "AgentTimeoutError" in timeout_fix["what"] and "agent/gateway logs" in timeout_fix["action"]
+    assert (judge_fix["scope"], judge_fix["attempts_lost"]) == ("b, c only", 2)
+    assert "judge" in judge_fix["what"].lower() and "judge model configuration" in judge_fix["action"]
+
+
 def test_multi_agent_issue_scope_names_the_failing_agent(tmp_path: Path) -> None:
     agents = {
         "claude-code": _agent({"c": _case(True, True)}, {}),

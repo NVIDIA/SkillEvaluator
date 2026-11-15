@@ -290,6 +290,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
   ended in `(from None)` and the SkillSpector row named
   `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
+- Tier 3 case recommendations treat required judge failures as unscored
+  evaluation problems, with advice to check judge configuration and provider
+  availability. Failed judging is no longer counted twice or blamed on the
+  skill, including for negative controls; genuine scored failures retain their
+  existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that

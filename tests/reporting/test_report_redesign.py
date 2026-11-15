@@ -7,6 +7,8 @@ from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
 
+import pytest
+
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
 from skillevaluator.models import Finding, ValidationResult
 from skillevaluator.reporting.html import HTMLReporter, fix_first_for_results, plain_check_name
@@ -512,6 +514,105 @@ def test_presentation_manifest_matches_the_template_and_its_checks() -> None:
         source = root / path
         assert source.is_file(), check
         assert not name or f"def {name}(" in source.read_text(encoding="utf-8"), check
+
+
+def _contrast_ratio(foreground: str, background: str) -> float:
+    def luminance(color: str) -> float:
+        channels = [int(color[index : index + 2], 16) / 255 for index in (1, 3, 5)]
+        linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
+        return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+    high, low = sorted((luminance(foreground), luminance(background)), reverse=True)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _hex_color(value: str) -> str:
+    color = value.replace("!important", "").strip().lower()
+    color = {"white": "#ffffff"}.get(color, color)
+    if re.fullmatch(r"#[0-9a-f]{3}", color):
+        color = "#" + "".join(char * 2 for char in color[1:])
+    assert re.fullmatch(r"#[0-9a-f]{6}", color), f"not a plain colour: {value!r}"
+    return color
+
+
+def _screen_rules(html: str) -> list[tuple[str, str]]:
+    """Every screen style rule in document order, as (selector, declarations)."""
+    styles = "\n".join(re.findall(r"<style[^>]*>(.*?)</style>", html, re.DOTALL))
+    css = re.sub(r"/\*.*?\*/", "", styles, flags=re.DOTALL)
+    return [
+        (re.sub(r"\s+", " ", part.replace('"', "")).strip(), body)
+        for media, selector, body in _rules(css)
+        if all(prelude == "@media screen" for prelude in media)
+        for part in selector.split(",")
+    ]
+
+
+def _specificity(selector: str) -> tuple[int, int]:
+    return (
+        len(re.findall(r"#[\w-]+", selector)),
+        len(re.findall(r"\.[\w-]+|\[[^\]]+\]|(?<!:):[\w-]+", selector)),
+    )
+
+
+def _resolved_colors(rules: list[tuple[str, str]], theme: str, matching: list[str]) -> tuple[str, str]:
+    """Foreground and background the cascade gives an element that `matching` selectors select."""
+    variables: dict[str, str] = {}
+    for selector, body in rules:
+        if selector == ":root" or (theme == "dark" and selector == "[data-theme=dark]"):
+            variables.update(re.findall(r"(--[\w-]+)\s*:\s*([^;]+)", body))
+
+    def resolve(value: str) -> str:
+        while match := re.search(r"var\((--[\w-]+)\)", value):
+            value = value.replace(match.group(0), variables[match.group(1)])
+        return _hex_color(value)
+
+    applies = [
+        selector
+        for selector in matching
+        if not selector.startswith("[data-theme=") or selector.startswith(f"[data-theme={theme}]")
+    ]
+    winners: dict[str, tuple[tuple[int, int, int], str]] = {}
+    for order, (selector, body) in enumerate(rules):
+        if selector not in applies:
+            continue
+        for prop, value in re.findall(r"(?:^|[;\s])(color|background|background-color)\s*:\s*([^;]+)", body):
+            key = "color" if prop == "color" else "background"
+            rank = (*_specificity(selector), order)
+            if key not in winners or rank >= winners[key][0]:
+                winners[key] = (rank, value)
+    assert winners.keys() == {"color", "background"}, (matching, winners)
+    return resolve(winners["color"][1]), resolve(winners["background"][1])
+
+
+_CHIP_AND_BADGE_SELECTORS = {
+    "pass tier chip": [".tier-card.pass .tier-card-verdict"],
+    "fail tier chip": [".tier-card.fail .tier-card-verdict"],
+    "warn tier chip": [".tier-card.warn .tier-card-verdict"],
+    "skipped tier chip": [".tier-card.skipped .tier-card-verdict"],
+    "issue count badge": [".count-badge"],
+    "medium issue count badge": [".count-badge", ".count-badge.medium-count"],
+    "low issue count badge": [".count-badge", ".count-badge.low-count", "[data-theme=dark] .count-badge.low-count"],
+    "incomplete badge": [".t3-incomplete-badge"],
+    "hovered skill pill": [".skill-pill", ".skill-pill:hover"],
+    "hovered quality pill": [".quality-pill", ".quality-pill:hover"],
+    "expanded validator header": [".validator-collapsible", ".validator-collapsible.active"],
+    "back to top button": ["#backToTop"],
+    "hovered back to top button": ["#backToTop", "#backToTop:hover"],
+}
+
+
+def test_contrast_helper_matches_the_published_ratios() -> None:
+    assert round(_contrast_ratio("#ffffff", "#22c55e"), 2) == 2.28
+    assert round(_contrast_ratio("#ffffff", "#eab308"), 2) == 1.92
+    assert round(_contrast_ratio("#ffffff", "#ef4444"), 2) == 3.76
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("name", _CHIP_AND_BADGE_SELECTORS)
+def test_status_chips_and_badges_have_readable_text(name: str, theme: str) -> None:
+    rules = _screen_rules(_render(_results()))
+    foreground, background = _resolved_colors(rules, theme, _CHIP_AND_BADGE_SELECTORS[name])
+    assert _contrast_ratio(foreground, background) >= 4.5, (name, theme, foreground, background)
 
 
 def test_table_overflow_is_scoped_to_scroll_containers() -> None:

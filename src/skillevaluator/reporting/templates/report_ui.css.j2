@@ -99,6 +99,16 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
 /* Light-theme critical/high colors are deep red; their dark-theme variants are bright. */
 .severity-filter-btn.active.critical-btn,.severity-filter-btn.active.high-btn { color:#fff; }
 [data-theme=dark] .severity-filter-btn.active.critical-btn,[data-theme=dark] .severity-filter-btn.active.high-btn { color:#0c111b; }
+/* Status chips and badges keep 4.5:1 for their small text. Tier chips use the badge colors; the rest keep their fill and take a dark or deeper-red text pair. */
+:root { --danger-solid:#b91c1c; }
+.tier-card.pass .tier-card-verdict { background:var(--badge-pass-bg);color:var(--badge-pass-tx);border:1px solid currentColor; }
+.tier-card.fail .tier-card-verdict { background:var(--badge-fail-bg);color:var(--badge-fail-tx);border:1px solid currentColor; }
+.tier-card.warn .tier-card-verdict { background:var(--badge-warn-bg);color:var(--badge-warn-tx);border:1px solid currentColor; }
+.tier-card.skipped .tier-card-verdict { color:var(--dark-text); }
+.count-badge,.t3-incomplete-badge { background:var(--danger-solid);color:#fff; }
+.count-badge.medium-count,[data-theme=dark] .count-badge.low-count { color:#0c111b; }
+.skill-pill:hover,.quality-pill:hover,.validator-collapsible.active,#backToTop { color:#0c111b; }
+#backToTop:hover { color:#fff; }
 
 /* New text links follow the theme; native lime actions need a dark foreground. */
 @media screen {

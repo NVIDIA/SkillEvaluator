@@ -166,7 +166,8 @@ All notable changes to SkillEvaluator are documented in this file.
   Recorded Harbor upload links survive saved-run regeneration. The renderer
   version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
   the aligned desktop report is slightly wider. Long scanner versions wrap
-  within mobile tiles.
+  within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
+  text contrast in the light and dark themes.
 
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`

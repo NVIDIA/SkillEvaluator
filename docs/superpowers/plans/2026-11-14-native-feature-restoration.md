@@ -6,9 +6,11 @@
 
 **Design:** the native report template remains the presentation baseline. Keep its header scale, version identification, consolidated human-readable dimension/baseline comparison, partial comparison annotations, clickable agent scorecards and Harbor actions. Retain the earlier concise Insights and closed routine provenance; reducing clutter must not remove useful native views or actions. The user's explicit follow-up supersedes the compact header and removed scorecards in the previous revision.
 
-**Architecture:** existing assessed display data feeds the single HTML template. Add only bounded, typed display projections for unavailable configured dimensions and custom metric comparisons. Repair Harbor fallback in the existing URL-normalization helper. Canonical payloads, scores, gates, supported backends and CLI behavior stay unchanged.
+**Architecture:** existing assessed display data feeds the single HTML template. Add only bounded, typed display projections for unavailable configured dimensions and custom metric comparisons. Repair Harbor fallback in the existing URL-normalization helper. The retained Tier 3 object, scores, gates, supported backends and CLI behavior stay unchanged. CLI JSON validator rows add the recorded boolean `optional_skip`, and the retained reader round-trips it.
 
-**Manifest:** `docs/report-presentation-port.json` records the pinned style digests and the intentional adaptations.
+**Manifest:** `docs/report-presentation-port.json` records two style digests from this repository's template and the intentional adaptations. Its checks cover those style snapshots and named regression tests.
+
+**Intentional changes from the prior public layout:** clickable tier cards replace the left sidebar and sticky mobile tier bar. Reports containing Tier 3 default to dark and others to light instead of following the device theme; saved Light, Dark and System choices take precedence. Concise failed-run Insights are renderer-only; newly persisted failure text remains unchanged.
 
 ## Constraints and review focus
 

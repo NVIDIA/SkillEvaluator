@@ -88,8 +88,10 @@ no-color, redirected, and string-rendered output retains readable paths.
 
 HTML reports use a shared NVIDIA presentation across all three tiers, with
 numbered Insights cards, expandable findings, and tables alongside charts.
-Reports containing Tier 3 open in dark mode; other reports open in light mode.
-An explicit theme choice is remembered when browser storage is available.
+Without a saved theme choice, reports containing Tier 3 open in dark mode and
+other reports open in light mode, replacing the previous device-theme default.
+Saved Light, Dark and System choices take precedence when browser storage is
+available; System follows changes to the device preference.
 Reports, including charts, work without a network connection.
 
 ```bash title="One run, four report files"
@@ -223,8 +225,11 @@ Harbor results and analysis actions are available in both the Tier 3 tile and
 Overview. Missing viewer URLs stay explicitly unavailable.
 
 Insights owns the complete conclusion and recommendation cards, with
-their original text, source, verification and evidence links. Full execution
-errors remain in Diagnostics. Routine configuration and provenance stay in the
+their source, verification and evidence links. For saved failed runs, the
+renderer replaces recognized repeated error summaries with concise coverage
+and actions; authored advice stays verbatim and full errors remain in
+Diagnostics. Newly saved failed-run conclusions and recommendations retain
+their existing raw error text. Routine configuration and provenance stay in the
 closed **Run details & provenance** footer; important execution or comparison
 limitations remain visible beside affected results. Rendering a saved run does
 not invoke a judge or change its scores.
@@ -238,6 +243,9 @@ The HTML header's JSON export is a report snapshot, with supplied plugin
 static/runtime projections included. Its envelope differs from the CLI's
 `-r json` format. A CI report configured with a canonical JSON artifact links
 directly to that retained file instead of embedding another report snapshot.
+CLI JSON validator rows now include `optional_skip` when recorded as a boolean.
+The retained JSON reader round-trips this additive field so an advisory skip
+keeps its recorded policy; this does not alter the Tier 3 payload or gate rules.
 
 Plugin evidence appears within its relevant tier. Bounds notices distinguish
 omitted rows from shortened text. A shortened historical snapshot cannot
@@ -305,7 +313,8 @@ the evidence below it:
   target paths and provenance. Passive plugin inventories and source details
   also stay folded, with recorded omissions and limitations disclosed.
 
-Use the tier cards to open a tier. A comprehensive `validate` report
+Clickable tier cards replace the previous left sidebar and sticky mobile tier
+bar. Use the tier cards to open a tier. A comprehensive `validate` report
 keeps all three tiers visible, including **Not run** and **Not run (not requested)**
 when evidence is absent. Targeted reports keep their narrower scope. On small
 screens, navigation and controls wrap within the viewport.
@@ -382,7 +391,7 @@ successful agent but produced no with-skill score, the dimension reads `Not
 scored with the skill — baseline 50.0%; uplift unavailable` (or `Not scored — a
 signal this dimension needs produced no score` without a baseline). A dimension
 whose signals had nothing to judge in any eval case reads `Not applicable`; it
-has no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+has no score, so the agent cannot PASS. A
 baseline-only run shows `Baseline 67.0% — baseline-only run; no with-skill score
 or uplift`.
 
@@ -1042,7 +1051,7 @@ plain-language meaning and evidence source beside its score. For a successful
 best agent, a standard dimension whose signals were active but produced no score
 is listed as N/A with a **not scored with the skill** note and **No verdict**.
 A dimension whose signals had nothing to judge reads **Not applicable**; it has
-no score, so the agent's verdict stays NEUTRAL and cannot PASS. A
+no score, so the agent cannot PASS. A
 collapsed **What each number means** panel under the Tier 3 overview cards
 separates the verdict, Overall Score, Skill Lift, pass@k, the Tier 1 Quality
 Score, and publication eligibility.
@@ -1065,8 +1074,10 @@ comparisons. A reported lift can therefore differ from subtracting the two
 displayed arm scores, even reversing their apparent direction. When no complete
 comparison with matching judge models remains, the affected metric, dimension,
 and overall lift are unavailable rather than zero. The HTML report's evaluator
-card says how many cases its lift left out, or, when it has no lift, that no
-comparable result remains, and its per-trial evidence labels those cases
+card says how many cases its lift left out. When it has no lift, the card says
+that no comparable result remains if its `comparison_basis` records
+`contributing_attempts` as 0, and otherwise that the loaded results cannot
+confirm the comparison. Its per-trial evidence labels those cases
 **Left out of lift: different judge models**. In the canonical JSON the
 evaluator records that count in `lift_excluded_cases`. Its card's
 `comparison_basis` lists in `case_ids` the lift's keys for the cases the loaded
@@ -1565,10 +1576,20 @@ score.
   every agent finished.
 
 In a standalone report, the **Tier 3 quality** status follows the run's verdict.
-A failed run keeps `neutral`, which the HTML
-labels **Changes required**, even when the completed agent's own dimension
-verdict passes. The completed-agent details still describe that agent, and
-the command status in the same hero also reads **Changes required**.
+HTML displays a failed run as **Changes required**, even when the completed
+agent's own dimension verdict passes. This also applies to
+`validate --block-on-agent-eval`. In a default `validate --tier3` report, Tier 3
+is advisory and reads **Failed (advisory)**; the command status follows the
+required tiers and reads **Passed required checks** when they pass. A successful
+run with a `neutral` verdict reads **Neutral**.
+
+The JSON report's `tier3` object and **Download Full Tier 3 Payload** preserve
+the recorded verdict, which can be `neutral` when a failed agent's collected
+results record the failure. An execution error reported after every agent
+scored can instead leave the recorded score-based verdict as `pass` or `fail`.
+HTML still displays the failed execution as a failure. Its stricter display
+does not rewrite the retained payload; completed-agent details describe that
+agent's evidence.
 
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
@@ -1584,8 +1605,8 @@ verdict follows the run, so a neutral run still reads
 When the run has a best agent, the HTML report names it with the score,
 and its **Skill Lift** card and the **Best-agent lift** line under
 **Run details & provenance** show that agent's lift when it has one, even when
-its evidence is incomplete. The payload keeps this lift in
-`summary.overall_lift` and records the failed run's `verdict` as `neutral`.
+its evidence is incomplete. The JSON report's `tier3` object and full Tier 3
+download both keep this lift in `summary.overall_lift`.
 The lift is diagnostic evidence for one agent, not a whole-run lift.
 
 To get a whole-run result, fix the failed agent and rerun the evaluation with

@@ -151,9 +151,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Standalone HTML reports use one NVIDIA presentation across all three tiers,
   with consistent typography, a green header, numbered Insights cards, and
-  plugin evidence inside the relevant tier. Tier 3 reports default to dark
-  mode, while explicit theme choices remain available. Saved incomplete runs
-  show concise coverage and actions, with full errors retained in Diagnostics.
+  plugin evidence inside the relevant tier. Clickable tier cards replace the
+  left sidebar and sticky mobile tier bar. Reports containing Tier 3 default
+  to dark and other reports to light, instead of following the device theme;
+  saved Light, Dark and System choices still take precedence. The renderer
+  gives saved incomplete runs concise coverage and actions, with full errors
+  in Diagnostics. Newly saved failed-run conclusions and recommendations
+  keep their existing raw error text.
   Overview links to complete Insights instead of repeating its cards; passive
   evidence and routine run provenance stay folded. Recorded native token and
   latency breakdowns are available under Trials without rerunning evaluations.
@@ -162,7 +166,10 @@ All notable changes to SkillEvaluator are documented in this file.
   scorecards, and Harbor results/analysis actions are retained. Empty primary
   viewer metadata no longer hides usable recorded summary links.
   Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
-  snapshots include plugin evidence and retain optional-skip metadata.
+  snapshots add supplied plugin evidence. CLI JSON validator rows now include
+  a recorded boolean `optional_skip`, which the retained JSON reader
+  round-trips without changing gate policy. Shared plugin composition supplies
+  static and retained runtime evidence before the HTML template renders.
   Recorded Harbor upload links survive saved-run regeneration. The renderer
   version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
   the aligned desktop report is slightly wider. Long scanner versions wrap

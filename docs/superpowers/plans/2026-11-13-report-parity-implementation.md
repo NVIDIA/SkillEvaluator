@@ -6,6 +6,8 @@ Approved specification: the user's “Bring GitHub SkillEvaluator reports to Git
 
 **Base:** public main f5bf6c1f3666699fd145612a2e9162e9721db3f9. Worktree is isolated from the user's dirty checkout. The presentation reference and private reports remain outside committed fixtures; source provenance belongs in the local audit manifest.
 
+**Final scope clarification:** the implementation supersedes the producer-write and source-pin instructions below: concise failed-run summaries are renderer-only, CLI JSON adds and round-trips recorded boolean `optional_skip`, and the public manifest snapshots two current-template style blocks.
+
 ## Global constraints
 
 - One HTMLReporter and one authoritative presentation; no alternate renderer or competing layout stylesheet.

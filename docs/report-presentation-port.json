@@ -1,6 +1,7 @@
 {
   "schema_version": 1,
   "template": "src/skillevaluator/reporting/templates/report.html.j2",
+  "style_snapshot_scope": "Comment-free digests of the base and Tier 3 inline style blocks in this repository's template.",
   "native_styles": [
     {
       "block": "base",
@@ -15,8 +16,12 @@
     "Public scores, gates, applicability, source identity and publication assessments remain authoritative.",
     "Chart.js 4.5.1 and its existing MIT notices remain pinned.",
     "Canonical retained exports are separate from bounded, sanitized display projections.",
+    "CLI JSON validator rows add a recorded boolean optional_skip, and the retained reader round-trips it; the retained Tier 3 object remains unchanged.",
+    "Clickable tier cards replace the previous left sidebar and sticky mobile tier bar.",
+    "Reports containing Tier 3 default to dark and other reports to light, replacing the device-theme default; saved Light, Dark and System choices take precedence.",
     "Typed passive plugin evidence is routed into tier sections before rendering.",
     "Overview summarizes recorded outcomes/actions; full Insights cards render once.",
+    "Concise failed-run summaries are a renderer-only projection; newly persisted failure conclusions and recommendations keep their existing raw error text.",
     "Routine metadata, passive evidence and resource methods use closed disclosures.",
     "Recorded token/latency adapters support native-shaped and current public evidence without collection or rescoring.",
     "Accessible active-control contrast, wrapped mobile controls, keyboard navigation, search, deep links, no-JS and print behavior are retained.",

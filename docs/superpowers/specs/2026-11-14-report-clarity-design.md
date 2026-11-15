@@ -1,6 +1,8 @@
 # Report clarity and complete recorded telemetry
 
-Approved design: retain the native three-tier report presentation and its features, consolidate repetitive tiles and prose, and keep routine Run Details and provenance quietly available. This extends the report-parity work on the same branch.
+User-approved design: retain the native three-tier report presentation and its features, consolidate repetitive tiles and prose, and keep routine Run Details and provenance quietly available. This extends the report-parity work on the same branch.
+
+Intentional public layout changes: tier cards replace the left sidebar and sticky mobile tier bar. Reports containing Tier 3 default to dark and others to light instead of the device theme; saved Light, Dark and System choices take precedence. CLI JSON adds the recorded boolean `optional_skip` to validator rows and round-trips it through retained reports; the retained Tier 3 object stays unchanged. Concise failed-run Insights are renderer-only, preserving newly persisted failure text.
 
 ## Content ownership
 
@@ -33,7 +35,7 @@ Use a bounded read-only display adapter; no collector calls, source reopening, r
 - One full Insights card per recorded insight; Overview has a concise summary/action and native links.
 - No default-open empty plugin panels, duplicate tier navigation, repeated hero score block or empty quality tile wall.
 - Required validation, live quality, completed-agent scope, publication and execution status remain distinct. Keep source rejection, incomplete arms, never-activated skills, provisional evidence, historical baselines and invalid comparisons visible at the affected result.
-- Opening Tier 3 Overview at 390 x 1000 exposes status, scored/planned coverage and recorded next action before routine metadata. Target a persistent mobile header no taller than 96px after scrolling; retain the 16px native body scale.
+- Opening Tier 3 Overview at 390 x 1000 exposes status, scored/planned coverage and recorded next action before routine metadata. The full-size header scrolls with the page; retain the 16px native body scale.
 - Target at least 40% fewer default Overview explanatory words on the audited incomplete and successful shapes. Never clip authored evidence or hide a necessary qualification to meet the target.
 - Routine Run Details stays closed; methods, run IDs, digests and paths do not precede primary results. A short, approximately 15-word shared attention cue links to complete scope-specific reasons.
 - All native features, filters, disclosures, links/copy/download actions and six Tier 3 tabs remain usable. Deep links reveal owning tabs and closed ancestors; search exposes folded matches. Preserve print state restoration, no-JS, offline charts, both themes and mobile overflow handling.
@@ -44,4 +46,4 @@ Use a bounded read-only display adapter; no collector calls, source reopening, r
 
 Use one main home for each fact with concise summaries and native disclosures. Wording-only changes leave structural duplication intact; a separate compact/detailed mode adds redundant UI and maintenance. Keep one renderer, pinned Chart.js 4.5.1 and the native typography/palette, with narrow accessibility/layout adaptations.
 
-The [presentation manifest](../../report-presentation-port.json) records the pinned style digests and intentional adaptations without including report data.
+The [presentation manifest](../../report-presentation-port.json) records two style digests from this repository's template, named regression checks and intentional adaptations without including report data.

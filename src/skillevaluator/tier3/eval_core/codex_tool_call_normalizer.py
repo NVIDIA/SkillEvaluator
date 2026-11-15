@@ -113,6 +113,16 @@ def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, A
         # Unscoped observations cannot prove that this particular call failed.
         if not tool_call_id or source_call_id != tool_call_id:
             continue
+        if str(tool_call.get("function_name", "")).lower() == "skill":
+            observation = atif_content_text(result.get("content")).strip()
+            if re.match(
+                r"^(?:error:\s*)?(?:skill\s+(?:(?:[\"'`][^\"'`\n]+[\"'`]|[\w./-]+)\s+)?"
+                r"(?:is\s+)?(?:not found|not available|unavailable)\b|unknown skill\b"
+                r"|(?:could not|unable to|cannot|can't)\s+(?:find|load|access)\s+(?:the\s+)?skill\b)",
+                observation,
+                re.IGNORECASE,
+            ):
+                return True
         extra = result.get("extra") or {}
         if not isinstance(extra, dict):
             continue
@@ -120,16 +130,6 @@ def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, A
             return True
         if extra.get("tool_result_is_error") is False:
             flag = False
-    if str(tool_call.get("function_name", "")).lower() == "skill":
-        observation = normalized_tool_call_observation(step, tool_call).strip()
-        if re.match(
-            r"^(?:error:\s*)?(?:skill\s+(?:(?:[\"'`][^\"'`\n]+[\"'`]|[\w./-]+)\s+)?"
-            r"(?:is\s+)?(?:not found|not available|unavailable)\b|unknown skill\b"
-            r"|(?:could not|unable to|cannot|can't)\s+(?:find|load|access)\s+(?:the\s+)?skill\b)",
-            observation,
-            re.IGNORECASE,
-        ):
-            return True
     return flag
 
 

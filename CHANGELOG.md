@@ -454,6 +454,62 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Judge evidence (`judge_attempts.json`) and security finding evidence now mask
+  credentials whose quotes are escaped twice or three times, as when a RAGAS
+  request repeats a tool call's JSON arguments as JSON, and single-quoted values
+  whose quotes are escaped once or twice, as in Python source, JSON or not.
+  - Newly masked: an argv element after a credential flag, `-u`, `-b`, or a
+    `login` or `sshpass` `-p`
+    (`[\\\"tool\\\", \\\"--password\\\", \\\"...\\\"]`, or
+    `[\'tool\', \'--password\', \'...\']` in a quoted Python list), which was
+    saved in clear. An attached `-p...` after a `login` or MySQL client element,
+    which was saved in clear when escaped twice or in a JSON-escaped quoted
+    Python list (a quoted Python list that is not JSON-escaped already masked
+    it). A double- or single-quoted value after a credential flag, `-u`, `-p`,
+    `.netrc` `password`, `aws configure set`, `git config`, `npm config set` or
+    `curl -b` (`--password \\\"two words\\\"`, `--password \'two words\'`,
+    `curl -u \'user:...\'`) and a JSON member such as
+    `\\\"password\\\": \\\"...\\\"`, which were saved in clear or with only
+    their first word masked.
+  - How: the text is also read with one, then two levels of string escapes
+    removed (`\\`, `\"`, `\'`, `\/`, `\n`, `\r`, `\t`, `\uXXXX`, inside a quoted
+    string or not). What the same patterns mask in a reading is masked in the
+    saved text too, where the text kept around it places it for certain, so a
+    value escaped again is masked as it is when escaped once, also where the
+    patterns mask more than a credential (`"total_tokens": self.total_tokens,`
+    in a Write call a RAGAS request repeats). Markers are only added: the text
+    as written is masked exactly as before. A value in a reading ends at a quote
+    that ends a string of the text it was read from, and `\\"` ends a string, as
+    in JSON, so JSON inside a Python `repr`, where `\\"` is an escaped quote, is
+    masked as before.
+  - Still kept: values in text escaped more than three times; single-quoted
+    values whose quotes are escaped three times; values in text that holds a NUL
+    character, which is not read again (an escaped `\u0000` is read as written);
+    the part of a value that once-escaped text keeps, such as the words after
+    the first in `"password: \"two words\""` at the start of a JSON string; and
+    the words after an escaped quote in a quoted Python argv value
+    (`[\'--token\', \'a\\\'b two\']`).
+  - Known over-masks: `{"command": "mysql -u root -p", "timeout": 30}` is saved
+    as `-p<redacted>timeout": 30}`, as before, and now also when escaped twice
+    or three times. The judge's line pass can still mask the JSON after a value
+    on a piece that starts inside a string
+    (`{"command": "run(['C:\\\\tmp\\\\']); password: ...", "note": "keep me"}`
+    loses `"note"`). And as escapes are decoded outside strings too, in text
+    that was never escaped, an escape that leaves a quote unmatched in a reading
+    can mask the rest of its line after a later credential assignment
+    (`export GITHUB_TOKEN=$(...)`, `password: ...`): a `\n`, `\r` or `\u000a`
+    inside a quoted string (`printf '%s\n'`, `tr -d '\n'`, `echo "a\nb"`,
+    `cd "C:\repo\x"`), or an odd number of `\"` in a double-quoted string
+    (`echo "it\"s"`). Finding evidence can then lose the `curl` or `rm` the
+    finding is about. Judge evidence already lost the rest of
+    such a line after a `\n`, `\r` or `\t` escape, and now also loses it after
+    an odd `\"` or a `\u000a`.
+  - Cost: text with a backslash is masked up to three times, in time and memory
+    linear in its length. Judge evidence takes two to four times as long to mask
+    (about 0.2 s instead of 0.06 s for a 70 KB RAGAS prompt of Bash calls), and
+    up to about eight times as long on adversarial text. Peak memory can grow by
+    about 250 MB per MB of input for one long quoted value escaped twice, as the
+    patterns then read that value decoded.
 - Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
   interpolation variable ... requires protected execution state` because the
   shell exports a short flag with a sensitive-looking name. A host variable such

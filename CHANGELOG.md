@@ -289,6 +289,9 @@ All notable changes to SkillEvaluator are documented in this file.
   half was never checked. Every clause of an expectation must now name a
   checkable artifact of its own; one that does not keeps the gate, as a wholly
   prose expectation already did.
+- Tier 3 recommendations preserve the configured pass threshold when an
+  incomplete condition has no pass-rate summary, so scored attempts below that
+  threshold still receive failure advice.
 - SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
   `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
   `100%.md` no longer produces an invalid URI.

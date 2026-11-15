@@ -503,6 +503,108 @@ def test_ragas_evidence_masks_consecutive_credential_lines_in_tool_calls(
         assert secret not in saved
 
 
+def test_ragas_evidence_masks_argv_lists_in_tool_calls(verifier: ModuleType, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A tool call's argv list reaches the RAGAS prompt and reply as JSON in JSON, so its quotes are escaped twice.
+
+    Each credential element is masked there as in plain text, and the other
+    elements stay.
+    """
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "function_name": "Bash",
+                        "arguments": {
+                            "command": "python -c 'import subprocess; "
+                            'subprocess.run(["tool", "--password", "aaaaaaaaaaaa"])\''
+                        },
+                    },
+                    {
+                        "function_name": "Write",
+                        "arguments": {
+                            "file_path": "db.py",
+                            "content": 'subprocess.run([\n    "mysql",\n    "-uroot",\n    "-pbbbbbbbbbbbb",\n])\n'
+                            'subprocess.run(["curl", "-u", "admin:cccccccccccc", url])\n',
+                        },
+                    },
+                ],
+            },
+        ]
+    }
+    secrets = ("aaaaaaaaaaaa", "bbbbbbbbbbbb", "cccccccccccc")
+    agent_text = verifier.build_conversation_summary(trajectory, "Set up the database.")
+    assert all(secret in agent_text for secret in secrets)
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert '[\\\\\\"tool\\\\\\", \\\\\\"--password\\\\\\", <redacted>]' in exchange[field]
+        assert '\\\\\\"-uroot\\\\\\",\\\\n    \\\\\\"-p<redacted>\\\\\\"' in exchange[field]
+        assert '[\\\\\\"curl\\\\\\", \\\\\\"-u\\\\\\", <redacted>, url]' in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in saved
+
+
+def test_ragas_evidence_masks_quoted_tool_call_values_escaped_twice(
+    verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A double-quoted value in a tool call's arguments reaches the RAGAS prompt and reply with its quotes escaped twice.
+
+    The whole value is masked, past the space in it, and the command around it
+    is kept.
+    """
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"function_name": "Bash", "arguments": {"command": 'deploy --password "aaaa cccccccccccc" -n'}},
+                    # Built from parts, so the source holds no curl user:password literal.
+                    {
+                        "function_name": "Bash",
+                        "arguments": {"command": "curl -u " + '"admin:' + "b" * 12 + '" https://x.example'},
+                    },
+                ],
+            },
+        ]
+    }
+    secrets = ("cccccccccccc", "bbbbbbbbbbbb")
+    agent_text = verifier.build_conversation_summary(trajectory, "Deploy the app.")
+    assert all(secret in agent_text for secret in secrets)
+    prompt = "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+    _install_ragas(monkeypatch, messages=[{"role": "user", "content": prompt}])
+    received = _stub_provider(monkeypatch, [_chat_reply(json.dumps({"end_state": agent_text, "verdict": 1}))])
+
+    with _judge_evidence(verifier):
+        result = verifier.judge_goal_accuracy("question", "expected", "agent answer")
+
+    assert (result["score"], result["method"]) == (1.0, "ragas")
+    assert len(received) == 1
+    exchange, outcome = _attempts(verifier)
+    assert [exchange["status"], outcome["status"]] == ["replied", "accepted"]
+    for field in ("prompt", "reply"):
+        assert "deploy --password <redacted> -n" in exchange[field]
+        assert "curl -u <redacted> https://x.example" in exchange[field]
+    saved = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for secret in secrets:
+        assert secret not in saved
+
+
 def test_ragas_evidence_masks_private_key_blocks_in_json_prompts_and_replies(
     verifier: ModuleType, monkeypatch: pytest.MonkeyPatch
 ) -> None:

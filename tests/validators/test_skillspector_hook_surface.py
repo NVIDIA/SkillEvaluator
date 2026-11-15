@@ -49,6 +49,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.reporting.console_ui import summarize_tier1
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.run_status import Status, resolve_run_status
 from skillevaluator.utils.tool_runner import ToolResult
@@ -373,6 +374,32 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     assert run.publication == Status.INCOMPLETE
 
 
+def _assert_terminal_summary_lists_a_failure(result: ValidationResult) -> None:
+    """The Tier 1 terminal summary counts the check as failed and points at a gate failure.
+
+    A check that is not counted as a confirmed failure is listed as one that
+    "didn't run", with advice to install the scanner or skip the check. The
+    scanners row and the single "what to fix" line follow the rules for any
+    incomplete scan, so this does not pin the scanners row, or which of
+    several gate failures comes first.
+    """
+    result.validator_name = "Security Scan"  # run_validation names the result this way
+    passed, rows = summarize_tier1([result], lineup=["security"])
+    shown = {row.label: "".join(text for text, _style in row.segments) for row in rows}
+    everything = "\n".join(shown.values())
+
+    assert not passed
+    assert shown["checks"] == "✗ security"
+    assert shown["summary"].startswith("0/1 checks passed")
+    assert "  ·  1 failed" in shown["summary"]
+    assert "didn't run" not in shown["summary"]
+    [fix] = [row for row in rows if row.glyph == "1"]
+    assert fix.label == "security"
+    assert "".join(text for text, _style in fix.segments) in result.gate_failures
+    assert "--skip" not in everything
+    assert "not installed" not in everything
+
+
 class TestCapturedReports:
     @pytest.mark.parametrize(("name", "build", "manifest"), _CAPTURES, ids=[name for name, _b, _m in _CAPTURES])
     def test_captured_report_matches_its_tree(
@@ -492,6 +519,7 @@ class TestUnmodeledHooks:
             assert resolve_run_status([result]).of(result) == Status.FAILED
         exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
         assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
+        _assert_terminal_summary_lists_a_failure(result)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_llm_verification_cannot_downgrade_the_hook_critical(self, mock_tools, tmp_path: Path) -> None:
@@ -788,6 +816,7 @@ class TestFolderScans:
         _assert_failed_with_incomplete_scan(result)
         exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
         assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
+        _assert_terminal_summary_lists_a_failure(result)
 
 
 class TestPartlyReadManifests:

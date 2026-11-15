@@ -258,6 +258,10 @@ All notable changes to SkillEvaluator are documented in this file.
   case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
+- No-baseline Tier 3 reports no longer describe an intentionally skipped
+  baseline as incomplete execution or mismatched score contracts. Completed
+  with-skill attempts retain their results, with lift explicitly not measured
+  because no baseline was run.
 - Success-detail metadata keeps the terminal's default text color. Values such
   as `grade=B` stay visible in the default blue Windows PowerShell console.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

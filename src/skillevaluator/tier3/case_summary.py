@@ -97,7 +97,19 @@ def _details_truncated(agent: Mapping[str, Any]) -> bool:
     return False
 
 
+def _baseline_skipped(agent: Mapping[str, Any]) -> bool:
+    conditions = agent.get("conditions")
+    baseline = conditions.get("without_skill") if isinstance(conditions, Mapping) else None
+    return (
+        isinstance(baseline, Mapping)
+        and baseline.get("execution_status") == "skipped"
+        and baseline.get("expected_attempts") == 0
+    )
+
+
 def _contract_mismatch(agent: Mapping[str, Any]) -> bool:
+    if _baseline_skipped(agent):
+        return False
     with_metrics, without_metrics = agent.get("metrics_with_skill"), agent.get("metrics_without_skill")
     if (
         isinstance(with_metrics, list | tuple)
@@ -117,12 +129,14 @@ def _execution_unavailable(agent: Mapping[str, Any]) -> bool:
         isinstance(condition := conditions.get(key), Mapping)
         and condition.get("execution_status") not in {None, "succeeded", "complete"}
         for key, _ in _VARIANTS
+        if not (key == "without_skill" and _baseline_skipped(agent))
     )
 
 
 def _comparable(agent: Mapping[str, Any]) -> bool:
     return not (
-        _never_activated(agent)
+        _baseline_skipped(agent)
+        or _never_activated(agent)
         or _details_truncated(agent)
         or _contract_mismatch(agent)
         or _case_mismatch(agent)
@@ -276,6 +290,7 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     deltas: dict[str, float] = {}
     not_run: dict[str, int] = {}
     unavailable: list[str] = []
+    no_baseline: list[str] = []
     for name, agent in agents.items():
         if not isinstance(agent, Mapping):
             continue
@@ -299,6 +314,9 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
             # Rates over different subsets of attempts are not comparable.
             not_run[str(name)] = missing
             continue
+        if _baseline_skipped(agent):
+            no_baseline.append(f"{name}: no baseline was run; lift not measured")
+            continue
         rates = _agent_rates(agent)
         with_pct, without_pct = _pct(*rates["with_skill"]), _pct(*rates["without_skill"])
         if with_pct is not None and without_pct is not None:
@@ -307,9 +325,12 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
         [f"{name} {delta:+.0f} pp" for name, delta in deltas.items()]
         + [f"{name}: {n} attempt(s) did not run" for name, n in not_run.items()]
         + unavailable
+        + no_baseline
     )
     if not deltas:
-        return ("inconclusive", detail) if not_run or unavailable else ("", "")
+        if not_run or unavailable:
+            return "inconclusive", detail
+        return ("lift not measured", detail) if no_baseline else ("", "")
     if all(delta >= _CLEAR_EFFECT_PP for delta in deltas.values()):
         label = "skill helps"
     elif all(delta <= -_CLEAR_EFFECT_PP for delta in deltas.values()):
@@ -487,8 +508,8 @@ def _condition_grid(
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
         effect = (
-            Text("-", style="dim")
-            if with_skill_skipped
+            Text("lift not measured" if _baseline_skipped(agent) else "-", style="dim")
+            if with_skill_skipped or _baseline_skipped(agent)
             else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case))
         )
         effect = _effect_diagnostics(effect, with_case, without_case, safe)
@@ -540,6 +561,7 @@ def _agent_cell(
     without_case: Mapping[str, Any] | None,
     *,
     comparable: bool = True,
+    baseline_skipped: bool = False,
     safe: Callable[[object], str],
 ) -> Text:
     with_marks, without_marks = _marks(with_case), _marks(without_case)
@@ -547,7 +569,9 @@ def _agent_cell(
     cell.append(" → ", style="dim")
     cell.append_text(_marks_text(with_marks))
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
-    if not comparable or not wn or not on or ERROR in with_marks + without_marks:
+    if baseline_skipped and wn and ERROR not in with_marks:
+        cell.append("  no baseline", style="dim")
+    elif not comparable or not wn or not on or ERROR in with_marks + without_marks:
         cell.append("  ?", style="yellow")
     else:
         delta = 100.0 * (wp / wn - op / on)
@@ -585,6 +609,7 @@ def _agent_grid(
                         a, _cases(a, "with_skill").get(case_id), _cases(a, "without_skill").get(case_id)
                     ),
                     safe=safe,
+                    baseline_skipped=_baseline_skipped(a) and not _execution_unavailable(a),
                 )
                 for a in agents.values()
             ),
@@ -594,7 +619,7 @@ def _agent_grid(
     for a in agents.values():
         r = _agent_rates(a)
         cell = _arrow_cell(_pct(*r["with_skill"]), _pct(*r["without_skill"]), "{:.0f}%", "{:+.0f} pp")
-        complete = _comparable(a)
+        complete = _comparable(a) or (_baseline_skipped(a) and not _execution_unavailable(a))
         rates.append(cell if complete else Text(cell.plain.split("  ")[0]).append("  ?", style="yellow"))
     table.add_row(
         Text(

@@ -1489,7 +1489,14 @@ def test_policy_endpoint_probe_environment_excludes_credentials(monkeypatch) -> 
 
 
 @pytest.mark.parametrize("proxy_name", ["http_proxy", "HTTP_PROXY"])
-def test_policy_endpoint_probe_honors_anonymous_http_proxy(monkeypatch, proxy_name) -> None:
+@pytest.mark.parametrize("scheme", ["http://", ""])
+@pytest.mark.parametrize(
+    "endpoint_scheme, status",
+    [("http", 405), ("http", 407), ("http", 502), ("http", 504), ("https", 407), ("https", 502), ("https", 504)],
+)
+def test_policy_endpoint_probe_honors_anonymous_http_proxy(
+    monkeypatch, proxy_name, scheme, endpoint_scheme, status
+) -> None:
     import http.server
     import threading
 
@@ -1500,22 +1507,33 @@ def test_policy_endpoint_probe_honors_anonymous_http_proxy(monkeypatch, proxy_na
     class Handler(http.server.BaseHTTPRequestHandler):
         def do_HEAD(self):
             requests.append((self.path, tuple(self.headers)))
-            self.send_response(405)
+            self.send_response(status)
             self.end_headers()
 
         def log_message(self, *_args):
             pass
 
-    for name in ("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY"):
+        def do_CONNECT(self):
+            self.do_HEAD()
+
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
         monkeypatch.delenv(name, raising=False)
     server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
     thread = threading.Thread(target=server.serve_forever)
     thread.start()
-    monkeypatch.setenv(proxy_name, f"http://user:password@127.0.0.1:{server.server_port}")
+    proxy_name = proxy_name.replace("http", endpoint_scheme).replace("HTTP", endpoint_scheme.upper())
+    monkeypatch.setenv(proxy_name, f"{scheme}user:password@127.0.0.1:{server.server_port}")
     try:
-        assert _nemo_gym_policy_endpoint_error("http://policy.invalid/v1") is None
-        assert len(requests) == 1 and requests[0][0] == "http://policy.invalid/v1"
+        error = _nemo_gym_policy_endpoint_error(f"{endpoint_scheme}://policy.invalid/v1")
+        expected_path = "http://policy.invalid/v1" if endpoint_scheme == "http" else "policy.invalid:443"
+        assert len(requests) == 1 and requests[0][0] == expected_path
         assert not {name.lower() for name in requests[0][1]} & {"authorization", "proxy-authorization", "x-api-key"}
+        if status != 405:
+            assert error and "proxy" in error
+            if status == 407:
+                assert "authentication" in error
+            return
+        assert error is None
         monkeypatch.setenv(proxy_name, "http://127.0.0.1:9")
         monkeypatch.setenv("NO_PROXY", "127.0.0.1")
         assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None

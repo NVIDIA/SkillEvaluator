@@ -1087,8 +1087,8 @@ _POLICY_ENDPOINT_PROBE_TIMEOUT_S = 3.0
 _POLICY_ENDPOINT_PROBE = """
 import sys
 from urllib.parse import urlsplit, urlunsplit
-from urllib.error import HTTPError
-from urllib.request import HTTPRedirectHandler, Request, build_opener
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, getproxies_environment, proxy_bypass
 
 class NoRedirect(HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
@@ -1098,12 +1098,20 @@ try:
     url = urlsplit(sys.stdin.read())
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
         sys.exit(1)
+    proxies = getproxies_environment()
+    using_proxy = bool(proxies.get(url.scheme)) and not proxy_bypass(url.netloc)
     try:
-        response = build_opener(NoRedirect()).open(
+        response = build_opener(ProxyHandler(proxies), NoRedirect()).open(
             Request(urlunsplit(url), method="HEAD"), timeout=2
         )
     except HTTPError as response:
         response.close()
+        if using_proxy and response.code in (407, 502, 504):
+            sys.exit(2 if response.code == 407 else 3)
+    except URLError as error:
+        if using_proxy:
+            sys.exit(2 if "Tunnel connection failed: 407" in str(error.reason) else 3)
+        sys.exit(1)
     else:
         response.close()
 except Exception:
@@ -1122,7 +1130,9 @@ def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
         if value := os.environ.get(name):
             if name.lower() != "no_proxy":
                 try:
-                    parsed = urlsplit(value)
+                    parsed = urlsplit(value if "://" in value else "//" + value, scheme="http")
+                    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                        continue
                     value = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
                 except ValueError:
                     continue
@@ -1141,13 +1151,19 @@ def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
         )
         if probe.returncode == 0:
             return None
+        if probe.returncode == 2:
+            detail = (
+                "policy endpoint proxy authentication is needed; this anonymous probe does not send proxy credentials"
+            )
+        elif probe.returncode == 3:
+            detail = "policy endpoint proxy could not reach the service; check HTTP_PROXY/HTTPS_PROXY/NO_PROXY and proxy access"
     except subprocess.TimeoutExpired:
         detail = f"policy endpoint probe timed out after {_POLICY_ENDPOINT_PROBE_TIMEOUT_S:g}s"
     except OSError:
         detail = "could not start the policy endpoint probe"
     return (
         f"NeMo Gym {detail}; check {MODEL_URL_ENV} or the selected provider's base URL, "
-        "start the inference service, and check network access. Any HTTP response is sufficient; "
+        "start the inference service, and check network access. A policy endpoint HTTP response is sufficient; "
         "this check does not validate credentials or model compatibility."
     )
 

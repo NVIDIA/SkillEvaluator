@@ -249,6 +249,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym doctor isolates its anonymous endpoint probe, honors proxy settings
+  without forwarding credentials, and reports proxy authentication and gateway failures.
 - Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
   unauthenticated HTTP probe and actionable connection-failure guidance.
 - NeMo Gym results reject verifier rewards that identify a different staged

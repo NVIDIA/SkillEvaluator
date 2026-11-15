@@ -193,12 +193,16 @@ def test_failed_native_skill_call_is_not_activation(grader) -> None:
     ],
 )
 @pytest.mark.parametrize("name", ["Skill", "skill"])
-def test_failed_skill_lookup_without_error_metadata_is_not_activation(grader, content, name) -> None:
+@pytest.mark.parametrize("error_metadata", [None, False])
+def test_failed_skill_lookup_is_not_activation(grader, content, name, error_metadata) -> None:
     extractor, scorer = grader
     trajectory = _claude_tool_result(name=name, arguments={"name": "demo-skill"}, is_error=False, content=content)
     for step in trajectory["steps"]:
         for result in (step.get("observation") or {}).get("results", []):
-            result.pop("extra", None)
+            if error_metadata is None:
+                result.pop("extra", None)
+            else:
+                result["extra"] = {"tool_result_is_error": error_metadata}
     calls = extractor.extract_tool_calls_as_dicts(trajectory)
     names = extractor.get_skill_tool_calls(trajectory)
     assert names == []

@@ -120,7 +120,7 @@ def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, A
             return True
         if extra.get("tool_result_is_error") is False:
             flag = False
-    if flag is None and str(tool_call.get("function_name", "")).lower() == "skill":
+    if str(tool_call.get("function_name", "")).lower() == "skill":
         observation = normalized_tool_call_observation(step, tool_call).strip()
         if re.match(
             r"^(?:error:\s*)?(?:skill\s+(?:(?:[\"'`][^\"'`\n]+[\"'`]|[\w./-]+)\s+)?"

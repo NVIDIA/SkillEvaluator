@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
@@ -249,13 +252,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 reports now use final run-budget accounting, including when rebuilding
-  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
-  reports show budget exhaustion, not-run attempts, overruns, and unverified
-  usage. Budget-stopped runs have an incomplete summary verdict; admitted
-  scores remain visible and their lift is not a complete-run skill-effect claim.
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
+- Success-detail metadata keeps the terminal's default text color. Values such
+  as `grade=B` stay visible in the default blue Windows PowerShell console.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
@@ -428,6 +430,11 @@ All notable changes to SkillEvaluator are documented in this file.
   After observed symlink creation, only an unadorned direct leaf can qualify;
   unknown command directories cannot qualify. Literal quoting is inert
   because expansions and escapes are rejected before operands are parsed.
+- Tier 3 reports now use final run-budget accounting, including when rebuilding
+  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
+  reports show budget exhaustion, not-run attempts, overruns, and unverified
+  usage. Budget-stopped runs have an incomplete summary verdict; admitted
+  scores remain visible and their lift is not a complete-run skill-effect claim.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized

@@ -724,6 +724,18 @@ Claude configuration directory. The baseline uses the same discovery settings
 without the target skill. Gym's required Anthropic credential field receives only
 a placeholder; policy credentials remain in the model-server environment.
 
+Install the pinned Gym in its own Python 3.13.14+ environment, separate from
+SkillEvaluator's, and check that its `gym eval run --help` lists `TARGET` and `--sandbox`:
+
+```bash
+uv venv --python ">=3.13.14,<3.14" /opt/nemo-gym/.venv
+uv pip install --python /opt/nemo-gym/.venv/bin/python \
+  "nemo-gym @ git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
+/opt/nemo-gym/.venv/bin/gym eval run --help
+```
+
+Then point SkillEvaluator at it and run:
+
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym

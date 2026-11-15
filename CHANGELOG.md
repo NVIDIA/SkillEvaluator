@@ -285,6 +285,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir

@@ -3597,6 +3597,11 @@ _FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
     + _FINDING_EVIDENCE_ARGV_QUOTE
     + r"[ \t]*,"
 )
+# A login or MySQL client element starting at a position (see
+# _attached_argv_password_spans).
+_FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE = re.compile(
+    "(?=(" + _FINDING_EVIDENCE_ARGV_LOGIN_RE.pattern + "|" + _FINDING_EVIDENCE_ARGV_MYSQL_RE.pattern + "))"
+)
 _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(
     r"(?<!\\)((?:\\\\){0,3}" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
 )
@@ -3975,25 +3980,15 @@ def _hidden_credential_spans(
         ]
     )
     hidden: list[tuple[int, int]] = []
+    # The indexes in *hidden* of spans inside one before them (see below).
+    inside: set[int] = set()
     starts_read: set[int] = set()
 
     def take_credentials(start: int, end: int) -> None:
         # A credential is hidden also when the masked text ends right before it.
         for index in command_parts:
             hidden.extend(index.take(start, end + 1))
-        # So it is when it starts where the masked text does, inside the
-        # password of another credential of its rule, which the search above
-        # does not find ("--use_token aws configure set aws_secret_access_key
-        # aws configure set aws_secret_access_key VALUE").
-        if start not in starts_read:
-            starts_read.add(start)
-            for pattern in found:
-                match = pattern.match(text, start)
-                if match is not None and (
-                    pattern is not _FINDING_EVIDENCE_CONFIG_SET_RE
-                    or _mask_config_set_value(match, values) != match.group()
-                ):
-                    hidden.append((match.end(1), match.end()))
+        take_credentials_at(start)
         # Other rules still read a password whose start is left when the
         # masked text lies inside it. The -u rule also needs a colon left in
         # it. The .netrc rule reads a password of several words up to the
@@ -4005,16 +4000,41 @@ def _hidden_credential_spans(
                 hidden.append((match.end(1), match.end()))
         hidden.extend((max(start, match.end(1)), match.end()) for match in netrc_passwords.take(start, end))
 
+    def take_credentials_at(start: int) -> None:
+        # A credential is hidden also when it starts where the masked text
+        # does, inside the password of another credential of its rule, which
+        # the search above does not find ("--use_token aws configure set
+        # aws_secret_access_key aws configure set aws_secret_access_key VALUE").
+        if start not in starts_read:
+            starts_read.add(start)
+            for pattern in found:
+                match = pattern.match(text, start)
+                if match is not None and (
+                    pattern is not _FINDING_EVIDENCE_CONFIG_SET_RE
+                    or _mask_config_set_value(match, values) != match.group()
+                ):
+                    hidden.append((match.end(1), match.end()))
+
     for start, end in value_spans:
         take_credentials(start, end)
     index = 0
     while index < len(hidden):
         start, end = hidden[index]
         index += 1
+        if index - 1 in inside:
+            # A span inside one before it would take nothing that one has not.
+            take_credentials_at(start)
+            continue
         take_credentials(start, end)
+        reach = end
         for name in names.take(start, end):
             value_end = values.value_end(name)
             if value_end is not None and value_end > end:
+                # Names come in order, so a value that ends no further than
+                # one before it here lies inside that one's span.
+                if value_end <= reach:
+                    inside.add(len(hidden))
+                reach = max(reach, value_end)
                 hidden.append((max(start, name.start()), value_end))
     # A .netrc password word stops before "\n", also between the two
     # backslashes of an escaped one ("login bob password VALUE\\n..."). Masked
@@ -4142,14 +4162,26 @@ def _argv_credential_spans(text: str) -> list[tuple[int, int]]:
 
 
 def _attached_argv_password_spans(text: str) -> list[tuple[int, int]]:
-    """Return where the value of each attached "-pVALUE" element after a login or MySQL client element is."""
+    """Return where the value of each attached "-pVALUE" element after a login or MySQL client element is.
+
+    The login or MySQL client element must lie in the 256 characters before
+    the "-pVALUE" element. The elements are read once, at every position, so
+    one that starts inside another (\\"login\\" at its backslash and at its
+    quote) is found as a search of those 256 characters finds it.
+    """
+    passwords = list(_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text))
+    if not passwords:
+        return []
+    elements = [(found.start(), found.end(1)) for found in _FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE.finditer(text)]
+    starts = [start for start, _ in elements]
+    # For each element, the first end among it and the elements after it.
+    first_ends = [end for _, end in elements]
+    for index in range(len(first_ends) - 2, -1, -1):
+        first_ends[index] = min(first_ends[index], first_ends[index + 1])
     spans: list[tuple[int, int]] = []
-    for match in _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text):
-        window = max(0, match.start() - 256)
-        if (
-            _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, window, match.start()) is not None
-            or _FINDING_EVIDENCE_ARGV_MYSQL_RE.search(text, window, match.start()) is not None
-        ):
+    for match in passwords:
+        index = bisect.bisect_left(starts, match.start() - 256)
+        if index < len(starts) and first_ends[index] <= match.start():
             spans.append((match.start(2), match.end(2)))
     return spans
 

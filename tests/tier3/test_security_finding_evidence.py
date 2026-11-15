@@ -1896,7 +1896,14 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
         ),
         pytest.param("--api_key " + "token=x," * 5000, id="names-in-one-long-flag-value"),
         pytest.param('["w", "--use_token", "mysql", "-pX", ' * 1000 + "]", id="value-less-flags-in-an-argv-list"),
-        pytest.param('--api_key "a --db_password "x ' * 3000, id="flags-inside-flag-values"),
+        pytest.param(
+            '["w", "--use_token", "mysql", ' + '"-pX", ' * 6000 + "]", id="attached-passwords-after-a-command"
+        ),
+        pytest.param(
+            "--use_token login bob password " + "token=" * 6000 + "\\nX" + "\\\\" * 6000 + " ",
+            id="names-in-a-hidden-password",
+        ),
+        pytest.param('--api_key "a --db_password "x ' * 1300, id="flags-inside-flag-values"),
         pytest.param(
             '{"c": "' + "./wrap --api_key K1\\\\nlogin bob password Z " * 1000 + '"}',
             id="escaped-backslashes-before-line-breaks",

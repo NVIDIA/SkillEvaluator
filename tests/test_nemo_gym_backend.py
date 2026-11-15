@@ -462,6 +462,59 @@ def test_stage_for_gym_drops_only_the_skills_dir_hook(tmp_path: Path) -> None:
     assert "cpus = 2" in text and 'A = "1"' in text
 
 
+@pytest.mark.parametrize("workdir", [None, "/work/custom/", "/work with spaces"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_opencode_project_skills_are_staged_in_both_arms(tmp_path: Path, workdir, with_skill: bool) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("---\nname: calculator\n---\n")
+    (task / "task.toml").write_text("[environment]\n" + (f"workdir = {json.dumps(workdir)}\n" if workdir else ""))
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent="opencode")
+    staged = dockerfile.read_text()
+    target = (workdir or "/workspace").rstrip("/") + "/.agents/skills/"
+    assert "COPY " + json.dumps(["skills/", target]) in staged.splitlines()
+    stage_for_gym(tmp_path, agent="opencode")
+    assert dockerfile.read_text() == staged
+    assert (skills / "calculator" / "SKILL.md").is_file() is with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "claude-code", "opencode"])
+def test_project_skill_projection_leaves_tasks_without_skills_unchanged(tmp_path: Path, agent) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == "FROM python:3.13-slim\n"
+
+
+@pytest.mark.parametrize("agent, directory", [("opencode", ".agents"), ("claude-code", ".claude")])
+def test_project_skill_projection_follows_final_authored_reset(tmp_path: Path, agent, directory) -> None:
+    from skillevaluator.tier3.harbor.adapter import _append_task_input_projection
+
+    task = tmp_path / "case"
+    environment = task / "environment"
+    (environment / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    projection = "COPY " + json.dumps(["skills/", f"/workspace/{directory}/skills/"])
+    authored = f"FROM python:3.13-slim\n{projection}\nRUN rm -rf /workspace/{directory}\n"
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text(_append_task_input_projection(authored, include_input=False, agent_config_lines=[]))
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text().splitlines()[-1] == projection
+    staged = dockerfile.read_text()
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == staged
+
+
 @pytest.mark.parametrize("workdir", [None, "/work", "/"])
 @pytest.mark.parametrize("with_skill", [True, False])
 def test_stage_for_gym_projects_claude_skills_into_task_workdir(
@@ -488,14 +541,18 @@ def test_stage_for_gym_projects_claude_skills_into_task_workdir(
 
 
 @pytest.mark.parametrize("agent", [None, "codex", "opencode"])
-def test_stage_for_gym_leaves_other_agent_images_unchanged(tmp_path: Path, agent: str | None) -> None:
+def test_stage_for_gym_projects_only_supported_agent_images(tmp_path: Path, agent: str | None) -> None:
     task = tmp_path / "case"
     (task / "environment" / "skills").mkdir(parents=True)
     (task / "task.toml").write_text("[environment]\n")
     dockerfile = task / "environment" / "Dockerfile"
     dockerfile.write_text("FROM python:3.12-slim\n")
     stage_for_gym(tmp_path, agent=agent)
-    assert dockerfile.read_text() == "FROM python:3.12-slim\n"
+    if agent == "opencode":
+        projection = "COPY " + json.dumps(["skills/", "/workspace/.agents/skills/"])
+        assert dockerfile.read_text().splitlines()[-1] == projection
+    else:
+        assert dockerfile.read_text() == "FROM python:3.12-slim\n"
 
 
 def test_stage_for_gym_claude_without_docker_skills(tmp_path: Path) -> None:

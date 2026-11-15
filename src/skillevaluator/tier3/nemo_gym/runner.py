@@ -76,8 +76,8 @@ def stage_for_gym(
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
-    already carries the skills at each agent's native location. Claude also gets project
-    skills because Gym uses a private ``CLAUDE_CONFIG_DIR``. The baseline image still has
+    already carries the skills at each agent's native location. Claude and OpenCode also get
+    project skills because Gym isolates their user configuration directories. The baseline has
     no target skill. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
@@ -90,13 +90,14 @@ def stage_for_gym(
         environment = tomllib.loads(text).get("environment") or {}
         if environment.get("mcp_servers"):
             raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
-        if agent == "claude-code":
+        project_directory = {"opencode": ".agents", "claude-code": ".claude"}.get(agent or "")
+        if project_directory:
             dockerfile = task_toml.parent / "environment" / "Dockerfile"
             if dockerfile.is_file() and (dockerfile.parent / "skills").is_dir():
                 workdir = environment.get("workdir") or "/workspace"
-                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/.claude/skills/"])
+                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/{project_directory}/skills/"])
                 docker_text = dockerfile.read_text(encoding="utf-8")
-                if projection not in docker_text.splitlines():
+                if not docker_text.rstrip().endswith("\n" + projection):
                     dockerfile.write_text(docker_text.rstrip("\n") + "\n" + projection + "\n", encoding="utf-8")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})

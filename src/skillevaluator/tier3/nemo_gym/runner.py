@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import tomllib
 from datetime import UTC, datetime
@@ -459,6 +460,33 @@ def _signals_raise_keyboard_interrupt() -> Any:
             signal.signal(getattr(signal, name), handler)
 
 
+@contextlib.contextmanager
+def _defer_termination_signals() -> Any:
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    pending = False
+
+    def _handler(_signum: int, _frame: object) -> None:
+        nonlocal pending
+        pending = True
+
+    previous = {
+        getattr(signal, name): signal.signal(getattr(signal, name), _handler)
+        for name in ("SIGTERM", "SIGHUP")
+        if hasattr(signal, name)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if pending:
+            raise KeyboardInterrupt
+
+
 def _gym_run_processes(token: str, leader_group: int) -> list[int]:
     try:
         snapshot = subprocess.run(
@@ -485,8 +513,11 @@ def _gym_run_processes(token: str, leader_group: int) -> list[int]:
 def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool = False) -> None:
     from skillevaluator.tier3.harbor.runner import _HARBOR_RUN_CANCEL_POLL_SECONDS, _HARBOR_RUN_REAP_SECONDS
 
+    seen: set[int] = set()
+
     def signal_owned(sig: int) -> list[int]:
         owned = _gym_run_processes(token, leader_group)
+        seen.update(owned)
         for pid in owned:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, sig)
@@ -511,6 +542,20 @@ def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool =
     except KeyboardInterrupt:
         signal_owned(signal.SIGKILL)
         raise
+    finally:
+        deadline = time.monotonic() + _HARBOR_RUN_REAP_SECONDS
+        while seen:
+            for pid in tuple(seen):
+                try:
+                    reaped, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    seen.remove(pid)
+                else:
+                    if reaped:
+                        seen.remove(pid)
+            if not seen or time.monotonic() >= deadline:
+                break
+            time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
 
 
 def _run_gym(
@@ -660,8 +705,18 @@ def _run_gym(
                     raise interrupt from stop_error
                 raise
     finally:
+        pending_interrupt = sys.exception()
         try:
-            _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+            with _defer_termination_signals():
+                try:
+                    _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+                except GymCleanupError as cleanup_error:
+                    if reporter is not None:
+                        with contextlib.suppress(Exception):
+                            reporter.emit(ProgressEvent(stage="cleanup", state="failed", detail=str(cleanup_error)))
+                    if isinstance(pending_interrupt, KeyboardInterrupt):
+                        raise pending_interrupt from cleanup_error
+                    raise
         finally:
             reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 

@@ -252,6 +252,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym detached cleanup defers termination signals until teardown finishes,
+  preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir

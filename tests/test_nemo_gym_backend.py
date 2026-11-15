@@ -2741,6 +2741,113 @@ def test_nemo_gym_rejects_unsupported_run_options(
     assert f"{flag} is not supported with --backend nemo-gym yet" in errors
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP"])
+def test_detached_cleanup_defers_termination_until_finished(tmp_path: Path, signal_name) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    marker = tmp_path / "finished"
+    script = (
+        "import os, signal, sys\n"
+        "from pathlib import Path\n"
+        "from skillevaluator.tier3.nemo_gym import runner\n"
+        "def cleanup(*args, **kwargs):\n"
+        f"    os.kill(os.getpid(), signal.{signal_name})\n"
+        f"    Path({str(marker)!r}).touch()\n"
+        "runner._stop_detached_gym_processes = cleanup\n"
+        f"with open({str(tmp_path / 'gym.log')!r}, 'w') as log:\n"
+        f"    runner._run_gym([sys.executable, '-c', 'pass'], cwd=Path({str(tmp_path)!r}), "
+        "env=dict(os.environ), log=log, timeout_s=5)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(Path(runner.__file__).parents[3])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert marker.exists(), f"cleanup interrupted: returncode={result.returncode}"
+    assert "KeyboardInterrupt" in result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_detached_inspection_failure_preserves_cancellation(tmp_path: Path, monkeypatch, interrupted) -> None:
+    import signal
+    import threading
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise runner.GymCleanupError("Cannot inspect detached processes")
+
+    monkeypatch.setattr(runner, "_stop_detached_gym_processes", fail_cleanup)
+    reporter = _RecordingReporter()
+    timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)) if interrupted else None
+    if timer:
+        timer.start()
+    try:
+        with (
+            (tmp_path / "gym.log").open("w") as log,
+            pytest.raises(KeyboardInterrupt if interrupted else runner.GymCleanupError) as error,
+        ):
+            runner._run_gym(
+                [sys.executable, "-c", "import time; time.sleep(60)" if interrupted else "pass"],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=5,
+                reporter=reporter,
+            )
+    finally:
+        if timer:
+            timer.cancel()
+            timer.join()
+    if interrupted:
+        assert isinstance(error.value.__cause__, runner.GymCleanupError)
+        assert any(event.stage == "cleanup" and event.state == "failed" for event in reporter.events)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs Linux PR_SET_CHILD_SUBREAPER")
+def test_detached_cleanup_reaps_adopted_servers(tmp_path: Path) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    child = "import time; time.sleep(60)"
+    leader = (
+        "import os, subprocess, sys\n"
+        f"server = subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        "print(server.pid, flush=True)\n"
+    )
+    script = (
+        "import ctypes, os, subprocess, sys\n"
+        "from skillevaluator.tier3.nemo_gym.runner import _stop_detached_gym_processes\n"
+        "assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0\n"
+        f"leader = subprocess.Popen([sys.executable, '-c', {leader!r}], stdout=subprocess.PIPE, text=True,\n"
+        "    env={**os.environ, 'SKILL_EVAL_NEMO_GYM_RUN_TOKEN': 'reap-test-token'})\n"
+        "pid = int(leader.stdout.readline())\n"
+        "leader.wait(timeout=5)\n"
+        "_stop_detached_gym_processes('reap-test-token', leader.pid, force=True)\n"
+        "try:\n"
+        "    reaped, _ = os.waitpid(pid, os.WNOHANG)\n"
+        "except ChildProcessError:\n"
+        "    pass\n"
+        "else:\n"
+        "    assert False, f'adopted server was not reaped: {reaped}'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(Path(runner.__file__).parents[3])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
+
+
 def test_nemo_gym_rejects_budget_config(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
 

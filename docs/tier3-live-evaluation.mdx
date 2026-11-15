@@ -1939,7 +1939,9 @@ saved judge evidence use the same credential masker:
   an attached `-p...` element after a `mysql` or `login` element such a flag
   takes in an argv list. So is a `docker login` or `mysql` password after a
   flag value that holds a `-p` or `;`
-  (`--use-token docker login --token "x -p y" -p ...`). A `docker login`,
+  (`--use-token docker login --token "x -p y" -p ...`), and the value after
+  a config set key and ` = `
+  (`--use-token npm config set _auth = token="..."`). A `docker login`,
   `.netrc`, or `/usr/bin/mysql`
   password after a `\n` inside a flag value or right after the value is
   masked too, and so is a `docker login` password after a `\n` right after an

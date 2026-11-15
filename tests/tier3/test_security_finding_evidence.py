@@ -1683,6 +1683,24 @@ def test_other_token_flags_are_masked_in_either_spelling() -> None:
             id="before-npm-registry-key",
         ),
         pytest.param(
+            f'./wrap --use_token npm config set _auth = token="{_API_TOKEN}"',
+            "--use_token",
+            "--use-token",
+            id="before-npm-config-key-and-separator",
+        ),
+        pytest.param(
+            f'./wrap --skip_token_check npm config set _authToken = token = "{_API_TOKEN}"',
+            "--skip_token_check",
+            "--skip-token-check",
+            id="before-npm-config-key-and-separator-with-a-scheme-word",
+        ),
+        pytest.param(
+            f"./wrap -api_key pnpm config set //registry.npmjs.org/:_authToken = token='{_API_TOKEN}'",
+            "-api_key",
+            "-api-key",
+            id="before-pnpm-registry-key-and-separator",
+        ),
+        pytest.param(
             f"--api_key git config --global secret {_API_TOKEN}", "--api_key", "--api-key", id="before-git-config"
         ),
     ],
@@ -1737,6 +1755,39 @@ def test_a_p_inside_a_flag_value_does_not_hide_the_password_after_a_masked_comma
     # and none past a ";". One inside an earlier flag value is gone once that
     # value is masked, so the password after it is masked when a flag that
     # takes no value masks the command word too, also in JSON text and in
+    # judge evidence.
+    text = command.replace("FLAG", flag)
+    masked = expected.replace("FLAG", flag)
+    for evidence_text, evidence_masked in (
+        (text, masked),
+        (json.dumps({"command": text}), json.dumps({"command": masked})),
+    ):
+        assert eval_core_checks._redact_finding_evidence(evidence_text) == evidence_masked
+        assert eval_template._redact_judge_evidence(evidence_text) == evidence_masked
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            f'./wrap FLAG git config github.token = token="{_API_TOKEN}"',
+            "./wrap FLAG <redacted> config github.token = <redacted>",
+            id="git-config",
+        ),
+        pytest.param(
+            f'./wrap FLAG npm set _auth := token="{_API_TOKEN}"',
+            "./wrap FLAG <redacted> set _auth := <redacted>",
+            id="npm-set",
+        ),
+    ],
+)
+def test_a_config_key_and_separator_keep_their_value_masked_after_a_masked_command_word(
+    flag: str, command: str, expected: str
+) -> None:
+    # A config set key followed by a separator word leaves its value to the
+    # assignment rule, which reads it as it does after the command word when
+    # a flag that takes no value masks that word, also in JSON text and in
     # judge evidence.
     text = command.replace("FLAG", flag)
     masked = expected.replace("FLAG", flag)

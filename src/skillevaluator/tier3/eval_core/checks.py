@@ -3505,11 +3505,14 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # before this rule read those NAMEs, and the unquoted value of such a NAME
 # ends at ";", "|" or "&", as a "_" flag's does, so a "NAME=VALUE" right after
 # it is still masked ('npm config set -- password K1;TOKEN="..."').
-_FINDING_EVIDENCE_CONFIG_SET_NAME = (
-    r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
+_FINDING_EVIDENCE_CONFIG_SET_COMMAND = (
+    r"\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
+)
+_FINDING_EVIDENCE_CONFIG_SET_KEY = (
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
     r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-)(?(2)(?![=:]))(?(3)(?![=:])))"
 )
+_FINDING_EVIDENCE_CONFIG_SET_NAME = "(" + _FINDING_EVIDENCE_CONFIG_SET_COMMAND + _FINDING_EVIDENCE_CONFIG_SET_KEY
 _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR = r"(?::=|=>|[=:])(?!\S)"
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
     _FINDING_EVIDENCE_CONFIG_SET_NAME
@@ -3529,9 +3532,16 @@ _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
 # after the separator, so the assignment rule reads each name inside the value
 # of NAME again, and reads names from that word, also when an auth scheme word
 # starts there ("npm config set _auth = token=\"...\"", "npm config set
-# _authToken = token = \"...\""; see _mask_credential_assignments).
+# _authToken = token = \"...\""; see _mask_credential_assignments). The
+# command word may be a marker, as the flag rule leaves it after a flag that
+# takes no value ("--use_token npm config set _auth = token=\"...\""), so the
+# assignment rule reads that form as it does after the command word.
 _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE = re.compile(
-    _FINDING_EVIDENCE_CONFIG_SET_NAME + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
+    "((?:"
+    + _FINDING_EVIDENCE_CONFIG_SET_COMMAND
+    + r"|<redacted>[ \t]+(?:config[ \t]+set|set|config))"
+    + _FINDING_EVIDENCE_CONFIG_SET_KEY
+    + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(

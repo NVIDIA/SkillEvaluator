@@ -194,7 +194,7 @@ def test_validate_terminal_shows_coverage():
 def test_html_and_both_benchmark_cards_show_all_checks(reporter):
     output = reporter.render(_validation(_payload()))
     visible = (
-        re.sub(r"<script\b[^>]*>.*?</script>", "", output, flags=re.DOTALL)
+        re.sub(r"<script\b[^>]*>.*?</script>", "", output, flags=re.DOTALL | re.IGNORECASE)
         if isinstance(reporter, HTMLReporter)
         else output
     )

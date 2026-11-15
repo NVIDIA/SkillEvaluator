@@ -1024,6 +1024,12 @@ also identifies estimate-based exhaustion. The budget summary shows measured
 usage and the estimated next unit, rather than implying usage reached the cap.
 Attempt-count limits and stopping on unknown bounded usage are unchanged.
 
+If every attempt for an agent arm is denied by the budget, no Harbor job is
+created for that arm. It is reported as skipped with `skip_reason:
+budget_exhausted`, zero expected and scored attempts, and no execution error.
+The run remains incomplete because the budget left planned attempts not run.
+An empty Harbor job that was expected to execute attempts still fails validation.
+
 Reservation reduces but does not eliminate in-flight overshoot. Estimates can
 grow, an attempt can exceed its estimate, and the calibration unit is
 unestimated. A run can also stop below its cap because of an estimate. Caps

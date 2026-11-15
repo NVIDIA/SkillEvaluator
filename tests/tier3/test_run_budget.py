@@ -11,6 +11,7 @@ from skillevaluator.tier3.harbor.run_budget import (
     BudgetController,
     Price,
     PriceBook,
+    budget_incomplete_reason,
     budget_line,
     planned_attempts,
 )
@@ -322,7 +323,8 @@ def test_budget_admits_both_arms_as_one_case_attempt(monkeypatch, tmp_path):
     assert budget.metadata()["attempts_not_run"] == 2
 
 
-def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
+@pytest.mark.parametrize("denial_mode", ["partial", "agent", "baseline"])
+def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path, denial_mode):
     import shutil
     from datetime import UTC, datetime
     from uuid import UUID
@@ -330,8 +332,14 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
     from harbor.models.job.result import JobResult, JobStats
     from harbor.models.trial.result import TrialResult
 
+    from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting import HTMLReporter
+    from skillevaluator.reporting.benchmark import BenchmarkReporter
     from skillevaluator.tier3.harbor.collector import _extract_rewards, collect_harbor_results
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
+    from skillevaluator.tier3.harbor.report_data import load_agent_data
+    from skillevaluator.tier3.result_display import render_evaluation_result
 
     jobs_dir = tmp_path / "jobs"
     starts = []
@@ -419,11 +427,18 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
 
     monkeypatch.setattr(runner, "_run_harbor", fake_harbor)
     monkeypatch.setattr(runner, "_merge_attempt_jobs", merge_attempts)
-    budget = BudgetController(max_agent_tokens=2500, planned=12)
+    budget = (
+        BudgetController(max_attempts_total=6, planned=12)
+        if denial_mode == "baseline"
+        else BudgetController(max_agent_tokens=2500, planned=24 if denial_mode == "agent" else 12)
+    )
+    jobs = [("with", tmp_path / "with", None)]
+    if denial_mode != "baseline":
+        jobs.append(("without", tmp_path / "without", None))
     errors = runner._run_budgeted_variants(
         skill_name="skill",
         agent="agent",
-        jobs=[("with", tmp_path / "with", None), ("without", tmp_path / "without", None)],
+        jobs=jobs,
         task_names=["case-1", "case-2", "case-3"],
         env_mode="docker",
         model="fixture-model",
@@ -440,14 +455,45 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
         n_concurrent=1,
     )
     assert not any(errors.values())
+    if denial_mode != "partial":
+        denied_agent = "denied" if denial_mode == "agent" else "agent"
+        denied_jobs = (
+            [("with", tmp_path / "with", None), ("without", tmp_path / "without", None)]
+            if denial_mode == "agent"
+            else [("without", tmp_path / "without", None)]
+        )
+        runner._run_budgeted_variants(
+            skill_name="skill",
+            agent=denied_agent,
+            jobs=denied_jobs,
+            task_names=["case-1", "case-2", "case-3"],
+            env_mode="docker",
+            model="fixture-model",
+            jobs_dir=jobs_dir,
+            run_env={},
+            n_attempts=2,
+            pass_threshold=0.5,
+            stop_on_pass=False,
+            timeout_multiplier=1,
+            override_cpus=None,
+            override_memory_mb=None,
+            override_storage_mb=None,
+            budget=budget,
+            n_concurrent=1,
+        )
+        for arm, _, _ in denied_jobs:
+            assert not (jobs_dir / f"skill-{denied_agent}-{arm}").exists()
+            stale_job = jobs_dir / f"skill-{denied_agent}-{arm}"
+            stale_job.mkdir(parents=True)
+            (stale_job / "result.json").write_text(json.dumps({"n_total_trials": 0, "stats": {}}))
     collected = _extract_rewards(
         jobs_dir / "skill-agent-with",
         {case_id: case_id for case_id in ("case-1", "case-2", "case-3")},
     )
-    assert len(collected) == 2, collected
+    assert len(collected) == (6 if denial_mode == "baseline" else 2), collected
     results = collect_harbor_results(
         "skill",
-        ["agent"],
+        ["agent", "denied"] if denial_mode == "agent" else ["agent"],
         tmp_path / "results",
         jobs_dir,
         n_attempts=2,
@@ -460,9 +506,45 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
     agent_result = results["agents"]["agent"]
     assert results["partial"] is True
     assert agent_result["execution_status"] == "succeeded", agent_result.get("execution_errors") or agent_result
-    assert agent_result["num_trials_with"] == 2
-    assert len(starts) == 4
-    assert all(row["basis"] == "estimate" for row in budget.not_run)
+    assert agent_result["num_trials_with"] == (6 if denial_mode == "baseline" else 2)
+    assert len(starts) == (6 if denial_mode == "baseline" else 4)
+    if denial_mode != "baseline":
+        assert all(row["basis"] == "estimate" for row in budget.not_run)
+    if denial_mode != "partial":
+        denied = results["agents"][denied_agent]
+        for arm, _, _ in denied_jobs:
+            condition = denied["conditions"][f"{arm}_skill"]
+            assert condition["execution_status"] == "skipped"
+            assert condition["skip_reason"] == "budget_exhausted"
+            assert condition["expected_attempts"] == condition["scored_attempts"] == 0
+            assert condition["execution_errors"] == []
+        assert denied["execution_status"] == ("skipped" if denial_mode == "agent" else "succeeded")
+        assert results["execution_errors"] == []
+        assert budget_incomplete_reason(budget.metadata())
+        assert f"{denied_agent} {denied_jobs[0][0]}-skill not run due to budget" in budget_line(
+            budget.metadata(), agents=results["agents"]
+        )
+        payload = build_agent_eval_payload(
+            "skill", load_agent_data(tmp_path / "results"), run_config={"budget": budget.metadata()}
+        )
+        assert payload["verdict"] == "incomplete"
+        validation = ValidationResult(validator_name="AGENT_EVAL", validator_description="Live evaluation")
+        validation.metadata["agent_eval"] = payload
+        html = HTMLReporter(include_timestamp=False).render_all([validation])
+        benchmark = BenchmarkReporter(report_scope="tier3").render_all([validation])
+        console = Console(record=True, width=300)
+        render_evaluation_result({**results, "budget": budget.metadata()}, console=console)
+        for report in (html, benchmark, console.export_text()):
+            assert f"{denied_agent} {denied_jobs[0][0]}-skill not run due to budget" in report
+            assert "Harbor completed with zero trials" not in report
+
+
+def test_zero_trial_job_with_expected_work_still_fails(tmp_path):
+    from skillevaluator.tier3.harbor.collector import validate_harbor_job_result
+
+    result = tmp_path / "result.json"
+    result.write_text(json.dumps({"n_total_trials": 0, "stats": {}}))
+    assert validate_harbor_job_result(result, expected_trials=1) == (False, "Harbor completed with zero trials")
 
 
 def test_fake_attempt_runner_stops_after_token_budget(monkeypatch, tmp_path):

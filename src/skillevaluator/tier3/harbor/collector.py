@@ -7519,7 +7519,11 @@ def collect_harbor_results(
         arm: str,
     ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
         matching = [
-            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+            item
+            for item in budget_not_run
+            if item.get("agent") == agent
+            and item.get("arm") in {arm, f"{arm}_skill"}
+            and item.get("reason") == "budget_exhausted"
         ]
         if not matching:
             return expected_trials, expected_case_ids, expected_cases, None
@@ -7583,6 +7587,8 @@ def collect_harbor_results(
         without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
             budget_expectations(agent, "without")
         )
+        with_budget_denied = bool(expected_trials and with_expected_trials == 0)
+        without_budget_denied = bool(expected_trials and without_expected_trials == 0)
         if skip_baseline:
             agent_expected_case_ids = with_expected_case_ids
         elif with_expected_case_ids is not None and without_expected_case_ids is not None:
@@ -7598,7 +7604,7 @@ def collect_harbor_results(
 
         with_job_name = f"{skill_name}-{agent}-with"
         # A skipped arm never adopts a stale job left in a reused jobs directory.
-        with_job_dir = None if skip_with_skill else _find_job_dir(jobs_dir, with_job_name)
+        with_job_dir = None if skip_with_skill or with_budget_denied else _find_job_dir(jobs_dir, with_job_name)
 
         with_collected_rewards: list[dict[str, Any]] = []
         with_rewards: list[dict[str, Any]] = []
@@ -7762,7 +7768,7 @@ def collect_harbor_results(
                 len(with_logical_rewards),
                 with_scores,
             )
-        elif not skip_with_skill:
+        elif not skip_with_skill and not with_budget_denied:
             with_job_failure = f"No Harbor job found for {with_job_name}"
             logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
             prefix = f"{agent} with-skill Harbor run failed: "
@@ -7780,10 +7786,12 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
-                skipped=skip_with_skill,
+                skipped=skip_with_skill or with_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
+        if with_budget_denied:
+            with_execution["skip_reason"] = "budget_exhausted"
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
         # A with-skill job that never started records the requested grading
@@ -7841,7 +7849,7 @@ def collect_harbor_results(
         without_job_dir: Path | None = None
         without_slots: dict[str, dict[str, Any]] = {}
         without_identity: dict[str, Any] = {}
-        if not skip_baseline:
+        if not skip_baseline and not without_budget_denied:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = (
                 reused_baseline_dir / agent / "without-skill"
@@ -8042,11 +8050,13 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 runtime_failures=without_runtime_failures,
-                skipped=skip_baseline,
+                skipped=skip_baseline or without_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=without_expected_attempts,
             )
+        if without_budget_denied:
+            without_execution["skip_reason"] = "budget_exhausted"
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)

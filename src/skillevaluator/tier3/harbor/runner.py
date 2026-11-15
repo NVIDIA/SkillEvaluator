@@ -4881,6 +4881,8 @@ def _run_budgeted_variants(
             for future in as_completed(futures):
                 future.result()
     for variant, _, _ in jobs:
+        if not attempt_job_dirs[variant]:
+            continue
         _merge_attempt_jobs(
             [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
             jobs_dir / f"{skill_name}-{agent}-{variant}",

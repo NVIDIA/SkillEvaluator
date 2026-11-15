@@ -669,7 +669,7 @@ NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_JUDGE_MODELS = {
     "openai": "gpt-6.1-sol",
     "anthropic": "claude-opus-5-5",
-    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+    "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "bedrock": "us.anthropic.claude-opus-5-5",
     "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }

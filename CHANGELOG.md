@@ -149,6 +149,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
+  for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
+  rubric and LLM security verification did not run. The same default applies to
+  SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
 - SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
   to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
   the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;

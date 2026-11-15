@@ -275,9 +275,10 @@ All notable changes to SkillEvaluator are documented in this file.
   permissions only to the comment job, with no workflow-wide token permissions.
 - Tier 3 security finding evidence no longer keeps the credential in five
   more command forms: an `auth=HTTPBasicAuth("bob", "...")` call value, also
-  one split over lines, which was masked only up to the class name, and a call
-  or `auth=("bob", "...")` tuple value whose quoted argument holds a `(` or
-  `)`, which was masked only up to that parenthesis; a
+  one split over lines or with a `(` or `)` inside a quoted argument, which
+  was masked only up to the class name, and an `auth=("bob", "...")` tuple
+  value whose quoted argument holds a `(` or `)`, which was masked only up to
+  that parenthesis; a
   credential name in a `sed` replacement, as in
   `sed -i 's/password=.*/password=.../'`, also inside an `ssh`, `sh -c`, or
   `eval` command string; a long flag with `_` between its words, such as

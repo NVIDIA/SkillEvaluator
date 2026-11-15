@@ -194,6 +194,20 @@ def test_incomplete_arm_states_and_counts(scored: int | None, expected: int, sta
         (["Missing scored attempts for cases: ParseError", "Scored attempt coverage is 1/2"], None),
         (["Excess scored attempts for cases: ParseError", TIMEOUT_ERROR], "agent timeout error"),
         (["Unexpected scored cases: ValueError"], None),
+        (
+            [
+                "Harbor evaluation statistics account for 1/2 completed trials; "
+                "trial case-1__attempt2 recorded RewardFileNotFoundError: reward.json missing",
+                TIMEOUT_ERROR,
+            ],
+            "reward file not found error",
+        ),
+        (
+            ["Without skill aggregate job: trial case-1 recorded harbor.trial.errors.VerifierTimeoutError"],
+            "verifier timeout error",
+        ),
+        (["trial case-1 recorded reward.json missing"], None),
+        (["trial FakeError recorded reward.json missing"], None),
         (["Scored attempt coverage is 1/2", "Unscoreable reward in case-1__attempt2: judge failed"], None),
         ("AgentTimeoutError: not a list", None),
     ],

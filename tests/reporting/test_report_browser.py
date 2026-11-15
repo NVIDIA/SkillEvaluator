@@ -445,6 +445,34 @@ def _open(page, directory: Path, name: str = "full"):
     )
 
 
+def _assert_readable_text(locator, *state):
+    colors = locator.evaluate("""node => {
+        const parse=color=>color.match(/[\\d.]+/g).map(Number);
+        const blend=(front,back)=>front.slice(0,3).map((value,i)=>
+            value*(front[3]??1)+back[i]*(1-(front[3]??1)));
+        const ancestors=[];
+        for(let current=node;current;current=current.parentElement)ancestors.unshift(current);
+        let background=[255,255,255],opacity=1;
+        for(const ancestor of ancestors){
+            const style=getComputedStyle(ancestor);
+            background=blend(parse(style.backgroundColor),background);
+            opacity*=Number(style.opacity);
+        }
+        const foreground=parse(getComputedStyle(node).color);
+        foreground[3]=(foreground[3]??1)*opacity;
+        return {foreground:blend(foreground,background),background,label:node.textContent.trim()};
+    }""")
+
+    def luminance(channels):
+        values = [value / 255 for value in channels]
+        linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in values]
+        return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
+
+    low, high = sorted((luminance(colors["foreground"]), luminance(colors["background"])))
+    ratio = (high + 0.05) / (low + 0.05)
+    assert ratio >= 4.5, (*state, colors, ratio)
+
+
 def _tier(page, name: str):
     page.locator(f'.tier-card[data-target-tab="{name}"] .tier-card-label').click()
     assert page.locator(f"#tab-{name}").is_visible()
@@ -795,7 +823,7 @@ def test_no_javascript_keeps_all_recorded_evidence_readable(browser, reports):
 
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("width", [1440, 390])
-def test_active_native_controls_have_readable_computed_contrast(page, reports, theme, width):
+def test_native_controls_have_readable_computed_contrast_in_each_state(page, reports, theme, width):
     directory, _, _ = reports
     page.set_viewport_size({"width": width, "height": 1000})
     _open(page, directory)
@@ -808,24 +836,91 @@ def test_active_native_controls_have_readable_computed_contrast(page, reports, t
         )
         assert controls.count() > 0
         for control in controls.all():
-            # Inspect every actual control's active variant, including severity colors.
-            colors = control.evaluate("""node => {
-                node.classList.add('active');
-                const style=getComputedStyle(node);
-                return {foreground:style.color, background:style.backgroundColor, label:node.textContent.trim()};
-            }""")
-
-            def luminance(color):
-                channels = [int(value) / 255 for value in re.findall(r"[0-9]+", color)[:3]]
-                linear = [value / 12.92 if value <= 0.04045 else ((value + 0.055) / 1.055) ** 2.4 for value in channels]
-                return sum(value * weight for value, weight in zip(linear, (0.2126, 0.7152, 0.0722), strict=True))
-
-            values = sorted((luminance(colors["foreground"]), luminance(colors["background"])))
-            ratio = (values[1] + 0.05) / (values[0] + 0.05)
-            assert ratio >= 4.5, (theme, width, colors, ratio)
-            checked.append(colors["label"])
+            # Hover and active selectors can compete, especially on the scope tabs.
+            was_active = "active" in (control.get_attribute("class") or "").split()
+            for active in (False, True):
+                control.evaluate("(node, active)=>node.classList.toggle('active',active)", active)
+                page.mouse.move(0, 0)
+                _assert_readable_text(control, theme, width, tier, active, "idle")
+                control.hover()
+                _assert_readable_text(control, theme, width, tier, active, "hover")
+            control.evaluate("(node, active)=>node.classList.toggle('active',active)", was_active)
+            checked.append(control.inner_text())
     assert len(checked) >= 8
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+
+
+@pytest.mark.parametrize("theme", ["light", "dark"])
+@pytest.mark.parametrize("width", [1440, 390])
+def test_native_status_chips_badges_and_pills_have_readable_computed_contrast(page, reports, theme, width):
+    directory, _, _ = reports
+    page.set_viewport_size({"width": width, "height": 1000})
+    statuses = set()
+    for fixture in ("full", "absent", "incomplete-full"):
+        _open(page, directory, fixture)
+        page.locator("html").evaluate("(node, theme)=>node.dataset.theme=theme", theme)
+        chips = page.locator(".tier-card-verdict:visible")
+        assert chips.count() > 0
+        for chip in chips.all():
+            statuses.update(chip.locator("..").locator("..").get_attribute("class").split())
+            _assert_readable_text(chip, theme, width, fixture, "tier verdict")
+    assert {"pass", "fail", "warn", "skipped"} <= statuses
+
+    _tier(page, "tier3")
+    # The retained legacy badge rule has no current emitter; exercise its loaded CSS explicitly.
+    page.locator("#tier3-page-overview").evaluate("""node=>{
+        const badge=document.createElement('span');
+        badge.className='t3-incomplete-badge';
+        badge.textContent='Incomplete';
+        node.append(badge);
+    }""")
+    incomplete = page.locator(".t3-incomplete-badge:visible")
+    assert incomplete.count() > 0
+    for badge in incomplete.all():
+        _assert_readable_text(badge, theme, width, "incomplete badge")
+
+    _open(page, directory)
+    page.locator("html").evaluate("(node, theme)=>node.dataset.theme=theme", theme)
+    _tier(page, "tier1")
+    for selector in (
+        ".count-badge:not(.medium-count):not(.low-count)",
+        ".count-badge.medium-count",
+        ".count-badge.low-count",
+    ):
+        badges = page.locator(f"{selector}:visible")
+        assert badges.count() > 0
+        for badge in badges.all():
+            _assert_readable_text(badge, theme, width, selector)
+    for selector in (".skill-pill", ".quality-pill"):
+        pills = page.locator(f"{selector}:visible")
+        assert pills.count() > 0
+        pill = pills.first
+        page.mouse.move(0, 0)
+        _assert_readable_text(pill, theme, width, selector, "idle")
+        pill.hover()
+        _assert_readable_text(pill, theme, width, selector, "hover")
+
+    page.locator("#view-validator").click()
+    headers = page.locator(".validator-collapsible:visible")
+    assert headers.count() > 0
+    header = headers.first
+    for expanded in (False, True):
+        if ("active" in header.get_attribute("class").split()) != expanded:
+            header.click()
+        assert ("active" in header.get_attribute("class").split()) == expanded
+        page.mouse.move(0, 0)
+        _assert_readable_text(header, theme, width, "validator header", expanded, "idle")
+        _assert_readable_text(header.locator(".expand-text"), theme, width, "validator disclosure", expanded)
+        header.hover()
+        _assert_readable_text(header, theme, width, "validator header", expanded, "hover")
+
+    page.evaluate("window.scrollTo(0, document.body.scrollHeight)")
+    back_to_top = page.locator("#backToTop")
+    back_to_top.wait_for(state="visible")
+    page.mouse.move(0, 0)
+    _assert_readable_text(back_to_top, theme, width, "back to top", "idle")
+    back_to_top.hover()
+    _assert_readable_text(back_to_top, theme, width, "back to top", "hover")
 
 
 @pytest.mark.parametrize("theme", ["light", "dark"])

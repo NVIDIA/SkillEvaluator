@@ -94,6 +94,8 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
  .hero-side { flex:0 1 22rem;max-width:40%;overflow-wrap:anywhere; }
 }
 
+/* Neutral pills and inactive hovered tabs retain a readable theme foreground. */
+.skill-pill,.quality-pill,.nav-tab:hover { color:var(--dark-text); }
 /* Bright native action colors need the existing dark palette foreground. */
 .nav-tab.active,.nav-tabs [aria-current=location],.view-toggle-btn.active,.filter-btn.active,.severity-filter-btn.active { color:#0c111b; }
 /* Light-theme critical/high colors are deep red; their dark-theme variants are bright. */

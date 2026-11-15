@@ -2865,7 +2865,7 @@
                         <td><span class="t3-pill warning">{{ 'Not measured' if dim.peer_only else 'Not applicable' }}</span></td>
                         {% for name in t3_other_agents %}{{ other_dimension_cell(t3_dim_by_agent[name].get(dim.id), t3_agents[name]) }}{% endfor %}
                         <td></td>
-                        <td class="t3-reasoning">{% if dim.peer_only %}No measurement was recorded for the primary agent; other-agent evidence is shown alongside.{% else %}{{ dim.reason or "Not applicable: its signals had nothing to judge in any eval case." }} It has no score, so the agent's verdict stays NEUTRAL and cannot PASS.{% endif %}</td>
+                        <td class="t3-reasoning">{% if dim.peer_only %}No measurement was recorded for the primary agent; other-agent evidence is shown alongside.{% else %}{% set na_reason = dim.reason or "Not applicable: its signals had nothing to judge in any eval case" %}{{ na_reason }}{{ "" if na_reason.endswith(".") else "." }} It has no score, so the agent cannot PASS.{% endif %}</td>
                     </tr>
                     {% endfor %}
                     {% set best_overall_score = t3_best.with_skill if t3_best else none %}
@@ -3762,8 +3762,10 @@
                                     {% set lift_excluded_label = lift_excluded_cases ~ (' case' if one_lift_excluded_case else ' cases') %}
                                     {# Only a card with both arm scores can say they include the cases. #}
                                     <div class="t3-dim-hint t3-eval-lift-note">
-                                        {%- if card.lift is none -%}
+                                        {%- if card.lift is none and card.comparison_basis.contributing_attempts == 0 -%}
                                             No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and no comparable result remains
+                                        {%- elif card.lift is none -%}
+                                            No lift: {{ lift_excluded_label }} {{ 'was' if one_lift_excluded_case else 'were' }} scored by different judge models and the loaded results cannot confirm the comparison
                                         {%- else -%}
                                             Lift leaves out {{ lift_excluded_label }} scored by different judge models
                                         {%- endif -%}

@@ -728,7 +728,10 @@ skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --mod
 
 `tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
 daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
-endpoint, and the selected agents and `--env-mode`. The CLI check runs
+endpoint, and the selected agents and `--env-mode`. The endpoint check uses
+an unauthenticated HTTP probe with a three-second deadline; any HTTP
+response counts as reachable, including authentication errors. It does not validate
+credentials or model compatibility. The separate CLI interface check runs
 `gym eval run --help` with a 15-second timeout and a combined stdout/stderr limit of
 256 KiB, without policy credentials or server startup. Timeout, interruption, or output
 overflow stops its isolated process group with bounded TERM/KILL cleanup. It rejects

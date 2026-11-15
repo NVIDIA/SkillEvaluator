@@ -1229,7 +1229,8 @@ def test_gym_run_removes_staged_tasks_and_jobs(tmp_path: Path, monkeypatch: pyte
     assert json.loads((run_dir / "run_config.json").read_text())["harbor"]["jobs_retained"] is False
 
 
-def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reachable", [True, False])
+def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reachable: bool) -> None:
     from skillevaluator.tier3 import commands
     from skillevaluator.tier3.nemo_gym import backend
     from skillevaluator.tier3.nemo_gym import runner as gym_runner
@@ -1244,17 +1245,85 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
     monkeypatch.setattr(gym_runner, "_model_endpoint", lambda model: (model or "m", "http://127.0.0.1:9/v1", "k"))
-    rows = commands._nemo_gym_doctor_rows(["codex"], "docker", {})
+    probes = []
+
+    def endpoint_probe(url):
+        probes.append(url)
+        return None if reachable else "check SKILL_EVAL_NEMO_GYM_MODEL_URL"
+
+    monkeypatch.setattr(commands, "_nemo_gym_policy_endpoint_error", endpoint_probe)
+    rows = commands._nemo_gym_doctor_rows(["codex", "opencode"], "docker", {})
     assert rows == [
         ("NeMo Gym CLI", "pass", f"{gym} (nemo-gym 0.7.0)"),
-        ("NeMo Gym backend", "pass", "docker sandbox ready"),
+        ("NeMo Gym backend", "pass", "docker sandbox ready")
+        if reachable
+        else ("NeMo Gym backend", "fail", "codex: check SKILL_EVAL_NEMO_GYM_MODEL_URL"),
     ]
+    assert probes == ["http://127.0.0.1:9/v1"]
 
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(tmp_path / "missing"))
     rows = commands._nemo_gym_doctor_rows(["codex", "goose"], "local", {})
     assert rows[0][:2] == ("NeMo Gym CLI", "fail")
     details = " ".join(detail for _name, status, detail in rows[1:] if status == "fail")
     assert "goose" in details and "docker only" in details
+
+
+@pytest.mark.parametrize("status", [200, 307, 401, 403, 404, 405])
+def test_policy_endpoint_probe_accepts_any_http_response_without_credentials(status: int) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    headers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            headers.append(dict(self.headers))
+            self.send_response(status)
+            self.send_header("Location", "http://127.0.0.1:9/unreachable")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(headers) == 1
+        assert not any(name.lower() in {"authorization", "x-api-key"} for name in headers[0])
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("url", ["", "not-a-url", "http://127.0.0.1:9/v1", "http://user:credential@127.0.0.1:9/v1"])
+def test_policy_endpoint_probe_failure_is_actionable_and_redacted(url: str) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    error = _nemo_gym_policy_endpoint_error(url)
+    assert error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error and "network access" in error
+    assert "credential@" not in error
+
+
+def test_policy_endpoint_probe_has_a_hard_deadline_even_for_stalled_dns(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    def stalled_probe(args, **kwargs):
+        assert kwargs["timeout"] == 3
+        assert kwargs["input"] == "https://example.invalid/v1"
+        assert "https://example.invalid/v1" not in args
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(commands.subprocess, "run", stalled_probe)
+    error = commands._nemo_gym_policy_endpoint_error("https://example.invalid/v1")
+    assert "timed out after 3s" in error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error
 
 
 def test_tier3_doctor_accepts_backend_option() -> None:

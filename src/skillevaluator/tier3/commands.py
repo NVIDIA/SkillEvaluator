@@ -10,6 +10,7 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import webbrowser
@@ -1081,6 +1082,56 @@ def _docker_daemon_error(env: Mapping[str, str]) -> str | None:
 _DOCKER_PROBE_TIMEOUT_S = 15.0
 
 
+_POLICY_ENDPOINT_PROBE_TIMEOUT_S = 3.0
+_POLICY_ENDPOINT_PROBE = """
+import http.client
+import sys
+from urllib.parse import urlsplit, urlunsplit
+
+try:
+    url = urlsplit(sys.stdin.read())
+    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+        sys.exit(1)
+    connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
+    connection = connection_type(url.hostname, url.port, timeout=2)
+    try:
+        connection.request("HEAD", urlunsplit(("", "", url.path or "/", url.query, "")))
+        connection.getresponse()
+    finally:
+        connection.close()
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
+    """Probe anonymously in a bounded child so DNS resolution cannot hang doctor."""
+    from skillevaluator.tier3.nemo_gym.backend import MODEL_URL_ENV
+
+    detail = "could not reach the policy endpoint"
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-c", _POLICY_ENDPOINT_PROBE],
+            input=url,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_POLICY_ENDPOINT_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return None
+    except subprocess.TimeoutExpired:
+        detail = f"policy endpoint probe timed out after {_POLICY_ENDPOINT_PROBE_TIMEOUT_S:g}s"
+    except OSError:
+        detail = "could not start the policy endpoint probe"
+    return (
+        f"NeMo Gym {detail}; check {MODEL_URL_ENV} or the selected provider's base URL, "
+        "start the inference service, and check network access. Any HTTP response is sufficient; "
+        "this check does not validate credentials or model compatibility."
+    )
+
+
 def _nemo_gym_doctor_rows(
     agents: list[str],
     env_mode: str,
@@ -1134,6 +1185,7 @@ def _nemo_gym_doctor_rows(
             overrides = parse_agent_model_overrides(agent_model)
         except ValueError:
             overrides = {}
+        checked_endpoints: set[str] = set()
         for agent in agents:
             try:
                 _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0])
@@ -1142,6 +1194,10 @@ def _nemo_gym_doctor_rows(
                 continue
             if (url_error := model_url_credential_error(endpoint_url)) and url_error not in errors:
                 errors.append(url_error)
+            elif not url_error and endpoint_url not in checked_endpoints:
+                checked_endpoints.add(endpoint_url)
+                if endpoint_error := _nemo_gym_policy_endpoint_error(endpoint_url):
+                    errors.append(f"{agent}: {endpoint_error}")
     if env_mode == "docker" and (docker_error := _docker_daemon_error(gym_launch_environment({}))):
         errors.append(docker_error)
     rows += [("NeMo Gym backend", "fail", error) for error in errors] or [

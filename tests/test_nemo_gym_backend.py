@@ -1375,6 +1375,74 @@ def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, inte
     assert cleanup[-1].detail == "NeMo Gym stopped"
 
 
+@pytest.mark.parametrize("exit_early", [False, True])
+def test_gym_cleanup_stops_detached_servers_but_not_other_runs(tmp_path: Path, exit_early: bool) -> None:
+    import socket
+    import subprocess
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    ready = tmp_path / "server.json"
+    child = (
+        "import json, os, signal, socket, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+        "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+        f"open({str(ready)!r}, 'w').write(json.dumps([os.getpid(), s.getsockname()[1]]))\n"
+        "time.sleep(60)\n"
+    )
+    leader = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        "time.sleep(0.5)\n" + ("sys.exit(1)\n" if exit_early else "time.sleep(60)\n")
+    )
+    try:
+        with (tmp_path / "gym.log").open("w") as log:
+            result = _run_gym([sys.executable, "-c", leader], cwd=tmp_path, env=dict(os.environ), log=log, timeout_s=2)
+        assert result == (1 if exit_early else None)
+        _pid, port = json.loads(ready.read_text())
+        with socket.socket() as connection:
+            assert connection.connect_ex(("127.0.0.1", port)) != 0
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+
+
+def test_detached_process_discovery_requires_this_runs_exact_marker(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(
+        gym_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="11 11 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "12 12 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run-other\n"
+            "13 13 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=another-run\n"
+            "14 10 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "15 15 Z python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+        ),
+    )
+    assert gym_runner._gym_run_processes("this-run", 10) == [11]
+
+
+def test_detached_process_discovery_error_is_actionable_and_does_not_echo_environment(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["ps"], output="credential-value")
+
+    monkeypatch.setattr(gym_runner.subprocess, "run", unavailable)
+    with pytest.raises(gym_runner.GymCleanupError, match="check host process access") as error:
+        gym_runner._gym_run_processes("this-run", 10)
+    assert "credential-value" not in str(error.value)
+
+
 def test_gym_judge_override_reaches_the_staged_verifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:

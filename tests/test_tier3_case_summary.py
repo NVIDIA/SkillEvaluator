@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from rich.console import Console
 
-from skillevaluator.tier3.case_summary import render_case_summary, verdict, what_to_fix
+from skillevaluator.tier3.case_summary import _weakens_requirements, render_case_summary, verdict, what_to_fix
 from skillevaluator.tier3.result_display import render_result
 
 
@@ -353,6 +353,148 @@ def test_case_action_fallback_text_with_a_long_judge_reason_is_checked_in_bounde
     [fix] = what_to_fix({"agents": {"a": _agent({"case-000": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
     assert time.perf_counter() - started < 1.0
     assert fix["source"] == "deterministic"
+
+
+# Verb modifiers a negator may govern: "without first deleting", "without ever having to delete the case".
+_NEGATION_CHAINS = (
+    "",
+    "first",
+    "outright",
+    "ever",
+    "even",
+    "actually",
+    "simply",
+    "just",
+    "also",
+    "then",
+    "again",
+    "entirely",
+    "completely",
+    "fully",
+    "altogether",
+    "necessarily",
+    "directly",
+    "having to",
+    "needing to",
+    "need to",
+    "the need to",
+    "having to first",
+    "being forced to",
+    "being asked to",
+    "trying to",
+    "attempting to",
+    "ever having to",
+    "ever even having to first",
+)
+# (negator, whether the verb after it is in its base form): "without first deleting", "do not first delete".
+_STRICT_NEGATORS = (
+    ("without", False),
+    ("instead of", False),
+    ("rather than", False),
+    ("there is no need to", True),
+    ("should not", True),
+)
+_ALL_NEGATORS = (*_STRICT_NEGATORS, ("do not", True), ("never", True), ("don't", True), ("avoid", False))
+
+
+def _negated_advice(negators: tuple[tuple[str, bool], ...], case_subject: str) -> list[str]:
+    sentences = []
+    for negator, base_form in negators:
+        for chain in _NEGATION_CHAINS:
+            base = base_form or chain.endswith(" to")
+            for verb, subject in (("delete", case_subject), ("lower", "the pass threshold")):
+                form = verb if base else verb.replace("lower", "lowering").replace("delete", "deleting")
+                sentences.append(" ".join(f"Fix the parser {negator} {chain} {form} {subject}.".split()))
+    return sentences
+
+
+def _unrelated_negation_advice(negators: tuple[tuple[str, bool], ...], case_subject: str) -> list[str]:
+    """A noun between the negator (and its modifiers) and the verb: the negator governs the noun, not the removal."""
+    return [
+        " ".join(f"Fix the parser {negator} {chain} {noun} by {verb} {subject}.".split())
+        for negator, _ in negators
+        for chain in _NEGATION_CHAINS
+        for noun in ("failures", "errors")
+        for verb, subject in (("deleting", case_subject), ("lowering", "the pass threshold"))
+    ]
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "Implement the missing field without having to delete the smoke case."),
+        ("smoke", "Fix the parser without first deleting the smoke case."),
+        ("smoke", "Fix the parser without outright deleting the smoke case."),
+        ("smoke", "Fix the parser without ever having to delete the smoke case."),
+        ("smoke", "Fix the parser without even needing to drop the smoke case."),
+        ("smoke", "Fix the parser without being forced to exclude the smoke case."),
+        ("smoke", "Fix the parser instead of first deleting the smoke case."),
+        ("smoke", "Fix the parser rather than simply dropping the smoke case."),
+        ("smoke", "Do not first delete the smoke case; fix the parser."),
+        ("smoke", "There is no need to delete the smoke case once the parser is fixed."),
+        ("smoke", "You should not delete the smoke case; fix the parser."),
+        ("positive-001", "Fix the parser without trying to delete the case for positive-001."),
+        ("smoke", "Get smoke to pass without first lowering the pass threshold."),
+        ("smoke", "Fix the parser so smoke passes without having to loosen the expected output."),
+        ("smoke", "Make smoke pass without ever relaxing the assertions."),
+        ("smoke", "Make smoke pass instead of outright softening the ground truth."),
+    ],
+)
+def test_case_action_keeps_advice_whose_negator_governs_the_verb_through_modifiers(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "Run without failures by deleting the smoke case from evals/evals.json."),
+        ("smoke", "Run without errors by removing the smoke case from evals/evals.json."),
+        ("positive-001", "Pass without errors by removing the positive-001 case from evals/evals.json."),
+        ("smoke", "Pass without regressions by dropping the smoke case."),
+        ("smoke", "Fix the parser without delay, deleting the smoke case."),
+        ("smoke", "Fix the parser without having to wait, delete the smoke case."),
+        ("smoke", "Fix the parser without ever fixing the parser by deleting the smoke case."),
+        ("smoke", "Fix the parser without first fixing the parser. Delete the smoke case."),
+        ("smoke", "Get smoke to pass without failures by lowering the pass threshold."),
+        ("smoke", "Get smoke to pass without errors by loosening the expected output."),
+        ("smoke", "Get smoke to pass without first fixing the parser, then relax the assertions."),
+    ],
+)
+def test_case_action_rejects_a_removal_that_a_negator_with_modifiers_does_not_govern(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize("known", [("smoke",), ()])
+def test_a_negator_and_its_verb_modifiers_negate_the_removal_and_the_weakening(known):
+    subject = "the smoke case" if known else "the case for positive-001"
+    offenders = [s for s in _negated_advice(_ALL_NEGATORS, subject) if _weakens_requirements(s, known)]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("known", [("smoke",), ()])
+def test_a_noun_between_the_negator_and_the_verb_breaks_the_negation(known):
+    subject = "the smoke case from evals/evals.json" if known else "the case for positive-001 from evals/evals.json"
+    missed = [s for s in _unrelated_negation_advice(_STRICT_NEGATORS, subject) if not _weakens_requirements(s, known)]
+    assert missed == []
 
 
 @pytest.mark.parametrize(

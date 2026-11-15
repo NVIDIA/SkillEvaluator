@@ -30,19 +30,83 @@ _TOKEN = re.compile(r"\w[\w./'\u2019-]*|[,:;!?()\[\]]")
 _WORD_TOKEN = re.compile(r"\w[\w./'\u2019-]*")
 _PHRASE_END_TOKENS = frozenset({".", ",", ";", ":", "!", "?", ")"})
 
-# Advice that keeps the case: "Do not delete the case", "fix the step instead of deleting the case". Only words
-# that modify the verb may sit between "without"/"instead of"/"rather than" and the verb, so "run without failures
-# by deleting the case" is still a removal.
-_NEGATION = re.compile(
-    r"\b(?:(?:do\s+not|don['\u2019]t|never|avoid)(?:\s+\w+){0,2}|"
-    r"(?:without|instead\s+of|rather\s+than)(?:\s+(?:just|also|then|even|ever|only|still|\w+ly)){0,2})\s*$",
-    re.IGNORECASE,
+# Advice that keeps the case: "Do not delete the case", "fix the step instead of deleting the case". A negator only
+# counts when it governs the verb, so the words between the two are limited to modifiers of the verb ("without first
+# deleting", "without ever having to delete") and "run without failures by deleting the case" stays a removal.
+# Only the last few words in front of the verb are read, so the check does not depend on the length of the text.
+_NEGATION_WINDOW = 120
+_NEGATION_WORD = re.compile(r"[\w'\u2019]+|[^\w\s]")
+_PLAIN_WORD = re.compile(r"\w+")
+# "do not"-style negators also cover up to two plain words before the verb: "do not try deleting the case".
+_LOOSE_NEGATORS = (("do", "not"), ("don't",), ("don\u2019t",), ("never",), ("avoid",))
+_NEGATORS = (
+    *_LOOSE_NEGATORS,
+    ("not",),
+    ("without",),
+    ("instead", "of"),
+    ("rather", "than"),
+    ("no", "need", "to"),
+)
+_MAX_MODIFIERS = 5
+_MODIFIER_WORD = re.compile(r"just|also|then|even|ever|only|still|first|outright|again|altogether|always|\w{3,}ly")
+_MODIFIER_PHRASES = frozenset(
+    {("the", "need", "to"), ("any", "need", "to")}
+    | {("being", participle, "to") for participle in ("forced", "asked", "required", "made")}
+    | {
+        (verb, "to")
+        for verb in (
+            "having",
+            "have",
+            "has",
+            "needing",
+            "need",
+            "needs",
+            "trying",
+            "attempting",
+            "resorting",
+            "wanting",
+            "choosing",
+            "bothering",
+        )
+    }
 )
 
 
+def _ends_with(words: list[str], end: int, phrases: tuple[tuple[str, ...], ...]) -> bool:
+    return any(end >= len(phrase) and tuple(words[end - len(phrase) : end]) == phrase for phrase in phrases)
+
+
+def _modifier_start(words: list[str], end: int) -> int | None:
+    """Start of the verb modifier ("first", "having to", "being forced to") that ends at ``end``, if any."""
+    for size in (3, 2):
+        if end >= size and tuple(words[end - size : end]) in _MODIFIER_PHRASES:
+            return end - size
+    if end >= 1 and _MODIFIER_WORD.fullmatch(words[end - 1]):
+        return end - 1
+    return None
+
+
 def negated_before(text: str, start: int) -> bool:
-    """True when advice that begins at ``start`` is negated ("do not ...", "instead of ...")."""
-    return _NEGATION.search(text[max(0, start - 48) : start]) is not None
+    """True when advice that begins at ``start`` is negated ("do not ...", "without first ...", "instead of ...")."""
+    words = _NEGATION_WORD.findall(text[max(0, start - _NEGATION_WINDOW) : start].lower())
+    count = len(words)
+    for plain in range(3):
+        end = count - plain
+        if (
+            end >= 1
+            and all(_PLAIN_WORD.fullmatch(word) for word in words[end:])
+            and _ends_with(words, end, _LOOSE_NEGATORS)
+        ):
+            return True
+    end = count
+    for _ in range(_MAX_MODIFIERS + 1):
+        if _ends_with(words, end, _NEGATORS):
+            return True
+        modifier = _modifier_start(words, end)
+        if modifier is None:
+            return False
+        end = modifier
+    return False
 
 
 _STRONG_VERB = re.compile(

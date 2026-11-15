@@ -461,6 +461,25 @@ def test_project_skill_projection_leaves_tasks_without_skills_unchanged(tmp_path
     assert dockerfile.read_text() == "FROM python:3.13-slim\n"
 
 
+@pytest.mark.parametrize("agent, directory", [("opencode", ".agents"), ("claude-code", ".claude")])
+def test_project_skill_projection_follows_final_authored_reset(tmp_path: Path, agent, directory) -> None:
+    from skillevaluator.tier3.harbor.adapter import _append_task_input_projection
+
+    task = tmp_path / "case"
+    environment = task / "environment"
+    (environment / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    projection = "COPY " + json.dumps(["skills/", f"/workspace/{directory}/skills/"])
+    authored = f"FROM python:3.13-slim\n{projection}\nRUN rm -rf /workspace/{directory}\n"
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text(_append_task_input_projection(authored, include_input=False, agent_config_lines=[]))
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text().splitlines()[-1] == projection
+    staged = dockerfile.read_text()
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == staged
+
+
 def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypatch) -> None:
     from skillevaluator.tier3.nemo_gym.runner import verifier_judge_env
 

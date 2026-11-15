@@ -89,13 +89,14 @@ def stage_for_gym(
         environment = tomllib.loads(text).get("environment") or {}
         if environment.get("mcp_servers"):
             raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
-        if agent == "opencode":
+        project_directory = {"opencode": ".agents", "claude-code": ".claude"}.get(agent or "")
+        if project_directory:
             dockerfile = task_toml.parent / "environment" / "Dockerfile"
             if dockerfile.is_file() and (dockerfile.parent / "skills").is_dir():
                 workdir = environment.get("workdir") or "/workspace"
-                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/.agents/skills/"])
+                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/{project_directory}/skills/"])
                 docker_text = dockerfile.read_text(encoding="utf-8")
-                if projection not in docker_text.splitlines():
+                if not docker_text.rstrip().endswith("\n" + projection):
                     dockerfile.write_text(docker_text.rstrip("\n") + "\n" + projection + "\n", encoding="utf-8")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})

@@ -175,6 +175,37 @@ def _evaluation_failed(reward: Any) -> bool:
     return isinstance(reward, Mapping) and str(reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
 
 
+# A failed evaluation never reached a score; the cause decides who has to act.
+_EVALUATION_FAILURES = {
+    "environment": (
+        "the sandbox environment is invalid",
+        "Not a skill problem: the sandbox could not run what this case needs. Fix the environment named above "
+        "(for example install the missing tool in evals/environment/Dockerfile), then re-run this case.",
+    ),
+    "collector": (
+        "the attempt's result could not be collected",
+        "Not a skill problem: SkillEvaluator could not read this attempt's verifier output. Re-run this case; "
+        "if it repeats, check the verifier artifacts and any custom grader output in the run directory.",
+    ),
+    "judge": (
+        "required judge evaluation failed",
+        "Not a skill problem: check the judge model configuration, credentials and provider availability, "
+        "then re-run this case.",
+    ),
+}
+
+
+def _evaluation_failure(reward: Mapping[str, Any]) -> tuple[str, str]:
+    """Name what failed an unscored evaluation (environment, collector or judge) and the recorded reason."""
+    errors = reward.get("evaluation_errors")
+    if isinstance(errors, Mapping):
+        for cause in ("environment", "collector"):
+            if cause in errors:
+                return cause, _short(errors[cause], 160)
+        return "judge", _short("; ".join(f"{metric}: {reason}" for metric, reason in errors.items() if reason), 160)
+    return "judge", _short(errors, 160)
+
+
 def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
     output_dir = agent.get("output_dir")
     trials = Path(str(output_dir)) / dict(_VARIANTS)[key] / "trials" if output_dir else None
@@ -896,39 +927,44 @@ def _diagnose_agent_case(
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
-    judge_trials = []
+    failed_evaluations: dict[str, list[tuple[Path, str]]] = {}
     with_trials = run_dir / agent_name / "with-skill" / "trials"
     if errors and with_trials.is_dir() and _SAFE_TRIAL.fullmatch(agent_name):
-        judge_trials = [
-            d
-            for d in sorted(with_trials.iterdir())
-            if d.name.split("__", 1)[0] == case_id
-            and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
-            and _evaluation_failed(_load_json(d / "reward.json", root=run_dir))
-        ]
-    judge_issues = []
-    if judge_trials:
-        judge_errors = min(errors, len(judge_trials))
-        errors -= judge_errors
-        judge_issues.append(
+        for d in sorted(with_trials.iterdir()):
+            if (
+                d.name.split("__", 1)[0] == case_id
+                and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
+                and _evaluation_failed(reward := _load_json(d / "reward.json", root=run_dir))
+            ):
+                cause, reason = _evaluation_failure(reward)
+                failed_evaluations.setdefault(cause, []).append((d, reason))
+    evaluation_issues = []
+    for cause, failed in failed_evaluations.items():
+        lost_unscored = min(errors, len(failed))
+        if not lost_unscored:
+            break
+        errors -= lost_unscored
+        label, action = _EVALUATION_FAILURES[cause]
+        evaluation_issues.append(
             {
                 "case": case_id,
                 "agent": agent_name,
                 "kind": "run error",
-                "what": f"{judge_errors} attempt(s) never produced a score: required judge evaluation failed",
-                "attempts_lost": judge_errors,
+                "what": f"{lost_unscored} attempt(s) never produced a score: {label}"
+                + (f": {failed[0][1]}" if failed[0][1] else ""),
+                "attempts_lost": lost_unscored,
                 "reasons": [],
                 "env_errors": [],
                 "final_message": "",
-                "evidence": (judge_trials[0].relative_to(run_dir) / "reward.json").as_posix(),
-                "action": "Not a skill problem: check the judge model configuration, credentials and provider availability, then re-run this case.",
+                "evidence": (failed[0][0].relative_to(run_dir) / "reward.json").as_posix(),
+                "action": action,
             }
         )
     # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
     if entry is None:
         entry = _dataset_entries(run_dir).get(case_id, {})
     should_trigger = resolve_should_trigger(dict(entry))
-    not_used = should_trigger is not False and _never_activated(agent) and (wn > 0 or not judge_issues)
+    not_used = should_trigger is not False and _never_activated(agent) and (wn > 0 or not evaluation_issues)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
@@ -955,7 +991,7 @@ def _diagnose_agent_case(
     )
     goal = _goal_not_met(run_dir, agent_name, case_id, with_case)
     if not lost and not hurts and not not_used:
-        return [*judge_issues, goal] if goal else judge_issues
+        return [*evaluation_issues, goal] if goal else evaluation_issues
     rewards = [
         (r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json", root=run_dir), Mapping)
     ]
@@ -999,7 +1035,7 @@ def _diagnose_agent_case(
         "final_message": _final_message(failed_trials[0][1], run_dir) if failed_trials else "",
         "evidence": _evidence(run_dir, evidence_dir, run_error=kind == "run error"),
     }
-    return [failure, *judge_issues, goal] if goal else [failure, *judge_issues]
+    return [failure, *evaluation_issues, goal] if goal else [failure, *evaluation_issues]
 
 
 def _goal_not_met(

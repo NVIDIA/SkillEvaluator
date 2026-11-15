@@ -242,6 +242,32 @@ def test_judge_failure_does_not_change_genuine_scored_failure_advice(tmp_path: P
     assert "judge" in fixes[1]["action"].lower()
 
 
+@pytest.mark.parametrize(
+    ("errors", "reason", "action_text"),
+    [
+        ({"environment": "required dependency unavailable"}, "required dependency unavailable", "environment"),
+        ({"collector": "Judge sidecar could not be read; trial was not scored"}, "could not be read", "verifier"),
+    ],
+)
+def test_environment_and_collector_failures_do_not_get_judge_advice(
+    tmp_path: Path, errors: dict, reason: str, action_text: str
+) -> None:
+    _trial(tmp_path, "a", "c__1", {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": errors})
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {"with_skill": [{"trial": "c__1", "reason": "Evaluation failed"}]}
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["kind"], fix["attempts_lost"]) == ("run error", 1)
+    assert reason in fix["what"]
+    assert "required judge evaluation failed" not in fix["what"]
+    assert fix["action"].startswith("Not a skill problem")
+    assert action_text in fix["action"]
+    assert "judge" not in fix["action"].lower() and "credentials" not in fix["action"]
+    assert fix["evidence"].endswith("c__1/reward.json")
+
+
 def test_multi_agent_issue_scope_names_the_failing_agent(tmp_path: Path) -> None:
     agents = {
         "claude-code": _agent({"c": _case(True, True)}, {}),

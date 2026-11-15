@@ -120,6 +120,10 @@ class BudgetController:
     _estimates: dict[str, int | float] = field(default_factory=dict, repr=False)
     _waits: int = 0
     _unestimated_admissions: int = 0
+    _calibration: set[tuple[Any, ...]] = field(default_factory=set, repr=False)
+    _calibration_waits: int = 0
+    _estimate_denials: int = 0
+    _denied_unit_size: int = 0
     _cancelled: bool = False
 
     def __post_init__(self) -> None:
@@ -150,35 +154,62 @@ class BudgetController:
                     raise ValueError("Attempt is already reserved")
                 self.exhausted_limit = self._admission_limit(len(attempts))
                 if self.exhausted_limit is not None:
-                    self.not_run.extend(
-                        self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
-                    )
-                    return False
+                    return self._deny(attempts)
                 bounded = (
                     ("agent_tokens", self.max_agent_tokens, self.used_agent_tokens),
                     ("judge_calls", self.max_judge_calls, self.used_judge_calls),
                     ("cost_usd", self.max_cost_usd, self.used_cost_usd),
                 )
-                if self._in_flight and any(
-                    cap is not None
-                    and (estimate := self._estimates.get(dimension)) is not None
-                    and (used or 0) + (len(self._in_flight) + len(attempts)) * estimate > cap
-                    for dimension, cap, used in bounded
-                ):
+                unestimated = any(cap is not None and dimension not in self._estimates for dimension, cap, _ in bounded)
+                if self._calibration or (unestimated and self._in_flight):
                     self._waits += 1
+                    self._calibration_waits += 1
                     self._condition.wait()
                     continue
-                if any(cap is not None and dimension not in self._estimates for dimension, cap, _ in bounded):
+                projected_limit = next(
+                    (
+                        dimension
+                        for dimension, cap, used in bounded
+                        if (
+                            cap is not None
+                            and (estimate := self._estimates.get(dimension)) is not None
+                            and (used or 0) + (len(self._in_flight) + len(attempts)) * estimate > cap
+                        )
+                    ),
+                    None,
+                )
+                if projected_limit is not None:
+                    if self._in_flight:
+                        self._waits += 1
+                        self._condition.wait()
+                        continue
+                    self.exhausted_limit = "cost" if projected_limit == "cost_usd" else projected_limit
+                    self._denied_unit_size = len(attempts)
+                    return self._deny(attempts)
+                if unestimated:
                     self._unestimated_admissions += len(attempts)
+                    self._calibration.update(keys)
                 self._in_flight.update(dict.fromkeys(keys))
                 self._started += len(attempts)
                 return True
+
+    def _deny(self, attempts: list[dict[str, Any]]) -> bool:
+        basis = {"basis": "estimate"} if self._denied_unit_size else {}
+        if basis:
+            self._estimate_denials += 1
+        self.not_run.extend(
+            dict(self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]), **basis)
+            for item in attempts
+        )
+        return False
 
     def _admission_limit(self, unit_size: int) -> str | None:
         if self.exhausted_limit is not None:
             return self.exhausted_limit
         if self.max_attempts_total is not None and self._started + unit_size > self.max_attempts_total:
             return "attempts"
+        if self._calibration:
+            return None
         dimensions = (
             ("agent_tokens", self.max_agent_tokens, self.used_agent_tokens, self.unmeasured_agent_attempts),
             ("judge_calls", self.max_judge_calls, self.used_judge_calls, self.unmeasured_judge_attempts),
@@ -256,6 +287,7 @@ class BudgetController:
                     self._estimates[dimension] = max(self._estimates.get(dimension, 0), value)
             if key is not None:
                 self._in_flight.pop(key)
+                self._calibration.discard(key)
             self._finished += 1
             self._condition.notify_all()
 
@@ -289,6 +321,7 @@ class BudgetController:
                 "status": "exhausted" if self.exhausted_limit else "ok",
                 "partial": bool(self.not_run),
                 "exhausted_limit": self.exhausted_limit,
+                "exhausted_basis": "estimate" if self._denied_unit_size else None,
                 "attempts_not_run": len(self.not_run),
                 "not_run": list(self.not_run),
                 "reservation": {
@@ -300,6 +333,9 @@ class BudgetController:
                     "in_flight_attempts": len(self._in_flight),
                     "waits": self._waits,
                     "unestimated_admissions": self._unestimated_admissions,
+                    "calibration_waits": self._calibration_waits,
+                    "estimate_denials": self._estimate_denials,
+                    "denied_unit_size": self._denied_unit_size,
                 },
             }
             metadata["observed_overruns"] = _budget_observations(metadata)[0]
@@ -398,7 +434,24 @@ def budget_line(metadata: dict[str, Any]) -> str:
         value = metadata.get("started_attempts") if key == "attempts" else used.get(key)
         shown = _budget_number(value, cost=key == "cost_usd")
         cap = _budget_number(limits.get(limit_key), cost=key == "cost_usd", missing="not configured")
-        line = f"Budget exhausted ({label} {shown} of {cap})"
+        estimate_detail = ""
+        if metadata.get("exhausted_basis") == "estimate":
+            reservation = metadata.get("reservation")
+            reservation = reservation if isinstance(reservation, dict) else {}
+            estimates = reservation.get("estimate_per_attempt")
+            estimates = estimates if isinstance(estimates, dict) else {}
+            estimate = _measured_number(estimates.get(key))
+            size = _measured_number(reservation.get("denied_unit_size"))
+            if estimate is not None and size is not None and size > 0:
+                amount = _budget_number(estimate * size, cost=key == "cost_usd")
+                estimate_detail = (
+                    f"; next attempt estimated {amount}"
+                    if size == 1
+                    else f"; next unit estimated {amount} for {_budget_number(size)} attempts"
+                )
+            else:
+                estimate_detail = "; next unit denied using estimated usage"
+        line = f"Budget exhausted ({label} {shown} of {cap}{estimate_detail})"
     elif observations:
         line = f"Budget overrun observed ({observations})"
     elif incomplete:

@@ -536,13 +536,19 @@ def agent_eval_result_from_directory(
     skill_name = (
         persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
     )
+    run_config = _read_run_config(run_dir)
+    result_truth = engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir)
+    if not isinstance(result_truth, dict) or not isinstance(result_truth.get("budget"), dict):
+        result_truth = _persisted_run_result(run_dir)
+    if isinstance(result_truth, dict) and isinstance(result_truth.get("budget"), dict):
+        run_config = {**(run_config or {}), "budget": result_truth["budget"]}
     payload = build_agent_eval_payload(
         skill_name,
         agents,
         dataset=dataset,
         attempt_policy=attempt_policy,
         historical_missing_score_policy="score_policy" not in attempt_policy,
-        run_config=_read_run_config(run_dir),
+        run_config=run_config,
         env_mode=env_mode,
         runtime_seconds=_runtime_seconds(engine_result),
         harbor_viewer=_harbor_viewer_from_engine_result(engine_result),
@@ -698,6 +704,9 @@ def render_agent_eval_html_report(
         # Restored feedback and fresh findings both join after the initial size budget.
         fit_token_usage(canonical_payload)
     if engine_result is not None and isinstance(canonical_payload, dict):
+        if canonical_payload.get("verdict") == "incomplete" and (canonical_payload.get("budget") or {}).get("not_run"):
+            engine_result["summary"] = dict(canonical_payload["summary"])
+            engine_result["verdict"] = "incomplete"
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
         # larger because it duplicates trials, datasets, agents, and provenance.
@@ -1116,7 +1125,13 @@ def build_agent_eval_payload(
     )
 
     budget_metadata = (run_config or {}).get("budget")
-    from skillevaluator.tier3.harbor.run_budget import budget_line
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
+
+    if reason := budget_incomplete_reason(budget_metadata):
+        verdict = "incomplete"
+        summary.update(verdict=verdict, verdict_reason=reason, overall_lift=None)
+        overall_lift = None
+        deterministic_conclusions = [{"severity": "warn", "title": "Evaluation incomplete", "message": reason}]
 
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -4261,7 +4276,11 @@ def _apply_saved_feedback(
     """
     saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
     fixes = _saved_case_fixes(run_dir)
-    if any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
+    if (payload.get("budget") or {}).get("not_run"):
+        saved.pop("conclusions", None)
+        payload.update(saved)
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+    elif any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
         _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
         payload.update(saved)
     else:
@@ -4299,6 +4318,10 @@ def _apply_case_findings(
         logger.debug("Case findings skipped", exc_info=True)
         return
     label, detail = case_verdict(source["agents"])
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(payload.get("budget")):
+        label, detail = "incomplete", reason
     if not label:
         return
     message = f"per-case result: {label} ({detail})."

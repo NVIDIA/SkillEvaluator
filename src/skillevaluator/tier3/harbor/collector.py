@@ -7517,16 +7517,12 @@ def collect_harbor_results(
     def budget_expectations(
         agent: str,
         arm: str,
-    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, bool]:
         matching = [
-            item
-            for item in budget_not_run
-            if item.get("agent") == agent
-            and item.get("arm") in {arm, f"{arm}_skill"}
-            and item.get("reason") == "budget_exhausted"
+            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
         ]
         if not matching:
-            return expected_trials, expected_case_ids, expected_cases, None
+            return expected_trials, expected_case_ids, expected_cases, None, False
         attempts_by_case: dict[str, int] = {}
         for item in matching:
             selector = str(item.get("case_id") or "")
@@ -7545,7 +7541,12 @@ def collect_harbor_results(
                 case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
             }
         actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
-        return actual_trials, active_case_ids, active_cases, attempt_counts
+        budget_denied = bool(
+            expected_trials
+            and actual_trials == 0
+            and all(item.get("reason") == "budget_exhausted" for item in matching)
+        )
+        return actual_trials, active_case_ids, active_cases, attempt_counts, budget_denied
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -7581,14 +7582,20 @@ def collect_harbor_results(
     tolerance_rejected: dict[str, str] = {}
 
     for agent in agents:
-        with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
-            agent, "with"
-        )
-        without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
-            budget_expectations(agent, "without")
-        )
-        with_budget_denied = bool(expected_trials and with_expected_trials == 0)
-        without_budget_denied = bool(expected_trials and without_expected_trials == 0)
+        (
+            with_expected_trials,
+            with_expected_case_ids,
+            with_expected_cases,
+            with_expected_attempts,
+            with_budget_denied,
+        ) = budget_expectations(agent, "with")
+        (
+            without_expected_trials,
+            without_expected_case_ids,
+            without_expected_cases,
+            without_expected_attempts,
+            without_budget_denied,
+        ) = budget_expectations(agent, "without")
         if skip_baseline:
             agent_expected_case_ids = with_expected_case_ids
         elif with_expected_case_ids is not None and without_expected_case_ids is not None:

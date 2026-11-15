@@ -547,6 +547,39 @@ def test_zero_trial_job_with_expected_work_still_fails(tmp_path):
     assert validate_harbor_job_result(result, expected_trials=1) == (False, "Harbor completed with zero trials")
 
 
+@pytest.mark.parametrize("reason", [None, "execution_failed"])
+def test_zero_trial_job_requires_explicit_budget_denial_to_skip(tmp_path, reason):
+    from skillevaluator.tier3.harbor.collector import collect_harbor_results
+
+    not_run = []
+    for arm in ("with", "without"):
+        job = tmp_path / "jobs" / f"skill-agent-{arm}"
+        job.mkdir(parents=True)
+        (job / "result.json").write_text(json.dumps({"n_total_trials": 0, "stats": {}}))
+        item = {"agent": "agent", "arm": arm, "case_id": "case", "attempt": 1, "status": "not_run"}
+        if reason is not None:
+            item["reason"] = reason
+        not_run.append(item)
+
+    results = collect_harbor_results(
+        skill_name="skill",
+        agents=["agent"],
+        output_dir=tmp_path / "results",
+        jobs_dir=tmp_path / "jobs",
+        n_attempts=1,
+        expected_trials=1,
+        expected_cases=1,
+        expected_case_ids=["case"],
+        budget_not_run=not_run,
+    )
+
+    assert results["execution_status"] == "failed"
+    assert any("Harbor completed with zero trials" in error for error in results["execution_errors"])
+    for condition in results["agents"]["agent"]["conditions"].values():
+        assert condition["execution_status"] == "failed"
+        assert "skip_reason" not in condition
+
+
 def test_fake_attempt_runner_stops_after_token_budget(monkeypatch, tmp_path):
     starts = []
 

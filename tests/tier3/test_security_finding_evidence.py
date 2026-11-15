@@ -2099,14 +2099,19 @@ def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> Non
         ),
         pytest.param(f'./tool --api_key "token=x --db-password "x TOKEN="{_API_TOKEN} x"', id="name-cut-by-the-flag"),
         pytest.param(f'./tool --api_key "a b --use-token "x y auth=("u", "{_API_TOKEN}")', id="call-cut-by-the-flag"),
+        pytest.param(
+            f'./tool --use_token "y z w --set_secret "\\n DB_PASSWORD=x ["mysql", "-u", "root", "-p{_API_TOKEN}"]',
+            id="argv-element-cut-by-the-flag",
+        ),
     ],
 )
 @pytest.mark.parametrize("judge", [False, True])
 def test_the_value_of_a_flag_inside_an_underscored_flag_value_hides_nothing(text: str, judge: bool) -> None:
     # A "_" flag value was left to the assignment rule when it held a
     # credential name, so a flag inside it was read. Its quoted value may run
-    # past the masked "_" value and cut a name or a call from what follows;
-    # each is still masked, also as JSON and as judge evidence.
+    # past the masked "_" value and cut a name, a call or an argv list element
+    # from what follows; each is still masked, also as JSON and as judge
+    # evidence.
     for evidence in (text, json.dumps({"cmd": text})):
         assert _API_TOKEN not in eval_core_checks._mask_finding_evidence_credentials(
             evidence, preserve_header_format=judge
@@ -2137,6 +2142,40 @@ def test_the_value_of_a_flag_inside_an_underscored_flag_value_hides_nothing(text
 def test_a_flag_inside_a_dashed_flag_value_is_not_read(text: str, expected: str, judge: bool) -> None:
     # A flag inside the quoted value of a "-" flag is not read, so its value
     # does not cut a name, a call or an argv list element from what follows.
+    assert eval_core_checks._mask_finding_evidence_credentials(text, preserve_header_format=judge) == expected
+    assert _API_TOKEN not in eval_core_checks._mask_finding_evidence_credentials(
+        json.dumps({"cmd": text}), preserve_header_format=judge
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f'./deploy --set_secret "auth_type=x ["mysql", "-u", "root", "-p{_API_TOKEN}"]',
+            './deploy --set_secret <redacted>mysql", "-u", "root", "-p<redacted>"]',
+            id="kept-name-value-masked-whole",
+        ),
+        pytest.param(
+            f'./deploy --api_key "PASS=1 ["login", "-p{_API_TOKEN}"]',
+            './deploy --api_key <redacted>login", "-p<redacted>"]',
+            id="count-value-masked-whole",
+        ),
+        pytest.param(
+            f'./deploy --use_token mysql -u root -p"x ["mysql", "-p{_API_TOKEN}"]',
+            './deploy --use_token <redacted> -u root -p<redacted>mysql", "-p<redacted>"]',
+            id="hidden-password",
+        ),
+    ],
+)
+@pytest.mark.parametrize("judge", [False, True])
+def test_an_argv_element_that_a_masked_flag_value_cuts_keeps_its_password_masked(
+    text: str, expected: str, judge: bool
+) -> None:
+    # A "_" flag value masked whole, or the password of a command a flag
+    # value hides, may end at the opening quote of a login or MySQL client
+    # element. The argv rule also reads the list as it was before, so the
+    # attached password after that element is still masked.
     assert eval_core_checks._mask_finding_evidence_credentials(text, preserve_header_format=judge) == expected
     assert _API_TOKEN not in eval_core_checks._mask_finding_evidence_credentials(
         json.dumps({"cmd": text}), preserve_header_format=judge

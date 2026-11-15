@@ -313,7 +313,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `--use_token mysql -u root -p...password: ...`. A flag inside the quoted
   value of an earlier `_` flag is read too, and the rest of its value past
   that quote is masked, as is a name or command that rest runs into; a flag
-  inside the value of a `-` flag is not read. Both the host checker and the
+  inside the value of a `-` flag is not read. The argv rule also reads list
+  elements as they were before flag values were masked, so a masked value
+  that cuts an element, as in `--set_secret "auth_type=x ["mysql", "-p..."]`,
+  does not hide the credential after it. Both the host checker and the
   bundled Harbor verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer

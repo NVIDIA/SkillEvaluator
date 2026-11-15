@@ -3902,7 +3902,13 @@ def _mask_credential_flags(text: str) -> str:
         spans.append((value.start(), value.end()))
         pos = value.end()
         underscored_value = underscored
-    return _mask_spans(text, spans + _hidden_credential_spans(text, spans, values, inner_flags))
+    if not spans:
+        return text
+    # A masked value may also cut an argv list element the argv rule reads
+    # next ('--api_key "a --use-token "["mysql", "-pVALUE"]'), so that rule
+    # reads the list elements of *text* here too.
+    hidden = _hidden_credential_spans(text, spans, values, inner_flags)
+    return _mask_spans(text, spans + hidden + _argv_credential_spans(text))
 
 
 def _hidden_credential_spans(
@@ -4080,6 +4086,16 @@ def _is_credential_flag_name(name: str) -> bool:
 
 def _mask_argv_credentials(text: str) -> str:
     """Mask the list element after a quoted credential flag (["tool", "--password", "VALUE"])."""
+    spans = _argv_credential_spans(text)
+    if spans:
+        text = _mask_spans(text, spans)
+    # An attached "-pVALUE" element is read again once the list is masked,
+    # which may bring a login or MySQL client element into reach.
+    return _mask_spans(text, _attached_argv_password_spans(text))
+
+
+def _argv_credential_spans(text: str) -> list[tuple[int, int]]:
+    """Return the text the argv rule masks in *text* and what that hides from later rules."""
     values = _AssignmentValues(text)
     spans: list[tuple[int, int]] = []
     pos = 0
@@ -4118,14 +4134,11 @@ def _mask_argv_credentials(text: str) -> str:
     # A masked element may hide a later credential's command as a flag value
     # does: in '["tool", "--use_token", "login"]\ndocker login -p VALUE' the
     # login rule reads "]\ndocker" as a command word only after the quote. An
-    # attached "-pVALUE" element is also read in the list as it was before
-    # its elements were masked, so a login or MySQL client element that a
-    # flag which takes no value reads as its value (["wrap", "--use_token",
+    # attached "-pVALUE" element is read in the list as it was before its
+    # elements were masked, so a login or MySQL client element that a flag
+    # which takes no value reads as its value (["wrap", "--use_token",
     # "mysql", "-uroot", "-pVALUE"]) still counts.
-    if spans:
-        spans += _hidden_credential_spans(text, spans, values) + _attached_argv_password_spans(text)
-        text = _mask_spans(text, spans)
-    return _mask_spans(text, _attached_argv_password_spans(text))
+    return spans + _hidden_credential_spans(text, spans, values) + _attached_argv_password_spans(text)
 
 
 def _attached_argv_password_spans(text: str) -> list[tuple[int, int]]:

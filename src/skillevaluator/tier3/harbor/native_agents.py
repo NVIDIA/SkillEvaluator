@@ -235,8 +235,11 @@ class _NativeClaudeCodeMixin(_NativePluginLoadMixin):
 
 
 class _NativeCodexMixin(_NativePluginLoadMixin):
-    # Harbor: ``...; codex exec --dangerously-bypass-approvals-and-sandbox ... -- <prompt>``.
-    _SKILLEVAL_LAUNCH_RE = re.compile(_COMMAND_START + r"codex[ \t]+exec\b")
+    # Harbor clears unselected fallback credentials with empty shell assignments
+    # before launching Codex. Keep them on the launch side of the setup group.
+    _SKILLEVAL_LAUNCH_RE = re.compile(
+        _COMMAND_START + r"(?:CODEX_API_KEY=[ \t]+)?(?:OPENAI_API_KEY=[ \t]+)?codex[ \t]+exec\b"
+    )
 
 
 class _NativeOpenCodeMixin(_NativePluginLoadMixin):

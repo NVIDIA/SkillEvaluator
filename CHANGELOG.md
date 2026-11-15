@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
@@ -249,18 +252,34 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
-  interpolation variable ... requires protected execution state` because the
-  shell exports a short flag with a sensitive-looking name. A host variable such
-  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
-  Compose value containing that character, for example `python:3.13-slim` or
-  `127.0.0.1`. Host values shorter than eight characters now match a Compose
-  value only when the two are identical, as the trusted Compose client check
-  already does. Host values of eight characters or more, and sensitive-named
-  values a task declares for its main container, are still refused anywhere
-  inside a Compose value.
+- NeMo Gym detached cleanup defers termination signals until teardown finishes,
+  preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- Native NeMo Gym project skill projections run after authored image instructions
+  and final workspace resets, even when an earlier layer already copied skills.
+- Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
+  so skill discovery works with Gym's isolated home and configuration directories.
+  Baseline tasks use the same layout without the target skill.
+- NeMo Gym doctor isolates its anonymous endpoint probe, honors proxy settings
+  without forwarding credentials, and reports proxy authentication and gateway failures.
+- Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
+  unauthenticated HTTP probe and actionable connection-failure guidance.
+- Native NeMo Gym teardown now completes its cleanup progress stage after a
+  successful stop, instead of reporting an interrupted cleanup on cancellation.
+- Native NeMo Gym cleanup now also stops run-owned detached server processes
+  after startup timeouts, interruptions and early exits, without targeting other runs.
+- Published documentation links use page routes so readers can navigate between
+  setup, report interpretation, recovery and the reference pages.
+
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
+- No-baseline Tier 3 reports no longer describe an intentionally skipped
+  baseline as incomplete execution or mismatched score contracts. Completed
+  with-skill attempts retain their results, with lift explicitly not measured
+  because no baseline was run.
+- Success-detail metadata keeps the terminal's default text color. Values such
+  as `grade=B` stay visible in the default blue Windows PowerShell console.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
@@ -271,6 +290,10 @@ All notable changes to SkillEvaluator are documented in this file.
   touches rather than letting the first stand for the rest, and keep the patch
   text itself as the write body. A headerless or malformed `input` is left
   alone, so a shell source string is not reported as a file change.
+- The NVIDIA Build bridge preserves reported input, output and cached token
+  usage in Anthropic Messages and Responses API replies. Anthropic replies use
+  schema-required zero defaults for missing input/output fields and clamp
+  uncached input counts at zero; Responses usage remains absent when unreported.
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider
@@ -281,6 +304,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
   ended in `(from None)` and the SkillSpector row named
   `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
+- Tier 3 case recommendations treat required judge failures as unscored
+  evaluation problems, with advice to check judge configuration and provider
+  availability. Failed judging is no longer counted twice or blamed on the
+  skill, including for negative controls; genuine scored failures retain their
+  existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that
@@ -290,6 +318,9 @@ All notable changes to SkillEvaluator are documented in this file.
   half was never checked. Every clause of an expectation must now name a
   checkable artifact of its own; one that does not keeps the gate, as a wholly
   prose expectation already did.
+- Tier 3 recommendations preserve the configured pass threshold when an
+  incomplete condition has no pass-rate summary, so scored attempts below that
+  threshold still receive failure advice.
 - SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
   `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
   `100%.md` no longer produces an invalid URI.
@@ -299,6 +330,10 @@ All notable changes to SkillEvaluator are documented in this file.
   generated `evals/evals.json` datasets accept the surrogate-escaped name
   Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
   the name's original bytes (`caf%E9.md`).
+- Native NeMo Gym Claude Code runs now bind the selected policy model server,
+  supply its placeholder credential, pin the sandbox runtime and enable project
+  skill discovery in both arms, including when Gym uses a private Claude
+  configuration directory.
 - SARIF `artifactLocation.uri` values stay valid for more paths. A
   repository-relative path whose first segment contains a colon, such as
   `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A
@@ -310,6 +345,10 @@ All notable changes to SkillEvaluator are documented in this file.
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
 
+- Allow grader-validation suites to use validated dataset `checks`, including
+  anchored `output_matches` rules, instead of rejecting the entry field before
+  running the verifier. Document exact-format declarations and the measured
+  limitations of natural-language format judging.
 - An author value is no longer rejected for containing a Unicode joiner. The
   character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
   (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
@@ -326,6 +365,10 @@ All notable changes to SkillEvaluator are documented in this file.
   side of the `@`, which still leaves a social handle such as
   `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
   now also catches a non-ASCII local part.
+- Hermes Docker runs with NVIDIA Build now validate `NVIDIA_API_KEY` during
+  Harbor preflight, matching the credential used by the runtime instead of
+  inheriting an OpenAI key requirement. Unrelated provider keys do not satisfy
+  the check.
 - An advisory carried from a passing skill into a collection result now names
   the skill it came from, in its location and in `metadata.collection_skill`.
   The findings were preserved but attributed to nothing, so a collection run
@@ -337,6 +380,10 @@ All notable changes to SkillEvaluator are documented in this file.
   failed the member and bumped its `severity_counts`, but a catalog validates
   each skill on its own, so nothing in that skill's output said what caused
   either.
+- Native Codex plugin loading now recognizes Harbor launches prefixed with
+  empty credential assignments, preserving credential isolation while running
+  plugin setup before the agent. These launches previously failed after the
+  task with a missing native-launch error.
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill
@@ -364,6 +411,9 @@ All notable changes to SkillEvaluator are documented in this file.
   user-request section when it is set below 2,000, and that a check budget too
   small to hold the final response beside some tool history is logged as a
   warning rather than quietly raised — lower the final-response limit with it.
+- OpenCode bash tool observations retain recorded shell exit codes in Harbor
+  trajectories. Declarative `command_succeeded` checks can now distinguish
+  successful commands from nonzero exits; missing exit codes remain not checked.
 - `judge_attempts.json` now masks `Cookie` header values, credential flag values
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
@@ -380,6 +430,16 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -387,6 +447,11 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
+- Failed native skill lookups no longer count as activation when the tool reports
+  that the skill was not found or unavailable without explicit error metadata.
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -394,9 +459,17 @@ All notable changes to SkillEvaluator are documented in this file.
   Additive `budget.observed_overruns` metadata is separate from admission
   `status`; limits are checked between logical admission units, so a completed
   run can exceed a cap without becoming partial or failed.
+- Tier 3 suggestion prompts qualify evidence by its owning case or trial, so
+  citations resolve to that case's excerpts regardless of trial order. Metric
+  findings cite only evidence from cases contributing to the reported outcome;
+  references with missing or ambiguous ownership are rejected.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
 - Tier 3 token usage rows are now validated against the evaluation dataset's own
   case IDs. Every case row uses one of those IDs at most once, and an attempt
   whose only name is Harbor's 32-character cut of a case name is attributed to
@@ -433,6 +506,11 @@ All notable changes to SkillEvaluator are documented in this file.
   After observed symlink creation, only an unadorned direct leaf can qualify;
   unknown command directories cannot qualify. Literal quoting is inert
   because expansions and escapes are rejected before operands are parsed.
+- Tier 3 reports now use final run-budget accounting, including when rebuilding
+  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
+  reports show budget exhaustion, not-run attempts, overruns, and unverified
+  usage. Budget-stopped runs have an incomplete summary verdict; admitted
+  scores remain visible and their lift is not a complete-run skill-effect claim.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized
@@ -447,6 +525,12 @@ All notable changes to SkillEvaluator are documented in this file.
   errors, instead of only the top-level `result.json`. A report re-rendered by
   `tier3 view` reads the status from the run's `result.json`. Scores from the
   completed trials are kept.
+- Concurrent Tier 3 budget admission now serializes one calibration unit,
+  reserves in-flight work using the largest measured per-attempt usage, and
+  waits for fresh accounting before admitting more work. Units whose estimates
+  exceed remaining capacity are denied even below the measured cap; budget
+  summaries and metadata distinguish estimate-based exhaustion. An attempt can
+  still exceed its estimate, so caps are not hard ceilings.
 - Skill activation now credits a SKILL.md read wrapped in a shell, such as
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL

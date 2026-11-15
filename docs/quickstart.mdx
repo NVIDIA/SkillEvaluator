@@ -13,7 +13,7 @@ quality check, or add NVIDIA Build to get feedback from a model.
 
 For an executable terminal replay with checked outputs, an editable task, a
 deliberate regression and report interpretation, use the
-[reproducible starter demo](starter-demo.mdx). It uses the same bundled skill.
+[reproducible starter demo](/skills/skillevaluator/starter-demo). It uses the same bundled skill.
 
 ## Get the example
 
@@ -54,7 +54,7 @@ This checks static quality across correctness, discoverability, reliability,
 and efficiency. It does not run the security scanners or measure an agent's
 performance. The report's publication status remains `INCOMPLETE` because a
 quality score alone does not supply all required evaluation evidence. See
-[Reports & Results](reports.mdx) for the full output contract.
+[Reports & Results](/skills/skillevaluator/reports) for the full output contract.
 
 ## Use NVIDIA Build
 
@@ -96,7 +96,7 @@ reports/first-build/skillevaluator-rubric.json
 
 Scores can vary between model calls. This evaluates the skill's instructions;
 it does not run an agent with the skill. For model overrides or another
-provider, see [Providers & Credentials](configuration.mdx).
+provider, see [Providers & Credentials](/skills/skillevaluator/configuration).
 
 ## Where to go next
 
@@ -114,7 +114,7 @@ uv run --python 3.13 skillevaluator quality-check ./my-skill \
 
 Full static Tier 1 coverage needs the separate
 Semgrep, SkillSpector, and Gitleaks executables. Follow
-[scanner setup](installation.mdx#system-tools), then run:
+[scanner setup](/skills/skillevaluator/installation#system-tools), then run:
 
 ```bash title="Run the static Tier 1 suite"
 uv run --python 3.13 skillevaluator tier1 ./my-skill --no-llm
@@ -122,18 +122,18 @@ uv run --python 3.13 skillevaluator tier1 ./my-skill --no-llm
 
 `--no-llm` disables model-backed stages; it does not remove scanner
 requirements. Missing required scanner evidence leaves validation `INCOMPLETE`
-and exits nonzero. See [Tier 1: Validation](tier1-validation.mdx) for the
+and exits nonzero. See [Tier 1: Validation](/skills/skillevaluator/tier1-validation) for the
 checks and exit codes.
 
 ### Add deduplication or live evaluation
 
 | Your goal | Additional setup | Guide |
 | --- | --- | --- |
-| Find repeated or overlapping guidance | The `tier2` extra, embeddings, and chat for intra-skill analysis | [Tier 2: Deduplication](tier2-deduplication.mdx) |
-| Measure whether a skill improves an agent | The `tier3` extra, evaluator and agent credentials, a supported agent, and Docker for the default sandbox | [Tier 3: Live Evaluation](tier3-live-evaluation.mdx) |
-| Run the combined pipeline or gate CI | The extras, credentials, scanners, and runtime for the selected tiers | [CLI Reference](cli-reference.mdx#validate) and [Gate Your CI](ci-integration.mdx) |
+| Find repeated or overlapping guidance | The `tier2` extra, embeddings, and chat for intra-skill analysis | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) |
+| Measure whether a skill improves an agent | The `tier3` extra, evaluator and agent credentials, a supported agent, and Docker for the default sandbox | [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) |
+| Run the combined pipeline or gate CI | The extras, credentials, scanners, and runtime for the selected tiers | [CLI Reference](/skills/skillevaluator/cli-reference#validate) and [Gate Your CI](/skills/skillevaluator/ci-integration) |
 
-The [live evaluation guide](tier3-live-evaluation.mdx#before-you-start) covers
+The [live evaluation guide](/skills/skillevaluator/tier3-live-evaluation#before-you-start) covers
 runtime readiness and the first with-skill and without-skill comparison.
-[Installation](installation.mdx#choosing-extras) explains how to add each extra
+[Installation](/skills/skillevaluator/installation#choosing-extras) explains how to add each extra
 to your checkout commands with `uv run --python 3.13 --extra EXTRA`.

@@ -181,6 +181,63 @@ def test_failed_native_skill_call_is_not_activation(grader) -> None:
     assert scorer.check_routing(calls, "demo-skill", skill_tool_names=[])["score"] == 0.0
 
 
+@pytest.mark.parametrize(
+    "content",
+    [
+        'Skill "demo-skill" not found. Available skills: other',
+        "Skill not found",
+        "Error: Skill demo-skill is unavailable",
+        "Skill 'demo-skill' not available",
+        "Unknown skill: demo-skill",
+        "Unable to load skill demo-skill",
+    ],
+)
+@pytest.mark.parametrize("name", ["Skill", "skill"])
+@pytest.mark.parametrize("error_metadata", [None, False])
+def test_failed_skill_lookup_is_not_activation(grader, content, name, error_metadata) -> None:
+    extractor, scorer = grader
+    trajectory = _claude_tool_result(name=name, arguments={"name": "demo-skill"}, is_error=False, content=content)
+    for step in trajectory["steps"]:
+        for result in (step.get("observation") or {}).get("results", []):
+            if error_metadata is None:
+                result.pop("extra", None)
+            else:
+                result["extra"] = {"tool_result_is_error": error_metadata}
+    calls = extractor.extract_tool_calls_as_dicts(trajectory)
+    names = extractor.get_skill_tool_calls(trajectory)
+    assert names == []
+    assert calls[0]["is_error"] is True
+    assert scorer.check_activation(calls, "demo-skill", skill_tool_names=names)["score"] == 0.0
+    assert scorer.check_routing(calls, "demo-skill", skill_tool_names=names)["score"] == 0.0
+
+
+@pytest.mark.parametrize("content", ["", "Launching skill: demo-skill", "# Demo skill\nSkill not found: retry it."])
+def test_successful_or_unobserved_skill_lookup_is_preserved(grader, content) -> None:
+    extractor, scorer = grader
+    trajectory = _claude_tool_result(name="Skill", arguments={"skill": "demo-skill"}, is_error=False, content=content)
+    names = extractor.get_skill_tool_calls(trajectory)
+    assert names == ["demo-skill"]
+    calls = extractor.extract_tool_calls_as_dicts(trajectory)
+    assert scorer.check_activation(calls, "demo-skill", skill_tool_names=names)["score"] == 1.0
+
+
+@pytest.mark.parametrize("source_call_id", [None, "unrelated-call"])
+def test_unrelated_lookup_failure_does_not_reject_successful_skill_call(grader, source_call_id) -> None:
+    extractor, scorer = grader
+    trajectory = _claude_tool_result(
+        name="Skill", arguments={"skill": "demo-skill"}, is_error=False, content="Launching skill: demo-skill"
+    )
+    for step in trajectory["steps"]:
+        results = (step.get("observation") or {}).get("results")
+        if results:
+            results.insert(0, {"source_call_id": source_call_id, "content": "Skill not found\n"})
+    calls = extractor.extract_tool_calls_as_dicts(trajectory)
+    names = extractor.get_skill_tool_calls(trajectory)
+    assert names == ["demo-skill"]
+    assert calls[0].get("is_error") is not True
+    assert scorer.check_activation(calls, "demo-skill", skill_tool_names=names)["score"] == 1.0
+
+
 def test_opencode_failed_read_is_marked_as_error(grader) -> None:
     from skillevaluator.tier3.eval_core.log_converters import synthetic_trajectory_from_opencode_json
 

@@ -136,6 +136,7 @@ def _trial_coverage_truncated(marker: dict[str, Any]) -> bool:
         "raw_reward_fields",
         "raw_metric_values",
         "unpaired_case_ids",
+        "declarative_check_rows",
         "comparison_payloads",
         "evidence_entries",
         "evaluator_cards",

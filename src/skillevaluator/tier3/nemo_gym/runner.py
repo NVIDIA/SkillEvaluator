@@ -437,6 +437,60 @@ def _signals_raise_keyboard_interrupt() -> Any:
             signal.signal(getattr(signal, name), handler)
 
 
+def _gym_run_processes(token: str, leader_group: int) -> list[int]:
+    try:
+        snapshot = subprocess.run(
+            ["ps", "axeww", "-o", "pid=,pgid=,stat=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GymCleanupError("Cannot inspect NeMo Gym's detached processes; check host process access.") from exc
+    marker = re.compile(r"(?:^|\s)SKILL_EVAL_NEMO_GYM_RUN_TOKEN=" + re.escape(token) + r"(?:\s|$)")
+    owned = []
+    for line in snapshot.stdout.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) != 4 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if int(fields[1]) != leader_group and not fields[2].startswith("Z") and marker.search(fields[3]):
+            owned.append(int(fields[0]))
+    return owned
+
+
+def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool = False) -> None:
+    from skillevaluator.tier3.harbor.runner import _HARBOR_RUN_CANCEL_POLL_SECONDS, _HARBOR_RUN_REAP_SECONDS
+
+    def signal_owned(sig: int) -> list[int]:
+        owned = _gym_run_processes(token, leader_group)
+        for pid in owned:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, sig)
+        return owned
+
+    try:
+        for sig, budget in (
+            (signal.SIGKILL if force else signal.SIGTERM, _GYM_SHUTDOWN_GRACE_SECONDS if not force else 0),
+            (signal.SIGKILL, _HARBOR_RUN_REAP_SECONDS),
+        ):
+            deadline = time.monotonic() + budget
+            while signal_owned(sig):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            else:
+                return
+        if _gym_run_processes(token, leader_group):
+            raise GymCleanupError(
+                "NeMo Gym's detached servers could not be stopped; stop this run's servers before retrying."
+            )
+    except KeyboardInterrupt:
+        signal_owned(signal.SIGKILL)
+        raise
+
+
 def _run_gym(
     command: list[str],
     *,
@@ -465,11 +519,13 @@ def _run_gym(
     )
     from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
 
+    run_token = os.urandom(16).hex()
+    force_detached_cleanup = False
     try:
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=env,
+            env={**env, "SKILL_EVAL_NEMO_GYM_RUN_TOKEN": run_token},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -529,6 +585,7 @@ def _run_gym(
             ) from cause
 
     def _stop() -> None:
+        nonlocal force_detached_cleanup
         # A second interrupt anywhere in here still SIGKILLs the group before it propagates.
         try:
             if reporter is not None:
@@ -555,6 +612,7 @@ def _run_gym(
             except (OSError, RuntimeError) as exc:
                 _confirm_stopped(exc)
         except KeyboardInterrupt:
+            force_detached_cleanup = True
             _kill_group()
             process.wait()
             raise
@@ -578,7 +636,10 @@ def _run_gym(
                     raise interrupt from stop_error
                 raise
     finally:
-        reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
+        try:
+            _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+        finally:
+            reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 
 
 def _redacted_row(row: dict[str, Any], secrets: set[str]) -> dict[str, Any]:

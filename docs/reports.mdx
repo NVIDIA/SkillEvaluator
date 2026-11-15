@@ -1531,6 +1531,11 @@ payload still keeps the scores: `summary.overall_score` is set, and the `tier3`
 object records the verdict those scores give, such as `pass` or `fail`. The
 HTML reports still show the run's verdict as `fail`.
 
+A failed run whose budget left planned attempts not run is the exception: its
+`tier3` object records `incomplete`, and the HTML reports label its verdict
+**Incomplete**, as does the command status of the standalone Tier 3
+`report.html`.
+
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
 in each arm. `tier3-benchmark.md` shows lift only when the baseline arm also

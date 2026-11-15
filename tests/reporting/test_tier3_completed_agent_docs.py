@@ -20,6 +20,7 @@ from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 from skillevaluator.reporting.html import ADVISORY_FAIL_WORD, VERDICT_WORDS
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.run_budget import BudgetController
 
 REPO = Path(__file__).resolve().parents[2]
 HEADING = "### Completed agents in an incomplete run"
@@ -473,15 +474,17 @@ def test_changelog_documents_the_failed_run_verdict_label() -> None:
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
     assert "keeps `neutral` for a failed run" not in entry
     assert (
-        "The HTML reports and the full Tier 3 payload they embed show a failed run's verdict as `fail`. The "
-        f"standalone Tier 3 `report.html` and the report of a `validate --block-on-agent-eval` run label it "
-        f"{VERDICT_WORDS['fail']};"
+        "The HTML reports show a failed run's verdict as `fail`, labelled "
+        f"{VERDICT_WORDS['fail']} in the standalone Tier 3 `report.html` and in a `validate --block-on-agent-eval` "
+        f"report, and {ADVISORY_FAIL_WORD} in a default `validate --tier3` report."
     ) in entry
     assert (
-        "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` when the run's collected results "
-        "record the failure, for example when one of several agents fails."
+        "The `tier3` object of a `validate --tier3` JSON report can still record `neutral` or the verdict the "
+        "agents' scores give."
     ) in entry
-    assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in entry
+    # The entry gives the rule and leaves each case to Reports & Results.
+    assert entry.endswith("Reports & Results has the details.")
+    assert "Harbor job" not in entry
 
 
 def _validate_tier3_reports(
@@ -548,7 +551,8 @@ def test_failed_run_label_follows_the_tier3_gate(
         "and its command status follows the required tiers, so it reads Passed required checks when they pass."
     ) in _section()
     assert (
-        f"the report of a default `validate --tier3` run, where Tier 3 is advisory, labels it {ADVISORY_FAIL_WORD}."
+        f"labelled {VERDICT_WORDS['fail']} in the standalone Tier 3 `report.html` and in a "
+        f"`validate --block-on-agent-eval` report, and {ADVISORY_FAIL_WORD} in a default `validate --tier3` report."
     ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
 
 
@@ -564,12 +568,10 @@ def test_blocking_run_without_a_tier3_source_records_fail_in_both_reports(
     assert report_tier3["summary"]["verdict"] == "fail"
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
+    # The entry says the JSON object can still record neutral, not that it always does.
     entry = _changelog_entry(FAILED_RUN_ENTRY)[2]
     assert "Only a `validate --block-on-agent-eval` run" not in entry
-    assert (
-        "A `validate --block-on-agent-eval` run without a valid Tier 3 source, which fails before any agent runs, "
-        "records `fail` there too."
-    ) in entry
+    assert "can still record `neutral`" in entry
 
 
 @pytest.mark.parametrize("blocking", [False, True])
@@ -603,9 +605,8 @@ def test_backend_failure_after_scoring_keeps_the_scored_verdict_in_the_json_repo
     assert f"Tier 3 quality: {VERDICT_WORDS['fail'] if blocking else ADVISORY_FAIL_WORD}" in _plain(raw)
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(standalone)
     assert (
-        "When the execution backend reports a failure after the agents scored, for example a Harbor job that exits "
-        "with an error after its trials, the `tier3` object keeps the verdict those scores give, such as `pass` or "
-        "`fail`."
+        "The `tier3` object of a `validate --tier3` JSON report can still record `neutral` or the verdict the "
+        "agents' scores give."
     ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
     assert (
         "An execution backend error reported after every agent scored, for example a Harbor job that exits with an "
@@ -614,3 +615,70 @@ def test_backend_failure_after_scoring_keeps_the_scored_verdict_in_the_json_repo
         "the verdict those scores give, such as `pass` or `fail`. The HTML reports still show the run's verdict as "
         "`fail`."
     ) in _section()
+
+
+def _budget_left_attempts_not_run() -> dict:
+    """Return budget metadata whose token cap stopped the run after its first attempt."""
+    budget = BudgetController(max_agent_tokens=10, planned=4)
+    budget.admit(agent="opencode", arm="with", case_id="case-a", attempt=1)
+    budget.record_usage({"total_tokens": 20, "judge_calls": 1})
+    budget.admit(agent="opencode", arm="with", case_id="case-a", attempt=2)
+    metadata = budget.metadata()
+    assert metadata["not_run"]
+    return metadata
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize("failure", ["failed peer", "backend error"])
+def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, failure: str
+) -> None:
+    # A failed run whose budget also left planned attempts not run is incomplete,
+    # not fail, in the JSON report and in the HTML labels.
+    budget = _budget_left_attempts_not_run()
+    if failure == "failed peer":
+        failed_peer = {"execution_status": "failed", "execution_errors": ["Agent setup failed"]}
+        payload = build_agent_eval_payload(
+            "demo",
+            {"opencode": _agent(0.8), "codex": {**failed_peer, "with_skill": {}, "without_skill": {}}},
+            dataset=[{"id": "case-a"}],
+            attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+            run_config={"budget": budget},
+            use_llm_judge=False,
+        )
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = payload
+        result.add_error("Agent setup failed")
+    else:
+        run_dir = tmp_path / "results" / "20260709_120005"
+        _write_summary(run_dir, score=1.0)
+        (tmp_path / "engine" / "demo").mkdir(parents=True)
+        engine = {"execution_status": "failed", "execution_errors": ["Harbor job exited 1"], "budget": budget}
+        loaded = agent_eval_result_from_directory(
+            tmp_path / "engine" / "demo", run_dir, engine_result=engine, use_llm_judge=False
+        )
+        assert loaded is not None
+        result = loaded
+    assert result.metadata["agent_eval"]["execution_status"] == "failed"
+    standalone = HTMLReporter(report_scope="tier3").render(result)
+
+    exit_code, report_tier3, raw = _validate_tier3_reports(monkeypatch, tmp_path, blocking=blocking, tier3=result)
+
+    assert exit_code == (1 if blocking else 0)
+    assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", "incomplete")
+    for html in (standalone, raw):
+        text = _plain(html)
+        assert f"Tier 3 quality: {VERDICT_WORDS['incomplete']}" in text
+        assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" not in text
+        assert f"Tier 3 quality: {ADVISORY_FAIL_WORD}" not in text
+    # Only the standalone report's command status follows the verdict.
+    assert _hero_command_status(standalone) == VERDICT_WORDS["incomplete"]
+    assert _hero_command_status(raw) == (VERDICT_WORDS["fail"] if blocking else "Passed required checks")
+    assert (
+        "A failed run whose budget left planned attempts not run is the exception: its `tier3` object records "
+        f"`incomplete`, and the HTML reports label its verdict {VERDICT_WORDS['incomplete']}, as does the command "
+        "status of the standalone Tier 3 `report.html`."
+    ) in _section()
+    assert (
+        f"A failed run whose budget left planned attempts not run reads {VERDICT_WORDS['incomplete']} instead."
+    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]

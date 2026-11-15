@@ -134,6 +134,22 @@ def test_missing_credential_does_not_fall_back_to_openrouter(monkeypatch):
     assert "NVIDIA_API_KEY" in _validate_agent_provider_credentials(_provider(), ["hermes"], {})[0]
 
 
+@pytest.mark.parametrize("model", ["nvidia/nemotron-3.5-super-vl-120b-a12b", "moonshotai/kimi-k2.6"])
+def test_harbor_preflight_accepts_only_selected_build_credential(monkeypatch, model):
+    from harbor.agents.factory import AgentFactory
+
+    for name in ("OPENAI_API_KEY", "OPENROUTER_API_KEY", "NVIDIA_API_KEY"):
+        monkeypatch.delenv(name, raising=False)
+    config = HarborAgentConfig(import_path=DOCKER_AGENT_IMPORT_PATHS["hermes"], model_name=model)
+    monkeypatch.setenv("NVIDIA_API_KEY", "selected-build-key")
+    AgentFactory.run_preflight(config)
+    monkeypatch.delenv("NVIDIA_API_KEY")
+    monkeypatch.setenv("OPENAI_API_KEY", "unrelated-openai-key")
+    monkeypatch.setenv("OPENROUTER_API_KEY", "unrelated-openrouter-key")
+    with pytest.raises(ValueError, match="NVIDIA_API_KEY"):
+        AgentFactory.run_preflight(config)
+
+
 def test_model_precedence_and_credential_isolation(monkeypatch):
     monkeypatch.setenv("OPENROUTER_API_KEY", "unrelated-key")
     monkeypatch.setenv("OPENAI_API_KEY", "another-key")

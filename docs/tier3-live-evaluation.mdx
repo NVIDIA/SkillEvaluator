@@ -717,6 +717,13 @@ Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs 
 input-file handling still need independent qualification. Codex, Claude Code and
 OpenCode mappings remain experimental and do not establish end-to-end agent support.
 
+The Claude Code mapping uses the same pinned runtime version as Harbor, installed
+by Gym inside the sandbox. It enables native discovery and projects staged skills
+into the task workdir's `.claude/skills/` directory because Gym uses a private
+Claude configuration directory. The baseline uses the same discovery settings
+without the target skill. Gym's required Anthropic credential field receives only
+a placeholder; policy credentials remain in the model-server environment.
+
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
@@ -990,6 +997,37 @@ logical units of work. Already admitted work can take measured usage above a
 cap, including on the final unit. These are admission boundaries, so a priced
 cost budget does not guarantee a hard dollar cap.
 
+Concurrent admission reserves each in-flight attempt using the largest measured
+per-attempt usage seen so far in this run, separately for agent tokens, judge
+calls, and priced cost. Estimates come only from real telemetry. When a bounded
+dimension has no measurement yet, only one logical calibration unit (such as a
+with-skill/baseline pair) may be in flight across the run. Other workers wait
+until every admitted attempt in that unit finishes, even if its first attempt
+already provided a measurement. If bounded usage is unmeasured, admission stops
+under the existing unknown-usage rule.
+For each bounded dimension with an estimate, admission checks
+`used + (in-flight attempts + proposed attempts) × estimate` against the cap.
+If that projection exceeds a cap while work is in flight, the worker waits for
+completion and re-checks fresh usage; waiting alone does not mark attempts
+`not_run`. If the projection still exceeds a cap with nothing in flight, the
+unit is denied, even when measured usage is below the cap. Its members retain
+`reason: budget_exhausted` and add `basis: estimate`; `budget.exhausted_basis`
+also identifies estimate-based exhaustion. The budget summary shows measured
+usage and the estimated next unit, rather than implying usage reached the cap.
+Attempt-count limits and stopping on unknown bounded usage are unchanged.
+
+Reservation reduces but does not eliminate in-flight overshoot. Estimates can
+grow, an attempt can exceed its estimate, and the calibration unit is
+unestimated. A run can also stop below its cap because of an estimate. Caps
+remain admission boundaries, not hard ceilings; there is no
+hard currency ceiling. `budget.reservation` records the
+`largest_measured_attempt` policy, `estimate_per_attempt` (or `not measured`),
+`in_flight_attempts`, `waits` (all condition waits), `calibration_waits` (the
+calibration subset), and `unestimated_admissions` (attempts admitted with at
+least one bounded usage dimension still unmeasured). `estimate_denials` counts
+logical units refused after estimate-based exhaustion; `denied_unit_size`
+records the size of the unit that first caused that exhaustion.
+
 `budget.status` and `exhausted_limit` describe admission decisions;
 `budget.partial` records attempts left not run. Separately,
 `budget.observed_overruns` maps each exceeded limit to its measured `used`,
@@ -999,6 +1037,20 @@ remains within it. Summaries derive these facts from usage and limits,
 including for older saved runs. Missing or partially measured bounded usage
 is reported as unverified, and unconfigured limits are not checked. An observed
 overrun alone does not change scores, execution success, or partial-run status.
+
+After execution, `run_config.json`, `result.json.run_config.budget`, and
+`result.json.budget` contain the same final accounting. Reports also prefer
+the top-level result budget when rebuilding older runs with stale run configs.
+Terminal, HTML, and benchmark reports show the shared budget summary, including
+exhaustion, not-run attempts, measured overruns, and unverified bounded usage.
+
+When `budget.not_run` is non-empty, the run-level summary verdict is
+`incomplete`: the budget left planned work unexecuted, not evaluated failures.
+Admitted attempts keep their per-case and per-agent scores. Any displayed
+Skill Lift covers admitted attempts only; it is not a complete-run verdict
+that the skill helps. An overrun without not-run attempts retains its verdict.
+Budget reporting does not change admission, scoring, execution status, or
+command exit codes.
 
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is

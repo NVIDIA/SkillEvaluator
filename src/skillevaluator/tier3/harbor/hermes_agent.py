@@ -8,14 +8,17 @@ from __future__ import annotations
 import json
 import os
 import shlex
-from typing import TYPE_CHECKING
+from collections.abc import Mapping
+from typing import TYPE_CHECKING, Any
 
+from harbor.agents.agent_auth_resolution import require_credential_env
 from harbor.agents.installed.base import with_prompt_template
 from harbor.agents.installed.hermes import Hermes
 
 from skillevaluator.tier3.harbor import HERMES_VERSION
 
 if TYPE_CHECKING:
+    from harbor.agents.agent_auth_resolution import ResolvedModelConnection
     from harbor.environments.base import BaseEnvironment
     from harbor.models.agent.context import AgentContext
     from harbor.models.trajectories import Trajectory
@@ -26,6 +29,19 @@ _HOME = "/tmp/hermes"
 
 class SkillEvaluatorHermes(Hermes):
     """Keep Harbor's session/ATIF contract without its OpenRouter fallback."""
+
+    @classmethod
+    def check_model_credentials(
+        cls,
+        connection: ResolvedModelConnection,
+        *,
+        kwargs: dict[str, Any],
+        env: Mapping[str, str],
+        explicit_env: Mapping[str, str] | None = None,
+    ) -> None:
+        """Validate the credential consumed by our fixed NVIDIA Build runtime."""
+        del connection, kwargs, explicit_env
+        require_credential_env(env, cls.name(), "NVIDIA_API_KEY")
 
     def get_version_command(self) -> str:
         return 'export PATH="$HOME/.local/bin:/usr/local/bin:$PATH"; hermes --version'

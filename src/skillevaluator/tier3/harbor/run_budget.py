@@ -17,6 +17,10 @@ class BudgetConfigurationError(ValueError):
     """Raised when a run budget or price file is invalid."""
 
 
+class BudgetCancelledError(BaseException):
+    """A cancelled run cannot admit more work."""
+
+
 @dataclass(frozen=True)
 class Price:
     input_per_mtok: float
@@ -111,8 +115,19 @@ class BudgetController:
     unmeasured_judge_attempts: int = 0
     unmeasured_cost_attempts: int = 0
     _lock: threading.Lock = field(default_factory=threading.Lock, repr=False)
+    _condition: threading.Condition = field(init=False, repr=False)
+    _in_flight: dict[tuple[Any, ...], None] = field(default_factory=dict, repr=False)
+    _estimates: dict[str, int | float] = field(default_factory=dict, repr=False)
+    _waits: int = 0
+    _unestimated_admissions: int = 0
+    _calibration: set[tuple[Any, ...]] = field(default_factory=set, repr=False)
+    _calibration_waits: int = 0
+    _estimate_denials: int = 0
+    _denied_unit_size: int = 0
+    _cancelled: bool = False
 
     def __post_init__(self) -> None:
+        self._condition = threading.Condition(self._lock)
         for name in ("max_agent_tokens", "max_judge_calls", "max_attempts_total"):
             value = getattr(self, name)
             if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
@@ -127,87 +142,115 @@ class BudgetController:
         return self.admit_many([{"agent": agent, "arm": arm, "case_id": case_id, "attempt": attempt}])
 
     def admit_many(self, attempts: list[dict[str, Any]]) -> bool:
-        """Atomically admit a logical unit, or record every member as not run."""
+        """Reserve a logical unit, waiting for measured in-flight work when necessary."""
         if not attempts:
             return True
-        with self._lock:
-            if self.exhausted_limit is not None:
-                self.not_run.extend(
-                    self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
+        keys = [self._attempt_key(item) for item in attempts]
+        with self._condition:
+            while True:
+                if self._cancelled:
+                    raise BudgetCancelledError("Run budget admission cancelled")
+                if len(set(keys)) != len(keys) or any(key in self._in_flight for key in keys):
+                    raise ValueError("Attempt is already reserved")
+                self.exhausted_limit = self._admission_limit(len(attempts))
+                if self.exhausted_limit is not None:
+                    return self._deny(attempts)
+                bounded = (
+                    ("agent_tokens", self.max_agent_tokens, self.used_agent_tokens),
+                    ("judge_calls", self.max_judge_calls, self.used_judge_calls),
+                    ("cost_usd", self.max_cost_usd, self.used_cost_usd),
                 )
-                return False
-            if self.max_attempts_total is not None and self._started + len(attempts) > self.max_attempts_total:
-                self.exhausted_limit = "attempts"
-                self.not_run.extend(
-                    self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
+                unestimated = any(cap is not None and dimension not in self._estimates for dimension, cap, _ in bounded)
+                if self._calibration or (unestimated and self._in_flight):
+                    self._waits += 1
+                    self._calibration_waits += 1
+                    self._condition.wait()
+                    continue
+                projected_limit = next(
+                    (
+                        dimension
+                        for dimension, cap, used in bounded
+                        if (
+                            cap is not None
+                            and (estimate := self._estimates.get(dimension)) is not None
+                            and (used or 0) + (len(self._in_flight) + len(attempts)) * estimate > cap
+                        )
+                    ),
+                    None,
                 )
-                return False
-            if self.max_agent_tokens == 0:
-                self.exhausted_limit = "agent_tokens"
-            elif self.max_judge_calls == 0:
-                self.exhausted_limit = "judge_calls"
-            elif self.max_cost_usd == 0:
-                self.exhausted_limit = "cost"
-            if self.exhausted_limit is not None:
-                self.not_run.extend(
-                    self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
-                )
-                return False
-            if self._finished and self.max_agent_tokens is not None and self.unmeasured_agent_attempts:
-                self.exhausted_limit = "agent_tokens"
-            elif self._finished and self.max_judge_calls is not None and self.unmeasured_judge_attempts:
-                self.exhausted_limit = "judge_calls"
-            elif self._finished and self.max_cost_usd is not None and self.unmeasured_cost_attempts:
-                self.exhausted_limit = "cost"
-            if self.exhausted_limit is not None:
-                self.not_run.extend(
-                    self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
-                )
-                return False
-            if (
-                self.max_agent_tokens is not None
-                and self.used_agent_tokens is not None
-                and self.used_agent_tokens >= self.max_agent_tokens
-            ):
-                self.exhausted_limit = "agent_tokens"
-            elif (
-                self.max_judge_calls is not None
-                and self.used_judge_calls is not None
-                and self.used_judge_calls >= self.max_judge_calls
-            ):
-                self.exhausted_limit = "judge_calls"
-            elif (
-                self.max_cost_usd is not None
-                and self.used_cost_usd is not None
-                and self.used_cost_usd >= self.max_cost_usd
-            ):
-                self.exhausted_limit = "cost"
-            if self.exhausted_limit is not None:
-                self.not_run.extend(
-                    self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]) for item in attempts
-                )
-                return False
-            self._started += len(attempts)
-            return True
+                if projected_limit is not None:
+                    if self._in_flight:
+                        self._waits += 1
+                        self._condition.wait()
+                        continue
+                    self.exhausted_limit = "cost" if projected_limit == "cost_usd" else projected_limit
+                    self._denied_unit_size = len(attempts)
+                    return self._deny(attempts)
+                if unestimated:
+                    self._unestimated_admissions += len(attempts)
+                    self._calibration.update(keys)
+                self._in_flight.update(dict.fromkeys(keys))
+                self._started += len(attempts)
+                return True
 
-    def record_usage(self, usage: dict[str, Any] | None, *, model: str | None = None) -> None:
-        with self._lock:
+    def _deny(self, attempts: list[dict[str, Any]]) -> bool:
+        basis = {"basis": "estimate"} if self._denied_unit_size else {}
+        if basis:
+            self._estimate_denials += 1
+        self.not_run.extend(
+            dict(self._not_run(item["agent"], item["arm"], item["case_id"], item["attempt"]), **basis)
+            for item in attempts
+        )
+        return False
+
+    def _admission_limit(self, unit_size: int) -> str | None:
+        if self.exhausted_limit is not None:
+            return self.exhausted_limit
+        if self.max_attempts_total is not None and self._started + unit_size > self.max_attempts_total:
+            return "attempts"
+        if self._calibration:
+            return None
+        dimensions = (
+            ("agent_tokens", self.max_agent_tokens, self.used_agent_tokens, self.unmeasured_agent_attempts),
+            ("judge_calls", self.max_judge_calls, self.used_judge_calls, self.unmeasured_judge_attempts),
+            ("cost", self.max_cost_usd, self.used_cost_usd, self.unmeasured_cost_attempts),
+        )
+        for check in (
+            lambda cap, _used, _unmeasured: cap == 0,
+            lambda _cap, _used, unmeasured: self._finished and unmeasured,
+            lambda cap, used, _unmeasured: used is not None and used >= cap,
+        ):
+            for dimension, cap, used, unmeasured in dimensions:
+                if cap is not None and check(cap, used, unmeasured):
+                    return dimension
+        return None
+
+    @staticmethod
+    def _attempt_key(attempt: dict[str, Any]) -> tuple[Any, ...]:
+        return tuple(attempt[key] for key in ("agent", "arm", "case_id", "attempt"))
+
+    def cancel(self) -> None:
+        with self._condition:
+            self._cancelled = True
+            self._condition.notify_all()
+
+    def release(self, attempt: dict[str, Any]) -> None:
+        """Finish an otherwise unrecorded reservation with unknown usage, at most once."""
+        self.record_usage(None, attempt=attempt)
+
+    def record_usage(
+        self, usage: dict[str, Any] | None, *, model: str | None = None, attempt: dict[str, Any] | None = None
+    ) -> None:
+        with self._condition:
+            key = self._attempt_key(attempt) if attempt is not None else next(iter(self._in_flight), None)
+            if attempt is not None and key not in self._in_flight:
+                return
             input_tokens = _usage_number(usage, "input_tokens", "prompt_tokens", "total_prompt_tokens")
             output_tokens = _usage_number(usage, "output_tokens", "completion_tokens", "total_completion_tokens")
             tokens = _usage_number(usage, "total_tokens")
             if tokens is None and input_tokens is not None and output_tokens is not None:
                 tokens = input_tokens + output_tokens
-            if tokens is None:
-                self.unmeasured_agent_attempts += 1
-            else:
-                self.used_agent_tokens = (self.used_agent_tokens or 0) + int(tokens)
-                self._agent_usage_seen = True
             judge_calls = _usage_number(usage, "judge_calls", "llm_call_count")
-            if judge_calls is None:
-                self.unmeasured_judge_attempts += 1
-            else:
-                self.used_judge_calls = (self.used_judge_calls or 0) + int(judge_calls)
-                self._judge_usage_seen = True
             cost = None
             if self.price_book is not None and model and input_tokens is not None and output_tokens is not None:
                 price = self.price_book.price_for(model)
@@ -224,12 +267,29 @@ class BudgetController:
                 ) / 1_000_000
             if cost is None:
                 cost = _usage_number(usage, "cost_usd", "total_cost_usd")
+            if tokens is None:
+                self.unmeasured_agent_attempts += 1
+            else:
+                self.used_agent_tokens = (self.used_agent_tokens or 0) + int(tokens)
+                self._agent_usage_seen = True
+            if judge_calls is None:
+                self.unmeasured_judge_attempts += 1
+            else:
+                self.used_judge_calls = (self.used_judge_calls or 0) + int(judge_calls)
+                self._judge_usage_seen = True
             if cost is None:
                 self.unmeasured_cost_attempts += 1
             else:
                 self.used_cost_usd = (self.used_cost_usd or 0.0) + float(cost)
                 self._cost_usage_seen = True
+            for dimension, value in (("agent_tokens", tokens), ("judge_calls", judge_calls), ("cost_usd", cost)):
+                if value is not None:
+                    self._estimates[dimension] = max(self._estimates.get(dimension, 0), value)
+            if key is not None:
+                self._in_flight.pop(key)
+                self._calibration.discard(key)
             self._finished += 1
+            self._condition.notify_all()
 
     def mark_remaining(self, attempts: list[dict[str, Any]]) -> None:
         with self._lock:
@@ -261,8 +321,22 @@ class BudgetController:
                 "status": "exhausted" if self.exhausted_limit else "ok",
                 "partial": bool(self.not_run),
                 "exhausted_limit": self.exhausted_limit,
+                "exhausted_basis": "estimate" if self._denied_unit_size else None,
                 "attempts_not_run": len(self.not_run),
                 "not_run": list(self.not_run),
+                "reservation": {
+                    "policy": "largest_measured_attempt",
+                    "estimate_per_attempt": {
+                        dimension: self._estimates.get(dimension, "not measured")
+                        for dimension in ("agent_tokens", "judge_calls", "cost_usd")
+                    },
+                    "in_flight_attempts": len(self._in_flight),
+                    "waits": self._waits,
+                    "unestimated_admissions": self._unestimated_admissions,
+                    "calibration_waits": self._calibration_waits,
+                    "estimate_denials": self._estimate_denials,
+                    "denied_unit_size": self._denied_unit_size,
+                },
             }
             metadata["observed_overruns"] = _budget_observations(metadata)[0]
             return metadata
@@ -337,6 +411,16 @@ def _budget_number(value: Any, *, cost: bool = False, missing: str = "not measur
     return f"{number:,}"
 
 
+def budget_incomplete_reason(metadata: object) -> str | None:
+    if not isinstance(metadata, dict) or not isinstance(metadata.get("not_run"), list) or not metadata["not_run"]:
+        return None
+    return (
+        f"run budget left {len(metadata['not_run'])} of "
+        f"{_budget_number(metadata.get('planned_attempts'), missing='unknown')} planned attempts not run; "
+        "scores and Skill Lift cover only admitted attempts"
+    )
+
+
 def budget_line(metadata: dict[str, Any]) -> str:
     # Recompute from usage and limits: cached observations may be absent or stale.
     overruns, incomplete, configured = _budget_observations(metadata)
@@ -360,7 +444,24 @@ def budget_line(metadata: dict[str, Any]) -> str:
         value = metadata.get("started_attempts") if key == "attempts" else used.get(key)
         shown = _budget_number(value, cost=key == "cost_usd")
         cap = _budget_number(limits.get(limit_key), cost=key == "cost_usd", missing="not configured")
-        line = f"Budget exhausted ({label} {shown} of {cap})"
+        estimate_detail = ""
+        if metadata.get("exhausted_basis") == "estimate":
+            reservation = metadata.get("reservation")
+            reservation = reservation if isinstance(reservation, dict) else {}
+            estimates = reservation.get("estimate_per_attempt")
+            estimates = estimates if isinstance(estimates, dict) else {}
+            estimate = _measured_number(estimates.get(key))
+            size = _measured_number(reservation.get("denied_unit_size"))
+            if estimate is not None and size is not None and size > 0:
+                amount = _budget_number(estimate * size, cost=key == "cost_usd")
+                estimate_detail = (
+                    f"; next attempt estimated {amount}"
+                    if size == 1
+                    else f"; next unit estimated {amount} for {_budget_number(size)} attempts"
+                )
+            else:
+                estimate_detail = "; next unit denied using estimated usage"
+        line = f"Budget exhausted ({label} {shown} of {cap}{estimate_detail})"
     elif observations:
         line = f"Budget overrun observed ({observations})"
     elif incomplete:

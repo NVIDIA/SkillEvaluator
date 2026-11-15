@@ -57,7 +57,7 @@ stops before any check and asks for an explicit `-o`/`--output-dir`.
 
 Ownership is tied to a key stored in your home directory (see
 `SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` in
-[Environment Variables](environment-variables.mdx)). Report folders written
+[Environment Variables](/skills/skillevaluator/environment-variables)). Report folders written
 with another key, for example by another account or by a container whose home
 directory was discarded, count as unowned. Pass `-o` in those setups.
 
@@ -124,6 +124,39 @@ no counters show **retained rows**, which are observations rather than complete
 scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
+
+### Tier 3 declarative-check coverage
+
+Runs with declarative checks include a **Declarative-check coverage** section in
+terminal summaries, HTML reports, and both benchmark Markdown cards. Run
+`result.json` and exported report JSON retain the same structured evidence under
+each agent's `declarative_checks`, separated into `with_skill` and
+`without_skill` arms. Reports without declarative checks add no section.
+
+Each arm shows checked totals (passed and failed), judged requirements, and
+not-checked checks. Evidence entries identify the case, trial, check type,
+expected target, verdict, and reason, including passing checks and checks that
+were not applicable without the skill. Not checked is not a pass or a failure.
+
+The behavior-check denominator for each reward is **checked + judged**;
+not-checked checks are excluded. Reports show both per-reward denominators and
+their sum across an arm. That sum is coverage, not a pooled behavior score:
+existing trial averaging and scoring remain unchanged. A judge error still
+produces no behavior score, even when its recorded denominator is nonzero.
+Missing judgment counts are unavailable rather than assumed to be zero.
+
+Coverage uses the reward artifacts already loaded by reporting, not a new
+evaluation or a fresh judgment. Failed trials without reward evidence do not
+gain invented checks. For retained runs, only available reward evidence can be
+reconstructed; existing report truncation notices still apply.
+
+A very large run can make this evidence exceed the result and report size
+limits. Then `result.json` and the report keep at most 200 check rows per arm,
+failed and not-checked rows first, and leave out the rest. Totals, judged
+counts, and per-reward denominators stay exact. Each trimmed arm records
+`omitted_checks`, the summary says how many rows were left out, and the report
+notes them as `declarative_check_rows` under `report_truncation.omitted`. The
+full rows remain in each trial's `reward.json`.
 
 ### Tier 2 comparison scopes and evidence
 

@@ -1505,6 +1505,39 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
         pytest.fail("child of the Gym leader survived")
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, interrupt: bool) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    script = "import os, signal, time; time.sleep(0.5); "
+    if interrupt:
+        script += "os.kill(os.getppid(), signal.SIGINT); "
+    script += "time.sleep(60)"
+    reporter = _RecordingReporter()
+    with (tmp_path / "gym.log").open("w") as log:
+
+        def run():
+            return _run_gym(
+                [sys.executable, "-c", script],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=1,
+                reporter=reporter,
+            )
+
+        if interrupt:
+            with pytest.raises(KeyboardInterrupt):
+                run()
+        else:
+            assert run() is None
+    cleanup = [event for event in reporter.events if event.stage == "cleanup"]
+    assert [event.state for event in cleanup] == ["running", "complete"]
+    assert cleanup[-1].detail == "NeMo Gym stopped"
+
+
 @pytest.mark.parametrize("exit_early", [False, True])
 def test_gym_cleanup_stops_detached_servers_but_not_other_runs(tmp_path: Path, exit_early: bool) -> None:
     import socket
@@ -1597,7 +1630,8 @@ def test_gym_run_removes_staged_tasks_and_jobs(tmp_path: Path, monkeypatch: pyte
     assert json.loads((run_dir / "run_config.json").read_text())["harbor"]["jobs_retained"] is False
 
 
-def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reachable", [True, False])
+def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reachable: bool) -> None:
     from skillevaluator.tier3 import commands
     from skillevaluator.tier3.nemo_gym import backend
     from skillevaluator.tier3.nemo_gym import runner as gym_runner
@@ -1612,17 +1646,185 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
     monkeypatch.setattr(gym_runner, "_model_endpoint", lambda model: (model or "m", "http://127.0.0.1:9/v1", "k"))
-    rows = commands._nemo_gym_doctor_rows(["codex"], "docker", {})
+    probes = []
+
+    def endpoint_probe(url):
+        probes.append(url)
+        return None if reachable else "check SKILL_EVAL_NEMO_GYM_MODEL_URL"
+
+    monkeypatch.setattr(commands, "_nemo_gym_policy_endpoint_error", endpoint_probe)
+    rows = commands._nemo_gym_doctor_rows(["codex", "opencode"], "docker", {})
     assert rows == [
         ("NeMo Gym CLI", "pass", f"{gym} (nemo-gym 0.7.0)"),
-        ("NeMo Gym backend", "pass", "docker sandbox ready"),
+        ("NeMo Gym backend", "pass", "docker sandbox ready")
+        if reachable
+        else ("NeMo Gym backend", "fail", "codex: check SKILL_EVAL_NEMO_GYM_MODEL_URL"),
     ]
+    assert probes == ["http://127.0.0.1:9/v1"]
 
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(tmp_path / "missing"))
     rows = commands._nemo_gym_doctor_rows(["codex", "goose"], "local", {})
     assert rows[0][:2] == ("NeMo Gym CLI", "fail")
     details = " ".join(detail for _name, status, detail in rows[1:] if status == "fail")
     assert "goose" in details and "docker only" in details
+
+
+@pytest.mark.parametrize("status", [200, 307, 401, 403, 404, 405])
+def test_policy_endpoint_probe_accepts_any_http_response_without_credentials(status: int) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    headers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            headers.append(dict(self.headers))
+            self.send_response(status)
+            self.send_header("Location", "http://127.0.0.1:9/unreachable")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(headers) == 1
+        assert not any(name.lower() in {"authorization", "x-api-key"} for name in headers[0])
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("url", ["", "not-a-url", "http://127.0.0.1:9/v1", "http://user:credential@127.0.0.1:9/v1"])
+def test_policy_endpoint_probe_failure_is_actionable_and_redacted(url: str) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    error = _nemo_gym_policy_endpoint_error(url)
+    assert error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error and "network access" in error
+    assert "credential@" not in error
+
+
+def test_policy_endpoint_probe_has_a_hard_deadline_even_for_stalled_dns(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    def stalled_probe(args, **kwargs):
+        assert kwargs["timeout"] == 3
+        assert kwargs["input"] == "https://example.invalid/v1"
+        assert "https://example.invalid/v1" not in args
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(commands.subprocess, "run", stalled_probe)
+    error = commands._nemo_gym_policy_endpoint_error("https://example.invalid/v1")
+    assert "timed out after 3s" in error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error
+
+
+def test_policy_endpoint_probe_does_not_import_from_checkout(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    marker = tmp_path / "imported"
+    (tmp_path / "http.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    monkeypatch.chdir(tmp_path)
+    _nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1")
+    assert not marker.exists()
+
+
+def test_policy_endpoint_probe_environment_excludes_credentials(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-probe-credential")
+
+    def probe(_args, **kwargs):
+        assert "OPENAI_API_KEY" not in tuple(kwargs.get("env", os.environ))
+        return subprocess.CompletedProcess(_args, 0)
+
+    monkeypatch.setattr(commands.subprocess, "run", probe)
+    assert commands._nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1") is None
+
+
+@pytest.mark.parametrize("proxy_name", ["http_proxy", "HTTP_PROXY"])
+@pytest.mark.parametrize("scheme", ["http://", ""])
+@pytest.mark.parametrize(
+    "endpoint_scheme, status",
+    [("http", 405), ("http", 407), ("http", 502), ("http", 504), ("https", 407), ("https", 502), ("https", 504)],
+)
+def test_policy_endpoint_probe_honors_anonymous_http_proxy(
+    monkeypatch, proxy_name, scheme, endpoint_scheme, status
+) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            requests.append((self.path, tuple(self.headers)))
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+        def do_CONNECT(self):
+            self.do_HEAD()
+
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    proxy_name = proxy_name.replace("http", endpoint_scheme).replace("HTTP", endpoint_scheme.upper())
+    monkeypatch.setenv(proxy_name, f"{scheme}user:password@127.0.0.1:{server.server_port}")
+    try:
+        error = _nemo_gym_policy_endpoint_error(f"{endpoint_scheme}://policy.invalid/v1")
+        expected_path = "http://policy.invalid/v1" if endpoint_scheme == "http" else "policy.invalid:443"
+        assert len(requests) == 1 and requests[0][0] == expected_path
+        assert not {name.lower() for name in requests[0][1]} & {"authorization", "proxy-authorization", "x-api-key"}
+        if status != 405:
+            assert error and "proxy" in error
+            if status == 407:
+                assert "authentication" in error
+            return
+        assert error is None
+        monkeypatch.setenv(proxy_name, "http://127.0.0.1:9")
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(requests) == 2 and requests[1][0] == "/v1"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("status", [502, 504])
+def test_https_policy_endpoint_origin_error_after_proxy_tunnel_is_reachable(monkeypatch, status) -> None:
+    import io
+    import urllib.error
+    import urllib.request
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3 import commands
+
+    def origin_response(request, **_kwargs):
+        raise urllib.error.HTTPError(request.full_url, status, "origin gateway error", {}, None)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("https://policy.invalid/v1"))
+    monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {"https": "http://proxy.invalid"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_handlers: SimpleNamespace(open=origin_response))
+    exec(commands._POLICY_ENDPOINT_PROBE, {})
 
 
 def test_tier3_doctor_accepts_backend_option() -> None:

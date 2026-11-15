@@ -514,6 +514,27 @@ class TestOutcomeTriState:
         )
         assert _activations(traj)[0]["succeeded"] is False
 
+    @pytest.mark.parametrize("header", ["Exit code: 127", "Process exited with code 127"])
+    def test_nonzero_exit_header_does_not_hide_a_leading_error(self, header: str) -> None:
+        # The status header is skipped, so the failing first line and the ordinary last line are what get read.
+        observation = f"{header}\nbash: helper: command not found\nRun setup before retrying.\n"
+        traj = _traj(_one("Bash", {"command": "helper --run"}, observation))
+        case = {"tool_arguments": [{"tool": "Bash", "contains": {"command": "helper"}}]}
+
+        block = _signals(traj, case)["arguments"]
+
+        assert (block["checked"], block["passed"]) == (1, 0)
+        assert [failure["rule"] for failure in block["failures"]] == ["call_failed"]
+
+    def test_zero_exit_header_still_outranks_a_leading_error_line(self) -> None:
+        observation = "Exit code: 0\nbash: helper: command not found\nRun setup before retrying.\n"
+        traj = _traj(_one("Bash", {"command": "helper --run"}, observation))
+        case = {"tool_arguments": [{"tool": "Bash", "contains": {"command": "helper"}}]}
+
+        block = _signals(traj, case)["arguments"]
+
+        assert (block["checked"], block["passed"]) == (1, 1)
+
     def test_missing_sibling_file_does_not_fail_a_shell_manifest_read(self) -> None:
         output = "cat: skills/alpha/REFERENCE.md: No such file or directory\n---\nname: alpha\n---\n"
         traj = _traj(_one("exec_command", {"cmd": "cat skills/alpha/SKILL.md skills/alpha/REFERENCE.md"}, output))

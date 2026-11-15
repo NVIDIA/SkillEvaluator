@@ -16,7 +16,14 @@ from rich.console import Console
 from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter
-from skillevaluator.tier3.declarative_coverage import agent_declarative_checks, aggregate_declarative_checks
+from skillevaluator.reporting.base import agent_eval_report_serialization_issue
+from skillevaluator.reporting.declarative_coverage import coverage_summary
+from skillevaluator.tier3.declarative_coverage import (
+    COMPACT_CHECK_ROWS_PER_ARM,
+    agent_declarative_checks,
+    aggregate_declarative_checks,
+    compact_declarative_checks,
+)
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.result_display import render_evaluation_result
@@ -370,3 +377,102 @@ def test_failed_arm_retains_coverage_without_restoring_withheld_quality(tmp_path
     html = HTMLReporter(report_scope="tier3").render(result)
     assert "behavior denominator 4" in html
     assert "File evidence unavailable" in html
+
+
+def test_compact_coverage_keeps_exact_counts_and_prefers_failing_rows():
+    full = aggregate_declarative_checks([_reward() for _ in range(4)])
+    original = copy.deepcopy(full)
+    assert len(full["results"]) == 12
+
+    compact, dropped = compact_declarative_checks({"with_skill": full}, max_rows=5)
+
+    arm = compact["with_skill"]
+    assert dropped == 7
+    assert arm["omitted_checks"] == 7
+    assert [row["passed"] for row in arm["results"]] == [False, None, False, None, False]
+    assert {key: value for key, value in arm.items() if key not in {"results", "omitted_checks"}} == {
+        key: value for key, value in full.items() if key != "results"
+    }
+    assert full == original
+    assert compact_declarative_checks(compact, max_rows=5) == (compact, 0)
+    assert compact_declarative_checks(compact, max_rows=3)[0]["with_skill"]["omitted_checks"] == 9
+    assert compact_declarative_checks({"with_skill": full}, max_rows=12) == ({"with_skill": full}, 0)
+
+
+def test_coverage_summary_says_how_many_check_rows_were_omitted():
+    group = {"checked_count": 2, "passed_count": 1, "failed_count": 1, "judged_count": 0}
+    assert "omitted" not in coverage_summary(group)
+    assert coverage_summary({**group, "omitted_checks": 7}).endswith("; 7 more check rows omitted to fit report limits")
+
+
+def _large_run_info(*, cases, attempts, checks):
+    def rewards(arm):
+        return [
+            {
+                **dict.fromkeys(DEFAULT_METRICS, 0.8),
+                "entry_id": f"case-{case:03d}",
+                "_trial_name": f"case-{case:03d}__{arm}{attempt}",
+                "details": {
+                    "behavior_check": {
+                        "status": "accepted",
+                        "declarative_checks": {
+                            "judged_count": 0,
+                            "results": [
+                                {
+                                    "type": "script_invoked",
+                                    "expected": f"scripts/s{check}.py",
+                                    "passed": check != 0,
+                                    "reason": f"check {check}",
+                                }
+                                for check in range(checks)
+                            ],
+                        },
+                    }
+                },
+            }
+            for case in range(cases)
+            for attempt in range(attempts)
+        ]
+
+    info = _info(checks=False)
+    info.update(rewards=rewards("a"), rewards_baseline=rewards("b"), without_skill=dict.fromkeys(DEFAULT_METRICS, 0.6))
+    return info
+
+
+def test_large_declarative_run_bounds_coverage_before_scored_report_details():
+    info = _large_run_info(cases=120, attempts=3, checks=10)
+    full = agent_declarative_checks(info["rewards"], info["rewards_baseline"])
+    assert all(len(arm["results"]) == 3600 for arm in full.values())
+
+    payload = build_agent_eval_payload("demo", {"agent-a": info}, use_llm_judge=False)
+
+    assert agent_eval_report_serialization_issue(payload) is None
+    agent = payload["agents"]["agent-a"]
+    for arm, expected in full.items():
+        coverage = agent["declarative_checks"][arm]
+        assert len(coverage["results"]) == COMPACT_CHECK_ROWS_PER_ARM
+        assert coverage["omitted_checks"] == 3600 - COMPACT_CHECK_ROWS_PER_ARM
+        assert {key: value for key, value in coverage.items() if key not in {"results", "omitted_checks"}} == {
+            key: value for key, value in expected.items() if key != "results"
+        }
+    omitted = payload["report_truncation"]["omitted"]
+    assert omitted["declarative_check_rows"] == 2 * (3600 - COMPACT_CHECK_ROWS_PER_ARM)
+    assert not {"non_best_agent_details", "dataset_and_trial_items", "attempt_verdict_details"} & set(omitted)
+    assert payload["overall_score"] == pytest.approx(0.8)
+    assert agent["with_skill"] == pytest.approx(0.8)
+    assert agent["baseline"] == pytest.approx(0.6)
+    assert agent["lift"] == pytest.approx(0.2)
+    assert len(agent["dimensions"]) == 5
+    assert len(agent["evaluator_cards"]) == 6
+    assert len(agent["trials"]) == len(agent["trials_baseline"]) == len(agent["cases"]) == 360
+    html = HTMLReporter(report_scope="tier3").render(_validation(payload))
+    assert "3400 more check rows omitted to fit report limits" in html
+
+
+def test_declarative_run_within_report_limits_keeps_every_check_row():
+    info = _large_run_info(cases=10, attempts=3, checks=10)
+    payload = build_agent_eval_payload("demo", {"agent-a": info}, use_llm_judge=False)
+    for arm in payload["agents"]["agent-a"]["declarative_checks"].values():
+        assert len(arm["results"]) == 300
+        assert "omitted_checks" not in arm
+    assert "declarative_check_rows" not in payload.get("report_truncation", {}).get("omitted", {})

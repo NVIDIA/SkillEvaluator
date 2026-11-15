@@ -41,10 +41,12 @@ def coverage_summary(group: dict[str, Any]) -> str:
         value = group.get(key)
         return str(value) if value is not None else "unavailable"
 
+    omitted = group.get("omitted_checks")
+    shown = f"; {omitted} more check rows omitted to fit report limits" if type(omitted) is int and omitted > 0 else ""
     return (
         f"Checked {count('checked_count')} ({count('passed_count')} passed / {count('failed_count')} failed); "
         f"judged {count('judged_count')}; not checked {count('not_checked_count')}; "
-        f"behavior denominator {count('score_denominator')}"
+        f"behavior denominator {count('score_denominator')}{shown}"
     )
 
 

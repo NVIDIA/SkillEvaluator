@@ -76,6 +76,7 @@ from skillevaluator.tier3.baseline_store import (
     select_baseline,
 )
 from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.tier3.declarative_coverage import compact_declarative_checks
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
     _GKE_INFRASTRUCTURE_KWARGS,
@@ -585,6 +586,18 @@ def _compact_agent_result(
         compact["execution_error_details_shown"] = len(compact["execution_errors"])
         compact["execution_error_details_truncated"] = len(compact["execution_errors"]) < exact_total
         omitted.append("execution_errors")
+
+    raw_coverage = compact.get("declarative_checks")
+    if isinstance(raw_coverage, dict):
+        # Cap the per-check rows; every count and per-reward denominator stays exact.
+        compact_coverage, dropped_checks = compact_declarative_checks(raw_coverage)
+        if dropped_checks:
+            compact["declarative_checks"] = compact_coverage
+            omitted.extend(
+                f"declarative_checks.{arm}.results"
+                for arm, data in compact_coverage.items()
+                if data is not raw_coverage[arm]
+            )
 
     if omitted:
         compact["detail_projection"] = {

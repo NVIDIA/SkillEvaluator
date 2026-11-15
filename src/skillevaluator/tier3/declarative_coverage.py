@@ -9,6 +9,9 @@ from typing import Any
 
 from skillevaluator.evaluation.tier3_findings import sanitize_grader_text
 
+# Per-check rows kept for each arm once a result or report is over its size limits.
+COMPACT_CHECK_ROWS_PER_ARM = 200
+
 
 def aggregate_declarative_checks(rewards: list[dict[str, Any]]) -> dict[str, Any]:
     """Keep every check and each reward's denominator; never pool behavior scores."""
@@ -69,3 +72,29 @@ def agent_declarative_checks(
         for arm, rewards in (("with_skill", with_rewards), ("without_skill", without_rewards))
         if (coverage := aggregate_declarative_checks(rewards))
     }
+
+
+def compact_declarative_checks(
+    coverage: dict[str, Any], *, max_rows: int = COMPACT_CHECK_ROWS_PER_ARM
+) -> tuple[dict[str, Any], int]:
+    """Cap each arm's per-check rows, keeping exact counts and recording what was left out.
+
+    Failed and not-checked rows are kept ahead of passed ones. The totals and the
+    per-reward ``attempts`` do not change; ``omitted_checks`` counts the dropped rows.
+    The input is never modified. Returns the compact copy and the rows dropped.
+    """
+    compact: dict[str, Any] = {}
+    dropped_total = 0
+    for arm, data in coverage.items():
+        rows = data.get("results") if isinstance(data, dict) else None
+        if not isinstance(rows, list) or len(rows) <= max_rows:
+            compact[arm] = data
+            continue
+        order = sorted(range(len(rows)), key=lambda i: (isinstance(rows[i], dict) and rows[i].get("passed") is True, i))
+        kept = sorted(order[:max_rows])
+        dropped = len(rows) - len(kept)
+        earlier = data.get("omitted_checks")
+        earlier = earlier if type(earlier) is int and earlier > 0 else 0
+        compact[arm] = {**data, "results": [rows[i] for i in kept], "omitted_checks": earlier + dropped}
+        dropped_total += dropped
+    return compact, dropped_total

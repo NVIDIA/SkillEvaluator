@@ -44,4 +44,4 @@ Use a bounded read-only display adapter; no collector calls, source reopening, r
 
 Use one main home for each fact with concise summaries and native disclosures. Wording-only changes leave structural duplication intact; a separate compact/detailed mode adds redundant UI and maintenance. Keep one renderer, pinned Chart.js 4.5.1 and the native typography/palette, with narrow accessibility/layout adaptations.
 
-The [presentation port manifest](../../report-presentation-port.json) records source hashes and intentional adaptations without including reference report data.
+The [presentation manifest](../../report-presentation-port.json) records the pinned style digests and intentional adaptations without including report data.

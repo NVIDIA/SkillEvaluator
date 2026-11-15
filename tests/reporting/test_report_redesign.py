@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """HTML report layout: header, executive summary, Fix first, vocabulary, print and accessibility."""
 
+import json
 import re
 from html.parser import HTMLParser
 from itertools import pairwise
@@ -477,8 +478,7 @@ def _px(value: str, unit: str) -> float:
     return float(value) * (16 if unit == "rem" else 1)
 
 
-def test_report_style_blocks_match_recorded_digests() -> None:
-    """Snapshot of this template's style blocks: a CSS edit must update the digests on purpose."""
+def _style_block_digests() -> list[str]:
     from hashlib import sha256
 
     template = (TEMPLATES / "report.html.j2").read_text(encoding="utf-8")
@@ -487,12 +487,31 @@ def test_report_style_blocks_match_recorded_digests() -> None:
         re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
         for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL)
     ]
-    assert [sha256(block.encode()).hexdigest() for block in blocks] == [
+    return [sha256(block.encode()).hexdigest() for block in blocks]
+
+
+def test_report_style_blocks_match_recorded_digests() -> None:
+    """Snapshot of this template's style blocks: a CSS edit must update the digests on purpose."""
+    assert _style_block_digests() == [
         "e09704d0a4a030b3fd7de5e063a5247c0770733ad8c5b380a24e194829c0364e",
         "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6",
         "f02e0b64bdb8ebe7e9fd65c6fd45cace436a961a60a0b6552d18a06db7780cba",
         "1997da9ee6f5b7cdefabbebffe2fa3d0101fce091f533e2f59403c2e2ce58875",
     ]
+
+
+def test_presentation_manifest_matches_the_template_and_its_checks() -> None:
+    root = TEMPLATES.parents[3]
+    manifest = json.loads((root / "docs" / "report-presentation-port.json").read_text(encoding="utf-8"))
+    assert (root / manifest["template"]).samefile(TEMPLATES / "report.html.j2")
+    base, tier3, *_ = _style_block_digests()
+    recorded = {entry["block"]: entry["comment_free_sha256"] for entry in manifest["native_styles"]}
+    assert recorded == {"base": base, "tier3": tier3}
+    for check in manifest["drift_checks"]:
+        path, _, name = check.partition("::")
+        source = root / path
+        assert source.is_file(), check
+        assert not name or f"def {name}(" in source.read_text(encoding="utf-8"), check
 
 
 def test_table_overflow_is_scoped_to_scroll_containers() -> None:

@@ -2,13 +2,13 @@
 
 > **For agentic workers:** use superpowers:subagent-driven-development; record task evidence in the ignored execution ledger.
 
-**Goal:** address the user's PR #560 follow-up by restoring visible native GitLab report features, then update the same branch and PR.
+**Goal:** address the user's PR #560 follow-up by restoring visible native report features, then update the same branch and PR.
 
-**Design:** the pinned 1.13.1 template remains the presentation reference. Keep its header scale, version identification, consolidated human-readable dimension/baseline comparison, partial comparison annotations, clickable agent scorecards and Harbor actions. Retain the earlier concise Insights and closed routine provenance; reducing clutter must not remove useful native views or actions. The user's explicit follow-up supersedes the compact header and removed scorecards in the previous revision.
+**Design:** the native report template remains the presentation baseline. Keep its header scale, version identification, consolidated human-readable dimension/baseline comparison, partial comparison annotations, clickable agent scorecards and Harbor actions. Retain the earlier concise Insights and closed routine provenance; reducing clutter must not remove useful native views or actions. The user's explicit follow-up supersedes the compact header and removed scorecards in the previous revision.
 
 **Architecture:** existing assessed display data feeds the single HTML template. Add only bounded, typed display projections for unavailable configured dimensions and custom metric comparisons. Repair Harbor fallback in the existing URL-normalization helper. Canonical payloads, scores, gates, supported backends and CLI behavior stay unchanged.
 
-**Reference:** presentation commit `75c5a82e3bb778edfed37012f603479347f3d205`; public adaptation manifest `docs/report-presentation-port.json`.
+**Manifest:** `docs/report-presentation-port.json` records the pinned style digests and the intentional adaptations.
 
 ## Constraints and review focus
 

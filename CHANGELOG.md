@@ -233,6 +233,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
+- The `nv_build` documentation names `nvidia/nemotron-3.5-lightning-30b-a3b`
+  (Nemotron 3.5 Lightning) as the default model in the configuration guide,
+  environment variables reference, CLI reference, agents and sandboxes guide
+  and Tier 3 live evaluation guide, and the runnable `--agent-model` examples
+  use it. This entry covers the documentation only; the runtime default change
+  ships separately.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists

@@ -672,18 +672,18 @@ in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
-agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
-OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
+agents default to Nemotron 3.5 Lightning (`nvidia/nemotron-3.5-lightning-30b-a3b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its
 adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
 when you want to compare harnesses or models:
 
 ```bash title="NVIDIA Build model overrides"
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
-  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+  --agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker \
-  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+  --agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
   --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
 ```

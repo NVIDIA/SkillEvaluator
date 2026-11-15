@@ -27,9 +27,10 @@ No model override is needed. Defaults are pinned in the installed release,
 not automatically selected as the latest available model. Set
 `SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
 standard judge inherits it unless a judge override is set. Embeddings use their
-own model, and Tier 3 agent selection is separate. With NVIDIA Build, OpenCode
-follows `SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Super
-default unless you override their models.
+own model, and Tier 3 agent selection is separate. With NVIDIA Build, all three
+agents default to Nemotron 3.5 Lightning. OpenCode follows
+`SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Lightning default
+unless you override their models.
 
 Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
@@ -115,7 +116,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export NVIDIA_API_KEY='nvapi-...'
     ```
 
-    Default model: `nvidia/nemotron-3-super-120b-a12b`, shared by evaluator chat, Tier 3's default OpenCode agent, and the standard judge. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
+    Default model: `nvidia/nemotron-3.5-lightning-30b-a3b`, shared by evaluator chat, Tier 3's default OpenCode agent, and the standard judge. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
 
     The previous default, `nvidia/nemotron-3-nano-30b-a3b`, has a deprecated public endpoint. If you explicitly pinned that model in `SKILL_EVAL_LLM_MODEL`, remove the override to use the current default. Explicit model selections are preserved; SkillEvaluator does not silently switch models after a failed request.
 

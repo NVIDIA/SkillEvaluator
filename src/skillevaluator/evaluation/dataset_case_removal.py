@@ -39,14 +39,12 @@ _NEGATION_WORD = re.compile(r"[\w'\u2019]+|[^\w\s]")
 _PLAIN_WORD = re.compile(r"\w+")
 # "do not"-style negators also cover up to two plain words before the verb: "do not try deleting the case".
 _LOOSE_NEGATORS = (("do", "not"), ("don't",), ("don\u2019t",), ("never",), ("avoid",))
-_NEGATORS = (
-    *_LOOSE_NEGATORS,
-    ("not",),
-    ("without",),
-    ("instead", "of"),
-    ("rather", "than"),
-    ("no", "need", "to"),
-)
+# "not only deleting the case but also fixing the parser" recommends the deletion. After one of these words a "not"
+# negator no longer forbids the verb, so "don't just delete the case, fix the parser" is rejected as well: it cannot
+# be told apart from the additive form, and a rejection only falls back to the deterministic remedy.
+_ADDITIVE_WORDS = frozenset({"only", "just", "merely", "simply", "solely", "exclusively", "purely"})
+_NOT_NEGATORS = (*_LOOSE_NEGATORS, ("not",))
+_OTHER_NEGATORS = (("without",), ("instead", "of"), ("rather", "than"), ("no", "need", "to"))
 _MAX_MODIFIERS = 5
 _MODIFIER_WORD = re.compile(r"just|also|then|even|ever|only|still|first|outright|again|altogether|always|\w{3,}ly")
 _MODIFIER_PHRASES = frozenset(
@@ -94,17 +92,21 @@ def negated_before(text: str, start: int) -> bool:
         end = count - plain
         if (
             end >= 1
-            and all(_PLAIN_WORD.fullmatch(word) for word in words[end:])
+            and all(_PLAIN_WORD.fullmatch(word) and word not in _ADDITIVE_WORDS for word in words[end:])
             and _ends_with(words, end, _LOOSE_NEGATORS)
         ):
             return True
     end = count
+    additive = False
     for _ in range(_MAX_MODIFIERS + 1):
-        if _ends_with(words, end, _NEGATORS):
+        if _ends_with(words, end, _OTHER_NEGATORS):
             return True
+        if _ends_with(words, end, _NOT_NEGATORS):
+            return not additive
         modifier = _modifier_start(words, end)
         if modifier is None:
             return False
+        additive = additive or any(word in _ADDITIVE_WORDS for word in words[modifier:end])
         end = modifier
     return False
 

@@ -895,10 +895,27 @@ _STRICT_NEGATORS = (
 _ALL_NEGATORS = (*_STRICT_NEGATORS, ("do not", True), ("never", True), ("don't", True), ("avoid", False))
 
 
+# "not only deleting the case but also fixing the parser" recommends the deletion, so after "not", "do not",
+# "should not", "never", "don't" or "avoid" these words void the negation. "without simply removing the case" and
+# "instead of just dropping it" are different: there the negator governs the verb.
+_ADDITIVE_WORDS = ("only", "just", "merely", "simply", "solely", "exclusively", "purely")
+_ADDITIVE_PREFIXES = (*_ADDITIVE_WORDS, "necessarily just", "necessarily only", "even just")
+_NOT_NEGATORS = (
+    ("not", False),
+    ("do not", True),
+    ("should not", True),
+    ("never", True),
+    ("don't", True),
+    ("avoid", False),
+)
+
+
 def _negated_advice(negators: tuple[tuple[str, bool], ...], case_subject: str) -> list[str]:
     sentences = []
     for negator, base_form in negators:
         for chain in _NEGATION_CHAINS:
+            if negator in dict(_NOT_NEGATORS) and set(chain.split()) & set(_ADDITIVE_WORDS):
+                continue
             base = base_form or chain.endswith(" to")
             for verb, subject in (("delete", case_subject), ("lower", "the pass threshold")):
                 form = verb if base else verb.replace("lower", "lowering").replace("delete", "deleting")
@@ -915,6 +932,17 @@ def _unrelated_negation_advice(negators: tuple[tuple[str, bool], ...], case_subj
         for noun in ("failures", "errors")
         for verb, subject in (("deleting", case_subject), ("lowering", "the pass threshold"))
     ]
+
+
+def _additive_advice(case_subject: str) -> list[str]:
+    """Additive wording ("not only lowering the threshold but also fixing the parser") still recommends the removal."""
+    sentences = []
+    for negator, base_form in _NOT_NEGATORS:
+        for additive in _ADDITIVE_PREFIXES:
+            for verb, subject in (("delete", case_subject), ("lower", "the pass threshold")):
+                form = verb if base_form else verb.replace("lower", "lowering").replace("delete", "deleting")
+                sentences.append(f"Fix the parser and {negator} {additive} {form} {subject} but also add a test.")
+    return sentences
 
 
 class TestInsightsJudgeRecommendationQuality:
@@ -1203,6 +1231,59 @@ class TestInsightsJudgeRecommendationQuality:
         missed = [
             s for s in _unrelated_negation_advice(_STRICT_NEGATORS, subject) if not _weakens_requirements(s, known)
         ]
+        assert missed == []
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("smoke", "Make smoke pass by not only lowering the pass threshold but also fixing the parser."),
+            ("smoke", "Not only delete the smoke case but also fix the parser."),
+            ("smoke", "Make smoke pass by not just lowering the pass threshold but also fixing the parser."),
+            ("smoke", "Make smoke pass by not merely relaxing the assertions but also fixing the parser."),
+            ("smoke", "Make smoke pass by not simply loosening the expected output but also fixing the parser."),
+            ("smoke", "Make smoke pass by not solely lowering the pass threshold but also fixing the parser."),
+            ("smoke", "Make smoke pass by not exclusively softening the ground truth but also fixing the parser."),
+            (
+                "smoke",
+                "Make smoke pass by not necessarily just lowering the pass threshold but also fixing the parser.",
+            ),
+            (
+                "smoke",
+                "Make smoke pass by not necessarily only lowering the pass threshold but also fixing the parser.",
+            ),
+            ("smoke", "Fix the parser by not only dropping the smoke case but also adding a unit test."),
+            ("smoke", "Not just removing the smoke case but also fixing the parser."),
+            ("smoke", "Fix the parser by not merely excluding the smoke case but also adding a unit test."),
+            ("positive-001", "Not simply delete the case for positive-001 but also fix the parser."),
+            ("smoke", "Do not only lower the pass threshold for smoke but also fix the parser."),
+            ("smoke", "Do not just delete the smoke case, fix the parser."),
+            ("smoke", "Don't simply delete the smoke case; fix the parser."),
+        ],
+    )
+    def test_drops_additive_wording_that_still_recommends_the_removal(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == []
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("smoke", "You should not lower the pass threshold for smoke; fix the parser."),
+            ("smoke", "You must not delete the smoke case; fix the parser."),
+            ("smoke", "Do not lower the pass threshold for smoke."),
+            ("smoke", "Do not delete the smoke case but also fix the parser."),
+            ("smoke", "Fix the parser and do not delete the smoke case."),
+            ("smoke", "Fix the parser; it should not drop the smoke case."),
+            ("smoke", "Fix the parser without simply removing the smoke case."),
+            ("smoke", "Fix the parser instead of just dropping the smoke case."),
+            ("smoke", "Fix the parser rather than merely excluding the smoke case."),
+        ],
+    )
+    def test_keeps_genuine_prohibitions_next_to_additive_wording(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == [message]
+
+    @pytest.mark.parametrize("known", [("smoke",), ()])
+    def test_additive_not_only_wording_does_not_negate_the_removal_or_the_weakening(self, known: tuple) -> None:
+        subject = "the smoke case" if known else "the case for positive-001"
+        missed = [s for s in _additive_advice(subject) if not _weakens_requirements(s, known)]
         assert missed == []
 
     def test_negation_is_read_from_a_bounded_window_before_the_verb(self) -> None:

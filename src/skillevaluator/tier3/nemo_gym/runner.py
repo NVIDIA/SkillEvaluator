@@ -68,15 +68,16 @@ def stage_for_gym(
     arm_dir: Path,
     verifier_env: dict[str, str] | None = None,
     *,
+    agent: str | None = None,
     timeout_multiplier: float = 1.0,
     resource_overrides: dict[str, int] | None = None,
 ) -> None:
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
-    already carries the skills at each agent's native location (``/root/.agents/skills``,
-    ``/root/.claude/skills``, ...), so the with-skill arm is unchanged and the baseline image
-    still has none. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
+    already carries the skills at each agent's native location. OpenCode also gets project
+    skills because Gym isolates its HOME and XDG directories. The baseline image still has
+    no target skill. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
     ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts. Writes the
@@ -85,8 +86,17 @@ def stage_for_gym(
     """
     for task_toml in arm_dir.glob("*/task.toml"):
         text = task_toml.read_text(encoding="utf-8")
-        if (tomllib.loads(text).get("environment") or {}).get("mcp_servers"):
+        environment = tomllib.loads(text).get("environment") or {}
+        if environment.get("mcp_servers"):
             raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
+        if agent == "opencode":
+            dockerfile = task_toml.parent / "environment" / "Dockerfile"
+            if dockerfile.is_file() and (dockerfile.parent / "skills").is_dir():
+                workdir = environment.get("workdir") or "/workspace"
+                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/.agents/skills/"])
+                docker_text = dockerfile.read_text(encoding="utf-8")
+                if projection not in docker_text.splitlines():
+                    dockerfile.write_text(docker_text.rstrip("\n") + "\n" + projection + "\n", encoding="utf-8")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})
         lines = "".join(
@@ -1006,6 +1016,7 @@ def run_nemo_gym_eval(
                     stage_for_gym(
                         arm_dir,
                         judge_job_env,
+                        agent=agent,
                         timeout_multiplier=effective_timeout,
                         # Generated tasks already carry them; native tasks get Harbor's job-level override.
                         resource_overrides={

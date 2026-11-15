@@ -290,6 +290,40 @@ def test_stage_for_gym_drops_only_the_skills_dir_hook(tmp_path: Path) -> None:
     assert "cpus = 2" in text and 'A = "1"' in text
 
 
+@pytest.mark.parametrize("workdir", [None, "/work/custom/", "/work with spaces"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_opencode_project_skills_are_staged_in_both_arms(tmp_path: Path, workdir, with_skill: bool) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("---\nname: calculator\n---\n")
+    (task / "task.toml").write_text("[environment]\n" + (f"workdir = {json.dumps(workdir)}\n" if workdir else ""))
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent="opencode")
+    staged = dockerfile.read_text()
+    target = (workdir or "/workspace").rstrip("/") + "/.agents/skills/"
+    assert "COPY " + json.dumps(["skills/", target]) in staged.splitlines()
+    stage_for_gym(tmp_path, agent="opencode")
+    assert dockerfile.read_text() == staged
+    assert (skills / "calculator" / "SKILL.md").is_file() is with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "claude-code", "opencode"])
+def test_project_skill_projection_leaves_tasks_without_skills_unchanged(tmp_path: Path, agent) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == "FROM python:3.13-slim\n"
+
+
 def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypatch) -> None:
     from skillevaluator.tier3.nemo_gym.runner import verifier_judge_env
 

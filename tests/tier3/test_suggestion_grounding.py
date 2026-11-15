@@ -59,12 +59,15 @@ def test_repeated_ref_within_one_trial_remains_available():
     assert ref["excerpt"] == "submit ..."
 
 
-def test_multi_trial_refs_require_case_qualified_sources():
+def test_multi_trial_refs_are_qualified_from_reward_ownership():
     first, second = _reward(), _reward()
     first["trial_id"], second["trial_id"] = "case-a__one", "case-b__one"
     second["details"]["goal_accuracy"]["evidence_refs"][0]["json_pointer"] = "/steps/99"
     for rewards in ([first, second], [second, first]):
-        assert report._build_evidence_ref_lookup(rewards) == {}
+        lookup = report._build_evidence_ref_lookup(rewards)
+        assert len(lookup) == 2
+        assert "trials/case-a__one/trajectory.json#/steps/14" in lookup
+        assert "trials/case-b__one/trajectory.json#/steps/99" in lookup
     for reward in (first, second):
         reward["details"]["goal_accuracy"]["evidence_refs"][0]["source"] = f"{reward['trial_id']}/trajectory.json"
     forward = report._build_evidence_ref_lookup([first, second])
@@ -79,6 +82,60 @@ def test_multi_trial_refs_require_case_qualified_sources():
 
 def test_empty_evidence_lookup_rejects_unrecorded_refs():
     assert report._recorded_evidence_refs(["trajectory.json#/steps/14"], report._build_evidence_ref_lookup([])) == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_prompt_exposes_citable_trial_qualified_evidence(monkeypatch, reverse):
+    first, second = _reward(), _reward()
+    first["trial_id"], second["trial_id"] = "case-a__one", "case-b__one"
+    second["entry_id"] = "case-b"
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "case-b failed output"
+    rewards = [second, first] if reverse else [first, second]
+    key = "trials/case-b__one/trajectory.json#/steps/14"
+
+    def fake_hub(prompt, **_kw):
+        assert key in prompt
+        assert "trials/case-a__one/trajectory.json#/steps/14" in prompt
+        return json.dumps([{"suggestion": "Fix case-b", "dimension": "goal_accuracy", "evidence_refs": [key]}]), None
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    findings = report._extract_findings(rewards)
+    [suggestion] = report._generate_suggestions_structured("demo", findings, rewards)
+    [ref] = suggestion["evidence_refs"]
+    assert ref["source"] == "trials/case-b__one/trajectory.json"
+    assert ref["excerpt"] == "case-b failed output"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_failing_finding_only_cites_failing_cases(reverse):
+    passing, failing = _reward(1.0), _reward(0.0)
+    passing["entry_id"], failing["entry_id"] = "arithmetic-negative", "syllable-positive"
+    passing["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "Answers 56"
+    failing["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "Missing syllable_count"
+    rewards = [failing, passing] if reverse else [passing, failing]
+
+    finding = next(f for f in report._extract_findings(rewards) if f["metric"] == "goal_accuracy")
+
+    assert finding["severity"] != "ok"
+    assert [(ref["source"], ref["excerpt"]) for ref in finding["evidence_refs"]] == [
+        ("trials/syllable-positive/trajectory.json", "Missing syllable_count")
+    ]
+
+
+def test_multi_trial_evidence_without_an_owner_is_rejected():
+    first, second = _reward(), _reward()
+    del first["entry_id"]
+    del second["entry_id"]
+    assert report._build_evidence_ref_lookup([first, second]) == {}
+    assert all(not finding["evidence_refs"] for finding in report._extract_findings([first, second]))
+
+
+def test_conflicting_refs_with_the_same_owner_are_rejected():
+    first, second = _reward(), _reward()
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "conflicting evidence"
+    for rewards in ([first, second], [second, first]):
+        assert report._build_evidence_ref_lookup(rewards) == {}
+        assert all(not finding["evidence_refs"] for finding in report._extract_findings(rewards))
 
 
 def _reward_multi_metric(metric_score=0.1):

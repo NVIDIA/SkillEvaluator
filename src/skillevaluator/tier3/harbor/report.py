@@ -295,6 +295,7 @@ def _extract_findings(
     from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
 
     findings: list[dict[str, Any]] = []
+    ref_lookup = _build_evidence_ref_lookup(rewards)
 
     metric_names = _finding_metric_names(rewards)
     aggregated: dict[str, list[list[dict[str, Any]]]] = {m: [] for m in metric_names}
@@ -335,24 +336,23 @@ def _extract_findings(
             continue
         label = _metric_label(metric)
 
+        affected_trials = [
+            trial
+            for trial in trials
+            if trial["score"] is not None
+            and (trial["score"] >= FINDING_OK_THRESHOLD) == (avg_score >= FINDING_OK_THRESHOLD)
+        ]
         metric_refs = []
-        for t in trials:
+        for t in affected_trials:
             d = t["detail"]
             if isinstance(d, dict):
-                metric_refs.extend(_normalize_evidence_refs(d.get("evidence_refs")))
-        _seen: set[tuple[Any, ...]] = set()
-        _refs: list[dict[str, Any]] = []
-        for raw_ref in metric_refs:
-            if not isinstance(raw_ref, dict | str):
-                continue
-            r = _resolve_evidence_ref(raw_ref, {})
-            k = (r.get("source"), evidence_ref_identity(r), r.get("kind"))
-            if k not in _seen:
-                _seen.add(k)
-                _refs.append(r)
+                for raw_ref in _normalize_evidence_refs(d.get("evidence_refs")):
+                    if ref := _trial_evidence_ref(raw_ref, t["reward"], multi_trial=len(rewards) > 1):
+                        metric_refs.append(ref)
+        _refs = _recorded_evidence_refs(metric_refs, ref_lookup)
 
         if avg_score >= FINDING_OK_THRESHOLD:
-            reasons = _collect_pass_reasons(metric, trials)
+            reasons = _collect_pass_reasons(metric, affected_trials)
             findings.append(
                 {
                     "metric": metric,
@@ -364,7 +364,7 @@ def _extract_findings(
                 }
             )
         else:
-            reasons = _collect_fail_reasons(metric, trials)
+            reasons = _collect_fail_reasons(metric, affected_trials)
             severity = "critical" if avg_score < FINDING_CRITICAL_THRESHOLD else "warning"
             finding = {
                 "metric": metric,
@@ -695,6 +695,24 @@ def _evidence_unavailable_reason(trials: list[dict[str, Any]]) -> str:
     return "No trajectory evidence was recorded for this metric"
 
 
+def _trial_evidence_ref(ref: Any, reward: dict[str, Any], *, multi_trial: bool) -> dict[str, Any] | None:
+    if not isinstance(ref, dict | str):
+        return None
+    resolved = _resolve_evidence_ref(ref, {})
+    if multi_trial:
+        scope = str(reward.get("trial_id") or reward.get("entry_id") or "")
+        if not scope or "/" in scope or "#" in scope or scope in {".", ".."}:
+            return None
+        source = str(resolved.get("source") or "")
+        if scope not in source.split("/"):
+            resolved["source"] = f"trials/{scope}/{source}"
+        bounded = _bounded_evidence_ref(resolved)
+        if bounded.get("source") != resolved.get("source"):
+            return None
+        resolved = bounded
+    return resolved
+
+
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Build a lookup from each stable compact evidence key to its full dict ref.
 
@@ -714,13 +732,9 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
             if not isinstance(metric_detail, dict):
                 continue
             for ref in _normalize_evidence_refs(metric_detail.get("evidence_refs")):
-                if not isinstance(ref, dict | str):
+                resolved = _trial_evidence_ref(ref, reward, multi_trial=len(rewards) > 1)
+                if resolved is None:
                     continue
-                resolved = _resolve_evidence_ref(ref, {})
-                if len(rewards) > 1:
-                    scope = str(reward.get("trial_id") or reward.get("entry_id") or "")
-                    if not scope or scope not in str(resolved.get("source") or "").split("/"):
-                        continue
                 if resolved.get("source") or evidence_ref_identity(resolved):
                     key = _compact_evidence_ref(resolved)
                     if key in ambiguous:
@@ -855,6 +869,9 @@ ERROR RECOVERY ISSUES:
 EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
+Each suggestion must cite at least one listed reference from the case or trial it addresses.
+The trials/<case-or-trial>/ prefix identifies the owner and must be included in the citation.
+
 Treat [environment] issues as evaluation setup problems, not skill defects. Recommend dependency declarations or installation in evals/environment/Dockerfile, not skill behavior changes.
 Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:
 1. What the developer should fix in their skill (SKILL.md, scripts, config)
@@ -868,7 +885,7 @@ Do not suggest loosening, removing, or rewriting an eval expectation just so the
 When the evidence does not establish a cause (for example, that a different model would do better), start the suggestion with "Hypothesis:" and say how to test it.
 Cite only evidence references listed above; references the run did not record are dropped.
 
-Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["trajectory.json#/steps/N", ...]}}, no other text."""
+Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["<exact listed reference>", ...]}}, no other text."""
 
     try:
         from skillevaluator.tier3.eval_core.llm_judge import _extract_json, call_public_llm

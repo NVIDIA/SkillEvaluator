@@ -249,9 +249,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 suggestion evidence requires case-qualified sources in multi-trial
-  runs and rejects ambiguous compact references instead of resolving them to
-  another case's excerpts, regardless of trial order.
+- Tier 3 suggestion prompts qualify evidence by its owning case or trial, so
+  citations resolve to that case's excerpts regardless of trial order. Metric
+  findings cite only evidence from cases contributing to the reported outcome;
+  references with missing or ambiguous ownership are rejected.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

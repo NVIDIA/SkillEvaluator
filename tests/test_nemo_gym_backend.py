@@ -95,6 +95,41 @@ def test_gym_command_keeps_api_key_out_of_argv(tmp_path: Path, monkeypatch: pyte
     assert "+default_host=172.17.0.1" in command
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode"])
+def test_gym_claude_command_configures_model_server_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: str
+) -> None:
+    from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
+
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-secret-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-secret")
+    command = gym_eval_command(
+        "gym",
+        tmp_path,
+        agent=agent,
+        model="policy-model",
+        model_url="https://example.com/v1",
+        rollouts_path=tmp_path / "rollouts.jsonl",
+        n_attempts=1,
+        n_concurrent=None,
+        sandbox="docker",
+    )
+    assert "policy-secret-value" not in " ".join(command)
+    assert "unrelated-anthropic-secret" not in " ".join(command)
+    assert f"+policy_api_key=${{oc.env:{MODEL_API_KEY_ENV}}}" in command
+    overrides = [
+        "++anthropic_api_key=EMPTY",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+        "{type:responses_api_models,name:policy_model}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+        + PINNED_RUNTIME_VERSIONS["claude-code"],
+    ]
+    for override in overrides:
+        assert (override in command) == (agent == "claude-code")
+
+
 def _rollout(tmp_path: Path, task: str, attempt: int, overall: float | None) -> dict:
     logs = tmp_path / "gym-logs" / f"{task}-{attempt}"
     logs.mkdir(parents=True)
@@ -427,6 +462,50 @@ def test_stage_for_gym_drops_only_the_skills_dir_hook(tmp_path: Path) -> None:
     assert "cpus = 2" in text and 'A = "1"' in text
 
 
+@pytest.mark.parametrize("workdir", [None, "/work", "/"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_stage_for_gym_projects_claude_skills_into_task_workdir(
+    tmp_path: Path, workdir: str | None, with_skill: bool
+) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("Use the calculator.\n")
+    (task / "task.toml").write_text(
+        '[environment]\nskills_dir = "/workspace/skills"\n' + (f"workdir = {json.dumps(workdir)}\n" if workdir else "")
+    )
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    stage_for_gym(tmp_path, agent="claude-code")
+    destination = (workdir or "/workspace").rstrip("/") + "/.claude/skills/"
+    assert dockerfile.read_text().splitlines().count("COPY " + json.dumps(["skills/", destination])) == 1
+    assert "skills_dir" not in (task / "task.toml").read_text()
+    assert bool(list(skills.rglob("SKILL.md"))) == with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "opencode"])
+def test_stage_for_gym_leaves_other_agent_images_unchanged(tmp_path: Path, agent: str | None) -> None:
+    task = tmp_path / "case"
+    (task / "environment" / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = task / "environment" / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == "FROM python:3.12-slim\n"
+
+
+def test_stage_for_gym_claude_without_docker_skills(tmp_path: Path) -> None:
+    task = tmp_path / "case"
+    task.mkdir()
+    (task / "task.toml").write_text("[environment]\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    assert not (task / "environment").exists()
+
+
 def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypatch) -> None:
     from skillevaluator.tier3.nemo_gym.runner import verifier_judge_env
 
@@ -567,6 +646,33 @@ def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
     }
     kwargs.update(overrides)
     return run_nemo_gym_eval(**kwargs)
+
+
+def test_fake_gym_claude_stages_project_skills_in_both_arms(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    original_stage = gym_runner.stage_for_gym
+    staged = {}
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        staged[arm_dir.name] = [
+            (
+                path.read_text(),
+                bool(list((path.parent / "skills").rglob("SKILL.md"))),
+            )
+            for path in arm_dir.glob("*/environment/Dockerfile")
+        ]
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    _run_fake_gym(skill, tmp_path, agents=["claude-code"])
+    assert set(staged) == {"with", "without"}
+    for arm, tasks in staged.items():
+        assert tasks
+        for dockerfile, has_skill in tasks:
+            assert 'COPY ["skills/", "/workspace/.claude/skills/"]' in dockerfile
+            assert has_skill == (arm == "with")
 
 
 @pytest.fixture
@@ -1340,6 +1446,74 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
         time.sleep(0.1)
     else:
         pytest.fail("child of the Gym leader survived")
+
+
+@pytest.mark.parametrize("exit_early", [False, True])
+def test_gym_cleanup_stops_detached_servers_but_not_other_runs(tmp_path: Path, exit_early: bool) -> None:
+    import socket
+    import subprocess
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    ready = tmp_path / "server.json"
+    child = (
+        "import json, os, signal, socket, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+        "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+        f"open({str(ready)!r}, 'w').write(json.dumps([os.getpid(), s.getsockname()[1]]))\n"
+        "time.sleep(60)\n"
+    )
+    leader = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        "time.sleep(0.5)\n" + ("sys.exit(1)\n" if exit_early else "time.sleep(60)\n")
+    )
+    try:
+        with (tmp_path / "gym.log").open("w") as log:
+            result = _run_gym([sys.executable, "-c", leader], cwd=tmp_path, env=dict(os.environ), log=log, timeout_s=2)
+        assert result == (1 if exit_early else None)
+        _pid, port = json.loads(ready.read_text())
+        with socket.socket() as connection:
+            assert connection.connect_ex(("127.0.0.1", port)) != 0
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+
+
+def test_detached_process_discovery_requires_this_runs_exact_marker(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(
+        gym_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="11 11 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "12 12 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run-other\n"
+            "13 13 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=another-run\n"
+            "14 10 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "15 15 Z python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+        ),
+    )
+    assert gym_runner._gym_run_processes("this-run", 10) == [11]
+
+
+def test_detached_process_discovery_error_is_actionable_and_does_not_echo_environment(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["ps"], output="credential-value")
+
+    monkeypatch.setattr(gym_runner.subprocess, "run", unavailable)
+    with pytest.raises(gym_runner.GymCleanupError, match="check host process access") as error:
+        gym_runner._gym_run_processes("this-run", 10)
+    assert "credential-value" not in str(error.value)
 
 
 def test_gym_judge_override_reaches_the_staged_verifier(

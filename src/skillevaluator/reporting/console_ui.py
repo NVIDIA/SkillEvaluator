@@ -1556,6 +1556,13 @@ def summarize_tier3(
         rows = [TierRow("agent", agent_segments)]
     if payload.get("verdict") == "inconclusive" or summary.get("verdict") == "inconclusive":
         rows.append(TierRow("verdict", [("INCONCLUSIVE: skill never activated", TEXT)]))
+    budget = payload.get("budget")
+    if isinstance(budget, dict):
+        from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
+
+        rows.append(TierRow("budget", [(budget_line(budget), TEXT)]))
+        if reason := budget_incomplete_reason(budget):
+            rows.append(TierRow("verdict", [(f"INCOMPLETE: {reason}", TEXT)]))
     lift = _tier3_finite_number(summary.get("overall_lift"))
     with_score = _tier3_finite_number(summary.get("overall_score"))
     if lift is not None and -1.0 <= lift <= 1.0 and with_score is not None and 0.0 <= with_score <= 1.0:

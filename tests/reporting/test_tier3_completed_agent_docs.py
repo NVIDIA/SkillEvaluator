@@ -472,16 +472,15 @@ def test_changelog_documents_the_failed_run_verdict_label() -> None:
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
     assert "keeps `neutral` for a failed run" not in entry
+    # The entry gives the rule and leaves the detail to Reports & Results.
     assert (
-        "The HTML reports and the full Tier 3 payload they embed show a failed run's verdict as `fail`. The "
-        f"standalone Tier 3 `report.html` and the report of a `validate --block-on-agent-eval` run label it "
-        f"{VERDICT_WORDS['fail']};"
+        "The HTML reports show a failed run's verdict as `fail`, labelled "
+        f"{VERDICT_WORDS['fail']}, or {ADVISORY_FAIL_WORD} when Tier 3 is advisory."
     ) in entry
     assert (
-        "The `tier3` object of a `validate --tier3` JSON report keeps `neutral` when the run's collected results "
-        "record the failure, for example when one of several agents fails."
+        "The `tier3` object of a `validate --tier3` JSON report can differ: it can still carry `neutral` or the "
+        "verdict the scores give. Reports & Results has the details."
     ) in entry
-    assert f"A `neutral` verdict of a successful run reads {VERDICT_WORDS['neutral']}." in entry
 
 
 def _validate_tier3_reports(
@@ -542,14 +541,11 @@ def test_failed_run_label_follows_the_tier3_gate(
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {label}" in _plain(raw)
     assert _hero_command_status(raw) == command_status
-    # The docs and the CHANGELOG name the advisory label beside the blocking one.
+    # The docs name the advisory label beside the blocking one.
     assert (
         f"The report of a default `validate --tier3` run, where Tier 3 is advisory, labels it {ADVISORY_FAIL_WORD}, "
         "and its command status follows the required tiers, so it reads Passed required checks when they pass."
     ) in _section()
-    assert (
-        f"the report of a default `validate --tier3` run, where Tier 3 is advisory, labels it {ADVISORY_FAIL_WORD}."
-    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
 
 
 def test_blocking_run_without_a_tier3_source_records_fail_in_both_reports(
@@ -564,12 +560,6 @@ def test_blocking_run_without_a_tier3_source_records_fail_in_both_reports(
     assert report_tier3["summary"]["verdict"] == "fail"
     assert _embedded_tier3(raw)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(raw)
-    entry = _changelog_entry(FAILED_RUN_ENTRY)[2]
-    assert "Only a `validate --block-on-agent-eval` run" not in entry
-    assert (
-        "A `validate --block-on-agent-eval` run without a valid Tier 3 source, which fails before any agent runs, "
-        "records `fail` there too."
-    ) in entry
 
 
 @pytest.mark.parametrize("blocking", [False, True])
@@ -602,11 +592,6 @@ def test_backend_failure_after_scoring_keeps_the_scored_verdict_in_the_json_repo
     assert _embedded_tier3(raw)["verdict"] == _embedded_tier3(standalone)["verdict"] == "fail"
     assert f"Tier 3 quality: {VERDICT_WORDS['fail'] if blocking else ADVISORY_FAIL_WORD}" in _plain(raw)
     assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" in _plain(standalone)
-    assert (
-        "When the execution backend reports a failure after the agents scored, for example a Harbor job that exits "
-        "with an error after its trials, the `tier3` object keeps the verdict those scores give, such as `pass` or "
-        "`fail`."
-    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]
     assert (
         "An execution backend error reported after every agent scored, for example a Harbor job that exits with an "
         "error after its trials, also fails the run, and an error that begins with an agent's name marks that agent "

@@ -110,9 +110,12 @@ not reuse historical scores as a fresh run or silently change expectations to
 make a check green. A fresh-user review should ask someone unfamiliar with the
 tool to explain the passing, regressed and incomplete outputs before showing
 the walkthrough's answers, and record what confused them in the pull request.
-The focused test intentionally runs the checkout's evaluator, so a scoring
-change on main can fail it even when the released replay still passes. Review
-both results before changing expectations.
+The focused test intentionally runs the checkout's evaluator. When the
+evaluator is the checkout's own source, the runner checks the `checkout` scores
+in `examples/starter/expected.json` instead of the pinned release's scores. A
+scoring change on main updates those `checkout` scores; the release scores and
+the starter guide change only when the pinned release does. Review both results
+before changing expectations.
 
 ## Code style and dependencies
 

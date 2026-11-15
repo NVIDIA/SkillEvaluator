@@ -253,8 +253,35 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
+- The eval dataset docs now say that a template prompt calls every bare
+  `SKILL.md` in the skill's description `my SKILL.md` only when the
+  description reads, opens, loads, consults or follows `SKILL.md`, or
+  otherwise points at the skill's own `SKILL.md` as a prompt `tier3 validate`
+  warns about would. Once one `SKILL.md` counts, every bare `SKILL.md` in the
+  description is renamed, even one after "a" or "the following", one before
+  a format noun or one before `in ./pdf-tools`. Reading does not count when
+  `in`, `of`, `from`, `under` or `inside` comes right after `SKILL.md`,
+  unless the skill itself follows (`the skill`, `the installed skill`,
+  `its own skill` or the skill's name), as in `in ./pdf-tools` or `in full`.
+  Other place words, such as `at` or `within`, do not count. The docs said
+  any `SKILL.md` in the description was renamed, but "Validates `SKILL.md`
+  frontmatter fields" and "Reads `SKILL.md` files" keep their `SKILL.md`, and
+  "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
+  request".
+
 ### Fixed
 
+- NeMo Gym detached cleanup defers termination signals until teardown finishes,
+  preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- Native NeMo Gym project skill projections run after authored image instructions
+  and final workspace resets, even when an earlier layer already copied skills.
+- Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
+  so skill discovery works with Gym's isolated home and configuration directories.
+  Baseline tasks use the same layout without the target skill.
+- NeMo Gym doctor isolates its anonymous endpoint probe, honors proxy settings
+  without forwarding credentials, and reports proxy authentication and gateway failures.
+- Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
+  unauthenticated HTTP probe and actionable connection-failure guidance.
 - Native NeMo Gym teardown now completes its cleanup progress stage after a
   successful stop, instead of reporting an interrupted cleanup on cancellation.
 - Native NeMo Gym cleanup now also stops run-owned detached server processes
@@ -303,6 +330,11 @@ All notable changes to SkillEvaluator are documented in this file.
   existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
+- Ctrl-C during a reusable Tier 1 workflow run is no longer missed when it
+  arrives while a scan is starting. The runner waited for scan results with no
+  time limit, and on Linux the interrupt could be handled on a scan thread,
+  which did not wake that wait; the run then went on until a scan ended. The
+  runner now checks for the interrupt every 0.1 seconds.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -422,6 +454,16 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -429,6 +471,11 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
+- Failed native skill lookups no longer count as activation when the tool reports
+  that the skill was not found or unavailable without explicit error metadata.
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -443,6 +490,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
 - Tier 3 token usage rows are now validated against the evaluation dataset's own
   case IDs. Every case row uses one of those IDs at most once, and an attempt
   whose only name is Harbor's 32-character cut of a case name is attributed to
@@ -508,6 +559,14 @@ All notable changes to SkillEvaluator are documented in this file.
   `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
   instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
   config.json'`) are still not counted.
+- The Tier 1 Gitleaks secret scan now reads authored eval files, including
+  `evals/evals.json`, graders such as `evals/grader.py`, and `evals/files`
+  inputs, so a credential committed there is reported. Generated Tier 3 output
+  in `evals/results` is still skipped, and so is every file under a `tests/`,
+  `examples/`, `fixtures/`, or `mocks/` folder, or the singular form, such as
+  a Harbor task grader in `evals/harbor/<case>/tests/`. To keep an intentional test token, add a
+  `gitleaks:allow` comment on its line or list the finding in a
+  `.gitleaksignore` file at the skill root.
 - Tier 3 reads the native Codex wrapper that runs a literal command array
   through `.map`, so a skill read batched that way is graded instead of scoring
   as an unsupported wrapper. The decoder stays a bounded static one: every array
@@ -706,6 +765,65 @@ All notable changes to SkillEvaluator are documented in this file.
   by default, instead of staying on its first frame. These follow the 0.9.0
   Fixed entry that starts "The interactive Tier 3 progress view
   (`--progress rich`, or `auto` in a terminal) now keeps one height".
+- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison
+  catalog, and names every such skill. When the configured skill roots hold
+  more than one skill, CI builds the catalog from all of them, including skills
+  that did not change. One `SKILL.md` among them whose frontmatter is not a
+  valid YAML mapping with a non-empty string `name` and `description` stops it
+  before any embedding request, and Tier 2 then checks no skill and is
+  incomplete. This includes a value that is not a string, such as
+  `name: 2048`, `name: yes`, or `description: [Draft]`, which Tier 2 commands
+  such as `similarity-check` converted to text before 0.9.0. With one skill
+  there is no catalog, and such frontmatter does not stop Tier 2. The Tier 2
+  reason pointed at provider and embedding configuration; it now says that a
+  skill's frontmatter is the cause, and the retained catalog log under
+  `tier2/catalog/diagnostics/` names every such skill by its path in the
+  repository. Quote such a value, as in `name: "2048"`. A `SKILL.md` that is
+  not valid UTF-8, such as one saved as UTF-16 or as Windows-1252 with an
+  accented letter, stops the catalog with the same reason and is named the same
+  way; save it as UTF-8. Frontmatter over a structure or length limit in any
+  skill still gets the reason that points at provider and embedding
+  configuration, and the log then names no skill, not even one whose
+  frontmatter is invalid.
+
+- Template cases from `create-eval-dataset` no longer quote a skill
+  description that names one of the skill's scripts without running it, such
+  as "Checks release manifests with review.py and reports blockers", in the
+  expected output and the assertion about the outcome. The no-skill baseline
+  does not have the script. The graded text is now the generic outcome; the
+  prompt still quotes the description. The autopilot starter case uses this
+  outcome text when it has no LLM reply, or when it replaces LLM-written
+  graded text that uses the skill; other LLM-written text that names a script
+  is kept.
+- When a template prompt would call a `SKILL.md` in the skill's description
+  `my SKILL.md` and the skill's name, "the `<name>` skill's" or "the
+  installed skill's" comes right before any `SKILL.md` in it, template cases
+  now get the generic task "handle a typical request" and generic graded
+  text, as for a description that names `<name>/SKILL.md`. This covers
+  "Reads release-review's `SKILL.md`", "Follows the release-review skill's
+  `SKILL.md`" and "Reads `SKILL.md`, then validates release-review's
+  `SKILL.md` frontmatter". Before, the prompt and the graded text quoted a
+  garbled task such as "reads release-review's my `SKILL.md`". A description
+  whose `SKILL.md` is not renamed, such as "Validates release-review's
+  `SKILL.md` frontmatter", is quoted as before. Generic wording comes first,
+  as in `tier3 validate`: for a skill named read or own, "read `SKILL.md`"
+  and "its own `SKILL.md`" are renamed as for any other skill.
+
+- Tier 1 quality no longer deducts 5 Correctness points, or reports
+  `SKILL_SPEC recommended field missing: 'version'`, when a skill has no root
+  `version` field. The version check reads only the optional
+  `metadata.version`, so a skill with that field or with no version scores
+  1.75 points higher; the bundled `text-analyzer` example now scores 86.2
+  instead of 84.5.
+
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
 
 ## 0.9.0 - 2026-11-13
 

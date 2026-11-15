@@ -104,9 +104,14 @@ def test_idle_projection_denial_has_estimate_basis_and_honest_budget_line(dimens
     assert metadata["observed_overruns"] == {}
     label = {"agent_tokens": "agent tokens", "judge_calls": "judge calls", "cost_usd": "cost"}[dimension]
     used, cap, estimate = ("$10.00", "$25.00", "$20.00") if dimension == "cost_usd" else ("10", "25", "20")
+    qualifier = (
+        "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
+        if dimension == "cost_usd"
+        else ""
+    )
     assert budget_line(metadata) == (
         f"Budget exhausted ({label} {used} of {cap}; next unit estimated {estimate} for 2 attempts)"
-        ": 2 of 6 attempts not run; results are partial"
+        f": 2 of 6 attempts not run; results are partial{qualifier}"
     )
     assert not budget.admit_many(unit("later", 1))
     assert budget.metadata()["reservation"]["estimate_denials"] == 2

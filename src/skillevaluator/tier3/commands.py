@@ -10,12 +10,14 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import webbrowser
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from rich.box import SIMPLE
@@ -1081,6 +1083,91 @@ def _docker_daemon_error(env: Mapping[str, str]) -> str | None:
 _DOCKER_PROBE_TIMEOUT_S = 15.0
 
 
+_POLICY_ENDPOINT_PROBE_TIMEOUT_S = 3.0
+_POLICY_ENDPOINT_PROBE = """
+import sys
+from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, getproxies_environment, proxy_bypass
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+try:
+    url = urlsplit(sys.stdin.read())
+    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+        sys.exit(1)
+    proxies = getproxies_environment()
+    using_proxy = bool(proxies.get(url.scheme)) and not proxy_bypass(url.netloc)
+    try:
+        response = build_opener(ProxyHandler(proxies), NoRedirect()).open(
+            Request(urlunsplit(url), method="HEAD"), timeout=2
+        )
+    except HTTPError as response:
+        response.close()
+        if using_proxy and (response.code == 407 or url.scheme == "http" and response.code in (502, 504)):
+            sys.exit(2 if response.code == 407 else 3)
+    except URLError as error:
+        if using_proxy:
+            sys.exit(2 if "Tunnel connection failed: 407" in str(error.reason) else 3)
+        sys.exit(1)
+    else:
+        response.close()
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
+    """Probe anonymously in a bounded child so DNS resolution cannot hang doctor."""
+    from skillevaluator.tier3.nemo_gym.backend import MODEL_URL_ENV
+
+    probe_env = {
+        name: os.environ[name] for name in ("SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ
+    }
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        if value := os.environ.get(name):
+            if name.lower() != "no_proxy":
+                try:
+                    parsed = urlsplit(value if "://" in value else "//" + value, scheme="http")
+                    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                        continue
+                    value = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
+                except ValueError:
+                    continue
+            probe_env[name] = value
+    detail = "could not reach the policy endpoint"
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-c", _POLICY_ENDPOINT_PROBE],
+            env=probe_env,
+            input=url,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_POLICY_ENDPOINT_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return None
+        if probe.returncode == 2:
+            detail = (
+                "policy endpoint proxy authentication is needed; this anonymous probe does not send proxy credentials"
+            )
+        elif probe.returncode == 3:
+            detail = "policy endpoint proxy could not reach the service; check HTTP_PROXY/HTTPS_PROXY/NO_PROXY and proxy access"
+    except subprocess.TimeoutExpired:
+        detail = f"policy endpoint probe timed out after {_POLICY_ENDPOINT_PROBE_TIMEOUT_S:g}s"
+    except OSError:
+        detail = "could not start the policy endpoint probe"
+    return (
+        f"NeMo Gym {detail}; check {MODEL_URL_ENV} or the selected provider's base URL, "
+        "start the inference service, and check network access. A policy endpoint HTTP response is sufficient; "
+        "this check does not validate credentials or model compatibility."
+    )
+
+
 def _nemo_gym_doctor_rows(
     agents: list[str],
     env_mode: str,
@@ -1134,6 +1221,7 @@ def _nemo_gym_doctor_rows(
             overrides = parse_agent_model_overrides(agent_model)
         except ValueError:
             overrides = {}
+        checked_endpoints: set[str] = set()
         for agent in agents:
             try:
                 _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0])
@@ -1142,6 +1230,10 @@ def _nemo_gym_doctor_rows(
                 continue
             if (url_error := model_url_credential_error(endpoint_url)) and url_error not in errors:
                 errors.append(url_error)
+            elif not url_error and endpoint_url not in checked_endpoints:
+                checked_endpoints.add(endpoint_url)
+                if endpoint_error := _nemo_gym_policy_endpoint_error(endpoint_url):
+                    errors.append(f"{agent}: {endpoint_error}")
     if env_mode == "docker" and (docker_error := _docker_daemon_error(gym_launch_environment({}))):
         errors.append(docker_error)
     rows += [("NeMo Gym backend", "fail", error) for error in errors] or [

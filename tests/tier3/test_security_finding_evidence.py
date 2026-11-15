@@ -1986,13 +1986,35 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
             json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=f(" * 3500})}),
             id="calls-past-a-masked-flag-value",
         ),
+        pytest.param("--password a" + "\\ --db-password=a" * 6000, id="flags-inside-a-long-flag-word"),
+        pytest.param("--db_password a" + "\\ -token=a" * 8000, id="flags-inside-a-long-underscored-flag-word"),
+        pytest.param(
+            json.dumps(
+                {"arguments": json.dumps({"argv": [f"--db-password=v{i}" for i in range(4000)]}, separators=(",", ":"))}
+            ),
+            id="flags-in-an-argv-list-repeated-as-json",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "arguments": json.dumps(
+                        {"argv": [f"--db-password=v{i}" for i in range(200)], "data": "A" * 500_000},
+                        separators=(",", ":"),
+                    )
+                }
+            ),
+            id="flags-before-a-long-word",
+        ),
     ],
 )
 def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> None:
     # Judge evidence is masked whole, with no 2,000-character scan window, so
-    # the flag rule must stay close to linear: each of these texts of about
-    # 40,000 characters takes tens of milliseconds, where a walk that grows
-    # with the square or cube of the text would take seconds to minutes. The
+    # the flag rule must stay close to linear: each of these texts of 40,000
+    # to 500,000 characters takes tens to hundreds of milliseconds, where a
+    # walk that grows with the square or cube of the text would take seconds
+    # to minutes. A flag inside the word value of an earlier flag ("--password
+    # a\ --db-password=a", or an argv list in JSON repeated as JSON, where
+    # every quote is escaped) must not read the rest of that word again. The
     # bound is generous for a slow CI runner.
     started = time.perf_counter()
     eval_core_checks._mask_finding_evidence_credentials(text)

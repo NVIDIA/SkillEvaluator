@@ -3390,7 +3390,10 @@ _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
     r"password|passwd|passphrase|token|secret|api[-_]?key|credential|bearer|cookie", re.IGNORECASE
 )
 _FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"[-_](?:stdin|file|jar|path|dir)$", re.IGNORECASE)
-_FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
+# The flag rule reads a value as a quoted value or a word (see
+# _AssignmentValues.flag_value_end).
+_FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_QUOTED_FLAG_VALUE)
+_FINDING_EVIDENCE_FLAG_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`\\])+")
 # A flag name with "_" was read before only by the rules after the flag rule,
 # so its unquoted value also ends at ";", "|" or "&", where the assignment rule
 # ends a word, and a "NAME=VALUE" right after it is still masked
@@ -3408,7 +3411,7 @@ _FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
 _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE = (
     "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
 )
-_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE)
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`\\;|&])+")
 # What a name that ends a value, or follows it with no space, may hold past
 # the value's end up to its separator: the rest of the name, its closing quote
 # or bracket and spaces (see _FINDING_EVIDENCE_ASSIGNMENT_NAME).
@@ -3877,8 +3880,11 @@ def _mask_credential_flags(text: str) -> str:
     pos = 0
     underscored_value = False
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
+        inner = match.start() < pos
         if (
-            not _is_credential_flag_name(match.group(1))
+            # A flag inside the value of an earlier "-" flag is not read (see below).
+            (inner and not underscored_value)
+            or not _is_credential_flag_name(match.group(1))
             # A name with "_" joined to its value by "=" ("--api_key=VALUE")
             # or followed by a separator ("--api_key = VALUE", "-access_token
             # := VALUE") is left to the assignment rule, which read it before,
@@ -3887,25 +3893,25 @@ def _mask_credential_flags(text: str) -> str:
         ):
             continue
         underscored = "_" in match.group(1)
-        value_re = _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE_RE if underscored else _FINDING_EVIDENCE_FLAG_VALUE_RE
-        value = value_re.match(text, match.end())
+        start = match.end()
+        end = values.flag_value_end(start, underscored)
         # A value of a name with "_" that holds a credential name whose value
         # the assignment rule masks past this value is left to that rule too
         # ("--api_key API_TOKEN=\"...\"").
-        if value is None or (underscored and values.runs_past(value.start(), value.end())):
+        if end is None or (underscored and values.runs_past(start, end)):
             continue
-        if match.start() < pos:
+        if inner:
             # A flag inside the value of an earlier one is not read on its
             # own. A flag inside the value of a "_" flag was read before,
             # when that value was not masked, and that value may end at the
             # quote that opens this flag's value ('--set_secret "a
             # --db_password "VALUE'), so the rest of this flag's value is
             # masked as a credential that value hides.
-            if underscored_value and value.end() > pos:
-                inner_flags.append((match.start(), value.start(), (max(pos, value.start()), value.end())))
+            if end > pos:
+                inner_flags.append((match.start(), start, (max(pos, start), end)))
             continue
-        spans.append((value.start(), value.end()))
-        pos = value.end()
+        spans.append((start, end))
+        pos = end
         underscored_value = underscored
     if not spans:
         return text
@@ -4217,9 +4223,10 @@ class _AssignmentValues:
 
     The quotes of the text are read once, when first needed, and a word or
     the rest of a quoted string once for all the names in it (see _run_end),
-    so reading every name in a long text stays close to linear. One is made
-    for each text a rule reads and dropped when the rule is done, so nothing
-    is kept between texts or shared between threads.
+    so reading every name in a long text stays close to linear. So is a word
+    the flag rule reads for all the flags in it (see flag_value_end). One is
+    made for each text a rule reads and dropped when the rule is done, so
+    nothing is kept between texts or shared between threads.
     """
 
     def __init__(self, text: str) -> None:
@@ -4283,6 +4290,24 @@ class _AssignmentValues:
         if quoted is not None and (end is None or quoted.end() > end):
             return quoted.end()
         return end
+
+    def flag_value_end(self, start: int, underscored: bool) -> int | None:
+        """Return where the value the flag rule reads at *start* ends (None: it reads none there).
+
+        The value is _FINDING_EVIDENCE_FLAG_VALUE, or for a name with "_"
+        _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE, with a word read by
+        _run_end, so the flags inside a long word value ("--db_password
+        a\\ -token=a\\ -token=a...") do not each read the rest of that word.
+        """
+        text = self.text
+        quoted = _FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE.match(text, start)
+        if quoted is not None:
+            return quoted.end()
+        if text.startswith(("|", "&", ";", "<", ">"), start):
+            return None
+        return self._run_end(
+            _FINDING_EVIDENCE_UNDERSCORED_FLAG_WORD_RE if underscored else _FINDING_EVIDENCE_FLAG_WORD_RE, start
+        )
 
     def _string_open(self, position: int) -> int | None:
         """Return where the quoted string open at *position* starts (None: none is), as the quote scan reads it."""

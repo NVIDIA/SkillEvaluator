@@ -648,7 +648,8 @@ All notable changes to SkillEvaluator are documented in this file.
   narrowed with `--checks` could pass without scanning the skill's other files;
   and a run from inside the skill wrote its reports into it. Tier 3 also
   received a `workflow-rules.mdc` file itself; it now receives the workflow
-  folder, as it already did for a `SKILL.md`.
+  folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
+  when the file is a symlink to a file with another name.
 
 ## 0.9.0 - 2026-11-13
 

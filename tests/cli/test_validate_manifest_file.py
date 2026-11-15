@@ -133,6 +133,71 @@ def test_linked_skill_manifest_validates_the_folder_holding_the_link(tmp_path: P
     assert _skill_names(manifest[1]) == ["linked"]
 
 
+def _link_manifest_to_another_name(manifest: Path, shared: Path, name: str) -> None:
+    """Move *manifest*'s content to ``shared/name`` and leave a link under the manifest's own name."""
+    shared.mkdir()
+    manifest.replace(shared / name)
+    try:
+        manifest.symlink_to(shared / name)
+    except (OSError, NotImplementedError) as exc:
+        pytest.skip(f"symlinks are unavailable: {exc}")
+
+
+@pytest.mark.parametrize("manifest_name", ["SKILL.md", "skill.md"])
+@pytest.mark.parametrize("type_args", [(), ("--type", "skill")], ids=["auto-type", "skill-type"])
+def test_skill_manifest_linked_to_a_file_with_another_name_scans_the_whole_skill(
+    tmp_path: Path, manifest_name: str, type_args: tuple[str, ...]
+) -> None:
+    # The link points at shared/guide.md, so the content type cannot be read from the file it resolves to.
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    _link_manifest_to_another_name(skill / "SKILL.md", tmp_path / "shared", "guide.md")
+    if manifest_name != "SKILL.md":
+        (skill / "SKILL.md").rename(skill / manifest_name)
+    script = skill / "scripts" / "summarize.py"
+    hidden = "".join(chr(0xE0000 + ord(char)) for char in "hidden")
+    script.write_text(script.read_text(encoding="utf-8") + f"# note{hidden}\n", encoding="utf-8")
+    args = ("--no-dedup", "--checks", "unicode", *type_args)
+
+    folder = _validate(skill, tmp_path / "folder-reports", *args)
+    manifest = _validate(skill / manifest_name, tmp_path / "manifest-reports", *args)
+
+    assert folder[0] == 1
+    assert manifest == folder
+
+
+def test_skill_manifest_linked_to_a_file_with_another_name_is_refused_without_no_dedup(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    skill = tmp_path / "simple"
+    shutil.copytree(FIXTURE, skill)
+    _link_manifest_to_another_name(skill / "SKILL.md", tmp_path / "shared", "guide.md")
+
+    def must_not_run(*_args, **_kwargs):
+        raise AssertionError("Validation must not receive a linked manifest unless --no-dedup is passed")
+
+    monkeypatch.setattr(cli_module, "run_validation", must_not_run)
+
+    result = CliRunner().invoke(cli_module.cli, ["validate", str(skill / "SKILL.md"), "--tiers", "1"])
+
+    assert result.exit_code == 2, result.output
+    assert "symlink or reparse point: SKILL.md" in result.output
+
+
+def test_workflow_manifest_linked_to_a_file_with_another_name_validates_the_folder(
+    tmp_path: Path, sample_workflow_dir: Path
+) -> None:
+    # The link points at shared/rules.mdc, which reads as a rules file, not as a workflow manifest.
+    _link_manifest_to_another_name(sample_workflow_dir / "workflow-rules.mdc", tmp_path / "shared", "rules.mdc")
+    args = ("--no-dedup", "--checks", "schema")
+
+    folder = _validate(sample_workflow_dir, tmp_path / "folder-reports", *args)
+    manifest = _validate(sample_workflow_dir / "workflow-rules.mdc", tmp_path / "manifest-reports", *args)
+
+    assert folder[0] == 0
+    assert manifest == folder
+
+
 @pytest.mark.parametrize("tiers", [(), ("--tiers", "1")], ids=["default-tiers", "tier1-only"])
 def test_manifest_in_linked_skill_folder_is_refused_like_the_folder(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, tiers: tuple[str, ...]

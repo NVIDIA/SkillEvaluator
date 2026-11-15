@@ -713,6 +713,22 @@ def _trial_evidence_ref(ref: Any, reward: dict[str, Any], *, multi_trial: bool) 
     return resolved
 
 
+# Fields that say what role a location plays (a ground truth that also names an
+# expected artifact, a tool call that is also a file write), not what it holds.
+_EVIDENCE_ROLE_FIELDS = frozenset({"kind", "label", "path", "status"})
+
+
+def _same_location_variants(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Return True when two refs cast one location and one body of text in different roles."""
+    if first.get("kind") == second.get("kind"):
+        return False
+    return all(
+        first.get(field) == second.get(field)
+        for field in _EVIDENCE_REF_TEXT_LIMITS
+        if field not in _EVIDENCE_ROLE_FIELDS
+    )
+
+
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Build a lookup from each stable compact evidence key to its full dict ref.
 
@@ -722,6 +738,12 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
     the LLM returns into the richer dict form consumed by SkillEvaluator report
     templates (which read ``ref.kind``, ``ref.json_pointer``, ``ref.path``,
     ``ref.excerpt``).
+
+    A key is dropped when it is claimed by more than one reward or when one
+    reward gives it conflicting content.  A single reward may cite one location
+    in several roles with the same content (for example ``ground_truth`` and
+    ``expected_artifact``, or ``tool_call`` and ``file_change``); the first one
+    seen, in metric order, is kept as the canonical reference.
     """
     lookup: dict[str, dict[str, Any]] = {}
     owners: dict[str, int] = {}
@@ -739,7 +761,10 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
                     key = _compact_evidence_ref(resolved)
                     if key in ambiguous:
                         continue
-                    if key in lookup and (owners[key] != index or lookup[key] != resolved):
+                    if key in lookup and (
+                        owners[key] != index
+                        or (lookup[key] != resolved and not _same_location_variants(lookup[key], resolved))
+                    ):
                         ambiguous.add(key)
                         del lookup[key]
                     elif key not in lookup:

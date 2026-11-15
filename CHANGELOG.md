@@ -327,6 +327,14 @@ All notable changes to SkillEvaluator are documented in this file.
   existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
+- Ctrl-C during a reusable Tier 1 workflow run is no longer missed when it
+  arrives while a scan is starting. The runner waited for scan results with no
+  time limit, and on Linux the interrupt could be handled on a scan thread,
+  which did not wake that wait; the run then went on until a scan ended. The
+  runner now checks for the interrupt every 0.1 seconds.
+- In local mode, the offered OpenCode install now pins OpenCode 1.19.5, the
+  release Harbor and CI install, instead of whatever npm resolves as latest.
+  Claude Code and Codex installs were already pinned.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -446,6 +454,16 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -488,6 +506,10 @@ All notable changes to SkillEvaluator are documented in this file.
   case names receive the same Markdown escaping, publication-label masking and
   terminal secret redaction as visible rows, before their displayed length is
   bounded.
+- Tier 3 case actions preserve dataset expectations and assertions, rejecting
+  requirement-weakening model advice in favor of deterministic remedies.
+  Recommendations identify model-written actions and record when generation
+  failed or unsafe advice was replaced by a fallback.
 - Tier 3 token usage per case, per agent and over all agents now counts each
   attempt in the case it belongs to. An unscored attempt of a native task whose
   `[metadata] entry_id` differs from its directory joins that case's row
@@ -684,20 +706,14 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
-- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
-  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
-  prompt such as `$ python run.py`, as a wildcard for every file left out of
-  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
-  was left out. A wildcard elsewhere in the line, or a label inside code, still
-  counts. So do such a label and `$` on a line with a quoted or escaped space
-  or shell delimiter, such as `setup' 'helper.sh` or `setup\ h*.sh`, where a
-  shell may join words that the check reads apart. With `validate --workers`
-  above 1, a skill of a folder that is also a plugin is judged against the
-  folder, as with one worker, so a line naming a file elsewhere in the folder
-  keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the
-  accepted missing-reference warning, or the error that says why a scan is
-  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
-  drops that error either.
+- The PII scan no longer reports link-local `169.254.x.x` addresses, such as the
+  cloud instance metadata endpoint `169.254.169.254` and the ECS credentials
+  endpoint `169.254.170.2`, as non-RFC1918 IP addresses; its advice to use a
+  private IP cannot apply to them. Other addresses outside the excluded ranges,
+  including `169.25.x.x` and `169.255.x.x`, are still reported. A
+  `--pii-waivers` entry that accepted such an address now matches no finding,
+  so it is reported as a LOW `stale-pii-waiver` instead of an INFO
+  `applied-pii-waiver` and can be removed.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded
@@ -811,6 +827,29 @@ All notable changes to SkillEvaluator are documented in this file.
   `metadata.version`, so a skill with that field or with no version scores
   1.75 points higher; the bundled `text-analyzer` example now scores 86.2
   instead of 84.5.
+
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. So do such a label and `$` on a line with a quoted or escaped space
+  or shell delimiter, such as `setup' 'helper.sh` or `setup\ h*.sh`, where a
+  shell may join words that the check reads apart. With `validate --workers`
+  above 1, a skill of a folder that is also a plugin is judged against the
+  folder, as with one worker, so a line naming a file elsewhere in the folder
+  keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the
+  accepted missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
 
 ## 0.9.0 - 2026-11-13
 

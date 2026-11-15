@@ -332,6 +332,9 @@ All notable changes to SkillEvaluator are documented in this file.
   time limit, and on Linux the interrupt could be handled on a scan thread,
   which did not wake that wait; the run then went on until a scan ended. The
   runner now checks for the interrupt every 0.1 seconds.
+- In local mode, the offered OpenCode install now pins OpenCode 1.19.5, the
+  release Harbor and CI install, instead of whatever npm resolves as latest.
+  Claude Code and Codex installs were already pinned.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

@@ -5377,8 +5377,8 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         ("provider", "credential", "model", "effort"),
         (
             ("openai", "OPENAI_API_KEY", "gpt-6.1-sol", "medium"),
-            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5", None),
-            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5", None),
+            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5-5", None),
+            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5-5", None),
         ),
     )
     def test_skillspector_child_environment_maps_supported_public_provider_defaults(
@@ -5507,8 +5507,8 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         ("provider", "credentials", "expected"),
         (
             ("openai", {"OPENAI_API_KEY": "provider-test-key"}, "gpt-6.1-sol"),
-            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5"),
-            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5"),
+            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5-5"),
+            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5-5"),
             ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3-super-120b-a12b"),
             (
                 "openai-compatible",

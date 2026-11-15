@@ -93,8 +93,8 @@ def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_mo
     # Literals, re-validated against the pinned SkillSpector release before they change.
     assert SKILLSPECTOR_DEFAULT_MODELS == {
         "openai": "gpt-6.1-sol",
-        "anthropic": "claude-opus-5",
-        "bedrock": "us.anthropic.claude-opus-5",
+        "anthropic": "claude-opus-5-5",
+        "bedrock": "us.anthropic.claude-opus-5-5",
         "nv_build": "nvidia/nemotron-3-super-120b-a12b",
         "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
     }

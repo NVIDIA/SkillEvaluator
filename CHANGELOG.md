@@ -249,6 +249,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Native NeMo Gym teardown now completes its cleanup progress stage after a
+  successful stop, instead of reporting an interrupted cleanup on cancellation.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

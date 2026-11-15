@@ -69,8 +69,8 @@ CHAT_DEFAULT_MODELS = {
 # An explicit ``SKILL_EVAL_LLM_MODEL`` still reaches SkillSpector.
 SKILLSPECTOR_DEFAULT_MODELS = {
     "openai": "gpt-6.1-sol",
-    "anthropic": "claude-opus-5",
-    "bedrock": "us.anthropic.claude-opus-5",
+    "anthropic": "claude-opus-5-5",
+    "bedrock": "us.anthropic.claude-opus-5-5",
     "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }

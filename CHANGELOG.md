@@ -154,6 +154,10 @@ All notable changes to SkillEvaluator are documented in this file.
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
   rubric and LLM security verification did not run. The same default applies to
   SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
+  to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
+  the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
+  a scan on the native Anthropic API completed at full coverage.
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
   in the reusable workflow); `ci/README.md` notes the same.

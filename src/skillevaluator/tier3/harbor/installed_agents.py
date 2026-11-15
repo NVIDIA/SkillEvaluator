@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from time import monotonic
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
@@ -26,6 +26,7 @@ from skillevaluator.utils.redaction import redact_sensitive_text
 if TYPE_CHECKING:
     from harbor.agents.installed.base import BaseInstalledAgent
     from harbor.environments.base import BaseEnvironment
+    from harbor.models.trajectories import Trajectory
 
 # Harbor's installers download over HTTPS but never request a CA bundle; apt
 # images used to get one only as a dependency of the skipped npm package.
@@ -177,6 +178,24 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
 
 class SkillEvaluatorOpenCode(OpenCode):
     """Avoid a redundant distribution Node/npm install before Harbor's NVM."""
+
+    def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:
+        normalized = []
+        for event in events:
+            part = event.get("part")
+            if event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") == "bash":
+                state = part.get("state")
+                if isinstance(state, dict) and state.get("status") in {"completed", "error"}:
+                    metadata = state.get("metadata")
+                    exit_code = metadata.get("exit") if isinstance(metadata, dict) else None
+                    if type(exit_code) is int:
+                        # Harbor retains output but drops metadata.exit from its ATIF observation.
+                        # "Exit code: N" is a header spelling the plugin failure scanner skips, so a
+                        # leading error line in the output is still read as the first line.
+                        output = f"Exit code: {exit_code}\n{state.get('output') or ''}"
+                        event = {**event, "part": {**part, "state": {**state, "output": output}}}
+            normalized.append(event)
+        return super()._convert_events_to_trajectory(normalized)
 
     async def ensure_system_dependencies(
         self,

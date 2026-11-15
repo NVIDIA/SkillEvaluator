@@ -106,7 +106,7 @@ uv run --python 3.13 skillevaluator quality-check \
   -r cli -r json -o reports/first-quality
 ```
 
-No API key, scanner, GPU or Docker is needed. The example scores **84.5/100 (B)**,
+No API key, scanner, GPU or Docker is needed. The example scores **86.2/100 (B)**,
 exits `0` and saves `reports/first-quality/skillevaluator-quality.json`. The
 passing threshold defaults to 70.
 

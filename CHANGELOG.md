@@ -310,10 +310,11 @@ All notable changes to SkillEvaluator are documented in this file.
   value, as in `-u "bob --api_key \"x a:..."`, no longer leaves that value
   unmasked. A name, command, or `.netrc` phrase that such a password runs
   into is masked as its own rule masks it, as in
-  `--use_token mysql -u root -p...password: ...`, and a flag inside the quoted
-  value of an earlier flag is read too, so its value is masked where it runs
-  past that quote. Both the host checker and the bundled Harbor verifier
-  apply the fix.
+  `--use_token mysql -u root -p...password: ...`. A flag inside the quoted
+  value of an earlier `_` flag is read too, and the rest of its value past
+  that quote is masked, as is a name or command that rest runs into; a flag
+  inside the value of a `-` flag is not read. Both the host checker and the
+  bundled Harbor verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

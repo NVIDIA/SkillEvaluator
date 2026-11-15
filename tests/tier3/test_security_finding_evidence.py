@@ -1896,6 +1896,7 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
         ),
         pytest.param("--api_key " + "token=x," * 5000, id="names-in-one-long-flag-value"),
         pytest.param('["w", "--use_token", "mysql", "-pX", ' * 1000 + "]", id="value-less-flags-in-an-argv-list"),
+        pytest.param('--api_key "a --db_password "x ' * 3000, id="flags-inside-flag-values"),
         pytest.param(
             '{"c": "' + "./wrap --api_key K1\\\\nlogin bob password Z " * 1000 + '"}',
             id="escaped-backslashes-before-line-breaks",
@@ -2087,6 +2088,59 @@ def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> Non
     text = f'./tool --api_key "a --db_password "{_API_TOKEN} b'
 
     assert eval_core_checks._redact_finding_evidence(text) == "./tool --api_key <redacted>"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            f'./w --set_secret " git -u github.tokenK1 auth_type= --db_password "{_API_TOKEN} [  = ',
+            id="flag-in-a-value-with-a-kept-name",
+        ),
+        pytest.param(f'./tool --api_key "token=x --db-password "x TOKEN="{_API_TOKEN} x"', id="name-cut-by-the-flag"),
+        pytest.param(f'./tool --api_key "a b --use-token "x y auth=("u", "{_API_TOKEN}")', id="call-cut-by-the-flag"),
+    ],
+)
+@pytest.mark.parametrize("judge", [False, True])
+def test_the_value_of_a_flag_inside_an_underscored_flag_value_hides_nothing(text: str, judge: bool) -> None:
+    # A "_" flag value was left to the assignment rule when it held a
+    # credential name, so a flag inside it was read. Its quoted value may run
+    # past the masked "_" value and cut a name or a call from what follows;
+    # each is still masked, also as JSON and as judge evidence.
+    for evidence in (text, json.dumps({"cmd": text})):
+        assert _API_TOKEN not in eval_core_checks._mask_finding_evidence_credentials(
+            evidence, preserve_header_format=judge
+        )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f'./tool --api-key "x y z --db-password "x TOKEN="{_API_TOKEN} x"',
+            "./tool --api-key <redacted>x TOKEN=<redacted>",
+            id="name",
+        ),
+        pytest.param(
+            f'./tool --password "a b --use-token "x y auth=("u", "{_API_TOKEN}")',
+            "./tool --password <redacted>x y auth=<redacted>",
+            id="call",
+        ),
+        pytest.param(
+            f'./tool --token "login --api-key "\\n ["mysql", "-u", "root", "-p{_API_TOKEN}"]',
+            './tool --token <redacted>\\n ["mysql", "-u", "root", "-p<redacted>"]',
+            id="argv-element",
+        ),
+    ],
+)
+@pytest.mark.parametrize("judge", [False, True])
+def test_a_flag_inside_a_dashed_flag_value_is_not_read(text: str, expected: str, judge: bool) -> None:
+    # A flag inside the quoted value of a "-" flag is not read, so its value
+    # does not cut a name, a call or an argv list element from what follows.
+    assert eval_core_checks._mask_finding_evidence_credentials(text, preserve_header_format=judge) == expected
+    assert _API_TOKEN not in eval_core_checks._mask_finding_evidence_credentials(
+        json.dumps({"cmd": text}), preserve_header_format=judge
+    )
 
 
 def test_the_finding_evidence_masker_keeps_no_cache_between_texts() -> None:

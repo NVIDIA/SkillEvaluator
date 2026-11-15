@@ -1946,8 +1946,9 @@ saved judge evidence use the same credential masker:
   flag value inside it holds (`-u "bob --api_key \"x a:..."`). A name,
   command, or `.netrc` phrase that such a password runs into is masked as
   its own rule masks it (`--use-token mysql -u root -p...password: ...`). A
-  flag inside the quoted value of an earlier flag is read too, so its value
-  is masked where it runs past that quote;
+  flag inside the quoted value of an earlier `_` flag is read too, and the
+  rest of its value past that quote is masked, as is a name or command that
+  rest runs into; a flag inside the value of a `-` flag is not read;
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
@@ -2016,9 +2017,10 @@ or `ssh` command string, or a credential that a masked flag value hides in
 other ways: the value of a credential name after a flag value that runs over
 a JSON-escaped line break (`\n`, also escaped again) at which the value of an
 earlier name in the same string ended, since that value then runs over the
-later name; text after a quoted value whose closing quote also opens the
-quoted value of a flag inside it; and an argv list element after a
-credential flag element that the masked password of a hidden command covers.
+later name; text after a flag value inside the quoted value of an earlier
+`_` flag when the two values use different quotes, such as `\"` and `\\\"`;
+and an argv list element after a credential flag element that the masked
+password of a hidden command covers.
 Some ordinary words are masked, such as the
 path in `grep -r token: /etc`, the value of a flag that names a token other
 than `--max-tokens` and `--token-limit` (`--max-new-tokens 256` or

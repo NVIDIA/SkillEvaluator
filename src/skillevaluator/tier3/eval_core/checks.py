@@ -20,7 +20,7 @@ import json
 import posixpath
 import re
 import shlex
-from collections.abc import Callable, Mapping
+from collections.abc import Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -3866,9 +3866,11 @@ def _mask_credential_flags(text: str) -> str:
     """Mask the value of each flag whose name holds a credential word ("--client-secret VALUE")."""
     values = _AssignmentValues(text)
     spans: list[tuple[int, int]] = []
-    # A flag inside the value of an earlier one is read too: that value may
-    # end at the quote that opens this flag's value ('--set_secret "a
-    # --db_password "VALUE'). Values that overlap are masked as one.
+    # Each flag inside the value of an earlier "_" flag whose own value runs
+    # past that value: the flag's name and the rest of its value (see below).
+    inner_flags: list[tuple[int, int, tuple[int, int]]] = []
+    pos = 0
+    underscored_value = False
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
         if (
             not _is_credential_flag_name(match.group(1))
@@ -3887,12 +3889,27 @@ def _mask_credential_flags(text: str) -> str:
         # ("--api_key API_TOKEN=\"...\"").
         if value is None or (underscored and values.runs_past(value.start(), value.end())):
             continue
+        if match.start() < pos:
+            # A flag inside the value of an earlier one is not read on its
+            # own. A flag inside the value of a "_" flag was read before,
+            # when that value was not masked, and that value may end at the
+            # quote that opens this flag's value ('--set_secret "a
+            # --db_password "VALUE'), so the rest of this flag's value is
+            # masked as a credential that value hides.
+            if underscored_value and value.end() > pos:
+                inner_flags.append((match.start(), value.start(), (max(pos, value.start()), value.end())))
+            continue
         spans.append((value.start(), value.end()))
-    return _mask_spans(text, spans + _hidden_credential_spans(text, spans, values))
+        pos = value.end()
+        underscored_value = underscored
+    return _mask_spans(text, spans + _hidden_credential_spans(text, spans, values, inner_flags))
 
 
 def _hidden_credential_spans(
-    text: str, value_spans: list[tuple[int, int]], values: _AssignmentValues
+    text: str,
+    value_spans: list[tuple[int, int]],
+    values: _AssignmentValues,
+    inner_flags: Sequence[tuple[int, int, tuple[int, int]]] = (),
 ) -> list[tuple[int, int]]:
     """Return the text later rules mask for each credential that masking the values *value_spans* hides from them.
 
@@ -3909,6 +3926,9 @@ def _hidden_credential_spans(
     value inside it ("login bob password X --use_token Y VALUE"), so its rest
     from that value on is returned. So it is for an argv list element masked
     as a flag's value ('["tool", "--password", "v"]\\ndocker login -p VALUE').
+    Each of *inner_flags* (the start of a flag inside a masked value, where
+    its value starts, and the rest of that value past the masked value) is
+    such a credential too, whose command part is the flag's name.
 
     Text returned may hide another credential in turn, or a name the
     assignment rule reads, also one its start cuts ("-pVALUEpassword:
@@ -3926,9 +3946,14 @@ def _hidden_credential_spans(
         for match in _FINDING_EVIDENCE_CONFIG_SET_RE.finditer(text)
         if _mask_config_set_value(match, values) != match.group()
     ]
+    # Each credential's command part and the password it hides.
     command_parts = [
-        _SpanIndex([(match.start(), match.end(1), match) for match in matches]) for matches in found.values() if matches
+        _SpanIndex([(match.start(), match.end(1), (match.end(1), match.end())) for match in matches])
+        for matches in found.values()
+        if matches
     ]
+    if inner_flags:
+        command_parts.append(_SpanIndex(list(inner_flags)))
     user_passwords = _SpanIndex([(match.end(1), match.end(), match) for match in found[_FINDING_EVIDENCE_USER_FLAG_RE]])
     netrc_passwords = _SpanIndex(
         [
@@ -3949,7 +3974,7 @@ def _hidden_credential_spans(
     def take_credentials(start: int, end: int) -> None:
         # A credential is hidden also when the masked text ends right before it.
         for index in command_parts:
-            hidden.extend((match.end(1), match.end()) for match in index.take(start, end + 1))
+            hidden.extend(index.take(start, end + 1))
         # So it is when it starts where the masked text does, inside the
         # password of another credential of its rule, which the search above
         # does not find ("--use_token aws configure set aws_secret_access_key
@@ -4031,11 +4056,11 @@ class _SpanIndex:
 
 
 def _mask_spans(text: str, spans: list[tuple[int, int]]) -> str:
-    """Replace each span of *text* in *spans* with "<redacted>", and spans that overlap with one."""
+    """Replace each span of *text* in *spans* with "<redacted>", and spans that overlap or touch with one."""
     parts: list[str] = []
     pos = 0
     for start, end in sorted(spans):
-        if start < pos:
+        if parts and start <= pos:
             pos = max(pos, end)
             continue
         parts.append(text[pos:start])

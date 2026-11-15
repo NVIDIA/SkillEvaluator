@@ -274,6 +274,10 @@ All notable changes to SkillEvaluator are documented in this file.
   touches rather than letting the first stand for the rest, and keep the patch
   text itself as the write body. A headerless or malformed `input` is left
   alone, so a shell source string is not reported as a file change.
+- The NVIDIA Build bridge preserves reported input, output and cached token
+  usage in Anthropic Messages and Responses API replies. Anthropic replies use
+  schema-required zero defaults for missing input/output fields and clamp
+  uncached input counts at zero; Responses usage remains absent when unreported.
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider

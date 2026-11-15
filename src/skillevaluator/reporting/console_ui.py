@@ -1275,7 +1275,10 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
 
 
 def _tier1_fix(result: ValidationResult) -> FixItem:
-    problem = _first_error(result) or f"{result.validator_name} failed"
+    # A check that failed beside an incomplete scan names every gate failure, so
+    # a failure that outranks the gap, such as the hook gate, is not hidden by it.
+    gates = "; ".join(dict.fromkeys(result.gate_failures)) if result.is_incomplete else ""
+    problem = gates or _first_error(result) or f"{result.validator_name} failed"
     action = next((f.suggestion for f in result.findings if f.message == problem and f.suggestion), None)
     if action is None and not result.gate_failures:
         action = first_fix([result])

@@ -49,6 +49,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.reporting.console_ui import summarize_tier1
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.run_status import Status, resolve_run_status
 from skillevaluator.utils.tool_runner import ToolResult
@@ -362,8 +363,9 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     """The scan is recorded as incomplete, but the check is reported as failed.
 
     A confirmed failure, such as the Critical, takes precedence over missing
-    evidence in the reported status, so the check shows FAIL, not INCOMPLETE.
-    Only the incomplete scans and publication eligibility say incomplete.
+    evidence in the reported status, so the check shows FAIL, not INCOMPLETE,
+    also in the terminal Tier 1 summary. Only the incomplete scans and
+    publication eligibility say incomplete.
     """
     assert result.incomplete_scans == [stage]
     run = resolve_run_status([result])
@@ -371,6 +373,27 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     assert run.headline == Status.FAILED
     assert run.missing == (stage,)
     assert run.publication == Status.INCOMPLETE
+    _assert_tier1_summary_reports_the_hook_gate(result)
+
+
+def _assert_tier1_summary_reports_the_hook_gate(result: ValidationResult) -> None:
+    """The terminal Tier 1 summary counts the check as failed and names its hook gate failure.
+
+    Beside a gap that records the scan as incomplete, the fix line names every
+    gate failure, so the hook gate is not hidden behind the gap. The summary
+    neither counts the check as not run nor suggests skipping it.
+    """
+    ok, rows = summarize_tier1([result], lineup=["security"])
+    assert not ok
+    [summary] = [row for row in rows if row.label == "summary"]
+    counts = [chunk for chunk, _style in summary.segments]
+    assert "1 failed" in counts
+    assert not [chunk for chunk in counts if "didn't run" in chunk or "incomplete" in chunk]
+    assert not [row for row in rows if row.label == "setup"]
+    assert not [row for row in rows if any("--skip" in chunk for chunk, _style in row.segments)]
+    [fix] = [row for row in rows if row.glyph == "1"]
+    assert [chunk for chunk, _style in fix.segments] == ["; ".join(result.gate_failures)]
+    assert [gate for gate in result.gate_failures if "could not model these hooks" in gate]
 
 
 class TestCapturedReports:
@@ -490,6 +513,7 @@ class TestUnmodeledHooks:
             assert result.status == "failed"
             assert result.errors == [_gate("hooks/hooks.json")]
             assert resolve_run_status([result]).of(result) == Status.FAILED
+            _assert_tier1_summary_reports_the_hook_gate(result)
         exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
         assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
 

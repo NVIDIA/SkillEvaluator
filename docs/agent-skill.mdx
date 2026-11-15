@@ -121,6 +121,13 @@ skill tells the agent never to print or store them.
 | "Explain this benchmark report" | Reads `result.json`, `tier3-benchmark.md`, `what_to_fix.json` | Plain-language verdict and prioritized fixes |
 | "Gate skills in our CI" | `skillevaluator ci init` | A workflow with the right exit-code gates |
 
+Keyless checks run without asking. Before anything that installs a package, uses
+a key, spends model tokens, or runs an agent on your machine, the agent stops and
+asks you. For eval cases it asks which real tasks matter and what a good result
+looks like instead of inventing them. Live evaluation starts its own agent
+processes and judge, so it needs a provider key on the host even when you launch
+it from inside your agent.
+
 ## What a live evaluation looks like
 
 For "does my skill help", the agent runs the same tasks twice in isolated

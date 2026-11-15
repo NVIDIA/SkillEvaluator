@@ -149,6 +149,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `skillevaluator` agent skill now asks the user before installing an
+  extra, using a credential, spending on a Tier 3 run or using `--env-mode
+  local`. It also asks for real tasks and outcomes before writing eval cases,
+  explains that Tier 3 needs its own provider key, and reports no verdict for a
+  tier that could not run. Its own `evals/evals.json` gains seven cases
+  covering these prompts.
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
   in the reusable workflow); `ci/README.md` notes the same.

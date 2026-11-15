@@ -91,6 +91,88 @@
         "Does not run or recommend SkillEvaluator"
       ],
       "expected_skill": null
+    },
+    {
+      "id": "skillevaluator-009-implicit-plain-quality",
+      "prompt": "Is my skill any good? It's in ./my-skill. I don't have an API key. If you can't run anything here, tell me exactly what you would run and what the result would and would not prove.",
+      "expected_output": "Chooses keyless static validation for ./my-skill (`skillevaluator tier1 ./my-skill --no-llm`, `quality-check`, or `validate ./my-skill --tiers 1`), says the result is a pass/fail gate plus a 0-100 quality score, and says static checks cover structure, wording and security but do not show whether the skill helps an agent.",
+      "assertions": [
+        "Gives a keyless Tier 1 command (tier1 --no-llm, quality-check, or validate --tiers 1) on ./my-skill",
+        "Says the static result does not prove the skill helps an agent, and that live evaluation would be needed for that",
+        "Does not ask for or invent an API key"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-010-implicit-written-well",
+      "prompt": "Can you check whether the skill in ./skills/release-notes is written well? Tell me what you'd run and what the score is made of.",
+      "expected_output": "Runs or gives a keyless quality command on ./skills/release-notes (`skillevaluator tier1 ./skills/release-notes --no-llm` or `quality-check`), explains the 0-100 quality score as Correctness 35%, Discoverability 25%, Reliability 25% and Efficiency 15% with a default pass mark of 70, and notes that the LLM rubric is a separate check that needs a provider.",
+      "assertions": [
+        "Gives a keyless quality command (tier1 --no-llm or quality-check) on ./skills/release-notes",
+        "Names the four quality dimensions: Correctness, Discoverability, Reliability, Efficiency",
+        "Says the LLM rubric needs a provider key and is not part of the keyless run"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-011-implicit-helps-agent-blocked",
+      "prompt": "I want to know whether my skill in ./skills/deploy-helper actually helps an agent do its tasks better. No API key is set on this machine and Docker isn't running. What do you need from me, and what can you do in the meantime?",
+      "expected_output": "Says this needs a live with-skill versus baseline evaluation (Tier 3) and cannot run yet. Names what is missing: a provider key exported in the host environment and a running sandbox (Docker, or the experimental local mode). Asks the user to supply those. Offers what can be done now without them: keyless Tier 1 and preparing or validating eval cases. Reports no lift, score or verdict for the live evaluation.",
+      "assertions": [
+        "Says a live with-skill versus baseline evaluation is required to answer the question",
+        "Names both blockers: no provider key and no running Docker or other sandbox",
+        "Tells the user what to provide: a provider key exported on the host and Docker started",
+        "Offers keyless Tier 1 or eval-case preparation as work that can happen now",
+        "Does not state or estimate a lift, score or verdict for the live evaluation"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-012-contextual-own-model",
+      "prompt": "I'm running you inside my coding agent, which already has a model behind it. When you run the live agent evaluation for my skill, will it just use that model, or do I have to set up another API key? Keep it short.",
+      "expected_output": "Says no, the live evaluation does not use the calling agent's model. It starts separate agent processes in a sandbox, with and without the skill, and an LLM judge scores the answers, so a provider credential must be exported in the host environment. One provider key, for example NVIDIA_API_KEY, can cover both the agents and the judge. Keys never go in evals/config.yml.",
+      "assertions": [
+        "Says the live evaluation does not reuse the model of the agent that launches it",
+        "Explains that separate agent processes run the cases with and without the skill",
+        "Explains that an LLM judge also needs a provider",
+        "Says the credential is exported in the host environment, not placed in config.yml"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-013-contextual-dataset-questions",
+      "prompt": "Set up live evaluation cases for my skill at ./skills/invoice-parser. Before you write anything, tell me what you need to know from me.",
+      "expected_output": "Asks the user for a few real requests the skill should handle and what a good result looks like for each, at least one request that should not trigger the skill, and any input files the cases need. Says the cases will go in evals/evals.json and should cover requests that name the skill, requests that only describe the task, requests inside a project, and a negative case. Does not invent finished cases before getting that input.",
+      "assertions": [
+        "Asks for real task requests the skill is expected to handle",
+        "Asks what a good or observable outcome looks like for those requests",
+        "Asks for at least one request that should not trigger the skill",
+        "Says the dataset lives in evals/evals.json",
+        "Does not present a finished dataset before the user has answered"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-014-contextual-run-cost",
+      "prompt": "I'm about to run the full live evaluation on ./skills/sql-helper: 10 cases, 3 attempts each, two agents. How many agent runs is that, and how do I check the setup cheaply before spending on all of it?",
+      "expected_output": "Computes 10 cases x 3 attempts x 2 agents x 2 arms (with skill and baseline) = 120 trials. Recommends a smoke run first with `--max-cases 1`, and says a smoke run is not publication evidence. May mention `--stop-on-pass` or `--skip-baseline` as ways to cut spend, noting that skipping the baseline gives no lift.",
+      "assertions": [
+        "States 120 trials, counting both the with-skill and baseline arms",
+        "Recommends a smoke run limited with --max-cases",
+        "Says a run that skips cases is not publication evidence"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
+      "id": "skillevaluator-015-negative-write-skill-content",
+      "prompt": "Write a SKILL.md for a new agent skill that formats SQL queries. Include frontmatter, instructions and two examples.",
+      "expected_output": "A complete SKILL.md for a SQL formatting skill with name and description frontmatter, instructions and two examples. Writing the skill's own content does not call for an evaluation workflow.",
+      "assertions": [
+        "Provides a SKILL.md with name and description frontmatter",
+        "Includes instructions and two examples for formatting SQL",
+        "Does not run an evaluation of the skill instead of writing it"
+      ],
+      "expected_skill": null
     }
   ]
 }

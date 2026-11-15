@@ -252,6 +252,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

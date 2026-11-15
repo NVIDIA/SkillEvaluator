@@ -287,6 +287,8 @@ All notable changes to SkillEvaluator are documented in this file.
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.

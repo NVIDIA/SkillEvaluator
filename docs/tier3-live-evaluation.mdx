@@ -727,8 +727,9 @@ a placeholder; policy credentials remain in the model-server environment.
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
-export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
-export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
+# Codex needs an endpoint that serves the OpenAI Responses API; NVIDIA Build does not.
+export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://api.openai.com/v1
+export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$OPENAI_API_KEY"
 skillevaluator tier3 doctor --backend nemo-gym --agents codex
 skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
 ```

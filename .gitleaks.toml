@@ -60,6 +60,13 @@ regexes = ['''^us\.anthropic\.claude-opus-5$''']
 paths = ['''^tests/validators/test_security\.py$''']
 
 [[allowlists]]
+description = "Claude Opus 5.5 Bedrock model ID that follows a credential name in SkillSpector bridge tests"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^us\.anthropic\.claude-opus-5-5$''']
+paths = ['''^tests/validators/test_security\.py$''']
+
+[[allowlists]]
 description = "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a"
 condition = "AND"
 targetRules = ["generic-api-key"]

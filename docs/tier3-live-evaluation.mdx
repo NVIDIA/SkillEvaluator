@@ -672,18 +672,18 @@ in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
-agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
-OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
+agents default to Nemotron 3.5 Lightning (`nvidia/nemotron-3.5-lightning-30b-a3b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its
 adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
 when you want to compare harnesses or models:
 
 ```bash title="NVIDIA Build model overrides"
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
-  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+  --agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker \
-  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+  --agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
   --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
 ```
@@ -1472,10 +1472,13 @@ the case is judged and scored normally.
   two characters `\n`, and inside JSON-escaped quotes (`-u \"user:password\"`),
   as in tool-call arguments. That includes a value whose flag or header name
   was masked together with an unquoted credential value that ends the line
-  before (`--password ...\n--token ...`). Long prompts and replies are
-  shortened. The prompts contain the task question, expected answer, and agent
-  evidence. Pass `--harbor-keep-jobs` to keep the Harbor trial directories that
-  hold this file.
+  before (`--password ...\n--token ...`). Values whose quotes are escaped twice
+  or three times, as when a RAGAS prompt repeats a tool call's arguments, and
+  single-quoted values whose quotes are escaped once or twice, as in Python
+  source (`[\'--password\', \'...\']`), are masked too. Long prompts and
+  replies are shortened. The prompts contain the task question, expected
+  answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the Harbor
+  trial directories that hold this file.
 - **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
   least 32,768 output tokens, because reasoning tokens count against the
   limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
@@ -2071,12 +2074,25 @@ query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
 password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
 option with a separate value (`--location global`), or all but the first word
 of a value with spaces on an unquoted here-document line or inside a `sh -c`
-or `ssh` command string. Some ordinary words are masked, such as the
-path in `grep -r token: /etc`, the words after a `.netrc`-like
-`login NAME password` phrase in prose, or, after an unmatched quote, the rest
-of the line after a credential name. Quotes are read from the start of each
-line, and unlike in a shell, a line break ends a quoted string here, so a
-quoted value ends at its closing quote or at the end of its line.
+or `ssh` command string. Escaped text is read with at most two levels of
+escapes removed, so a value can also appear in text escaped more than three
+times, in a single-quoted value whose quotes are escaped three times, in text
+that holds a NUL character (which is not read again), in JSON inside a Python
+`repr` (where `\\"` is an escaped quote), after an escaped quote inside a quoted
+Python argv value, and where text escaped once keeps part of a value
+(`"password: \"two words\""` at the start of a JSON string). Some ordinary
+words are masked, such as the path in `grep -r token: /etc`, the words after a
+`.netrc`-like `login NAME password` phrase in prose, or, after an unmatched
+quote, the rest of the line after a credential name. As escapes are also
+decoded in text that was never escaped, an escape that leaves a quote
+unmatched there can mask the rest of its line after a later credential
+assignment such as `export GITHUB_TOKEN=$(...)`: a `\n`, `\r` or `\u000a`
+inside a single- or double-quoted string (`printf '%s\n'`, `echo "a\nb"`,
+`cd "C:\repo\x"`), or an odd number of `\"` in a double-quoted string
+(`echo "it\"s"`). That can hide the rest of a command that a destructive or
+network finding is about. Quotes are read from the start of each line, and
+unlike in a shell, a line break ends a quoted string here, so a quoted value
+ends at its closing quote or at the end of its line.
 For security findings, only the first 2,000 characters are scanned. Judge
 evidence retains the separate judge evidence budgets described above.
 A word that the security-finding scan limit cuts in

@@ -14,7 +14,10 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import random
+import re
 import time
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -1151,6 +1154,28 @@ def test_finding_evidence_redaction_masks_credentials(text: str, secrets: tuple[
         # The same with the quotes escaped twice, after a plain MySQL client element.
         'run(["mysql", "-e", "x"]); '
         + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
+        # Argument lists without a credential, with the quotes escaped twice,
+        # also one element per line, and in a quoted Python string, plain and
+        # JSON-escaped.
+        json.dumps(json.dumps('["date", "-u", "+%H:%M:%S"]; ["pip", "install", "-U", "git+https://h.example/r"]')),
+        json.dumps(json.dumps('["sshpass", "-f", "pw.txt", "ssh", "-p", "2222", "host.example"]')),
+        json.dumps(json.dumps('["curl", "-b", "cookies.txt"]; ["find", "/var/lib/mysql", "-path", "*.ibd", "-print"]')),
+        json.dumps(json.dumps('subprocess.run([\n    "rsync",\n    "-u",\n    "host:/data",\n    ".",\n])')),
+        "code = '[\\'date\\', \\'-u\\', \\'+%H:%M:%S\\'] + [\\'mkdir\\', \\'-p\\', \\'out\\']'",
+        json.dumps("code = '[\\'tool\\', \\'--token\\', \\'--verbose\\'] + [\\'ssh\\', \\'-p\\', \\'2222\\']'"),
+        # A URL, a remote path and a date format after -u, and -u values with
+        # no colon, in double quotes escaped twice and three times.
+        json.dumps(
+            json.dumps('pip install -U "git+https://github.com/o/r" && rsync -u "host:/data" . && date -u "+%H"')
+        ),
+        json.dumps(
+            json.dumps(json.dumps('rsync -avu "host:/loot" /tmp && date -u "+%H:%M" && curl -u "bot" https://x'))
+        ),
+        json.dumps(json.dumps('git push -u "origin" main && echo "done" && judge --token-limit "5 10"')),
+        # A Windows path and an escaped backslash before a closing quote, in
+        # JSON escaped once and twice.
+        json.dumps({"path": "C:\\tmp\\", "cmd": "tool --password-file C:\\tmp\\pw.txt", "note": "keep"}),
+        json.dumps(json.dumps({"path": "C:\\tmp\\", "cmd": 'echo "C:\\new\\" && ls', "note": "keep"})),
     ],
 )
 def test_finding_evidence_redaction_keeps_ordinary_text(text: str) -> None:
@@ -1196,6 +1221,476 @@ def test_finding_evidence_masks_twice_escaped_attached_password(context: str) ->
     text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
 
     assert eval_core_checks._redact_finding_evidence(text) == text.replace(_BASIC_PASSWORD, "<redacted>")
+
+
+def _escaped_twice(text: str) -> str:
+    return json.dumps(json.dumps({"command": text}))
+
+
+def _in_quoted_python_string(text: str) -> str:
+    """Write *text*, a list with double-quoted elements, as a single-quoted list inside a single-quoted string."""
+    source = text.replace('"', "'")
+    return "code = '" + source.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+# An argv list escaped twice, as in a RAGAS request that repeats a tool call's
+# JSON arguments, has three backslashes before each quote, and a list inside
+# a quoted Python string has one, two once that string is JSON. Its elements
+# are masked as in plain text, with the list's other elements and escapes
+# intact.
+@pytest.mark.parametrize(
+    ("argv", "expected"),
+    [
+        pytest.param(
+            f'["tool", "--password", "{_BASIC_PASSWORD}"]', '["tool", "--password", <redacted>]', id="credential-flag"
+        ),
+        pytest.param(
+            f'["docker", "login", "-u", "bot", "-p", "{_BASIC_PASSWORD}"]',
+            '["docker", "login", "-u", "bot", "-p", <redacted>]',
+            id="login-password",
+        ),
+        pytest.param(
+            f'["curl", "-u", "{_ADMIN_AUTH}", "https://x.example"]',
+            '["curl", "-u", <redacted>, "https://x.example"]',
+            id="user-password",
+        ),
+        pytest.param(
+            f'["sshpass", "-p", "{_BASIC_PASSWORD}", "ssh", "host.example"]',
+            '["sshpass", "-p", <redacted>, "ssh", "host.example"]',
+            id="sshpass",
+        ),
+        pytest.param(
+            f'["curl", "-b", "session={_API_TOKEN}", "https://x.example"]',
+            '["curl", "-b", <redacted>, "https://x.example"]',
+            id="cookie",
+        ),
+        pytest.param(
+            f'["/usr/bin/mysql", "-uroot", "-p{_BASIC_PASSWORD}", "-e", "drop database app"]',
+            '["/usr/bin/mysql", "-uroot", "-p<redacted>", "-e", "drop database app"]',
+            id="attached-mysql-password",
+        ),
+    ],
+)
+def test_finding_evidence_masks_argv_lists_escaped_again(argv: str, expected: str) -> None:
+    for form in (_escaped_twice, _in_quoted_python_string, lambda text: json.dumps(_in_quoted_python_string(text))):
+        text = form(f"subprocess.run({argv})")
+
+        assert eval_core_checks._redact_finding_evidence(text) == form(f"subprocess.run({expected})")
+
+
+def test_finding_evidence_masks_argv_lines_escaped_twice() -> None:
+    # A line break between elements is "\\n" there.
+    argv = f'[\n    "docker",\n    "login",\n    "-u",\n    "bot",\n    "-p",\n    "{_BASIC_PASSWORD}",\n]'
+    masked = argv.replace('"' + _BASIC_PASSWORD + '"', "<redacted>")
+
+    assert eval_core_checks._redact_finding_evidence(_escaped_twice(f"subprocess.run({argv})")) == _escaped_twice(
+        f"subprocess.run({masked})"
+    )
+
+
+# Tool-call JSON written as JSON again puts three backslashes before each quote
+# of a double-quoted shell value (\\\"VALUE\\\"), and seven when it is escaped
+# once more. The value is masked through its closing quote, past any space in
+# it, and the text after it is kept.
+@pytest.mark.parametrize(
+    ("text", "value"),
+    [
+        pytest.param(f'tool --password "{_BASIC_PASSWORD} two" -x', f'"{_BASIC_PASSWORD} two"', id="password-flag"),
+        pytest.param(f'tool --token "a {_BASIC_PASSWORD}" -x', f'"a {_BASIC_PASSWORD}"', id="token-flag"),
+        pytest.param(f'curl -u "{_ADMIN_AUTH}" https://example.com', f'"{_ADMIN_AUTH}"', id="user-flag"),
+        pytest.param(f'curl --proxy-user "{_ADMIN_AUTH} two" https://x', f'"{_ADMIN_AUTH} two"', id="proxy-user"),
+        pytest.param(f'sshpass -p "{_BASIC_PASSWORD} two" ssh host', f'"{_BASIC_PASSWORD} two"', id="sshpass"),
+        pytest.param(f'mysql -uroot -p"{_BASIC_PASSWORD} two" app', f'"{_BASIC_PASSWORD} two"', id="mysql-password"),
+        pytest.param(
+            f'machine db login bot password "{_BASIC_PASSWORD} two"', f'"{_BASIC_PASSWORD} two"', id="netrc-password"
+        ),
+        pytest.param(
+            f'git config github.token "{_BASIC_PASSWORD} two" && ls', f'"{_BASIC_PASSWORD} two"', id="git-config-set"
+        ),
+        pytest.param(
+            f'npm config set _authToken "{_BASIC_PASSWORD} two" && ls', f'"{_BASIC_PASSWORD} two"', id="npm-config-set"
+        ),
+        pytest.param(
+            f'aws configure set aws_secret_access_key "{_BASIC_PASSWORD} two" && ls',
+            f'"{_BASIC_PASSWORD} two"',
+            id="aws-configure-set",
+        ),
+        pytest.param(
+            f'curl -b "sid={_BASIC_PASSWORD} two" https://x.example', f'"sid={_BASIC_PASSWORD} two"', id="cookie-flag"
+        ),
+    ],
+)
+@pytest.mark.parametrize("times", [2, 3])
+def test_finding_evidence_masks_quoted_values_escaped_again(text: str, value: str, times: int) -> None:
+    escaped, expected = text, text.replace(value, "<redacted>")
+    for _ in range(times):
+        escaped, expected = json.dumps(escaped), json.dumps(expected)
+
+    assert eval_core_checks._redact_finding_evidence(escaped) == expected
+
+
+# A value escaped again is masked whole also when a later pattern masks a
+# word in it, here a GitHub token.
+def test_finding_evidence_masks_a_value_escaped_again_with_a_token_in_it() -> None:
+    token = "gh" + "p_" + "Ab3" * 12
+    text = f'bash -lc "bash -c \\"tool --password \\\\\\"word {token} two words\\\\\\" --verbose\\""'
+
+    assert (
+        eval_core_checks._redact_finding_evidence(text)
+        == 'bash -lc "bash -c \\"tool --password <redacted> --verbose\\""'
+    )
+
+
+def _ragas_tool_call(tool: str, arguments: dict[str, str]) -> str:
+    return "input: " + json.dumps(
+        {"user_input": [{"content": f"Agent called: {tool}({json.dumps(arguments)})", "type": "ai"}]}, indent=4
+    )
+
+
+# A RAGAS request that repeats a Write call writes the file's JSON content as
+# JSON twice, so a member there has three backslashes before each quote of its
+# name and its value, as does a curl -d JSON body in a repeated Bash call. The
+# value of a member whose name names a credential is masked with its quotes,
+# as in JSON escaped once, and the other members are kept.
+@pytest.mark.parametrize(
+    "content",
+    [
+        pytest.param({"db": {"host": "h", "password": _BASIC_PASSWORD}}, id="json-password"),
+        pytest.param(
+            {"token": _BASIC_PASSWORD, "token_type": "bearer", "max_tokens": 5, "author": "bob"}, id="json-token"
+        ),
+        pytest.param({"api_key": _BASIC_PASSWORD, "key_file": "/k.pem"}, id="json-api-key"),
+        pytest.param({"headers": {"Authorization": f"Bearer {_BASIC_PASSWORD}"}}, id="json-authorization"),
+    ],
+)
+def test_finding_evidence_masks_credentials_in_json_content_escaped_twice(content: dict[str, Any]) -> None:
+    written = json.dumps(content, indent=2)
+    masked = written.replace(f'"{_BASIC_PASSWORD}"', "<redacted>").replace(f'"Bearer {_BASIC_PASSWORD}"', "<redacted>")
+    text = _ragas_tool_call("Write", {"file_path": "config.json", "content": written})
+
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == _ragas_tool_call(
+        "Write", {"file_path": "config.json", "content": masked}
+    )
+
+
+def test_finding_evidence_masks_a_json_body_escaped_twice() -> None:
+    def command(body: str) -> str:
+        return f"curl -X POST -d '{body}' https://h.example/login"
+
+    body = json.dumps({"username": "bot", "password": _BASIC_PASSWORD})
+    text = _ragas_tool_call("Bash", {"command": command(body)})
+
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == _ragas_tool_call(
+        "Bash", {"command": command(body.replace(f'"{_BASIC_PASSWORD}"', "<redacted>"))}
+    )
+
+
+# A -p element whose "login" element lies more than 256 characters back names
+# no password, also when the list is JSON-escaped: a port mapping is kept.
+def test_finding_evidence_keeps_a_port_mapping_far_from_a_login_element() -> None:
+    script = (
+        f'subprocess.run(["docker", "login", "-u", "bot", "-p", "{_BASIC_PASSWORD}{"A" * 80}", "registry.example.com"])\n'
+        'subprocess.run(["docker", "pull", "registry.example.com/team/app:1.4.2"], check=True)\n'
+        'subprocess.run(["docker", "run", "-d", "-p", "8080:80", "registry.example.com/team/app:1.4.2"])\n'
+    )
+    for text in (script, json.dumps({"code": script}), json.dumps(json.dumps({"code": script}))):
+        redacted = eval_core_checks._redact_finding_evidence(text, 10**9)
+
+        assert _BASIC_PASSWORD not in redacted
+        assert '"-p", "8080:80"' in redacted.replace("\\", "")
+
+
+# An argv value escaped twice that the patterns mask only in part, at a token
+# that ends it, is masked whole: the marker of its reading and the token's
+# marker are one marker, and none of the token is kept.
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(_GHP, id="token"),
+        pytest.param(f"word {_GHP}", id="word-and-token"),
+        pytest.param(f"user:{_GHP}", id="user-and-token"),
+    ],
+)
+def test_finding_evidence_masks_a_partly_masked_value_escaped_twice_as_one_value(value: str) -> None:
+    text = _escaped_twice(f'subprocess.run(["tool", "--token", "{value}"], check=True)')
+
+    assert eval_core_checks._mask_finding_evidence_credentials_as_written(text) != text
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == _escaped_twice(
+        'subprocess.run(["tool", "--token", <redacted>], check=True)'
+    )
+
+
+# A value of a reading ends at the quote that ends the string it was read
+# from. A double-quoted value that does not close before the end of its JSON
+# string is masked to that end, and the quote and the members after it stay.
+@pytest.mark.parametrize("times", [1, 2])
+def test_finding_evidence_masks_an_unclosed_quoted_value_to_the_end_of_its_string(times: int) -> None:
+    text = {"command": f'tool --password "{_BASIC_PASSWORD} two && echo done', "note": "keep me"}
+    expected = {"command": "tool --password <redacted>", "note": "keep me"}
+    escaped, masked = json.dumps(text), json.dumps(expected)
+    for _ in range(times - 1):
+        escaped, masked = json.dumps(escaped), json.dumps(masked)
+
+    assert eval_core_checks._redact_finding_evidence(escaped, 10**9) == masked
+
+
+# A double quote after an escaped backslash ends a JSON string, also in the
+# readings, where that backslash is kept as written. A credential flag before
+# a line continuation that ends a string has that backslash masked, and the
+# string's closing quote and the members after it stay.
+def test_finding_evidence_keeps_the_quote_after_a_continuation_that_ends_a_string() -> None:
+    text = json.dumps({"lines": ["tool --token \\", "  --verbose"], "note": "keep me"})
+
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == json.dumps(
+        {"lines": ["tool --token <redacted>", "  --verbose"], "note": "keep me"}
+    )
+
+
+# A reading can hold a shell line continuation that the text as written
+# escapes, and the patterns read the reading without it. What they mask there
+# is still placed in the text: here an argv list in a python -c command whose
+# Bash call continues on the next line.
+def test_finding_evidence_masks_an_argv_value_escaped_again_before_a_line_continuation() -> None:
+    def call(value: str) -> str:
+        script = f'import subprocess; subprocess.run(["tool", "--password", {value}])'
+        return json.dumps({"command": f"python -c {json.dumps(script)} \\\n  && echo done"})
+
+    assert eval_core_checks._redact_finding_evidence(call(f'"{_BASIC_PASSWORD}"'), 10**9) == call("<redacted>")
+
+
+# A NUL character written as \u0000 elsewhere in the text, as in tool output
+# that a RAGAS request repeats, is read as written, so the text is still read
+# with its escapes removed.
+def test_finding_evidence_reads_text_with_an_escaped_nul_again() -> None:
+    def prompt(command: str) -> str:
+        return json.dumps({"call": json.dumps({"command": command}), "output": "bin\x00ary"})
+
+    text = prompt(f'tool --password "{_BASIC_PASSWORD} two" && echo done')
+
+    assert "\\u0000" in text
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == prompt("tool --password <redacted> && echo done")
+
+
+# A synthetic JWT and private key block, built from parts so that neither
+# appears in this file as one literal.
+_JWT = "ey" + "JhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9." + "ey" + "JzdWIiOiIxMjM0NTY3ODkwIn0." + "c3ludGhldGljLXNpZ25hdHVyZQ"
+_KEY_BLOCK = f"-----BEGIN RSA {_PRIVATE_KEY}-----\nMIIEbodyLineOne\n-----END RSA {_PRIVATE_KEY}-----"
+# A value the judge tests configure as the judge's credential, which the Harbor
+# verifier masks as [REDACTED] wherever it appears. Finding evidence keeps it.
+_CONFIGURED_CREDENTIAL = "dummy-configured-" + "judge-credential"
+
+
+# The readings place what they mask by the text kept between markers, so a
+# JWT's jwt-<redacted> and a private key's marker are read as markers too: a
+# value escaped again in the same text is still masked.
+@pytest.mark.parametrize(
+    ("output", "masked_output"),
+    [
+        pytest.param(f"session {_JWT} saved", "session jwt-<redacted> saved", id="jwt"),
+        pytest.param(f"key:\n{_KEY_BLOCK}\ndone", "key:\n<redacted private key>\ndone", id="private-key"),
+    ],
+)
+def test_finding_evidence_masks_a_value_escaped_again_next_to_a_marker_of_another_kind(
+    output: str, masked_output: str
+) -> None:
+    def prompt(value: str, output: str) -> str:
+        call = json.dumps({"command": f'subprocess.run(["tool", "--password", {value}])'})
+        return json.dumps({"call": call, "output": output})
+
+    text = prompt(f'"{_BASIC_PASSWORD}"', output)
+
+    assert _BASIC_PASSWORD in eval_core_checks._mask_finding_evidence_credentials_as_written(text)
+    assert eval_core_checks._redact_finding_evidence(text, 10**9) == prompt("<redacted>", masked_output)
+
+
+def _jwt_continued(times: int) -> str:
+    """A JWT split by a shell line continuation, inside a JSON string escaped *times* times, without its quotes."""
+    text = f"{_JWT[:40]}\\\n{_JWT[40:]} done"
+    for _ in range(times):
+        text = json.dumps(text)[1:-1]
+    return text
+
+
+# The text that a reading keeps before its first marker starts the reading,
+# and is placed there also when it is found again inside the value masked
+# after it (a value that repeats its flag) or is empty, as the reading starts
+# with a marker (evidence that starts with a JWT split by a line continuation,
+# escaped once or twice). The text as written masks these in part or not at
+# all, and a reading masks them whole.
+_READINGS_THAT_START_THE_TEXT = (
+    pytest.param(
+        f'--password \\\\\\"--password {_BASIC_PASSWORD} two\\\\\\" -x',
+        "--password <redacted> -x",
+        id="value-repeats-its-flag",
+    ),
+    pytest.param(_jwt_continued(1), "<redacted> done", id="jwt-continued-escaped-once"),
+    pytest.param(_jwt_continued(2), "<redacted> done", id="jwt-continued-escaped-twice"),
+)
+
+
+@pytest.mark.parametrize(("text", "expected"), _READINGS_THAT_START_THE_TEXT)
+def test_finding_evidence_places_the_text_a_reading_keeps_before_its_first_marker(text: str, expected: str) -> None:
+    assert eval_core_checks._mask_finding_evidence_credentials_as_written(text) != expected
+    for preserve_header_format in (False, True):
+        assert (
+            eval_core_checks._mask_finding_evidence_credentials(text, preserve_header_format=preserve_header_format)
+            == expected
+        )
+
+
+# A reading's markers are mapped back by the text kept between them. Where
+# that text fits the reading in more than one way, the span of the reading
+# that a marker stands for is not known, and nothing is masked for it; a
+# marker whose kept text fits one way is masked.
+def test_masking_escaped_again_skips_a_marker_its_kept_text_does_not_place() -> None:
+    text = "pw: one\\ntwo\\nthree\\nfour"
+
+    def mask(masked_reading: str) -> Callable[[str], str]:
+        return lambda view: masked_reading if view == "pw: one\ntwo\nthree\nfour" else view
+
+    # "one\ntwo" and "three", or "one" and "two\nthree".
+    ambiguous = mask("pw: <redacted>\n<redacted>\nfour")
+    assert eval_core_checks._mask_unescaped_views(text, text, ambiguous) == text
+    placed = mask("pw: <redacted>\nfour")
+    assert eval_core_checks._mask_unescaped_views(text, text, placed) == "pw: <redacted>\\nfour"
+
+
+_MARKERS = re.compile(r"(?:(?:jwt-)?<redacted>|<redacted private key>|\[REDACTED\])+")
+
+
+def _only_adds_markers(base: str, new: str) -> bool:
+    """Whether *new* is *base* with more of its text replaced by markers, and none taken back."""
+    if new == base:
+        return True
+    marks = [match.span() for match in _MARKERS.finditer(base)]
+    kept = _MARKERS.split(new)
+    if len(kept) == 1 or not base.startswith(kept[0]) or not base.endswith(kept[-1]):
+        return False
+    pos = 0
+    for index, piece in enumerate(kept):
+        found = 0 if index == 0 else len(base) - len(piece) if index == len(kept) - 1 else base.find(piece, pos)
+        # A piece of kept text never overlaps a marker of *base*.
+        while found >= pos and any(start < found + len(piece) and found < end for start, end in marks):
+            found = base.find(piece, found + 1) if 0 < index < len(kept) - 1 else -1
+        if found < pos:
+            return False
+        pos = found + len(piece)
+    return True
+
+
+_ESCAPE_FORMS = (
+    json.dumps,
+    repr,
+    lambda text: json.dumps({"command": text}),
+    lambda text: f"Agent called: Bash({json.dumps({'command': text})})",
+)
+_TEXT_PIECES = (
+    "tool --password VALUE more",
+    'tool --token "VALUE two" -x',
+    # Built from parts, so the source holds no curl user:password literal.
+    "curl -u " + "admin" + ":VALUE https://x.example",
+    'subprocess.run(["mysql", "-uroot", "-pVALUE"])',
+    '["docker", "login", "-u", "bot", "-p", "VALUE"]',
+    "machine h login bot password VALUE",
+    "git config github.token VALUE && ls",
+    "curl -b sid=VALUE https://x.example",
+    "Authorization: Bearer VALUE",
+    '{"password": "VALUE", "note": "keep"}',
+    "export DB_PASSWORD=VALUE; ls",
+    "mysql -u root -p",
+    "C:\\tmp\\new\\",
+    "it's 'open",
+    'echo "done" && ls -la',
+    "<redacted> kept",
+    "gh" + "p_" + "Ab3" * 12,
+    # Tokens the patterns mask wherever they appear, at the JSON members after
+    # a command: a reading must not write them back in clear.
+    '{"command": "tool --password VALUE more", "key": "AKIA' + _AWS_KEY_BODY + '", "token": "' + _GLPAT + '"}',
+    '["' + _NPM_TOKEN + '", "' + "xo" + "xb-" + "1234567890-AbCdEfGhIj" + '", "' + _HF_TOKEN + '"]',
+    # Text masked with a marker of another kind, which the readings must read
+    # as a marker: a JWT, a private key block and a configured credential.
+    f"session {_JWT} saved",
+    f"key:\n{_KEY_BLOCK}\ndone",
+    f"auth failed for {_CONFIGURED_CREDENTIAL}",
+)
+_NOISE = ("\\", "\\\\", '\\"', '"', "'", "\\n", '\\\\\\"', "\\u00e4", "\\\n")
+
+
+def _generated_texts(count: int) -> list[str]:
+    """Commands with and without credentials, escaped up to three times, some with stray escapes and quotes."""
+    rng = random.Random(547)
+    texts = []
+    for _ in range(count):
+        text = " ".join(rng.choice(_TEXT_PIECES) for _ in range(rng.randint(1, 4)))
+        text = text.replace("VALUE", f"Kq7{rng.randint(0, 99)}Secret")
+        for _ in range(rng.randint(0, 3)):
+            text = rng.choice(_ESCAPE_FORMS)(text)
+        for _ in range(rng.randint(0, 2)):
+            pos = rng.randrange(len(text) + 1)
+            text = text[:pos] + rng.choice(_NOISE) * rng.randint(1, 3) + text[pos:]
+        texts.append(text)
+    return texts
+
+
+# Reading the text with its escapes removed only adds markers: the result is
+# the result of the patterns read on the text as written, with more of its
+# text masked and none of its markers taken back.
+def test_finding_evidence_masking_escaped_again_only_adds_markers() -> None:
+    changed = 0
+    for text in _generated_texts(800):
+        for preserve_header_format in (False, True):
+            as_written = eval_core_checks._mask_finding_evidence_credentials_as_written(
+                text, preserve_header_format=preserve_header_format
+            )
+            masked = eval_core_checks._mask_finding_evidence_credentials(
+                text, preserve_header_format=preserve_header_format
+            )
+
+            assert _only_adds_markers(as_written, masked), (text, as_written, masked)
+            changed += masked != as_written
+    assert changed > 100
+
+
+def test_only_adds_markers_rejects_a_marker_taken_back() -> None:
+    assert _only_adds_markers("a <redacted> b", "a <redacted>")
+    assert _only_adds_markers("a sk-<redacted> b", "a <redacted> b")
+    assert not _only_adds_markers("a <redacted> b", "a VALUE b")
+    assert not _only_adds_markers("a <redacted> b", "a <redacted> b c")
+    assert not _only_adds_markers("a b", "a b c")
+
+
+# Reading a long text with deep backslash runs, many escaped quotes, long
+# escape runs, values escaped twice in JSON strings that end in an escaped
+# backslash, argv elements escaped twice or many markers takes time in
+# proportion to its length.
+@pytest.mark.parametrize(
+    "unit",
+    [
+        pytest.param("\\", id="one-backslash-run"),
+        pytest.param('\\\\\\"', id="escaped-quotes"),
+        pytest.param('{"c": "--password \\\\\\"a b\\\\\\" C:\\\\"}, ', id="strings-ending-in-escaped-backslashes"),
+        pytest.param("\\n\\t\\u00e4\\/\\'", id="escape-runs"),
+        pytest.param('--password \\\\\\"a b\\\\\\" ', id="values-escaped-twice"),
+        pytest.param("<redacted>x\\n", id="markers"),
+        pytest.param('<redacted>\\\\\\"', id="markers-and-escaped-quotes"),
+        pytest.param('\\\\\\"--token\\\\\\", \\\\\\"a\\\\\\", ', id="argv-elements-escaped-twice"),
+    ],
+)
+def test_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
+    def elapsed(size: int) -> float:
+        text = unit * (size // len(unit))
+        times = []
+        for _ in range(3):
+            started = time.perf_counter()
+            eval_core_checks._mask_finding_evidence_credentials(text)
+            times.append(time.perf_counter() - started)
+        return min(times)
+
+    small, large = elapsed(25_000), elapsed(250_000)
+    # Ten times the text takes about ten times as long. A step quadratic in
+    # the number of markers took twenty times as long on the escaped quotes
+    # between markers. The margin allows for a slow CI runner.
+    assert large < 16 * small + 0.05
 
 
 @pytest.mark.parametrize(

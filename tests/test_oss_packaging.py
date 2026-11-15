@@ -850,13 +850,13 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert f"`{CHAT_DEFAULT_OPENAI}`" in public_docs
     assert "gpt-5.4-mini" in public_docs
     assert f"`{CHAT_DEFAULT_ANTHROPIC}`" in public_docs
-    assert "nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "Nemotron Super" in public_docs
+    assert "nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "Nemotron 3.5 Lightning" in public_docs
     assert "meta/llama-3.1-8b-instruct" in public_docs
-    assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
     assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
     assert "skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
     assert "skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker\n" in tier3

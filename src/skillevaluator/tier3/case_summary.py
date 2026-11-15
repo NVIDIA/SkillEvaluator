@@ -21,6 +21,7 @@ from rich.box import SIMPLE
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.evaluation.insights_judge import _weakens_requirements
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
@@ -1202,8 +1203,9 @@ def _llm_actions(
     prompt = (
         "You help a skill author fix an agent skill after a live evaluation. For each issue give ONE concrete fix, "
         "at most 35 words, naming the file and what to change (SKILL.md section, a script, "
-        "evals/environment/Dockerfile, or the eval case in evals/evals.json if the case expects something the skill "
-        "does not provide). For [skill not used] issues the fix belongs in the SKILL.md frontmatter description, "
+        "or evals/environment/Dockerfile). Preserve the dataset expectations and assertions: do not remove, "
+        "loosen or lower them to make a failing case pass, even if the skill currently lacks the feature. "
+        "For [skill not used] issues the fix belongs in the SKILL.md frontmatter description, "
         "which is all the agent sees when deciding whether to load the skill. "
         "Write fixes that cover the whole class of requests; do not copy names or details from this one case. "
         "Base it only on the evidence; do not invent features.\n\n"
@@ -1334,10 +1336,28 @@ def what_to_fix(
         if issue["kind"] not in ("run error", "eval case", "missing input", "skill not used")
         and not issue.get("asks_for_input")
     ]
+    case_ids = {*dataset, *_case_ids(agents)}
     actions = _llm_actions(actionable, skill_path, dataset) if use_llm and actionable else None
     by_id = dict(zip((id(i) for i in actionable), actions or [], strict=False))
+    actionable_ids = {id(issue) for issue in actionable}
     for issue in issues:
-        issue["action"] = issue.get("action") or by_id.get(id(issue)) or _fallback_action(issue)
+        existing_action = issue.get("action")
+        action = existing_action or by_id.get(id(issue))
+        if action and not _weakens_requirements(action, case_ids):
+            issue["action"] = action
+            issue["source"] = "deterministic" if existing_action else "llm"
+        else:
+            if action:
+                issue["fallback_reason"] = "requirement_weakening"
+            elif use_llm and id(issue) in actionable_ids:
+                issue["fallback_reason"] = "llm_unavailable_or_invalid"
+            fallback = _fallback_action(issue)
+            issue["action"] = (
+                "Update SKILL.md or the skill's scripts to meet the existing case requirements, then re-run the case."
+                if _weakens_requirements(fallback, case_ids)
+                else fallback
+            )
+            issue["source"] = "deterministic"
     secrets = secret_values_from_environment(os.environ)
     return [
         {

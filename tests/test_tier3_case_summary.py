@@ -125,6 +125,36 @@ def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action
         ("positive-001", "The case for positive-001 in evals/evals.json can be removed."),
         ("syllable-count", "The syllable-count case should be removed."),
         ("smoke", "The smoke case must be dropped."),
+        ("positive-001", "Exclude the case for positive-001 from the run."),
+        ("positive-001", "Omit the case for positive-001."),
+        ("positive-001", "Get rid of the positive-001 case."),
+        ("positive-001", "Take out the case for positive-001."),
+        ("positive-001", "Take positive-001 out of the dataset."),
+        ("positive-001", "Take the positive-001 case out of evals/evals.json."),
+        ("syllable-count", "Leave out the syllable-count case."),
+        ("smoke", "Leave the smoke case out of the dataset."),
+        ("positive-001", "Filter out the case for positive-001."),
+        ("positive-001", "Filter positive-001 out of evals/evals.json."),
+        ("smoke", "Discard the smoke case."),
+        ("positive-001", "Strip the case for positive-001 from evals/evals.json."),
+        ("positive-001", "Ignore the case for positive-001."),
+        ("smoke", "Ignore the smoke case."),
+        ("positive-001", "Stop running the case for positive-001."),
+        ("syllable-count", "Retire the syllable-count case."),
+        ("positive-001", "Replace the positive-001 case with an easier one."),
+        ("positive-001", "Replace the case for positive-001 in evals/evals.json with a simpler one."),
+        ("positive-001", "Replace positive-001 with a simpler case."),
+        ("smoke", "Swap out the smoke case for an easier one."),
+        ("positive-001", "Instead of keeping the case for positive-001, move on to the next one."),
+        ("positive-001", "The positive-001 case should be excluded."),
+        ("positive-001", "The case for positive-001 should be replaced with an easier one."),
+        ("syllable-count", "The syllable-count case should be discarded."),
+        ("smoke", "The smoke case can be left out."),
+        ("positive-001", "The case for positive-001 should be ignored."),
+        ("positive-001", "The positive-001 case should be taken out of the dataset."),
+        ("syllable-count", "The syllable-count case must be filtered out."),
+        ("positive-001", "The case for positive-001 can be stripped from evals/evals.json."),
+        ("smoke", "The smoke case should be retired."),
     ],
 )
 def test_case_action_rejects_deleting_a_dataset_case_named_by_its_id(tmp_path, monkeypatch, case_id, action):
@@ -172,6 +202,45 @@ def test_case_action_rejects_deleting_another_case_named_in_the_dataset_snapshot
     ],
 )
 def test_case_action_keeps_advice_that_names_a_case_id_but_edits_the_implementation(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({case_id: _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Do not exclude the case for positive-001; implement the rule in SKILL.md."),
+        ("positive-001", "Never replace the case for positive-001 with an easier one; implement the rule in SKILL.md."),
+        ("smoke", "Never replace the smoke case; implement the missing step in SKILL.md."),
+        ("syllable-count", "Don't ignore the syllable-count case; implement the counting rule in SKILL.md."),
+        ("positive-001", "Do not take positive-001 out of the dataset; implement the rule in SKILL.md."),
+        ("positive-001", "Instead of deleting the case for positive-001, implement the rounding rule in SKILL.md."),
+        ("syllable-count", "Instead of removing the syllable-count case, implement the counting rule in SKILL.md."),
+        ("smoke", "Implement the missing step in SKILL.md instead of dropping the smoke case."),
+        ("positive-001", "Fix the rounding step rather than excluding the case for positive-001."),
+        ("positive-001", "Make positive-001 pass without deleting the case for positive-001."),
+        ("positive-001", "Discard the special case in parser.py for positive-001 and implement the general rule."),
+        ("syllable-count", "Exclude the syllable-count case in analyze_text.py and implement it generally."),
+        ("positive-001", "Take the special case for positive-001 out of parser.py and implement the general rule."),
+        ("smoke", "Retire the smoke case from analyze_text.py and implement it generally."),
+        ("positive-001", "Discard the test case failure for positive-001 by implementing the rule in SKILL.md."),
+        ("positive-001", "Ignore case when comparing units, as positive-001 expects."),
+        ("positive-001", "Strip whitespace from the answer, as positive-001 expects."),
+        ("positive-001", "Take the case for positive-001 into account in SKILL.md."),
+        ("positive-001", "Replace the special case for positive-001 in parser.py with the general rounding rule."),
+    ],
+)
+def test_case_action_keeps_negated_instead_of_and_implementation_advice_for_the_wider_verbs(
     tmp_path, monkeypatch, case_id, action
 ):
     from skillevaluator.tier3.eval_core import llm_judge

@@ -97,15 +97,33 @@ _PASSIVE_WEAKENING_PATTERN = re.compile(
 
 # Deleting a dataset case removes the whole requirement, so it is checked separately from the requirement nouns
 # above: "fix the mismatch by deleting the case" must not pass just because its first clause names a failure.
-_CASE_REMOVAL_VERB = (
+_STRONG_CASE_REMOVAL_VERB = (
     r"(?:remov(?:e[sd]?|ing)|delet(?:e[sd]?|ing)|drop(?:s|ped|ping)?|skip(?:s|ped|ping)?|"
-    r"disabl(?:e[sd]?|ing)|comment(?:s|ed|ing)?\s+out)"
+    r"disabl(?:e[sd]?|ing)|comment(?:s|ed|ing)?\s+out|exclud(?:e[sd]?|ing)|discard(?:s|ed|ing)?|"
+    r"omit(?:s|ted|ting)?|eliminat(?:e[sd]?|ing)|retir(?:e[sd]?|ing)|stop(?:s|ped|ping)?\s+running|"
+    r"(?:get(?:s|ting)?|got|gotten)\s+rid\s+of|(?:tak(?:e[sn]?|ing)|took)\s+out|(?:leav(?:e|es|ing)|left)\s+out|"
+    r"filter(?:s|ed|ing)?\s+out|swap(?:s|ped|ping)?\s+out|instead\s+of\s+keeping)"
 )
-_DATASET_LOCATION = (
-    r"(?:from|in|within|of|out\s+of)\s+(?:the\s+|this\s+|our\s+|your\s+)?"
+# "ignore case" and "strip case" are also about letter case, so these two verbs only count with a determiner:
+# "ignore the case for positive-001" removes a case, "ignore case when comparing" does not.
+_WEAK_CASE_REMOVAL_VERB = r"(?:ignor(?:e[sd]?|ing)|strip(?:s|ped|ping)?)"
+_CASE_REMOVAL_VERB = rf"(?:{_STRONG_CASE_REMOVAL_VERB}|{_WEAK_CASE_REMOVAL_VERB})"
+# "take the case out of the dataset", "filter positive-001 out of evals.json": the object sits between verb and "out of".
+_CASE_EXTRACTION_VERB = (
+    r"(?:tak(?:e[sn]?|ing)|took|leav(?:e|es|ing)|left|filter(?:s|ed|ing)?|pull(?:s|ed|ing)?|cut(?:s|ting)?)"
+)
+# "replace the case with an easier one" swaps the requirement for a weaker one.
+_CASE_REPLACEMENT_VERB = r"(?:replac(?:e[sd]?|ing))"
+_EASIER_REPLACEMENT = (
+    r"(?:an?\s+|another\s+|some\s+)?(?:easier|simpler|weaker|softer|looser|lighter|trivial|"
+    r"more\s+(?:lenient|forgiving|permissive)|less\s+(?:strict|demanding|difficult|challenging))\b"
+)
+_DATASET_TARGET = (
+    r"(?:the\s+|this\s+|our\s+|your\s+)?"
     r"(?:(?:[\w.-]+/)*(?<![A-Za-z])evals?(?![A-Za-z])[\w./-]*|(?:[\w.-]+/)*[\w.-]*datasets?\b[\w./-]*|"
     r"[\w./-]+\.jsonl?\b|benchmark\b|(?:test|eval(?:uation)?)\s+(?:set|suite|file))"
 )
+_DATASET_LOCATION = rf"(?:from|in|within|of|out\s+of)\s+{_DATASET_TARGET}"
 # A trailing failure noun means the advice fixes a failure, not the case: "Remove the test case failure".
 _CASE_END = rf"(?![\w-]){_NOT_FAILURE_OF_REQUIREMENT}"
 # Ids such as "positive-001", "syllable-positive" or "syllable-count" name a dataset case: a token with a letter and a
@@ -130,7 +148,7 @@ _CASE_NAME_END = (
 # A case, entry or id that sits in a script or source file ("the special case for positive-001 in parser.py") is an
 # implementation branch, not a dataset row.
 _NOT_IN_CODE = (
-    r"(?!\s+(?:in|from|inside|within)\s+(?:the\s+|this\s+|our\s+|your\s+)?"
+    r"(?!\s+(?:in|from|inside|within|out\s+of)\s+(?:the\s+|this\s+|our\s+|your\s+)?"
     r"(?:[\w./-]*\.(?:py|js|mjs|cjs|ts|tsx|jsx|sh|bash|rb|go|rs|java|c|cc|cpp|h|hpp|md)\b|"
     r"(?:script|code|function|parser|module|implementation|handler|logic|class|method|helper|switch|conditional|"
     r"branch|loop|program|algorithm|routine)\b))"
@@ -144,19 +162,33 @@ _CASE_QUALIFIER = (
     r"while|is|are|was|were|be|per|during|across|within|inside|into|onto|via|using|until|upon|around)\b)"
     r"`?[A-Za-z0-9_'-]+`?"
 )
+_OBJECT_PHRASE = rf"(?:{_CASE_QUALIFIER}\s+){{0,3}}"
 _CASE_REMOVAL_PREFIX = (
-    rf"\b{_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+(?:{_CASE_QUALIFIER}\s+){{0,3}}"
+    rf"\b(?:{_STRONG_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}|"
+    rf"{_WEAK_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{1,3}})\s+{_OBJECT_PHRASE}"
+)
+_CASE_EXTRACTION_PREFIX = rf"\b{_CASE_EXTRACTION_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+{_OBJECT_PHRASE}"
+_CASE_REPLACEMENT_PREFIX = rf"\b{_CASE_REPLACEMENT_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+{_OBJECT_PHRASE}"
+_CASE_EXTRACTION_SUFFIX = rf"(?=\s+out\s+of\s+{_DATASET_TARGET})"
+_CASE_REPLACEMENT_SUFFIX = rf"(?=(?:\s+{_DATASET_LOCATION})?\s+(?:with|by)\s+{_EASIER_REPLACEMENT})"
+# Each way of taking a case out of the dataset: the verb prefix, what must follow the case, and whether the
+# object may be a bare known case id ("replace positive-001 with an easier case").
+_CASE_REMOVAL_FORMS = (
+    (_CASE_REMOVAL_PREFIX, "", False),
+    (_CASE_EXTRACTION_PREFIX, _CASE_EXTRACTION_SUFFIX, False),
+    (_CASE_REPLACEMENT_PREFIX, _CASE_REPLACEMENT_SUFFIX, True),
 )
 _PASSIVE_CASE_REMOVAL_TAIL = (
     r"\s+(?:also\s+|then\s+)?"
     r"(?:is|are|was|were|be|been|being|(?:should|must|can|could|may|might|will|would)\s+be|"
-    rf"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?{_CASE_REMOVAL_VERB}\b"
+    r"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?"
+    rf"(?:{_CASE_REMOVAL_VERB}\b|replaced(?=\s+(?:with|by)\s+{_EASIER_REPLACEMENT}))"
 )
 
 
 @lru_cache(maxsize=32)
-def _case_removal_patterns(case_ids: tuple[str, ...] = ()) -> tuple[re.Pattern[str], re.Pattern[str]]:
-    """Active and passive patterns for deleting a dataset case, aware of the case ids named in the advice."""
+def _case_removal_patterns(case_ids: tuple[str, ...] = ()) -> tuple[re.Pattern[str], ...]:
+    """Patterns for taking a dataset case out of the dataset, aware of the case ids named in the advice."""
     known = rf"(?<![\w-])(?:{'|'.join(re.escape(case_id) for case_id in case_ids)})(?![\w-])" if case_ids else None
     name = rf"(?:{_CASE_NAME}|{known})" if known else _CASE_NAME
     separator = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
@@ -178,18 +210,24 @@ def _case_removal_patterns(case_ids: tuple[str, ...] = ()) -> tuple[re.Pattern[s
             rf"{known}(?=\s+{_DATASET_LOCATION})",
         ]
     noun = f"(?:{'|'.join(alternatives)})"
-    return (
-        re.compile(rf"{_CASE_REMOVAL_PREFIX}{noun}", re.IGNORECASE),
-        re.compile(rf"\b{noun}(?:\s+{_DATASET_LOCATION})?{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE),
-    )
+    active = [
+        re.compile(rf"{prefix}{f'(?:{noun}|{known})' if known and bare_id else noun}{suffix}", re.IGNORECASE)
+        for prefix, suffix, bare_id in _CASE_REMOVAL_FORMS
+    ]
+    passive = re.compile(rf"\b{noun}(?:\s+{_DATASET_LOCATION})?{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE)
+    return (*active, passive)
 
 
 # The same removals of a bare "case" only count when the sentence before them points at the dataset:
 # "In evals/evals.json, remove the special case" is a dataset edit; "Remove the special case in parser.py" is not.
-_BARE_CASE_REMOVAL_PATTERN = re.compile(rf"{_CASE_REMOVAL_PREFIX}{_BARE_CASE}", re.IGNORECASE)
-_PASSIVE_BARE_CASE_REMOVAL_PATTERN = re.compile(rf"\b{_BARE_CASE}{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE)
+_BARE_CASE_REMOVAL_PATTERNS = (
+    *(re.compile(rf"{prefix}{_BARE_CASE}{suffix}", re.IGNORECASE) for prefix, suffix, _ in _CASE_REMOVAL_FORMS),
+    re.compile(rf"\b{_BARE_CASE}{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE),
+)
 _DATASET_SCOPE_PATTERN = re.compile(rf"\b{_DATASET_LOCATION}", re.IGNORECASE)
 _SENTENCE_BREAK_PATTERN = re.compile(r"[.!?;]\s|\n")
+# Advice that keeps the case: "Do not delete the case", "fix the rounding step instead of deleting the case".
+_NEGATION_PREFIX = r"\b(?:do\s+not|don't|never|avoid|instead\s+of|rather\s+than|without)(?:\s+\w+){0,2}\s*$"
 _QUOTE_PATTERN = re.compile(r"[`\"\u201c\u201d]|(?<!\w)['\u2018\u2019]|['\u2018\u2019](?!\w)")
 
 
@@ -595,18 +633,16 @@ def _weakens_requirements(text: str, case_ids: Iterable[object] = ()) -> bool:
     """
     # Inline-code ticks and quotes must not hide a name: "Remove the `expectation`" is still a removal.
     text = _QUOTE_PATTERN.sub("", text)
-    case_removal, passive_case_removal = _case_removal_patterns(_case_ids_in(text, case_ids))
+    case_removal_patterns = _case_removal_patterns(_case_ids_in(text, case_ids))
     for pattern, needs_dataset_scope in (
         (_WEAKENING_PATTERN, False),
         (_PASSIVE_WEAKENING_PATTERN, False),
-        (case_removal, False),
-        (passive_case_removal, False),
-        (_BARE_CASE_REMOVAL_PATTERN, True),
-        (_PASSIVE_BARE_CASE_REMOVAL_PATTERN, True),
+        *((pattern, False) for pattern in case_removal_patterns),
+        *((pattern, True) for pattern in _BARE_CASE_REMOVAL_PATTERNS),
     ):
         for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 48) : match.start()]
-            if re.search(r"\b(?:do\s+not|don't|never|avoid)(?:\s+\w+){0,2}\s*$", prefix, re.IGNORECASE):
+            if re.search(_NEGATION_PREFIX, prefix, re.IGNORECASE):
                 continue
             if needs_dataset_scope and not _DATASET_SCOPE_PATTERN.search(_sentence_prefix(text, match.start())):
                 continue

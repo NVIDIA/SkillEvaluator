@@ -8697,6 +8697,48 @@ class TestSpdxAndIpFalsePositiveHardening:
             if finding.check_name == "ip_addresses"
         ] == ["8.8.8.8"]
 
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Block requests to the instance metadata endpoint http://169.254.169.254/latest/meta-data/\n",
+            "ECS task credentials are served from http://169.254.170.2/v2/credentials\n",
+            "The interface fell back to the link-local address 169.254.1.1\n",
+        ],
+    )
+    def test_link_local_addresses_are_not_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "link-local-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize("address", ["8.8.8.8", "169.25.1.1", "169.255.1.1"])
+    def test_addresses_outside_the_link_local_range_remain_pii(self, tmp_path: Path, address: str) -> None:
+        skill_dir = tmp_path / "near-link-local-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f"Upstream resolver: {address}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        matched = [
+            finding.metadata.get("matched_value") for finding in result.findings if finding.check_name == "ip_addresses"
+        ]
+        assert matched == [address]
+
+    def test_link_local_address_does_not_hide_a_public_ip_on_its_line(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "link-local-and-public-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Block 169.254.169.254; resolver 8.8.8.8\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        matched = [
+            finding.metadata.get("matched_value") for finding in result.findings if finding.check_name == "ip_addresses"
+        ]
+        assert matched == ["8.8.8.8"]
+
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
     """Return one PNG chunk with its length and CRC."""

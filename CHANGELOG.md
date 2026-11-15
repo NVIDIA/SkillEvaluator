@@ -351,6 +351,9 @@ All notable changes to SkillEvaluator are documented in this file.
   time limit, and on Linux the interrupt could be handled on a scan thread,
   which did not wake that wait; the run then went on until a scan ended. The
   runner now checks for the interrupt every 0.1 seconds.
+- In local mode, the offered OpenCode install now pins OpenCode 1.19.5, the
+  release Harbor and CI install, instead of whatever npm resolves as latest.
+  Claude Code and Codex installs were already pinned.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -722,6 +725,14 @@ All notable changes to SkillEvaluator are documented in this file.
   evidence; with no other in-range count for that attempt the agent is
   refused as `no_progress_evidence`, where result collection used to stop
   with `browser-unsafe JSON integer` and write no `result.json` or report.
+- The PII scan no longer reports link-local `169.254.x.x` addresses, such as the
+  cloud instance metadata endpoint `169.254.169.254` and the ECS credentials
+  endpoint `169.254.170.2`, as non-RFC1918 IP addresses; its advice to use a
+  private IP cannot apply to them. Other addresses outside the excluded ranges,
+  including `169.25.x.x` and `169.255.x.x`, are still reported. A
+  `--pii-waivers` entry that accepted such an address now matches no finding,
+  so it is reported as a LOW `stale-pii-waiver` instead of an INFO
+  `applied-pii-waiver` and can be removed.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded

@@ -34,6 +34,8 @@ SCHEMA = "skillevaluator.grader-qualification/v1"
 CATEGORIES = {"positive", "negative", "edge", "failure_recovery", "unavailable_evidence", "non_use", "baseline"}
 METRICS = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
 VERDICTS = ("pass", "fail", "not_applicable", "error", "insufficient_evidence")
+# Qualification copies only the trajectory, so checks on workspace files have nothing recorded to inspect.
+WORKSPACE_CHECKS = {"file_exists"}
 DEFAULT_THRESHOLDS = dict.fromkeys(METRICS, 1.0) | {"accuracy": 0.8, "overall": 0.5}
 TEMPLATE = Path(__file__).parent / "harbor" / "templates" / "eval.py"
 REFERENCE_SUITE = Path(__file__).parent / "grader_reference"
@@ -145,6 +147,12 @@ def load_suite(directory):
             errors = validate_declarative_checks(entry["checks"])
             if errors:
                 raise ValueError(f"entry.checks: {'; '.join(errors)}")
+            workspace = sorted({check["type"] for check in entry["checks"]} & WORKSPACE_CHECKS)
+            if workspace:
+                raise ValueError(
+                    f"entry.checks: {', '.join(workspace)} inspects the agent's workspace files, which "
+                    "qualification does not record; remove it"
+                )
         expected = case["expected"]
         _object(expected, {"overall", "metrics"}, {"overall", "metrics"}, "expected")
         if not isinstance(expected["overall"], str) or expected["overall"] not in {

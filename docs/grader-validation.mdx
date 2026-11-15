@@ -96,7 +96,10 @@ lets a non-use case receive credit for correctly avoiding that skill.
 `entry.checks` accepts the dataset's [declarative checks](/skills/skillevaluator/eval-datasets#deterministic-checks),
 including anchored `output_matches` patterns for exact final-response formats.
 These run in the shipped verifier and contribute to Behavior alongside any
-remaining `expected_behavior` judgments. Use a scalar `pass`/`fail` metric label
+remaining `expected_behavior` judgments. `file_exists` is rejected: qualification
+records only the trajectory, not the agent's workspace files, so the check would
+inspect the machine running qualification instead of the agent's output.
+Use a scalar `pass`/`fail` metric label
 for the combined Behavior result when declaring checks; boolean-list labels
 describe only numbered model-judged behaviors. `label.checks` below has a
 different purpose: it verifies recorded evidence supporting the author's label.

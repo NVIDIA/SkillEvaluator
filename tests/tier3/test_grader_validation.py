@@ -108,6 +108,19 @@ def test_suite_validates_declarative_entry_checks(suite_dir, checks):
         gv.load_suite(suite_dir)
 
 
+@pytest.mark.parametrize("path", ["README.md", "out/report.md"])
+def test_suite_rejects_workspace_file_checks(suite_dir, path):
+    # Qualification records only the trajectory. A file_exists check would otherwise inspect the
+    # caller's directory, passing for an unrelated host file and failing for a missing artifact.
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    suite["cases"][0]["entry"]["checks"] = [{"type": "file_exists", "path": path}]
+    suite["cases"][0]["expected"]["metrics"]["behavior_check"] = "pass"
+    write_suite(suite_dir, suite)
+
+    with pytest.raises(ValueError, match=r"entry\.checks: file_exists inspects the agent's workspace files"):
+        gv.load_suite(suite_dir)
+
+
 @pytest.mark.parametrize(("response", "passed"), [("999", True), ("14\n", False), ("Result: 14", False)])
 def test_qualification_runs_anchored_output_check(judge_server, suite_dir, tmp_path, response, passed):
     suite = json.loads((suite_dir / "suite.json").read_text())

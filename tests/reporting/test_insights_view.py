@@ -151,9 +151,11 @@ def test_new_failed_evaluation_emits_actions_and_keeps_complete_errors_without_p
     payload = build_agent_eval_payload("demo", {"agent-a": agent}, use_llm_judge=True)
     assert payload["execution_status"] == "failed" and payload["overall_score"] is None
     assert payload["execution_errors"] == errors
-    assert "2 of 4 attempts scored" in " ".join(item["message"] for item in payload["conclusions"])
-    assert all(error not in card["message"] for error in errors for card in payload["recommendations"])
-    assert payload["recommendations"]
+    # The saved payload keeps the recorded text; the report view derives the concise cards from it.
+    view = _project(payload)
+    assert "2 of 4 attempts scored" in " ".join(item["message"] for item in view["conclusions"])
+    assert all(error not in card["message"] for error in errors for card in view["recommendations"])
+    assert view["recommendations"]
 
 
 def test_error_blob_replacement_keeps_its_distinct_trace_associations():

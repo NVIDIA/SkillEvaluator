@@ -689,22 +689,13 @@ All notable changes to SkillEvaluator are documented in this file.
   prompt such as `$ python run.py`, as a wildcard for every file left out of
   the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
   was left out. A wildcard elsewhere in the line, or a label inside code, still
-  counts. The check now also reads a word as a shell splits it, so
-  `setup' 'helper.sh`, `setup" "helper.sh` and `setup\ h*.sh` name the left-out
-  file `setup helper.sh` and keep the scan `INCOMPLETE`, also after an
-  apostrophe such as `don't` earlier in the line. Quoted text in such a word,
-  such as the JSON in `'{"a": 1, "b": 2}'` or `"%s %s"`, is read as written,
-  as before. Compact JSON outside shell quotes with a space in a quoted value
-  is now such a word too, so a line with `{"title":"My note","tags":[]}`,
-  which stands for any text, as `{a,b}` does, now stays `INCOMPLETE` whenever
-  anything is left out, and `["a b","c"]` stands for any one-character name.
-  The work charged for reading each line has also doubled, so the line check
-  reaches its bound, which keeps the scan `INCOMPLETE`, with about half as
-  many long lines as before. With `validate --workers` above 1, a skill of a
-  folder that is also a plugin is judged against the folder, as with one
-  worker, so a line naming a file elsewhere in the folder keeps it
-  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
-  missing-reference warning, or the error that says why a scan is
+  counts. So do such a label and `$` on a line with a quoted or escaped space
+  or shell delimiter, such as `setup' 'helper.sh` or `setup\ h*.sh`, where a
+  shell may join words that the check reads apart. With `validate --workers`
+  above 1, a skill of a folder that is also a plugin is judged against the
+  folder, as with one worker, so a line naming a file elsewhere in the folder
+  keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the
+  accepted missing-reference warning, or the error that says why a scan is
   `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
   drops that error either.
 

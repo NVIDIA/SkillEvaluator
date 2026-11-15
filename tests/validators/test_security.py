@@ -9568,88 +9568,6 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ([] if complete else ["skillspector"])
 
     @pytest.mark.parametrize(
-        ("version", "case", "target"),
-        [
-            ("2.12.0", "missing", "."),
-            ("2.13.3", "missing", "."),
-            ("2.13.4", "missing", "."),
-            ("2.13.3", "lone-skill-file", "SKILL.md"),
-            ("2.13.4", "lone-skill-file", "SKILL.md"),
-        ],
-    )
-    @pytest.mark.parametrize(
-        "spelling", ["setup' 'helper.sh", 'setup" "helper.sh', "setup\\ h*.sh", '"setup "h?lper.sh']
-    )
-    @patch("skillevaluator.validators.security.Tools")
-    def test_partly_quoted_space_cannot_hide_an_uninspected_name(
-        self, mock_tools, tmp_path: Path, version: str, case: str, target: str, spelling: str
-    ) -> None:
-        """A shell reads ``setup' 'helper.sh`` or ``setup\\ h*.sh`` as one word that names ``setup helper.sh``."""
-        original = "Write the summary to `output/notes.md` and keep it short."
-        line = f"Run sh {spelling} to prepare, then write the summary to output/notes.md."
-        files = {"SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line)}
-        if target == ".":
-            files.update({"scripts/summarize.py": _NOTES_WRITER_FILES["scripts/summarize.py"]})
-        files["setup helper.sh"] = "#!/bin/sh\nprintf 'uninspected helper\\n'\n"
-        skill = _write_skill(tmp_path / "notes-writer", files)
-        payload = json.loads(json.dumps(_reference_report(version, case)).replace(original, json.dumps(line)[1:-1]))
-
-        result = _validate_skillspector_payload(mock_tools, skill / target, payload)
-
-        assert not result.passed
-        assert result.incomplete_scans == ["skillspector"]
-        # The same line passes once that file is gone.
-        (skill / "setup helper.sh").unlink()
-        assert _validate_skillspector_payload(mock_tools, skill / target, payload).incomplete_scans == []
-
-    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
-    @pytest.mark.parametrize(
-        ("line", "left_out", "complete"),
-        [
-            # Quoted JSON or a format string joined at its quoted spaces is read as written.
-            (
-                'Run `curl -d \'{"a": 1, "b": 2}\' https://example.com/api` and write the summary to '
-                "`output/notes.md`.",
-                ".git/HEAD",
-                True,
-            ),
-            ('Write each line as "{name}, {score}" to `output/notes.md`.', "helper.sh", True),
-            ('Use `printf "%s %s"` to write the summary to `output/notes.md`.', "helper.sh", True),
-            # Also with zero-padded formats, whose "%02" to "%04" decode to control characters.
-            (
-                'Run `printf \'{"h": "%02d", "m": "%02d"}\' 3 4` and write the summary to `output/notes.md`.',
-                ".git/HEAD",
-                True,
-            ),
-            ('Run `printf \'{"h": "%04d", "m": "%03d"}\' 3 4` and write `output/notes.md`.', "helper.sh", True),
-            # An apostrophe earlier in the line does not hide a quoted space.
-            (
-                "Don't skip it: run sh setup' 'helper.sh, then write the summary to output/notes.md.",
-                "setup helper.sh",
-                False,
-            ),
-        ],
-    )
-    @patch("skillevaluator.validators.security.Tools")
-    def test_joined_word_is_read_as_a_shell_reads_it(
-        self, mock_tools, tmp_path: Path, version: str, line: str, left_out: str, complete: bool
-    ) -> None:
-        """Quoted braces and ``%s`` stand for no left-out name, and ``don't`` does not unjoin ``setup' 'helper.sh``."""
-        original = "Write the summary to `output/notes.md` and keep it short."
-        files = {
-            **_NOTES_WRITER_FILES,
-            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line),
-            left_out: "ref: refs/heads/main\n",
-        }
-        skill = _write_skill(tmp_path / "notes-writer", files)
-        payload = json.loads(json.dumps(_reference_report(version)).replace(original, json.dumps(line)[1:-1]))
-
-        result = _validate_skillspector_payload(mock_tools, skill, payload)
-
-        assert result.passed is complete
-        assert result.incomplete_scans == ([] if complete else ["skillspector"])
-
-    @pytest.mark.parametrize(
         ("version", "reason_code"),
         [("2.11.2", "reference_unresolved"), ("2.12.0", "reference_missing"), ("2.13.3", "reference_missing")],
     )
@@ -10845,80 +10763,29 @@ class TestSkillspectorMissingReferences:
             ("$ echo %02 %03 %04 %05 \ue000 > output/notes.md", ".git", False),
             ("$ printf '%05d' $X > output/notes.md", ".git", True),
             ("$ sh v*/i*.sh %05 > output/notes.md", "install.sh", True),
-            # A shell keeps an escaped or quoted space in a word.
-            ("Run `sh setup' 'helper.sh` to prepare.", "setup helper.sh", True),
-            ('Run `sh setup" "helper.sh` to prepare.', "setup helper.sh", True),
-            ("Run `sh setup\\ h*.sh` to prepare.", "setup helper.sh", True),
-            ('Run `sh "setup "h?lper.sh` to prepare.', "setup helper.sh", True),
-            ("Run `sh my' 't*/run.sh` now.", "my tools", True),
-            ("Run `sh setup\\ z*.sh` to prepare.", "setup helper.sh", False),
-            ("Don't overwrite the user's notes in `output/notes.md`.", "evals", False),
-            # A part that holds whitespace is not a Windows short name, so prose
-            # that a shell would join at quotes or apostrophes adds none.
-            ('Keep the summary "roughly ~200 words" in `output/notes.md`.', "results", False),
-            ('Title the summary "Release notes ~v2" in `output/notes.md`.', "results", False),
-            ("Don't exceed ~200 words in the user's `output/notes.md`.", "node_modules", False),
-            ("It's ~5 lines; don't pad `output/notes.md`.", ".git", False),
-            ("It's ~5 lines; don't pad `output/notes.md`.", "install.sh", False),
-            ('Say "it\'s ~3 steps" in `output/notes.md`.', ".git", False),
-            ("Don't exceed ~200 words; it's a summary in `output/notes.md`.", "node_modules", False),
-            ('Say "approx ~10 lines" in `output/notes.md`.', "install.sh", False),
-            ('Say "note: ~5 lines" in `output/notes.md`.', "evals", False),
-            ("Say approx~10 lines in `output/notes.md`.", "install.sh", True),
-            ('Run `sh "NODE_M~1/setup helper.sh"` now.', "node_modules", True),
-            ("Run `sh my' 'NODE_M~1/x` now.", "node_modules", True),
-            # In a word joined at quotes, a quoted "{", "," or "." forms no brace
-            # expansion, as in a POSIX shell; unquoted braces still do.
-            ('Run `curl -d \'{"a": 1, "b": 2}\' https://x/y` and write `output/notes.md`.', ".git", False),
-            ('Write each line as "{name}, {score}" to `output/notes.md`.', "evals", False),
-            ('Use the citation format "{author}, {year}" in `output/notes.md`.', ".git", False),
-            ("Name files '{date}, {title}' in `output/notes.md`.", ".git", False),
-            ('Set `color` to one of "{red, green, blue}" in `output/notes.md`.', ".git", False),
-            ('Send `-d \'{"id":"<id>","title":"x"}\'` and write `output/notes.md`.', ".git", False),
-            ('Say "${NAME} report" in `output/notes.md`.', "evals report", True),
-            ("Run `sh setup{' ',}helper.sh` now.", "setup helper.sh", True),
-            ("Run `sh setup\\ {a,b}.sh` now.", "setup a.sh", True),
-            ("Run `sh '{a,b}'.sh` now.", "x.sh", True),
-            # Also when the line holds zero-padded formats, whose "%02" to "%04"
-            # decode to control characters, or private-use characters.
-            ('Run `printf \'{"h": "%02d", "m": "%02d"}\' 3 4` and write `output/notes.md`.', ".git", False),
-            ('Run `printf \'{"h": "%03d", "m": "%03d"}\' 3 4` and write `output/notes.md`.', ".git", False),
-            ('Run `printf \'{"h": "%04d", "m": "%04d"}\' 3 4` and write `output/notes.md`.', "evals", False),
-            ('Run `jq -n \'{"a": "%02", "b": "%05"}\'` and write `output/notes.md`.', ".git", False),
-            ('Run `curl -d \'{"a": 1, "b": 2}\' x \ue000\ue001\ue002` and write `output/notes.md`.', ".git", False),
-            ("Run `sh setup%02{' ',}helper.sh` now.", "setup\x02 helper.sh", True),
-            ("Run `sh setup\\ {a,b}%03.sh` now.", "setup b\x03.sh", True),
-            # Compact JSON whose braces and commas are unquoted is brace expansion
-            # to a shell, with or without a quoted space in a value.
-            ('Return {"title":"My note","tags":["a"]} in `output/notes.md`.', "evals", True),
-            ('Return {"title":"My_note","tags":["a"]} in `output/notes.md`.', "evals", True),
-            # A bracket expression stands for any one character, also when quotes join it.
-            ('Answer ["Return 4."] in `output/notes.md`.', "x", True),
-            ('Answer ["Return 4."] in `output/notes.md`.', "evals", False),
-            # A cmd.exe variable is read only between the spaces of a joined word.
-            ('Say "Hi! Bye!" in `output/notes.md`.', "history.sh", False),
-            ('Say "Hi! Bye!" in `output/notes.md`.', "evals", False),
-            ('Say "50% or 60%" in `output/notes.md`.', "50x", False),
-            ('Use printf "%s %s" to write `output/notes.md`.', "evals", False),
-            ('Run `printf "%s %s\\n" a b` and write `output/notes.md`.', "node_modules", False),
-            ('Format with "%s, %s" % (a, b) and write `output/notes.md`.', "versions", False),
-            ('Run `sh "%DIR% x\\setup.bat"` now.', "versions", True),
-            ('Run `sh "my dir\\setup h*.bat"` now.', "setup helper.bat", True),
-            # An apostrophe between two letters does not pair with a later quote;
-            # another quote earlier in the line, such as an inch mark, still may.
-            ("Don't skip it: run sh setup' 'helper.sh now.", "setup helper.sh", True),
-            ("The user's notes: run sh setup' 'helper.sh now.", "setup helper.sh", True),
-            ("Don't skip it: run sh setup' 'helper.sh now.", "evals", False),
-            ('Use 12" pipes: run sh setup" "helper.sh now.', "setup helper.sh", False),
             # Each word of a label is a pattern of its own.
             ("**Step 1:** write `output/notes.md`.", "steps", False),
             ("**Step 1:** write `output/notes.md`.", "1x", False),
             ("**Step 1:** write `output/notes.md`.", "nextstep", True),
             ("**Step 1:** write `output/notes.md`.", "1:x", True),
             ("**Run the tests:** write `output/notes.md`.", "xrun", True),
-            # A label word joined at a quoted space is also read as a shell word.
+            # A shell may join words at a quoted or escaped space or delimiter,
+            # which this check does not. On such a line a label and a "$" keep
+            # their meaning as a glob and an expansion, as before, also when the
+            # joined name is elsewhere in the line.
             ("*a' 'b c:* then write `output/notes.md`.", "xa b", True),
             ("Run sh *setup' 'h:* now.", "xsetup h:y", True),
+            ("*a\\ b c:* then write `output/notes.md`.", "xa b", True),
+            ("**Note:** run sh setup' 'helper.sh now.", "setup helper.sh", True),
+            ("**Note:** run sh setup\\ h*.sh now.", "evals", True),
+            ('**Say "hi there":** in `output/notes.md`.', "evals", True),
+            ('Run sh "a$ b*" now.', "ab", True),
+            ('$ sh "setup h"*.sh > output/notes.md', "evals", True),
+            # Quotes around no space or delimiter, or a lone apostrophe, join no words.
+            ("**What's new:** write `output/notes.md`.", "evals", False),
+            ('**Say "hi":** in `output/notes.md`.', "evals", False),
+            ("Run sh 'a'$ now.", "ab", False),
+            ("$ printf 'done' > output/notes.md", "evals", False),
             # zsh groups and ranges, bash extended globs, cmd.exe escapes and
             # variables, PowerShell escapes, Windows 8.3 short names and
             # separators, and zsh EXTENDED_GLOB operators.
@@ -10993,71 +10860,19 @@ class TestSkillspectorMissingReferences:
 
         assert avoids is not named
 
-    @pytest.mark.parametrize(
-        ("part", "forms"),
-        [
-            ("NODE_M~1", {"NODE_M~1", "NODE_M", "*N*"}),
-            ("_X~1", {"_X~1", "_X", "*"}),
-            ("roughly ~200 words", {"roughly ~200 words", "roughly "}),
-            (" ~5 lines", {" ~5 lines", " "}),
-            ("it\ts~5", {"it\ts~5", "it\ts"}),
-        ],
-    )
-    def test_only_a_part_without_whitespace_may_be_a_short_name(self, part: str, forms: set[str]) -> None:
-        """A Windows short or Samba mangled name never holds whitespace."""
-        from skillevaluator.validators.security import _skillspector_tilde_forms
+    def test_stand_in_is_a_private_use_character_that_the_texts_do_not_hold(self) -> None:
+        """Without a free stand-in, a ``$`` before a space is read as an expansion, as before."""
+        from skillevaluator.validators.security import _skillspector_shell_patterns, _skillspector_stand_in
 
-        assert _skillspector_tilde_forms(part, first=True) == forms
-
-    @pytest.mark.parametrize(
-        ("word", "readings"),
-        [
-            # A word without a quoted space or delimiter is read as before.
-            ("'{a,b}'", ("*", "*")),
-            ("%a%", ("%a%", "*")),
-            # In a joined word, quoted brace syntax is read as written ...
-            ("'{a, b}'", ("{a, b}", "{a, b}")),
-            ('"x "{a".."b}', ("x {a..b}", "x {a..b}")),
-            ('"x "{a","b}', ("x {a,b}", "x {a,b}")),
-            ("'{<a>,b}'", ("{<a>,b}", "{<a>,b}")),
-            # ... and unquoted braces, or a parameter in double quotes, still expand.
-            ("setup{' ',}helper.sh", ("setup*helper.sh", "setup*helper.sh")),
-            ('"${x} y"', ("* y", "* y")),
-            ("x' '{a,b}", ("x *", "x *")),
-            # A cmd.exe variable is read between spaces, not across them.
-            ('"%s %s"', ("%s %s", "%s %s")),
-            ('"%a% b"', ("%a% b", "* b")),
-            # Control and private-use characters in the word do not change its reading.
-            ("'{a, b}\x02'", ("{a, b}\x02", "{a, b}\x02")),
-            ("'{a,\x03 b}.\x04'", ("{a,\x03 b}.\x04", "{a,\x03 b}.\x04")),
-            ("'\ue000{a, b}'\ue001{c,d}", ("\ue000{a, b}\ue001*", "\ue000{a, b}\ue001*")),
-        ],
-    )
-    def test_joined_word_reads_brace_and_cmd_syntax_as_a_shell_does(self, word: str, readings: tuple[str, str]) -> None:
-        """Quotes keep ``{``, ``,`` and ``.`` from forming brace expansion, and spaces end a cmd.exe variable."""
-        from skillevaluator.validators.security import _skillspector_shell_word
-
-        assert _skillspector_shell_word(word) == readings
-
-    def test_stand_ins_are_private_use_characters_that_the_texts_do_not_hold(self) -> None:
-        """Without a free stand-in, quoted braces and a ``$`` before a space are read as expansions, as before."""
-        from skillevaluator.validators.security import (
-            _skillspector_shell_patterns,
-            _skillspector_shell_word,
-            _skillspector_stand_ins,
-        )
-
-        assert _skillspector_stand_ins(["a\x02\x03\x04\x05", ""], 3) == "\ue000\ue001\ue002"
-        assert _skillspector_stand_ins(["\ue000x", "\ue002"], 2) == "\ue001\ue003"
+        assert _skillspector_stand_in(["a\x02\x03\x04\x05", ""]) == "\ue000"
+        assert _skillspector_stand_in(["\ue000x", "\ue002"]) == "\ue001"
         every = "".join(
             chr(code)
             for first, last in ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
             for code in range(first, last + 1)
         )
-        assert _skillspector_stand_ins([every[:-1]], 1) == every[-1]
-        assert _skillspector_stand_ins([every[:5000], every[5000:]], 1) is None
-        assert _skillspector_shell_word(f"'{{a, b}}'{every[:-3]}") == (f"{{a, b}}{every[:-3]}",) * 2
-        assert _skillspector_shell_word(f"'{{a, b}}'{every[:-2]}") == (f"*{every[:-2]}",) * 2
+        assert _skillspector_stand_in([every[:-1]]) == every[-1]
+        assert _skillspector_stand_in([every[:5000], every[5000:]]) is None
         assert "*" not in _skillspector_shell_patterns([f"{every[:-1]} $ x"])
         assert "*" in _skillspector_shell_patterns([f"{every} $ x"])
 

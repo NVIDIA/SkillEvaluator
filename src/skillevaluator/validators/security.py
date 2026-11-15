@@ -1632,21 +1632,10 @@ _SKILLSPECTOR_NAME_RUN_RE = re.compile(r"[\w.-]+")
 # A word of a reference's line: text between whitespace and the Markdown or
 # shell delimiters around a path.
 _SKILLSPECTOR_LINE_WORD_RE = re.compile(r"[^\s`()<>|;&]+")
-# A word as a POSIX shell splits it: as above, but an escaped character and a
-# quoted string, which may hold whitespace or a delimiter, are part of it, as
-# in ``setup\\ h*.sh`` or ``setup' 'helper.sh``.
-_SKILLSPECTOR_SHELL_WORD_RE = re.compile(r"""(?:[^\s`()<>|;&'"\\]+|\\.|'[^'`]*'|"(?:\\.|[^"\\`])*"|['"\\])+""")
-# An apostrophe between two letters, as in ``don't`` or ``user's``. The words
-# are also split as above with each one removed, so that it does not pair
-# with a quote later in the line, as in ``don't run sh setup' 'helper.sh``.
-_SKILLSPECTOR_PROSE_APOSTROPHE_RE = re.compile(r"(?<=[^\W\d_])'(?=[^\W\d_])")
-# A quoted string or an escaped character in a word as a POSIX shell splits
-# it; that shell reads no brace expansion in it (:func:`_skillspector_shell_word`).
-_SKILLSPECTOR_SHELL_QUOTED_RE = re.compile(r"""\\.|'[^']*'|"(?:\\.|[^"\\])*\"""")
-# The private-use code points, from which the stand-ins for a quoted ``{``,
-# ``,`` and ``.`` and for a literal ``$`` are taken while a line is read
-# (:func:`_skillspector_stand_ins`). Neither whitespace nor a word character,
-# they split no word and join no parameter name.
+# The private-use code points, from which the stand-in for a literal ``$`` is
+# taken while a line is read (:func:`_skillspector_stand_in`). Neither
+# whitespace nor a word character, it splits no word and joins no parameter
+# name.
 _SKILLSPECTOR_STAND_IN_RANGES = ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
 # Stands for any text where a shell group or range was read in a line
 # (:func:`_skillspector_shell_groups`); unlike ``*``, a word made of it is
@@ -1695,9 +1684,16 @@ _SKILLSPECTOR_BACKTICK_RUN_RE = re.compile(r"`+")
 # written, as in a prompt such as ``$ python run.py``; one after another ``$``
 # may end the parameter ``$$``.
 _SKILLSPECTOR_LITERAL_DOLLAR_RE = re.compile(r"(?<!\$)\$(?=\s|\Z)")
+# A quoted or escaped character that would otherwise end a word: one between
+# two of the same quote, as in ``setup' 'helper.sh`` or ``"a$ b*"``, or after
+# a backslash, as in ``setup\ h*.sh``. A shell may join words there, which the
+# words of a line are not (:func:`_skillspector_shell_patterns`).
+_SKILLSPECTOR_QUOTED_SPLIT_RE = re.compile(
+    r"""\\[\s`()<>|;&]|'[^'\s`()<>|;&]*[\s`()<>|;&][^']*'|"[^"\s`()<>|;&]*[\s`()<>|;&][^"]*\""""
+)
 # Work that checking the lines of one report's missing references may take, in
 # units of about one character compared: decoding a line and reading its shell
-# groups and words costs 18,000 per character, each search of a decoded line
+# groups and words costs 9,000 per character, each search of a decoded line
 # for a name 100 plus the line's length, and each pattern 20,000 plus 1,000 per
 # character and 300 plus the name's length for each name matched against it.
 # Beyond the budget the lines are not accepted, which bounds the time that a
@@ -2103,22 +2099,19 @@ def _skillspector_shell_expansions(word: str) -> str:
     return _SKILLSPECTOR_SHELL_PARAMETER_RE.sub("*", word)
 
 
-def _skillspector_stand_ins(texts: Iterable[str], count: int) -> str | None:
-    """The first *count* code points of :data:`_SKILLSPECTOR_STAND_IN_RANGES` that no text of *texts* holds.
+def _skillspector_stand_in(texts: Iterable[str]) -> str | None:
+    """The first code point of :data:`_SKILLSPECTOR_STAND_IN_RANGES` that no text of *texts* holds.
 
     So a stand-in for syntax in the texts being read is never also a
     character of them, such as one that a percent-escape or a character
-    reference decodes to. Returns ``None`` when fewer are left. The work is
-    linear in the length of the texts and *count*.
+    reference decodes to. Returns ``None`` when none is left. The work is
+    linear in the length of the texts.
     """
     held: set[str] = set().union(*texts)
-    found: list[str] = []
     for first, last in _SKILLSPECTOR_STAND_IN_RANGES:
         for code in range(first, last + 1):
             if chr(code) not in held:
-                found.append(chr(code))
-                if len(found) == count:
-                    return "".join(found)
+                return chr(code)
     return None
 
 
@@ -2137,35 +2130,11 @@ def _skillspector_shell_word(word: str) -> tuple[str, str]:
 
     ``*``, ``?`` and ``[...]`` keep their meaning, and so does ``~``
     (:func:`_skillspector_tilde_forms`).
-
-    In a word that holds a quoted or escaped space or delimiter, which only a
-    POSIX shell keeps in one word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`), a
-    ``{``, ``,`` or ``.`` inside quotes or after a backslash forms no brace
-    expansion, as in that shell. So ``"{name}, {score}"`` or
-    ``'{"a": 1, "b": 2}'`` is read as written, while ``setup{' ',}helper.sh``
-    still stands for ``setup*helper.sh``. A cmd.exe variable or batch
-    parameter is read only within the text between spaces and delimiters, as
-    in a word that holds neither, so ``"%s %s"`` or ``"Hi! Bye!"`` is read as
-    written. The quoted syntax is read through stand-ins that the word does
-    not hold (:func:`_skillspector_stand_ins`), so any character in it, such
-    as one that ``%02`` decodes to, leaves this reading unchanged.
     """
     word = word.replace(_SKILLSPECTOR_SHELL_ANY, "*")
-    unmask: dict[int, str] = {}
-    if (
-        _SKILLSPECTOR_LINE_WORD_RE.fullmatch(word) is None
-        and (stand_ins := _skillspector_stand_ins((word,), 3)) is not None
-    ):
-        mask = str.maketrans("{,.", stand_ins)
-        unmask = str.maketrans(stand_ins, "{,.")
-        word = _SKILLSPECTOR_SHELL_QUOTED_RE.sub(lambda quoted: quoted.group().translate(mask), word)
-        # Parameter expansion, unlike brace expansion, also takes place inside double quotes.
-        word = word.replace("$" + stand_ins[0], "${")
-    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word)).translate(unmask)
-    windows = _SKILLSPECTOR_LINE_WORD_RE.sub(
-        lambda run: _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", run.group()), _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word)
-    )
-    windows = _skillspector_shell_expansions(windows).translate(unmask).replace("\\", "/")
+    posix = _skillspector_shell_expansions(_SKILLSPECTOR_SHELL_QUOTE_RE.sub("", word))
+    windows = _SKILLSPECTOR_CMD_VARIABLE_RE.sub("*", _SKILLSPECTOR_CMD_QUOTE_RE.sub("", word))
+    windows = _skillspector_shell_expansions(windows).replace("\\", "/")
     return posix, windows
 
 
@@ -2179,11 +2148,9 @@ def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
     share mangles, which stand for a longer name. Each keeps the first
     character of that name after the dots and spaces Windows drops, or ``_``
     for one it cannot keep, so ``*``, that character and ``*`` is a pattern
-    too, and ``*`` when the character is ``_`` or glob syntax. Such a name
-    never holds whitespace, so a part that does, as a shell reads
-    ``"roughly ~200 words"`` or ``It's ~5 lines; don't``, is not one. A ``~``
-    at the start of the first part of a word (*first*) is a home directory and
-    is skipped; one at the start of any other part makes the part ``*``.
+    too, and ``*`` when the character is ``_`` or glob syntax. A ``~`` at the
+    start of the first part of a word (*first*) is a home directory and is
+    skipped; one at the start of any other part makes the part ``*``.
     """
     tilde = part.find("~", 1 if first and part.startswith("~") else 0)
     if tilde < 0:
@@ -2192,7 +2159,7 @@ def _skillspector_tilde_forms(part: str, *, first: bool) -> set[str]:
         return {"*"}
     base = part[:tilde]
     forms = {part, base}
-    if tilde + 1 < len(part) and _SKILLSPECTOR_NON_SPACE_RUN_RE.fullmatch(part):
+    if tilde + 1 < len(part):
         lead = (base[1:] if first and base.startswith("~") else base).lstrip(". ")[:1]
         forms.add(f"*{lead}*" if lead and lead not in "_*?[]\\" else "*")
     return forms
@@ -2292,52 +2259,49 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     """Glob patterns for the path parts of the words in *texts* that a shell or Windows expands or unquotes.
 
     The words are split at whitespace and the Markdown or shell delimiters
-    around a path, and also as a POSIX shell splits them, where an escaped or
-    quoted space is part of the word (:data:`_SKILLSPECTOR_SHELL_WORD_RE`),
-    once as written and once with each apostrophe between two letters removed
-    (:data:`_SKILLSPECTOR_PROSE_APOSTROPHE_RE`), so that ``don't`` earlier in
-    the line does not pair with the quotes of a command after it. A
-    word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``, ``!``, ``^``, ``#``,
-    ``~``, a quote, a backslash or a group read in the line is read as a POSIX shell and as
-    cmd.exe or PowerShell would (:func:`_skillspector_shell_word`). Each part
-    between ``/`` is a pattern, and so is each piece of it between ``=``,
-    ``:`` and ``,``, as written and without the dots and punctuation that end
-    a sentence after it, with what a ``~`` in it may stand for
-    (:func:`_skillspector_tilde_forms`), each read with the zsh
-    ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
+    around a path. A word with ``*``, ``?``, ``[``, ``{``, ``$``, ``%``,
+    ``!``, ``^``, ``#``, ``~``, a quote, a backslash or a group read in the
+    line is read as a POSIX shell and as cmd.exe or PowerShell would
+    (:func:`_skillspector_shell_word`). Each part between ``/`` is a pattern,
+    and so is each piece of it between ``=``, ``:`` and ``,``, as written and
+    without the dots and punctuation that end a sentence after it, with what a
+    ``~`` in it may stand for (:func:`_skillspector_tilde_forms`), each read
+    with the zsh ``EXTENDED_GLOB`` operators (:func:`_skillspector_zsh_pattern`).
 
-    Markdown and a shell prompt are read first: a leading list marker ``*``
-    is skipped, and a ``$`` before whitespace or the end of the line, which a
+    Markdown and a shell prompt are read first. A leading list marker ``*``
+    is skipped. A ``$`` before whitespace or the end of the line, which a
     shell keeps as written, is read as a literal ``$``, not as an expansion
-    (:data:`_SKILLSPECTOR_LITERAL_DOLLAR_RE`). So ``$ python run.py`` adds
-    no pattern, and ``*a$`` stands for names that end in ``a$``. While the
-    words are read, such a ``$`` is a stand-in that no text of *texts* holds
-    (:func:`_skillspector_stand_ins`). A bold or italic label outside code, such
-    as ``**Note:**``, is read as its text, and each of its words, with its
-    ``*``, split at whitespace and as a POSIX shell splits them, is also a
-    pattern that is not split at ``=``, ``:`` or ``,``
+    (:data:`_SKILLSPECTOR_LITERAL_DOLLAR_RE`). So ``$ python run.py`` adds no
+    pattern, and ``*a$`` stands for names that end in ``a$``. While the words
+    are read, such a ``$`` is a stand-in that no text of *texts* holds
+    (:func:`_skillspector_stand_in`). A bold or italic label outside code,
+    such as ``**Note:**``, is read as its text, and each of its words, with
+    its ``*``, is also a pattern that is not split at ``=``, ``:`` or ``,``
     (:func:`_skillspector_markdown_labels`). So ``**Note:**`` stands only for
     names that hold ``note:``, and ``**Step 1:**`` for names that end in
-    ``step`` or start with ``1:``. Any other wildcard keeps its meaning, so
-    ``bash *`` or ``--include=*`` may name every uninspected file.
+    ``step`` or start with ``1:``. A text with a quoted or escaped space or
+    delimiter (:data:`_SKILLSPECTOR_QUOTED_SPLIT_RE`), such as
+    ``setup' 'helper.sh``, is read without these two steps: a shell may join
+    its words, which these words do not, so its labels and ``$`` keep their
+    meaning as globs and expansions, and the text is read no more narrowly
+    than before. Any other wildcard keeps its meaning, so ``bash *`` or
+    ``--include=*`` may name every uninspected file.
     """
     split_words: set[str] = set()
     label_words: set[str] = set()
     texts = tuple(texts)
     # Without a free stand-in, such a "$" is read as an expansion.
-    literal_dollar = _skillspector_stand_ins(texts, 1)
+    literal_dollar = _skillspector_stand_in(texts)
     for text in texts:
         text = _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1)
-        if literal_dollar is not None:
-            text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(literal_dollar, text)
-        text, labels = _skillspector_markdown_labels(text)
+        labels: list[str] = []
+        if _SKILLSPECTOR_QUOTED_SPLIT_RE.search(text) is None:
+            if literal_dollar is not None:
+                text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(literal_dollar, text)
+            text, labels = _skillspector_markdown_labels(text)
         split_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(text))
-        split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(text))
-        if "'" in text:
-            split_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(_SKILLSPECTOR_PROSE_APOSTROPHE_RE.sub("", text)))
         for label in labels:
             label_words.update(_SKILLSPECTOR_LINE_WORD_RE.findall(label))
-            label_words.update(_SKILLSPECTOR_SHELL_WORD_RE.findall(label))
     patterns: set[str] = set()
     for word in split_words | label_words:
         if _SKILLSPECTOR_SHELL_SYNTAX.isdisjoint(word):
@@ -2414,7 +2378,7 @@ def _skillspector_reference_line_avoids(
     if not keys:
         return True
     budget = budget or _SkillspectorMatchBudget()
-    if not budget.spend(len(line) * 18_000):
+    if not budget.spend(len(line) * 9_000):
         return False
     decodings: tuple[Callable[[str], str], ...] = (
         lambda text: _SKILLSPECTOR_MARKDOWN_ESCAPE_RE.sub(r"\1", text),

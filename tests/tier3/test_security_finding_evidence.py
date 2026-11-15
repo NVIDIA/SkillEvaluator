@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -1880,6 +1882,43 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
     assert kept.replace("FLAG", flag) in evidence
 
 
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            '{"cmd": "PASSWORD: x ' + "--use_token mysql -u root -pX token=y " * 1000 + '"}',
+            id="value-less-flags-in-a-quoted-string",
+        ),
+        pytest.param("--use_token login bob password X " + "token=y a " * 4000, id="names-in-a-long-netrc-password"),
+        pytest.param(
+            '{"cmd": "' + "--api_key 'TOKEN='v --set_secret auth=f('a', 'b') " * 800 + '"}',
+            id="names-in-flag-values-in-a-quoted-string",
+        ),
+        pytest.param("--api_key " + "token=x," * 5000, id="names-in-one-long-flag-value"),
+        pytest.param('["w", "--use_token", "mysql", "-pX", ' * 1000 + "]", id="value-less-flags-in-an-argv-list"),
+        pytest.param(
+            '{"c": "' + "./wrap --api_key K1\\\\nlogin bob password Z " * 1000 + '"}',
+            id="escaped-backslashes-before-line-breaks",
+        ),
+        pytest.param('curl -u "bob --api_key \\"x a:b" https://h ' * 1000, id="flag-values-in-user-values"),
+        pytest.param(
+            "./wrap --use_token " + "aws configure set aws_secret_access_key " * 1000 + "x",
+            id="commands-in-hidden-passwords",
+        ),
+        pytest.param("--use_token mysql -u root -pXpassword: Y " * 1000, id="names-cut-by-hidden-passwords"),
+    ],
+)
+def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> None:
+    # Judge evidence is masked whole, with no 2,000-character scan window, so
+    # the flag rule must stay close to linear: each of these texts of about
+    # 40,000 characters takes tens of milliseconds, where a walk that grows
+    # with the square or cube of the text would take seconds to minutes. The
+    # bound is generous for a slow CI runner.
+    started = time.perf_counter()
+    eval_core_checks._mask_finding_evidence_credentials(text)
+    assert time.perf_counter() - started < 2.0
+
+
 _HOOK_URL = "https://hooks.example.com/services/T0/B0/" + _API_TOKEN
 
 
@@ -2048,6 +2087,53 @@ def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> Non
     text = f'./tool --api_key "a --db_password "{_API_TOKEN} b'
 
     assert eval_core_checks._redact_finding_evidence(text) == "./tool --api_key <redacted>"
+
+
+def test_the_finding_evidence_masker_keeps_no_cache_between_texts() -> None:
+    # Judge evidence of parallel trials is masked in several threads at once,
+    # and evidence can be long, so the masker keeps nothing between calls.
+    cached = [
+        name
+        for name, value in vars(eval_core_checks).items()
+        if hasattr(value, "cache_info") and value.__module__ == eval_core_checks.__name__
+    ]
+
+    assert cached == []
+
+
+def test_masking_the_same_text_in_several_threads_gives_the_same_evidence() -> None:
+    text = json.dumps(
+        {
+            "cmd": "PASSWORD: x "
+            + f"./wrap --use_token mysql -u root -p{_API_TOKEN} --api_key token=a,b login bob password X --use_token Y Z "
+            * 40
+        }
+    )
+    expected = eval_core_checks._mask_finding_evidence_credentials(text)
+    results: list[str] = []
+    errors: list[BaseException] = []
+
+    def mask() -> None:
+        try:
+            for _ in range(10):
+                results.append(eval_core_checks._mask_finding_evidence_credentials(text))
+        except BaseException as exc:
+            errors.append(exc)
+
+    interval = sys.getswitchinterval()
+    sys.setswitchinterval(1e-6)
+    try:
+        threads = [threading.Thread(target=mask) for _ in range(4)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+    finally:
+        sys.setswitchinterval(interval)
+
+    assert errors == []
+    assert results == [expected] * 40
+    assert _API_TOKEN not in expected
 
 
 # A password with parentheses in it, which a call value must not cut short.

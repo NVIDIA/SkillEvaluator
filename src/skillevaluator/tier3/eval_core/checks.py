@@ -3686,16 +3686,20 @@ _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
 _FINDING_EVIDENCE_TUPLE_ARGUMENTS = r"(?:[^()\r\n]|\([^()\r\n]{0,64}\)){0,256}"
 _FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()]|\([^()]{0,64}\)){0,256}"
 _FINDING_EVIDENCE_WORD_VALUE = r"(?:\\.|[^\s'\"`;|&\\])+"
-_FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
+_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
     + r"|\("
     + _FINDING_EVIDENCE_TUPLE_ARGUMENTS
     + r"\)?|(?P<call>[A-Za-z_][\w.]{0,63}\("
     + _FINDING_EVIDENCE_CALL_ARGUMENTS
-    + r"\)(?![^\s'\"`;|&\\),\]}]))|"
-    + _FINDING_EVIDENCE_WORD_VALUE
+    + r"\)(?![^\s'\"`;|&\\),\]}]))"
 )
+_FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
+    _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE + "|" + _FINDING_EVIDENCE_WORD_VALUE
+)
+# The same value without its word reading (see _AssignmentValues.value_end).
+_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE_RE = re.compile(_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE)
 _FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
 # The same tuple and call values with each quoted argument read whole, a
 # JSON-escaped (\"...\"), double- or single-quoted string closed on its line,
@@ -4141,14 +4145,18 @@ def _mask_config_set_value(match: re.Match[str], values: _AssignmentValues) -> s
 class _AssignmentValues:
     """Where the assignment rule masks the value after a name in *text*, each name read on its own.
 
-    The quotes of the text are read once, when first needed. One is made for
-    each text a rule reads and dropped when the rule is done, so nothing is
-    kept between texts or shared between threads.
+    The quotes of the text are read once, when first needed, and a word or
+    the rest of a quoted string once for all the names in it (see _run_end),
+    so reading every name in a long text stays close to linear. One is made
+    for each text a rule reads and dropped when the rule is done, so nothing
+    is kept between texts or shared between threads.
     """
 
     def __init__(self, text: str) -> None:
         self.text = text
         self._quotes: tuple[list[int], list[int | None]] | None = None
+        # For each pattern, the runs read so far: their starts, in order, and their ends.
+        self._runs: dict[re.Pattern[str], tuple[list[int], list[int]]] = {}
 
     def runs_past(self, start: int, end: int) -> bool:
         """Return whether the assignment rule masks past *end* the value of a credential name in *start*:*end*, or at *end*.
@@ -4186,8 +4194,25 @@ class _AssignmentValues:
         if reading is None:
             return None
         pattern, start, _ = reading
-        value = _assignment_value_match(text, start) if pattern is None else pattern.match(text, start)
-        return None if value is None else value.end()
+        if pattern is _FINDING_EVIDENCE_STUCK_VALUE_RE:
+            value = pattern.match(text, start)
+            return None if value is None else value.end()
+        if pattern is not None:
+            return self._run_end(pattern, start)
+        # As _assignment_value_match reads the value, with a word read by _run_end.
+        value = _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE_RE.match(text, start)
+        if value is None:
+            end = self._run_end(_FINDING_EVIDENCE_WORD_VALUE_RE, start)
+        else:
+            end = value.end()
+            if value.group("call") is not None:
+                word = self._run_end(_FINDING_EVIDENCE_WORD_VALUE_RE, start)
+                if word is not None and word >= end:
+                    end = word
+        quoted = _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE.match(text, start)
+        if quoted is not None and (end is None or quoted.end() > end):
+            return quoted.end()
+        return end
 
     def _string_open(self, position: int) -> int | None:
         """Return where the quoted string open at *position* starts (None: none is), as the quote scan reads it."""
@@ -4204,6 +4229,27 @@ class _AssignmentValues:
         positions, openings = self._quotes
         index = bisect.bisect_left(positions, position)
         return openings[index - 1] if index else None
+
+    def _run_end(self, pattern: re.Pattern[str], start: int) -> int | None:
+        """Return where *pattern* ends when matched at *start* (None: no match).
+
+        *pattern* is a run of units, each a character or a backslash and the
+        character after it, that ends where the text read from the run's
+        start stops it: a word, or the rest of a quoted string. A run read
+        from inside one already read, at a unit boundary (not right after a
+        backslash), ends where that run ends, so a long run is read once for
+        all the names in it.
+        """
+        starts, ends = self._runs.setdefault(pattern, ([], []))
+        index = bisect.bisect_right(starts, start) - 1
+        if index >= 0 and start < ends[index] and (starts[index] == start or self.text[start - 1] != "\\"):
+            return ends[index]
+        match = pattern.match(self.text, start)
+        if match is None:
+            return None
+        starts.insert(index + 1, start)
+        ends.insert(index + 1, match.end())
+        return match.end()
 
 
 def _config_separator_name_ends(text: str) -> set[int]:

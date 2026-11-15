@@ -8,7 +8,7 @@ from __future__ import annotations
 import copy
 import io
 import json
-import re
+from html.parser import HTMLParser
 
 import pytest
 from rich.console import Console
@@ -20,6 +20,33 @@ from skillevaluator.tier3.declarative_coverage import agent_declarative_checks, 
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.result_display import render_evaluation_result
+
+
+class _VisibleHTMLText(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.hidden = False
+        self.parts = []
+
+    def handle_starttag(self, tag, _attrs):
+        if tag in {"script", "style"}:
+            self.hidden = True
+
+    def handle_endtag(self, tag):
+        if tag in {"script", "style"}:
+            self.hidden = False
+
+    def handle_data(self, data):
+        if not self.hidden:
+            self.parts.append(data)
+
+
+@pytest.mark.parametrize("tag", ["script", "SCRIPT", "script ", "style"])
+def test_visible_html_text_excludes_embedded_data(tag):
+    parser = _VisibleHTMLText()
+    parser.feed(f"<p>Visible evidence</p><{tag}>Embedded data</{tag}><p>More evidence</p>")
+    parser.close()
+    assert " ".join(parser.parts) == "Visible evidence More evidence"
 
 
 def _reward(*, baseline=False):
@@ -193,11 +220,12 @@ def test_validate_terminal_shows_coverage():
 )
 def test_html_and_both_benchmark_cards_show_all_checks(reporter):
     output = reporter.render(_validation(_payload()))
-    visible = (
-        re.sub(r"<script\b[^>]*>.*?</script>", "", output, flags=re.DOTALL | re.IGNORECASE)
-        if isinstance(reporter, HTMLReporter)
-        else output
-    )
+    visible = output
+    if isinstance(reporter, HTMLReporter):
+        parser = _VisibleHTMLText()
+        parser.feed(output)
+        parser.close()
+        visible = " ".join(parser.parts)
     if isinstance(reporter, BenchmarkReporter):
         visible = visible.replace("\\_", "_")
     for value in (

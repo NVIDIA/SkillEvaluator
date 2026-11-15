@@ -224,6 +224,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 

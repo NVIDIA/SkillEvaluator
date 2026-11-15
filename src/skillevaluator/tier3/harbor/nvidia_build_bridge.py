@@ -1388,13 +1388,24 @@ def _chat_usage(payload: dict[str, Any], *, anthropic: bool) -> dict[str, Any] |
                 result["input_tokens"] = max(0, result["input_tokens"] - cached)
         else:
             result["input_tokens_details"] = {"cached_tokens": cached}
-    if not anthropic:
-        total = usage.get("total_tokens")
-        if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
-            result["total_tokens"] = total
-        elif "input_tokens" in result and "output_tokens" in result:
-            result["total_tokens"] = result["input_tokens"] + result["output_tokens"]
-    return result or None
+    if anthropic:
+        return result
+    completion_details = usage.get("completion_tokens_details")
+    reasoning = completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else None
+    if isinstance(reasoning, int) and not isinstance(reasoning, bool) and reasoning >= 0:
+        result["output_tokens_details"] = {"reasoning_tokens": reasoning}
+    total = usage.get("total_tokens")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        result["total_tokens"] = total
+    if not result:
+        return None
+    # Responses usage has no optional fields once present, so fill what Build did not report.
+    result.setdefault("input_tokens", 0)
+    result.setdefault("output_tokens", 0)
+    result.setdefault("input_tokens_details", {"cached_tokens": 0})
+    result.setdefault("output_tokens_details", {"reasoning_tokens": 0})
+    result.setdefault("total_tokens", result["input_tokens"] + result["output_tokens"])
+    return result
 
 
 def _anthropic_message_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:

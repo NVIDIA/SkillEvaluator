@@ -2521,15 +2521,26 @@ def test_build_tool_call_emits_anthropic_tool_use_and_message_stop() -> None:
         (None, {"input_tokens": 0, "output_tokens": 0}, None),
         ({}, {"input_tokens": 0, "output_tokens": 0}, None),
         ({"prompt_tokens": "bad", "completion_tokens": -1}, {"input_tokens": 0, "output_tokens": 0}, None),
-        ({"completion_tokens": 0}, {"input_tokens": 0, "output_tokens": 0}, {"output_tokens": 0}),
+        (
+            {"completion_tokens": 0},
+            {"input_tokens": 0, "output_tokens": 0},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 0,
+            },
+        ),
         (
             {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 30}},
             {"input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30},
             {
                 "input_tokens": 100,
-                "output_tokens": 20,
-                "total_tokens": 120,
                 "input_tokens_details": {"cached_tokens": 30},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 120,
             },
         ),
     ],
@@ -2544,6 +2555,96 @@ def test_bridge_preserves_reported_usage(usage: object, anthropic: object, respo
     assert message["content"][0]["text"] == CHAT_TEXT_RESPONSE["choices"][0]["message"]["content"]
     response_events = list(chat_completion_to_responses_events(completion))
     assert response_events[-1]["response"]["usage"] == responses
+
+
+@pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        pytest.param(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 125,
+                "prompt_tokens_details": {"cached_tokens": 30},
+                "completion_tokens_details": {"reasoning_tokens": 5},
+            },
+            {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 30},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 125,
+            },
+            id="measured",
+        ),
+        pytest.param(
+            {"prompt_tokens": 100, "completion_tokens": 20},
+            {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 120,
+            },
+            id="uncached",
+        ),
+        pytest.param(
+            {"completion_tokens": 20},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 20,
+            },
+            id="completion-only",
+        ),
+        pytest.param(
+            {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 4}},
+            {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 10,
+            },
+            id="prompt-only",
+        ),
+        pytest.param(
+            {"total_tokens": 7},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 7,
+            },
+            id="total-only",
+        ),
+        pytest.param(
+            {"prompt_tokens": 10, "completion_tokens": 3, "completion_tokens_details": {"reasoning_tokens": "bad"}},
+            {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 13,
+            },
+            id="invalid-reasoning",
+        ),
+    ],
+)
+def test_responses_usage_is_complete_and_sdk_valid(
+    completion: dict[str, object], usage: dict[str, object], expected: dict[str, object]
+) -> None:
+    events = list(chat_completion_to_responses_events({**completion, "usage": usage}))
+    validator = TypeAdapter(ResponsesServerEvent)
+
+    for event in events:
+        validator.validate_python(event, strict=True)
+    assert events[-1]["type"] == "response.completed"
+    assert events[-1]["response"]["usage"] == expected
 
 
 @pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])

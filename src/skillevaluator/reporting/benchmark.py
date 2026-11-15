@@ -53,6 +53,13 @@ from skillevaluator.reporting.base import (
     tier1_unscanned_publication_paths,
     unrecognized_tier2_results,
 )
+from skillevaluator.reporting.declarative_coverage import (
+    DENOMINATOR_NOTE,
+    attempt_denominators,
+    check_status,
+    coverage_summary,
+    declarative_coverage_groups,
+)
 from skillevaluator.reporting.run_status import resolve_run_status
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
@@ -331,6 +338,34 @@ class BenchmarkReporter(ReporterBase):
         self._render_results_at_a_glance(lines, ae, private_labels)
         lines.extend(_agent_coverage_lines(ae, private_labels))
         lines.extend(_token_usage_lines(ae, private_labels))
+        groups = declarative_coverage_groups((ae or {}).get("agents"))
+        if groups:
+            lines.extend(["## Declarative-check coverage", "", DENOMINATOR_NOTE, ""])
+            for group in groups:
+                lines.extend(
+                    [
+                        f"### {_md_cell(group['agent'], private_labels)} / {group['arm']}",
+                        "",
+                        coverage_summary(group),
+                        "",
+                        "Per-reward denominators: " + _md_cell(attempt_denominators(group), private_labels),
+                        "",
+                        "| Case / trial | Check | Expected | Status | Reason |",
+                        "| --- | --- | --- | --- | --- |",
+                    ]
+                )
+                for item in group["results"]:
+                    values = (
+                        item["case_id"],
+                        item["trial_id"],
+                        item["type"],
+                        item["expected"],
+                        check_status(item),
+                        item["reason"],
+                    )
+                    case, trial, *evidence = (_md_cell(value, private_labels) for value in values)
+                    lines.append("| " + " | ".join([f"{case} / {trial}", *evidence]) + " |")
+                lines.append("")
         self._render_tier_status(
             lines,
             results,

@@ -8,7 +8,7 @@ run: which agents attempt the tasks (`--agents`) and where the trials execute
 (`--env-mode`). This page is the complete matrix for both, plus the resource,
 safety, and workspace controls around them and the readiness checks that tell
 you a run will work before you spend compute. The run workflow itself is
-[Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+[Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework that executes each Tier 3 trial and provides its Docker,
@@ -147,7 +147,7 @@ refusal in 20 cases with 3 attempts each, the run's `result.json` records
 does `validate --block-on-agent-eval`. On a route that serves the fallback
 model, such as the Anthropic API, the retry used to finish such an attempt,
 and the attempt was scored, so a run that completed before can now fail. See
-[Troubleshooting](tier3-live-evaluation.mdx#troubleshooting) for what to do.
+[Troubleshooting](/skills/skillevaluator/tier3-live-evaluation#troubleshooting) for what to do.
 
 The `claude` alias is canonicalized to `claude-code` everywhere an agent
 name can appear — `-a/--agents`, `--agent-model`, and `harbor.agents` in
@@ -166,7 +166,7 @@ skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
 ```
 
 To make an override persistent, set it in `evals/config.yml` under
-`harbor.agents.<name>.model` — see [Eval Datasets](eval-datasets.mdx).
+`harbor.agents.<name>.model` — see [Eval Datasets](/skills/skillevaluator/eval-datasets).
 
 <Note>
 Harbor installs agent CLIs in Docker and remote task environments. Local mode
@@ -176,7 +176,7 @@ Operator credentials come only from the host environment — a
 credential name (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
 `CLAUDE_CODE_USE_BEDROCK`, `NVIDIA_API_KEY`, `OPENAI_API_KEY`,
 `OPENAI_BASE_URL`) or references one with `${...}` is rejected at run time.
-See the two credential roles in [Providers & Credentials](configuration.mdx).
+See the two credential roles in [Providers & Credentials](/skills/skillevaluator/configuration).
 </Note>
 
 ## One NVIDIA Build key for everything
@@ -601,7 +601,7 @@ skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
 
 To make the sizing part of the skill's run policy instead of a flag, set
 `harbor.resources` (`cpus`, `memory_mb`, `storage_mb`) in `evals/config.yml`
-— see [Eval Datasets](eval-datasets.mdx). A trial that dies mid-run with the
+— see [Eval Datasets](/skills/skillevaluator/eval-datasets). A trial that dies mid-run with the
 agent process killed is the classic out-of-memory symptom; raise
 `--override-memory-mb` first.
 
@@ -637,7 +637,7 @@ skips the check.
 
 Environment rules — size limits, auto-generated fallbacks, and sidecar
 containers — are part of the `evals/` contract in
-[Eval Datasets](eval-datasets.mdx).
+[Eval Datasets](/skills/skillevaluator/eval-datasets).
 
 Docker Compose project `.env` files are rejected before startup. Protected
 main-container and sidecar operations disable Compose's implicit env-file
@@ -746,7 +746,7 @@ The sandbox policy is controlled by environment variables:
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
 
 Full semantics for each variable are in
-[Environment Variables](environment-variables.mdx). `doctor --env-mode local`
+[Environment Variables](/skills/skillevaluator/environment-variables). `doctor --env-mode local`
 verifies the sandbox backend and the installed agent CLIs before you commit to
 a run.
 
@@ -867,7 +867,7 @@ any check fails, so either can gate a script or CI job. Warnings from
 inconclusive rather than a definitive rejection. Both commands check Tier 3 by
 default. `--tier 1` checks the Tier 1 scanners, `--tier 2` the embedding and LLM
 providers, and `--tier all` every tier; see the
-[CLI Reference](cli-reference.mdx#doctor).
+[CLI Reference](/skills/skillevaluator/cli-reference#doctor).
 
 ### doctor
 
@@ -925,16 +925,16 @@ skillevaluator harbor-view <jobs-dir>
 The retained tree holds the full agent trajectory and grader output for every
 trial — the fastest way to see what an agent actually did. The results layout
 and where `<jobs-dir>` lands on disk are in
-[Reports & Results](reports.mdx); debugging custom graders this way is
-covered in [Custom Graders & Tasks](custom-graders.mdx).
+[Reports & Results](/skills/skillevaluator/reports); debugging custom graders this way is
+covered in [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     The end-to-end run workflow — readiness, dataset, evaluation, and results.
   </Card>
-  <Card title="Custom Graders & Tasks" icon="terminal" href="custom-graders.mdx">
+  <Card title="Custom Graders & Tasks" icon="terminal" href="/skills/skillevaluator/custom-graders">
     Bring your own grader or Harbor task when the defaults can't express
     success.
   </Card>

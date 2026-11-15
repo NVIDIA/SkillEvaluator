@@ -3225,6 +3225,22 @@
             </details>
             {% endif %}
 
+            {% if declarative_coverage_groups %}
+            <h3>Declarative-check coverage</h3>
+            <p class="t3-section-hint">{{ declarative_denominator_note }}</p>
+            {% for group in declarative_coverage_groups %}
+            <h4>{{ group.agent }} / {{ group.arm }}</h4>
+            <p>{{ declarative_coverage_summary(group) }}</p>
+            <p class="t3-section-hint">Per-reward denominators: {{ declarative_attempt_denominators(group) }}</p>
+            <div class="table-scroll"><table class="summary-table">
+                <thead><tr><th>Case / trial</th><th>Check</th><th>Expected</th><th>Status</th><th>Reason</th></tr></thead>
+                <tbody>{% for item in group.results %}
+                <tr><td>{{ item.case_id }} / {{ item.trial_id }}</td><td>{{ item.type }}</td><td>{{ item.expected }}</td><td>{{ declarative_check_status(item) }}</td><td>{{ item.reason }}</td></tr>
+                {% endfor %}</tbody>
+            </table></div>
+            {% endfor %}
+            {% endif %}
+
             {% if t3_condition_trial_rows %}
 
             {% set t3_trial_agent_groups = (tier3.trials or []) | groupby('agent') %}

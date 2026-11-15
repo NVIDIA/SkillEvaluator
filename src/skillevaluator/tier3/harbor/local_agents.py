@@ -23,7 +23,6 @@ from urllib.parse import urlsplit
 
 from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
-from harbor.agents.installed.opencode import OpenCode
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
@@ -527,7 +526,7 @@ class SkillEvaluatorGatewayOpenCode(SkillEvaluatorOpenCode):
         )
 
 
-class SkillEvaluatorLocalOpenCode(OpenCode):
+class SkillEvaluatorLocalOpenCode(SkillEvaluatorOpenCode):
     """OpenCode wrapper that skips nvm/npm bootstrap in local mode."""
 
     _REMOTE_WORKSPACE = PurePosixPath("/workspace")

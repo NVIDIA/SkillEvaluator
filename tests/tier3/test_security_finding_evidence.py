@@ -1671,6 +1671,120 @@ def test_an_underscored_flag_takes_the_next_word_as_its_dashed_spelling_does(
     assert evidence(command) == evidence(command.replace(underscored, dashed)).replace(dashed, underscored)
 
 
+_HOOK_URL = "https://hooks.example.com/services/T0/B0/" + _API_TOKEN
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        # A name the assignment rule leaves alone: a location, a type, a count
+        # with a number, or a bare PASS with a number.
+        pytest.param(
+            f"./deploy --set_secret SLACK_TOKEN_URL={_HOOK_URL}", "./deploy --set_secret <redacted>", id="location-name"
+        ),
+        pytest.param(f"./tool --api_key auth_type={_API_TOKEN}", "./tool --api_key <redacted>", id="type-name"),
+        pytest.param("./tool --api_key max_tokens=4096", "./tool --api_key <redacted>", id="count-name"),
+        pytest.param("./tool --db_password PASS=1234", "./tool --db_password <redacted>", id="pass-number"),
+        # A name whose value ends inside the flag value.
+        pytest.param(
+            f"./tool --db_password {_API_TOKEN},token=x", "./tool --db_password <redacted>", id="name-value-inside"
+        ),
+        pytest.param(
+            f'subprocess.run(["deploy", "--set_secret", "SLACK_TOKEN_URL={_HOOK_URL}"])',
+            'subprocess.run(["deploy", "--set_secret", <redacted>])',
+            id="argv-location-name",
+        ),
+        pytest.param(
+            f"npm config set -- _authToken SLACK_TOKEN_URL={_HOOK_URL}",
+            "npm config set -- _authToken <redacted>",
+            id="config-key-after-terminator",
+        ),
+        pytest.param(
+            f"npm config set '_authToken' auth_type={_API_TOKEN}",
+            "npm config set '_authToken' <redacted>",
+            id="quoted-config-key",
+        ),
+    ],
+)
+def test_an_underscored_flag_or_config_value_is_masked_whole_unless_a_name_in_it_runs_past_it(
+    text: str, expected: str
+) -> None:
+    # The value of a "_" flag, or of a quoted config key or one after "--",
+    # is left to the assignment rule only when that rule masks the value of a
+    # credential name in it past the value's end. Otherwise it is masked
+    # whole, as after the "-" spelling or an unquoted key.
+    assert eval_core_checks._redact_finding_evidence(text) == expected
+
+
+@pytest.mark.parametrize("flag", ["--set_secret", "--api_key", "--db_password"])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param(f"SLACK_TOKEN_URL={_HOOK_URL}", id="location-name"),
+        pytest.param(f"auth_type={_API_TOKEN}", id="type-name"),
+        pytest.param("PASS=1234", id="pass-number"),
+        pytest.param(f"{_API_TOKEN},token=x", id="name-value-inside"),
+    ],
+)
+def test_an_underscored_flag_value_the_assignment_rule_would_not_mask_whole_is_masked_as_its_dashed_spelling(
+    flag: str, value: str
+) -> None:
+    text = f"./tool {flag} {value} && rm -rf /srv/app"
+    dashed = flag.replace("_", "-")
+
+    assert eval_core_checks._redact_finding_evidence(text) == f"./tool {flag} <redacted> && rm -rf /srv/app"
+    assert eval_core_checks._redact_finding_evidence(text.replace(flag, dashed)) == (
+        f"./tool {dashed} <redacted> && rm -rf /srv/app"
+    )
+
+
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            json.dumps({"cmd": f'curl -b auth_token=abc https://x && ./deploy --api_key API_TOKEN="{_PASSPHRASE}"'}),
+            '{"cmd": "curl -b <redacted> https://x && ./deploy --api_key API_TOKEN=<redacted>"}',
+            id="after-a-cookie-name",
+        ),
+        pytest.param(
+            json.dumps({"command": f'mysql -u root -ptoken=abc db && ./deploy --api_key API_TOKEN="{_PASSPHRASE}"'}),
+            '{"command": "mysql -u root -p<redacted> db && ./deploy --api_key API_TOKEN=<redacted>"}',
+            id="after-a-mysql-password-name",
+        ),
+        pytest.param(
+            f"echo \"./a --password token=x && ./b --api_key 'TOKEN='{_API_TOKEN}\"",
+            "echo \"./a --password <redacted> && ./b --api_key 'TOKEN='<redacted>\"",
+            id="after-a-flag-value-name-before-a-stuck-value",
+        ),
+        pytest.param(
+            f'echo "./a --password token=x ./b --db_password password: {_API_TOKEN}"',
+            'echo "./a --password <redacted> ./b --db_password password: <redacted>"',
+            id="after-a-flag-value-name-before-a-separator",
+        ),
+        pytest.param(
+            f"echo \"./a --password token=x ./b --set_secret auth=HTTPBasicAuth('bob', '{_BASIC_PASSWORD}')\"",
+            'echo "./a --password <redacted> ./b --set_secret auth=<redacted>"',
+            id="after-a-flag-value-name-before-a-call",
+        ),
+        pytest.param(
+            json.dumps(
+                {"cmd": f"./a -token token = f(u) && ./b --set_secret auth=HTTPBasicAuth('bob', '{_BASIC_PASSWORD}')"}
+            ),
+            '{"cmd": "./a -token <redacted> = f(u) && ./b --set_secret auth=<redacted>"}',
+            id="after-a-short-flag-value-name",
+        ),
+    ],
+)
+def test_a_name_in_an_underscored_flag_value_is_read_on_its_own(text: str, expected: str) -> None:
+    # An earlier name in the same quoted string would read on to its closing
+    # quote, over the flag value, but a rule before the assignment rule masks
+    # that name (a curl cookie, a MySQL password, another flag's value), so
+    # the assignment rule no longer reads it. The flag value's own name and
+    # value decide that the value is left to the assignment rule, which then
+    # masks all of it.
+    assert eval_core_checks._redact_finding_evidence(text) == expected
+
+
 # A password with parentheses in it, which a call value must not cut short.
 _PAREN_PASSWORD = f"{_BASIC_PASSWORD[:7]}(x){_BASIC_PASSWORD[7:]}"
 # The part of a password after a ")" that a call reading would end at.

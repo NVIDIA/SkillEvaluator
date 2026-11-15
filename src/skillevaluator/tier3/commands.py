@@ -17,6 +17,7 @@ import webbrowser
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from rich.box import SIMPLE
@@ -1084,21 +1085,27 @@ _DOCKER_PROBE_TIMEOUT_S = 15.0
 
 _POLICY_ENDPOINT_PROBE_TIMEOUT_S = 3.0
 _POLICY_ENDPOINT_PROBE = """
-import http.client
 import sys
 from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError
+from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
 
 try:
     url = urlsplit(sys.stdin.read())
     if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
         sys.exit(1)
-    connection_type = http.client.HTTPSConnection if url.scheme == "https" else http.client.HTTPConnection
-    connection = connection_type(url.hostname, url.port, timeout=2)
     try:
-        connection.request("HEAD", urlunsplit(("", "", url.path or "/", url.query, "")))
-        connection.getresponse()
-    finally:
-        connection.close()
+        response = build_opener(NoRedirect()).open(
+            Request(urlunsplit(url), method="HEAD"), timeout=2
+        )
+    except HTTPError as response:
+        response.close()
+    else:
+        response.close()
 except Exception:
     sys.exit(1)
 """
@@ -1108,13 +1115,23 @@ def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
     """Probe anonymously in a bounded child so DNS resolution cannot hang doctor."""
     from skillevaluator.tier3.nemo_gym.backend import MODEL_URL_ENV
 
+    probe_env = {
+        name: os.environ[name] for name in ("SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ
+    }
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        if value := os.environ.get(name):
+            if name.lower() != "no_proxy":
+                try:
+                    parsed = urlsplit(value)
+                    value = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
+                except ValueError:
+                    continue
+            probe_env[name] = value
     detail = "could not reach the policy endpoint"
     try:
         probe = subprocess.run(
             [sys.executable, "-I", "-c", _POLICY_ENDPOINT_PROBE],
-            env={
-                name: os.environ[name] for name in ("SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ
-            },
+            env=probe_env,
             input=url,
             text=True,
             stdout=subprocess.DEVNULL,

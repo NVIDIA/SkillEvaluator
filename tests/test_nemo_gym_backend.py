@@ -1488,6 +1488,44 @@ def test_policy_endpoint_probe_environment_excludes_credentials(monkeypatch) -> 
     assert commands._nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1") is None
 
 
+@pytest.mark.parametrize("proxy_name", ["http_proxy", "HTTP_PROXY"])
+def test_policy_endpoint_probe_honors_anonymous_http_proxy(monkeypatch, proxy_name) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            requests.append((self.path, tuple(self.headers)))
+            self.send_response(405)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    for name in ("http_proxy", "HTTP_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    monkeypatch.setenv(proxy_name, f"http://user:password@127.0.0.1:{server.server_port}")
+    try:
+        assert _nemo_gym_policy_endpoint_error("http://policy.invalid/v1") is None
+        assert len(requests) == 1 and requests[0][0] == "http://policy.invalid/v1"
+        assert not {name.lower() for name in requests[0][1]} & {"authorization", "proxy-authorization", "x-api-key"}
+        monkeypatch.setenv(proxy_name, "http://127.0.0.1:9")
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(requests) == 2 and requests[1][0] == "/v1"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
 def test_tier3_doctor_accepts_backend_option() -> None:
     from click.testing import CliRunner
 

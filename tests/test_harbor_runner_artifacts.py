@@ -13,6 +13,7 @@ import pytest
 
 import skillevaluator.tier3.harbor.runner as harbor_runner
 from skillevaluator import __version__
+from skillevaluator.tier3.declarative_coverage import COMPACT_CHECK_ROWS_PER_ARM, agent_declarative_checks
 from skillevaluator.tier3.harbor import collector as harbor_collector
 from skillevaluator.tier3.harbor import report_data
 
@@ -578,6 +579,94 @@ def test_final_result_fails_closed_before_publishing_unreferenced_oversize_detai
 
     assert not result_path.exists()
     assert not list(tmp_path.glob(".result.json.*"))
+
+
+def _declarative_rewards(arm: str, *, cases: int, attempts: int, checks: int) -> list[dict[str, Any]]:
+    return [
+        {
+            "entry_id": f"case-{case:03d}",
+            "_trial_name": f"case-{case:03d}__{arm}{attempt}",
+            "overall": 0.8,
+            "details": {
+                "behavior_check": {
+                    "status": "accepted",
+                    "declarative_checks": {
+                        "judged_count": 1,
+                        "results": [
+                            {
+                                "type": "script_invoked",
+                                "expected": f"scripts/s{check}.py",
+                                "passed": check != 0,
+                                "reason": f"check {check}",
+                            }
+                            for check in range(checks)
+                        ],
+                    },
+                }
+            },
+        }
+        for case in range(cases)
+        for attempt in range(attempts)
+    ]
+
+
+def test_final_result_publishes_a_large_declarative_run_with_bounded_coverage(tmp_path: Path) -> None:
+    rewards = {
+        arm: _declarative_rewards(arm, cases=120, attempts=3, checks=10) for arm in ("with-skill", "without-skill")
+    }
+    coverage = agent_declarative_checks(rewards["with-skill"], rewards["without-skill"])
+    pass_summary = {"pass_at_k": {"1": 0.8}, "cases": {}, "extra_cases": []}
+    agent = {
+        "with_skill": {"overall": 0.8},
+        "without_skill": {"overall": 0.5},
+        "overall_with_skill": 0.8,
+        "overall_without_skill": 0.5,
+        "lift": {"overall": 0.3},
+        "pass_at_k": {"with_skill": pass_summary, "without_skill": pass_summary, "lift": {"overall": 0.3}},
+        "execution_status": "succeeded",
+        "expected_attempts": 720,
+        "scored_attempts": 720,
+        "declarative_checks": coverage,
+    }
+    result: dict[str, Any] = {"execution_status": "succeeded", "execution_errors": [], "agents": {"opencode": agent}}
+    assert all(len(arm["results"]) == 3600 for arm in coverage.values())
+    with pytest.raises(harbor_runner._FinalResultContractError):
+        harbor_runner._validate_final_result_tree(result)
+
+    result_path = tmp_path / "result.json"
+    harbor_runner._write_final_result(result_path, result)
+
+    persisted = json.loads(result_path.read_text(encoding="utf-8"))
+    harbor_runner._validate_final_result_tree(persisted)
+    assert result_path.stat().st_size <= harbor_runner.FINAL_RESULT_MAX_BYTES
+    published = persisted["agents"]["opencode"]
+    for key in (
+        "with_skill",
+        "without_skill",
+        "overall_with_skill",
+        "overall_without_skill",
+        "lift",
+        "pass_at_k",
+        "execution_status",
+        "scored_attempts",
+    ):
+        assert published[key] == agent[key]
+    for arm, full in coverage.items():
+        compact = published["declarative_checks"][arm]
+        assert len(compact["results"]) == COMPACT_CHECK_ROWS_PER_ARM
+        assert compact["omitted_checks"] == len(full["results"]) - COMPACT_CHECK_ROWS_PER_ARM
+        assert all(row["passed"] is False for row in compact["results"])
+        assert {key: value for key, value in compact.items() if key not in {"results", "omitted_checks"}} == {
+            key: value for key, value in full.items() if key != "results"
+        }
+    # 360 rewards, each with 9 passed, 1 failed, and 1 judged requirement.
+    assert published["declarative_checks"]["with_skill"]["failed_count"] == 360
+    assert published["declarative_checks"]["with_skill"]["score_denominator"] == 360 * (9 + 1 + 1)
+    assert persisted["result_projection"]["omitted_detail_fields"]["opencode"] == [
+        "declarative_checks.with_skill.results",
+        "declarative_checks.without_skill.results",
+    ]
+    assert all(len(arm["results"]) == 3600 and "omitted_checks" not in arm for arm in coverage.values())
 
 
 def test_final_result_projects_real_multi_agent_aggregate_errors_without_losing_exact_total(tmp_path: Path) -> None:

@@ -20,6 +20,7 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.declarative_coverage import render_declarative_coverage
 from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
@@ -1280,6 +1281,8 @@ def render_evaluation_result(
     elif incomplete and detailed:
         # A run whose arms all failed has no scores to show, but its attempts still used tokens.
         _render_token_usage(console, result, safe)
+
+    render_declarative_coverage(console, agents, text=safe)
 
     # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
     for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:

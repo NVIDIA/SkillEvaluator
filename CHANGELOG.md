@@ -286,7 +286,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed.
-
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym project skill projections run after authored image instructions

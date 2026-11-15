@@ -17,6 +17,7 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import tomllib
 from datetime import UTC, datetime
@@ -663,9 +664,18 @@ def _run_gym(
                     raise interrupt from stop_error
                 raise
     finally:
+        pending_interrupt = sys.exception()
         try:
             with _defer_termination_signals():
-                _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+                try:
+                    _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+                except GymCleanupError as cleanup_error:
+                    if reporter is not None:
+                        with contextlib.suppress(Exception):
+                            reporter.emit(ProgressEvent(stage="cleanup", state="failed", detail=str(cleanup_error)))
+                    if isinstance(pending_interrupt, KeyboardInterrupt):
+                        raise pending_interrupt from cleanup_error
+                    raise
         finally:
             reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 

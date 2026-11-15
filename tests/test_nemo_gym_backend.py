@@ -2407,6 +2407,44 @@ def test_detached_cleanup_defers_termination_until_finished(tmp_path: Path, sign
     assert "KeyboardInterrupt" in result.stderr
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_detached_inspection_failure_preserves_cancellation(tmp_path: Path, monkeypatch, interrupted) -> None:
+    import signal
+    import threading
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise runner.GymCleanupError("Cannot inspect detached processes")
+
+    monkeypatch.setattr(runner, "_stop_detached_gym_processes", fail_cleanup)
+    reporter = _RecordingReporter()
+    timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)) if interrupted else None
+    if timer:
+        timer.start()
+    try:
+        with (
+            (tmp_path / "gym.log").open("w") as log,
+            pytest.raises(KeyboardInterrupt if interrupted else runner.GymCleanupError) as error,
+        ):
+            runner._run_gym(
+                [sys.executable, "-c", "import time; time.sleep(60)" if interrupted else "pass"],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=5,
+                reporter=reporter,
+            )
+    finally:
+        if timer:
+            timer.cancel()
+            timer.join()
+    if interrupted:
+        assert isinstance(error.value.__cause__, runner.GymCleanupError)
+        assert any(event.stage == "cleanup" and event.state == "failed" for event in reporter.events)
+
+
 def test_nemo_gym_rejects_budget_config(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
 

@@ -347,6 +347,10 @@ All notable changes to SkillEvaluator are documented in this file.
   failed the member and bumped its `severity_counts`, but a catalog validates
   each skill on its own, so nothing in that skill's output said what caused
   either.
+- Native Codex plugin loading now recognizes Harbor launches prefixed with
+  empty credential assignments, preserving credential isolation while running
+  plugin setup before the agent. These launches previously failed after the
+  task with a missing native-launch error.
 - Folder validation preserves author and metadata ID advisories from passing
   skills. Catalog summaries include duplicate ID severity counts and consistent
   member verdicts, while explicitly labeling linked reports as single-skill

@@ -11,6 +11,7 @@ network access.
 from __future__ import annotations
 
 import json
+import time
 
 import pytest
 
@@ -21,6 +22,7 @@ from skillevaluator.evaluation import (
     compute_dimensions,
     compute_dimensions_deterministic,
 )
+from skillevaluator.evaluation.insights_judge import _weakens_requirements
 from skillevaluator.evaluation.tier3_report import _normalize_trials
 from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
 from skillevaluator.tier3.harbor.metrics import DIMENSION_DEFINITIONS
@@ -1055,6 +1057,119 @@ class TestInsightsJudgeRecommendationQuality:
         self, case_id: str, message: str
     ) -> None:
         assert self._parse(message, case_id=case_id) == [message]
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("positive-001", "Run without failures by deleting the positive-001 case from evals/evals.json."),
+            ("positive-001", "Make the run pass without failures by dropping the case for positive-001."),
+            ("smoke", "Get a green run without extra work by excluding the smoke case."),
+            ("positive-001", "Rather than a fix, delete the case for positive-001."),
+            ("positive-001", "Instead of the old approach, delete the case for positive-001 from the dataset."),
+        ],
+    )
+    def test_drops_a_removal_when_the_negation_word_governs_something_else(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == []
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("positive-001", "Make positive-001 pass without deleting the case for positive-001."),
+            ("positive-001", "Make positive-001 pass without simply removing the case for positive-001."),
+            ("positive-001", "Fix the rounding step for positive-001 without ever dropping its case."),
+            ("syllable-count", "Implement the counting rule instead of just dropping the syllable-count case."),
+            ("smoke", "Fix the missing step in SKILL.md rather than excluding the smoke case."),
+        ],
+    )
+    def test_keeps_advice_whose_negation_word_governs_the_removal_verb(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == [message]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Remove the special case for UTF-8 and use the standard decoder for positive-001.",
+            "Drop the special case for ISO-8859 input and use the standard decoder for positive-001.",
+            "Delete the utf-16 case and decode with the standard library for positive-001.",
+            "Remove the UNIX case and normalise line endings generally for positive-001.",
+            "Remove the v2-api case and call the current endpoint for positive-001.",
+            "Remove the hard-coded case and compute the answer for positive-001 generally.",
+            "Exclude the base-64 case from the encoder and handle positive-001 with the standard library.",
+        ],
+    )
+    def test_keeps_advice_that_names_an_identifier_that_is_not_a_known_case_id(self, message: str) -> None:
+        assert self._parse(message) == [message]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Delete the utf-16 case from evals/evals.json, then document what positive-001 expects.",
+            "Remove the special case for UTF-8 from the dataset and document what positive-001 expects.",
+        ],
+    )
+    def test_drops_an_unlisted_identifier_when_the_sentence_points_at_the_dataset(self, message: str) -> None:
+        assert self._parse(message) == []
+
+    def test_identifier_shaped_names_count_only_without_case_ids_or_with_a_dataset_location(self) -> None:
+        assert _weakens_requirements("Delete the syllable-count case.")
+        assert _weakens_requirements("Delete the syllable-count case.", ())
+        assert not _weakens_requirements("Delete the syllable-count case.", ("positive-001",))
+        assert _weakens_requirements("Delete the syllable-count case.", ("syllable-count",))
+        assert _weakens_requirements("Delete the syllable-count case from evals.json.", ("positive-001",))
+
+    def test_case_ids_that_are_not_single_words_are_matched_by_name(self) -> None:
+        ids = ("edge one", "positive-001")
+        assert _weakens_requirements("Delete the edge one case.", ids)
+        assert _weakens_requirements("Remove the case for edge one so it stops failing.", ids)
+        assert not _weakens_requirements("Remove the edge case in parser.py and handle edge one generally.", ids)
+
+    def test_a_list_of_case_ids_without_a_case_noun_is_checked_in_bounded_time(self) -> None:
+        ids = tuple(f"case-{i:02d}" for i in range(20))
+        text = "Remove the " + ", ".join(ids) + " overrides in parser.py and implement the general rule."
+        for known in (ids, ()):
+            started = time.perf_counter()
+            assert _weakens_requirements(text, known) is False
+            assert time.perf_counter() - started < 1.0
+
+    def test_long_adversarial_actions_are_checked_in_bounded_time(self) -> None:
+        ids = tuple(f"case-{i:03d}" for i in range(250))
+        listed = ", ".join(ids[:150])
+        hyphenated = " ".join(["a-b-c-d-e-f-g"] * 700)
+        adversarial = {
+            "list without a noun": (f"Remove the {listed} overrides in parser.py and implement the rule.", False),
+            "list before the noun": (f"Delete the {listed} cases.", True),
+            "repeated hyphen words": (f"Remove {hyphenated} case", False),
+            "repeated lists": (("Remove the foo-bar, " * 300) + "baz-qux case", False),
+            "repeated removals": ("Delete the case for case-001 and exclude the case " * 100, True),
+            "removal verbs only": ("remove delete drop skip exclude discard omit " * 150, False),
+            "nouns only": ("case cases entry row example test case " * 150, False),
+            "locations only": ("in evals.json from the dataset of benchmark out of the test set " * 100, False),
+            "one long identifier": ("remove the " + "positive-" * 600 + "x case", False),
+            "requirement nouns": ("expectations are " * 400, False),
+        }
+        for label, (text, expected) in adversarial.items():
+            for known in (ids, ()):
+                started = time.perf_counter()
+                result = _weakens_requirements(text, known)
+                elapsed = time.perf_counter() - started
+                assert elapsed < 1.0, f"{label} took {elapsed:.2f}s with {len(known)} case ids"
+                if known:
+                    assert result is expected, label
+
+    def test_parse_checks_a_list_of_known_case_ids_in_bounded_time(self) -> None:
+        ids = [f"case-{i:03d}" for i in range(250)]
+        dataset = [{"id": case_id, "expected_skill": "calculator"} for case_id in ids]
+        cited = ids[:10]
+        benign = f"Remove the {', '.join(cited)} overrides in parser.py and implement the general rule."
+        removal = f"Delete the {', '.join(cited)} cases from evals/evals.json."
+
+        def recommendation(message: str) -> dict:
+            return {**self._recommendation(message), "evidence_case_ids": cited}
+
+        response = json.dumps({"conclusions": [], "recommendations": [recommendation(benign), recommendation(removal)]})
+        started = time.perf_counter()
+        parsed = InsightsJudge().parse_response(response, canonical={"dataset": dataset, "trials": []})
+        assert time.perf_counter() - started < 1.0
+        assert [item["message"] for item in parsed["recommendations"]] == [benign]
 
     @pytest.mark.parametrize("case_id", ["smoke", "syllable-count"])
     def test_drops_a_named_dataset_case_removal_in_the_title_even_when_the_message_is_benign(

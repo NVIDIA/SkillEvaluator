@@ -4,6 +4,7 @@
 """Case-first Tier 3 summary and How-to-improve ranking."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
@@ -253,6 +254,105 @@ def test_case_action_keeps_negated_instead_of_and_implementation_advice_for_the_
     assert fix["action"] == action
     assert fix["source"] == "llm"
     assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Run without failures by deleting the positive-001 case from evals/evals.json."),
+        ("positive-001", "Make the run pass without failures by dropping the case for positive-001."),
+        ("smoke", "Get a green run without extra work by excluding the smoke case."),
+        ("positive-001", "Rather than a fix, delete the case for positive-001."),
+        ("positive-001", "Instead of the old approach, delete the case for positive-001 from the dataset."),
+    ],
+)
+def test_case_action_rejects_a_removal_when_the_negation_word_governs_something_else(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Make positive-001 pass without deleting the case for positive-001."),
+        ("positive-001", "Make positive-001 pass without simply removing the case for positive-001."),
+        ("positive-001", "Fix the rounding step for positive-001 without ever dropping its case."),
+        ("syllable-count", "Implement the counting rule instead of just dropping the syllable-count case."),
+        ("smoke", "Fix the missing step in SKILL.md rather than excluding the smoke case."),
+        ("positive-001", "Remove the special case for UTF-8 and use the standard decoder for positive-001."),
+        ("positive-001", "Drop the special case for ISO-8859 input and use the standard decoder for positive-001."),
+        ("positive-001", "Delete the utf-16 case and decode with the standard library for positive-001."),
+        ("positive-001", "Remove the UNIX case and normalise line endings generally for positive-001."),
+        ("positive-001", "Remove the v2-api case and call the current endpoint for positive-001."),
+        (
+            "positive-001",
+            "Exclude the base-64 case from the encoder and handle positive-001 with the standard library.",
+        ),
+    ],
+)
+def test_case_action_keeps_advice_whose_negation_or_identifier_is_not_about_a_dataset_case(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+def test_case_action_rejects_an_unlisted_identifier_when_the_action_points_at_the_dataset(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    action = "Delete the utf-16 case from evals/evals.json, then implement syllable_count."
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({"syllable-positive": _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+def test_case_action_with_a_long_list_of_known_case_ids_is_checked_in_bounded_time(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    ids = [f"case-{i:02d}" for i in range(20)]
+    dataset = [{"id": case_id, "question": "q"} for case_id in ids + [f"case-{i:03d}" for i in range(230)]]
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": dataset}))
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    actions = {
+        "Remove the " + ", ".join(ids) + " overrides in parser.py and implement the general rule.": "llm",
+        "Remove " + " ".join(["a-b-c-d-e-f-g"] * 50) + " case": "llm",
+        "Delete the " + ", ".join(ids[:5]) + " cases.": "deterministic",
+    }
+    for action, expected_source in actions.items():
+        monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, action=action, **_k: (json.dumps([action]), None))
+        started = time.perf_counter()
+        [fix] = what_to_fix({"agents": {"a": _agent({"case-00": _case(False)}, {})}}, run_dir=tmp_path)
+        assert time.perf_counter() - started < 1.0
+        assert fix["source"] == expected_source
+
+
+def test_case_action_fallback_text_with_a_long_judge_reason_is_checked_in_bounded_time(tmp_path):
+    ids = [f"case-{i:03d}" for i in range(250)]
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": i, "question": "q"} for i in ids]}))
+    reason = "Missing " + ", ".join(ids[:100]) + " and " + " ".join(["a-b-c-d-e-f-g"] * 200)
+    _trial(tmp_path, "a", "t0", _reward(True, reason))
+    started = time.perf_counter()
+    [fix] = what_to_fix({"agents": {"a": _agent({"case-000": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert time.perf_counter() - started < 1.0
+    assert fix["source"] == "deterministic"
 
 
 @pytest.mark.parametrize(

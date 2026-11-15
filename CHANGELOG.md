@@ -503,6 +503,10 @@ All notable changes to SkillEvaluator are documented in this file.
   case names receive the same Markdown escaping, publication-label masking and
   terminal secret redaction as visible rows, before their displayed length is
   bounded.
+- Tier 3 case actions preserve dataset expectations and assertions, rejecting
+  requirement-weakening model advice in favor of deterministic remedies.
+  Recommendations identify model-written actions and record when generation
+  failed or unsafe advice was replaced by a fallback.
 - Tier 3 token usage per case, per agent and over all agents now counts each
   attempt in the case it belongs to. An unscored attempt of a native task whose
   `[metadata] entry_id` differs from its directory joins that case's row

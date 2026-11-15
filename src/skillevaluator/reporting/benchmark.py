@@ -202,10 +202,12 @@ class BenchmarkReporter(ReporterBase):
 
         run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
         run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
-        from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
-
         budget = ae.get("budget") if isinstance(ae, dict) else None
-        budget_reason = budget_incomplete_reason(budget)
+        budget_reason = None
+        if isinstance(budget, dict):
+            from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
+
+            budget_reason = budget_incomplete_reason(budget)
         if budget_reason:
             tier3_callout = f"> **Tier 3: INCOMPLETE** — {budget_reason}"
         elif self.report_scope == "tier3" and isinstance(run_verdict, str):

@@ -23,6 +23,14 @@ from skillevaluator.utils.tool_runner import (
 )
 from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase
 
+# Directory names Gitleaks skips at any depth. Unlike the file-walk scans, it
+# keeps ``evals/`` in scope because evals.json, graders and task inputs there
+# are authored and covered by the publication digest. ``.evals/`` stays in
+# scope too, as it does for SkillSpector, although the digest leaves out a
+# root ``.evals/``. Generated output below either, such as
+# ``evals/results/``, still matches the ``results`` entry.
+_GITLEAKS_EXCLUDED_DIRS = SCAN_EXCLUDED_DIRS - {"evals", ".evals"}
+
 
 class SecretsValidator(ValidatorBase):
     """Scan for hardcoded secrets using Gitleaks.
@@ -182,15 +190,20 @@ tags = ["nvidia", "api-key"]
     def _create_gitleaks_config(self) -> Path:
         """Create Gitleaks config with NVIDIA rules and allowlists.
 
-        Tier 1 artifact dirs (evals/, results/, versions/, ...) hold Tier 3
-        output snapshots that routinely carry harvested test credentials;
+        Generated output dirs (results/, versions/ and their dot forms) hold
+        Tier 3 output snapshots that routinely carry harvested test
+        credentials, and dependency or cache dirs are not skill content;
         gitleaks has to skip them via config since it takes no exclude flag.
+        Authored ``evals/`` files stay in scope; ``evals/results/`` is skipped
+        by the ``results`` entry.
 
         Test/example/fixture/mock skips are directory path components, not
         substrings. ``(.*)?test(.*)?`` would also skip ``latest`` and
         ``attestation``.
         """
-        artifact_paths = "\n".join(f"    '''(^|/){re.escape(name)}(/|$)'''," for name in sorted(SCAN_EXCLUDED_DIRS))
+        artifact_paths = "\n".join(
+            f"    '''(^|/){re.escape(name)}(/|$)'''," for name in sorted(_GITLEAKS_EXCLUDED_DIRS)
+        )
         config = f"""
 [extend]
 useDefault = true

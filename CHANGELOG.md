@@ -430,6 +430,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Additive `budget.observed_overruns` metadata is separate from admission
   `status`; limits are checked between logical admission units, so a completed
   run can exceed a cap without becoming partial or failed.
+- Tier 3 suggestion prompts qualify evidence by its owning case or trial, so
+  citations resolve to that case's excerpts regardless of trial order. Metric
+  findings cite only evidence from cases contributing to the reported outcome;
+  references with missing or ambiguous ownership are rejected.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.

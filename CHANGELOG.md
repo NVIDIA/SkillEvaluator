@@ -268,61 +268,10 @@ All notable changes to SkillEvaluator are documented in this file.
   touches rather than letting the first stand for the rest, and keep the patch
   text itself as the write body. A headerless or malformed `input` is left
   alone, so a shell source string is not reported as a file change.
-- Automatic SkillSpector selection now verifies the pinned release on first use
-  and falls back to the verified managed wheel for a different or unverifiable
-  version. Discovery stays free of subprocesses, version probes omit provider
-  credentials and respect the caller timeout, and explicit executable overrides
-  remain available. Doctor reports the path and source selected by the probe.
-- `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
-  SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
-  `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
-  ended in `(from None)` and the SkillSpector row named
-  `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
-- The comments-only consumer template now grants its required read and PR-comment
-  permissions only to the comment job, with no workflow-wide token permissions.
-- The behavior evidence gate no longer keeps a score for an expectation that
-  names an observed artifact but also asks for something only the final answer
-  could show. "Writes `report.py` and explains why each column was dropped" was
-  treated as settled by the artifact alone, so a case kept a score whose second
-  half was never checked. Every clause of an expectation must now name a
-  checkable artifact of its own; one that does not keeps the gate, as a wholly
-  prose expectation already did.
-- SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
-  `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
-  `100%.md` no longer produces an invalid URI.
-- Reports no longer fail on Linux when a skill file name is not valid UTF-8
-  (#525). Finding IDs, HTML issue keys, the written HTML, JSON, Markdown and
-  SARIF reports, the CI workflow scripts that re-render retained reports, and
-  generated `evals/evals.json` datasets accept the surrogate-escaped name
-  Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
-  the name's original bytes (`caf%E9.md`).
-- SARIF `artifactLocation.uri` values stay valid for more paths. A
-  repository-relative path whose first segment contains a colon, such as
-  `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A
-  path outside the workspace is written as an absolute `file:` URI instead of
-  a bare file system path, and a symlink in the workspace that points outside
-  it keeps the link's repository-relative path.
-- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
-  apply to the entire final response, independently of correct values in tool
-  output or references. Scoring and thresholds are unchanged; an Accuracy format
-  failure alone can still score 0.8 and pass the default threshold.
-
 - The NVIDIA Build bridge preserves reported input, output and cached token
   usage in Anthropic Messages and Responses API replies. Anthropic replies use
   schema-required zero defaults for missing input/output fields and clamp
   uncached input counts at zero; Responses usage remains absent when unreported.
-- The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
-  of `harness-check` no longer show internal test notes in their messages.
-- The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
-  calls. Codex passes its patch as a single `input` argument, which the write
-  evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
-  entry and its contents survived only in the compact tool history -- the
-  section budgeted last, and so the first dropped when the bundle is trimmed.
-  The helpers now take the changed paths from the patch's `Add File`,
-  `Update File` and `Delete File` headers, naming every file a multi-file patch
-  touches rather than letting the first stand for the rest, and keep the patch
-  text itself as the write body. A headerless or malformed `input` is left
-  alone, so a shell source string is not reported as a file change.
 - Automatic SkillSpector selection now verifies the pinned release on first use
   and falls back to the verified managed wheel for a different or unverifiable
   version. Discovery stays free of subprocesses, version probes omit provider

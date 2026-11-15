@@ -1656,6 +1656,24 @@ def test_other_token_flags_are_masked_in_either_spelling() -> None:
         pytest.param(
             f"./wrap --use_token docker login -u bot -p {_API_TOKEN}", "--use_token", "--use-token", id="before-login"
         ),
+        pytest.param(
+            f'./wrap --use_token docker login -u bot --token "x -p y" -p {_API_TOKEN} reg',
+            "--use_token",
+            "--use-token",
+            id="before-login-with-a-p-in-a-flag-value",
+        ),
+        pytest.param(
+            f"./wrap --with_token docker login -u bot --password-hint 'use -p to prompt' -p {_API_TOKEN} reg",
+            "--with_token",
+            "--with-token",
+            id="before-login-with-a-p-in-a-quoted-flag-value",
+        ),
+        pytest.param(
+            f'./wrap --skip_token_check mysql -h db --api-key "see -pX" -u root -p{_API_TOKEN} app',
+            "--skip_token_check",
+            "--skip-token-check",
+            id="before-mysql-with-a-p-in-a-flag-value",
+        ),
         pytest.param(f"./wrap --use_token login bob password {_API_TOKEN}", "--use_token", "--use-token", id="netrc"),
         pytest.param(f"-api_key npm config set secret {_API_TOKEN}", "-api_key", "-api-key", id="before-npm-config"),
         pytest.param(
@@ -1684,6 +1702,50 @@ def test_an_underscored_flag_takes_the_next_word_as_its_dashed_spelling_does(
     assert _API_TOKEN not in evidence(command)
     assert _API_TOKEN not in evidence(command.replace(underscored, dashed))
     assert evidence(command) == evidence(command.replace(underscored, dashed)).replace(dashed, underscored)
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    ("command", "expected"),
+    [
+        pytest.param(
+            f'./wrap FLAG docker login -u bot --token "x -p y" -p {_API_TOKEN} reg',
+            "./wrap FLAG <redacted> login -u bot --token <redacted> -p <redacted> reg",
+            id="login",
+        ),
+        pytest.param(
+            f"./wrap FLAG mysql --api-key 'a -pX' --api-key 'b -pY' -u root -p{_API_TOKEN} app",
+            "./wrap FLAG <redacted> --api-key <redacted> --api-key <redacted> -u root -p<redacted> app",
+            id="mysql-after-two-values",
+        ),
+        pytest.param(
+            f'./wrap FLAG docker login -u bot --token "a;b" -p {_API_TOKEN} reg',
+            "./wrap FLAG <redacted> login -u bot --token <redacted> -p <redacted> reg",
+            id="login-after-a-value-with-a-semicolon",
+        ),
+        pytest.param(
+            f'["wrap", "FLAG", "login"]\\ndocker login --token "x -p y" -p {_API_TOKEN} reg',
+            '["wrap", "FLAG", <redacted>]\\ndocker login --token <redacted> -p <redacted> reg',
+            id="login-after-an-argv-list",
+        ),
+    ],
+)
+def test_a_p_inside_a_flag_value_does_not_hide_the_password_after_a_masked_command_word(
+    flag: str, command: str, expected: str
+) -> None:
+    # The login and MySQL rules read the first "-p" after the command word,
+    # and none past a ";". One inside an earlier flag value is gone once that
+    # value is masked, so the password after it is masked when a flag that
+    # takes no value masks the command word too, also in JSON text and in
+    # judge evidence.
+    text = command.replace("FLAG", flag)
+    masked = expected.replace("FLAG", flag)
+    for evidence_text, evidence_masked in (
+        (text, masked),
+        (json.dumps({"command": text}), json.dumps({"command": masked})),
+    ):
+        assert eval_core_checks._redact_finding_evidence(evidence_text) == evidence_masked
+        assert eval_template._redact_judge_evidence(evidence_text) == evidence_masked
 
 
 @pytest.mark.parametrize("flag", ["--use_token", "--use-token"])

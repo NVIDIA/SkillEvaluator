@@ -305,7 +305,10 @@ All notable changes to SkillEvaluator are documented in this file.
   longer hides the password of a `mysql`, `sshpass`, `docker login`,
   `aws configure set`, config set, or `.netrc` command that starts with that
   word, as in `--use_token mysql -u root -p...`, nor an attached `-p...`
-  element after a `mysql` or `login` element it takes in an argv list. A
+  element after a `mysql` or `login` element it takes in an argv list. Nor
+  does it hide a `docker login` or `mysql` password when a flag value between
+  that word and the password holds a `-p` or `;`, as in
+  `--use_token docker login --token "x -p y" -p ...`. A
   `docker login`, `.netrc`, or `/usr/bin/mysql` password after a `\n` inside
   a flag value or right after it is masked too, and so is a `docker login`
   password after a `\n` right after an argv list whose last element is

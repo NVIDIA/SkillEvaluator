@@ -95,6 +95,41 @@ def test_gym_command_keeps_api_key_out_of_argv(tmp_path: Path, monkeypatch: pyte
     assert "+default_host=172.17.0.1" in command
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode"])
+def test_gym_claude_command_configures_model_server_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: str
+) -> None:
+    from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
+
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-secret-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-secret")
+    command = gym_eval_command(
+        "gym",
+        tmp_path,
+        agent=agent,
+        model="policy-model",
+        model_url="https://example.com/v1",
+        rollouts_path=tmp_path / "rollouts.jsonl",
+        n_attempts=1,
+        n_concurrent=None,
+        sandbox="docker",
+    )
+    assert "policy-secret-value" not in " ".join(command)
+    assert "unrelated-anthropic-secret" not in " ".join(command)
+    assert f"+policy_api_key=${{oc.env:{MODEL_API_KEY_ENV}}}" in command
+    overrides = [
+        "++anthropic_api_key=EMPTY",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+        "{type:responses_api_models,name:policy_model}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+        + PINNED_RUNTIME_VERSIONS["claude-code"],
+    ]
+    for override in overrides:
+        assert (override in command) == (agent == "claude-code")
+
+
 def _rollout(tmp_path: Path, task: str, attempt: int, overall: float | None) -> dict:
     logs = tmp_path / "gym-logs" / f"{task}-{attempt}"
     logs.mkdir(parents=True)
@@ -427,6 +462,50 @@ def test_stage_for_gym_drops_only_the_skills_dir_hook(tmp_path: Path) -> None:
     assert "cpus = 2" in text and 'A = "1"' in text
 
 
+@pytest.mark.parametrize("workdir", [None, "/work", "/"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_stage_for_gym_projects_claude_skills_into_task_workdir(
+    tmp_path: Path, workdir: str | None, with_skill: bool
+) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("Use the calculator.\n")
+    (task / "task.toml").write_text(
+        '[environment]\nskills_dir = "/workspace/skills"\n' + (f"workdir = {json.dumps(workdir)}\n" if workdir else "")
+    )
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    stage_for_gym(tmp_path, agent="claude-code")
+    destination = (workdir or "/workspace").rstrip("/") + "/.claude/skills/"
+    assert dockerfile.read_text().splitlines().count("COPY " + json.dumps(["skills/", destination])) == 1
+    assert "skills_dir" not in (task / "task.toml").read_text()
+    assert bool(list(skills.rglob("SKILL.md"))) == with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "opencode"])
+def test_stage_for_gym_leaves_other_agent_images_unchanged(tmp_path: Path, agent: str | None) -> None:
+    task = tmp_path / "case"
+    (task / "environment" / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = task / "environment" / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == "FROM python:3.12-slim\n"
+
+
+def test_stage_for_gym_claude_without_docker_skills(tmp_path: Path) -> None:
+    task = tmp_path / "case"
+    task.mkdir()
+    (task / "task.toml").write_text("[environment]\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    assert not (task / "environment").exists()
+
+
 def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypatch) -> None:
     from skillevaluator.tier3.nemo_gym.runner import verifier_judge_env
 
@@ -567,6 +646,33 @@ def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
     }
     kwargs.update(overrides)
     return run_nemo_gym_eval(**kwargs)
+
+
+def test_fake_gym_claude_stages_project_skills_in_both_arms(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    original_stage = gym_runner.stage_for_gym
+    staged = {}
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        staged[arm_dir.name] = [
+            (
+                path.read_text(),
+                bool(list((path.parent / "skills").rglob("SKILL.md"))),
+            )
+            for path in arm_dir.glob("*/environment/Dockerfile")
+        ]
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    _run_fake_gym(skill, tmp_path, agents=["claude-code"])
+    assert set(staged) == {"with", "without"}
+    for arm, tasks in staged.items():
+        assert tasks
+        for dockerfile, has_skill in tasks:
+            assert 'COPY ["skills/", "/workspace/.claude/skills/"]' in dockerfile
+            assert has_skill == (arm == "with")
 
 
 @pytest.fixture

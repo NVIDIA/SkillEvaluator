@@ -301,6 +301,10 @@ All notable changes to SkillEvaluator are documented in this file.
   generated `evals/evals.json` datasets accept the surrogate-escaped name
   Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
   the name's original bytes (`caf%E9.md`).
+- Native NeMo Gym Claude Code runs now bind the selected policy model server,
+  supply its placeholder credential, pin the sandbox runtime and enable project
+  skill discovery in both arms, including when Gym uses a private Claude
+  configuration directory.
 - SARIF `artifactLocation.uri` values stay valid for more paths. A
   repository-relative path whose first segment contains a colon, such as
   `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A

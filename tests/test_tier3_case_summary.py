@@ -66,6 +66,8 @@ def _reward(activated: bool, reason: str) -> dict:
         "The `expectation` should be removed from the dataset.",
         "The expectation for `syllable_count` should be removed from the dataset.",
         "The `pass threshold` for the syllable-positive case should be lowered.",
+        "Remove the expected output mismatch by dropping the assertion from evals/evals.json.",
+        "Remove the expected output for syllable_count from evals/evals.json.",
     ],
 )
 def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action):
@@ -88,6 +90,15 @@ def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action
         ("Do not remove the expectation; implement it in analyze_text.py.", None, "llm", None),
         ("Do not remove the `expectation`; implement it in analyze_text.py.", None, "llm", None),
         ("Never drop the `expected output` for syllable_count; implement it in analyze_text.py.", None, "llm", None),
+        ("Remove the expected output mismatch by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove the assertion failure by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove the `expected output` mismatch by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        (
+            "The requirement violation should be removed by implementing syllable_count in analyze_text.py.",
+            None,
+            "llm",
+            None,
+        ),
         ("Remove temporary files after analysis.", None, "llm", None),
         (None, "Connection error", "deterministic", "llm_unavailable_or_invalid"),
         ("", None, "deterministic", "llm_unavailable_or_invalid"),

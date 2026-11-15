@@ -71,6 +71,8 @@ _REQUIREMENT_NOUN = (
     r"(?:expectations?|expected(?:\s+(?:output|answer|result))?|assertions?|ground[\s_-]*truth|"
     r"pass[\s_-]*thresholds?|thresholds?|requirements?|criteria)"
 )
+# "Remove the expected output mismatch" fixes a failure; it does not remove the requirement itself.
+_NOT_FAILURE_OF_REQUIREMENT = r"(?!(?:\s+(?:output|answer|result))?\s+(?:mismatch(?:es)?|failures?|violations?)\b)"
 _WEAKENING_VERB = (
     r"(?:loosen(?:s|ed|ing)?|relax(?:es|ed|ing)?|weaken(?:s|ed|ing)?|lower(?:s|ed|ing)?|soften(?:s|ed|ing)?|"
     r"remov(?:e[sd]?|ing)|drop(?:s|ped|ping)?|delet(?:e[sd]?|ing)|skip(?:s|ped|ping)?|disabl(?:e[sd]?|ing))"
@@ -81,11 +83,11 @@ _REQUIREMENT_DETERMINER = (
 )
 _WEAKENING_PATTERN = re.compile(
     rf"\b{_WEAKENING_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+"
-    rf"(?:`?[A-Za-z0-9_-]+`?\s+)?{_REQUIREMENT_NOUN}\b",
+    rf"(?:`?[A-Za-z0-9_-]+`?\s+)?{_REQUIREMENT_NOUN}\b{_NOT_FAILURE_OF_REQUIREMENT}",
     re.IGNORECASE,
 )
 _PASSIVE_WEAKENING_PATTERN = re.compile(
-    rf"\b{_REQUIREMENT_NOUN}\b[\w\s,'\u2019_-]{{0,48}}\b"
+    rf"\b{_REQUIREMENT_NOUN}\b{_NOT_FAILURE_OF_REQUIREMENT}[\w\s,'\u2019_-]{{0,48}}\b"
     rf"(?:is|are|was|were|be|been|being|should\s+be|must\s+be|ought\s+to\s+be|will\s+be)\s+"
     rf"{_WEAKENING_VERB}\b",
     re.IGNORECASE,

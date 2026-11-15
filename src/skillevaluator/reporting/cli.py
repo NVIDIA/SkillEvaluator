@@ -47,6 +47,7 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.declarative_coverage import render_declarative_coverage
 from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -452,6 +453,7 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        render_declarative_coverage(console, agent_eval.get("agents"))
         if agent_eval.get("baseline"):
             console.print(escape_markup(baseline_description(agent_eval["baseline"])))
         verdict = agent_eval.get("verdict", "unknown")
@@ -468,7 +470,14 @@ class CLIReporter(ReporterBase):
         composite_style = lift_style(composite) if scored_lift else "dim"
         verdict_text = escape_markup(str(verdict).upper())
         verdict_reason = agent_eval.get("verdict_reason")
-        safe_reason = f" — {escape_markup(str(verdict_reason))}" if verdict == "fail" and verdict_reason else ""
+        safe_reason = (
+            f" — {escape_markup(str(verdict_reason))}" if verdict in {"fail", "incomplete"} and verdict_reason else ""
+        )
+        budget = agent_eval.get("budget")
+        if isinstance(budget, dict):
+            from skillevaluator.tier3.harbor.run_budget import budget_line
+
+            console.print(escape_markup(budget_line(budget)))
         lift_label = (
             "Skill Lift (for reference)" if verdict == "fail" and scored_lift and composite > 0 else "Skill Lift"
         )
@@ -754,7 +763,8 @@ class CLIReporter(ReporterBase):
             console.print(
                 "  [green][OK][/green] "
                 f"{escape_markup(str(detail.check_name))}: "
-                f"{escape_markup(str(detail.message))}{escape_markup(meta_str)}"
+                f"{escape_markup(str(detail.message))}{escape_markup(meta_str)}",
+                highlight=False,
             )
 
     def _print_findings(self, result: ValidationResult, console: Console) -> None:

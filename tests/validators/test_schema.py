@@ -1657,6 +1657,16 @@ class TestSchemaPortabilityChecks:
         assert len(findings) == 1
         assert "references/inner/SKILL.md" in findings[0].message
 
+    def test_nested_lowercase_manifest_is_reported_once_with_its_own_name(self, tmp_path: Path):
+        """On macOS and Windows one nested file answers to both SKILL.md and skill.md."""
+        skill_dir = _write_skill(tmp_path, _BASE_FM)
+        (skill_dir / "references" / "inner").mkdir(parents=True)
+        (skill_dir / "references" / "inner" / "skill.md").write_text("---\nname: inner\n---\n")
+
+        findings = _checks(SchemaValidator().validate(skill_dir), "nested_manifest")
+
+        assert [f.file_path for f in findings] == [str(skill_dir / "references" / "inner" / "skill.md")]
+
     def test_nested_manifest_under_evals_is_reported(self, tmp_path: Path):
         skill_dir = _write_skill(tmp_path, _BASE_FM)
         (skill_dir / "evals" / "snapshot").mkdir(parents=True)

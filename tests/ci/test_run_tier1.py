@@ -1546,8 +1546,14 @@ def test_scan_timeout_also_ends_the_scanner_tools(tmp_path, monkeypatch):
     path = scan_shim(tmp_path)
     output = tmp_path / "out"
     output.mkdir()
-    clock = types.SimpleNamespace(offset=0.0)
-    clock.monotonic = lambda: time.monotonic() + clock.offset
+    clock = types.SimpleNamespace(offset=0.0, read=threading.Event())
+
+    def monotonic():
+        now = time.monotonic() + clock.offset
+        clock.read.set()
+        return now
+
+    clock.monotonic = monotonic
     monkeypatch.setattr(runner, "time", clock)
     outcome = {}
 
@@ -1568,6 +1574,10 @@ def test_scan_timeout_also_ends_the_scanner_tools(tmp_path, monkeypatch):
     thread.start()
     pids = survivors = scan_pids(output, time.monotonic() + WAIT)
     try:
+        # The scan sets its time limit after it starts the evaluator, which can write its
+        # PIDs first. Move the clock only once the scan has read it, or the limit moves too.
+        clock.read.clear()
+        assert clock.read.wait(WAIT), "the scan did not read the clock"
         clock.offset = WAIT
         thread.join(WAIT)
         assert not thread.is_alive() and "error" in outcome
@@ -1717,6 +1727,37 @@ def test_second_ctrl_c_does_not_leave_the_runner_waiting(tmp_path):
             process.kill()
             process.wait()
         kill_quietly(survivors)
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="sends a signal to one thread")
+def test_ctrl_c_handled_on_a_scan_thread_still_ends_the_run(tmp_path, monkeypatch):
+    # Python acts on Ctrl-C in the main thread, but the system can run the signal handler on
+    # another one. Linux hands a waiting SIGINT to a thread that unblocks signals, as a scan
+    # thread does when it starts an evaluator. That does not wake a main thread that waits
+    # for scan events without a time limit, so the run would go on until a scan ended.
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    waits, aborted = threading.Semaphore(0), []
+
+    class Events(runner.queue.SimpleQueue):
+        def get(self, *args, **kwargs):
+            waits.release()
+            return super().get(*args, **kwargs)
+
+    def run_scan(argv, *, abort, **options):
+        # A busy main thread acts on any signal, and this scan's start event ends its first
+        # wait when that wait has no time limit. Signal once it has started a second wait.
+        for _ in range(2):
+            waits.acquire(timeout=WAIT)
+        signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+        aborted.append(abort.wait(WAIT))
+        return CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(runner, "queue", types.SimpleNamespace(SimpleQueue=Events, Empty=runner.queue.Empty))
+    monkeypatch.setattr(runner, "run_scan", run_scan)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(workspace, tmp_path / "reports", {})
+    assert aborted == [True]
 
 
 def test_each_report_is_released_once_its_result_is_logged(tmp_path, monkeypatch):

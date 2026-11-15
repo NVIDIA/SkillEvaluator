@@ -97,7 +97,19 @@ def _details_truncated(agent: Mapping[str, Any]) -> bool:
     return False
 
 
+def _baseline_skipped(agent: Mapping[str, Any]) -> bool:
+    conditions = agent.get("conditions")
+    baseline = conditions.get("without_skill") if isinstance(conditions, Mapping) else None
+    return (
+        isinstance(baseline, Mapping)
+        and baseline.get("execution_status") == "skipped"
+        and baseline.get("expected_attempts") == 0
+    )
+
+
 def _contract_mismatch(agent: Mapping[str, Any]) -> bool:
+    if _baseline_skipped(agent):
+        return False
     with_metrics, without_metrics = agent.get("metrics_with_skill"), agent.get("metrics_without_skill")
     if (
         isinstance(with_metrics, list | tuple)
@@ -117,12 +129,14 @@ def _execution_unavailable(agent: Mapping[str, Any]) -> bool:
         isinstance(condition := conditions.get(key), Mapping)
         and condition.get("execution_status") not in {None, "succeeded", "complete"}
         for key, _ in _VARIANTS
+        if not (key == "without_skill" and _baseline_skipped(agent))
     )
 
 
 def _comparable(agent: Mapping[str, Any]) -> bool:
     return not (
-        _never_activated(agent)
+        _baseline_skipped(agent)
+        or _never_activated(agent)
         or _details_truncated(agent)
         or _contract_mismatch(agent)
         or _case_mismatch(agent)
@@ -166,8 +180,44 @@ def _cases(agent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     )
     rebuilt = _scored_trials(agent, key)
     for case_id, n in errored.items():
-        rebuilt.setdefault(case_id, {"attempts": []})["attempts_missing"] = n
+        case = rebuilt.setdefault(case_id, {"attempts": []})
+        case["attempts_missing"] = max(n, case.get("attempts_missing", 0))
     return rebuilt
+
+
+def _evaluation_failed(reward: Any) -> bool:
+    return isinstance(reward, Mapping) and str(reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
+
+
+# A failed evaluation never reached a score; the cause decides who has to act.
+_EVALUATION_FAILURES = {
+    "environment": (
+        "the sandbox environment is invalid",
+        "Not a skill problem: the sandbox could not run what this case needs. Fix the environment named above "
+        "(for example install the missing tool in evals/environment/Dockerfile), then re-run this case.",
+    ),
+    "collector": (
+        "the attempt's result could not be collected",
+        "Not a skill problem: SkillEvaluator could not read this attempt's verifier output. Re-run this case; "
+        "if it repeats, check the verifier artifacts and any custom grader output in the run directory.",
+    ),
+    "judge": (
+        "required judge evaluation failed",
+        "Not a skill problem: check the judge model configuration, credentials and provider availability, "
+        "then re-run this case.",
+    ),
+}
+
+
+def _evaluation_failure(reward: Mapping[str, Any]) -> tuple[str, str]:
+    """Name what failed an unscored evaluation (environment, collector or judge) and the recorded reason."""
+    errors = reward.get("evaluation_errors")
+    if isinstance(errors, Mapping):
+        for cause in ("environment", "collector"):
+            if cause in errors:
+                return cause, _short(errors[cause], 160)
+        return "judge", _short("; ".join(f"{metric}: {reason}" for metric, reason in errors.items() if reason), 160)
+    return "judge", _short(errors, 160)
 
 
 def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
@@ -176,17 +226,36 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
     if trials is None or not trials.is_dir():
         return {}
     pass_at_k = agent.get("pass_at_k") if isinstance(agent.get("pass_at_k"), Mapping) else {}
+    run_dir = Path(str(output_dir)).parent
+    saved = _load_json(run_dir / "result.json", root=run_dir)
+    saved = saved if isinstance(saved, Mapping) else {}
+    provenance = saved.get("provenance")
+    provenance = provenance if isinstance(provenance, Mapping) else {}
+    policies = [
+        agent.get("attempt_policy"),
+        saved.get("attempt_policy"),
+        provenance.get("attempt_policy"),
+        pass_at_k.get(key),
+        *pass_at_k.values(),
+    ]
     threshold = next(
         (
             float(v["pass_threshold"])
-            for v in pass_at_k.values()
-            if isinstance(v, Mapping) and isinstance(v.get("pass_threshold"), int | float)
+            for v in policies
+            if isinstance(v, Mapping)
+            and isinstance(v.get("pass_threshold"), int | float)
+            and not isinstance(v["pass_threshold"], bool)
+            and 0 <= v["pass_threshold"] <= 1
         ),
         0.5,
     )
     cases: dict[str, dict[str, Any]] = {}
     for trial in sorted(trials.iterdir()):
         reward = _load_json(trial / "reward.json", root=Path(str(output_dir)))
+        if _evaluation_failed(reward):
+            case = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})
+            case["attempts_missing"] = case.get("attempts_missing", 0) + 1
+            continue
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
             attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
@@ -261,6 +330,7 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
     deltas: dict[str, float] = {}
     not_run: dict[str, int] = {}
     unavailable: list[str] = []
+    no_baseline: list[str] = []
     for name, agent in agents.items():
         if not isinstance(agent, Mapping):
             continue
@@ -284,6 +354,9 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
             # Rates over different subsets of attempts are not comparable.
             not_run[str(name)] = missing
             continue
+        if _baseline_skipped(agent):
+            no_baseline.append(f"{name}: no baseline was run; lift not measured")
+            continue
         rates = _agent_rates(agent)
         with_pct, without_pct = _pct(*rates["with_skill"]), _pct(*rates["without_skill"])
         if with_pct is not None and without_pct is not None:
@@ -292,9 +365,12 @@ def verdict(agents: Mapping[str, Any]) -> tuple[str, str]:
         [f"{name} {delta:+.0f} pp" for name, delta in deltas.items()]
         + [f"{name}: {n} attempt(s) did not run" for name, n in not_run.items()]
         + unavailable
+        + no_baseline
     )
     if not deltas:
-        return ("inconclusive", detail) if not_run or unavailable else ("", "")
+        if not_run or unavailable:
+            return "inconclusive", detail
+        return ("lift not measured", detail) if no_baseline else ("", "")
     if all(delta >= _CLEAR_EFFECT_PP for delta in deltas.values()):
         label = "skill helps"
     elif all(delta <= -_CLEAR_EFFECT_PP for delta in deltas.values()):
@@ -472,8 +548,8 @@ def _condition_grid(
     for case_id in case_ids:
         with_case, without_case = _cases(agent, "with_skill").get(case_id), _cases(agent, "without_skill").get(case_id)
         effect = (
-            Text("-", style="dim")
-            if with_skill_skipped
+            Text("lift not measured" if _baseline_skipped(agent) else "-", style="dim")
+            if with_skill_skipped or _baseline_skipped(agent)
             else _effect(with_case, without_case, comparable=_case_comparable(agent, with_case, without_case))
         )
         effect = _effect_diagnostics(effect, with_case, without_case, safe)
@@ -525,6 +601,7 @@ def _agent_cell(
     without_case: Mapping[str, Any] | None,
     *,
     comparable: bool = True,
+    baseline_skipped: bool = False,
     safe: Callable[[object], str],
 ) -> Text:
     with_marks, without_marks = _marks(with_case), _marks(without_case)
@@ -532,7 +609,9 @@ def _agent_cell(
     cell.append(" → ", style="dim")
     cell.append_text(_marks_text(with_marks))
     (wp, wn), (op, on) = _attempt_rate(with_marks), _attempt_rate(without_marks)
-    if not comparable or not wn or not on or ERROR in with_marks + without_marks:
+    if baseline_skipped and wn and ERROR not in with_marks:
+        cell.append("  no baseline", style="dim")
+    elif not comparable or not wn or not on or ERROR in with_marks + without_marks:
         cell.append("  ?", style="yellow")
     else:
         delta = 100.0 * (wp / wn - op / on)
@@ -570,6 +649,7 @@ def _agent_grid(
                         a, _cases(a, "with_skill").get(case_id), _cases(a, "without_skill").get(case_id)
                     ),
                     safe=safe,
+                    baseline_skipped=_baseline_skipped(a) and not _execution_unavailable(a),
                 )
                 for a in agents.values()
             ),
@@ -579,7 +659,7 @@ def _agent_grid(
     for a in agents.values():
         r = _agent_rates(a)
         cell = _arrow_cell(_pct(*r["with_skill"]), _pct(*r["without_skill"]), "{:.0f}%", "{:+.0f} pp")
-        complete = _comparable(a)
+        complete = _comparable(a) or (_baseline_skipped(a) and not _execution_unavailable(a))
         rates.append(cell if complete else Text(cell.plain.split("  ")[0]).append("  ?", style="yellow"))
     table.add_row(
         Text(
@@ -640,6 +720,10 @@ def render_case_summary(
     if not case_ids:
         return False
     label, detail = verdict(agents)
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(result.get("budget")):
+        label, detail = "incomplete", reason
     if label:
         style = "bold green" if label == "skill helps" else "bold red" if label == "skill hurts" else "bold yellow"
         line = Text(f"{'✔' if label == 'skill helps' else '✖' if label == 'skill hurts' else '•'} {label}", style=style)
@@ -887,11 +971,45 @@ def _diagnose_agent_case(
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
+    failed_evaluations: dict[str, list[tuple[Path, str]]] = {}
+    with_trials = run_dir / agent_name / "with-skill" / "trials"
+    if errors and with_trials.is_dir() and _SAFE_TRIAL.fullmatch(agent_name):
+        for d in sorted(with_trials.iterdir()):
+            if (
+                d.name.split("__", 1)[0] == case_id
+                and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
+                and _evaluation_failed(reward := _load_json(d / "reward.json", root=run_dir))
+            ):
+                cause, reason = _evaluation_failure(reward)
+                failed_evaluations.setdefault(cause, []).append((d, reason))
+    evaluation_issues = []
+    for cause, failed in failed_evaluations.items():
+        lost_unscored = min(errors, len(failed))
+        if not lost_unscored:
+            break
+        errors -= lost_unscored
+        label, action = _EVALUATION_FAILURES[cause]
+        evaluation_issues.append(
+            {
+                "case": case_id,
+                "agent": agent_name,
+                "kind": "run error",
+                "cause": cause,
+                "what": f"{lost_unscored} attempt(s) never produced a score: {label}"
+                + (f": {failed[0][1]}" if failed[0][1] else ""),
+                "attempts_lost": lost_unscored,
+                "reasons": [],
+                "env_errors": [],
+                "final_message": "",
+                "evidence": (failed[0][0].relative_to(run_dir) / "reward.json").as_posix(),
+                "action": action,
+            }
+        )
     # Negative controls must avoid the skill; an agent-wide positive miss does not apply to them.
     if entry is None:
         entry = _dataset_entries(run_dir).get(case_id, {})
     should_trigger = resolve_should_trigger(dict(entry))
-    not_used = should_trigger is not False and _never_activated(agent)
+    not_used = should_trigger is not False and _never_activated(agent) and (wn > 0 or not evaluation_issues)
     failed_trials = []
     for attempt in with_case.get("attempts", []) if isinstance(with_case, Mapping) else []:
         if isinstance(attempt, Mapping) and attempt.get("passed") is not True:
@@ -918,7 +1036,7 @@ def _diagnose_agent_case(
     )
     goal = _goal_not_met(run_dir, agent_name, case_id, with_case)
     if not lost and not hurts and not not_used:
-        return [goal] if goal else []
+        return [*evaluation_issues, goal] if goal else evaluation_issues
     rewards = [
         (r, d) for _, d in failed_trials if isinstance(r := _load_json(d / "reward.json", root=run_dir), Mapping)
     ]
@@ -962,7 +1080,7 @@ def _diagnose_agent_case(
         "final_message": _final_message(failed_trials[0][1], run_dir) if failed_trials else "",
         "evidence": _evidence(run_dir, evidence_dir, run_error=kind == "run error"),
     }
-    return [failure, goal] if goal else [failure]
+    return [failure, *evaluation_issues, goal] if goal else [failure, *evaluation_issues]
 
 
 def _goal_not_met(
@@ -1169,13 +1287,17 @@ def what_to_fix(
     result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None = None, use_llm: bool = True
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
-    agents = {str(k): v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
+    agents = {
+        str(k): dict(v, attempt_policy=result.get("attempt_policy") or v.get("attempt_policy"))
+        for k, v in (result.get("agents") or {}).items()
+        if isinstance(v, Mapping)
+    }
     dataset = _dataset_entries(run_dir)
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
             for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
-                grouped.setdefault((case_id, issue["kind"]), []).append(issue)
+                grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)
     issues = []
     for items in grouped.values():
         names = [item["agent"] for item in items]

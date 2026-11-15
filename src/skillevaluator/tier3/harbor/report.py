@@ -295,6 +295,7 @@ def _extract_findings(
     from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
 
     findings: list[dict[str, Any]] = []
+    ref_lookup = _build_evidence_ref_lookup(rewards)
 
     metric_names = _finding_metric_names(rewards)
     aggregated: dict[str, list[list[dict[str, Any]]]] = {m: [] for m in metric_names}
@@ -335,24 +336,23 @@ def _extract_findings(
             continue
         label = _metric_label(metric)
 
+        affected_trials = [
+            trial
+            for trial in trials
+            if trial["score"] is not None
+            and (trial["score"] >= FINDING_OK_THRESHOLD) == (avg_score >= FINDING_OK_THRESHOLD)
+        ]
         metric_refs = []
-        for t in trials:
+        for t in affected_trials:
             d = t["detail"]
             if isinstance(d, dict):
-                metric_refs.extend(_normalize_evidence_refs(d.get("evidence_refs")))
-        _seen: set[tuple[Any, ...]] = set()
-        _refs: list[dict[str, Any]] = []
-        for raw_ref in metric_refs:
-            if not isinstance(raw_ref, dict | str):
-                continue
-            r = _resolve_evidence_ref(raw_ref, {})
-            k = (r.get("source"), evidence_ref_identity(r), r.get("kind"))
-            if k not in _seen:
-                _seen.add(k)
-                _refs.append(r)
+                for raw_ref in _normalize_evidence_refs(d.get("evidence_refs")):
+                    if ref := _trial_evidence_ref(raw_ref, t["reward"], multi_trial=len(rewards) > 1):
+                        metric_refs.append(ref)
+        _refs = _recorded_evidence_refs(metric_refs, ref_lookup)
 
         if avg_score >= FINDING_OK_THRESHOLD:
-            reasons = _collect_pass_reasons(metric, trials)
+            reasons = _collect_pass_reasons(metric, affected_trials)
             findings.append(
                 {
                     "metric": metric,
@@ -364,7 +364,7 @@ def _extract_findings(
                 }
             )
         else:
-            reasons = _collect_fail_reasons(metric, trials)
+            reasons = _collect_fail_reasons(metric, affected_trials)
             severity = "critical" if avg_score < FINDING_CRITICAL_THRESHOLD else "warning"
             finding = {
                 "metric": metric,
@@ -695,6 +695,40 @@ def _evidence_unavailable_reason(trials: list[dict[str, Any]]) -> str:
     return "No trajectory evidence was recorded for this metric"
 
 
+def _trial_evidence_ref(ref: Any, reward: dict[str, Any], *, multi_trial: bool) -> dict[str, Any] | None:
+    if not isinstance(ref, dict | str):
+        return None
+    resolved = _resolve_evidence_ref(ref, {})
+    if multi_trial:
+        scope = str(reward.get("trial_id") or reward.get("entry_id") or "")
+        if not scope or "/" in scope or "#" in scope or scope in {".", ".."}:
+            return None
+        source = str(resolved.get("source") or "")
+        if scope not in source.split("/"):
+            resolved["source"] = f"trials/{scope}/{source}"
+        bounded = _bounded_evidence_ref(resolved)
+        if bounded.get("source") != resolved.get("source"):
+            return None
+        resolved = bounded
+    return resolved
+
+
+# Fields that say what role a location plays (a ground truth that also names an
+# expected artifact, a tool call that is also a file write), not what it holds.
+_EVIDENCE_ROLE_FIELDS = frozenset({"kind", "label", "path", "status"})
+
+
+def _same_location_variants(first: dict[str, Any], second: dict[str, Any]) -> bool:
+    """Return True when two refs cast one location and one body of text in different roles."""
+    if first.get("kind") == second.get("kind"):
+        return False
+    return all(
+        first.get(field) == second.get(field)
+        for field in _EVIDENCE_REF_TEXT_LIMITS
+        if field not in _EVIDENCE_ROLE_FIELDS
+    )
+
+
 def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[str, Any]]:
     """Build a lookup from each stable compact evidence key to its full dict ref.
 
@@ -704,21 +738,38 @@ def _build_evidence_ref_lookup(rewards: list[dict[str, Any]]) -> dict[str, dict[
     the LLM returns into the richer dict form consumed by SkillEvaluator report
     templates (which read ``ref.kind``, ``ref.json_pointer``, ``ref.path``,
     ``ref.excerpt``).
+
+    A key is dropped when it is claimed by more than one reward or when one
+    reward gives it conflicting content.  A single reward may cite one location
+    in several roles with the same content (for example ``ground_truth`` and
+    ``expected_artifact``, or ``tool_call`` and ``file_change``); the first one
+    seen, in metric order, is kept as the canonical reference.
     """
     lookup: dict[str, dict[str, Any]] = {}
-    for reward in rewards:
+    owners: dict[str, int] = {}
+    ambiguous: set[str] = set()
+    for index, reward in enumerate(rewards):
         for metric in _finding_metric_names([reward]):
             metric_detail = _detail_for_finding(reward, metric)
             if not isinstance(metric_detail, dict):
                 continue
             for ref in _normalize_evidence_refs(metric_detail.get("evidence_refs")):
-                if not isinstance(ref, dict | str):
+                resolved = _trial_evidence_ref(ref, reward, multi_trial=len(rewards) > 1)
+                if resolved is None:
                     continue
-                resolved = _resolve_evidence_ref(ref, {})
                 if resolved.get("source") or evidence_ref_identity(resolved):
                     key = _compact_evidence_ref(resolved)
-                    if key not in lookup:
+                    if key in ambiguous:
+                        continue
+                    if key in lookup and (
+                        owners[key] != index
+                        or (lookup[key] != resolved and not _same_location_variants(lookup[key], resolved))
+                    ):
+                        ambiguous.add(key)
+                        del lookup[key]
+                    elif key not in lookup:
                         lookup[key] = resolved
+                        owners[key] = index
     return lookup
 
 
@@ -818,10 +869,11 @@ def _generate_suggestions_structured(
             error = _bounded_reason_text(correction.get("error"), max_len=150)
             error_recovery_info.append(f"[{fault}] {error}")
 
+    ref_lookup = _build_evidence_ref_lookup(rewards)
     evidence_lines = []
     for f in failed_findings:
         for ref in (f.get("evidence_refs") or [])[:3]:
-            if isinstance(ref, dict):
+            if isinstance(ref, dict) and _compact_evidence_ref(ref) in ref_lookup:
                 evidence_lines.append(
                     f"  - [{f['metric']}] {ref.get('kind', '')} {_compact_evidence_ref(ref)}: "
                     f"{str(ref.get('label') or ref.get('excerpt') or '')[:120]}"
@@ -842,6 +894,9 @@ ERROR RECOVERY ISSUES:
 EVIDENCE REFERENCES (cite the relevant compact reference exactly in your suggestions):
 {evidence_block}
 
+Each suggestion must cite at least one listed reference from the case or trial it addresses.
+The trials/<case-or-trial>/ prefix identifies the owner and must be included in the citation.
+
 Treat [environment] issues as evaluation setup problems, not skill defects. Recommend dependency declarations or installation in evals/environment/Dockerfile, not skill behavior changes.
 Based on these results, provide exactly 3-4 specific, actionable suggestions for the skill developer to improve their skill. Focus on:
 1. What the developer should fix in their skill (SKILL.md, scripts, config)
@@ -855,10 +910,7 @@ Do not suggest loosening, removing, or rewriting an eval expectation just so the
 When the evidence does not establish a cause (for example, that a different model would do better), start the suggestion with "Hypothesis:" and say how to test it.
 Cite only evidence references listed above; references the run did not record are dropped.
 
-Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["trajectory.json#/steps/N", ...]}}, no other text."""
-
-    # Build the lookup once from all rewards' detail refs
-    ref_lookup = _build_evidence_ref_lookup(rewards)
+Respond with ONLY a JSON array of objects {{"suggestion": "...", "dimension": "<metric>", "evidence_refs": ["<exact listed reference>", ...]}}, no other text."""
 
     try:
         from skillevaluator.tier3.eval_core.llm_judge import _extract_json, call_public_llm

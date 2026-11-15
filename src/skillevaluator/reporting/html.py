@@ -2941,7 +2941,7 @@ class HTMLReporter(ReporterBase):
         ) -> bool:
             if agent_eval_publication_evidence_complete(candidate):
                 return True
-            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive"}:
+            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive", "incomplete"}:
                 return False
             execution_status = payload_execution_status(candidate)
             if execution_status == "succeeded":

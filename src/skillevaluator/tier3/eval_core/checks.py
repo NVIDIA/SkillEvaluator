@@ -1159,8 +1159,11 @@ def _sensitive_write_target(command: str) -> str | None:
 # option or a cluster of them, as in "cp -t/etc/sudoers.d",
 # "curl -4fsSLo/etc/profile.d/x.sh" or "OPTS=-t/etc/sudoers.d", starts after
 # the option letters and digits when the option follows whitespace, a quote or
-# "=". The entry is group 1 of the pattern.
-_KEYWORD_PATH_START = r"(?:(?<![\w~$])|(?<=[\s'\"=])-[a-z0-9]+)"
+# "=". A variable that starts the word, as in "$ROOT/etc/sudoers", may hold
+# the leading part, so it also starts the path, while a variable inside a
+# longer path, as in /opt/$X/etc/profile.d, does not. The entry is group 1 of
+# the pattern.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$])|(?<=[\s'\"=])-[a-z0-9]+|(?<![\w~$/.-])(?:\$\w+)+)"
 # The file a source or . command reads: its first operand. The command starts
 # the text, a line (also after a "\n" escape, as an argv list prints a
 # newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens

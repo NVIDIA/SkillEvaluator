@@ -24,6 +24,7 @@ from skillevaluator.tier3.dataset_utils import load_dataset_entries_with_format,
 from skillevaluator.tier3.evals_spec import (
     EVALS_SPEC,
     _baseline_fairness_warnings,
+    _normalized_match_text,
     validate_skillevaluators,
     validate_tier3_source,
 )
@@ -895,6 +896,352 @@ def test_template_prompt_names_a_skill_md_in_the_description_as_the_users_file(d
     assert case["ground_truth"] == f"A correct, complete result for: {task}"
 
 
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Follows the release-review skill's SKILL.md to check manifests.",
+        "Reads release-review's SKILL.md and reports errors.",
+        "Reads release-review\u2019s own SKILL.md and reports errors.",
+        "Follows the release-review SKILL.md to check manifests.",
+        "Uses the installed skill's SKILL.md to report errors.",
+        "Reads the installed release-review skill's SKILL.md and reports errors.",
+        "Reads release-review's [SKILL.md] and reports errors.",
+    ],
+)
+def test_template_task_is_generic_when_the_skill_owns_the_skill_md_it_reads(description):
+    # Renamed, "release-review's SKILL.md" would read "release-review's my SKILL.md".
+    skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
+
+    assert generate_dataset._template_task(skill) == ("handle a typical request", None)
+    for case in generate_dataset._generate_full(skill):
+        assert "my SKILL.md" not in case["question"], case
+        assert _baseline_fairness_warnings(case, skill_scripts=_SCRIPT_FILES) == [], case
+
+
+@pytest.mark.parametrize(
+    ("description", "task"),
+    [
+        ("Reads the skill's SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("Reads its own SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("Reads my-tool's SKILL.md and reports errors.", "reads my-tool's skill.md and reports errors"),
+        ("Reads release-review's SKILL.md in ./pdf-tools.", "reads release-review's skill.md in ./pdf-tools"),
+    ],
+)
+def test_template_task_still_quotes_a_skill_md_no_skill_name_owns(description, task):
+    assert generate_dataset._template_task(_skill(description=description)) == (task, task)
+
+
+@pytest.mark.parametrize(
+    ("name", "description", "task"),
+    [
+        ("read", "Read SKILL.md and report errors.", "read my SKILL.md and report errors"),
+        ("follow", "Follow SKILL.md to check manifests.", "follow my SKILL.md to check manifests"),
+        ("cat", "cat SKILL.md and report errors", "cat my SKILL.md and report errors"),
+        ("skill", "Reads the skill's SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("own", "Reads its own SKILL.md and reports errors.", "reads my SKILL.md and reports errors"),
+        ("of", "Reads the contents of SKILL.md.", "reads the contents of my SKILL.md"),
+        ("skill", "Uses the skill's SKILL.md template.", "uses my SKILL.md template"),
+        ("skill", "Read SKILL.md, then skill's SKILL.md.", "read my SKILL.md, then my SKILL.md"),
+    ],
+)
+def test_template_task_renames_a_skill_md_generic_wording_explains_when_the_skill_is_named_after_it(
+    name, description, task
+):
+    # As in `tier3 validate`, "read SKILL.md" is generic wording before it is the name of a skill called read.
+    assert generate_dataset._template_task(_skill(name=name, description=description)) == (task, task)
+
+
+# Descriptions that name one of the skill's scripts without saying it is run.
+_SCRIPT_NAMING_DESCRIPTIONS = [
+    "Checks release manifests with review.py and reports blockers.",
+    "Checks release manifests via review.py.",
+    "Checks release manifests with the bundled review.sh script.",
+    "A wrapper around review.py for release manifests.",
+    "Checks release manifests; review.sh does the parsing.",
+    # Spellings `tier3 validate` normalizes: a zero-width space and fullwidth letters.
+    "Checks release manifests with review\u200b.py.",
+    "Checks release manifests with \uff32\uff25\uff36\uff29\uff25\uff37.py.",
+    # A Markdown link target is still quoted in the graded text.
+    "A wrapper around [the release checker](review.py).",
+]
+
+
+def _graded_names_a_skill_script(*graded) -> bool:
+    """Whether graded text names review.py or review.sh, as written or as `tier3 validate` normalizes it."""
+    text = json.dumps(graded, ensure_ascii=False)
+    return any(re.search(r"review\.(?:py|sh)", t, re.IGNORECASE) for t in (text, _normalized_match_text(text)))
+
+
+@pytest.mark.parametrize("description", _SCRIPT_NAMING_DESCRIPTIONS)
+@pytest.mark.parametrize("generate", [generate_dataset._generate_simple, generate_dataset._generate_full])
+def test_template_graded_text_does_not_quote_a_description_that_names_a_skill_script(generate, description):
+    # The no-skill baseline does not have the script, so the graded text stays generic.
+    skill = _skill(description=description, scripts=["review.py"], script_files=_SCRIPT_FILES)
+
+    cases = generate(skill)
+
+    assert cases[0]["question"] == f"Use release-review to {description.lower().rstrip('.')}"
+    for case in cases:
+        assert not _graded_names_a_skill_script(case["ground_truth"], case["expected_behavior"]), case
+
+
+@pytest.mark.parametrize(
+    "description",
+    ["Checks setup.py files for unpinned versions.", "Checks preview.py and review.python.txt for typos."],
+)
+def test_template_cases_still_quote_a_description_that_names_other_files(description):
+    (case,) = generate_dataset._generate_simple(_skill(description=description, script_files=_SCRIPT_FILES))
+
+    assert case["ground_truth"] == f"A correct, complete result for: {description.lower().rstrip('.')}"
+
+
+# How the docs, the _template_task() docstring and the CHANGELOG entry say
+# which SKILL.md in a description becomes "my SKILL.md".
+_RENAMING_VERBS = ("reads", "opens", "loads", "consults", "follows")
+_RENAMING_HEDGE = "otherwise points at the skill's own skill.md as a prompt tier3 validate"
+_KEEPING_PLACES = ("in", "of", "from", "under", "inside")
+_OTHER_PLACES = ("at", "within")
+_FORMAT_NOUNS = ("files", "format", "spec", "template")
+# The words that cannot stand between SKILL.md and a format noun.
+_CONNECTIVES = ("and", "or", "then", "but", "before", "after", "to", "for", "with")
+_STILL_SKILL_FILES = (
+    "Keeps release-review/SKILL.md in sync with the docs.",
+    "Keeps skills/release-review in sync with the docs.",
+    "Reads SKILL.md and uses the installed skill to report errors.",
+)
+_MY_SKILL_MD_ENTRY = "The eval dataset docs now say that a template prompt calls every bare `SKILL.md`"
+
+
+def _listed(words: tuple[str, ...]) -> str:
+    """Words as the docs list them: "a, b or c"."""
+    return f"{', '.join(words[:-1])} or {words[-1]}"
+
+
+# How each says that a word after SKILL.md keeps it unless the skill itself follows.
+_KEEPING_RULE = (
+    f"when {_listed(_KEEPING_PLACES)} comes right after skill.md, unless the skill itself follows "
+    "(the skill, the installed skill, its own skill or the skill's name), as in"
+)
+# How each says that the other bare SKILL.md files are renamed once one counts.
+_RENAMING_ALL = "once one skill.md counts, every bare skill.md in the description is renamed, even one"
+# How each says that wording `tier3 validate` reads first is not the skill's name.
+_GENERIC_FIRST = (
+    'generic wording comes first, as in tier3 validate: for a skill named read or own, "read skill.md" and '
+    '"its own skill.md" are renamed as for any other skill.'
+)
+_SKILL_OWNS_SKILL_MD_ENTRY = "When a template prompt would call a `SKILL.md` in the skill's description"
+# How each says which descriptions with the skill's name right before a SKILL.md get the generic task.
+_OWNER_RULE = 'the skill\'s name, "the <name> skill\'s" or "the installed skill\'s" comes right before any skill.md in'
+
+
+def _flat(text: str) -> str:
+    """Lowercase text with Markdown code marks dropped and whitespace collapsed."""
+    return " ".join(text.replace("`", "").split()).lower()
+
+
+def _changelog_entry(opening: str) -> str:
+    """The CHANGELOG entry that starts with these words."""
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = re.search(r"^- " + r"\s+".join(map(re.escape, opening.split())), text, re.MULTILINE)
+    assert entry, opening
+    end = text.find("\n\n", entry.start())
+    return text[entry.start() : end if end >= 0 else len(text)]
+
+
+def _my_skill_md_wording() -> dict[str, str]:
+    return {
+        "docs/eval-datasets.mdx": _flat((_REPO / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")),
+        "_template_task": _flat(generate_dataset._template_task.__doc__ or ""),
+        "CHANGELOG.md": _flat(_changelog_entry(_MY_SKILL_MD_ENTRY)),
+    }
+
+
+def _sentence_at(text: str, index: int) -> str:
+    start = text.rfind(". ", 0, index)
+    end = text.find(". ", index)
+    return text[start + 2 if start >= 0 else 0 : end if end >= 0 else len(text)]
+
+
+def _renames_skill_md(description: str) -> bool:
+    (case,) = generate_dataset._generate_simple(_skill(description=description))
+    return "my SKILL.md" in case["question"]
+
+
+def test_docs_say_which_skill_md_in_a_description_becomes_my_skill_md():
+    # A SKILL.md the description reads, opens, loads, consults or follows, or
+    # otherwise points at as a prompt `tier3 validate` flags would, is renamed.
+    for verb in _RENAMING_VERBS:
+        assert _renames_skill_md(f"{verb.title()} SKILL.md and reports errors."), verb
+    for description in ("Cat SKILL.md and report errors.", "Uses the skill's SKILL.md template."):
+        assert _renames_skill_md(description), description
+    for description in ("Validates SKILL.md frontmatter fields.", "Creates a SKILL.md for a new agent skill."):
+        assert not _renames_skill_md(description), description
+    # Reading another SKILL.md or the file format does not count: "a SKILL.md",
+    # "the following SKILL.md", or a format noun right after it or after one
+    # other word that is not one of the connectives.
+    for description in (
+        *(f"Reads SKILL.md {noun} and reports errors." for noun in _FORMAT_NOUNS),
+        "Follows the SKILL.md frontmatter format for new skills.",
+        "Reads a SKILL.md and reports errors.",
+        "Reads the following SKILL.md and reports errors.",
+        "Reads SKILL.md on format errors.",
+    ):
+        assert not _renames_skill_md(description), description
+    for word in _CONNECTIVES:
+        assert _renames_skill_md(f"Reads SKILL.md {word} format errors."), word
+    # Once one SKILL.md counts, every bare one is renamed, even one that would
+    # not count by itself.
+    for description in (
+        "Reads SKILL.md and creates a SKILL.md for a new agent skill.",
+        "Reads SKILL.md and checks the following SKILL.md.",
+        "Reads SKILL.md, then validates SKILL.md frontmatter fields.",
+        "Reads SKILL.md and writes SKILL.md files.",
+        "Reads SKILL.md and compares it with SKILL.md in ./pdf-tools.",
+    ):
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert case["question"].count("my SKILL.md") == 2, description
+    # A description that still points at the skill's files after the rename,
+    # or that has the skill's name or "the installed skill's" right before
+    # SKILL.md, gives the generic task, not "my SKILL.md".
+    for description in (*_STILL_SKILL_FILES, "Reads release-review's SKILL.md and reports errors."):
+        (case,) = generate_dataset._generate_simple(_skill(description=description))
+        assert case["question"] == "Use release-review to handle a typical request", description
+        assert case["ground_truth"] == "A correct, complete result for the request", description
+
+    wording = _my_skill_md_wording()
+    for where, text in wording.items():
+        mentions = [match.start() for match in re.finditer(r"my skill\.md", text)]
+        assert mentions, where
+        for start in mentions:
+            sentence = _sentence_at(text, start)
+            assert _listed(_RENAMING_VERBS) in sentence, (where, sentence)
+            assert _RENAMING_HEDGE in sentence, (where, sentence)
+        # Each names a format noun case, the generic task for <name>/SKILL.md,
+        # and that every bare SKILL.md is renamed once one counts.
+        assert '"reads skill.md files"' in text, where
+        assert "<name>/skill.md" in text and '"handle a typical request"' in text, where
+        assert _RENAMING_ALL in text, where
+    for where in ("docs/eval-datasets.mdx", "_template_task"):
+        text = wording[where]
+        assert f"a format noun such as {_listed(_FORMAT_NOUNS)} right after it or after one other word" in text, where
+        assert (
+            f'that other word cannot be {_listed(_CONNECTIVES)}, so "reads skill.md for format errors" '
+            'is still renamed but "reads skill.md on format errors" is not.'
+        ) in text, where
+        assert '"a skill.md", "the following skill.md"' in text, where
+        assert f"reading also does not count {_KEEPING_RULE}" in text, where
+        rule = text.find("still points at the skill's files after the rename")
+        assert rule >= 0, where
+        for example in ("<name>/skill.md", "skills/<name>", "uses the installed skill"):
+            assert example in text[rule : rule + 160], (where, text[rule : rule + 160])
+        owner = text.find(f"one skill.md counts and {_OWNER_RULE} the description", rule)
+        assert 0 <= owner - rule < 260, (where, text[rule : rule + 400])
+        for example in (
+            '"reads <name>\'s skill.md"',
+            '"reads skill.md, then validates <name>\'s skill.md frontmatter"',
+        ):
+            assert example in text[owner : owner + 300], (where, example, text[owner : owner + 300])
+        kept = text.find("when no skill.md counts, the description keeps such a skill.md", owner)
+        assert 0 <= kept - owner < 500, (where, text[owner : owner + 600])
+        assert '"validates <name>\'s skill.md frontmatter"' in text[kept : kept + 120], (where, text[kept : kept + 120])
+        assert _GENERIC_FIRST in text[owner : owner + 700], (where, text[owner : owner + 700])
+    entry = _flat(_changelog_entry(_SKILL_OWNS_SKILL_MD_ENTRY))
+    assert f"my skill.md and {_OWNER_RULE} it" in entry
+    assert '"validates release-review\'s skill.md frontmatter", is quoted as before' in entry
+    assert _GENERIC_FIRST in entry
+    # Once one SKILL.md counts, the skill's name right before any SKILL.md in
+    # the description gives the generic task, wherever the reading is.
+    for description in (
+        "Reads release-review's SKILL.md and reports errors.",
+        "Follows the release-review skill's SKILL.md to check manifests.",
+        "Reads SKILL.md, then validates release-review's SKILL.md frontmatter.",
+    ):
+        assert generate_dataset._template_task(_skill(description=description)) == (
+            "handle a typical request",
+            None,
+        ), description
+    # When no SKILL.md counts, the description keeps the one the skill's name comes before.
+    for description in (
+        "Validates release-review's SKILL.md frontmatter.",
+        "Lists release-review's SKILL.md sections.",
+        "Checks the installed skill's SKILL.md for errors.",
+    ):
+        task = description.rstrip(".").lower()
+        assert generate_dataset._template_task(_skill(description=description)) == (task, task), description
+    # Generic wording comes first for a skill named after it.
+    for name, description in (("read", "Read SKILL.md and report errors."), ("own", "Reads its own SKILL.md.")):
+        (case,) = generate_dataset._generate_simple(_skill(name=name, description=description))
+        assert "my SKILL.md" in case["question"], (name, case["question"])
+    # The docstring's examples reach the branch it gives them: calling the
+    # skill "the <name> skill" gives the generic task, and naming the skill or
+    # one of its scripts keeps the task but quotes no outcome.
+    doc = wording["_template_task"]
+    assert '"the <name> skill" ("the release-review skill checks manifests")' in doc
+    named = generate_dataset._template_task(_skill(description="The release-review skill checks manifests"))
+    assert named == ("handle a typical request", None)
+    for example in ("Uses release-review for manifests", "Checks manifests with review.py"):
+        assert f'"{example.lower()}"' in doc, example
+        assert generate_dataset._template_task(_skill(description=example)) == (example.lower(), None), example
+    # The docs name the hedge's examples, and the next sentence still names the
+    # command whose LLM prompts it means.
+    docs = wording["docs/eval-datasets.mdx"]
+    assert '(such as cat skill.md or "uses the skill\'s skill.md")' in docs
+    assert "as for any other skill. create-eval-dataset's llm prompts ask for outcome checks." in docs
+
+
+def test_docs_say_which_word_after_skill_md_keeps_a_description_s_skill_md():
+    # In, of, from, under or inside right after SKILL.md keeps it, whatever
+    # follows, unless the skill itself does. Other place words and a place
+    # word further on are still renamed.
+    for place in _KEEPING_PLACES:
+        assert not _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
+    for description in (
+        "Reads SKILL.md in full and reports errors.",
+        "Follows SKILL.md in order.",
+        "Reads SKILL.md from start to finish.",
+        "Reads SKILL.md from its own directory.",
+    ):
+        assert not _renames_skill_md(description), description
+    for place in _OTHER_PLACES:
+        assert _renames_skill_md(f"Reads SKILL.md {place} ./pdf-tools and reports errors."), place
+    for description in (
+        "Reads SKILL.md in the skill directory and reports errors.",
+        "Reads SKILL.md in the installed skill and reports errors.",
+        "Reads SKILL.md from its own skill folder and reports errors.",
+        "Reads SKILL.md in release-review and reports errors.",
+        "Reads SKILL.md located in ./pdf-tools and reports errors.",
+    ):
+        assert _renames_skill_md(description), description
+
+    other = f"other place words, such as {_listed(_OTHER_PLACES)}, do not count"
+    for where, text in _my_skill_md_wording().items():
+        rule = text.find(_KEEPING_RULE)
+        assert rule >= 0, where
+        examples = text[rule + len(_KEEPING_RULE) : rule + len(_KEEPING_RULE) + 40]
+        assert "in ./pdf-tools" in examples and "in full" in examples, (where, examples)
+        assert other in text[rule : rule + 260], (where, text[rule : rule + 260])
+    docs = _my_skill_md_wording()["docs/eval-datasets.mdx"]
+    assert f'{other}: "reads skill.md at ./pdf-tools" is still renamed.' in docs
+
+
+def _changelog_section(opening: str) -> str:
+    """The heading of the CHANGELOG section that holds the entry starting with these words."""
+    text = (_REPO / "CHANGELOG.md").read_text(encoding="utf-8")
+    entry = re.search(r"^- " + r"\s+".join(map(re.escape, opening.split())), text, re.MULTILINE)
+    assert entry, opening
+    headings = re.findall(r"^## (.+)$", text[: entry.start()], re.MULTILINE)
+    assert headings, opening
+    return headings[-1].strip()
+
+
+def test_changelog_records_the_my_skill_md_docs_correction_after_0_9_0():
+    # The 0.9.0 entry stays as released, so the correction is a later entry.
+    section = _changelog_section(_MY_SKILL_MD_ENTRY)
+    release = re.match(r"(\d+)\.(\d+)\.(\d+)\b", section)
+    released_after_0_9_0 = release is not None and tuple(map(int, release.groups())) > (0, 9, 0)
+    assert section == "Unreleased" or released_after_0_9_0, section
+
+
 def test_template_prompt_is_generic_when_the_description_names_the_skill_directory():
     skill = _skill(description="Keeps skills/release-review/SKILL.md in sync with the docs")
 
@@ -930,6 +1277,16 @@ def test_starter_case_passes_strict_validate(tmp_path: Path, description):
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
 
     assert result.exit_code == 0, result.output
+
+
+@pytest.mark.parametrize("description", _SCRIPT_NAMING_DESCRIPTIONS[:3:2])
+def test_starter_case_does_not_quote_a_description_that_names_a_skill_script(tmp_path: Path, description):
+    skill = _write_skill(tmp_path, description, scripts=_SCRIPT_FILES)
+
+    output = generate_dataset.generate_one_case(skill, use_llm=False)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert not _graded_names_a_skill_script(case["expected_output"], case["assertions"]), case
 
 
 @pytest.fixture
@@ -979,6 +1336,32 @@ def test_autopilot_llm_case_does_not_grade_skill_use(tmp_path: Path, llm_reply):
     ]
     result = CliRunner().invoke(cli, ["tier3", "validate", str(skill), "--strict", "--json"])
     assert result.exit_code == 0, result.output
+
+
+def test_autopilot_llm_case_replaces_skill_use_with_text_that_names_no_skill_script(tmp_path: Path, llm_reply):
+    # The template outcome that replaces graded skill use does not quote a description that names a script.
+    skill = _write_skill(tmp_path, _SCRIPT_NAMING_DESCRIPTIONS[0], scripts=_SCRIPT_FILES)
+    llm_reply.append(
+        json.dumps(
+            [
+                {
+                    "id": "release-review-001",
+                    "question": "Is release.yaml ready to ship?",
+                    "expected_skill": "release-review",
+                    "expected_script": "review.py",
+                    "ground_truth": "The agent ran review.py on release.yaml and listed the blockers",
+                    "expected_behavior": ["The agent ran review.py on release.yaml"],
+                }
+            ]
+        )
+    )
+
+    output = generate_dataset.generate_one_case(skill, use_llm=True)
+
+    (case,) = json.loads(output.read_text(encoding="utf-8"))["evals"]
+    assert case["expected_output"] == "A correct, complete result for the request"
+    assert case["assertions"] == generate_dataset._outcome_behaviors(None, [])
+    assert not _graded_names_a_skill_script(case["expected_output"], case["assertions"]), case
 
 
 def test_autopilot_llm_case_with_only_skill_use_checks_gets_outcome_checks(tmp_path: Path, llm_reply):

@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The GitHub Actions CI recipe in `ci-integration.mdx` verifies the downloaded
+  Gitleaks archive against its published SHA-256 checksum before extracting it.
+
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 

@@ -79,8 +79,12 @@ jobs:
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=8.30.0
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfL "${base}/${archive}" -o "${archive}"
+          curl -sSfL "${base}/gitleaks_${GITLEAKS_VERSION}_checksums.txt" -o gitleaks_checksums.txt
+          grep " ${archive}$" gitleaks_checksums.txt | sha256sum -c -
+          tar -xzf "${archive}" gitleaks
           sudo mv gitleaks /usr/local/bin/
 
       - name: Validate skills

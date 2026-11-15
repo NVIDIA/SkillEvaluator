@@ -72,14 +72,16 @@ _REQUIREMENT_NOUN = (
     r"pass[\s_-]*thresholds?|thresholds?|requirements?|criteria)"
 )
 _WEAKENING_VERB = (
-    r"(?:loosen(?:s|ed|ing)?|relax(?:es|ed|ing)?|weaken(?:s|ed|ing)?|lower(?:s|ed|ing)?|soften(?:s|ed|ing)?)"
+    r"(?:loosen(?:s|ed|ing)?|relax(?:es|ed|ing)?|weaken(?:s|ed|ing)?|lower(?:s|ed|ing)?|soften(?:s|ed|ing)?|"
+    r"remov(?:e[sd]?|ing)|drop(?:s|ped|ping)?|delet(?:e[sd]?|ing)|skip(?:s|ped|ping)?|disabl(?:e[sd]?|ing))"
 )
 _REQUIREMENT_DETERMINER = (
     r"(?:the|a|an|my|your|our|their|its|this|that|these|those|any|each|every|all|both|"
     r"[A-Za-z0-9_-]+(?:'s|\u2019s))"
 )
 _WEAKENING_PATTERN = re.compile(
-    rf"\b{_WEAKENING_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+{_REQUIREMENT_NOUN}\b",
+    rf"\b{_WEAKENING_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+"
+    rf"(?:`?[A-Za-z0-9_-]+`?\s+)?{_REQUIREMENT_NOUN}\b",
     re.IGNORECASE,
 )
 _PASSIVE_WEAKENING_PATTERN = re.compile(

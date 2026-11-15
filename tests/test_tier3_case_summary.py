@@ -52,6 +52,78 @@ def _reward(activated: bool, reason: str) -> dict:
     }
 
 
+@pytest.mark.parametrize(
+    "action",
+    [
+        "In evals/evals.json, remove the expectation for syllable_count from the syllable-positive case.",
+        "Loosen the assertion in evals/evals.json.",
+        "Drop the syllable_count expectation from evals/evals.json.",
+        "The assertion should be removed from the dataset.",
+        "Lower the pass threshold to make this case pass.",
+    ],
+)
+def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({"syllable-positive": _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["source"] == "deterministic"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "action,error,expected_source,expected_fallback",
+    [
+        ("Implement syllable_count in analyze_text.py.", None, "llm", None),
+        ("Do not remove the expectation; implement it in analyze_text.py.", None, "llm", None),
+        ("Remove temporary files after analysis.", None, "llm", None),
+        (None, "Connection error", "deterministic", "llm_unavailable_or_invalid"),
+        ("", None, "deterministic", "llm_unavailable_or_invalid"),
+    ],
+)
+def test_case_action_provenance_reaches_canonical_recommendation(
+    tmp_path, monkeypatch, action, error, expected_source, expected_fallback
+):
+    from skillevaluator.evaluation.tier3_report import _apply_case_findings
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), error))
+    source = {"agents": {"a": _agent({"syllable-positive": _case(False)}, {"syllable-positive": _case(False)})}}
+    payload = {}
+    _apply_case_findings(payload, source, tmp_path, tmp_path, use_llm=True)
+    [fix] = json.loads((tmp_path / "what_to_fix.json").read_text())
+    [recommendation] = payload["recommendations"]
+
+    for record in (fix, recommendation):
+        assert record["source"] == expected_source
+        assert record.get("fallback_reason") == expected_fallback
+    assert fix["action"] in recommendation["message"]
+
+
+def test_case_action_disabled_is_not_a_failed_llm_fallback(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("LLM should not be called")
+
+    monkeypatch.setattr(llm_judge, "call_public_llm", unexpected)
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert fix["source"] == "deterministic"
+    assert "fallback_reason" not in fix
+
+
+def test_case_action_deterministic_remedy_does_not_repeat_weakening_reason(tmp_path):
+    _trial(tmp_path, "a", "t0", _reward(True, "Remove the expectation for syllable_count"))
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert "Remove the expectation" not in fix["action"]
+
+
 def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     result = {
         "execution_status": "succeeded",

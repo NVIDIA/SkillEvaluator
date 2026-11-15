@@ -435,6 +435,8 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
+- Failed native skill lookups no longer count as activation when the tool reports
+  that the skill was not found or unavailable without explicit error metadata.
 - Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
   coverage per agent and arm, including passed/failed counts, judgments,
   not-checked reasons, and the behavior-score denominators.

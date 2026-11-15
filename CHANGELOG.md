@@ -249,6 +249,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

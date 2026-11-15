@@ -35,6 +35,7 @@ def test_token_and_cost_admission():
     assert (
         budget_line(budget.metadata())
         == "Budget exhausted (agent tokens 10 of 10): 1 of 2 attempts not run; results are partial"
+        "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
     )
 
 
@@ -632,7 +633,12 @@ def test_legacy_overrun_boundaries_include_zero_and_subcent_costs(key, cap, valu
         "attempts": "max_attempts_total",
     }[key]
     metadata = {"limits": {limit: cap}, "used": {key: value}, "started_attempts": value}
-    assert budget_line(metadata) == f"Budget overrun observed ({expected})"
+    qualifier = (
+        "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
+        if key == "cost_usd"
+        else ""
+    )
+    assert budget_line(metadata) == f"Budget overrun observed ({expected}){qualifier}"
 
 
 @pytest.mark.parametrize("invalid", [True, False, -1, "[bold]bad[/bold]", float("nan"), float("inf"), [], {}])

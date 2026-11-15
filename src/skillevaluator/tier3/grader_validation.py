@@ -28,11 +28,14 @@ from skillevaluator.tier3.eval_core.atif_helpers import (
     get_final_response,
 )
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.declarative_checks import validate_declarative_checks
 
 SCHEMA = "skillevaluator.grader-qualification/v1"
 CATEGORIES = {"positive", "negative", "edge", "failure_recovery", "unavailable_evidence", "non_use", "baseline"}
 METRICS = ("security", "skill_execution", "skill_efficiency", "accuracy", "goal_accuracy", "behavior_check")
 VERDICTS = ("pass", "fail", "not_applicable", "error", "insufficient_evidence")
+# Qualification copies only the trajectory, so checks on workspace files have nothing recorded to inspect.
+WORKSPACE_CHECKS = {"file_exists"}
 DEFAULT_THRESHOLDS = dict.fromkeys(METRICS, 1.0) | {"accuracy": 0.8, "overall": 0.5}
 TEMPLATE = Path(__file__).parent / "harbor" / "templates" / "eval.py"
 REFERENCE_SUITE = Path(__file__).parent / "grader_reference"
@@ -46,6 +49,7 @@ ENTRY_FIELDS = {
     "question",
     "ground_truth",
     "expected_behavior",
+    "checks",
     "expected_skill",
     "expected_script",
     "should_trigger",
@@ -139,6 +143,16 @@ def load_suite(directory):
         for key in ("expected_behavior", "acceptable_skills", "acceptable_alternates", "workspace_skill_names"):
             if key in entry and (not isinstance(entry[key], list) or any(not isinstance(v, str) for v in entry[key])):
                 raise ValueError(f"entry.{key}: expected list of strings")
+        if "checks" in entry:
+            errors = validate_declarative_checks(entry["checks"])
+            if errors:
+                raise ValueError(f"entry.checks: {'; '.join(errors)}")
+            workspace = sorted({check["type"] for check in entry["checks"]} & WORKSPACE_CHECKS)
+            if workspace:
+                raise ValueError(
+                    f"entry.checks: {', '.join(workspace)} inspects the agent's workspace files, which "
+                    "qualification does not record; remove it"
+                )
         expected = case["expected"]
         _object(expected, {"overall", "metrics"}, {"overall", "metrics"}, "expected")
         if not isinstance(expected["overall"], str) or expected["overall"] not in {
@@ -150,6 +164,11 @@ def load_suite(directory):
         _object(expected["metrics"], set(METRICS), set(), "expected.metrics")
         for metric, label in expected["metrics"].items():
             if metric == "behavior_check" and isinstance(label, list):
+                if entry.get("checks"):
+                    raise ValueError(
+                        "behavior label list cannot be combined with entry.checks; the verifier scores "
+                        "checks together with judged behaviors, so use a scalar pass or fail label"
+                    )
                 if len(label) != len(entry.get("expected_behavior", [])) or any(type(v) is not bool for v in label):
                     raise ValueError("behavior label length must match expected_behavior and contain booleans")
             elif not isinstance(label, str) or label not in set(VERDICTS) - {"error"}:

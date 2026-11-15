@@ -376,6 +376,31 @@ class TestCLIReporter:
         assert "PASS" in output
         assert "FAIL" in output
 
+    @pytest.mark.parametrize("colored", [False, True])
+    def test_success_metadata_uses_default_text_color(self, colored: bool) -> None:
+        from io import StringIO
+
+        from rich.console import Console
+
+        result = ValidationResult(validator_name="QUALITY", validator_description="Quality checks")
+        result.add_success("quality_score", "Quality score: 84.5/100", grade="B", skill_type="script-based", count=3)
+        stream = StringIO()
+        console = Console(
+            file=stream,
+            force_terminal=colored,
+            color_system="standard" if colored else None,
+            no_color=False,
+            width=160,
+        )
+
+        CLIReporter()._print_success_details(result, console)
+
+        output = stream.getvalue()
+        # Syntax highlighting can hide values against PowerShell's blue background.
+        assert "Quality score: 84.5/100 (grade=B, skill_type=script-based, count=3)" in output
+        if colored:
+            assert "\x1b[32m[OK]\x1b[0m" in output
+
     @pytest.mark.parametrize("severity", [Severity.MEDIUM, Severity.LOW])
     def test_render_all_shows_passing_findings_without_changing_pass_state(self, severity: Severity) -> None:
         result = _similarity_result(severity=severity)

@@ -256,6 +256,9 @@ All notable changes to SkillEvaluator are documented in this file.
   successful stop, instead of reporting an interrupted cleanup on cancellation.
 - Native NeMo Gym cleanup now also stops run-owned detached server processes
   after startup timeouts, interruptions and early exits, without targeting other runs.
+- Published documentation links use page routes so readers can navigate between
+  setup, report interpretation, recovery and the reference pages.
+
 - NeMo Gym results reject verifier rewards that identify a different staged
   case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings

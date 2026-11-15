@@ -621,6 +621,27 @@ class ValidationResult:
         represented = self._finding_legacy_lines()
         return [warning for warning in self.warnings if warning not in represented]
 
+    def recalculate_keeping_independent(self, errors: list[str], warnings: list[str]) -> None:
+        """Rebuild from findings after their severities changed, keeping the messages no finding repeats.
+
+        :meth:`recalculate_from_findings` drops every error and warning.
+        *errors* and *warnings* are what :meth:`independent_errors` and
+        :meth:`independent_warnings` returned before the change, since a line
+        that repeats a finding names its old severity. Every such warning is
+        put back, such as why a scanner did not complete. Such errors are put
+        back only when the scan is incomplete, which fails anyway and whose
+        errors say why; any other may explain a blocker that the change
+        lowered. An error the rebuilt result already holds, such as a gate
+        failure, is not added again.
+        """
+        self.recalculate_from_findings()
+        if self.is_incomplete:
+            for error in errors:
+                if error not in self.errors:
+                    self.add_error(error)
+        for warning in warnings:
+            self.add_warning(warning)
+
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.
 

@@ -201,6 +201,31 @@ class TestRecalculateFromFindings:
         for key in ("errors", "warnings", "critical_count", "high_count", "medium_count", "low_count"):
             assert before[key] == after[key]
 
+    @pytest.mark.parametrize("incomplete", [False, True])
+    def test_keeping_independent_messages(self, incomplete: bool):
+        """Warnings no finding repeats stay; such errors stay only on an incomplete scan, each gate failure once."""
+        result = ValidationResult()
+        result.add_finding(_finding(Severity.HIGH))
+        result.add_error("baseline fingerprints were ignored")
+        result.fail_gate("scanner status is unknown")
+        result.add_warning("scanner skipped one file")
+        result.add_warning("scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("scanner")
+        errors, warnings = result.independent_errors(), result.independent_warnings()
+
+        result.findings[0].severity = Severity.INFO
+        result.recalculate_keeping_independent(errors, warnings)
+
+        expected = ["scanner status is unknown"]
+        if incomplete:
+            expected.append("baseline fingerprints were ignored")
+        assert result.errors == expected
+        assert result.summary.errors == len(expected)
+        assert result.warnings == [result.findings[0].to_legacy_string(), *["scanner skipped one file"] * 2]
+        assert result.summary.warnings == 3
+        assert result.passed is False
+
 
 class TestMerge:
     """Tests for merge and merge_with_prefix aggregation."""

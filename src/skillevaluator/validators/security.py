@@ -6769,17 +6769,9 @@ class SecurityValidator(ValidatorBase):
                 suppressed += 1
 
         if suppressed:
-            result.recalculate_from_findings()
-            # Rebuilding from findings drops every error and warning that no finding repeats.
-            # An incomplete scan already fails, and its errors say why. Any other such
-            # error, such as a stale-baseline note, explains blockers that may be gone.
-            if result.is_incomplete:
-                for error in errors:
-                    if error not in result.errors:
-                        result.add_error(error)
-            for warning in warnings:
-                if warning not in result.warnings:
-                    result.add_warning(warning)
+            # An error no finding repeats, such as a stale-baseline note, may
+            # explain blockers that are gone, so it stays only on an incomplete scan.
+            result.recalculate_keeping_independent(errors, warnings)
             target_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
             verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")
             result.add_message(

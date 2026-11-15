@@ -20,6 +20,8 @@ def test_install_argv_pins_release_under_managed_root(tmp_path):
 
 
 def test_every_managed_install_pins_the_release_harbor_installs(tmp_path):
+    # Both sides read PINNED_RUNTIME_VERSIONS, so this guards against runner.py
+    # handing Harbor a version literal of its own again.
     from skillevaluator.tier3.harbor import runner
 
     for agent in local_runtime.LOCAL_RUNTIME_AGENTS:

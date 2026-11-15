@@ -250,6 +250,22 @@ All notable changes to SkillEvaluator are documented in this file.
   `tier3/dataset_sufficiency.py`, the default quality config and the bundled
   grader suite, so retuning any of them fails CI instead of rotting the page.
 
+- The eval dataset docs now say that a template prompt calls every bare
+  `SKILL.md` in the skill's description `my SKILL.md` only when the
+  description reads, opens, loads, consults or follows `SKILL.md`, or
+  otherwise points at the skill's own `SKILL.md` as a prompt `tier3 validate`
+  warns about would. Once one `SKILL.md` counts, every bare `SKILL.md` in the
+  description is renamed, even one after "a" or "the following", one before
+  a format noun or one before `in ./pdf-tools`. Reading does not count when
+  `in`, `of`, `from`, `under` or `inside` comes right after `SKILL.md`,
+  unless the skill itself follows (`the skill`, `the installed skill`,
+  `its own skill` or the skill's name), as in `in ./pdf-tools` or `in full`.
+  Other place words, such as `at` or `within`, do not count. The docs said
+  any `SKILL.md` in the description was renamed, but "Validates `SKILL.md`
+  frontmatter fields" and "Reads `SKILL.md` files" keep their `SKILL.md`, and
+  "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
+  request".
+
 ### Fixed
 
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
@@ -743,6 +759,29 @@ All notable changes to SkillEvaluator are documented in this file.
   skill still gets the reason that points at provider and embedding
   configuration, and the log then names no skill, not even one whose
   frontmatter is invalid.
+
+- Template cases from `create-eval-dataset` no longer quote a skill
+  description that names one of the skill's scripts without running it, such
+  as "Checks release manifests with review.py and reports blockers", in the
+  expected output and the assertion about the outcome. The no-skill baseline
+  does not have the script. The graded text is now the generic outcome; the
+  prompt still quotes the description. The autopilot starter case uses this
+  outcome text when it has no LLM reply, or when it replaces LLM-written
+  graded text that uses the skill; other LLM-written text that names a script
+  is kept.
+- When a template prompt would call a `SKILL.md` in the skill's description
+  `my SKILL.md` and the skill's name, "the `<name>` skill's" or "the
+  installed skill's" comes right before any `SKILL.md` in it, template cases
+  now get the generic task "handle a typical request" and generic graded
+  text, as for a description that names `<name>/SKILL.md`. This covers
+  "Reads release-review's `SKILL.md`", "Follows the release-review skill's
+  `SKILL.md`" and "Reads `SKILL.md`, then validates release-review's
+  `SKILL.md` frontmatter". Before, the prompt and the graded text quoted a
+  garbled task such as "reads release-review's my `SKILL.md`". A description
+  whose `SKILL.md` is not renamed, such as "Validates release-review's
+  `SKILL.md` frontmatter", is quoted as before. Generic wording comes first,
+  as in `tier3 validate`: for a skill named read or own, "read `SKILL.md`"
+  and "its own `SKILL.md`" are renamed as for any other skill.
 
 ## 0.9.0 - 2026-11-13
 

@@ -101,11 +101,42 @@ expected output or assertion that the agent read `SKILL.md`, ran the skill's
 script, or used the skill, cannot be met by the baseline and inflates lift.
 `skill_execution` scores skill use separately (see
 [How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
-Template cases from `create-eval-dataset` are outcome-only; when the skill's
-description mentions `SKILL.md`, the template prompt calls it `my SKILL.md`.
-Its LLM prompts ask for outcome checks. It prints a warning for each generated
-case that still grades skill use, and the autopilot starter case leaves such
-text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
+Template cases from `create-eval-dataset` are outcome-only. When the skill's
+description reads, opens, loads, consults or follows `SKILL.md` with no path
+before it, or otherwise points at the skill's own `SKILL.md` as a prompt
+`tier3 validate` warns about would (such as `cat SKILL.md` or "uses the
+skill's `SKILL.md`"), the template prompt calls every bare `SKILL.md` in the
+description `my SKILL.md`. Reading `SKILL.md` does not count when the wording
+means another `SKILL.md` or the file format: "a `SKILL.md`", "the following
+`SKILL.md`", or a format noun such as `files`, `format`, `spec` or `template`
+right after it or after one other word, as in "reads `SKILL.md` files" or
+"follows the `SKILL.md` frontmatter format". That other word cannot be `and`,
+`or`, `then`, `but`, `before`, `after`, `to`, `for` or `with`, so "reads
+`SKILL.md` for format errors" is still renamed but "reads `SKILL.md` on
+format errors" is not. Reading also does not count when `in`, `of`, `from`,
+`under` or `inside` comes right after `SKILL.md`, unless the skill itself
+follows (`the skill`, `the installed skill`, `its own skill` or the skill's
+name), as in `in ./pdf-tools` or `in full`. Other place words, such as `at`
+or `within`, do not count: "reads `SKILL.md` at ./pdf-tools" is still
+renamed. A description that only names `SKILL.md` without reading it, such
+as "validates `SKILL.md` frontmatter", keeps it too. Once one `SKILL.md`
+counts, every bare `SKILL.md` in the description is renamed, even one that
+would not count by itself, such as one after "a" or "the following", one
+before a format noun or one before `in ./pdf-tools`. When the description
+still points at the skill's files after the rename, such as
+`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when one
+`SKILL.md` counts and the skill's name, "the `<name>` skill's" or "the
+installed skill's" comes right before any `SKILL.md` in the description, as
+in "reads `<name>`'s `SKILL.md`" or "reads `SKILL.md`, then validates
+`<name>`'s `SKILL.md` frontmatter", the template prompt asks for the generic
+task "handle a typical request" and the graded text is generic. When no
+`SKILL.md` counts, the description keeps such a `SKILL.md`, as in "validates
+`<name>`'s `SKILL.md` frontmatter". Generic wording comes first, as in `tier3 validate`:
+for a skill named read or own, "read `SKILL.md`" and "its own `SKILL.md`" are
+renamed as for any other skill. `create-eval-dataset`'s LLM prompts ask for
+outcome checks. It
+prints a warning for each generated case that still grades skill use, and
+the autopilot starter case leaves such text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of
 its scripts. It also checks strings in nested prompts, expected outputs and
 assertions for skill use, using the skill's directory and frontmatter names

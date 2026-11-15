@@ -437,6 +437,33 @@ def _signals_raise_keyboard_interrupt() -> Any:
             signal.signal(getattr(signal, name), handler)
 
 
+@contextlib.contextmanager
+def _defer_termination_signals() -> Any:
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    pending = False
+
+    def _handler(_signum: int, _frame: object) -> None:
+        nonlocal pending
+        pending = True
+
+    previous = {
+        getattr(signal, name): signal.signal(getattr(signal, name), _handler)
+        for name in ("SIGTERM", "SIGHUP")
+        if hasattr(signal, name)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if pending:
+            raise KeyboardInterrupt
+
+
 def _gym_run_processes(token: str, leader_group: int) -> list[int]:
     try:
         snapshot = subprocess.run(
@@ -637,7 +664,8 @@ def _run_gym(
                 raise
     finally:
         try:
-            _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+            with _defer_termination_signals():
+                _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
         finally:
             reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 

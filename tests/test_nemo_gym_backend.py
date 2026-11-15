@@ -2376,6 +2376,37 @@ def test_nemo_gym_rejects_unsupported_run_options(
     assert f"{flag} is not supported with --backend nemo-gym yet" in errors
 
 
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP"])
+def test_detached_cleanup_defers_termination_until_finished(tmp_path: Path, signal_name) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    marker = tmp_path / "finished"
+    script = (
+        "import os, signal, sys\n"
+        "from pathlib import Path\n"
+        "from skillevaluator.tier3.nemo_gym import runner\n"
+        "def cleanup(*args, **kwargs):\n"
+        f"    os.kill(os.getpid(), signal.{signal_name})\n"
+        f"    Path({str(marker)!r}).touch()\n"
+        "runner._stop_detached_gym_processes = cleanup\n"
+        f"with open({str(tmp_path / 'gym.log')!r}, 'w') as log:\n"
+        f"    runner._run_gym([sys.executable, '-c', 'pass'], cwd=Path({str(tmp_path)!r}), "
+        "env=dict(os.environ), log=log, timeout_s=5)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(Path(runner.__file__).parents[3])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert marker.exists(), f"cleanup interrupted: returncode={result.returncode}"
+    assert "KeyboardInterrupt" in result.stderr
+
+
 def test_nemo_gym_rejects_budget_config(tmp_path: Path) -> None:
     from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
 

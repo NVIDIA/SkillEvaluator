@@ -101,11 +101,42 @@ expected output or assertion that the agent read `SKILL.md`, ran the skill's
 script, or used the skill, cannot be met by the baseline and inflates lift.
 `skill_execution` scores skill use separately (see
 [How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
-Template cases from `create-eval-dataset` are outcome-only; when the skill's
-description mentions `SKILL.md`, the template prompt calls it `my SKILL.md`.
-Its LLM prompts ask for outcome checks. It prints a warning for each generated
-case that still grades skill use, and the autopilot starter case leaves such
-text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
+Template cases from `create-eval-dataset` are outcome-only. When the skill's
+description reads, opens, loads, consults or follows `SKILL.md` with no path
+before it, or otherwise points at the skill's own `SKILL.md` as a prompt
+`tier3 validate` warns about would (such as `cat SKILL.md` or "uses the
+skill's `SKILL.md`"), the template prompt calls every bare `SKILL.md` in the
+description `my SKILL.md`. Reading `SKILL.md` does not count when the wording
+means another `SKILL.md` or the file format: "a `SKILL.md`", "the following
+`SKILL.md`", or a format noun such as `files`, `format`, `spec` or `template`
+right after it or after one other word, as in "reads `SKILL.md` files" or
+"follows the `SKILL.md` frontmatter format". That other word cannot be `and`,
+`or`, `then`, `but`, `before`, `after`, `to`, `for` or `with`, so "reads
+`SKILL.md` for format errors" is still renamed but "reads `SKILL.md` on
+format errors" is not. Reading also does not count when `in`, `of`, `from`,
+`under` or `inside` comes right after `SKILL.md`, unless the skill itself
+follows (`the skill`, `the installed skill`, `its own skill` or the skill's
+name), as in `in ./pdf-tools` or `in full`. Other place words, such as `at`
+or `within`, do not count: "reads `SKILL.md` at ./pdf-tools" is still
+renamed. A description that only names `SKILL.md` without reading it, such
+as "validates `SKILL.md` frontmatter", keeps it too. Once one `SKILL.md`
+counts, every bare `SKILL.md` in the description is renamed, even one that
+would not count by itself, such as one after "a" or "the following", one
+before a format noun or one before `in ./pdf-tools`. When the description
+still points at the skill's files after the rename, such as
+`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when one
+`SKILL.md` counts and the skill's name, "the `<name>` skill's" or "the
+installed skill's" comes right before any `SKILL.md` in the description, as
+in "reads `<name>`'s `SKILL.md`" or "reads `SKILL.md`, then validates
+`<name>`'s `SKILL.md` frontmatter", the template prompt asks for the generic
+task "handle a typical request" and the graded text is generic. When no
+`SKILL.md` counts, the description keeps such a `SKILL.md`, as in "validates
+`<name>`'s `SKILL.md` frontmatter". Generic wording comes first, as in `tier3 validate`:
+for a skill named read or own, "read `SKILL.md`" and "its own `SKILL.md`" are
+renamed as for any other skill. `create-eval-dataset`'s LLM prompts ask for
+outcome checks. It
+prints a warning for each generated case that still grades skill use, and
+the autopilot starter case leaves such text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
 `<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of
 its scripts. It also checks strings in nested prompts, expected outputs and
 assertions for skill use, using the skill's directory and frontmatter names
@@ -169,6 +200,37 @@ mentioned in the response. `output_matches` uses a regular expression and
 Unknown check types and invalid fields are dataset-validation errors. On a
 without-skill baseline, checks for scripts inside the evaluated skill are not
 checked because that skill is not installed.
+
+For an exact final-response format, use an anchored `output_matches` check
+and keep semantic requirements in `expected_behavior` (or `assertions`). For
+example, this legacy entry checks numeric-only output without judging it:
+
+```json
+{
+  "id": "numeric-only",
+  "question": "Calculate 6 * 7. Return only the numeric answer.",
+  "ground_truth": "42",
+  "expected_behavior": [],
+  "checks": [
+    {"type": "output_matches", "pattern": "\\A[+-]?\\d+(?:\\.\\d+)?\\Z"}
+  ]
+}
+```
+
+`output_matches` uses Python `re.search`: without anchors, a matching substring
+is sufficient. Use `\A` and `\Z` to require the whole literal response;
+`$` also permits a match before a final newline. Leading/trailing whitespace,
+labels and Markdown fences fail the example above. To require a literal prefix,
+use a pattern such as `\ATOTAL=[+-]?\d+(?:\.\d+)?\Z`, escaping any regular-expression
+metacharacters in the prefix. Double backslashes in JSON strings, as shown.
+Choose the numeric syntax your dataset actually requires (for example, add an
+exponent explicitly if allowed). A wrong value such as `43` still passes this
+format check; factual correctness remains separate. Avoid duplicating the
+same rule in both checks and judged assertions.
+
+Natural-language format judgments can accept malformed output or reject a
+well-formatted wrong value. See the [measured diagnostic and its limitations](/skills/skillevaluator/grader-validation#reading-the-report),
+including sample sizes and the lack of independent human labels.
 
 <AccordionGroup>
   <Accordion title="Legacy flat format">
@@ -502,8 +564,8 @@ grading:
 | `harbor.max_agent_tokens` | integer ≥ 0 | Maximum observed agent-model tokens across the run. |
 | `harbor.max_judge_calls` | integer ≥ 0 | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `harbor.max_attempts_total` | integer ≥ 0 | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
-| `harbor.max_cost_usd` | finite number ≥ 0 | Agent model spend ceiling; requires `harbor.price_file` and excludes judge spend, setup, and container time. |
-| `harbor.price_file` | path | JSON price book keyed by exact resolved model identifier. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. |
+| `harbor.max_cost_usd` | finite number ≥ 0 | Agent inference accounting admission limit, not a hard currency ceiling or billed spend; requires `harbor.price_file`. Judge, setup, container, backend, and infrastructure charges are excluded. |
+| `harbor.price_file` | path | User-supplied JSON rates per million tokens, keyed by exact resolved model identifier, not verified billing prices. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. File name/hash and actually applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
 | `harbor.tolerate_baseline_timeouts` | boolean | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)). Default: `false`; the CLI flag overrides this value. |
@@ -654,11 +716,11 @@ Passing checks and warnings are not listed as source errors.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Run a live evaluation" icon="rocket" href="tier3-live-evaluation.mdx">
+  <Card title="Run a live evaluation" icon="rocket" href="/skills/skillevaluator/tier3-live-evaluation">
     Point `tier3 evaluate` at your skill and measure Skill Lift with the
     dataset you just authored.
   </Card>
-  <Card title="Custom graders and tasks" icon="flask" href="custom-graders.mdx">
+  <Card title="Custom graders and tasks" icon="flask" href="/skills/skillevaluator/custom-graders">
     When assertions aren't enough, bring your own grader or a complete Harbor
     task.
   </Card>

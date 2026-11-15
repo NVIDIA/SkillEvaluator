@@ -56,7 +56,7 @@ excluded from lift, so it can differ from subtracting the displayed arm scores.
 Pass-rate and resource differences can remain available when score lift is
 unavailable. If every positive with-skill trial has confirmed zero activation,
 the comparison is **inconclusive** and all differences stay unavailable. See
-[Skill Lift](reports.mdx#skill-lift) for these eligibility rules.
+[Skill Lift](/skills/skillevaluator/reports#skill-lift) for these eligibility rules.
 
 When a pair's differences stay blank, the **Comparison reason** column says why.
 Repeated attempts pair by case, as in the HTML report: each arm must record the
@@ -85,7 +85,7 @@ Missing measurements stay unavailable, and cost is shown only when recorded in
 USD. Canonical Tier 3 JSON records each single-step trial's agent execution time
 (`agent_seconds`) when Harbor's timestamps carry a timezone. Timestamps without a
 timezone are treated as unavailable, as in the HTML report's
-[measured agent resources](reports.mdx#measured-agent-resources). Agent time excludes
+[measured agent resources](/skills/skillevaluator/reports#measured-agent-resources). Agent time excludes
 environment setup and verification. Canonical JSON never records USD cost; open
 the retained run directory to show Harbor's recorded `agent_result.cost_usd` and
 multi-step totals. For retained runs whose trajectory lacks token totals or

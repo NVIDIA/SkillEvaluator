@@ -84,3 +84,15 @@ def test_second_launch_in_one_run_fails() -> None:
     agent.skilleval_native_command(CODEX, None)
     with pytest.raises(NativeLaunchError):
         agent.skilleval_native_command(CODEX, None)
+
+
+@pytest.mark.parametrize("assignments", ["CODEX_API_KEY= ", "OPENAI_API_KEY= ", "CODEX_API_KEY= OPENAI_API_KEY= "])
+def test_codex_native_setup_preserves_harbor_credential_clearing(assignments: str) -> None:
+    command = CODEX.replace("codex exec", assignments + "codex exec")
+    agent = _mixin(native_agents._NativeCodexMixin)
+    rewritten, _ = agent.skilleval_native_command(command, None)
+    assert agent._skilleval_native_started
+    assert rewritten == command.replace(assignments + "codex exec", SETUP + assignments + "codex exec")
+    assert subprocess.run(["sh", "-n", "-c", rewritten], check=False).returncode == 0
+    with pytest.raises(NativeLaunchError):
+        agent.skilleval_native_command(command, None)

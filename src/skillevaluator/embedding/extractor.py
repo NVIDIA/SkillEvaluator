@@ -64,6 +64,10 @@ MAX_EXCLUSION_PATH_CHARS = 512
 MAX_FRONTMATTER_FIELD_CHARS = 16_384
 
 
+class ManifestEncodingError(ValueError):
+    """A manifest's bytes are not valid UTF-8, so its frontmatter cannot be read."""
+
+
 @dataclass
 class ContentEntry:
     """Unified representation of a content item for embedding.
@@ -440,7 +444,7 @@ def _read_bounded_manifest(
     try:
         return raw_bytes.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise ValueError(f"Manifest is not valid UTF-8: {file_path.name}") from exc
+        raise ManifestEncodingError(f"Manifest is not valid UTF-8: {file_path.name}") from exc
 
 
 def _is_discovery_manifest_name(name: str) -> bool:

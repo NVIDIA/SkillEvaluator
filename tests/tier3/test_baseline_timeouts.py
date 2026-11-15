@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -867,15 +868,45 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
     assert lead in html
+
     # The completed-agent lead names other execution failures when its verdict
     # fails. Each tolerated baseline keeps one scoped coverage/limitation cue,
     # including when another complete agent never activated the skill.
-    overview = html.split('class="t3-overview-lead"', 1)[1].split("</div>", 1)[0]
+    class OverviewSummary(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth = 0
+            self.matches = 0
+            self.parts: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "div" and (self.depth or dict(attrs).get("id") == "tier3-overview-summary"):
+                if not self.depth:
+                    self.matches += 1
+                self.depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "div" and self.depth:
+                self.depth -= 1
+
+        def handle_data(self, data: str) -> None:
+            if self.depth:
+                self.parts.append(data)
+
+    # The summary includes nested divs before the tolerated-baseline notice.
+    summary = OverviewSummary()
+    summary.feed(html)
+    summary.close()
+    assert summary.matches == 1
+    assert summary.depth == 0
+    overview = " ".join("".join(summary.parts).split())
+    assert lead.removeprefix("<strong>").removesuffix("</strong>") in overview
     lead_attention = "Other execution failures need attention;"
     tolerated_attention = "baseline timeouts were tolerated by"
     assert (lead_attention in overview) is (verdict == "fail")
     assert overview.count(tolerated_attention) == 1
-    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in overview
+    assert "Baseline incomplete for opencode (1 of 2 attempts scored)" in overview
+    assert "--tolerate-baseline-timeouts; baseline and uplift unavailable." in overview
     assert "**Needs attention:** other execution failures remain." in benchmark
     if verdict == "inconclusive":
         # The tolerated agent did activate the skill, so Insights names whose trials never did.

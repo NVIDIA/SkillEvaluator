@@ -491,8 +491,11 @@ def _gym_run_processes(token: str, leader_group: int) -> list[int]:
 def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool = False) -> None:
     from skillevaluator.tier3.harbor.runner import _HARBOR_RUN_CANCEL_POLL_SECONDS, _HARBOR_RUN_REAP_SECONDS
 
+    seen: set[int] = set()
+
     def signal_owned(sig: int) -> list[int]:
         owned = _gym_run_processes(token, leader_group)
+        seen.update(owned)
         for pid in owned:
             with contextlib.suppress(ProcessLookupError):
                 os.kill(pid, sig)
@@ -517,6 +520,20 @@ def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool =
     except KeyboardInterrupt:
         signal_owned(signal.SIGKILL)
         raise
+    finally:
+        deadline = time.monotonic() + _HARBOR_RUN_REAP_SECONDS
+        while seen:
+            for pid in tuple(seen):
+                try:
+                    reaped, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    seen.remove(pid)
+                else:
+                    if reaped:
+                        seen.remove(pid)
+            if not seen or time.monotonic() >= deadline:
+                break
+            time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
 
 
 def _run_gym(

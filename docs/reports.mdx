@@ -989,6 +989,16 @@ count as activation opportunities; missing or unsupported evidence remains
 unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
 
+Budget-stopped runs are different from evaluated failures. If `budget.not_run`
+contains attempts, the canonical run summary verdict is `incomplete`, with a
+reason naming the budget and the planned attempts left not run. Terminal,
+HTML, `tier3-benchmark.md`, and the full benchmark card show the budget summary.
+Admitted attempts retain their scores, but any Skill Lift is labelled as
+covering admitted attempts only, not a complete-run claim that the skill helps.
+An overrun alone keeps the verdict and adds the budget warning. All reports
+use final accounting; rebuilding older runs prefers `result.json.budget` over
+a stale `run_config.json` snapshot. Execution status and exit codes are unchanged.
+
 An arm that ran but failed, for example because one baseline attempt hit the
 agent timeout, fails the agent and the run unless `--tolerate-baseline-timeouts`
 keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)),

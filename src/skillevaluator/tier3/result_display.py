@@ -528,6 +528,11 @@ def _agent_score_headlines(
     agents = result.get("agents")
     multiple_agents = isinstance(agents, Mapping) and len(agents) > 1
     agent_verdict = "inconclusive" if _never_activated(data) else "fail" if verdict_reason else "pass"
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    budget_partial = budget_incomplete_reason(result.get("budget")) is not None
+    if budget_partial:
+        agent_verdict = "incomplete"
     if multiple_agents or verdict_reason:
         verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
         reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
@@ -542,6 +547,8 @@ def _agent_score_headlines(
         )
     ):
         lift_label = "OVERALL SKILL LIFT"
+        if budget_partial:
+            lift_label += " (admitted attempts only)"
         if verdict_reason and _finite_number(overall.get("delta")) is not None and overall["delta"] > 0:
             lift_label += " (for reference)"
         headline = Text(f"{lift_label}   ", style="bold")
@@ -1097,11 +1104,21 @@ def render_evaluation_result(
         console.print(safe(baseline_description(dict(baseline))))
     budget = result.get("budget")
     if isinstance(budget, Mapping) and (
-        budget.get("status") == "exhausted" or any(value is not None for value in (budget.get("limits") or {}).values())
+        budget.get("status") == "exhausted"
+        or budget.get("partial")
+        or budget.get("not_run")
+        or budget.get("observed_overruns")
+        or any(value is not None for value in (budget.get("limits") or {}).values())
     ):
         from skillevaluator.tier3.harbor.run_budget import budget_line
 
         console.print(budget_line(dict(budget)))
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    budget_reason = budget_incomplete_reason(dict(budget)) if isinstance(budget, Mapping) else None
+    if budget_reason:
+        console.print(Text("RUN QUALITY VERDICT: INCOMPLETE", style="bold yellow"))
+        console.print(Text(budget_reason, style="yellow"))
     provenance_line, provenance_is_template = dataset_provenance_display(result.get("dataset_provenance"))
     if provenance_line:
         console.print(Text(provenance_line, style="yellow" if provenance_is_template else "dim"))
@@ -1120,7 +1137,7 @@ def render_evaluation_result(
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
     has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
-        if len(agents) > 1:
+        if len(agents) > 1 and not budget_reason:
             run_verdict = str(result.get("verdict") or "").casefold()
             if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
                 agent_verdicts = []

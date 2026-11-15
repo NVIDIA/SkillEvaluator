@@ -451,6 +451,11 @@ All notable changes to SkillEvaluator are documented in this file.
   After observed symlink creation, only an unadorned direct leaf can qualify;
   unknown command directories cannot qualify. Literal quoting is inert
   because expansions and escapes are rejected before operands are parsed.
+- Tier 3 reports now use final run-budget accounting, including when rebuilding
+  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
+  reports show budget exhaustion, not-run attempts, overruns, and unverified
+  usage. Budget-stopped runs have an incomplete summary verdict; admitted
+  scores remain visible and their lift is not a complete-run skill-effect claim.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized

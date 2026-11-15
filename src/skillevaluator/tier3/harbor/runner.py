@@ -6709,6 +6709,7 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    run_config["budget"] = budget.metadata()
     identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
@@ -6731,7 +6732,7 @@ def _run_harbor_eval_impl(
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
             "identity_dataset_digest": identity_digest,
             "baseline_task_tree_digest": task_tree_digest,
-            "budget": budget.metadata(),
+            "budget": run_config["budget"],
             "dataset_provenance": dataset_provenance,
             "run_config": run_config,
             "partial": bool(budget.not_run),
@@ -6802,6 +6803,11 @@ def _run_harbor_eval_impl(
             if best_agent in agent_results:
                 results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(results["budget"]):
+        results["verdict"] = "incomplete"
+        results["summary"] = {"verdict": "incomplete", "verdict_reason": reason}
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}
     selected_policy = results.get("score_policy") or attempt_policy.get("score_policy")

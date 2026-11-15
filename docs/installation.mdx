@@ -6,12 +6,12 @@ description: "Install SkillEvaluator with uv, from source, or in Docker, and cho
 Start with the base package for deterministic quality checks, then add only the
 extras needed for your next command. No API key is needed to install or to run
 deterministic Tier 1 checks. LLM-backed features use a configured provider
-([Providers & Credentials](configuration.mdx)); live Tier 3 evaluation adds an
+([Providers & Credentials](/skills/skillevaluator/configuration)); live Tier 3 evaluation adds an
 agent runtime and a sandbox.
 
 For a complete first run against a bundled skill, use the
-[keyless Quickstart](quickstart.mdx#run-without-an-llm), or add the `llm` extra
-for the [NVIDIA Build route](quickstart.mdx#use-nvidia-build). Those routes use a
+[keyless Quickstart](/skills/skillevaluator/quickstart#run-without-an-llm), or add the `llm` extra
+for the [NVIDIA Build route](/skills/skillevaluator/quickstart#use-nvidia-build). Those routes use a
 source checkout and `uv run`; the standalone install below is convenient when
 you already have your own skill directory.
 
@@ -26,7 +26,7 @@ This project will download and install additional third-party open source softwa
 - No API key is needed for deterministic Tier 1 checks. The base package
   includes Bandit and the uv executable; Tier 1 provisions SkillSpector and
   Gitleaks itself, and Semgrep is optional (see [System tools](#system-tools)). LLM-backed checks and Tiers 2–3 use a configured provider — see
-  [Providers & Credentials](configuration.mdx).
+  [Providers & Credentials](/skills/skillevaluator/configuration).
 
 ## Install
 
@@ -50,7 +50,7 @@ Add the `llm` extra when you want to make your first rubric-evaluation call:
 uv tool install --python 3.13 --reinstall "skillevaluator[llm] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
-Then follow the [NVIDIA Build setup](quickstart.mdx#use-nvidia-build), using
+Then follow the [NVIDIA Build setup](/skills/skillevaluator/quickstart#use-nvidia-build), using
 `skillevaluator rubric-eval ./my-skill` for a standalone installation. Provider
 clients install with the extra; an API key is still required for the model call.
 
@@ -83,7 +83,7 @@ skillevaluator --version
 </Tab>
 <Tab title="From source" language="source">
 
-The [Quickstart](quickstart.mdx) uses `uv run --python 3.13` for the base quality
+The [Quickstart](/skills/skillevaluator/quickstart) uses `uv run --python 3.13` for the base quality
 check and adds `--extra llm` for the NVIDIA Build rubric call. This installs
 only the dependencies needed for each route.
 
@@ -178,7 +178,7 @@ and environment backends.
 | `dev` | Build, test, coverage, and formatting tools for contributors |
 
 <Tip>
-`[all]` installs the evaluator extras (`tier2`, `tier3`, `security`); add `dashboard` with `[all,dashboard]`. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.25.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](agents-and-sandboxes.mdx#where-trials-run).
+`[all]` installs the evaluator extras (`tier2`, `tier3`, `security`); add `dashboard` with `[all,dashboard]`. External scanner tools, Docker, agent CLIs, and the Harbor extras for managed sandbox backends (such as `harbor[modal]==0.25.0`) stay separate no matter which extra you pick — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#where-trials-run).
 </Tip>
 
 ## System tools
@@ -198,7 +198,7 @@ uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
 brew install gitleaks          # or a binary from https://github.com/gitleaks/gitleaks/releases
 ```
 
-Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](agents-and-sandboxes.mdx).
+Docker is required only for Tier 3 Docker-mode evaluation. Agent CLIs and their credentials are user-supplied — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
 
 `skillevaluator health-check --tier 1` reports the path and version of each installed scanner and exits non-zero when one is missing, misconfigured, or older than the supported release. Add `--checks security,code-integrity,dependency` to include pip-audit.
 </Note>
@@ -216,7 +216,7 @@ skillevaluator --version
 skillevaluator health-check
 ```
 
-`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (the agent follows the configured provider; the environment defaults to `docker`), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground; add `doctor --verify-models` to make a live credential-bearing catalog request for each resolved agent model. A public or otherwise non-authoritative result is reported as a warning because catalog access alone does not prove inference access. See the [CLI Reference](cli-reference.mdx) for both commands.
+`--version` confirms the CLI is on PATH — that is the whole smoke test for a Tier 1-only install. `health-check` goes one step further: a quick readiness check of the CLI and the selected live-eval backend (the agent follows the configured provider; the environment defaults to `docker`), useful once you plan to run Tier 3. On an install without the `tier3` extra or a configured provider it lists the missing pieces and exits non-zero — expected for a Tier 1-only setup, not a broken install. For a deeper diagnosis, `doctor` covers the same ground; add `doctor --verify-models` to make a live credential-bearing catalog request for each resolved agent model. A public or otherwise non-authoritative result is reported as a warning because catalog access alone does not prove inference access. See the [CLI Reference](/skills/skillevaluator/cli-reference) for both commands.
 
 ## Troubleshooting
 
@@ -232,10 +232,10 @@ A required scanner could not run. Check that GitHub and PyPI are reachable (Skil
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Quickstart" icon="rocket" href="quickstart.mdx">
+  <Card title="Quickstart" icon="rocket" href="/skills/skillevaluator/quickstart">
     Check a bundled skill without an LLM, or use NVIDIA Build for a rubric review.
   </Card>
-  <Card title="Providers & Credentials" icon="shield" href="configuration.mdx">
+  <Card title="Providers & Credentials" icon="shield" href="/skills/skillevaluator/configuration">
     Wire up an LLM provider for Tier 2, Tier 3, and LLM-backed checks.
   </Card>
 </CardGroup>

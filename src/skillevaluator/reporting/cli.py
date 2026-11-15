@@ -47,6 +47,7 @@ from skillevaluator.reporting.base import (
     source_validation_errors,
     source_validation_preview,
 )
+from skillevaluator.reporting.declarative_coverage import render_declarative_coverage
 from skillevaluator.reporting.finding_verification import finding_verification
 from skillevaluator.reporting.harbor_viewer import (
     harbor_evidence_link_text,
@@ -452,6 +453,7 @@ class CLIReporter(ReporterBase):
     @staticmethod
     def _print_agent_eval_tables(agent_eval: dict, console: Console) -> None:
         """Print Tier 3 agent evaluation results."""
+        render_declarative_coverage(console, agent_eval.get("agents"))
         if agent_eval.get("baseline"):
             console.print(escape_markup(baseline_description(agent_eval["baseline"])))
         verdict = agent_eval.get("verdict", "unknown")

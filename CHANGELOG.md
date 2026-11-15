@@ -252,6 +252,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym detached cleanup defers termination signals until teardown finishes,
+  preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym cleanup now also stops run-owned detached server processes
   after startup timeouts, interruptions and early exits, without targeting other runs.
 - NeMo Gym results reject verifier rewards that identify a different staged

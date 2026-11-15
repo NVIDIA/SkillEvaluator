@@ -175,6 +175,29 @@ All notable changes to SkillEvaluator are documented in this file.
   the aligned desktop report is slightly wider. Long scanner versions wrap
   within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
   text contrast in the light and dark themes.
+- HTML Overview combines execution status, scored/unscored coverage and the
+  recorded next action. The baseline comparison stays open with its scores,
+  lift and Overall visible; signals and reasoning use adjacent disclosures.
+  Native agent cards, versions and typography remain. Dataset diagnostics
+  share exact structured explanations within an attempt and status while
+  retaining every assertion, requirement and evidence association. Missing
+  pass@k case outcomes show N/A alongside retained attempt counts; measured
+  zero success remains 0%. Harbor actions use concise recorded labels and
+  retain exact job identities in Diagnostics.
+- HTML can display optional retained native dependency completeness,
+  composition/ablation, Harbor delivery status, provider refusal/mixed-model
+  comparison basis, and recovery notes. Active warnings stay visible; routine
+  evidence is folded in the relevant view with local omission and shortening
+  notices. These are passive display fields, not new backend coverage;
+  hook/canary runtime summaries still need separate producer integration.
+  Public recovery, MCP and comparison projections remain. No scoring, gate,
+  CLI, canonical payload or newly produced insight behavior changes.
+- Embedded HTML JSON uses compact whitespace and charts receive only their
+  consumed data. Charts initialize for visible views after applying the theme,
+  reuse instances, and prepare closed views synchronously for print. Print
+  includes retained Dataset cases hidden by screen filters and restores the
+  screen's disclosure and filter state afterward. Downloads preserve the
+  retained snapshot and existing safety bounds.
 
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint

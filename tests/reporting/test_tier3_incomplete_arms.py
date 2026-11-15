@@ -526,8 +526,8 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
         assert "`validate` prints" not in text, name
 
 
-def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_docs_say_so() -> None:
-    """Only the callout tells a baseline that ran and failed from one that was skipped."""
+def test_html_agent_details_distinguish_an_unavailable_baseline_from_a_skipped_one() -> None:
+    """Unavailable aggregate quality must not imply the recorded baseline never ran."""
     _, _, _, report = _render(
         {
             "claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR])),
@@ -537,13 +537,15 @@ def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_d
 
     kpi_subs = re.findall(r'<div class="t3-kpi-sub">(.*?)</div>', report)
     assert kpi_subs.count("baseline N/A") == 2
-    assert kpi_subs.count("no baseline") == 2
+    assert kpi_subs.count("no baseline") == 1
+    assert kpi_subs.count("Overall baseline unavailable") == 1
     (note,) = _html_coverage_notes(report)
     assert note.startswith("claude-code baseline incomplete")
 
     definition = _doc_block("docs/reports.mdx", "When the HTML report has no lift for an agent or dimension")
-    assert "**no baseline** means" in definition
-    assert "a baseline arm that ran but failed" in definition
+    assert "**Overall baseline unavailable**" in definition
+    assert "**no baseline**" in definition
+    assert "aggregate quality score is missing" in definition
     assert "**Agent coverage notes**" in definition
     details = _doc_block("docs/reports.mdx", "The HTML report keeps a short coverage cue near the Tier 3 result")
-    assert "**no baseline** and `baseline N/A`" in details
+    assert "**Overall baseline unavailable**" in details and "`baseline N/A`" in details

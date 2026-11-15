@@ -2,6 +2,7 @@
 """Read agent associations from the consolidated native comparison table."""
 
 import re
+from html import unescape
 
 from report_markup_assertions import text_content
 
@@ -22,6 +23,8 @@ def dimension_lift_labels(html, agents, best_agent):
     for row in re.findall(r"<tr(?:\s[^>]*)?>(.*?)</tr>", body[1], re.DOTALL):
         cells = re.findall(r"<td(?:\s[^>]*)?>(.*?)</td>", row, re.DOTALL)
         primary = _text(cells[3])
+        if primary == "N/A":
+            primary += " " + " ".join(unescape(value) for value in re.findall(r'title="([^"]+)"', cells[3]))
         if re.fullmatch(r"[+-]\d+\.\d{2}", primary):
             primary += " lift"
         elif "inconclusive: skill never activated" in primary:

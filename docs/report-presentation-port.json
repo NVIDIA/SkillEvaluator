@@ -1,7 +1,7 @@
 {
   "schema_version": 1,
   "template": "src/skillevaluator/reporting/templates/report.html.j2",
-  "style_snapshot_scope": "Comment-free digests of the base and Tier 3 inline style blocks in this repository's template.",
+  "style_snapshot_scope": "Comment-free digests of the unchanged base and Tier 3 inline style blocks in this repository template; shared report_ui.css.j2 presentation adaptations are listed separately and are not covered by these two baseline hashes.",
   "native_styles": [
     {
       "block": "base",
@@ -31,12 +31,31 @@
     "Configured standard metrics remain explicitly unavailable in incomplete comparison tables; custom-only runs use their recorded metric names and values.",
     "Harbor viewer fallback selects a usable sanitized primary or recorded summary without combining unrelated jobs or inferring URLs.",
     "Renderer version sits beside the brand, with recorded SkillSpector versions in the Tier 1 tile; aligned screen content widens to 1280px while native typography and print sizing remain intact.",
-    "Recorded Harbor upload URLs survive shared display projection and directory regeneration, with live metadata taking precedence for the same job URL."
+    "Recorded Harbor upload URLs survive shared display projection and directory regeneration, with live metadata taking precedence for the same job URL.",
+    "Overview combines recorded execution status, scored/unscored coverage and a next action; full diagnostics and authored Insights remain accessible in their owning views.",
+    "The native baseline comparison stays open with scores, baseline, lift, Overall and agent context visible; signal lists, definitions and detailed reasoning use closed adjacent disclosures.",
+    "A baseline aggregate missing after execution is labeled baseline quality unavailable; baseline not run requires a recorded skipped arm.",
+    "Native agent cards, renderer/scanner version placement and existing body, header and metric type scales are preserved; compact mobile changes adjust arrangement and spacing.",
+    "Dataset diagnostics group identical structured causes only within the same attempt and status, retaining all assertion IDs, requirement text, rubric checks and evidence associations within existing preview bounds.",
+    "Absent, null and empty pass-at-k case outcomes display N/A with retained attempt counts; explicit recorded zero outcomes remain zero without recomputing scores or denominators.",
+    "Concise Harbor labels use recorded agent and condition associations; exact job identifiers remain in Diagnostics and URLs are never inferred.",
+    "Optional recorded native plugin completeness, composition, delivery, refusal/comparison basis and recovery notes use bounded typed display adapters; only active warnings appear in Overview and routine detail stays closed in Agent Details, Trials or Diagnostics.",
+    "Native compatibility does not add backend execution, collection, scoring, gate policy or public producer coverage; hook census and canary runtime summaries remain a separate producer integration gap.",
+    "MCP failed-call and connected-unused interpretations require explicit recorded counts/status; missing measurements never become zero.",
+    "Scope-level catalog skip reasons and repeated passive evidence qualifications have one owner, while local row/note omissions and shortened text remain disclosed.",
+    "Embedded report JSON is compact and chart literals contain only consumed fields; canonical download reconstruction and escaping remain unchanged.",
+    "Charts initialize after theme selection when visible, reuse instances, and prepare all print charts synchronously; print reveals retained Dataset cases hidden by screen filters and restores screen disclosure/filter state.",
+    "Bounded native agent identities retain attribution after content-budget exhaustion; unused composition components retain their recorded kind and disclose omitted kind groups."
   ],
   "drift_checks": [
     "tests/reporting/test_report_redesign.py::test_report_style_blocks_match_recorded_digests",
     "tests/reporting/test_telemetry_view.py",
-    "tests/reporting/test_report_browser.py"
+    "tests/reporting/test_report_browser.py",
+    "tests/reporting/test_report_readability.py",
+    "tests/reporting/test_diagnostic_view.py",
+    "tests/reporting/test_native_evidence.py",
+    "tests/reporting/test_report_efficiency.py",
+    "tests/reporting/test_report_efficiency_browser.py"
   ],
   "reference_reports_or_private_datasets_included": false
 }

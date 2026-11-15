@@ -254,7 +254,9 @@ def test_reporters_share_one_environment_and_compile_each_template_once(payload,
     # Pages built outside report.html.j2, such as the CI index, reuse the same compiled logo.
     assert html_module.render_logo("one") != html_module.render_logo("two")
     assert sorted(loads) == [
+        "dataset_diagnostics.html.j2",
         "logo.svg.j2",
+        "native_evidence.html.j2",
         "plugin_evidence.html.j2",
         "report.html.j2",
         "report_ui.css.j2",

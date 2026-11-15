@@ -87,6 +87,7 @@ from skillevaluator.reporting.declarative_coverage import (
     coverage_summary,
     declarative_coverage_groups,
 )
+from skillevaluator.reporting.diagnostic_view import build_dataset_diagnostics_view
 from skillevaluator.reporting.finding_summary import (
     describe_issue_counts,
     finding_counts,
@@ -95,8 +96,9 @@ from skillevaluator.reporting.finding_summary import (
     total_issue_count,
 )
 from skillevaluator.reporting.finding_verification import finding_verification
-from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_agent_eval_harbor_links
+from skillevaluator.reporting.harbor_viewer import harbor_job_display_links, normalize_agent_eval_harbor_links
 from skillevaluator.reporting.insights_view import build_insights_view
+from skillevaluator.reporting.native_evidence import build_native_evidence
 from skillevaluator.reporting.plugin_evidence import build_plugin_evidence
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
@@ -1708,6 +1710,38 @@ def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
         if isinstance(baseline, list):
             omitted += len(baseline) if index >= limit else max(0, len(baseline) - limit)
     return omitted
+
+
+def _tier3_chart_projection(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only measurements consumed by the native dimension/token charts.
+
+    Derive this from the same bounded display preview as the tables. The full
+    retained evidence is embedded separately for JSON downloads.
+    """
+    data = payload or {}
+    return {
+        "dimensions": [{"id": row.get("id")} for row in (data.get("dimensions") or [])],
+        "agents": {
+            name: {
+                "dimensions": [
+                    {key: row[key] for key in ("id", "score", "with_skill") if key in row}
+                    for row in (agent.get("dimensions") or [])
+                ]
+            }
+            for name, agent in (data.get("agents") or {}).items()
+        },
+        "trials": [
+            {
+                "agent": trial.get("agent"),
+                "tokens": {
+                    key: value
+                    for key, value in (trial.get("tokens") or {}).items()
+                    if key in ("prompt", "completion", "cached")
+                },
+            }
+            for trial in (data.get("trials") or [])
+        ],
+    }
 
 
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
@@ -3815,7 +3849,7 @@ class HTMLReporter(ReporterBase):
         report_json = None
         if not self.ci_context.get("canonical_json_url"):
             report_json = (
-                json.dumps(report_data, indent=2, allow_nan=False)
+                json.dumps(report_data, separators=(",", ":"), allow_nan=False)
                 .replace("<", "\\u003c")
                 .replace(">", "\\u003e")
                 .replace("&", "\\u0026")
@@ -3911,7 +3945,10 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_chart_data=_tier3_chart_projection(tier3_preview),
             insights_view=insights_view,
+            dataset_diagnostics_view=build_dataset_diagnostics_view((tier3_preview or {}).get("case_diagnostics")),
+            native_evidence=build_native_evidence(tier3_data),
             remaining_insight_steps=remaining_insight_steps,
             insights_case_fix_count=insights_case_fix_count,
             plugin_evidence=plugin_evidence,
@@ -3957,7 +3994,7 @@ class HTMLReporter(ReporterBase):
             tier1_display_summary=tier1_display_summary,
             tier2_results=tier2_results,
             tier2_scopes=tier2_scope_views(tier2_results),
-            harbor_jobs=harbor_job_links(tier3_data or {}),
+            harbor_jobs=harbor_job_display_links(tier3_data or {}),
             dataset_provenance=agent_eval_publication_dataset_provenance(tier3_data),
             evaluated_source=recorded_evaluated_source(result.metadata for result in results),
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,

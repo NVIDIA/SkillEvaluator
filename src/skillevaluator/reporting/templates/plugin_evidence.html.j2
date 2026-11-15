@@ -23,7 +23,7 @@
 {% set source = sections[0] %}
 <section{% if sections | selectattr('first') | list %} id="plugin-{{ owner }}-evidence"{% endif %} aria-label="{{ source.source_label }}">
   <p class="plugin-evidence-source"><strong>{{ source.source_label }} · {{ source.name }}</strong> · {% if owner == 'runtime' %}Evidence {{ source.status }} · execution {{ source.execution_status }} · advisory snapshot; scores and validation gates unchanged.{% else %}Static snapshot · {{ source.status }}; does not demonstrate runtime loading or behavior.{% endif %}</p>
-  {% if source.truncated %}<p>Retained snapshot is bounded. Values shortened before retention cannot be recovered. Section summaries identify omitted rows and display shortening.</p>{% endif %}
+  {% if source.truncated %}<p class="t3-dim-hint"><a href="#report-retention-limits">Retained evidence limits</a></p>{% endif %}
   {% for section in sections if not section.empty_observation %}
   {{ render_section(section) }}
   {% endfor %}
@@ -37,4 +37,14 @@
 </section>
 {% endif %}
 {% endfor %}
+{%- endmacro %}
+
+{% macro render_retention_limits(evidence) -%}
+{% if (evidence.metadata.static and evidence.metadata.static.truncated) or (evidence.metadata.runtime and evidence.metadata.runtime.truncated) %}
+<details class="t3-details" id="report-retention-limits">
+  <summary>Retained evidence limits</summary>
+  <p>Retained snapshot is bounded. Values shortened before retention cannot be recovered. Section summaries identify omitted rows and display shortening.</p>
+  <p>Exports preserve the recorded snapshot. Detailed sections identify their own row omissions and shortened display cells.</p>
+</details>
+{% endif %}
 {%- endmacro %}

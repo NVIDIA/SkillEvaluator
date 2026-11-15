@@ -334,7 +334,7 @@ def test_html_report_links_source_error_scope_and_preserves_full_insights(tmp_pa
     preview = _html_section(html, "tier3-next-steps-preview")
     insights = _html_section(html, "tier3-page-suggestions")
 
-    assert 'href="#tier3-page-suggestions">Open Full Insights</a>' in preview
+    assert 'href="#tier3-page-suggestions">View insights</a>' in preview
     assert "Create or fix the Tier 3 source" in preview
     assert "Create or fix the Tier 3 source" in insights
     assert "entry case-" not in preview

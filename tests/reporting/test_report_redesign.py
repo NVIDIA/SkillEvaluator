@@ -400,12 +400,15 @@ def test_tier3_charts_are_redrawn_with_print_colors() -> None:
 
     # A canvas keeps the colors it was drawn with, so printing redraws every
     # chart with the light (print) colors and restores the theme afterwards.
-    assert 'window.addEventListener("beforeprint", function(){ redrawForPrint(true); });' in script
+    # Print mode is enabled first; the shared disclosure handler then redraws
+    # after it exposes inactive chart containers for synchronous measurement.
+    assert 'window.addEventListener("beforeprint", function(){ printing = true; });' in script
     assert 'window.addEventListener("afterprint", function(){ redrawForPrint(false); });' in script
     assert 'window.matchMedia("print")' in script
     assert 'if (printing && theme === "dark") root.setAttribute("data-theme", "light");' in script
     # All four chart types' print redraw, colors and theme restoration are
-    # executed in test_chart_dependency rather than counting constructor sites.
+    # executed in test_chart_dependency and the offline browser efficiency
+    # tests rather than counting constructor sites.
 
 
 def _rules(css: str):

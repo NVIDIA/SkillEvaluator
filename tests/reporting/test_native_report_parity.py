@@ -36,7 +36,7 @@ def test_native_header_and_page_geometry_replace_sidebar_workspace():
     assert "body{font-family:ui-sans-serif" not in html
     assert ".container { max-width: 1200px; margin: 0 auto; padding: 2rem; }" in html
     assert "background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);" in html
-    assert '<div class="dashboard">' in html
+    assert re.search(r'<div class="dashboard(?:\s[^"]*)?">', html)
     assert "Validators Run" in html
 
 

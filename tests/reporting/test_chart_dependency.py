@@ -165,8 +165,13 @@ const vm = require('node:vm');
 const controller = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
 const ids = ['tier3-radar', 'tier3-metric-bar', 'tier3-recorded-token-chart', 'tier3-steps-chart'];
 const elements = {};
+let visible = true;
 ids.forEach(id => {
-    elements[id] = {id, hidden: true};
+    elements[id] = {
+        id, hidden: true,
+        closest: () => null,
+        parentElement: {getClientRects: () => visible ? [{}] : []}
+    };
     elements[id + '-fallback'] = {hidden: false};
 });
 const listeners = {};
@@ -182,7 +187,8 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(controller, context);
-listeners.DOMContentLoaded();
+// Theme initialization invokes the controller after selecting the report palette.
+context.window.rebuildTier3Charts();
 const missing = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
 context.Chart = class {constructor() {throw new Error('Canvas unavailable');}};
 context.window.rebuildTier3Charts();
@@ -197,23 +203,39 @@ context.Chart = class {
 };
 context.window.rebuildTier3Charts();
 const missingContext = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
-let built = 0, destroyed = 0;
-const printAnimations = [];
-const colors = [];
+let built = 0, destroyed = 0, resized = 0;
+const constructions = [];
+const updates = [];
 context.Chart = class {
     constructor(canvas, config) {
         this.ctx = {};
+        this.id = canvas.id;
+        this.data = config.data;
+        this.options = config.options;
         built++;
-        printAnimations.push(config.options.animation);
-        colors.push(config.options.plugins.legend.labels.color);
+        constructions.push({id:canvas.id, type:config.type, color:config.options.plugins.legend.labels.color});
+    }
+    resize() {resized++;}
+    update(mode) {
+        updates.push({
+            id:this.id, mode:mode || null,
+            animation:this.options.animation === false ? false : null,
+            color:this.options.plugins.legend.labels.color
+        });
     }
     destroy() {destroyed++;}
 };
+visible = false;
+context.window.rebuildTier3Charts();
+const hiddenBuilt = built;
+visible = true;
 context.window.rebuildTier3Charts();
 const recovered = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
 listeners.beforeprint();
+// The shared report handler redraws after exposing print containers/disclosures.
+context.window.rebuildTier3Charts();
 listeners.afterprint();
-process.stdout.write(JSON.stringify({missing, failed, missingContext, released, recovered, built, destroyed, printAnimations, colors, theme}));
+process.stdout.write(JSON.stringify({missing, failed, missingContext, released, recovered, hiddenBuilt, built, destroyed, resized, constructions, updates, theme}));
 """
     result = subprocess.run(
         [node, "-e", script], input=json.dumps(controller.group()), capture_output=True, text=True, check=False
@@ -225,10 +247,20 @@ process.stdout.write(JSON.stringify({missing, failed, missingContext, released, 
     assert states["missingContext"] == [[True, False]] * 4
     assert states["released"] == 4
     assert states["recovered"] == [[False, True]] * 4
-    assert states["built"] == 12
-    assert states["destroyed"] == 8
-    assert states["printAnimations"][4:8] == [False] * 4
-    assert states["colors"] == ["#e2e8f0"] * 4 + ["#0f172a"] * 4 + ["#e2e8f0"] * 4
+    assert states["hiddenBuilt"] == 0
+    assert states["built"] == 4
+    assert states["destroyed"] == 0
+    assert states["resized"] == 8
+    assert [(row["id"], row["type"]) for row in states["constructions"]] == [
+        ("tier3-radar", "radar"),
+        ("tier3-metric-bar", "bar"),
+        ("tier3-recorded-token-chart", "bar"),
+        ("tier3-steps-chart", "bar"),
+    ]
+    assert [row["color"] for row in states["constructions"]] == ["#e2e8f0"] * 4
+    assert [row["animation"] for row in states["updates"][:4]] == [False] * 4
+    assert [row["mode"] for row in states["updates"][:4]] == ["none"] * 4
+    assert [row["color"] for row in states["updates"]] == ["#0f172a"] * 4 + ["#e2e8f0"] * 4
     assert states["theme"] == "dark"
 
 

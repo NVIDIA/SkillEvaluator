@@ -11,6 +11,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
+from report_markup_assertions import text_content
 
 from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
@@ -849,8 +850,16 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
         cell_start = html.index(f'<td title="{title}">')
         cell_end = html.index("</td>", cell_start)
         cell = html[cell_start:cell_end]
-        assert "N/A" in cell
-        assert '<div class="t3-dim-hint">baseline quality unavailable</div>' in cell
+        assert '<span title="baseline quality unavailable">N/A</span>' in cell
+        row_start = html.rfind("<tr>", 0, cell_start)
+        row_end = html.index("</tr>", cell_end)
+        details = re.search(
+            r'<details class="t3-table-detail"><summary>Details</summary>(.*?)</details>',
+            html[row_start:row_end],
+            re.DOTALL,
+        )
+        assert details is not None
+        assert "baseline quality unavailable" in text_content(details.group(1))
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
@@ -3830,7 +3839,13 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
     assert re.search(r"<th>Pass-rate difference</th>\s*</tr>", region.group("table"))
     assert "Pass@1 (supporting reliability)" in html
     assert "attempt passes at Overall ≥ 0.50" in html
-    assert SKILL_LIFT_DEFINITION in html
+    number_key = re.search(r'<details[^>]*id="tier3-number-key">(.*?)</details>', html, re.DOTALL)
+    assert number_key is not None
+    assert "<summary>What each number means</summary>" in number_key.group(1)
+    lift_note = re.search(r"<li><strong>Skill Lift</strong>:(.*?)</li>", number_key.group(1), re.DOTALL)
+    assert lift_note is not None
+    assert text_content(lift_note.group(1)).strip().startswith(SKILL_LIFT_DEFINITION.removeprefix("Skill Lift "))
+    assert '<a href="#tier3-number-key">How lift is measured</a>' in html
     assert ".table-scroll { max-width: 100%; overflow-x: auto;" in html
     assert ".pass-at-k-table { min-width: 720px; }" in html
 

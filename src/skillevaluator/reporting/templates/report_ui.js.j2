@@ -118,10 +118,14 @@ filterToAffectedSkills = function(row) {
 // Raw scanner output stays collapsed: it only repeats finding cards, which print.
 let reportPrintClosedDetails = [];
 window.addEventListener('beforeprint', function() {
+    document.documentElement.setAttribute('data-report-printing', '');
     reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open]):not(.raw-output)'));
     reportPrintClosedDetails.forEach(detail => { detail.open = true; });
+    // Disclosure opening must precede the synchronous print chart resize.
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
 });
 window.addEventListener('afterprint', function() {
+    document.documentElement.removeAttribute('data-report-printing');
     reportPrintClosedDetails.forEach(detail => { detail.open = false; });
     reportPrintClosedDetails = [];
     reportMeasureNavigation();
@@ -238,6 +242,7 @@ function activateReportTier(tierId, options = {}) {
     });
     reportMeasureNavigation();
     reportCurrentSection(panel.id);
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
     if (options.scroll !== false) reportScrollTo(panel);
     if (options.focus !== false) panel.focus({preventScroll:true});
     return true;
@@ -252,6 +257,7 @@ function activateReportTabs(tabSelector, panelSelector, panelId, button) {
         tab.setAttribute('aria-selected', String(selected));
         tab.tabIndex = selected ? 0 : -1;
     });
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
     if (button) button.focus({preventScroll:true});
 }
 function reportTabKeyboard(event) {

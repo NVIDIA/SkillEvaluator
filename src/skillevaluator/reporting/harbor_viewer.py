@@ -133,6 +133,49 @@ def harbor_job_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
     return jobs
 
 
+def harbor_job_display_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
+    """Use exact recorded job associations for concise labels, retaining identifiers."""
+    labels: dict[str, list[str]] = {}
+
+    def record(trial: object, name: object, condition: str) -> None:
+        if not isinstance(name, str) or not name:
+            return
+        viewer = trial.get("harbor_viewer") if isinstance(trial, dict) else None
+        url = safe_url(viewer.get("job_url")) if isinstance(viewer, dict) else None
+        if url:
+            associated = labels.setdefault(url, [])
+            label = f"{name} · {condition}"
+            if label not in associated:
+                associated.append(label)
+
+    trials = agent_eval.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if isinstance(trial, dict):
+                record(
+                    trial,
+                    trial.get("agent"),
+                    "Without skill" if agent_eval.get("mode") == "baseline_only" else "With skill",
+                )
+    agents = agent_eval.get("agents")
+    if isinstance(agents, dict):
+        for name, agent in agents.items():
+            if not isinstance(agent, dict):
+                continue
+            for key, condition in (("trials", "With skill"), ("trials_baseline", "Without skill")):
+                trials = agent.get(key)
+                if not isinstance(trials, list):
+                    continue
+                for trial in trials:
+                    record(trial, name, condition)
+    jobs = harbor_job_links(agent_eval)
+    for index, job in enumerate(jobs, 1):
+        job["display_label"] = "; ".join(labels.get(job.get("url", ""), [])) or (
+            "Run analysis" if job.get("name") == "Run analysis" else f"Job {index}"
+        )
+    return jobs
+
+
 def normalize_agent_eval_harbor_links(agent_eval: dict[str, Any]) -> dict[str, Any]:
     """Return a shallow copy with display-safe Harbor links in nested fields."""
     normalized = dict(agent_eval)

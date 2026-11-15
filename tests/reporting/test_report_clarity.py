@@ -162,7 +162,7 @@ def test_tier_navigation_has_one_headline_and_tier1_owns_severity_detail():
     assert "tier-card-sev" not in navigation
     assert "Best agent score" not in navigation
     tier1 = html.split('id="tab-tier1"', 1)[1].split('id="tab-tier2"', 1)[0]
-    dashboard = tier1.split('class="dashboard"', 1)[1].split("</div>\n            <details", 1)[0]
+    dashboard = tier1.split('class="dashboard tier1-statistics"', 1)[1].split("</div>\n            <details", 1)[0]
     assert ">Findings</h3>" in dashboard
     assert ">Tier 1 Status</h3>" not in dashboard
     assert "Each check with its results and the evidence behind them." not in html

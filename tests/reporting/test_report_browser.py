@@ -1346,15 +1346,17 @@ def test_overview_text_links_and_insights_action_have_readable_contrast(page, re
         assert ratio >= 4.5, (theme, width, colors, ratio)
 
 
-def test_sole_mobile_coverage_metric_uses_the_available_grid_width(page, reports):
+def test_mobile_incomplete_summary_keeps_coverage_in_one_full_width_owner(page, reports):
     directory, _, _ = reports
     page.set_viewport_size({"width": 390, "height": 1000})
     _open(page, directory, "incomplete")
     _tier(page, "tier3")
-    grid = page.locator(".t3-primary-metrics")
-    cards = grid.locator(".dashboard-card")
-    assert cards.count() == 1
-    assert cards.first.bounding_box()["width"] >= grid.bounding_box()["width"] - 2
+    summary = page.locator("#tier3-overview-summary")
+    assert summary.locator(".trial-coverage").is_visible()
+    assert summary.locator("#tier3-quality-unavailable").is_visible()
+    assert summary.locator("#tier3-next-steps-preview").is_visible()
+    assert summary.bounding_box()["width"] >= page.locator(".t3-subtabs").bounding_box()["width"] - 2
+    assert page.locator('.t3-primary-metrics [data-primary-metric="coverage"]').count() == 0
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
 
 

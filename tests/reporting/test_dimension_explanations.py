@@ -76,6 +76,13 @@ def _dimension_table(html: str) -> str:
     return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", match.group(0)))
 
 
+def _dimension_row(html: str, label: str) -> str:
+    table = re.search(r'<table[^>]*id="tier3-dimension-table".*?</table>', html, re.DOTALL)
+    return next(
+        row for row in re.findall(r"<tr[^>]*>(.*?)</tr>", table[0], re.DOTALL) if f"<strong>{label}</strong>" in row
+    )
+
+
 def _assert_gate_accepts(markdown: str, tmp_path: Path) -> None:
     card = tmp_path / "BENCHMARK.md"
     card.write_text(markdown, encoding="utf-8")
@@ -121,7 +128,11 @@ def test_unscored_dimension_is_explained_not_zero(tmp_path: Path) -> None:
 
     table = _dimension_table(html)
     assert "Correctness" in table
-    assert "N/A not scored with the skill 0.50 N/A with-skill unavailable No verdict" in table
+    row = _dimension_row(html, "Correctness")
+    assert 'title="not scored with the skill"' in row
+    assert 'title="with-skill unavailable"' in row
+    assert re.search(r">0.50<|>\s*0.50\s*<", row)
+    assert "No verdict" in row
     assert "With-skill score unavailable; no verdict was computed." in table
 
 
@@ -148,9 +159,10 @@ def test_missing_and_not_applicable_dimensions_have_reasons(tmp_path: Path) -> N
     assert "Discoverability" in table
     assert "N/A N/A N/A Not applicable" in table
     assert "Skill Efficiency" in table
-    assert (
-        "N/A not scored with the skill N/A baseline quality unavailable N/A with-skill unavailable No verdict" in table
-    )
+    row = _dimension_row(html, "Skill Efficiency")
+    for missing_reason in ("not scored with the skill", "baseline quality unavailable", "with-skill unavailable"):
+        assert missing_reason in row
+    assert "No verdict" in row
     assert "A signal this dimension needs produced no score." in table
     assert f"{reason}. It has no score, so the agent cannot PASS." in table
     assert "NEUTRAL" not in table
@@ -183,7 +195,9 @@ def test_html_dimension_table_names_evidence_and_baseline_status() -> None:
 
     table = _dimension_table(html)
     assert f"Evidence: {SIGNAL_EVIDENCE_SOURCES['security']}." in table.replace("&#39;", "'")
-    assert "0.90 N/A baseline not run N/A no baseline PASS" in table
+    row = _dimension_row(html, "Security")
+    assert "0.90" in row and "PASS" in row
+    assert 'title="baseline not run"' in row and 'title="no baseline score"' in row
     assert "N/A means no measurement, never a score of zero; the note under it says why." in html
 
 

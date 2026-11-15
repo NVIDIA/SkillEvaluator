@@ -2178,7 +2178,7 @@ class TestGatingSplit:
         assert 'class="tier-card-verdict">Changes required</span>' in tier2_card
         assert "<strong>1</strong> finding(s)</span>" in tier2_card
         tier2 = output.split('id="tab-tier2"', 1)[1]
-        assert re.search(r'Checks Run</h3>\s*<p class="dashboard-card-value">1</p>', tier2)
+        assert re.search(r'Reported checks</h3>\s*<p class="dashboard-card-value">1</p>', tier2)
         assert report_data["gating"] == {
             "blocking_tiers": ["tier1", "tier2"],
             "advisory_tiers": ["tier3"],

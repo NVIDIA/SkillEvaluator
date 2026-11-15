@@ -99,14 +99,16 @@ These run in the shipped verifier and contribute to Behavior alongside any
 remaining `expected_behavior` judgments. `file_exists` is rejected: qualification
 records only the trajectory, not the agent's workspace files, so the check would
 inspect the machine running qualification instead of the agent's output.
-Use a scalar `pass`/`fail` metric label
-for the combined Behavior result when declaring checks; boolean-list labels
-describe only numbered model-judged behaviors. `label.checks` below has a
+When a case declares checks, label the
+combined Behavior result with a scalar `pass`/`fail`. A boolean-list Behavior
+label is rejected there, because it describes only the numbered model-judged
+behaviors and cannot say whether the direct checks pass. `label.checks` below has a
 different purpose: it verifies recorded evidence supporting the author's label.
 
 Expected overall is `pass`, `fail` or `insufficient_evidence`. Metric labels
 also allow `not_applicable`; omit metrics without independent labels.
-Behavior can instead be a boolean list exactly matching expected behavior length.
+Behavior can instead be a boolean list exactly matching expected behavior length
+(only for a case without `checks`).
 A null trajectory is allowed only for unavailable-evidence cases labelled
 insufficient evidence. Missing referenced files are errors, not abstentions.
 

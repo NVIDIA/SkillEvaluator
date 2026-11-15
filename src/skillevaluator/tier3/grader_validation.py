@@ -164,6 +164,11 @@ def load_suite(directory):
         _object(expected["metrics"], set(METRICS), set(), "expected.metrics")
         for metric, label in expected["metrics"].items():
             if metric == "behavior_check" and isinstance(label, list):
+                if entry.get("checks"):
+                    raise ValueError(
+                        "behavior label list cannot be combined with entry.checks; the verifier scores "
+                        "checks together with judged behaviors, so use a scalar pass or fail label"
+                    )
                 if len(label) != len(entry.get("expected_behavior", [])) or any(type(v) is not bool for v in label):
                     raise ValueError("behavior label length must match expected_behavior and contain booleans")
             elif not isinstance(label, str) or label not in set(VERDICTS) - {"error"}:

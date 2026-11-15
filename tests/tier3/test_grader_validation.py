@@ -108,6 +108,24 @@ def test_suite_validates_declarative_entry_checks(suite_dir, checks):
         gv.load_suite(suite_dir)
 
 
+def test_suite_rejects_behavior_label_list_with_declarative_checks(suite_dir):
+    # The verifier folds direct checks into one Behavior score, so a list label that covers only the
+    # judged behaviors would compare different things: a passing judged step plus a correctly
+    # failing direct check scores 0.5, an expected list pass against an observed aggregate fail.
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    case = suite["cases"][0]
+    case["entry"]["checks"] = [{"type": "output_matches", "pattern": r"\AX\Z"}]
+    assert len(case["entry"]["expected_behavior"]) == len(case["expected"]["metrics"]["behavior_check"])
+    write_suite(suite_dir, suite)
+
+    with pytest.raises(ValueError, match=r"behavior label list cannot be combined with entry\.checks"):
+        gv.load_suite(suite_dir)
+
+    case["entry"]["checks"] = []
+    write_suite(suite_dir, suite)
+    assert gv.load_suite(suite_dir)["cases"][0]["expected"]["metrics"]["behavior_check"] == [True, True]
+
+
 @pytest.mark.parametrize("path", ["README.md", "out/report.md"])
 def test_suite_rejects_workspace_file_checks(suite_dir, path):
     # Qualification records only the trajectory. A file_exists check would otherwise inspect the

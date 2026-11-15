@@ -326,6 +326,10 @@ All notable changes to SkillEvaluator are documented in this file.
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
 
+- Allow grader-validation suites to use validated dataset `checks`, including
+  anchored `output_matches` rules, instead of rejecting the entry field before
+  running the verifier. Document exact-format declarations and the measured
+  limitations of natural-language format judging.
 - An author value is no longer rejected for containing a Unicode joiner. The
   character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
   (U+200D), which Persian, Arabic and Devanagari names need to render, plus a

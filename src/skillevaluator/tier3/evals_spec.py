@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import functools
 import logging
+import os
 import re
 import unicodedata
 from collections.abc import Iterator, Mapping, Sequence
@@ -332,6 +333,7 @@ AGENTSKILLS_REQUIRED_FIELDS = {"id", "prompt", "expected_output"}
 DATASET_RECOMMENDED_FIELDS = {"expected_skill", "ground_truth", "expected_behavior"}
 
 DOCKERFILE_MAX_BYTES = 20_000
+_EVALS_CONFIG_REL_PATHS = ("evals/config.yml", "evals/config.yaml")
 
 
 # ---------------------------------------------------------------------------
@@ -372,7 +374,8 @@ def validate_skillevaluators(skill_path: Path) -> list[CheckResult]:
             if target.is_dir():
                 results.append(CheckResult(spec.rel_path, "ok", spec.description))
             # Dirs are always optional — don't warn about absence
-        elif target.exists():
+        elif target.exists() or (spec.rel_path in _EVALS_CONFIG_REL_PATHS and os.path.lexists(target)):
+            # A broken config symlink is checked too: loading rejects it, as the run does.
             results.append(CheckResult(spec.rel_path, "ok", spec.description))
             _run_file_checks(target, spec, results)
             # Optional files — no warning for absence
@@ -1187,7 +1190,7 @@ def _run_file_checks(target: Path, spec: EntrySpec, results: list[CheckResult]) 
     if "mcp_servers.toml" in spec.rel_path:
         _validate_mcp_toml(target, results)
 
-    if spec.rel_path in ("evals/config.yml", "evals/config.yaml"):
+    if spec.rel_path in _EVALS_CONFIG_REL_PATHS:
         _validate_evals_config(target, results)
 
 

@@ -344,6 +344,11 @@ All notable changes to SkillEvaluator are documented in this file.
   existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
+- Ctrl-C during a reusable Tier 1 workflow run is no longer missed when it
+  arrives while a scan is starting. The runner waited for scan results with no
+  time limit, and on Linux the interrupt could be handled on a scan thread,
+  which did not wake that wait; the run then went on until a scan ended. The
+  runner now checks for the interrupt every 0.1 seconds.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was
@@ -463,6 +468,16 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
 - Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
   error that names up to 20 unparsed files, relative to the skill and with the
   line of the first error, instead of the first three truncated messages. The
@@ -814,6 +829,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `metadata.version`, so a skill with that field or with no version scores
   1.75 points higher; the bundled `text-analyzer` example now scores 86.2
   instead of 84.5.
+
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
 
 - Tier 3 coverage notices now name the exception type Harbor recorded under a
   job whose statistics miss a trial. The collector's job failure then ends with

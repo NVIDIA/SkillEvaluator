@@ -777,7 +777,12 @@ def run(
             live.append(thread)
             running += 1
         while running:
-            batch = [events.get()]
+            try:
+                batch = [events.get(timeout=POLL_SECONDS)]
+            except queue.Empty:
+                # Ctrl-C is acted on in this thread, but its signal handler can run on a
+                # scan thread, and that does not interrupt a wait without a time limit.
+                continue
             while True:
                 try:
                     batch.append(events.get_nowait())

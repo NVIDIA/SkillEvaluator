@@ -20,7 +20,7 @@ from pathlib import Path
 from typing import Any
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-_VERIFIER_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "test-stdout.txt")
+_VERIFIER_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json", "test-stdout.txt")
 
 
 def _safe(value: str) -> str:
@@ -191,9 +191,15 @@ def write_job_from_rollouts(
             rewards: dict[str, Any] | None = None
             loaded = None if failure else read_verifier_rewards(trial_dir / "verifier")
             if loaded is not None:
-                rewards = {"entry_id": case_id, **loaded}
-                if reward_path.is_file():
-                    reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
+                loaded_entry_id = loaded.get("entry_id")
+                if loaded_entry_id is not None and str(loaded_entry_id) != str(case_id):
+                    failure = (
+                        f"the task verifier reported case {str(loaded_entry_id)!r} for staged case {str(case_id)!r}"
+                    )
+                else:
+                    rewards = {**loaded, "entry_id": case_id}
+                    if reward_path.is_file():
+                        reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
             if rewards is None:
                 failure = failure or "the task verifier wrote no reward.json or numeric reward.txt"
                 n_errors += 1

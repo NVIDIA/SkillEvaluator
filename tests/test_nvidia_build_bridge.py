@@ -20,7 +20,7 @@ from pathlib import Path
 from threading import Event, Thread
 
 import pytest
-from anthropic.types import RawMessageStreamEvent
+from anthropic.types import Message, RawMessageStreamEvent
 from openai.types.responses import ResponsesServerEvent
 from pydantic import TypeAdapter
 
@@ -266,6 +266,18 @@ def _local_test_transport(endpoint: str, body: bytes) -> bytes:
         return response.read()
 
 
+def _wait_for_bridge_server(started: Event, bridge_thread: Thread) -> None:
+    """Wait for ``bridge.serve`` to report its bound server, failing at once if its thread died first.
+
+    Binding, the ready-file fsync and thread scheduling have no latency bound on a
+    loaded CI runner, so the deadline only guards against a start that hangs.
+    """
+    deadline = time.monotonic() + 30
+    while not started.wait(timeout=0.05):
+        assert bridge_thread.is_alive(), "bridge thread exited before its server was ready"
+        assert time.monotonic() < deadline, "bridge server did not start"
+
+
 def _read_raw_http_response(client: socket.socket) -> str:
     chunks: list[bytes] = []
     client.settimeout(2)
@@ -436,7 +448,7 @@ def bridge_services(tmp_path: Path) -> _BridgeServices:
         daemon=True,
     )
     bridge_thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, bridge_thread)
     port = int(servers[0].server_port)
     base_url = f"http://127.0.0.1:{port}"
     for _ in range(40):
@@ -540,7 +552,7 @@ def test_host_bridge_requires_the_per_run_client_token_before_forwarding(tmp_pat
         daemon=True,
     )
     thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, thread)
     origin = f"http://127.0.0.1:{servers[0].server_port}"
     try:
         responses_payload = {"model": "nvidia/model", "input": "Hello"}
@@ -637,7 +649,7 @@ def test_bridge_rejects_authenticated_requests_after_per_run_budget_is_exhausted
         daemon=True,
     )
     thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, thread)
     origin = f"http://127.0.0.1:{servers[0].server_port}"
     headers = {"Authorization": f"Bearer {client_token}"}
     payload = {"model": "nvidia/model", "input": "Hello"}
@@ -2515,6 +2527,164 @@ def test_build_tool_call_emits_anthropic_tool_use_and_message_stop() -> None:
     assert events[-1] == {"type": "message_stop"}
 
 
+@pytest.mark.parametrize(
+    ("usage", "anthropic", "responses"),
+    [
+        (None, {"input_tokens": 0, "output_tokens": 0}, None),
+        ({}, {"input_tokens": 0, "output_tokens": 0}, None),
+        ({"prompt_tokens": "bad", "completion_tokens": -1}, {"input_tokens": 0, "output_tokens": 0}, None),
+        (
+            {"completion_tokens": 0},
+            {"input_tokens": 0, "output_tokens": 0},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 0,
+            },
+        ),
+        (
+            {"prompt_tokens": 100, "completion_tokens": 20, "prompt_tokens_details": {"cached_tokens": 30}},
+            {"input_tokens": 70, "output_tokens": 20, "cache_read_input_tokens": 30},
+            {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 30},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 120,
+            },
+        ),
+    ],
+)
+def test_bridge_preserves_reported_usage(usage: object, anthropic: object, responses: object) -> None:
+    completion = {**CHAT_TEXT_RESPONSE, "usage": usage}
+    events = list(chat_completion_to_anthropic_events(completion))
+    assert events[0]["message"]["usage"] == anthropic
+    assert events[-2]["usage"] == anthropic
+    message = bridge._anthropic_message_from_events(events)
+    assert message["usage"] == anthropic
+    assert message["content"][0]["text"] == CHAT_TEXT_RESPONSE["choices"][0]["message"]["content"]
+    response_events = list(chat_completion_to_responses_events(completion))
+    assert response_events[-1]["response"]["usage"] == responses
+
+
+@pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
+@pytest.mark.parametrize(
+    ("usage", "expected"),
+    [
+        pytest.param(
+            {
+                "prompt_tokens": 100,
+                "completion_tokens": 20,
+                "total_tokens": 125,
+                "prompt_tokens_details": {"cached_tokens": 30},
+                "completion_tokens_details": {"reasoning_tokens": 5},
+            },
+            {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 30},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 5},
+                "total_tokens": 125,
+            },
+            id="measured",
+        ),
+        pytest.param(
+            {"prompt_tokens": 100, "completion_tokens": 20},
+            {
+                "input_tokens": 100,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 120,
+            },
+            id="uncached",
+        ),
+        pytest.param(
+            {"completion_tokens": 20},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 20,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 20,
+            },
+            id="completion-only",
+        ),
+        pytest.param(
+            {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 4}},
+            {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 4},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 10,
+            },
+            id="prompt-only",
+        ),
+        pytest.param(
+            {"total_tokens": 7},
+            {
+                "input_tokens": 0,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 0,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 7,
+            },
+            id="total-only",
+        ),
+        pytest.param(
+            {"prompt_tokens": 10, "completion_tokens": 3, "completion_tokens_details": {"reasoning_tokens": "bad"}},
+            {
+                "input_tokens": 10,
+                "input_tokens_details": {"cached_tokens": 0},
+                "output_tokens": 3,
+                "output_tokens_details": {"reasoning_tokens": 0},
+                "total_tokens": 13,
+            },
+            id="invalid-reasoning",
+        ),
+    ],
+)
+def test_responses_usage_is_complete_and_sdk_valid(
+    completion: dict[str, object], usage: dict[str, object], expected: dict[str, object]
+) -> None:
+    events = list(chat_completion_to_responses_events({**completion, "usage": usage}))
+    validator = TypeAdapter(ResponsesServerEvent)
+
+    for event in events:
+        validator.validate_python(event, strict=True)
+    assert events[-1]["type"] == "response.completed"
+    assert events[-1]["response"]["usage"] == expected
+
+
+@pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
+@pytest.mark.parametrize(
+    ("usage_fields", "expected"),
+    [
+        ({}, {"input_tokens": 0, "output_tokens": 0}),
+        ({"usage": {"completion_tokens": 20}}, {"input_tokens": 0, "output_tokens": 20}),
+        (
+            {"usage": {"prompt_tokens": 10, "prompt_tokens_details": {"cached_tokens": 30}}},
+            {"input_tokens": 0, "output_tokens": 0, "cache_read_input_tokens": 30},
+        ),
+    ],
+)
+def test_anthropic_missing_usage_is_schema_valid(
+    completion: dict[str, object], usage_fields: dict[str, object], expected: dict[str, int]
+) -> None:
+    events = list(chat_completion_to_anthropic_events({**completion, **usage_fields}))
+    validator = TypeAdapter(RawMessageStreamEvent)
+    for event in events:
+        validator.validate_python(event, strict=True)
+    assert events[0]["message"]["usage"] == expected
+    assert events[-2]["usage"] == expected
+    message = bridge._anthropic_message_from_events(events)
+    TypeAdapter(Message).validate_python(message, strict=True)
+    assert message["usage"] == expected
+
+
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:
     malformed_completion = {
         **CHAT_TOOL_RESPONSE,
@@ -2583,7 +2753,18 @@ def test_responses_events_validate_with_openai_sdk_and_have_sequence_numbers(com
 
 @pytest.mark.parametrize("completion", [CHAT_TOOL_RESPONSE, CHAT_TEXT_RESPONSE])
 def test_anthropic_events_validate_with_sdk(completion: dict[str, object]) -> None:
-    events = list(chat_completion_to_anthropic_events(completion))
+    events = list(
+        chat_completion_to_anthropic_events(
+            {
+                **completion,
+                "usage": {
+                    "prompt_tokens": 100,
+                    "completion_tokens": 20,
+                    "prompt_tokens_details": {"cached_tokens": 30},
+                },
+            }
+        )
+    )
     validator = TypeAdapter(RawMessageStreamEvent)
 
     for event in events:

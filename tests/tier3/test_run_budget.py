@@ -35,6 +35,7 @@ def test_token_and_cost_admission():
     assert (
         budget_line(budget.metadata())
         == "Budget exhausted (agent tokens 10 of 10): 1 of 2 attempts not run; results are partial"
+        "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
     )
 
 
@@ -236,7 +237,7 @@ def test_budgeted_attempts_run_concurrently_up_to_limit(monkeypatch, tmp_path):
     assert peak == 2
 
 
-def test_in_flight_agents_are_not_rejected_for_missing_usage(monkeypatch, tmp_path):
+def test_calibrated_agents_can_run_concurrently(monkeypatch, tmp_path):
     barrier = threading.Barrier(2)
     starts = []
     lock = threading.Lock()
@@ -251,6 +252,8 @@ def test_in_flight_agents_are_not_rejected_for_missing_usage(monkeypatch, tmp_pa
     monkeypatch.setattr(runner, "_run_harbor", fake_harbor)
     monkeypatch.setattr(runner, "_merge_attempt_jobs", lambda *_: None)
     budget = BudgetController(max_agent_tokens=100_000)
+    budget.record_usage({"total_tokens": 100})
+    monkeypatch.setattr(runner, "_budget_usage", lambda _path: {"total_tokens": 100})
 
     def run_agent(agent):
         return runner._run_budgeted_variant(
@@ -276,7 +279,7 @@ def test_in_flight_agents_are_not_rejected_for_missing_usage(monkeypatch, tmp_pa
     with ThreadPoolExecutor(max_workers=2) as executor:
         list(executor.map(run_agent, ["first", "second"]))
     assert len(starts) == 2
-    assert budget.metadata()["finished_attempts"] == 2
+    assert budget.metadata()["finished_attempts"] == 3
 
 
 def test_budget_admits_both_arms_as_one_case_attempt(monkeypatch, tmp_path):
@@ -441,7 +444,7 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
         jobs_dir / "skill-agent-with",
         {case_id: case_id for case_id in ("case-1", "case-2", "case-3")},
     )
-    assert len(collected) == 3, collected
+    assert len(collected) == 2, collected
     results = collect_harbor_results(
         "skill",
         ["agent"],
@@ -457,8 +460,9 @@ def test_partial_budget_run_collects_real_harbor_results(monkeypatch, tmp_path):
     agent_result = results["agents"]["agent"]
     assert results["partial"] is True
     assert agent_result["execution_status"] == "succeeded", agent_result.get("execution_errors") or agent_result
-    assert agent_result["num_trials_with"] == 3
-    assert len(starts) == 6
+    assert agent_result["num_trials_with"] == 2
+    assert len(starts) == 4
+    assert all(row["basis"] == "estimate" for row in budget.not_run)
 
 
 def test_fake_attempt_runner_stops_after_token_budget(monkeypatch, tmp_path):
@@ -539,9 +543,8 @@ def test_html_overview_renders_budget_warning():
 
 
 def test_final_attempt_overrun_is_reported_without_changing_admission_status():
-    # Retained A2 shape: all four attempts finished, but no fifth admission
-    # happened to update the admission status after usage exceeded 32,000.
-    budget = BudgetController(max_agent_tokens=32_000, max_judge_calls=12, max_attempts_total=4, planned=4)
+    # The final attempt can exceed its measured estimate.
+    budget = BudgetController(max_agent_tokens=40_000, max_judge_calls=12, max_attempts_total=4, planned=4)
     for attempt, tokens in enumerate([10_000, 10_000, 10_000, 15_236], start=1):
         assert budget.admit(agent="a", arm="with", case_id="c", attempt=attempt)
         budget.record_usage({"total_tokens": tokens, "judge_calls": 3})
@@ -552,9 +555,9 @@ def test_final_attempt_overrun_is_reported_without_changing_admission_status():
     assert metadata["exhausted_limit"] is None
     assert metadata["attempts_not_run"] == 0
     assert metadata["observed_overruns"] == {
-        "agent_tokens": {"used": 45_236, "limit": 32_000, "excess": 13_236},
+        "agent_tokens": {"used": 45_236, "limit": 40_000, "excess": 5_236},
     }
-    assert budget_line(metadata) == "Budget overrun observed (agent tokens 45,236 of 32,000)"
+    assert budget_line(metadata) == "Budget overrun observed (agent tokens 45,236 of 40,000)"
 
 
 @pytest.mark.parametrize("cached", [None, {}, {"agent_tokens": {"used": 1, "limit": 0, "excess": 1}}])
@@ -632,7 +635,12 @@ def test_legacy_overrun_boundaries_include_zero_and_subcent_costs(key, cap, valu
         "attempts": "max_attempts_total",
     }[key]
     metadata = {"limits": {limit: cap}, "used": {key: value}, "started_attempts": value}
-    assert budget_line(metadata) == f"Budget overrun observed ({expected})"
+    qualifier = (
+        "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
+        if key == "cost_usd"
+        else ""
+    )
+    assert budget_line(metadata) == f"Budget overrun observed ({expected}){qualifier}"
 
 
 @pytest.mark.parametrize("invalid", [True, False, -1, "[bold]bad[/bold]", float("nan"), float("inf"), [], {}])

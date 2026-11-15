@@ -723,6 +723,13 @@ Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs 
 input-file handling still need independent qualification. Codex, Claude Code and
 OpenCode mappings remain experimental and do not establish end-to-end agent support.
 
+The Claude Code mapping uses the same pinned runtime version as Harbor, installed
+by Gym inside the sandbox. It enables native discovery and projects staged skills
+into the task workdir's `.claude/skills/` directory because Gym uses a private
+Claude configuration directory. The baseline uses the same discovery settings
+without the target skill. Gym's required Anthropic credential field receives only
+a placeholder; policy credentials remain in the model-server environment.
+
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
 export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
@@ -734,7 +741,15 @@ skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --mod
 
 `tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
 daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
-endpoint, and the selected agents and `--env-mode`. The CLI check runs
+endpoint, and the selected agents and `--env-mode`. The endpoint check uses
+an isolated, unauthenticated HTTP probe with a three-second deadline. It honors
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (also lowercase), but sends no endpoint
+or proxy credentials and does not follow redirects. Policy endpoint HTTP responses,
+including authentication errors, count as reachable. Proxy authentication failures
+(`407`), failed HTTPS tunnels, and plain-HTTP proxy gateway errors (`502`, `504`)
+fail the check instead. HTTPS origin responses after a successful tunnel still
+count as reachable, including `502` and `504`. It does not
+validate credentials or model compatibility. The separate CLI interface check runs
 `gym eval run --help` with a 15-second timeout and a combined stdout/stderr limit of
 256 KiB, without policy credentials or server startup. Timeout, interruption, or output
 overflow stops its isolated process group with bounded TERM/KILL cleanup. It rejects
@@ -996,6 +1011,43 @@ logical units of work. Already admitted work can take measured usage above a
 cap, including on the final unit. These are admission boundaries, so a priced
 cost budget does not guarantee a hard dollar cap.
 
+Concurrent admission reserves each in-flight attempt using the largest measured
+per-attempt usage seen so far in this run, separately for agent tokens, judge
+calls, and priced cost. Estimates come only from real telemetry. When a bounded
+dimension has no measurement yet, only one logical calibration unit (such as a
+with-skill/baseline pair) may be in flight across the run. Other workers wait
+until every admitted attempt in that unit finishes, even if its first attempt
+already provided a measurement. If bounded usage is unmeasured, admission stops
+under the existing unknown-usage rule.
+For each bounded dimension with an estimate, admission checks
+`used + (in-flight attempts + proposed attempts) × estimate` against the cap.
+If that projection exceeds a cap while work is in flight, the worker waits for
+completion and re-checks fresh usage; waiting alone does not mark attempts
+`not_run`. If the projection still exceeds a cap with nothing in flight, the
+unit is denied, even when measured usage is below the cap. Its members retain
+`reason: budget_exhausted` and add `basis: estimate`; `budget.exhausted_basis`
+also identifies estimate-based exhaustion. The budget summary shows measured
+usage and the estimated next unit, rather than implying usage reached the cap.
+Attempt-count limits and stopping on unknown bounded usage are unchanged.
+
+Reservation reduces but does not eliminate in-flight overshoot. Estimates can
+grow, an attempt can exceed its estimate, and the calibration unit is
+unestimated. A run can also stop below its cap because of an estimate. Caps
+remain admission boundaries, not hard ceilings; there is no
+hard currency ceiling. `budget.reservation` records the
+`largest_measured_attempt` policy, `estimate_per_attempt` (or `not measured`),
+`in_flight_attempts`, `waits` (all condition waits), `calibration_waits` (the
+calibration subset), and `unestimated_admissions` (attempts admitted with at
+least one bounded usage dimension still unmeasured). `estimate_denials` counts
+logical units refused after estimate-based exhaustion; `denied_unit_size`
+records the size of the unit that first caused that exhaustion.
+
+Cost summaries cover agent inference accounting only, using user-supplied
+rates with a provider-reported cost fallback, not billed spend. Judge inference,
+setup, containers, backend fees, and infrastructure charges are not included.
+Unknown agent cost is not treated as zero; measured subtotals remain visible,
+and unknown cost stops further admission when a cost limit is configured.
+
 `budget.status` and `exhausted_limit` describe admission decisions;
 `budget.partial` records attempts left not run. Separately,
 `budget.observed_overruns` maps each exceeded limit to its measured `used`,
@@ -1005,6 +1057,20 @@ remains within it. Summaries derive these facts from usage and limits,
 including for older saved runs. Missing or partially measured bounded usage
 is reported as unverified, and unconfigured limits are not checked. An observed
 overrun alone does not change scores, execution success, or partial-run status.
+
+After execution, `run_config.json`, `result.json.run_config.budget`, and
+`result.json.budget` contain the same final accounting. Reports also prefer
+the top-level result budget when rebuilding older runs with stale run configs.
+Terminal, HTML, and benchmark reports show the shared budget summary, including
+exhaustion, not-run attempts, measured overruns, and unverified bounded usage.
+
+When `budget.not_run` is non-empty, the run-level summary verdict is
+`incomplete`: the budget left planned work unexecuted, not evaluated failures.
+Admitted attempts keep their per-case and per-agent scores. Any displayed
+Skill Lift covers admitted attempts only; it is not a complete-run verdict
+that the skill helps. An overrun without not-run attempts retains its verdict.
+Budget reporting does not change admission, scoring, execution status, or
+command exit codes.
 
 In a terminal, `--progress auto` uses the `rich` view: one table of the run
 plan and its stages that keeps the same height for the whole run. Each row is
@@ -1720,8 +1786,33 @@ tokens use the input rate. A model key must exactly match the resolved agent
 model. Relative `harbor.price_file` paths resolve from the source skill
 directory.
 
-Token and cost limits measure agent model spend only; they exclude judge
-spend, environment setup, and container time. `--max-judge-calls` counts
+The price file is user-supplied, not a verified billing rate card. Its currency
+is as supplied by the file, labelled USD by `--max-cost-usd`; no currency
+conversion or billing verification occurs. `budget.pricing` records
+`source: user_price_file`, the file name without its absolute path, the SHA-256
+of the exact loaded bytes, and `rates_per_mtok` for models whose rates actually
+derived an attempt cost (empty before any such derivation). The effective cached
+rate is recorded even when it defaults to the input rate.
+`verified_against_provider_billing` is always false.
+
+For each attempt, complete agent input/output token telemetry takes precedence
+over provider-reported cost. Cost is uncached input times the input rate, plus
+cached input times the cached rate, plus output times the output rate, divided
+by one million. Cached tokens are clamped to input tokens; missing cached counts
+are treated as uncached. If input/output telemetry is missing, reported agent
+cost is used instead; otherwise cost is unmeasured, never invented or treated as
+zero. An unknown attempt retains earlier measured subtotals and stops further
+cost-bounded admission.
+
+`budget.charge_coverage.attempts_by_derivation` counts completed accounting
+records as `price_file`, `provider_reported`, or `unmeasured`. The coverage policy
+excludes judge inference, environment setup, containers, backend fees, and
+infrastructure. Judge evidence does not supply structured token counts for
+pricing; prompt/reply character counts are not converted to tokens or money.
+Neither the computed cost nor a provider-reported fallback verifies billed
+spend, and the admission boundary is not a hard currency ceiling.
+
+Token and cost limits cover agent inference only. `--max-judge-calls` counts
 recorded judge attempts, excluding `salvage` entries, transport retries, and
 requests made internally by RAGAS. Measured usage totals are retained even
 when another attempt has no telemetry; that attempt is tracked as unmeasured.
@@ -2155,19 +2246,19 @@ machine-readable JSON contract, and how to judge whether a given lift is good.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Eval Datasets" icon="book" href="eval-datasets.mdx">
+  <Card title="Eval Datasets" icon="book" href="/skills/skillevaluator/eval-datasets">
     The full evals/ contract — dataset format, generation, and config.yml run
     policy.
   </Card>
-  <Card title="Agents & Sandboxes" icon="shield" href="agents-and-sandboxes.mdx">
+  <Card title="Agents & Sandboxes" icon="shield" href="/skills/skillevaluator/agents-and-sandboxes">
     Every supported agent and execution environment, plus readiness and
     debugging tools.
   </Card>
-  <Card title="Custom Graders & Tasks" icon="flask" href="custom-graders.mdx">
+  <Card title="Custom Graders & Tasks" icon="flask" href="/skills/skillevaluator/custom-graders">
     Bring your own grader or a complete Harbor task when the defaults can't
     express success.
   </Card>
-  <Card title="Reports & Results" icon="terminal" href="reports.mdx">
+  <Card title="Reports & Results" icon="terminal" href="/skills/skillevaluator/reports">
     What every run writes to disk and how to read it — including the JSON
     contract for CI.
   </Card>

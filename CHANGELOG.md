@@ -282,7 +282,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `sed -i 's/password=.*/password=.../'`, also inside an `ssh`, `sh -c`, or
   `eval` command string; a long flag with `_` between its words, such as
   `--db_password` or `--api_key`; an `npm config set`, `yarn config set`, or
-  `git config` key that is quoted or follows `--`, or whose value follows
+  `git config` key that is quoted (also with its quotes JSON-escaped, as in
+  saved tool-call arguments) or follows `--`, or whose value follows
   ` = `; and a shell `apply_patch` command whose 400-character cut split URL
   user info before it was masked.
   The `apply_patch` text is now masked before it is cut. A word with

@@ -1980,7 +1980,8 @@ saved judge evidence use the same credential masker:
   on its own line;
 - credentials set with `aws configure set`, `npm config set` (or `npm set`),
   `pnpm config set`, `yarn config set`, or `git config`, also after options
-  such as `--location=global` or a `--` that ends them, and with a quoted key
+  such as `--location=global` or a `--` that ends them, and with a quoted key,
+  also when its quotes are JSON-escaped, as in saved tool-call arguments
   (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
   `--unset` take no value. An unquoted value after a quoted key or one after
   `--` ends at `;`, `|`, or `&`, and such a key's value that holds a

@@ -3470,7 +3470,9 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # carry its own value ("--location=global"). The value is masked when the last
 # part of NAME names a credential ("//registry.npmjs.org/:_authToken",
 # "npmAuthToken", "github.token"), so "credential.helper store" and
-# "always-auth true" are kept. NAME may be single- or double-quoted and may
+# "always-auth true" are kept. NAME may be single- or double-quoted, with the
+# double quotes JSON-escaped as in tool-call arguments (git config
+# \"github.token\" VALUE, also escaped again, with three backslashes), and may
 # follow a "--" that ends the options. "git config --get" and "--unset" read
 # or remove a key and take no value. A separator word after NAME ("password =
 # VALUE", "token := VALUE") is no value; the assignment rule reads that form
@@ -3483,7 +3485,7 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 _FINDING_EVIDENCE_CONFIG_SET_NAME = (
     r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
-    r"([\"'])?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-)(?(2)(?![=:]))(?(3)(?![=:])))"
+    r"(\\{0,3}\"|')?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-)(?(2)(?![=:]))(?(3)(?![=:])))"
 )
 _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR = r"(?::=|=>|[=:])(?!\S)"
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(

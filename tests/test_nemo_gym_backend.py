@@ -1463,6 +1463,31 @@ def test_policy_endpoint_probe_has_a_hard_deadline_even_for_stalled_dns(monkeypa
     assert "timed out after 3s" in error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error
 
 
+def test_policy_endpoint_probe_does_not_import_from_checkout(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    marker = tmp_path / "imported"
+    (tmp_path / "http.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    monkeypatch.chdir(tmp_path)
+    _nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1")
+    assert not marker.exists()
+
+
+def test_policy_endpoint_probe_environment_excludes_credentials(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-probe-credential")
+
+    def probe(_args, **kwargs):
+        assert "OPENAI_API_KEY" not in tuple(kwargs.get("env", os.environ))
+        return subprocess.CompletedProcess(_args, 0)
+
+    monkeypatch.setattr(commands.subprocess, "run", probe)
+    assert commands._nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1") is None
+
+
 def test_tier3_doctor_accepts_backend_option() -> None:
     from click.testing import CliRunner
 

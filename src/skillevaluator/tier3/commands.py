@@ -1111,7 +1111,10 @@ def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
     detail = "could not reach the policy endpoint"
     try:
         probe = subprocess.run(
-            [sys.executable, "-c", _POLICY_ENDPOINT_PROBE],
+            [sys.executable, "-I", "-c", _POLICY_ENDPOINT_PROBE],
+            env={
+                name: os.environ[name] for name in ("SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ
+            },
             input=url,
             text=True,
             stdout=subprocess.DEVNULL,

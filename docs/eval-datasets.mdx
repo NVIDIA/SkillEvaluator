@@ -170,6 +170,37 @@ Unknown check types and invalid fields are dataset-validation errors. On a
 without-skill baseline, checks for scripts inside the evaluated skill are not
 checked because that skill is not installed.
 
+For an exact final-response format, use an anchored `output_matches` check
+and keep semantic requirements in `expected_behavior` (or `assertions`). For
+example, this legacy entry checks numeric-only output without judging it:
+
+```json
+{
+  "id": "numeric-only",
+  "question": "Calculate 6 * 7. Return only the numeric answer.",
+  "ground_truth": "42",
+  "expected_behavior": [],
+  "checks": [
+    {"type": "output_matches", "pattern": "\\A[+-]?\\d+(?:\\.\\d+)?\\Z"}
+  ]
+}
+```
+
+`output_matches` uses Python `re.search`: without anchors, a matching substring
+is sufficient. Use `\A` and `\Z` to require the whole literal response;
+`$` also permits a match before a final newline. Leading/trailing whitespace,
+labels and Markdown fences fail the example above. To require a literal prefix,
+use a pattern such as `\ATOTAL=[+-]?\d+(?:\.\d+)?\Z`, escaping any regular-expression
+metacharacters in the prefix. Double backslashes in JSON strings, as shown.
+Choose the numeric syntax your dataset actually requires (for example, add an
+exponent explicitly if allowed). A wrong value such as `43` still passes this
+format check; factual correctness remains separate. Avoid duplicating the
+same rule in both checks and judged assertions.
+
+Natural-language format judgments can accept malformed output or reject a
+well-formatted wrong value. See the [measured diagnostic and its limitations](/skills/skillevaluator/grader-validation#reading-the-report),
+including sample sizes and the lack of independent human labels.
+
 <AccordionGroup>
   <Accordion title="Legacy flat format">
     Older datasets are a flat array of entries with `question` instead of
@@ -654,11 +685,11 @@ Passing checks and warnings are not listed as source errors.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Run a live evaluation" icon="rocket" href="tier3-live-evaluation.mdx">
+  <Card title="Run a live evaluation" icon="rocket" href="/skills/skillevaluator/tier3-live-evaluation">
     Point `tier3 evaluate` at your skill and measure Skill Lift with the
     dataset you just authored.
   </Card>
-  <Card title="Custom graders and tasks" icon="flask" href="custom-graders.mdx">
+  <Card title="Custom graders and tasks" icon="flask" href="/skills/skillevaluator/custom-graders">
     When assertions aren't enough, bring your own grader or a complete Harbor
     task.
   </Card>

@@ -632,6 +632,8 @@ def _run_gym(
                     _kill_group()
             except (OSError, RuntimeError) as exc:
                 _confirm_stopped(exc)
+            if reporter is not None:
+                reporter.emit(ProgressEvent(stage="cleanup", state="complete", detail="NeMo Gym stopped"))
         except KeyboardInterrupt:
             force_detached_cleanup = True
             _kill_group()

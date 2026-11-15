@@ -1448,6 +1448,39 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
         pytest.fail("child of the Gym leader survived")
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, interrupt: bool) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    script = "import os, signal, time; time.sleep(0.5); "
+    if interrupt:
+        script += "os.kill(os.getppid(), signal.SIGINT); "
+    script += "time.sleep(60)"
+    reporter = _RecordingReporter()
+    with (tmp_path / "gym.log").open("w") as log:
+
+        def run():
+            return _run_gym(
+                [sys.executable, "-c", script],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=1,
+                reporter=reporter,
+            )
+
+        if interrupt:
+            with pytest.raises(KeyboardInterrupt):
+                run()
+        else:
+            assert run() is None
+    cleanup = [event for event in reporter.events if event.stage == "cleanup"]
+    assert [event.state for event in cleanup] == ["running", "complete"]
+    assert cleanup[-1].detail == "NeMo Gym stopped"
+
+
 @pytest.mark.parametrize("exit_early", [False, True])
 def test_gym_cleanup_stops_detached_servers_but_not_other_runs(tmp_path: Path, exit_early: bool) -> None:
     import socket

@@ -10,7 +10,7 @@ your own complete [Harbor](https://github.com/harbor-framework/harbor) task.
 Harbor is the open-source agent evaluation framework that executes Tier 3
 trials. Scaffolding is keyless and takes one command; running a custom-graded
 evaluation needs the same Tier 3 stack as any live eval — see
-[Tier 3: Live Evaluation](tier3-live-evaluation.mdx).
+[Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 ## Grading modes
 
@@ -88,7 +88,7 @@ optional — the config already selects it.
 `custom_only` still requires a numeric overall score. Qualitative reasons can
 accompany it, but prose alone is not a reward. For a manual, evidence-linked
 assessment alongside current scores, see the
-[qualitative assessment review contract](reports.mdx#qualitative-assessment-review-contract).
+[qualitative assessment review contract](/skills/skillevaluator/reports#qualitative-assessment-review-contract).
 Its worksheet is a documentation prototype, not input to your grader or a
 scoreless runtime mode.
 
@@ -172,7 +172,7 @@ Role log directories retain their host locations, so use
 deriving a parent from a role directory or writing `../artifacts` from it.
 
 Your grader reads Harbor's `trajectory.json` as written. Unlike the standard
-grader, it does not [rebuild a missing or empty trajectory](tier3-live-evaluation.mdx#the-graded-trajectory)
+grader, it does not [rebuild a missing or empty trajectory](/skills/skillevaluator/tier3-live-evaluation#the-graded-trajectory)
 from agent logs, so handle that case explicitly. A step's `message` and an
 observation result's `content` can each be a string or a list of content parts
 (`text`, `image`, or `audio`), so read both forms.
@@ -196,7 +196,7 @@ skillevaluator init-harbor-task ./my-skill
 | `--force` | off | Overwrite an existing starter case |
 
 Exact defaults for both scaffolding commands are in the
-[CLI Reference](cli-reference.mdx#init-custom-grader).
+[CLI Reference](/skills/skillevaluator/cli-reference#init-custom-grader).
 
 The scaffold produces a complete, runnable task source:
 
@@ -235,7 +235,7 @@ Two rules keep BYOT predictable:
   `[metadata]` in `task.toml`, falling back to the case directory name — must
   match an entry `id` in `evals/evals.json`, or the run refuses to start.
   `custom_only` has no such requirement. See
-  [Eval Datasets](eval-datasets.mdx).
+  [Eval Datasets](/skills/skillevaluator/eval-datasets).
 - **Your source is never mutated in place.** SkillEvaluator stages with-skill
   and baseline copies of `evals/harbor/` under the results directory for each
   run; the files you author stay untouched. In a paired run, the staged copies
@@ -310,7 +310,7 @@ skillevaluator harbor-view <jobs-dir>
 
 Grader stdout, the written `reward.json`, and the full trajectory are all in
 the retained job tree — the fastest way to find out why a score isn't what
-you expected. [Agents & Sandboxes](agents-and-sandboxes.mdx) covers the
+you expected. [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) covers the
 debugging workflow in depth.
 
 ## What reports show
@@ -334,7 +334,7 @@ Custom scores flow into the same results tree as everything else:
   run's attempt policy.
 
 Custom lift needs both arms — a `--skip-baseline` run reports your custom
-scores but no lift. [Reports & Results](reports.mdx) covers the full on-disk
+scores but no lift. [Reports & Results](/skills/skillevaluator/reports) covers the full on-disk
 layout and the machine-readable contract.
 
 ## Import precomputed custom metrics
@@ -409,7 +409,7 @@ must have a nonempty `custom_metrics` object, but its declared metrics may all
 be null. Arm means exclude missing values and report a scored count per metric
 against total observations. All-missing metrics render `NO SCORE`.
 
-Case IDs are strings following the [dataset identity rules](eval-datasets.mdx). Attempts are
+Case IDs are strings following the [dataset identity rules](/skills/skillevaluator/eval-datasets). Attempts are
 integers from 1 through 1000, not booleans. Only `with_skill` and `without_skill`
 arms are accepted; duplicate case/attempt/arm identities and case IDs differing
 only in capitalization are rejected. Standard metric names, metadata names
@@ -480,11 +480,11 @@ scores produce null delta/improvement and `NO SCORE`, not a fabricated zero.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Eval Datasets" icon="book" href="eval-datasets.mdx">
+  <Card title="Eval Datasets" icon="book" href="/skills/skillevaluator/eval-datasets">
     The full evals/ contract — dataset format, config.yml run policy, and
     fixtures your custom task can build on.
   </Card>
-  <Card title="Reports & Results" icon="terminal" href="reports.mdx">
+  <Card title="Reports & Results" icon="terminal" href="/skills/skillevaluator/reports">
     Everything a run writes to disk and how to read it, including where
     custom metrics and custom lift surface.
   </Card>

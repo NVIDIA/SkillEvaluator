@@ -252,8 +252,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Native NeMo Gym teardown now completes its cleanup progress stage after a
+  successful stop, instead of reporting an interrupted cleanup on cancellation.
 - Native NeMo Gym cleanup now also stops run-owned detached server processes
   after startup timeouts, interruptions and early exits, without targeting other runs.
+- Published documentation links use page routes so readers can navigate between
+  setup, report interpretation, recovery and the reference pages.
+
 - NeMo Gym results reject verifier rewards that identify a different staged
   case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
@@ -288,6 +293,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
   ended in `(from None)` and the SkillSpector row named
   `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
+- Tier 3 case recommendations treat required judge failures as unscored
+  evaluation problems, with advice to check judge configuration and provider
+  availability. Failed judging is no longer counted twice or blamed on the
+  skill, including for negative controls; genuine scored failures retain their
+  existing advice.
 - The comments-only consumer template now grants its required read and PR-comment
   permissions only to the comment job, with no workflow-wide token permissions.
 - The behavior evidence gate no longer keeps a score for an expectation that
@@ -324,6 +334,10 @@ All notable changes to SkillEvaluator are documented in this file.
   output or references. Scoring and thresholds are unchanged; an Accuracy format
   failure alone can still score 0.8 and pass the default threshold.
 
+- Allow grader-validation suites to use validated dataset `checks`, including
+  anchored `output_matches` rules, instead of rejecting the entry field before
+  running the verifier. Document exact-format declarations and the measured
+  limitations of natural-language format judging.
 - An author value is no longer rejected for containing a Unicode joiner. The
   character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
   (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
@@ -386,6 +400,9 @@ All notable changes to SkillEvaluator are documented in this file.
   user-request section when it is set below 2,000, and that a check budget too
   small to hold the final response beside some tool history is logged as a
   warning rather than quietly raised — lower the final-response limit with it.
+- OpenCode bash tool observations retain recorded shell exit codes in Harbor
+  trajectories. Declarative `command_succeeded` checks can now distinguish
+  successful commands from nonzero exits; missing exit codes remain not checked.
 - `judge_attempts.json` now masks `Cookie` header values, credential flag values
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
@@ -409,6 +426,9 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,
@@ -416,6 +436,10 @@ All notable changes to SkillEvaluator are documented in this file.
   Additive `budget.observed_overruns` metadata is separate from admission
   `status`; limits are checked between logical admission units, so a completed
   run can exceed a cap without becoming partial or failed.
+- Tier 3 suggestion prompts qualify evidence by its owning case or trial, so
+  citations resolve to that case's excerpts regardless of trial order. Metric
+  findings cite only evidence from cases contributing to the reported outcome;
+  references with missing or ambiguous ownership are rejected.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.

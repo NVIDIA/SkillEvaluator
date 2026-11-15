@@ -283,6 +283,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym project skill projections run after authored image instructions

@@ -266,6 +266,18 @@ def _local_test_transport(endpoint: str, body: bytes) -> bytes:
         return response.read()
 
 
+def _wait_for_bridge_server(started: Event, bridge_thread: Thread) -> None:
+    """Wait for ``bridge.serve`` to report its bound server, failing at once if its thread died first.
+
+    Binding, the ready-file fsync and thread scheduling have no latency bound on a
+    loaded CI runner, so the deadline only guards against a start that hangs.
+    """
+    deadline = time.monotonic() + 30
+    while not started.wait(timeout=0.05):
+        assert bridge_thread.is_alive(), "bridge thread exited before its server was ready"
+        assert time.monotonic() < deadline, "bridge server did not start"
+
+
 def _read_raw_http_response(client: socket.socket) -> str:
     chunks: list[bytes] = []
     client.settimeout(2)
@@ -436,7 +448,7 @@ def bridge_services(tmp_path: Path) -> _BridgeServices:
         daemon=True,
     )
     bridge_thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, bridge_thread)
     port = int(servers[0].server_port)
     base_url = f"http://127.0.0.1:{port}"
     for _ in range(40):
@@ -540,7 +552,7 @@ def test_host_bridge_requires_the_per_run_client_token_before_forwarding(tmp_pat
         daemon=True,
     )
     thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, thread)
     origin = f"http://127.0.0.1:{servers[0].server_port}"
     try:
         responses_payload = {"model": "nvidia/model", "input": "Hello"}
@@ -637,7 +649,7 @@ def test_bridge_rejects_authenticated_requests_after_per_run_budget_is_exhausted
         daemon=True,
     )
     thread.start()
-    assert started.wait(timeout=1)
+    _wait_for_bridge_server(started, thread)
     origin = f"http://127.0.0.1:{servers[0].server_port}"
     headers = {"Authorization": f"Bearer {client_token}"}
     payload = {"model": "nvidia/model", "input": "Hello"}

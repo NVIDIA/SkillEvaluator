@@ -213,7 +213,8 @@ def test_anthropic_pagination_fails_when_overall_deadline_expires(monkeypatch) -
 
 
 def test_catalog_body_trickle_cannot_extend_the_wall_clock_deadline() -> None:
-    payload = json.dumps({"data": [{"id": "slow-model"}]}).encode()
+    # 400 bytes, one every 25ms: a client that waits for the whole body needs 10 seconds.
+    payload = json.dumps({"data": [{"id": "slow-model"}]}).encode().ljust(400)
 
     class SlowBodyHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:
@@ -248,10 +249,11 @@ def test_catalog_body_trickle_cannot_extend_the_wall_clock_deadline() -> None:
             server.shutdown()
             thread.join(timeout=2)
 
-    # The old single response.read() waited for the complete slow body (~0.9s).
-    # Allow ample scheduler jitter while still proving the configured deadline is
-    # wall-clock bounded rather than reset by each arriving byte.
-    assert elapsed < 0.5
+    # The old single response.read() waited for the complete slow body (10s here),
+    # because every arriving byte reset the socket timeout. The bound stays far from
+    # both that and the 0.15s deadline: a stalled CI runner has needed 0.86s, and
+    # must not look like a body that extended the deadline.
+    assert elapsed < 5.0
 
 
 def test_catalog_dns_resolution_cannot_extend_the_wall_clock_deadline(monkeypatch) -> None:

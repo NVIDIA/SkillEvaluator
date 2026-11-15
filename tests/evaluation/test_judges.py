@@ -853,26 +853,26 @@ def test_regressed_dimension_reasoning_names_the_weakest_signal() -> None:
 
 class TestInsightsJudgeRecommendationQuality:
     @staticmethod
-    def _recommendation(message: str, title: str = "Next step") -> dict:
+    def _recommendation(message: str, title: str = "Next step", case_id: str = "positive-001") -> dict:
         return {
             "claim_type": "general",
             "category": "Improve",
             "title": title,
             "message": message,
             "severity": "warn",
-            "evidence_case_ids": ["positive-001"],
+            "evidence_case_ids": [case_id],
         }
 
-    def _parse(self, *messages: str, deterministic: dict | None = None) -> list[str]:
+    def _parse(self, *messages: str, deterministic: dict | None = None, case_id: str = "positive-001") -> list[str]:
         response = json.dumps(
             {
                 "conclusions": [],
-                "recommendations": [self._recommendation(message) for message in messages],
+                "recommendations": [self._recommendation(message, case_id=case_id) for message in messages],
             }
         )
         parsed = InsightsJudge().parse_response(
             response,
-            canonical={"dataset": [{"id": "positive-001", "expected_skill": "calculator"}], "trials": []},
+            canonical={"dataset": [{"id": case_id, "expected_skill": "calculator"}], "trials": []},
             deterministic=deterministic or {},
         )
         return [item["message"] for item in parsed["recommendations"]]
@@ -945,6 +945,67 @@ class TestInsightsJudgeRecommendationQuality:
     )
     def test_keeps_advice_that_removes_implementation_cases_and_case_failures(self, message: str) -> None:
         assert self._parse(message) == [message]
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("positive-001", "Delete the case for positive-001 so it stops failing."),
+            ("positive-001", "Remove the case named positive-001 so the run passes."),
+            ("positive-001", "Delete case positive-001."),
+            ("positive-001", "Delete test case positive-001."),
+            ("positive-001", "Fix the mismatch by deleting the case for positive-001."),
+            ("positive-001", "Delete the entry for positive-001."),
+            ("positive-001", "Remove positive-001 from evals/evals.json."),
+            ("negative-007", "Remove the case for `negative-007`"),
+            ("negative-007", 'Drop the "negative-007" case.'),
+            ("syllable-count", "Delete the syllable-count case."),
+            ("syllable-count", "Remove the case for syllable-count."),
+            ("smoke", "Delete the smoke case."),
+            ("smoke", "Remove the case for smoke so it stops failing."),
+            ("positive-001", "The case for positive-001 should be deleted."),
+            ("positive-001", "The positive-001 entry should be deleted."),
+            ("positive-001", "The case for positive-001 in evals/evals.json can be removed."),
+            ("syllable-count", "The syllable-count case should be removed."),
+            ("smoke", "The smoke case must be dropped."),
+        ],
+    )
+    def test_drops_advice_that_deletes_a_dataset_case_named_by_its_id(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == []
+
+    @pytest.mark.parametrize(
+        "case_id,message",
+        [
+            ("positive-001", "Remove the special case in parser.py for positive-001 and implement the general rule."),
+            ("positive-001", "Remove the special case for positive-001 in parser.py and implement the general rule."),
+            ("positive-001", "Remove the case for positive-001 from analyze_text.py and implement the general rule."),
+            ("syllable-count", "Remove the syllable-count case in analyze_text.py and implement it generally."),
+            ("smoke", "Remove the smoke case in analyze_text.py and implement it generally."),
+            ("positive-001", "Remove the test case failure for positive-001 by implementing the rule in SKILL.md"),
+            ("positive-001", "Do not delete the case for positive-001; implement the rounding rule in SKILL.md."),
+            ("syllable-count", "Never remove the syllable-count case; implement the counting rule in SKILL.md."),
+            ("smoke", "Do not drop the smoke case; implement the missing step in SKILL.md."),
+            ("positive-001", "Remove the special case for zero-length input in parser.py, which positive-001 hits."),
+            (
+                "positive-001",
+                "Remove the special case for zero-length input and implement the rule positive-001 needs.",
+            ),
+        ],
+    )
+    def test_keeps_advice_that_names_a_case_id_but_edits_the_implementation(self, case_id: str, message: str) -> None:
+        assert self._parse(message, case_id=case_id) == [message]
+
+    @pytest.mark.parametrize("case_id", ["smoke", "syllable-count"])
+    def test_drops_a_named_dataset_case_removal_in_the_title_even_when_the_message_is_benign(
+        self, case_id: str
+    ) -> None:
+        message = f"Implement the missing step that {case_id} exercises in SKILL.md."
+        recommendation = self._recommendation(message, title=f"Delete the {case_id} case", case_id=case_id)
+        response = json.dumps({"conclusions": [], "recommendations": [recommendation]})
+        parsed = InsightsJudge().parse_response(
+            response,
+            canonical={"dataset": [{"id": case_id, "expected_skill": "calculator"}], "trials": []},
+        )
+        assert parsed["recommendations"] == []
 
     @pytest.mark.parametrize(
         "message",

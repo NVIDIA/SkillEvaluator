@@ -1262,13 +1262,14 @@ def what_to_fix(
         if issue["kind"] not in ("run error", "eval case", "missing input", "skill not used")
         and not issue.get("asks_for_input")
     ]
+    case_ids = {*dataset, *_case_ids(agents)}
     actions = _llm_actions(actionable, skill_path, dataset) if use_llm and actionable else None
     by_id = dict(zip((id(i) for i in actionable), actions or [], strict=False))
     actionable_ids = {id(issue) for issue in actionable}
     for issue in issues:
         existing_action = issue.get("action")
         action = existing_action or by_id.get(id(issue))
-        if action and not _weakens_requirements(action):
+        if action and not _weakens_requirements(action, case_ids):
             issue["action"] = action
             issue["source"] = "deterministic" if existing_action else "llm"
         else:
@@ -1279,7 +1280,7 @@ def what_to_fix(
             fallback = _fallback_action(issue)
             issue["action"] = (
                 "Update SKILL.md or the skill's scripts to meet the existing case requirements, then re-run the case."
-                if _weakens_requirements(fallback)
+                if _weakens_requirements(fallback, case_ids)
                 else fallback
             )
             issue["source"] = "deterministic"

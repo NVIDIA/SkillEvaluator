@@ -19,6 +19,8 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable
+from functools import lru_cache
 from typing import Any
 
 from skillevaluator.constants import (
@@ -106,23 +108,36 @@ _DATASET_LOCATION = (
 )
 # A trailing failure noun means the advice fixes a failure, not the case: "Remove the test case failure".
 _CASE_END = rf"(?![\w-]){_NOT_FAILURE_OF_REQUIREMENT}"
-# Ids such as "positive-001" or "syllable-positive" (and the words "positive"/"negative") name a dataset case.
+# Ids such as "positive-001", "syllable-positive" or "syllable-count" name a dataset case: a token with a letter and a
+# digit, one built around "positive"/"negative", or any hyphen/underscore identifier. Plain-word ids ("smoke") are
+# only recognised when the caller passes the known case ids.
 _CASE_NAME = (
     r"(?:(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+|"
-    r"(?:[A-Za-z0-9]+[_-])*(?:positive|negative)(?:[_-][A-Za-z0-9]+)*)"
+    r"(?:[A-Za-z0-9]+[_-])*(?:positive|negative)(?:[_-][A-Za-z0-9]+)*|"
+    r"[A-Za-z0-9]+(?:[_-][A-Za-z0-9]+)+)"
+)
+# "the case for positive-001": an id that is not a known case id must end its phrase, so "the case for zero-length
+# input" and "the special case positive-001 hits" stay implementation prose.
+_CASE_LINK = (
+    r"(?:\s*:\s*|\s+(?:(?:for|of|named|called|titled|labell?ed|id|name|with\s+(?:the\s+)?(?:id|name))\s+){1,2}"
+    r"(?:the\s+)?)"
+)
+_CASE_NAME_END = (
+    r"(?=\s*(?:[.,;:!?)]|$)|"
+    r"\s+(?:so|to|and|or|but|because|since|as|which|that|if|when|by|then|from|in|within|out|"
+    r"is|are|was|were|be|should|must|can|could|may|might|will|would)\b)"
+)
+# A case, entry or id that sits in a script or source file ("the special case for positive-001 in parser.py") is an
+# implementation branch, not a dataset row.
+_NOT_IN_CODE = (
+    r"(?!\s+(?:in|from|inside|within)\s+(?:the\s+|this\s+|our\s+|your\s+)?"
+    r"(?:[\w./-]*\.(?:py|js|mjs|cjs|ts|tsx|jsx|sh|bash|rb|go|rs|java|c|cc|cpp|h|hpp|md)\b|"
+    r"(?:script|code|function|parser|module|implementation|handler|logic|class|method|helper|switch|conditional|"
+    r"branch|loop|program|algorithm|routine)\b))"
 )
 # A bare "case" is also an implementation branch ("remove the special case in parser.py"), so on its own it is not
 # a dataset case: it needs a dataset location in the same clause, a dataset sentence prefix, or a case-name qualifier.
 _BARE_CASE = rf"cases?{_CASE_END}(?!\s+(?:of|statements?|conversions?|folding|handling|(?:in)?sensitiv\w*))"
-# "entry", "row" and "example" are only treated as a case when a dataset qualifier precedes them or a dataset
-# location follows them in the same clause ("delete the cache entry" is unrelated).
-_DATASET_CASE_NOUN = (
-    r"(?:(?:test|eval(?:uation)?|dataset|benchmark)[\s_-]*(?:cases?|entr(?:y|ies)|rows?|examples?)"
-    rf"{_CASE_END}|"
-    rf"{_CASE_NAME}\s+{_BARE_CASE}|"
-    rf"{_BARE_CASE}(?=[^.;!?]{{0,40}}?\b{_DATASET_LOCATION})|"
-    rf"(?:entr(?:y|ies)|rows?|examples?)(?![\w-])(?=[^.;!?]{{0,60}}?\b{_DATASET_LOCATION}))"
-)
 # Words that end a noun phrase, so "remove temp files per case" is not read as "remove the case".
 _CASE_QUALIFIER = (
     r"(?!(?:in|of|on|at|by|for|to|if|as|and|or|with|without|from|after|before|when|where|that|which|than|then|but|so|"
@@ -137,16 +152,45 @@ _PASSIVE_CASE_REMOVAL_TAIL = (
     r"(?:is|are|was|were|be|been|being|(?:should|must|can|could|may|might|will|would)\s+be|"
     rf"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?{_CASE_REMOVAL_VERB}\b"
 )
-_CASE_REMOVAL_PATTERN = re.compile(rf"{_CASE_REMOVAL_PREFIX}{_DATASET_CASE_NOUN}", re.IGNORECASE)
-_PASSIVE_CASE_REMOVAL_PATTERN = re.compile(
-    rf"\b{_DATASET_CASE_NOUN}(?:\s+{_DATASET_LOCATION})?{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE
-)
+
+
+@lru_cache(maxsize=32)
+def _case_removal_patterns(case_ids: tuple[str, ...] = ()) -> tuple[re.Pattern[str], re.Pattern[str]]:
+    """Active and passive patterns for deleting a dataset case, aware of the case ids named in the advice."""
+    known = rf"(?<![\w-])(?:{'|'.join(re.escape(case_id) for case_id in case_ids)})(?![\w-])" if case_ids else None
+    name = rf"(?:{_CASE_NAME}|{known})" if known else _CASE_NAME
+    separator = r"(?:\s*,\s*(?:(?:and|or)\s+)?|\s+(?:and|or)\s+)"
+    named = rf"(?:{name}{separator})*{name}(?:['\u2019]s)?"
+    # "entry", "row" and "example" are only treated as a case when a dataset qualifier precedes them, a dataset
+    # location follows them in the same clause ("delete the cache entry" is unrelated), or the id is a known one.
+    alternatives = [
+        rf"(?:test|eval(?:uation)?|dataset|benchmark)[\s_-]*(?:cases?|entr(?:y|ies)|rows?|examples?){_CASE_END}",
+        rf"{named}\s+{_BARE_CASE}{_NOT_IN_CODE}",
+        rf"cases?(?![\w-])(?:{_CASE_LINK}|\s+){_CASE_NAME}{_CASE_NAME_END}{_NOT_IN_CODE}",
+        rf"{_BARE_CASE}(?=[^.;!?]{{0,40}}?\b{_DATASET_LOCATION})",
+        rf"(?:entr(?:y|ies)|rows?|examples?)(?![\w-])(?=[^.;!?]{{0,60}}?\b{_DATASET_LOCATION})",
+    ]
+    if known:
+        known_named = rf"(?:{known}{separator})*{known}(?:['\u2019]s)?"
+        alternatives += [
+            rf"{known_named}\s+(?:entr(?:y|ies)|rows?|examples?){_CASE_END}{_NOT_IN_CODE}",
+            rf"(?:cases?|entr(?:y|ies)|rows?|examples?)(?![\w-])(?:{_CASE_LINK}|\s+){known}{_NOT_IN_CODE}",
+            rf"{known}(?=\s+{_DATASET_LOCATION})",
+        ]
+    noun = f"(?:{'|'.join(alternatives)})"
+    return (
+        re.compile(rf"{_CASE_REMOVAL_PREFIX}{noun}", re.IGNORECASE),
+        re.compile(rf"\b{noun}(?:\s+{_DATASET_LOCATION})?{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE),
+    )
+
+
 # The same removals of a bare "case" only count when the sentence before them points at the dataset:
 # "In evals/evals.json, remove the special case" is a dataset edit; "Remove the special case in parser.py" is not.
 _BARE_CASE_REMOVAL_PATTERN = re.compile(rf"{_CASE_REMOVAL_PREFIX}{_BARE_CASE}", re.IGNORECASE)
 _PASSIVE_BARE_CASE_REMOVAL_PATTERN = re.compile(rf"\b{_BARE_CASE}{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE)
 _DATASET_SCOPE_PATTERN = re.compile(rf"\b{_DATASET_LOCATION}", re.IGNORECASE)
 _SENTENCE_BREAK_PATTERN = re.compile(r"[.!?;]\s|\n")
+_QUOTE_PATTERN = re.compile(r"[`\"\u201c\u201d]|(?<!\w)['\u2018\u2019]|['\u2018\u2019](?!\w)")
 
 
 _SYSTEM_PROMPT = """\
@@ -534,14 +578,29 @@ def _sentence_prefix(text: str, end: int) -> str:
     return text[breaks[-1] if breaks else 0 : end]
 
 
-def _weakens_requirements(text: str) -> bool:
-    # Inline-code ticks must not hide a requirement noun: "Remove the `expectation`" is still a removal.
-    text = text.replace("`", "")
+def _case_ids_in(text: str, case_ids: Iterable[object]) -> tuple[str, ...]:
+    """Known case ids that appear in ``text``, longest first, so the removal patterns only list ids that can match."""
+    lowered = text.lower()
+    # One-character ids ("a", "1") read as ordinary words ("remove a case"), so only longer ids are matched by name.
+    present = {name for case_id in case_ids if len(name := str(case_id).strip().lower()) >= 2 and name in lowered}
+    return tuple(sorted(present, key=lambda name: (-len(name), name)))
+
+
+def _weakens_requirements(text: str, case_ids: Iterable[object] = ()) -> bool:
+    """True when advice removes or weakens a dataset requirement or deletes a dataset case.
+
+    ``case_ids`` are the ids of the dataset cases the advice may name. Any case id is recognised in a case removal
+    even when it is a plain word ("Delete the smoke case"); ids shaped like identifiers ("positive-001",
+    "syllable-count") are recognised without it.
+    """
+    # Inline-code ticks and quotes must not hide a name: "Remove the `expectation`" is still a removal.
+    text = _QUOTE_PATTERN.sub("", text)
+    case_removal, passive_case_removal = _case_removal_patterns(_case_ids_in(text, case_ids))
     for pattern, needs_dataset_scope in (
         (_WEAKENING_PATTERN, False),
         (_PASSIVE_WEAKENING_PATTERN, False),
-        (_CASE_REMOVAL_PATTERN, False),
-        (_PASSIVE_CASE_REMOVAL_PATTERN, False),
+        (case_removal, False),
+        (passive_case_removal, False),
         (_BARE_CASE_REMOVAL_PATTERN, True),
         (_PASSIVE_BARE_CASE_REMOVAL_PATTERN, True),
     ):
@@ -656,6 +715,7 @@ class InsightsJudge(LLMClient):
             raise ValueError(f"Expected JSON object, got {type(data).__name__}")
         canonical = kwargs.get("canonical") if isinstance(kwargs.get("canonical"), dict) else {}
         grounding = _negative_control_grounding(canonical)
+        known_case_ids = tuple(grounding[1])
         # Each entry names the model that wrote it, which on the native
         # Anthropic API can be the server-side fallback.
         provenance = {"model": safe_llm_model(self.model_used)} if self.model_used else {}
@@ -694,7 +754,7 @@ class InsightsJudge(LLMClient):
             message = (item.get("message") or "").strip()
             if not title and not message:
                 continue
-            if _weakens_requirements(title) or _weakens_requirements(message):
+            if _weakens_requirements(title, known_case_ids) or _weakens_requirements(message, known_case_ids):
                 continue
             if (key := _normalized_text(message or title)) in seen_messages:
                 continue

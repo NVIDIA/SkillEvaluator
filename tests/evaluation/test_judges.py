@@ -911,10 +911,40 @@ class TestInsightsJudgeRecommendationQuality:
             "The positive-001 entry in evals/evals.json should be removed.",
             "The positive-001 test case must be dropped.",
             "Do not remove the expectation; delete the positive-001 case from the dataset.",
+            "Delete the positive-001 case from evals/evals.json.",
+            "Remove the test case for positive-001 from the dataset.",
+            "Drop the eval case for positive-001.",
+            "The test case should be deleted so positive-001 stops failing.",
+            "Remove the special case for positive-001 from evals/evals.json.",
+            "In evals/evals.json, remove the special case for positive-001.",
+            "In the dataset, delete the edge case for positive-001.",
+            "The special case in evals/evals.json should be removed so positive-001 passes.",
         ],
     )
     def test_drops_advice_that_deletes_a_dataset_case(self, message: str) -> None:
         assert self._parse(message) == []
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "Remove the special case in parser.py for positive-001 and implement the general rounding algorithm.",
+            "Remove the test case failure for positive-001 by implementing the rounding rule in SKILL.md",
+            "Remove the special case in the script for positive-001 and implement the general rounding algorithm.",
+            "Delete the default case branch in parser.py; implement the rounding rule positive-001 needs.",
+            "Remove the base case in the recursive function that positive-001 exercises.",
+            "Remove the corner case for zero in parser.py, which positive-001 hits.",
+            "Remove the error case in parser.py and handle positive-001 generally.",
+            "Remove the case failure in positive-001 by implementing the rounding rule in SKILL.md.",
+            "Remove the case mismatch in positive-001 by implementing the rounding rule in SKILL.md.",
+            "Remove the test case violation in positive-001 by implementing the rounding rule in SKILL.md.",
+            "The positive-001 test case failure should be removed by implementing the rounding rule in SKILL.md.",
+            "The special case in parser.py that positive-001 hits should be removed.",
+            "Never remove the positive-001 test case; fix the rounding step instead.",
+            "Fix the failing positive-001 test case by removing the special case in parser.py.",
+        ],
+    )
+    def test_keeps_advice_that_removes_implementation_cases_and_case_failures(self, message: str) -> None:
+        assert self._parse(message) == [message]
 
     @pytest.mark.parametrize(
         "message",

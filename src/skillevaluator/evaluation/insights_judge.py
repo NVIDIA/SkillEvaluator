@@ -104,11 +104,23 @@ _DATASET_LOCATION = (
     r"(?:(?:[\w.-]+/)*(?<![A-Za-z])evals?(?![A-Za-z])[\w./-]*|(?:[\w.-]+/)*[\w.-]*datasets?\b[\w./-]*|"
     r"[\w./-]+\.jsonl?\b|benchmark\b|(?:test|eval(?:uation)?)\s+(?:set|suite|file))"
 )
-# "case" alone is a dataset case. "entry", "row" and "example" are only treated as one when a dataset qualifier
-# precedes them or a dataset location follows them in the same clause ("delete the cache entry" is unrelated).
+# A trailing failure noun means the advice fixes a failure, not the case: "Remove the test case failure".
+_CASE_END = rf"(?![\w-]){_NOT_FAILURE_OF_REQUIREMENT}"
+# Ids such as "positive-001" or "syllable-positive" (and the words "positive"/"negative") name a dataset case.
+_CASE_NAME = (
+    r"(?:(?=[A-Za-z0-9_-]*[A-Za-z])(?=[A-Za-z0-9_-]*\d)[A-Za-z0-9_-]+|"
+    r"(?:[A-Za-z0-9]+[_-])*(?:positive|negative)(?:[_-][A-Za-z0-9]+)*)"
+)
+# A bare "case" is also an implementation branch ("remove the special case in parser.py"), so on its own it is not
+# a dataset case: it needs a dataset location in the same clause, a dataset sentence prefix, or a case-name qualifier.
+_BARE_CASE = rf"cases?{_CASE_END}(?!\s+(?:of|statements?|conversions?|folding|handling|(?:in)?sensitiv\w*))"
+# "entry", "row" and "example" are only treated as a case when a dataset qualifier precedes them or a dataset
+# location follows them in the same clause ("delete the cache entry" is unrelated).
 _DATASET_CASE_NOUN = (
-    r"(?:(?:test|eval(?:uation)?|dataset|benchmark)[\s_-]*(?:cases?|entr(?:y|ies)|rows?|examples?)(?![\w-])|"
-    r"cases?(?![\w-])(?!\s+(?:of|statements?|conversions?|folding|handling|(?:in)?sensitiv\w*))|"
+    r"(?:(?:test|eval(?:uation)?|dataset|benchmark)[\s_-]*(?:cases?|entr(?:y|ies)|rows?|examples?)"
+    rf"{_CASE_END}|"
+    rf"{_CASE_NAME}\s+{_BARE_CASE}|"
+    rf"{_BARE_CASE}(?=[^.;!?]{{0,40}}?\b{_DATASET_LOCATION})|"
     rf"(?:entr(?:y|ies)|rows?|examples?)(?![\w-])(?=[^.;!?]{{0,60}}?\b{_DATASET_LOCATION}))"
 )
 # Words that end a noun phrase, so "remove temp files per case" is not read as "remove the case".
@@ -117,17 +129,24 @@ _CASE_QUALIFIER = (
     r"while|is|are|was|were|be|per|during|across|within|inside|into|onto|via|using|until|upon|around)\b)"
     r"`?[A-Za-z0-9_'-]+`?"
 )
-_CASE_REMOVAL_PATTERN = re.compile(
-    rf"\b{_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+"
-    rf"(?:{_CASE_QUALIFIER}\s+){{0,3}}{_DATASET_CASE_NOUN}",
-    re.IGNORECASE,
+_CASE_REMOVAL_PREFIX = (
+    rf"\b{_CASE_REMOVAL_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+(?:{_CASE_QUALIFIER}\s+){{0,3}}"
 )
+_PASSIVE_CASE_REMOVAL_TAIL = (
+    r"\s+(?:also\s+|then\s+)?"
+    r"(?:is|are|was|were|be|been|being|(?:should|must|can|could|may|might|will|would)\s+be|"
+    rf"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?{_CASE_REMOVAL_VERB}\b"
+)
+_CASE_REMOVAL_PATTERN = re.compile(rf"{_CASE_REMOVAL_PREFIX}{_DATASET_CASE_NOUN}", re.IGNORECASE)
 _PASSIVE_CASE_REMOVAL_PATTERN = re.compile(
-    rf"\b{_DATASET_CASE_NOUN}(?:\s+{_DATASET_LOCATION})?\s+(?:also\s+|then\s+)?"
-    rf"(?:is|are|was|were|be|been|being|(?:should|must|can|could|may|might|will|would)\s+be|"
-    rf"ought\s+to\s+be|needs?\s+to\s+be)\s+(?:just\s+|simply\s+|safely\s+)?{_CASE_REMOVAL_VERB}\b",
-    re.IGNORECASE,
+    rf"\b{_DATASET_CASE_NOUN}(?:\s+{_DATASET_LOCATION})?{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE
 )
+# The same removals of a bare "case" only count when the sentence before them points at the dataset:
+# "In evals/evals.json, remove the special case" is a dataset edit; "Remove the special case in parser.py" is not.
+_BARE_CASE_REMOVAL_PATTERN = re.compile(rf"{_CASE_REMOVAL_PREFIX}{_BARE_CASE}", re.IGNORECASE)
+_PASSIVE_BARE_CASE_REMOVAL_PATTERN = re.compile(rf"\b{_BARE_CASE}{_PASSIVE_CASE_REMOVAL_TAIL}", re.IGNORECASE)
+_DATASET_SCOPE_PATTERN = re.compile(rf"\b{_DATASET_LOCATION}", re.IGNORECASE)
+_SENTENCE_BREAK_PATTERN = re.compile(r"[.!?;]\s|\n")
 
 
 _SYSTEM_PROMPT = """\
@@ -510,18 +529,27 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
     return references
 
 
+def _sentence_prefix(text: str, end: int) -> str:
+    breaks = [match.end() for match in _SENTENCE_BREAK_PATTERN.finditer(text, 0, end)]
+    return text[breaks[-1] if breaks else 0 : end]
+
+
 def _weakens_requirements(text: str) -> bool:
     # Inline-code ticks must not hide a requirement noun: "Remove the `expectation`" is still a removal.
     text = text.replace("`", "")
-    for pattern in (
-        _WEAKENING_PATTERN,
-        _PASSIVE_WEAKENING_PATTERN,
-        _CASE_REMOVAL_PATTERN,
-        _PASSIVE_CASE_REMOVAL_PATTERN,
+    for pattern, needs_dataset_scope in (
+        (_WEAKENING_PATTERN, False),
+        (_PASSIVE_WEAKENING_PATTERN, False),
+        (_CASE_REMOVAL_PATTERN, False),
+        (_PASSIVE_CASE_REMOVAL_PATTERN, False),
+        (_BARE_CASE_REMOVAL_PATTERN, True),
+        (_PASSIVE_BARE_CASE_REMOVAL_PATTERN, True),
     ):
         for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 48) : match.start()]
             if re.search(r"\b(?:do\s+not|don't|never|avoid)(?:\s+\w+){0,2}\s*$", prefix, re.IGNORECASE):
+                continue
+            if needs_dataset_scope and not _DATASET_SCOPE_PATTERN.search(_sentence_prefix(text, match.start())):
                 continue
             return True
     return False

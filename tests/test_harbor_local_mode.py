@@ -792,7 +792,7 @@ def test_local_nvidia_build_bridge_closes_if_cancelled_during_startup(
     from skillevaluator.tier3.harbor import local_agents
 
     agent = object.__new__(local_agents.SkillEvaluatorLocalNvidiaBuildClaudeCode)
-    agent.model_name = "nvidia/nemotron-3-super-120b-a12b"
+    agent.model_name = "nvidia/nemotron-3.5-lightning-30b-a3b"
     agent._extra_env = {}
     worker_started = threading.Event()
     release_worker = threading.Event()
@@ -5582,7 +5582,7 @@ def test_doctor_local_codex_ignores_native_credentials_and_accepts_explicit_buil
         tier3_commands.doctor(
             agents="codex",
             env_mode="local",
-            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
+            agent_model=("codex=nvidia/nemotron-3.5-lightning-30b-a3b",),
         )
         == 0
     )
@@ -5614,7 +5614,7 @@ def test_doctor_accepts_isolated_docker_bridge_and_direct_agents(
         tier3_commands.doctor(
             agents="codex,opencode",
             env_mode="docker",
-            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
+            agent_model=("codex=nvidia/nemotron-3.5-lightning-30b-a3b",),
         )
         == 0
     )

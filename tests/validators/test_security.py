@@ -5273,7 +5273,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
-        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-super-120b-a12b"
+        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
         assert retired_name not in child_env
@@ -5509,7 +5509,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
             ("openai", {"OPENAI_API_KEY": "provider-test-key"}, "gpt-6.1-sol"),
             ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5"),
             ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5"),
-            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3-super-120b-a12b"),
+            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3.5-lightning-30b-a3b"),
             (
                 "openai-compatible",
                 {

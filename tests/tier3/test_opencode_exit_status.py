@@ -16,6 +16,7 @@ from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_di
 from skillevaluator.tier3.eval_core.checks import check_script_execution, check_tool_efficiency
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
 from skillevaluator.tier3.eval_core.log_converters import load_trajectory_with_fallback
+from skillevaluator.tier3.eval_core.plugin_signals import compute_plugin_signals
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorOpenCode
 from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorGatewayOpenCode, SkillEvaluatorLocalOpenCode
 
@@ -53,7 +54,7 @@ def test_native_bash_exit_is_attributable(agent_class, exit_code, native_events,
 
     assert native_events == original
     assert len(calls) == 1
-    assert f"exit_code={exit_code}\n" in calls[0]["observation"]
+    assert f"Exit code: {exit_code}\n" in calls[0]["observation"]
     result = _succeeded(calls)
     assert result["passed"] is (exit_code == 0)
     if exit_code:
@@ -75,7 +76,7 @@ def test_only_finished_bash_calls_gain_exit_evidence(tool, status, native_events
     native_events[1]["part"]["tool"] = tool
     native_events[1]["part"]["state"]["status"] = status
     calls = _convert(SkillEvaluatorOpenCode, native_events, tmp_path)
-    assert "exit_code=" not in calls[0]["observation"]
+    assert "Exit code:" not in calls[0]["observation"]
 
 
 def test_empty_events_remain_empty(tmp_path):
@@ -111,8 +112,8 @@ def test_status_is_paired_per_call(native_events, tmp_path):
     second["part"]["state"]["metadata"]["exit"] = 0
     native_events.insert(2, second)
     calls = _convert(SkillEvaluatorOpenCode, native_events, tmp_path)
-    assert "exit_code=2" in calls[0]["observation"]
-    assert "exit_code=0" in calls[1]["observation"]
+    assert "Exit code: 2" in calls[0]["observation"]
+    assert "Exit code: 0" in calls[1]["observation"]
 
 
 def test_shell_tail_status_is_not_script_success(native_events, tmp_path):
@@ -123,3 +124,37 @@ def test_shell_tail_status_is_not_script_success(native_events, tmp_path):
     result = _succeeded(calls)
     assert result["passed"] is None
     assert "could not be attributed" in result["reason"]
+
+
+@pytest.mark.parametrize(
+    "agent_class", [SkillEvaluatorOpenCode, SkillEvaluatorLocalOpenCode, SkillEvaluatorGatewayOpenCode]
+)
+def test_failed_bash_with_leading_error_stays_failed_in_plugin_signals(agent_class, native_events, tmp_path):
+    state = native_events[1]["part"]["state"]
+    state["output"] = "bash: helper: command not found\nRun setup before retrying.\n"
+    state["metadata"].update(output=state["output"], exit=127)
+    trajectory = agent_class(logs_dir=tmp_path, model_name="openai/test-model")._convert_events_to_trajectory(
+        native_events
+    )
+    assert trajectory is not None
+
+    case = {"tool_arguments": [{"tool": "bash", "contains": {"command": "validate_input"}}]}
+    arguments = compute_plugin_signals(trajectory.to_json_dict(), case, declared={})["arguments"]
+
+    assert (arguments["checked"], arguments["passed"]) == (1, 0)
+    assert [failure["rule"] for failure in arguments["failures"]] == ["call_failed"]
+
+
+def test_zero_exit_bash_with_error_text_still_passes_in_plugin_signals(native_events, tmp_path):
+    state = native_events[1]["part"]["state"]
+    state["output"] = "bash: helper: command not found\nRun setup before retrying.\n"
+    state["metadata"].update(output=state["output"], exit=0)
+    trajectory = SkillEvaluatorOpenCode(
+        logs_dir=tmp_path, model_name="openai/test-model"
+    )._convert_events_to_trajectory(native_events)
+    assert trajectory is not None
+
+    case = {"tool_arguments": [{"tool": "bash", "contains": {"command": "validate_input"}}]}
+    arguments = compute_plugin_signals(trajectory.to_json_dict(), case, declared={})["arguments"]
+
+    assert (arguments["checked"], arguments["passed"]) == (1, 1)

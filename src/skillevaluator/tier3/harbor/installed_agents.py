@@ -190,7 +190,9 @@ class SkillEvaluatorOpenCode(OpenCode):
                     exit_code = metadata.get("exit") if isinstance(metadata, dict) else None
                     if type(exit_code) is int:
                         # Harbor retains output but drops metadata.exit from its ATIF observation.
-                        output = f"exit_code={exit_code}\n{state.get('output') or ''}"
+                        # "Exit code: N" is a header spelling the plugin failure scanner skips, so a
+                        # leading error line in the output is still read as the first line.
+                        output = f"Exit code: {exit_code}\n{state.get('output') or ''}"
                         event = {**event, "part": {**part, "state": {**state, "output": output}}}
             normalized.append(event)
         return super()._convert_events_to_trajectory(normalized)

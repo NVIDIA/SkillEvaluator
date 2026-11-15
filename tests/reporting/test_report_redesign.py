@@ -488,7 +488,7 @@ def test_report_style_blocks_match_recorded_digests() -> None:
         for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL)
     ]
     assert [sha256(block.encode()).hexdigest() for block in blocks] == [
-        "9a5dbf4ca0521d8c4130e82fc65a5ed0188d9d667e119323bf6b3c29871d2146",
+        "e09704d0a4a030b3fd7de5e063a5247c0770733ad8c5b380a24e194829c0364e",
         "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6",
         "f02e0b64bdb8ebe7e9fd65c6fd45cace436a961a60a0b6552d18a06db7780cba",
         "1997da9ee6f5b7cdefabbebffe2fa3d0101fce091f533e2f59403c2e2ce58875",

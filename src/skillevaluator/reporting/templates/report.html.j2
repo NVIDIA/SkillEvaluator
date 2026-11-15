@@ -1349,30 +1349,6 @@
             .agent-hero-top { align-items: flex-start; }
             .tier-cards { grid-template-columns: 1fr; }
         }
-        {%- if plugin_view or tier3_plugin %}
-        /* Plugin sections (Tier 1 static metadata and Tier 3 plugin evidence) */
-        .plugin-section { background: var(--bg); border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 12px; padding: 1rem 1.15rem; margin: 0 0 1.25rem; box-shadow: var(--shadow); }
-        .plugin-section-head { display: flex; align-items: center; gap: 0.6rem; flex-wrap: wrap; }
-        .plugin-section-head h3 { margin: 0; font-size: 1.05rem; color: var(--dark-text); }
-        .plugin-hint { color: var(--text-secondary); font-size: 0.85rem; margin: 0.4rem 0; }
-        .plugin-subsection { margin-top: 1rem; }
-        .plugin-subsection h4 { margin: 0 0 0.5rem; font-size: 0.95rem; color: var(--dark-text); display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
-        .plugin-stat-row { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 0.55rem; margin: 0.5rem 0; }
-        .plugin-stat { background: var(--bg-secondary); border: 1px solid var(--border-color); border-radius: 8px; padding: 0.5rem 0.65rem; display: flex; flex-direction: column; gap: 0.15rem; }
-        .plugin-stat-value { font-size: 1.1rem; font-weight: 800; color: var(--dark-text); font-variant-numeric: tabular-nums; }
-        .plugin-stat-label { font-size: 0.7rem; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.03em; }
-        .plugin-pill { display: inline-block; padding: 0.15rem 0.5rem; border-radius: 4px; font-size: 0.7rem; font-weight: 700; text-transform: uppercase; }
-        .plugin-pill.ok { background: var(--badge-pass-bg); color: var(--badge-pass-tx); }
-        .plugin-pill.warn { background: var(--badge-warn-bg); color: var(--badge-warn-tx); }
-        .plugin-pill.fail { background: var(--badge-fail-bg); color: var(--badge-fail-tx); }
-        .plugin-pill.neutral { background: var(--bg-secondary); color: var(--text-secondary); border: 1px solid var(--border-color); }
-        .plugin-callout { border: 1px solid var(--border-color); border-left: 4px solid var(--secondary-color); border-radius: 8px; padding: 0.65rem 0.85rem; margin: 0.65rem 0; font-size: 0.875rem; color: var(--dark-text); background: var(--bg-secondary); }
-        .plugin-callout.warn { border-left-color: var(--warning-color); background: var(--badge-warn-bg); }
-        .plugin-callout ul { margin: 0.35rem 0 0; padding-left: 1.2rem; }
-        .plugin-subtle { color: var(--text-secondary); font-size: 0.78rem; font-weight: 500; }
-        .plugin-headline { font-size: 1.05rem; margin: 0 0 0.5rem; color: var(--dark-text); }
-        .plugin-headline.bad strong { color: var(--danger-color); }
-        {%- endif %}
     </style>
         <style>
             .t3-subtabs { display:flex; gap:0.25rem; background:var(--bg); border-radius:10px; padding:0.25rem; margin-bottom:1.25rem; overflow-x:auto; border:1px solid var(--border-color); }

@@ -332,6 +332,10 @@ All notable changes to SkillEvaluator are documented in this file.
   side of the `@`, which still leaves a social handle such as
   `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
   now also catches a non-ASCII local part.
+- Hermes Docker runs with NVIDIA Build now validate `NVIDIA_API_KEY` during
+  Harbor preflight, matching the credential used by the runtime instead of
+  inheriting an OpenAI key requirement. Unrelated provider keys do not satisfy
+  the check.
 - An advisory carried from a passing skill into a collection result now names
   the skill it came from, in its location and in `metadata.collection_skill`.
   The findings were preserved but attributed to nothing, so a collection run

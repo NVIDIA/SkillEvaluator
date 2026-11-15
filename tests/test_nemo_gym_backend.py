@@ -194,6 +194,143 @@ def test_normalized_gym_jobs_are_read_by_shared_collector(tmp_path: Path) -> Non
     assert agent["scored_attempts"]
 
 
+def test_verifier_case_id_mismatches_are_unscored_by_shared_collector(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    task_case_ids = {"case-1": "case-1", "case-2": "case-2"}
+    rows = []
+    for task, reported_id, score in (("case-1", "case-2", 1.0), ("case-2", "case-1", 0.0)):
+        row = _rollout(tmp_path, task, 1, score)
+        Path(row["verifier_logs_dir"], "reward.json").write_text(
+            json.dumps({"entry_id": reported_id, "overall": score}),
+            encoding="utf-8",
+        )
+        rows.append(row)
+
+    errors = write_job_from_rollouts(
+        rows,
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids=task_case_ids,
+        n_attempts=1,
+    )
+
+    assert errors == [
+        "case case-1 attempt 1: the task verifier reported case 'case-2' for staged case 'case-1'",
+        "case case-2 attempt 1: the task verifier reported case 'case-1' for staged case 'case-2'",
+    ]
+    job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    assert job_result["stats"]["n_errors"] == 2
+    assert job_result["stats"]["evals"]["codex__m"]["n_trials"] == 0
+    assert job_result["stats"]["evals"]["codex__m"]["reward_stats"]["reward"] == {}
+    for task in task_case_ids:
+        trial_result = json.loads((job_dir / f"{task}__gym001" / "result.json").read_text(encoding="utf-8"))
+        assert trial_result["verifier_result"] is None
+        assert trial_result["exception_info"]["exception_type"] == "NeMoGymEpisodeFailure"
+
+    output_dir = tmp_path / "out"
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        output_dir,
+        jobs,
+        skip_baseline=True,
+        expected_cases=2,
+        expected_case_ids=list(task_case_ids.values()),
+        expected_trials=2,
+    )
+    agent = results["agents"]["codex"]
+    assert results["execution_status"] == "failed"
+    assert agent["num_trials_with"] == 0
+    assert agent["scored_attempts"] == 0
+    assert agent["overall_with_skill"] is None
+    assert not list((output_dir / "codex" / "with-skill" / "trials").glob("*/reward.json"))
+
+
+def test_matching_verifier_case_id_still_scores_through_shared_collector(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    row = _rollout(tmp_path, "case-1", 1, 0.75)
+    Path(row["verifier_logs_dir"], "reward.json").write_text(
+        json.dumps({"entry_id": "case-1", "overall": 0.75}),
+        encoding="utf-8",
+    )
+
+    errors = write_job_from_rollouts(
+        [row],
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids={"case-1": "case-1"},
+        n_attempts=1,
+    )
+    assert errors == []
+    normalized_reward = json.loads(
+        (job_dir / "case-1__gym001" / "verifier" / "reward.json").read_text(encoding="utf-8")
+    )
+    assert normalized_reward == {"entry_id": "case-1", "overall": 0.75}
+
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        tmp_path / "out",
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+        expected_trials=1,
+    )
+    agent = results["agents"]["codex"]
+    assert agent["overall_with_skill"] == pytest.approx(0.75)
+    assert agent["scored_attempts"] == 1
+
+
+def test_custom_reward_sidecar_survives_normalization_and_collection(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    row = _rollout(tmp_path, "case-1", 1, 0.75)
+    logs_dir = Path(row["verifier_logs_dir"])
+    (logs_dir / "reward.json").write_text(json.dumps({"overall": 0.75}), encoding="utf-8")
+    custom_reward = {
+        "overall": 0.75,
+        "custom_metrics": {"quality": 0.8},
+        "details": {"quality": {"reason": "The answer follows the requested format."}},
+    }
+    (logs_dir / "custom_reward.json").write_text(json.dumps(custom_reward), encoding="utf-8")
+
+    errors = write_job_from_rollouts(
+        [row],
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids={"case-1": "case-1"},
+        n_attempts=1,
+    )
+    assert errors == []
+    normalized_sidecar = job_dir / "case-1__gym001" / "verifier" / "custom_reward.json"
+    assert json.loads(normalized_sidecar.read_text(encoding="utf-8")) == custom_reward
+
+    output_dir = tmp_path / "out"
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        output_dir,
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+        expected_trials=1,
+        grading_mode="custom_only",
+    )
+    agent = results["agents"]["codex"]
+    assert agent["scored_attempts"] == 1
+    collected_reward = json.loads(
+        (output_dir / "codex" / "with-skill" / "trials" / "case-1__gym001" / "reward.json").read_text(encoding="utf-8")
+    )
+    detail = {"reason": "The answer follows the requested format."}
+    assert collected_reward["custom_metrics"]["quality"] == pytest.approx(0.8)
+    assert collected_reward["details"]["quality"] == detail
+    assert collected_reward["custom_details"]["quality"] == detail
+
+
 def test_an_unscored_gym_attempt_of_a_native_task_counts_its_tokens_in_its_case(tmp_path: Path) -> None:
     from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
     from skillevaluator.tier3.harbor.report_data import load_agent_data

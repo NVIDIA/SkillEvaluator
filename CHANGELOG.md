@@ -447,6 +447,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Grader qualification reports null behavior-step results with a matching
   `not_checked` expectation as insufficient evidence instead of errors. Raw
   scores and unjudgeable rates are unchanged.
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
 - Tier 3 token usage rows are now validated against the evaluation dataset's own
   case IDs. Every case row uses one of those IDs at most once, and an attempt
   whose only name is Harbor's 32-character cut of a case name is attributed to

@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
@@ -68,15 +69,16 @@ def stage_for_gym(
     arm_dir: Path,
     verifier_env: dict[str, str] | None = None,
     *,
+    agent: str | None = None,
     timeout_multiplier: float = 1.0,
     resource_overrides: dict[str, int] | None = None,
 ) -> None:
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
-    already carries the skills at each agent's native location (``/root/.agents/skills``,
-    ``/root/.claude/skills``, ...), so the with-skill arm is unchanged and the baseline image
-    still has none. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
+    already carries the skills at each agent's native location. Claude also gets project
+    skills because Gym uses a private ``CLAUDE_CONFIG_DIR``. The baseline image still has
+    no target skill. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
     ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts. Writes the
@@ -85,8 +87,17 @@ def stage_for_gym(
     """
     for task_toml in arm_dir.glob("*/task.toml"):
         text = task_toml.read_text(encoding="utf-8")
-        if (tomllib.loads(text).get("environment") or {}).get("mcp_servers"):
+        environment = tomllib.loads(text).get("environment") or {}
+        if environment.get("mcp_servers"):
             raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
+        if agent == "claude-code":
+            dockerfile = task_toml.parent / "environment" / "Dockerfile"
+            if dockerfile.is_file() and (dockerfile.parent / "skills").is_dir():
+                workdir = environment.get("workdir") or "/workspace"
+                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/.claude/skills/"])
+                docker_text = dockerfile.read_text(encoding="utf-8")
+                if projection not in docker_text.splitlines():
+                    dockerfile.write_text(docker_text.rstrip("\n") + "\n" + projection + "\n", encoding="utf-8")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})
         lines = "".join(
@@ -382,6 +393,16 @@ def gym_eval_command(
     ]
     if n_concurrent:
         command += ["--concurrency", str(n_concurrent)]
+    if agent == "claude-code":
+        command += [
+            "++anthropic_api_key=EMPTY",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+            "{type:responses_api_models,name:policy_model}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+            + PINNED_RUNTIME_VERSIONS["claude-code"],
+        ]
     if inherit_sandbox_environment:
         # Gym's Codex agent starts Codex with only its own variables unless told to keep the sandbox's.
         gym_agent = NEMO_GYM_AGENTS[agent]
@@ -611,6 +632,8 @@ def _run_gym(
                     _kill_group()
             except (OSError, RuntimeError) as exc:
                 _confirm_stopped(exc)
+            if reporter is not None:
+                reporter.emit(ProgressEvent(stage="cleanup", state="complete", detail="NeMo Gym stopped"))
         except KeyboardInterrupt:
             force_detached_cleanup = True
             _kill_group()
@@ -1067,6 +1090,7 @@ def run_nemo_gym_eval(
                     stage_for_gym(
                         arm_dir,
                         judge_job_env,
+                        agent=agent,
                         timeout_multiplier=effective_timeout,
                         # Generated tasks already carry them; native tasks get Harbor's job-level override.
                         resource_overrides={

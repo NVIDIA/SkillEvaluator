@@ -161,6 +161,12 @@ All notable changes to SkillEvaluator are documented in this file.
   comparison with Overall and partial-comparison details, clickable agent
   scorecards, and Harbor results/analysis actions are retained. Empty primary
   viewer metadata no longer hides usable recorded summary links.
+  Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
+  snapshots include plugin evidence and retain optional-skip metadata.
+  Recorded Harbor upload links survive saved-run regeneration. The renderer
+  version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
+  the aligned desktop report is slightly wider. Long scanner versions wrap
+  within mobile tiles.
 
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
@@ -516,6 +522,10 @@ All notable changes to SkillEvaluator are documented in this file.
   case names receive the same Markdown escaping, publication-label masking and
   terminal secret redaction as visible rows, before their displayed length is
   bounded.
+- Tier 3 case actions preserve dataset expectations and assertions, rejecting
+  requirement-weakening model advice in favor of deterministic remedies.
+  Recommendations identify model-written actions and record when generation
+  failed or unsafe advice was replaced by a fallback.
 - Tier 3 token usage per case, per agent and over all agents now counts each
   attempt in the case it belongs to. An unscored attempt of a native task whose
   `[metadata] entry_id` differs from its directory joins that case's row
@@ -826,13 +836,14 @@ All notable changes to SkillEvaluator are documented in this file.
   1.75 points higher; the bundled `text-analyzer` example now scores 86.2
   instead of 84.5.
 
-- HTML's full Tier 3 download preserves the recorded canonical payload instead
-  of exporting display defaults. Plugin evidence accompanies standalone HTML
-  JSON snapshots, and retained optional-skip metadata survives JSON round trips.
-- HTML keeps recorded Harbor upload links when displaying or regenerating saved
-  runs. The renderer version sits beside SkillEvaluator, recorded SkillSpector
-  versions appear in the Tier 1 tile, and the aligned desktop report is slightly
-  wider. Long scanner versions wrap within mobile tiles.
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
 
 ## 0.9.0 - 2026-11-13
 

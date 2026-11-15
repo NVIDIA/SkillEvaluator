@@ -4404,7 +4404,8 @@ def _apply_case_findings(
                 if part
             ),
             "severity": "fail" if fix["kind"] == "skill hurts" else "warn",
-            "source": "deterministic",
+            "source": fix.get("source") or "deterministic",
+            **({"fallback_reason": fix["fallback_reason"]} if fix.get("fallback_reason") else {}),
         }
         for fix in fixes
     ]

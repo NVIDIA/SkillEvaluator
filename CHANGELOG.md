@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
@@ -254,10 +257,14 @@ All notable changes to SkillEvaluator are documented in this file.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.
+- Native NeMo Gym cleanup now also stops run-owned detached server processes
+  after startup timeouts, interruptions and early exits, without targeting other runs.
 - NeMo Gym results reject verifier rewards that identify a different staged
   case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
+- Success-detail metadata keeps the terminal's default text color. Values such
+  as `grade=B` stay visible in the default blue Windows PowerShell console.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES

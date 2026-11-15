@@ -756,7 +756,8 @@ class CLIReporter(ReporterBase):
             console.print(
                 "  [green][OK][/green] "
                 f"{escape_markup(str(detail.check_name))}: "
-                f"{escape_markup(str(detail.message))}{escape_markup(meta_str)}"
+                f"{escape_markup(str(detail.message))}{escape_markup(meta_str)}",
+                highlight=False,
             )
 
     def _print_findings(self, result: ValidationResult, console: Console) -> None:

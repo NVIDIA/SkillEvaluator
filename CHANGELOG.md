@@ -219,6 +219,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
@@ -249,11 +252,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
-  coverage per agent and arm, including passed/failed counts, judgments,
-  not-checked reasons, and the behavior-score denominators.
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
+- Success-detail metadata keeps the terminal's default text color. Values such
+  as `grade=B` stay visible in the default blue Windows PowerShell console.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
   calls. Codex passes its patch as a single `input` argument, which the write
   evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
@@ -380,6 +384,9 @@ All notable changes to SkillEvaluator are documented in this file.
   JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
   `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
   reported as before.
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
 - The supporting Tier 3 Pass@k table displays an unavailable or skipped
   baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
 - Tier 3 budget summaries disclose measured usage above configured limits,

@@ -251,6 +251,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
   unauthenticated HTTP probe and actionable connection-failure guidance.
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

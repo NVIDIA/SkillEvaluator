@@ -477,12 +477,12 @@ def _px(value: str, unit: str) -> float:
     return float(value) * (16 if unit == "rem" else 1)
 
 
-def test_native_presentation_stylesheets_match_pinned_reference() -> None:
+def test_report_style_blocks_match_recorded_digests() -> None:
+    """Snapshot of this template's style blocks: a CSS edit must update the digests on purpose."""
     from hashlib import sha256
 
     template = (TEMPLATES / "report.html.j2").read_text(encoding="utf-8")
-    # Canonical product branding may change comments; every native declaration stays pinned.
-    # Expected comment-free digests were computed once from the approved 31019ce3b reference.
+    # Comments are stripped, so only declarations change a digest.
     blocks = [
         re.sub(r"/\*.*?\*/", "", block, flags=re.DOTALL)
         for block in re.findall(r"<style>(.*?)</style>", template, re.DOTALL)

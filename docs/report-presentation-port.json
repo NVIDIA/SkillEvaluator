@@ -49,7 +49,7 @@
     "Recorded Harbor upload URLs survive shared display projection and directory regeneration, with live metadata taking precedence for the same job URL."
   ],
   "drift_checks": [
-    "tests/reporting/test_report_redesign.py::test_native_presentation_stylesheets_match_pinned_reference",
+    "tests/reporting/test_report_redesign.py::test_report_style_blocks_match_recorded_digests",
     "tests/reporting/test_telemetry_view.py",
     "tests/reporting/test_report_browser.py"
   ],

@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import selectors
 import shutil
 import signal
 import subprocess
@@ -629,7 +630,20 @@ def test_ragas_cleanup_does_not_wait_for_cancellation_acknowledgment(
     """Cleanup returns before resistant work finishes, closes the client, and preserves the scorer's outcome."""
     verifier = _load_verifier(tmp_path)
     _use_ragas_eligible_judge(monkeypatch)
-    loop = asyncio.new_event_loop()
+    # Run the loop on a virtual clock that jumps to the next timer instead of waiting for it.
+    # Timers keep their order, so the rescue below fires only if cleanup really waits for the
+    # resistant work, never because a stalled machine took half a second to reach cleanup.
+    clock = [0.0]
+
+    class JumpingSelector(selectors.DefaultSelector):
+        def select(self, timeout=None):
+            if timeout:
+                clock[0] += timeout
+                timeout = 0
+            return super().select(timeout)
+
+    loop = asyncio.SelectorEventLoop(JumpingSelector())
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
     real_close = loop.close
     release = asyncio.Event()
     rescued: list[bool] = []
@@ -848,6 +862,19 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
             return real_remaining(timeout)
 
         monkeypatch.setattr(verifier, "_remaining_judge_timeout", remaining_after_scorer)
+        # Ring the alarm from the loop's own wait, which is where a real timer interrupts an idle loop.
+        # A short timer armed by the scorer can expire before the scorer is suspended and raise inside
+        # it, and that is a scorer failure, not the cancellation of cut-off work this case checks.
+        alarm_due: list[bool] = []
+
+        class AlarmedSelector(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                if alarm_due:
+                    alarm_due.clear()
+                    signal.raise_signal(signal.SIGALRM)
+                return super().select(timeout)
+
+        monkeypatch.setattr(asyncio, "new_event_loop", lambda: asyncio.SelectorEventLoop(AlarmedSelector()))
 
     class FakeMetric:
         """Mock metric object for Ragas async evaluation."""
@@ -859,10 +886,10 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
             if cutoff == "scorer_timeout":
                 elapsed[0] = 1.0
             else:
-                # The real timer represents expiry of the virtual deadline.
+                # The alarm represents expiry of the virtual deadline.
                 # Fallback must see that expiry too, after scoring is cancelled.
                 elapsed[0] = 31.0
-                signal.setitimer(signal.ITIMER_REAL, 0.01)
+                alarm_due.append(True)
             try:
                 await asyncio.sleep(scorer_sleep)
             except asyncio.CancelledError:

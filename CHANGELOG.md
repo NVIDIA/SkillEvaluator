@@ -283,6 +283,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
 - Native NeMo Gym project skill projections run after authored image instructions

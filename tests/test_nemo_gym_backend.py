@@ -1612,6 +1612,25 @@ def test_policy_endpoint_probe_honors_anonymous_http_proxy(
         server.server_close()
 
 
+@pytest.mark.parametrize("status", [502, 504])
+def test_https_policy_endpoint_origin_error_after_proxy_tunnel_is_reachable(monkeypatch, status) -> None:
+    import io
+    import urllib.error
+    import urllib.request
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3 import commands
+
+    def origin_response(request, **_kwargs):
+        raise urllib.error.HTTPError(request.full_url, status, "origin gateway error", {}, None)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("https://policy.invalid/v1"))
+    monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {"https": "http://proxy.invalid"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_handlers: SimpleNamespace(open=origin_response))
+    exec(commands._POLICY_ENDPOINT_PROBE, {})
+
+
 def test_tier3_doctor_accepts_backend_option() -> None:
     from click.testing import CliRunner
 

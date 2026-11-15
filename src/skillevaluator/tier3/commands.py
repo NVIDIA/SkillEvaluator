@@ -1106,7 +1106,7 @@ try:
         )
     except HTTPError as response:
         response.close()
-        if using_proxy and response.code in (407, 502, 504):
+        if using_proxy and (response.code == 407 or url.scheme == "http" and response.code in (502, 504)):
             sys.exit(2 if response.code == 407 else 3)
     except URLError as error:
         if using_proxy:

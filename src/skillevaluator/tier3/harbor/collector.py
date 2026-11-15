@@ -30,6 +30,7 @@ from typing import Any
 
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_baseline_rows, measured_condition_usage
+from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -8346,6 +8347,9 @@ def collect_harbor_results(
             },
             "output_dir": str(agent_dir.resolve()),
         }
+        coverage = agent_declarative_checks(with_collected_rewards, without_collected_rewards)
+        if coverage:
+            all_results["agents"][agent]["declarative_checks"] = coverage
         if (
             tolerance_on
             and without_job_dir is not None

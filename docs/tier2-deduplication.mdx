@@ -8,8 +8,8 @@ Tier 2 finds redundant content — inside a single skill and across a skill
 collection — using embedding similarity, with chat-LLM verification for
 intra-skill candidates. It needs a configured embeddings provider; intra-skill
 analysis also needs a chat LLM. See
-[Providers & Credentials](configuration.mdx) to set both up, including the
-[fully local recipe](configuration.mdx#fully-local-setup) when skill content
+[Providers & Credentials](/skills/skillevaluator/configuration) to set both up, including the
+[fully local recipe](/skills/skillevaluator/configuration#fully-local-setup) when skill content
 must not leave your machine.
 
 Both checks read local files only.
@@ -21,7 +21,7 @@ The [all-tier onboarding path](/skills/skillevaluator/advanced-ci)
 runs Tier 2 as an advisory check, independently from the Tier 1 image and paired
 Tier 3 evaluation. Configure chat and embedding provider credentials as CI
 secrets. Tier 2 does not read `evals/`; committed native datasets are needed
-only for [Tier 3](tier3-live-evaluation.mdx). Missing credentials or a central
+only for [Tier 3](/skills/skillevaluator/tier3-live-evaluation). Missing credentials or a central
 dataset mapping produce an actionable incomplete result before paid work.
 
 The aggregate artifact preserves native Tier 2 JSON and HTML, including
@@ -55,7 +55,7 @@ Direct Tier 2 prints the terminal report and writes JSON and HTML reports to
 
 For NVIDIA Build or OpenAI, the same provider and key configure both chat and
 embeddings; no separate embedding variables are needed. See
-[Providers & Credentials](configuration.mdx) for other providers.
+[Providers & Credentials](/skills/skillevaluator/configuration) for other providers.
 
 ## Which check do you need
 
@@ -242,7 +242,7 @@ again on a rerun, so Tier 2 records a MEDIUM `llm_refused` finding that names
 the overlapping sections and does not block. Review that overlap by hand, or
 rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
 a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
-[policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
+[policy overlay](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies).
 
 The JSON report's `llm_analysis` names the configured `provider` and `model`.
 A server-side fallback model can answer a cluster in the configured model's
@@ -482,7 +482,7 @@ All Tier 2 commands accept the standard report options (`-r cli,json,html,markdo
 and `-o`). HIGH and CRITICAL findings, along with blocking analysis errors,
 produce a non-zero exit code; MEDIUM and LOW findings are advisory. Exit
 behavior is identical in every output mode, so these commands work as CI gates
-— see [Gate Your CI](ci-integration.mdx).
+— see [Gate Your CI](/skills/skillevaluator/ci-integration).
 
 Inside the combined `validate` pipeline, Tier 2 also gates by default. Pass
 `--no-block-on-dedup` to keep the scan and its findings in every report without
@@ -559,7 +559,7 @@ scan.
 - Catalog files are read and written locally; SkillEvaluator does not upload
   them to a catalog service.
 
-Use the [fully local provider recipe](configuration.mdx#fully-local-setup) when
+Use the [fully local provider recipe](/skills/skillevaluator/configuration#fully-local-setup) when
 skill content must not leave the machine, and review your provider's data
 handling terms before sending confidential skill content to a hosted endpoint.
 
@@ -604,13 +604,13 @@ handling terms before sending confidential skill content to a hosted endpoint.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Prove the skill changes agent behavior with a live A/B evaluation.
   </Card>
-  <Card title="Providers & Credentials" icon="book" href="configuration.mdx">
+  <Card title="Providers & Credentials" icon="book" href="/skills/skillevaluator/configuration">
     Configure an embeddings provider — including a fully local setup.
   </Card>
-  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
     Every Tier 2 flag, default, and report option.
   </Card>
 </CardGroup>

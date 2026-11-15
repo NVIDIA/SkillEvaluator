@@ -473,6 +473,8 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
 
 
 def _weakens_requirements(text: str) -> bool:
+    # Inline-code ticks must not hide a requirement noun: "Remove the `expectation`" is still a removal.
+    text = text.replace("`", "")
     for pattern in (_WEAKENING_PATTERN, _PASSIVE_WEAKENING_PATTERN):
         for match in pattern.finditer(text):
             prefix = text[max(0, match.start() - 48) : match.start()]

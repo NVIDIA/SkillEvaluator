@@ -60,6 +60,12 @@ def _reward(activated: bool, reason: str) -> dict:
         "Drop the syllable_count expectation from evals/evals.json.",
         "The assertion should be removed from the dataset.",
         "Lower the pass threshold to make this case pass.",
+        "Remove the `expectation` for syllable_count from the dataset.",
+        "Drop the `syllable_count` `expectation` from evals/evals.json.",
+        "Loosen the `assertion` in evals/evals.json.",
+        "The `expectation` should be removed from the dataset.",
+        "The expectation for `syllable_count` should be removed from the dataset.",
+        "The `pass threshold` for the syllable-positive case should be lowered.",
     ],
 )
 def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action):
@@ -80,6 +86,8 @@ def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action
     [
         ("Implement syllable_count in analyze_text.py.", None, "llm", None),
         ("Do not remove the expectation; implement it in analyze_text.py.", None, "llm", None),
+        ("Do not remove the `expectation`; implement it in analyze_text.py.", None, "llm", None),
+        ("Never drop the `expected output` for syllable_count; implement it in analyze_text.py.", None, "llm", None),
         ("Remove temporary files after analysis.", None, "llm", None),
         (None, "Connection error", "deterministic", "llm_unavailable_or_invalid"),
         ("", None, "deterministic", "llm_unavailable_or_invalid"),

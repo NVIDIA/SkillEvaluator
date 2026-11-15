@@ -49,6 +49,7 @@ def _run_engine(
     (skill / "evals" / "config.yml").write_text(config_yaml, encoding="utf-8")
 
     captured: dict[str, Any] = {"pairs": [], "collect": {}, "progress": []}
+    on_pair = engine_kwargs.pop("on_pair", None)
 
     monkeypatch.setattr(runner, "resolve_llm_provider", _provider)
     monkeypatch.setattr(runner, "find_evals_file", lambda _path: skill / "evals" / "evals.json")
@@ -64,6 +65,8 @@ def _run_engine(
         return tasks
 
     def pair(**kwargs: Any) -> list[str]:
+        if on_pair is not None:
+            on_pair(kwargs["budget_controller"])
         datasets = [kwargs["with_skill"], kwargs["baseline"]]
         captured["pairs"].append(
             {
@@ -126,6 +129,22 @@ def _run_engine(
 def _snapshot_ids(result: dict[str, Any]) -> list[str]:
     snapshot = json.loads(Path(result["dataset_snapshot_path"]).read_text(encoding="utf-8"))
     return [entry["id"] for entry in snapshot["dataset"]]
+
+
+def test_final_budget_snapshot_is_shared_by_all_result_artifacts(monkeypatch, tmp_path):
+    def use_budget(budget):
+        budget.admit(agent="opencode", arm="with", case_id=CASES[0], attempt=1)
+        budget.record_usage({"total_tokens": 100, "judge_calls": 1})
+        budget.admit(agent="opencode", arm="with", case_id=CASES[1], attempt=1)
+
+    result, _ = _run_engine(monkeypatch, tmp_path, agents=["opencode"], max_attempts_total=1, on_pair=use_budget)
+    saved = json.loads(Path(result["result_path"]).read_text())
+    config = json.loads((Path(result["run_dir"]) / "run_config.json").read_text())
+    assert config["budget"] == saved["budget"] == saved["run_config"]["budget"] == result["budget"]
+    assert config["budget"]["status"] == "exhausted"
+    assert config["budget"]["started_attempts"] == 1
+    assert saved["summary"]["verdict"] == "incomplete"
+    assert saved["execution_status"] == "succeeded"
 
 
 def test_unset_max_cases_runs_every_staged_case(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

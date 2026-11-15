@@ -23,6 +23,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
@@ -75,8 +76,8 @@ def stage_for_gym(
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
-    already carries the skills at each agent's native location. OpenCode also gets project
-    skills because Gym isolates its HOME and XDG directories. The baseline image still has
+    already carries the skills at each agent's native location. Claude and OpenCode also get
+    project skills because Gym isolates their user configuration directories. The baseline has
     no target skill. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
@@ -393,6 +394,16 @@ def gym_eval_command(
     ]
     if n_concurrent:
         command += ["--concurrency", str(n_concurrent)]
+    if agent == "claude-code":
+        command += [
+            "++anthropic_api_key=EMPTY",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+            "{type:responses_api_models,name:policy_model}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+            + PINNED_RUNTIME_VERSIONS["claude-code"],
+        ]
     if inherit_sandbox_environment:
         # Gym's Codex agent starts Codex with only its own variables unless told to keep the sandbox's.
         gym_agent = NEMO_GYM_AGENTS[agent]

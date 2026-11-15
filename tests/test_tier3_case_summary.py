@@ -52,6 +52,43 @@ def _reward(activated: bool, reason: str) -> dict:
     }
 
 
+@pytest.mark.parametrize("source", ["result", "saved", "provenance", "variant", "other_variant", "default"])
+def test_incomplete_reconstruction_preserves_configured_threshold(tmp_path: Path, source: str) -> None:
+    from skillevaluator.tier3.case_summary import _cases
+
+    _trial(tmp_path, "a", "strict__one", {"overall": 0.95, "goal_accuracy": 1.0, "skill_invoked": True})
+    agent = _agent({}, {})
+    agent.update(output_dir=str(tmp_path / "a"), execution_status="failed")
+    result = {"agents": {"a": agent}}
+    policy = {"pass_threshold": 0.99}
+    if source == "result":
+        result["attempt_policy"] = policy
+    elif source == "saved":
+        (tmp_path / "result.json").write_text(json.dumps({"attempt_policy": policy}))
+    elif source == "provenance":
+        (tmp_path / "result.json").write_text(json.dumps({"provenance": {"attempt_policy": policy}}))
+    elif source in {"variant", "other_variant"}:
+        agent["pass_at_k"]["with_skill" if source == "variant" else "without_skill"]["pass_threshold"] = 0.99
+
+    fixes = what_to_fix(result, run_dir=tmp_path, use_llm=False)
+
+    assert bool(fixes) is (source != "default")
+    if fixes:
+        assert (fixes[0]["case"], fixes[0]["kind"], fixes[0]["attempts_lost"]) == ("strict", "skill", 1)
+    if source != "result":
+        assert _cases(agent, "with_skill")["strict"]["attempts"][0]["passed"] is (source == "default")
+
+
+def test_incomplete_reconstruction_without_saved_result_keeps_default(tmp_path: Path) -> None:
+    _trial(tmp_path, "a", "ordinary__one", {"overall": 0.2, "goal_accuracy": 1.0, "skill_invoked": True})
+    agent = dict(_agent({}, {}), output_dir=str(tmp_path / "a"), execution_status="failed")
+    (tmp_path / "result.json").write_text("invalid JSON")
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"]) == ("ordinary", "skill")
+
+
 def test_grid_shows_one_row_per_case_with_attempt_marks_per_agent() -> None:
     result = {
         "execution_status": "succeeded",

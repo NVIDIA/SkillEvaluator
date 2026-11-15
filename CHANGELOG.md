@@ -813,6 +813,15 @@ All notable changes to SkillEvaluator are documented in this file.
   1.75 points higher; the bundled `text-analyzer` example now scores 86.2
   instead of 84.5.
 
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

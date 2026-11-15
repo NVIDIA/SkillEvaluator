@@ -950,6 +950,7 @@ def _diagnose_agent_case(
                 "case": case_id,
                 "agent": agent_name,
                 "kind": "run error",
+                "cause": cause,
                 "what": f"{lost_unscored} attempt(s) never produced a score: {label}"
                 + (f": {failed[0][1]}" if failed[0][1] else ""),
                 "attempts_lost": lost_unscored,
@@ -1244,11 +1245,11 @@ def what_to_fix(
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
     agents = {str(k): v for k, v in (result.get("agents") or {}).items() if isinstance(v, Mapping)}
     dataset = _dataset_entries(run_dir)
-    grouped: dict[tuple[str, str], list[dict[str, Any]]] = {}
+    grouped: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
             for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
-                grouped.setdefault((case_id, issue["kind"]), []).append(issue)
+                grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)
     issues = []
     for items in grouped.values():
         names = [item["agent"] for item in items]

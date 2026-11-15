@@ -268,6 +268,66 @@ def test_environment_and_collector_failures_do_not_get_judge_advice(
     assert fix["evidence"].endswith("c__1/reward.json")
 
 
+def test_runtime_and_judge_failures_in_one_case_keep_their_own_causes_and_remedies(tmp_path: Path) -> None:
+    _trial(
+        tmp_path,
+        "a",
+        "c__judge",
+        {"overall": 0.0, "evaluation_status": "failed", "evaluation_errors": {"accuracy": "Judge reply was empty"}},
+    )
+    timeout = tmp_path / "a" / "with-skill" / "trials" / "c__timeout"
+    timeout.mkdir(parents=True)
+    (timeout / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    agent = _agent({}, {})
+    agent["output_dir"] = str(tmp_path / "a")
+    agent["trial_failures"] = {
+        "with_skill": [
+            {"trial": "c__timeout", "reason": "Agent timed out"},
+            {"trial": "c__judge", "reason": "Required judge evaluation failed"},
+        ]
+    }
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert [(f["kind"], f["attempts_lost"]) for f in fixes] == [("run error", 1), ("run error", 1)]
+    timeout_fix, judge_fix = fixes
+    assert "AgentTimeoutError" in timeout_fix["what"] and "judge" not in timeout_fix["what"].lower()
+    assert "agent/gateway logs" in timeout_fix["action"]
+    assert timeout_fix["evidence"].endswith("c__timeout/failure.json")
+    assert "Judge reply was empty" in judge_fix["what"]
+    assert "judge model configuration" in judge_fix["action"]
+    assert judge_fix["evidence"].endswith("c__judge/reward.json")
+
+
+def test_run_errors_with_different_causes_stay_separate_across_agents(tmp_path: Path) -> None:
+    timeout = tmp_path / "a" / "with-skill" / "trials" / "c__timeout"
+    timeout.mkdir(parents=True)
+    (timeout / "failure.json").write_text(json.dumps({"error": {"type": "AgentTimeoutError", "message": "900s"}}))
+    judge_failed = {
+        "overall": 0.0,
+        "evaluation_status": "failed",
+        "evaluation_errors": {"accuracy": "Judge unavailable"},
+    }
+    for name in ("b", "c"):
+        _trial(tmp_path, name, "c__1", judge_failed)
+    agents = {}
+    for name, trial, reason in (
+        ("a", "c__timeout", "Agent timed out"),
+        ("b", "c__1", "Required judge evaluation failed"),
+        ("c", "c__1", "Required judge evaluation failed"),
+    ):
+        agents[name] = _agent({}, {})
+        agents[name]["output_dir"] = str(tmp_path / name)
+        agents[name]["trial_failures"] = {"with_skill": [{"trial": trial, "reason": reason}]}
+
+    judge_fix, timeout_fix = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert (timeout_fix["scope"], timeout_fix["attempts_lost"]) == ("a only", 1)
+    assert "AgentTimeoutError" in timeout_fix["what"] and "agent/gateway logs" in timeout_fix["action"]
+    assert (judge_fix["scope"], judge_fix["attempts_lost"]) == ("b, c only", 2)
+    assert "judge" in judge_fix["what"].lower() and "judge model configuration" in judge_fix["action"]
+
+
 def test_multi_agent_issue_scope_names_the_failing_agent(tmp_path: Path) -> None:
     agents = {
         "claude-code": _agent({"c": _case(True, True)}, {}),

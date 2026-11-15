@@ -249,6 +249,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Failed native skill lookups no longer count as activation when the tool reports
+  that the skill was not found or unavailable without explicit error metadata.
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

@@ -99,10 +99,10 @@ def normalized_tool_call_observation(step: dict[str, Any], tool_call: dict[str, 
 
 
 def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, Any]) -> bool | None:
-    """Return an attributable tool result's explicit ``tool_result_is_error`` flag.
+    """Return an attributable result's error flag, including metadata-free skill lookup failures.
 
     ``True`` if any attributable result reports an error, ``False`` if they
-    explicitly report success, and ``None`` when none carries the flag.
+    explicitly report success, and ``None`` when neither metadata nor a lookup failure is present.
     """
     if tool_call.get("_atif_observation_status") not in (None, MAPPED_OUTER_EXEC_OBSERVATION):
         return None
@@ -120,11 +120,21 @@ def normalized_tool_call_error_flag(step: dict[str, Any], tool_call: dict[str, A
             return True
         if extra.get("tool_result_is_error") is False:
             flag = False
+    if flag is None and str(tool_call.get("function_name", "")).lower() == "skill":
+        observation = normalized_tool_call_observation(step, tool_call).strip()
+        if re.match(
+            r"^(?:error:\s*)?(?:skill\s+(?:(?:[\"'`][^\"'`\n]+[\"'`]|[\w./-]+)\s+)?"
+            r"(?:is\s+)?(?:not found|not available|unavailable)\b|unknown skill\b"
+            r"|(?:could not|unable to|cannot|can't)\s+(?:find|load|access)\s+(?:the\s+)?skill\b)",
+            observation,
+            re.IGNORECASE,
+        ):
+            return True
     return flag
 
 
 def normalized_tool_call_is_error(step: dict[str, Any], tool_call: dict[str, Any]) -> bool:
-    """Preserve explicit failure metadata only for an attributable tool result."""
+    """Reject attributable failed tool results, including unsuccessful skill lookups."""
     return normalized_tool_call_error_flag(step, tool_call) is True
 
 
@@ -1376,7 +1386,9 @@ def _normalize_tool_call_with_records(tool_call: dict[str, Any]) -> list[dict[st
     """Unwrap proven native Codex calls, adding the inline and allSettled forms of #235."""
     normalized = _upstream_normalize_tool_call(tool_call)
     arguments = tool_call.get("arguments")
-    source = arguments.get("input") if tool_call.get("function_name") == "exec" and isinstance(arguments, dict) else None
+    source = (
+        arguments.get("input") if tool_call.get("function_name") == "exec" and isinstance(arguments, dict) else None
+    )
     parsed = _extended_codex_program(source) if isinstance(source, str) and len(source) <= _MAX_SOURCE_CHARS else None
     if parsed is None:
         if "_atif_inner_tool_index" in normalized[0] and _has_non_js_space(source):
@@ -1469,14 +1481,9 @@ def _normalized_tool_call_observation_with_records(step: dict[str, Any], tool_ca
     return _upstream_normalized_tool_call_observation(step, tool_call)
 
 
-def _normalized_tool_call_error_flag_with_records(
-    step: dict[str, Any], tool_call: dict[str, Any]
-) -> bool | None:
+def _normalized_tool_call_error_flag_with_records(step: dict[str, Any], tool_call: dict[str, Any]) -> bool | None:
     """Report a call's own record outcome, which may be unknown, before the upstream flag."""
-    if (
-        tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION
-        and _RECORD_IS_ERROR in tool_call
-    ):
+    if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and _RECORD_IS_ERROR in tool_call:
         return tool_call[_RECORD_IS_ERROR]
     return _upstream_normalized_tool_call_error_flag(step, tool_call)
 

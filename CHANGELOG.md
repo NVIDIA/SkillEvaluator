@@ -397,6 +397,9 @@ All notable changes to SkillEvaluator are documented in this file.
   user-request section when it is set below 2,000, and that a check budget too
   small to hold the final response beside some tool history is logged as a
   warning rather than quietly raised — lower the final-response limit with it.
+- OpenCode bash tool observations retain recorded shell exit codes in Harbor
+  trajectories. Declarative `command_succeeded` checks can now distinguish
+  successful commands from nonzero exits; missing exit codes remain not checked.
 - `judge_attempts.json` now masks `Cookie` header values, credential flag values
   (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
   `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and

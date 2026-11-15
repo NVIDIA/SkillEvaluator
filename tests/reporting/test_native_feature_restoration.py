@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from browser_navigation_fixtures import _agent_result
+from report_markup_assertions import text_content
 
 from skillevaluator import __version__
 from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
@@ -110,8 +111,10 @@ def test_recorded_tool_versions_are_visible_without_a_generated_timestamp():
     original = deepcopy(result)
     html = _render(result)
     header = html.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
-    assert f"SkillEvaluator v{__version__}" in header
-    assert "SkillSpector v2.11.1" in header
+    assert f"SkillEvaluator v{__version__}" in " ".join(text_content(header).split())
+    tile = html.split('data-target-tab="tier1"', 1)[1].split("</nav>", 1)[0]
+    assert "SkillSpector v2.11.1" in " ".join(text_content(tile).split())
+    assert "SkillSpector" not in header
     assert "<details" not in header
     assert "Generated:" not in header
     assert result == original

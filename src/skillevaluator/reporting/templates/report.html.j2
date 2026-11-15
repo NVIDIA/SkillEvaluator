@@ -1703,7 +1703,10 @@
     <header class="main-header">
         <div class="header-content">
             <div class="logo-section">
-                <p class="header-title">SkillEvaluator</p>
+                <div class="header-brand-row">
+                    <p class="header-title">SkillEvaluator</p>
+                    {% if version %}<span class="header-version" title="SkillEvaluator report renderer version">v{{ version }}</span>{% endif %}
+                </div>
                 <div class="header-subtitle-row"><p class="header-subtitle">NVIDIA Benchmark for Agent Skills Evaluation</p></div>
             </div>
             <div class="header-meta">
@@ -1714,7 +1717,6 @@
                         <span aria-hidden="true">↓</span><span>Download JSON</span>
                     </button>{% endif %}
                 </div>
-                <p class="header-meta-item report-versions">{% if version %}<span title="HTML report renderer version">SkillEvaluator v{{ version }}</span>{% endif %}{% if skillspector_versions %}<span title="Scanner version recorded by this evaluation">SkillSpector v{{ skillspector_versions | join(', v') }}</span>{% endif %}</p>
             </div>
         </div>
     </header>
@@ -1823,6 +1825,7 @@
                         {% elif ui_t1_na %}<span><strong>{{ ui_t1_na }}</strong> not applicable</span>
                         {% else %}<span>No checks ran</span>{% endif %}
                         {% endif %}
+                        {% if skillspector_versions %}<span class="tier-card-scanner-version" title="SkillSpector version that ran the Tier 1 security scan">SkillSpector <strong>v{{ skillspector_versions | join(', v') }}</strong></span>{% endif %}
                     </div>
                 </div>
                 {% elif presentation.tiers[1].displayed %}{{ absent_tier_tile(1, presentation.tiers[1]) }}

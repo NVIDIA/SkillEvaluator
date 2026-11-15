@@ -120,8 +120,14 @@ pre { max-width:100%;overflow:auto; } code,td,th,p { overflow-wrap:anywhere; }
 /* Each retained baseline warning remains a separate readable notice. */
 .t3-overview-lead .tolerated-baseline { display:block; margin-top:.5rem; }
 
-/* Native brand scale stays intact; only routine identity lives in Run Details. */
-.report-versions { display:flex;flex-wrap:wrap;gap:.35rem 1rem; }
+/* Keep the native brand scale and align its version with the product name. */
+.header-brand-row { display:flex;align-items:baseline;flex-wrap:wrap;gap:.35rem .65rem; }
+.header-version { font-size:.85rem;font-weight:600;line-height:1.3;overflow-wrap:anywhere; }
+.tier-card-stats .tier-card-scanner-version { min-width:0;max-width:100%;overflow-wrap:anywhere; }
+/* A little more room on desktop, with the header and report edges aligned. */
+@media screen {
+ .header-content,.container { max-width:1280px; }
+}
 .tier-card-job-label,.t3-harbor-job-label { overflow-wrap:anywhere; }
 .t3-harbor-unavailable { color:var(--text-secondary);font-size:.85rem;margin:.75rem 0; }
 .t3-primary-metrics { grid-template-columns:repeat(3,minmax(0,1fr)); }

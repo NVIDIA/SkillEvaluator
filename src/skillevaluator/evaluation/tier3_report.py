@@ -543,9 +543,10 @@ def agent_eval_result_from_directory(
         persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
     )
     run_config = _read_run_config(run_dir)
-    result_truth = engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir)
+    persisted_result = _persisted_run_result(run_dir)
+    result_truth = engine_result if isinstance(engine_result, dict) else persisted_result
     if not isinstance(result_truth, dict) or not isinstance(result_truth.get("budget"), dict):
-        result_truth = _persisted_run_result(run_dir)
+        result_truth = persisted_result
     if isinstance(result_truth, dict) and isinstance(result_truth.get("budget"), dict):
         run_config = {**(run_config or {}), "budget": result_truth["budget"]}
     payload = build_agent_eval_payload(
@@ -557,7 +558,10 @@ def agent_eval_result_from_directory(
         run_config=run_config,
         env_mode=env_mode,
         runtime_seconds=_runtime_seconds(engine_result),
-        harbor_viewer=_harbor_viewer_from_engine_result(engine_result),
+        harbor_viewer=_merge_harbor_viewer_summaries(
+            _harbor_viewer_from_engine_result(engine_result),
+            _harbor_viewer_from_engine_result(persisted_result),
+        ),
         run_dir=run_dir,
         comparison=_read_comparison(run_dir),
         evaluated_at=evaluated_at or _evaluated_at_from_run(run_dir, engine_result),
@@ -573,7 +577,7 @@ def agent_eval_result_from_directory(
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
     )
-    _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir))
+    _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else persisted_result)
     with contextlib.suppress(Exception):
         source = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
         if isinstance(source, dict) and isinstance(source.get("agents"), dict):
@@ -3857,21 +3861,14 @@ def _harbor_viewer_from_engine_result(engine_result: dict[str, Any] | None) -> d
 def _normalize_harbor_upload_summary(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
+    from skillevaluator.reporting.harbor_viewer import _normalize_harbor_upload_jobs
 
     jobs: list[dict[str, str]] = []
     seen: set[str] = set()
-    for upload in raw.get("uploads") or []:
-        if not isinstance(upload, dict):
-            continue
-        job_url = _safe_harbor_viewer_url(upload.get("viewer_url") or upload.get("job_url"))
-        if not job_url or job_url in seen:
-            continue
+    for job in _normalize_harbor_upload_jobs(raw.get("uploads")):
+        job_url = job["url"]
         seen.add(job_url)
-        analysis_url = _safe_harbor_viewer_url(upload.get("analysis_url")) or _build_job_analysis_url(job_url)
-        job: dict[str, str] = {"url": job_url, "analysis_url": analysis_url}
-        name = upload.get("uploaded_job_name") or upload.get("job_name") or upload.get("original_job_name")
-        if isinstance(name, str) and name.strip():
-            job["name"] = name.strip()
+        job["analysis_url"] = job.get("analysis_url") or _build_job_analysis_url(job_url)
         jobs.append(job)
 
     job_url = _safe_harbor_viewer_url(raw.get("job_url"))

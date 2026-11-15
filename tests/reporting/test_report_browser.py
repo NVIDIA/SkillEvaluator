@@ -184,6 +184,19 @@ def reports(tmp_path_factory):
         HTMLReporter(include_timestamp=False).render_all([*native_static, _similarity_result(), native_agent]),
         encoding="utf-8",
     )
+    uploaded_agent = deepcopy(native_agent)
+    uploaded_payload = uploaded_agent.metadata["agent_eval"]
+    uploaded_payload["harbor_viewer"] = {
+        "uploads": [
+            {"viewer_url": job["url"], "analysis_url": job["analysis_url"], "uploaded_job_name": job["name"]}
+            for job in native_payload["harbor_viewer"]["jobs"]
+        ]
+    }
+    (directory / "native-upload-features.html").write_text(
+        HTMLReporter(include_timestamp=False).render_all([*native_static, _similarity_result(), uploaded_agent]),
+        encoding="utf-8",
+    )
+    (directory / "native-upload-canonical.json").write_text(json.dumps(uploaded_payload), encoding="utf-8")
     if external := os.environ.get("SKILLEVALUATOR_BROWSER_REPORTS"):
         for name in ("full.html", "stress.html", "absent.html"):
             shutil.copyfile(Path(external) / name, directory / name)
@@ -498,9 +511,18 @@ def test_native_header_versions_and_visible_overview_comparison_are_restored(pag
     assert header.locator(".header-title").evaluate(
         "node=>parseFloat(getComputedStyle(node).fontSize)"
     ) == pytest.approx(32 if width == 1440 else 26.4)
-    assert f"v{__version__}" in header.inner_text()
-    assert "SkillSpector" in page.locator(".agent-hero").inner_text() or "SkillSpector" in header.inner_text()
-    assert page.get_by_text("v2.13.4", exact=False).filter(visible=True).count() > 0
+    brand = header.locator(".header-brand-row")
+    assert brand.locator(".header-title").inner_text() == "SkillEvaluator"
+    assert brand.locator(".header-version").inner_text() == f"v{__version__}"
+    assert "SkillSpector" not in header.inner_text()
+    scanner = page.locator('.tier-card[data-target-tab="tier1"] .tier-card-stats')
+    assert "SkillSpector" in scanner.inner_text() and "v2.13.4" in scanner.inner_text()
+    header_box = header.locator(".header-content").bounding_box()
+    report_box = page.locator("main.container").bounding_box()
+    assert header_box["x"] == pytest.approx(report_box["x"])
+    assert header_box["width"] == pytest.approx(report_box["width"])
+    if width == 1440:
+        assert header_box["width"] == pytest.approx(1280)
     _tier(page, "tier3")
     comparison = page.locator("#tier3-dimension-table")
     assert comparison.is_visible()
@@ -523,14 +545,15 @@ def test_native_header_versions_and_visible_overview_comparison_are_restored(pag
 
 
 @pytest.mark.parametrize("width", [1440, 390])
-def test_harbor_actions_keep_every_job_visible_in_tile_and_overview_and_work_by_keyboard(page, reports, width):
+@pytest.mark.parametrize("fixture", ["native-features", "native-upload-features"])
+def test_harbor_actions_keep_every_job_visible_in_tile_and_overview_and_work_by_keyboard(page, reports, width, fixture):
     directory, _, _ = reports
     page.context.route(
         "https://example.test/harbor/**",
         lambda route: route.fulfill(status=200, content_type="text/html", body="<title>Synthetic Harbor view</title>"),
     )
     page.set_viewport_size({"width": width, "height": 1000})
-    _open(page, directory, "native-features")
+    _open(page, directory, fixture)
     for owner in ('.tier-card[data-target-tab="tier3"]', "#tier3-page-overview"):
         if owner.startswith("#"):
             _tier(page, "tier3")
@@ -544,6 +567,29 @@ def test_harbor_actions_keep_every_job_visible_in_tile_and_overview_and_work_by_
         popup.value.wait_for_load_state()
         assert popup.value.url == expected
         popup.value.close()
+    assert page.evaluate("document.documentElement.scrollWidth <= innerWidth+1")
+
+
+def test_long_recorded_scanner_version_wraps_inside_the_mobile_tier1_tile(page, tmp_path):
+    version = "2.13.4+" + "x" * 64
+    result = ValidationResult(validator_name="Schema Check")
+    result.add_success("schema", "Synthetic schema check passed")
+    result.metadata["skillspector_version"] = version
+    path = tmp_path / "long-scanner-version.html"
+    path.write_text(HTMLReporter(include_timestamp=False).render_all([result]), encoding="utf-8")
+    page.set_viewport_size({"width": 390, "height": 1000})
+    page.goto(path.as_uri())
+    label = page.locator(
+        '.tier-card[data-target-tab="tier1"] [title="SkillSpector version that ran the Tier 1 security scan"]'
+    )
+    assert label.is_visible()
+    assert label.locator("strong").inner_text() == f"v{version}"
+    assert label.evaluate("""node => {
+        const tile = node.closest('.tier-card').getBoundingClientRect();
+        const range = document.createRange();
+        range.selectNodeContents(node);
+        return [...range.getClientRects()].every(rect => rect.left >= tile.left && rect.right <= tile.right);
+    }""")
     assert page.evaluate("document.documentElement.scrollWidth <= innerWidth+1")
 
 
@@ -629,7 +675,7 @@ def test_keyboard_navigation_reveals_nested_agent_and_finding_evidence(page, rep
     assert page.evaluate("document.activeElement.id") == finding_id
 
 
-@pytest.mark.parametrize("fixture", ["canonical", "incomplete"])
+@pytest.mark.parametrize("fixture", ["canonical", "incomplete", "native-upload-features"])
 def test_full_payload_download_preserves_retained_canonical_object(page, reports, fixture, tmp_path):
     directory, canonical, failed = reports
     _open(page, directory, fixture)
@@ -639,7 +685,12 @@ def test_full_payload_download_preserves_retained_canonical_object(page, reports
         page.get_by_role("button", name="Download Full Tier 3 Payload", exact=True).click()
     destination = tmp_path / "tier3.json"
     event.value.save_as(destination)
-    assert json.loads(destination.read_text()) == (canonical if fixture == "canonical" else failed)
+    expected = {
+        "canonical": canonical,
+        "incomplete": failed,
+        "native-upload-features": json.loads((directory / "native-upload-canonical.json").read_text()),
+    }
+    assert json.loads(destination.read_text()) == expected[fixture]
 
 
 def test_incomplete_insights_are_concise_and_full_errors_stay_in_diagnostics(page, reports):

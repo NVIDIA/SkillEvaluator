@@ -18,6 +18,28 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
     return _normalize_harbor_viewer(summary.get("harbor_viewer") if isinstance(summary, dict) else None)
 
 
+def _normalize_harbor_upload_jobs(raw: object) -> list[dict[str, str]]:
+    """Project recorded upload URLs without deriving links or changing source data."""
+    jobs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for upload in raw if isinstance(raw, list) else []:
+        if not isinstance(upload, dict):
+            continue
+        url = safe_url(upload.get("viewer_url") or upload.get("job_url"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        job = {"url": url}
+        analysis = safe_url(upload.get("analysis_url"))
+        if analysis:
+            job["analysis_url"] = analysis
+        name = upload.get("uploaded_job_name") or upload.get("job_name") or upload.get("original_job_name")
+        if isinstance(name, str) and name.strip():
+            job["name"] = name.strip()
+        jobs.append(job)
+    return jobs
+
+
 def _normalize_harbor_viewer(raw: object) -> dict[str, Any]:
     """Normalize one source before choosing primary or legacy summary evidence."""
     if not isinstance(raw, dict):
@@ -48,6 +70,16 @@ def _normalize_harbor_viewer(raw: object) -> dict[str, Any]:
         if item.get("name"):
             job["name"] = str(item["name"])
         jobs.append(job)
+    by_url = {job["url"]: job for job in jobs}
+    for uploaded in _normalize_harbor_upload_jobs(raw.get("uploads")):
+        retained = by_url.get(uploaded["url"])
+        if retained is None:
+            jobs.append(uploaded)
+            by_url[uploaded["url"]] = uploaded
+        else:
+            # Canonical metadata wins; enrich only the same validated job URL.
+            for key, value in uploaded.items():
+                retained.setdefault(key, value)
     if jobs:
         out["jobs"] = jobs
         out.setdefault("job_url", jobs[0]["url"])

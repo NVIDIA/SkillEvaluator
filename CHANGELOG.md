@@ -829,6 +829,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML's full Tier 3 download preserves the recorded canonical payload instead
   of exporting display defaults. Plugin evidence accompanies standalone HTML
   JSON snapshots, and retained optional-skip metadata survives JSON round trips.
+- HTML keeps recorded Harbor upload links when displaying or regenerating saved
+  runs. The renderer version sits beside SkillEvaluator, recorded SkillSpector
+  versions appear in the Tier 1 tile, and the aligned desktop report is slightly
+  wider. Long scanner versions wrap within mobile tiles.
 
 ## 0.9.0 - 2026-11-13
 

@@ -188,13 +188,18 @@ when available, keeping exact job identities in Diagnostics. Otherwise it uses
 the recorded job name or `Job N`. Legacy single-job and analysis-only links
 remain usable. Job names alone do not establish agent or condition ownership.
 Links use the existing URL validation and output escaping.
+HTML shows these actions in both the Tier 3 tile and Overview when published
+URLs are recorded. Keeping local Harbor jobs does not publish them to a hosted
+viewer. Saved upload records and persisted run metadata retain their links
+when reports are regenerated.
 
 The HTML header shows the SkillEvaluator renderer version independently of the
-generation timestamp. Recorded SkillSpector scanner versions remain visible
-beside the native header or Tier 1 summary. A regenerated report identifies its
+generation timestamp, beside the product name. The Tier 1 tile shows the
+recorded SkillSpector scanner versions. A regenerated report identifies its
 current renderer; it does not imply the saved evaluation used that version.
-The native header retains its original type scale. On narrow screens it scrolls
-with the page so that report navigation and evidence retain usable space.
+The header retains its native type scale and aligns with the slightly wider
+desktop report. On narrow screens it scrolls with the page so that report
+navigation and evidence retain usable space.
 
 HTML disclosures show scanner and LLM provenance, plus
 sanitized model, evaluator, dataset digest, and evaluated source metadata under

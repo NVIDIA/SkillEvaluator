@@ -44,7 +44,9 @@
     "Canonical public product branding is SkillEvaluator.",
     "The full-size native header scrolls on narrow screens so it does not obscure report evidence.",
     "Configured standard metrics remain explicitly unavailable in incomplete comparison tables; custom-only runs use their recorded metric names and values.",
-    "Harbor viewer fallback selects a usable sanitized primary or recorded summary without combining unrelated jobs or inferring URLs."
+    "Harbor viewer fallback selects a usable sanitized primary or recorded summary without combining unrelated jobs or inferring URLs.",
+    "Renderer version sits beside the brand, with recorded SkillSpector versions in the Tier 1 tile; aligned screen content widens to 1280px while native typography and print sizing remain intact.",
+    "Recorded Harbor upload URLs survive shared display projection and directory regeneration, with live metadata taking precedence for the same job URL."
   ],
   "drift_checks": [
     "tests/reporting/test_report_redesign.py::test_native_presentation_stylesheets_match_pinned_reference",

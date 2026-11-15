@@ -397,7 +397,8 @@ class TestCLIReporter:
 
         output = stream.getvalue()
         # Syntax highlighting can hide values against PowerShell's blue background.
-        assert "Quality score: 84.5/100 (grade=B, skill_type=script-based, count=3)" in output
+        # TERM=dumb may wrap even an explicit width; keep ANSI while joining lines.
+        assert "Quality score: 84.5/100 (grade=B, skill_type=script-based, count=3)" in " ".join(output.split())
         if colored:
             assert "\x1b[32m[OK]\x1b[0m" in output
 

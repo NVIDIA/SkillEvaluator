@@ -1650,8 +1650,17 @@ def test_other_token_flags_are_masked_in_either_spelling() -> None:
             "--use-token",
             id="before-aws-configure-set",
         ),
+        pytest.param(
+            f"./wrap --use_token docker login -u bot -p {_API_TOKEN}", "--use_token", "--use-token", id="before-login"
+        ),
         pytest.param(f"./wrap --use_token login bob password {_API_TOKEN}", "--use_token", "--use-token", id="netrc"),
         pytest.param(f"-api_key npm config set secret {_API_TOKEN}", "-api_key", "-api-key", id="before-npm-config"),
+        pytest.param(
+            f"./wrap --use_token npm config set //registry.npmjs.org/:_authToken {_API_TOKEN}",
+            "--use_token",
+            "--use-token",
+            id="before-npm-registry-key",
+        ),
         pytest.param(
             f"--api_key git config --global secret {_API_TOKEN}", "--api_key", "--api-key", id="before-git-config"
         ),
@@ -1661,14 +1670,214 @@ def test_an_underscored_flag_takes_the_next_word_as_its_dashed_spelling_does(
     copy: str, command: str, underscored: str, dashed: str
 ) -> None:
     # A "_" flag that names a credential is read like its "-" spelling, so
-    # the word after one that takes no value is masked as its value, and the
-    # command that word starts is read as it is after the "-" spelling.
+    # the word after one that takes no value is masked as its value. When that
+    # word starts a command whose password another rule masks, that password
+    # is still masked after either spelling.
     def evidence(text: str) -> str:
         result = _security(copy, {"action": "Bash", "action_input": {"command": f"{text} && rm -rf /srv/app"}})
         return result["findings"][0]["evidence"]
 
     assert f"{underscored} <redacted> " in evidence(command)
+    assert _API_TOKEN not in evidence(command)
+    assert _API_TOKEN not in evidence(command.replace(underscored, dashed))
     assert evidence(command) == evidence(command.replace(underscored, dashed)).replace(dashed, underscored)
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    "rest",
+    [
+        pytest.param(f" export DB_PASSWORD='{_PASSPHRASE}'", id="assignment"),
+        pytest.param(f"; git config --global -- 'github.token' {_AWS_KEY_BODY}", id="config-set"),
+        pytest.param(f" auth=('bob', '{_BASIC_PASSWORD}')", id="tuple"),
+    ],
+)
+def test_a_netrc_password_after_a_value_less_flag_does_not_hide_a_later_credential(flag: str, rest: str) -> None:
+    # The password of a .netrc-like phrase whose "login" word a flag masks
+    # runs over the words after it, so a credential among them is masked as
+    # its own rule masks it.
+    text = f"./wrap {flag} login bob password {_API_TOKEN}{rest} && rm -rf /srv/app"
+
+    evidence = eval_core_checks._redact_finding_evidence(text)
+
+    assert f"./wrap {flag} <redacted> bob password <redacted>" in evidence
+    for secret in (_API_TOKEN, _PASSPHRASE_TAIL, _AWS_KEY_BODY, _BASIC_PASSWORD):
+        assert secret not in evidence
+    assert evidence.endswith(" && rm -rf /srv/app")
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(
+            f"./wrap FLAG sshpass -p {_API_TOKEN};git config --global github.token {_AWS_KEY_BODY}",
+            id="config-set-in-the-same-word",
+        ),
+        pytest.param(
+            f'./wrap FLAG mysql -u root -p"{_API_TOKEN} && export TOKEN={_AWS_KEY_BODY}',
+            id="assignment-after-an-unclosed-quote",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "command": f"./wrap FLAG aws configure set aws_secret_access_key {_API_TOKEN}\n"
+                    f'auth=("bob", "{_BASIC_PASSWORD}")'
+                }
+            ),
+            id="json-escaped-line-break",
+        ),
+    ],
+)
+def test_a_command_password_after_a_value_less_flag_does_not_hide_a_later_credential(flag: str, text: str) -> None:
+    # The password of a command whose word a flag masks may run over a
+    # credential another rule reads, which is then masked as that rule masks
+    # it.
+    evidence = eval_core_checks._redact_finding_evidence(text.replace("FLAG", flag))
+
+    assert f"{flag} <redacted> " in evidence
+    for secret in (_API_TOKEN, _AWS_KEY_BODY, _BASIC_PASSWORD):
+        assert secret not in evidence
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["wrap", "FLAG", "mysql", "-u", "root", "-pVALUE", "db"]', id="mysql"),
+        pytest.param('["wrap", "FLAG", "/usr/bin/mysql", "-uroot", "-pVALUE"]', id="mysql-path"),
+        pytest.param("['wrap', 'FLAG', 'mysql', '-pVALUE']", id="single-quoted"),
+        pytest.param('["wrap", "FLAG", "login", "-u", "bot", "-pVALUE"]', id="login"),
+    ],
+)
+def test_an_argv_flag_value_that_names_a_command_keeps_its_attached_password_masked(flag: str, argv: str) -> None:
+    # The element after a credential flag that takes no value is masked as
+    # its value. When that element is the MySQL client or login element an
+    # attached "-pVALUE" element follows, that password is still masked.
+    text = f"subprocess.run({argv.replace('FLAG', flag).replace('VALUE', _API_TOKEN)})"
+    element = argv.split(", ")[2]
+
+    # Also in JSON text, such as tool-call arguments, where the quotes are escaped.
+    for evidence_text, value in ((text, element), (json.dumps({"command": text}), json.dumps(element)[1:-1])):
+        evidence = eval_core_checks._redact_finding_evidence(evidence_text)
+
+        assert _API_TOKEN not in evidence
+        assert evidence == evidence_text.replace(value, "<redacted>", 1).replace(_API_TOKEN, "<redacted>")
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token", "--password"])
+def test_a_masked_argv_element_does_not_hide_a_login_password_right_after_the_list(flag: str) -> None:
+    # A "\n" right after the list joins its "]" to the next command word,
+    # which the login rule reads only after a quote, so masking the last
+    # element would hide that command. Its password is masked too.
+    command = f'["wrap", "{flag}", "login"]\\ndocker login -u bot -p {_API_TOKEN} reg'
+
+    # In a printf string, and in JSON text where the line break and the quotes are escaped.
+    for text, element in (
+        (f"printf '{command}\\n' > f", '"login"'),
+        (json.dumps({"command": command.replace("\\n", "\n")}), '\\"login\\"'),
+    ):
+        evidence = eval_core_checks._redact_finding_evidence(text)
+
+        assert _API_TOKEN not in evidence
+        assert evidence == text.replace(element, "<redacted>").replace(_API_TOKEN, "<redacted>")
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f"./wrap FLAG K1,token=x\\nlogin bob password {_API_TOKEN}",
+            "./wrap FLAG <redacted> bob password <redacted>",
+            id="netrc-after-an-escaped-line-break-in-the-value",
+        ),
+        pytest.param(
+            json.dumps({"cmd": f"./wrap FLAG K1\nlogin bob password {_API_TOKEN}"}),
+            '{"cmd": "./wrap FLAG <redacted> bob password <redacted>"}',
+            id="netrc-after-a-json-line-break-in-the-value",
+        ),
+        pytest.param(
+            f"./wrap FLAG 'v y'\\ndocker login -u bot -p {_API_TOKEN} reg",
+            "./wrap FLAG <redacted>\\ndocker login -u bot -p <redacted> reg",
+            id="login-right-after-a-quoted-value",
+        ),
+        pytest.param(
+            f"login bob password X1 FLAG Y1 {_API_TOKEN}",
+            "login bob password <redacted> <redacted>",
+            id="value-inside-a-netrc-password",
+        ),
+        pytest.param(
+            f"login bob password X1; FLAG auth_type = f({_API_TOKEN})",
+            "login bob password <redacted> <redacted>",
+            id="type-name-value-inside-a-netrc-password",
+        ),
+    ],
+)
+def test_a_credential_that_a_masked_flag_value_runs_into_stays_masked(flag: str, text: str, expected: str) -> None:
+    # A flag value word runs over a JSON-escaped line break, and a value may
+    # end right before a command word or lie inside a .netrc password of
+    # several words. The command rule no longer reads the credential once
+    # the value is masked, or ends the password at the marker, so the
+    # password is masked with the flag value.
+    evidence = eval_core_checks._redact_finding_evidence(text.replace("FLAG", flag))
+
+    assert _API_TOKEN not in evidence
+    assert evidence == expected.replace("FLAG", flag)
+
+
+@pytest.mark.parametrize("flag", ["--password", "--use_token", "--use-token"])
+@pytest.mark.parametrize("tail", ["--set-secret VALUE", "npm config set -- _authToken VALUE"])
+def test_a_password_masked_behind_a_flag_value_keeps_the_escaped_backslash_after_it(flag: str, tail: str) -> None:
+    # A .netrc password word stops before "\n", also when its backslash is
+    # itself escaped ("\\n"). Masking that password with the flag value that
+    # hides its "login" word keeps both backslashes, so the rest is not read
+    # as a new line and the quoted value of an earlier name still runs over it.
+    line = f"password: {_BASIC_PASSWORD} && {flag} K1\\nlogin bob password X2\\n{tail.replace('VALUE', _API_TOKEN)}"
+    raw = 'echo "' + line.replace("\\n", "\\\\n") + '" > f && rm -rf /srv/app'
+    wrapped = json.dumps({"cmd": f"{line} && rm -rf /srv/app"})
+
+    assert eval_core_checks._redact_finding_evidence(raw) == 'echo "password: <redacted>" > f && rm -rf /srv/app'
+    assert eval_core_checks._redact_finding_evidence(wrapped) == '{"cmd": "password: <redacted>"}'
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        pytest.param(
+            json.dumps(
+                {"cmd": f"curl -b auth_token=abc https://x && ./wrap FLAG mysql -u root -p{_API_TOKEN} && echo done"}
+            ),
+            "https://x && ./wrap FLAG <redacted> -u root -p<redacted> && echo done",
+            id="after-a-cookie-name-in-a-quoted-string",
+        ),
+        pytest.param(
+            f'login bob password X1; FLAG Y1; auth=HTTPBasicAuth(user, \\"{_API_TOKEN}\\"),',
+            "auth=<redacted>,",
+            id="after-a-netrc-password-that-holds-the-value",
+        ),
+        pytest.param(
+            json.dumps(
+                {
+                    "cmd": 'auth=HTTPBasicAuth(user, "a+b"), ./wrap FLAG docker login -u bot -password X\n'
+                    f"aws configure set aws_secret_access_key {_API_TOKEN}\n./wrap ..."
+                }
+            ),
+            '\\n./wrap ..."}',
+            id="after-a-call-value-in-a-quoted-string",
+        ),
+    ],
+)
+def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: str, text: str, kept: str) -> None:
+    # The command and assignment rules still read the text around such a
+    # password as they do with no flag: an earlier name whose value would
+    # run to the end of the string is masked by its own rule first, and a
+    # later name stays readable.
+    evidence = eval_core_checks._redact_finding_evidence(text.replace("FLAG", flag))
+
+    assert _API_TOKEN not in evidence
+    assert kept.replace("FLAG", flag) in evidence
 
 
 _HOOK_URL = "https://hooks.example.com/services/T0/B0/" + _API_TOKEN
@@ -1783,6 +1992,62 @@ def test_a_name_in_an_underscored_flag_value_is_read_on_its_own(text: str, expec
     # value decide that the value is left to the assignment rule, which then
     # masks all of it.
     assert eval_core_checks._redact_finding_evidence(text) == expected
+
+
+@pytest.mark.parametrize("flag", ["--api_key", "--api-key"])
+def test_a_flag_value_that_holds_the_colon_of_a_user_value_keeps_that_value_masked(flag: str) -> None:
+    # Masking a flag value inside a quoted -u value may remove the only colon
+    # the -u rule needs, so the whole -u value is masked with it, also in JSON
+    # text where the inner quote is escaped again.
+    command = f'curl -u "bob {flag} \\"x api_key: {_API_TOKEN}" https://h'
+
+    assert eval_core_checks._redact_finding_evidence(command) == "curl -u <redacted> https://h"
+    assert eval_core_checks._redact_finding_evidence(json.dumps({"cmd": command})) == (
+        '{"cmd": "curl -u <redacted> https://h"}'
+    )
+
+
+@pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f"./wrap FLAG mysql -u root -p{_API_TOKEN}password: {_BASIC_PASSWORD}",
+            "./wrap FLAG <redacted> -u root -p<redacted>",
+            id="name-cut-by-a-mysql-password",
+        ),
+        pytest.param(
+            f"./wrap FLAG aws configure set aws_secret_access_key aws configure set aws_secret_access_key {_API_TOKEN}",
+            "./wrap FLAG <redacted> configure set aws_secret_access_key <redacted> configure set"
+            " aws_secret_access_key <redacted>",
+            id="command-starting-at-a-password",
+        ),
+        pytest.param(
+            f"./wrap FLAG mysql -u root -pV1\\nlogin bob password {_API_TOKEN}, --password V3",
+            "./wrap FLAG <redacted> -u root -p<redacted> bob password <redacted>",
+            id="netrc-login-word-in-a-password",
+        ),
+    ],
+)
+def test_what_a_hidden_command_password_runs_into_stays_masked(flag: str, text: str, expected: str) -> None:
+    # The password of a command whose word a flag masks is masked with the
+    # flag value, and it may run into more credentials: a name it cuts
+    # ("-pVALUEpassword: VALUE"), a command of the same rule that starts at
+    # it, or the login word of a .netrc phrase whose password holds a flag
+    # value. Each of those is masked as its own rule masks it.
+    evidence = eval_core_checks._redact_finding_evidence(text.replace("FLAG", flag))
+
+    assert _API_TOKEN not in evidence
+    assert _BASIC_PASSWORD not in evidence
+    assert evidence == expected.replace("FLAG", flag)
+
+
+def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> None:
+    # A quoted flag value may end at the quote that opens the value of a flag
+    # inside it, which runs past that value and is masked too.
+    text = f'./tool --api_key "a --db_password "{_API_TOKEN} b'
+
+    assert eval_core_checks._redact_finding_evidence(text) == "./tool --api_key <redacted>"
 
 
 # A password with parentheses in it, which a call value must not cut short.

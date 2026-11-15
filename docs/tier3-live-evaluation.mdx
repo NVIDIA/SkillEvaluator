@@ -1930,7 +1930,24 @@ saved judge evidence use the same credential masker:
   `--token-file`, or `--cookie-jar`, and token-count flags `--max-tokens` and
   `--token-limit` (or `--max_tokens`), keep the word after them. A
   `-b cookies.txt` cookie jar keeps its path too. A shell operator after a
-  flag is no value (`gh auth login --with-token < token.txt`);
+  flag is no value (`gh auth login --with-token < token.txt`). A flag that
+  takes no value masks the next word as its value; when that word starts a
+  command whose password is masked below, as in
+  `--use-token mysql -u root -p...`, that password is masked too, and so is
+  an attached `-p...` element after a `mysql` or `login` element such a flag
+  takes in an argv list. A `docker login`, `.netrc`, or `/usr/bin/mysql`
+  password after a `\n` inside a flag value or right after the value is
+  masked too, and so is a `docker login` password after a `\n` right after an
+  argv list whose last element is masked
+  (`["wrap", "--password", "..."]\ndocker login -p ...`); the plain `mysql`,
+  `sshpass`, `aws configure set`, and config set rules below do not match
+  after a `\n` escape. The rest of a `.netrc` password that holds a flag
+  value is masked as well, and so is a quoted `-u` value whose only colon a
+  flag value inside it holds (`-u "bob --api_key \"x a:..."`). A name,
+  command, or `.netrc` phrase that such a password runs into is masked as
+  its own rule masks it (`--use-token mysql -u root -p...password: ...`). A
+  flag inside the quoted value of an earlier flag is read too, so its value
+  is masked where it runs past that quote;
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
@@ -1993,9 +2010,16 @@ is ...` or `use token ...`), a `.pgpass` line, a standalone `pypi-` token, URL
 query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
 `unzip -P` password, a
 password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
-option with a separate value (`--location global`), or all but the first word
+option with a separate value (`--location global`), all but the first word
 of a value with spaces on an unquoted here-document line or inside a `sh -c`
-or `ssh` command string. Some ordinary words are masked, such as the
+or `ssh` command string, or a credential that a masked flag value hides in
+other ways: the value of a credential name after a flag value that runs over
+a JSON-escaped line break (`\n`, also escaped again) at which the value of an
+earlier name in the same string ended, since that value then runs over the
+later name; text after a quoted value whose closing quote also opens the
+quoted value of a flag inside it; and an argv list element after a
+credential flag element that the masked password of a hidden command covers.
+Some ordinary words are masked, such as the
 path in `grep -r token: /etc`, the value of a flag that names a token other
 than `--max-tokens` and `--token-limit` (`--max-new-tokens 256` or
 `--tokenizer_name gpt2`), the words after a `.netrc`-like

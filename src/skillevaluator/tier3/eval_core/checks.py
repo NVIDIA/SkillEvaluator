@@ -3533,6 +3533,17 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
 # curl's "-b NAME=VALUE" sends a cookie; "-b FILE" reads a cookie jar and is
 # kept. This follows the report excerpts' _CLI_COOKIE_FLAG_RE.
 _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*=)" + _FINDING_EVIDENCE_FLAG_VALUE)
+# The rules, in order, that mask the credential a command or flag word starts
+# after the flag and argv rules: each masks the text after its group 1.
+_FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES = (
+    _FINDING_EVIDENCE_USER_FLAG_RE,
+    _FINDING_EVIDENCE_LOGIN_PASSWORD_RE,
+    _FINDING_EVIDENCE_SSHPASS_RE,
+    _FINDING_EVIDENCE_MYSQL_PASSWORD_RE,
+    _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE,
+    _FINDING_EVIDENCE_NETRC_PASSWORD_RE,
+    _FINDING_EVIDENCE_COOKIE_FLAG_RE,
+)
 # The same flags as quoted elements of an argv list: the element after a
 # credential flag (subprocess.run(["tool", "--password", "VALUE"])), after
 # "-u", "-U", "--user" or "--proxy-user" when it holds a colon, after "-b" when
@@ -3785,15 +3796,7 @@ def _mask_finding_evidence_credentials(text: str, *, preserve_header_format: boo
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_credential_flags(redacted)
     redacted = _mask_argv_credentials(redacted)
-    for pattern in (
-        _FINDING_EVIDENCE_USER_FLAG_RE,
-        _FINDING_EVIDENCE_LOGIN_PASSWORD_RE,
-        _FINDING_EVIDENCE_SSHPASS_RE,
-        _FINDING_EVIDENCE_MYSQL_PASSWORD_RE,
-        _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE,
-        _FINDING_EVIDENCE_NETRC_PASSWORD_RE,
-        _FINDING_EVIDENCE_COOKIE_FLAG_RE,
-    ):
+    for pattern in _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES:
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_config_set_values(redacted)
     redacted = _mask_credential_assignments(redacted, preserve_header_format=preserve_header_format)
@@ -3858,12 +3861,13 @@ def _mask_authorization_headers(text: str) -> str:
 def _mask_credential_flags(text: str) -> str:
     """Mask the value of each flag whose name holds a credential word ("--client-secret VALUE")."""
     values = _AssignmentValues(text)
-    parts: list[str] = []
-    pos = 0
+    spans: list[tuple[int, int]] = []
+    # A flag inside the value of an earlier one is read too: that value may
+    # end at the quote that opens this flag's value ('--set_secret "a
+    # --db_password "VALUE'). Values that overlap are masked as one.
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
         if (
-            match.start() < pos
-            or not _is_credential_flag_name(match.group(1))
+            not _is_credential_flag_name(match.group(1))
             # A name with "_" joined to its value by "=" ("--api_key=VALUE")
             # or followed by a separator ("--api_key = VALUE", "-access_token
             # := VALUE") is left to the assignment rule, which read it before,
@@ -3879,9 +3883,160 @@ def _mask_credential_flags(text: str) -> str:
         # ("--api_key API_TOKEN=\"...\"").
         if value is None or (underscored and values.runs_past(value.start(), value.end())):
             continue
-        parts.append(text[pos : value.start()])
+        spans.append((value.start(), value.end()))
+    return _mask_spans(text, spans + _hidden_credential_spans(text, spans, values))
+
+
+def _hidden_credential_spans(
+    text: str, value_spans: list[tuple[int, int]], values: _AssignmentValues
+) -> list[tuple[int, int]]:
+    """Return the text later rules mask for each credential that masking the values *value_spans* hides from them.
+
+    A flag that takes no value ("--use_token") reads the next word as its
+    value, and a value word runs over a JSON-escaped line break ("--api_key
+    K1\\nlogin bob password VALUE"). Once such a value is masked, a rule in
+    _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES or the config set rule no longer
+    reads a credential whose command part, from its first word up to the
+    password, the value overlaps or ends right before ("--use_token mysql -u
+    root -pVALUE", "--use_token 'v'\\ndocker login -p VALUE"), so the password
+    that rule masks in *text* is returned. So it is when a value inside the
+    password removes every colon the -u rule needs ('-u "bob --api_key
+    \\"x a:VALUE"'). A .netrc password of several words ends at a
+    value inside it ("login bob password X --use_token Y VALUE"), so its rest
+    from that value on is returned. So it is for an argv list element masked
+    as a flag's value ('["tool", "--password", "v"]\\ndocker login -p VALUE').
+
+    Text returned may hide another credential in turn, or a name the
+    assignment rule reads, also one its start cuts ("-pVALUEpassword:
+    VALUE"), so the same is done for it, and the rest of the value of such a
+    name past it is returned too (each name read on its own, see
+    _AssignmentValues). Each credential and name is read once, so this stays
+    close to linear on long text.
+    """
+    if not value_spans:
+        return []
+    # Each rule's credentials, which do not overlap one another.
+    found = {pattern: list(pattern.finditer(text)) for pattern in _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES}
+    found[_FINDING_EVIDENCE_CONFIG_SET_RE] = [
+        match
+        for match in _FINDING_EVIDENCE_CONFIG_SET_RE.finditer(text)
+        if _mask_config_set_value(match, values) != match.group()
+    ]
+    command_parts = [
+        _SpanIndex([(match.start(), match.end(1), match) for match in matches]) for matches in found.values() if matches
+    ]
+    user_passwords = _SpanIndex([(match.end(1), match.end(), match) for match in found[_FINDING_EVIDENCE_USER_FLAG_RE]])
+    netrc_passwords = _SpanIndex(
+        [
+            (match.end(1), match.end(), match)
+            for match in found[_FINDING_EVIDENCE_NETRC_PASSWORD_RE]
+            if not text.startswith(("'", '"', '\\"'), match.end(1))
+        ]
+    )
+    names = _SpanIndex(
+        [
+            (name.start(), name.end(), name)
+            for name, _ in _assignment_name_matches(text, _config_separator_name_ends(text))
+        ]
+    )
+    hidden: list[tuple[int, int]] = []
+    starts_read: set[int] = set()
+
+    def take_credentials(start: int, end: int) -> None:
+        # A credential is hidden also when the masked text ends right before it.
+        for index in command_parts:
+            hidden.extend((match.end(1), match.end()) for match in index.take(start, end + 1))
+        # So it is when it starts where the masked text does, inside the
+        # password of another credential of its rule, which the search above
+        # does not find ("--use_token aws configure set aws_secret_access_key
+        # aws configure set aws_secret_access_key VALUE").
+        if start not in starts_read:
+            starts_read.add(start)
+            for pattern in found:
+                match = pattern.match(text, start)
+                if match is not None and (
+                    pattern is not _FINDING_EVIDENCE_CONFIG_SET_RE
+                    or _mask_config_set_value(match, values) != match.group()
+                ):
+                    hidden.append((match.end(1), match.end()))
+        # Other rules still read a password whose start is left when the
+        # masked text lies inside it. The -u rule also needs a colon left in
+        # it. The .netrc rule reads a password of several words up to the
+        # marker, so only the rest from the masked text on is returned: masked
+        # from its start, that password would be read again from the marker
+        # as a first word, which runs on over ";", "|", "&", "<" and ">".
+        for match in user_passwords.take(start, end):
+            if ":" not in text[match.end(1) : start] and ":" not in text[end : match.end()]:
+                hidden.append((match.end(1), match.end()))
+        hidden.extend((max(start, match.end(1)), match.end()) for match in netrc_passwords.take(start, end))
+
+    for start, end in value_spans:
+        take_credentials(start, end)
+    index = 0
+    while index < len(hidden):
+        start, end = hidden[index]
+        index += 1
+        take_credentials(start, end)
+        for name in names.take(start, end):
+            value_end = values.value_end(name)
+            if value_end is not None and value_end > end:
+                hidden.append((max(start, name.start()), value_end))
+    # A .netrc password word stops before "\n", also between the two
+    # backslashes of an escaped one ("login bob password VALUE\\n..."). Masked
+    # without its first backslash, the rest would read as a JSON-escaped line
+    # break, which ends what later rules read, so the backslashes a span ends
+    # with are kept. Spans that end at the same place are looked at once.
+    kept_ends = {}
+    for end in {end for _, end in hidden}:
+        kept = end
+        while kept and text[kept - 1] == "\\":
+            kept -= 1
+        kept_ends[end] = kept
+    return [(start, kept_ends[end]) for start, end in hidden if start < kept_ends[end]]
+
+
+class _SpanIndex:
+    """Spans of text, each with an item, whose starts and ends both run in order; each item is taken out once."""
+
+    def __init__(self, entries: list[tuple[int, int, Any]]) -> None:
+        self._starts = [start for start, _, _ in entries]
+        self._ends = [end for _, end, _ in entries]
+        self._items = [item for _, _, item in entries]
+        # For each entry, the first one from it on that is not taken yet.
+        self._next = list(range(len(entries) + 1))
+
+    def take(self, start: int, end: int) -> list[Any]:
+        """Take out and return, in order, the items not taken yet whose spans overlap *start*:*end*."""
+        items = []
+        index = self._untaken(bisect.bisect_right(self._ends, start))
+        stop = bisect.bisect_left(self._starts, end)
+        while index < stop:
+            items.append(self._items[index])
+            self._next[index] = index + 1
+            index = self._untaken(index + 1)
+        return items
+
+    def _untaken(self, index: int) -> int:
+        found = index
+        while self._next[found] != found:
+            found = self._next[found]
+        # Each entry passed on the way now points at the one found.
+        while self._next[index] != found:
+            self._next[index], index = found, self._next[index]
+        return found
+
+
+def _mask_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Replace each span of *text* in *spans* with "<redacted>", and spans that overlap with one."""
+    parts: list[str] = []
+    pos = 0
+    for start, end in sorted(spans):
+        if start < pos:
+            pos = max(pos, end)
+            continue
+        parts.append(text[pos:start])
         parts.append("<redacted>")
-        pos = value.end()
+        pos = end
     parts.append(text[pos:])
     return "".join(parts)
 
@@ -3897,7 +4052,7 @@ def _is_credential_flag_name(name: str) -> bool:
 def _mask_argv_credentials(text: str) -> str:
     """Mask the list element after a quoted credential flag (["tool", "--password", "VALUE"])."""
     values = _AssignmentValues(text)
-    parts: list[str] = []
+    spans: list[tuple[int, int]] = []
     pos = 0
     for match in _FINDING_EVIDENCE_ARGV_FLAG_RE.finditer(text):
         flag = match.group(2)
@@ -3929,29 +4084,32 @@ def _mask_argv_credentials(text: str) -> str:
             )
         if not masked:
             continue
-        parts.append(text[pos : value.start()])
-        parts.append("<redacted>")
+        spans.append((value.start(), value.end()))
         pos = value.end()
-    parts.append(text[pos:])
-    return _mask_attached_argv_values("".join(parts))
+    # A masked element may hide a later credential's command as a flag value
+    # does: in '["tool", "--use_token", "login"]\ndocker login -p VALUE' the
+    # login rule reads "]\ndocker" as a command word only after the quote. An
+    # attached "-pVALUE" element is also read in the list as it was before
+    # its elements were masked, so a login or MySQL client element that a
+    # flag which takes no value reads as its value (["wrap", "--use_token",
+    # "mysql", "-uroot", "-pVALUE"]) still counts.
+    if spans:
+        spans += _hidden_credential_spans(text, spans, values) + _attached_argv_password_spans(text)
+        text = _mask_spans(text, spans)
+    return _mask_spans(text, _attached_argv_password_spans(text))
 
 
-def _mask_attached_argv_values(text: str) -> str:
-    """Mask an attached "-pVALUE" element that follows a login or MySQL client element."""
-    parts: list[str] = []
-    pos = 0
+def _attached_argv_password_spans(text: str) -> list[tuple[int, int]]:
+    """Return where the value of each attached "-pVALUE" element after a login or MySQL client element is."""
+    spans: list[tuple[int, int]] = []
     for match in _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text):
         window = max(0, match.start() - 256)
         if (
-            _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, window, match.start()) is None
-            and _FINDING_EVIDENCE_ARGV_MYSQL_RE.search(text, window, match.start()) is None
+            _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, window, match.start()) is not None
+            or _FINDING_EVIDENCE_ARGV_MYSQL_RE.search(text, window, match.start()) is not None
         ):
-            continue
-        parts.append(text[pos : match.start(2)])
-        parts.append("<redacted>")
-        pos = match.end(2)
-    parts.append(text[pos:])
-    return "".join(parts)
+            spans.append((match.start(2), match.end(2)))
+    return spans
 
 
 def _config_key_names_a_credential(key: str) -> bool:

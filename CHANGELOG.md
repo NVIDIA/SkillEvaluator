@@ -294,8 +294,26 @@ All notable changes to SkillEvaluator are documented in this file.
   that holds a credential name whose value runs past it, as in
   `--set_secret API_TOKEN="..."`, is read as an assignment; any other value,
   as in `--set_secret SLACK_TOKEN_URL=...` or `--db_password PASS=1234`, is
-  masked whole, as after the `-` spelling. Both the host checker and the
-  bundled Harbor verifier apply the fix.
+  masked whole, as after the `-` spelling. A credential flag that takes no
+  value, in either spelling, still masks the next word as its value, but no
+  longer hides the password of a `mysql`, `sshpass`, `docker login`,
+  `aws configure set`, config set, or `.netrc` command that starts with that
+  word, as in `--use_token mysql -u root -p...`, nor an attached `-p...`
+  element after a `mysql` or `login` element it takes in an argv list. A
+  `docker login`, `.netrc`, or `/usr/bin/mysql` password after a `\n` inside
+  a flag value or right after it is masked too, and so is a `docker login`
+  password after a `\n` right after an argv list whose last element is
+  masked, as in `["wrap", "--use_token", "login"]\ndocker login -p ...`; the
+  plain `mysql`, `sshpass`, `aws configure set`, and config set rules do not
+  match after a `\n` escape. A flag value inside a `.netrc` password no longer
+  ends that password, and one that holds the only colon of a quoted `-u`
+  value, as in `-u "bob --api_key \"x a:..."`, no longer leaves that value
+  unmasked. A name, command, or `.netrc` phrase that such a password runs
+  into is masked as its own rule masks it, as in
+  `--use_token mysql -u root -p...password: ...`, and a flag inside the quoted
+  value of an earlier flag is read too, so its value is masked where it runs
+  past that quote. Both the host checker and the bundled Harbor verifier
+  apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

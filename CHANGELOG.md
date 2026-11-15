@@ -316,8 +316,14 @@ All notable changes to SkillEvaluator are documented in this file.
   inside the value of a `-` flag is not read. The argv rule also reads list
   elements as they were before flag values were masked, so a masked value
   that cuts an element, as in `--set_secret "auth_type=x ["mysql", "-p..."]`,
-  does not hide the credential after it. Both the host checker and the
-  bundled Harbor verifier apply the fix.
+  does not hide the credential after it. When text an earlier rule masked,
+  such as a flag value that runs over the JSON-escaped line break or quote at
+  which the value of an earlier name ended, lies inside that value before a
+  later credential name, the rest of the later name's own value is masked
+  too, as it is when that name is read on its own, as in
+  `\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
+  arguments repeated as JSON. Both the host checker and the bundled Harbor
+  verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

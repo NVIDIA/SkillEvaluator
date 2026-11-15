@@ -1843,6 +1843,66 @@ def test_a_password_masked_behind_a_flag_value_keeps_the_escaped_backslash_after
     assert eval_core_checks._redact_finding_evidence(wrapped) == '{"cmd": "password: <redacted>"}'
 
 
+_SSHPASS_ARGV = '["wrap", "--access_token", "sshpass", "-p", "' + _API_TOKEN + '"]'
+
+
+@pytest.mark.parametrize(
+    ("flag", "command", "expected"),
+    [
+        *(
+            pytest.param(
+                flag,
+                f"password: f({_BASIC_PASSWORD}), {flag} K1\n['wrap', '{flag}', 'mysql', 'db'] && "
+                f"passwd = https://h/{_BASIC_PASSWORD}\n{line}",
+                '{"arguments": "{\\"cmd\\": \\"password: <redacted>"}',
+                id=f"{name}{flag[5:]}",
+            )
+            for flag in ("--api_key", "--api-key")
+            for name, line in (
+                ("argv-list", _SSHPASS_ARGV),
+                ("sshpass", f"sshpass -p {_API_TOKEN} ssh h"),
+                ("mysql", f"mysql -u root -p{_API_TOKEN} db"),
+                ("aws-configure-set", f"aws configure set aws_secret_access_key {_API_TOKEN}"),
+            )
+        ),
+        *(
+            pytest.param(
+                flag,
+                f"DB_PASSWORD=f({_BASIC_PASSWORD}) | {flag} K1\\n{flag} auth= {_BASIC_PASSWORD},x\n"
+                f"token_url='{_API_TOKEN}'; npm config set _authToken 'K2 z'",
+                '{"arguments": "{\\"cmd\\": \\"DB_PASSWORD=<redacted>"}',
+                id=f"location-value{flag[5:]}",
+            )
+            for flag in ("--use_token", "--use-token")
+        ),
+        *(
+            pytest.param(
+                flag,
+                f'echo "password: {_BASIC_PASSWORD} {flag} K1" b passwd = {_BASIC_PASSWORD}\n'
+                f"sshpass -p {_API_TOKEN} ssh h",
+                '{"arguments": "{\\"cmd\\": \\"echo \\\\\\"password: <redacted>"}',
+                id=f"after-a-quote{flag[5:]}",
+            )
+            for flag in ("--api_key", "--api-key")
+        ),
+    ],
+)
+def test_a_name_that_a_value_runs_over_past_a_masked_flag_value_keeps_its_own_value_masked(
+    flag: str, command: str, expected: str
+) -> None:
+    # In a tool call's JSON arguments repeated as JSON (\\n is a line break),
+    # the value of a name right after an escaped quote ends at the next line
+    # break or escaped quote, and a name further on reads the rest of the
+    # outer string. A flag value runs over such a line break or quote, so once
+    # it is masked the earlier value runs over the next name, whose own value
+    # is still masked as it is read with no flag value masked.
+    evidence = eval_core_checks._redact_finding_evidence(json.dumps({"arguments": json.dumps({"cmd": command})}))
+
+    assert _API_TOKEN not in evidence
+    assert _BASIC_PASSWORD not in evidence
+    assert evidence == expected
+
+
 @pytest.mark.parametrize("flag", ["--use_token", "--use-token"])
 @pytest.mark.parametrize(
     ("text", "kept"),
@@ -1914,6 +1974,18 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
             id="commands-in-hidden-passwords",
         ),
         pytest.param("--use_token mysql -u root -pXpassword: Y " * 1000, id="names-cut-by-hidden-passwords"),
+        pytest.param(
+            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=x " * 3500})}),
+            id="names-past-a-masked-flag-value",
+        ),
+        pytest.param(
+            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\nb token=x " * 1200})}),
+            id="lines-past-masked-flag-values",
+        ),
+        pytest.param(
+            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=f(" * 3500})}),
+            id="calls-past-a-masked-flag-value",
+        ),
     ],
 )
 def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> None:

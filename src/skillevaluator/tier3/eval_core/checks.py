@@ -4371,6 +4371,11 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # separator starts, see _assignment_name_matches).
     plain_end = 0
     config_name_ends = _config_separator_name_ends(text)
+    # Where each marker an earlier rule left starts, and where the value
+    # masked last starts.
+    markers = [found.start() for found in re.finditer("<redacted>", text)]
+    masked_start = 0
+    values = _AssignmentValues(text)
     for match, name_sed_end in _assignment_name_matches(text, config_name_ends):
         # A name inside a masked value is skipped, unless it starts a sed
         # pattern or replacement, or the value is that of a name in a sed
@@ -4379,9 +4384,21 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         # name holds it, as when no sed expression, call, call inside a tuple
         # or config set value after a separator word is read (see below).
         overlapped = match.start() < pos
-        if (
-            overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end)
-        ) or _assignment_name_is_kept(text, match):
+        if overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end):
+            # A marker inside the masked value may stand for the line break
+            # or quote that ended it before an earlier rule masked the text
+            # around it, as a flag value runs over a JSON-escaped line break
+            # ('\"password: x --api_key K1\\nb passwd = VALUE' in a tool call's
+            # JSON arguments repeated as JSON, where the value of a name right
+            # after the escaped quote ends at the next line break, but that of
+            # a name further on runs to the end of the outer string). So the
+            # rest of the value of a name past such a marker is masked too, as
+            # that name is read on its own (see _AssignmentValues).
+            marker = bisect.bisect_left(markers, masked_start)
+            if marker < len(markers) and markers[marker] < match.start():
+                pos = max(pos, values.value_end(match) or 0)
+            continue
+        if _assignment_name_is_kept(text, match):
             continue
         reading = _assignment_value_reading(text, match, string_open, preserve_header_format=preserve_header_format)
         if reading is None:
@@ -4421,6 +4438,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
                 scheme = re.match(_FINDING_EVIDENCE_AUTH_SCHEME, body, re.IGNORECASE).group()
             replacement = opening + scheme + replacement + closing
         parts.append(replacement)
+        masked_start = value.start()
         pos = value.end()
         sed_end = name_sed_end
     parts.append(text[pos:])

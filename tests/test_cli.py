@@ -758,6 +758,28 @@ def test_doctor_all_without_the_tier3_extra_still_checks_lower_tiers(monkeypatch
     assert "Install skillevaluator[tier3]" in result.output
 
 
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("cannot import name 'GKEExecStreamClosedError'", name="harbor.environments.gke"),
+        ModuleNotFoundError("No module named 'harbor.missing'", name="harbor.missing"),
+    ],
+)
+def test_doctor_preserves_an_installed_dependency_import_failure(monkeypatch, error) -> None:
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise error
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exception is error
+    assert "dependencies are not installed" not in result.output
+
+
 def test_doctor_keeps_an_unrelated_import_error(monkeypatch) -> None:
     _fail_tier3_commands_import(monkeypatch, missing="skillevaluator.tier3.missing")
 

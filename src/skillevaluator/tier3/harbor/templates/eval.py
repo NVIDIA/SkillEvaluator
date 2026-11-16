@@ -4165,12 +4165,16 @@ def write_reward_outputs(result, overall):
 
 
 _YAML_FRONTMATTER = re.compile(r"\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
-_YAML_TOP_LEVEL_KEY = re.compile(
-    r"""^(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\n]|'')*)'|([^\s#'"\-?:\[\]{}|>&*!%@`,][^:\n]*?))[ \t]*:(?=[ \t\r\n]|\Z)""",
-    re.MULTILINE,
+_YAML_LINE_PREFIX = re.compile(r"[ \t]*(?:[-?][ \t]+)*")
+_YAML_KEY = re.compile(
+    r"""(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\n]|'')*)'|([^\s#'"\-?:\[\]{}|>&*!%@`,][^:\n]*?))[ \t]*:(?=[ \t\r\n]|\Z)"""
 )
+_YAML_PROPERTIES = re.compile(r"(?:[&!]\S*[ \t]*)+")
 _YAML_QUOTED_BODY = {'"': re.compile(r"(?:[^\"\\]|\\.)*", re.DOTALL), "'": re.compile(r"(?:[^']|'')*")}
 _YAML_BLOCK_SCALAR = re.compile(r"([|>])[+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
+_YAML_FLOW_TOKEN = re.compile(
+    r"""([\[{])|([\]}])|(?<![^\s\[{,:])(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')|(?<!\S)#[^\n]*""", re.DOTALL
+)
 _YAML_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)", re.DOTALL)
 _YAML_SIMPLE_ESCAPES = {"0": "\0", "n": "\n", "r": "\r", "t": "\t"}
 
@@ -4185,69 +4189,130 @@ def _yaml_unescape(match: re.Match[str]) -> str:
     return _YAML_SIMPLE_ESCAPES.get(code, code)
 
 
-def _yaml_scalar(text: str, start: int) -> tuple[str, int]:
-    """Read the YAML scalar whose value begins at ``text[start]``.
+def _yaml_line_end(text: str, position: int) -> int:
+    end = text.find("\n", position)
+    return len(text) if end < 0 else end
 
-    Returns the value and the index just past it. Covers the spellings a skill
-    name takes: plain (with a trailing comment), single- or double-quoted
-    (possibly folded over several lines), a ``|``/``>`` block scalar, and a
-    value on the line after the key.
+
+def _yaml_flow_end(text: str, start: int) -> int:
+    """Return the index just past the flow collection that opens at ``text[start]``.
+
+    A flow collection may continue over lines whose keys are not indented, so
+    brackets are counted while skipping quoted strings and comments.
+    """
+    depth = 0
+    for token in _YAML_FLOW_TOKEN.finditer(text, start):
+        if token.group(1):
+            depth += 1
+        elif token.group(2):
+            depth -= 1
+            if depth == 0:
+                return token.end()
+    return len(text)
+
+
+def _yaml_node(text: str, start: int, parent: int, *, lookahead: bool = False) -> tuple[str | None, int]:
+    """Consume the node whose value begins at ``text[start]``.
+
+    ``parent`` is the column of the key or ``-`` that owns the node; a plain or
+    block scalar continues over the lines indented deeper than it. Returns the
+    scalar value (``None`` for no value or a flow collection) and the index of
+    the newline that ends the node. With ``lookahead``, an empty value takes a
+    scalar written on the following lines.
     """
     while text[start : start + 1] in {" ", "\t"}:
         start += 1
-    if text[start : start + 1] in {'"', "'"}:
-        quote = text[start]
-        body = _YAML_QUOTED_BODY[quote].match(text, start + 1)
+    properties = _YAML_PROPERTIES.match(text, start)
+    start = properties.end() if properties else start
+    first = text[start : start + 1]
+    if first in {'"', "'"}:
+        body = _YAML_QUOTED_BODY[first].match(text, start + 1)
         end = body.end()
-        if text[end : end + 1] != quote:
-            return "", len(text)  # unterminated: not valid YAML
+        if text[end : end + 1] != first:
+            return None, len(text)  # unterminated: not valid YAML
         value = re.sub(r"[ \t]*\r?\n[ \t]*", " ", body.group())
-        value = _YAML_ESCAPE.sub(_yaml_unescape, value) if quote == '"' else value.replace("''", "'")
-        return value, end + 1
-    line_end = text.find("\n", start)
-    line_end = len(text) if line_end < 0 else line_end
+        value = _YAML_ESCAPE.sub(_yaml_unescape, value) if first == '"' else value.replace("''", "'")
+        return value, _yaml_line_end(text, end + 1)
+    if first in {"[", "{"}:
+        return None, _yaml_line_end(text, _yaml_flow_end(text, start))
     block = _YAML_BLOCK_SCALAR.match(text, start)
     if block:
-        position, lines = block.end(), []
+        position, lines, last_end = block.end(), [], block.end() - 1
         while position < len(text):
-            end = text.find("\n", position)
-            end = len(text) if end < 0 else end
+            end = _yaml_line_end(text, position)
             line = text[position:end]
-            if line.strip() and line[0] not in {" ", "\t"}:
-                break  # the block ends at the next unindented line
+            if line.strip() and len(line) - len(line.lstrip(" \t")) <= parent:
+                break  # the block ends at the next line that is not indented under its key
             if line.strip():
                 lines.append(line.strip())
+            position, last_end = end + 1, end
+        return (" " if block.group(1) == ">" else "\n").join(lines), min(last_end, len(text))
+    line_end = _yaml_line_end(text, start)
+    head = re.split(r"(?:^|[ \t])#", text[start:line_end], maxsplit=1)
+    value, commented = head[0].strip(), len(head) == 2
+    if not value:
+        position = line_end + 1
+        while lookahead and position < len(text):  # no value here: it may be written on the next lines
+            end = _yaml_line_end(text, position)
+            line = text[position:end]
+            if line.strip() and not line.lstrip().startswith("#"):
+                indent = len(line) - len(line.lstrip(" \t"))
+                if (
+                    indent > parent
+                    and not _YAML_KEY.match(line, indent)
+                    and not re.match(r"[-?](?:[ \t]|$)", line[indent:])
+                ):
+                    return _yaml_node(text, position + indent, parent)
+                break
             position = end + 1
-        return (" " if block.group(1) == ">" else "\n").join(lines), min(position, len(text))
-    value = re.split(r"(?:^|[ \t])#", text[start:line_end], maxsplit=1)[0].strip()
-    if value:
-        return value, line_end
-    position = line_end + 1
-    while position < len(text):  # no value on this line: it may continue, indented, below
-        end = text.find("\n", position)
-        end = len(text) if end < 0 else end
-        line = text[position:end]
-        if line.strip() and not line.lstrip().startswith("#"):
-            return _yaml_scalar(text, position) if line[0] in {" ", "\t"} else ("", line_end)
+        return None, line_end
+    lines, end = [value], line_end
+    while not commented:  # a plain scalar continues over the lines indented under its key
         position = end + 1
-    return "", line_end
+        while position < len(text) and not text[position : _yaml_line_end(text, position)].strip():
+            position = _yaml_line_end(text, position) + 1
+        if position >= len(text):
+            break
+        next_end = _yaml_line_end(text, position)
+        line = text[position:next_end]
+        if len(line) - len(line.lstrip(" \t")) <= parent or line.lstrip().startswith("#"):
+            break
+        head = re.split(r"(?:^|[ \t])#", line, maxsplit=1)
+        lines.append(head[0].strip())
+        end, commented = next_end, len(head) == 2
+    return " ".join(lines), end
 
 
 def _frontmatter_skill_name(content: str) -> str:
     """Read the top-level ``name`` of a SKILL.md the way ``yaml.safe_load`` does.
 
     The verifier image does not guarantee PyYAML, and loading skill-authored
-    YAML there would also expand its aliases, so this reads only the scalar
-    spellings above. Like ``yaml.safe_load``, a later ``name`` key wins.
+    YAML there would also expand its aliases, so this reads just enough of the
+    structure to tell a root key from text that merely sits on an unindented
+    line: nested mappings and sequences, multi-line flow collections, quoted
+    strings, and plain or block scalars. Like ``yaml.safe_load``, a later
+    ``name`` key wins.
     """
     frontmatter = _YAML_FRONTMATTER.match(content)
     if not frontmatter:
         return ""
     text, name, position = frontmatter.group(1), "", 0
-    while key := _YAML_TOP_LEVEL_KEY.search(text, position):
-        value, position = _yaml_scalar(text, key.end())
-        if (key.group(1) or key.group(2) or key.group(3)) == "name":
-            name = value.strip()
+    while position < len(text):
+        end = _yaml_line_end(text, position)
+        line = text[position:end]
+        if not line.strip() or line.lstrip().startswith("#"):
+            position = end + 1
+            continue
+        prefix = _YAML_LINE_PREFIX.match(line).group()
+        value_start = position + len(prefix)
+        key = _YAML_KEY.match(text, value_start)
+        marker = max(prefix.rfind("-"), prefix.rfind("?"))
+        parent = len(prefix) if key else (marker if marker >= 0 else max(len(prefix) - 1, 0))
+        root_name = bool(key) and not prefix and (key.group(1) or key.group(2) or key.group(3)) == "name"
+        value, end = _yaml_node(text, key.end() if key else value_start, parent, lookahead=root_name)
+        if root_name:
+            name = (value or "").strip()
+        position = end + 1
     return name
 
 

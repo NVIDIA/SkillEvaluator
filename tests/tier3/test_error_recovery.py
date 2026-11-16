@@ -10,6 +10,7 @@ command must NOT be scored as first-attempt clean.
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
 from skillevaluator.tier3.eval_core.checks import check_error_recovery, score_skill_execution
@@ -231,6 +232,28 @@ _TEXT_ANALYZER_FRONTMATTERS = {
     "name-after-block-description": "description: |\n  Count words.\n  name: not-this-one\nname: text-analyzer\n",
     "nested-name-is-ignored": f"metadata:\n  name: not-this-one\nname: text-analyzer\n{_DESCRIPTION}",
     "name-inside-multiline-quoted-text": 'description: "Count words.\nname: not-this-one"\nname: text-analyzer\n',
+    # Keys named `name` below the top level never replace the skill name, wherever they sit.
+    "nested-block-mapping-after-name": f"name: text-analyzer\nmetadata:\n  name: other\n{_DESCRIPTION}",
+    "nested-block-mapping-last": f"{_DESCRIPTION}name: text-analyzer\nmetadata:\n  version: 1\n  name: other\n",
+    "single-line-flow-mapping-after-name": f"name: text-analyzer\nmetadata: {{name: other}}\n{_DESCRIPTION}",
+    "single-line-flow-mapping-before-name": f"metadata: {{name: other}}\nname: text-analyzer\n{_DESCRIPTION}",
+    "multiline-flow-mapping-after-name": f"name: text-analyzer\n{_DESCRIPTION}metadata: {{\nname: other\n}}\n",
+    "multiline-flow-mapping-before-name": f"metadata: {{\nname: other\n}}\nname: text-analyzer\n{_DESCRIPTION}",
+    "multiline-flow-sequence-with-name-entry": "name: text-analyzer\ntags: [x,\nname: other\n]\n",
+    "multiline-flow-mapping-in-block-mapping": "name: text-analyzer\nmeta:\n  k: {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-in-block-sequence": "name: text-analyzer\ntags:\n- {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-on-next-line": "name: text-analyzer\nmeta:\n  {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-with-anchor": "name: text-analyzer\nbase: &base {\nname: other\n}\n",
+    "nested-flow-collections": "name: text-analyzer\nmeta: {a: [1, 2],\nname: other,\nb: {c: d}\n}\n",
+    "flow-with-quoted-bracket-and-comment": 'name: text-analyzer\nmeta: {"}": 1, # }\nname: other\n}\n',
+    "flow-with-apostrophe-in-plain-value": "name: text-analyzer\nmeta: {x: it's,\nname: other\n}\n",
+    "multiline-quoted-in-block-sequence": 'name: text-analyzer\ntags:\n- "x\nname: other"\n',
+    "block-sequence-of-mappings": "name: text-analyzer\nitems:\n- name: other\n- name: another\n",
+    "name-after-multiline-flow-mapping": f"metadata: {{a: 1,\nb: 2}}\nname: text-analyzer\n{_DESCRIPTION}",
+    # Brackets and quotes inside plain text or block scalars do not open anything.
+    "unbalanced-brackets-in-plain-text": "description: Edits {file or [path, it's # not a comment\nname: text-analyzer\n",
+    "brackets-in-block-scalar": "description: |\n  {[\"' # x\nname: text-analyzer\n",
+    "plain-continuation-starting-with-bracket": 'description: Count words.\n  [optional] "Use when" asked.\nname: text-analyzer\n',
 }
 
 
@@ -248,6 +271,14 @@ def test_skill_name_is_read_from_any_yaml_spelling_of_the_name(checker, tmp_path
     assert other["failures"][0]["fault_kind"] == "undeclared_dependency"
 
 
+@pytest.mark.parametrize("frontmatter", _TEXT_ANALYZER_FRONTMATTERS.values(), ids=_TEXT_ANALYZER_FRONTMATTERS.keys())
+def test_skill_name_matches_yaml_safe_load(frontmatter):
+    """The verifier's reader agrees with the parser the schema validator uses."""
+    expected = yaml.safe_load(frontmatter)["name"].strip()
+    assert expected == "text-analyzer"
+    assert eval_template._frontmatter_skill_name(f"---\n{frontmatter}---\nBody\n") == expected
+
+
 def test_crlf_frontmatter_name_is_read(tmp_path):
     skill = tmp_path / "text-analyzer"
     skill.mkdir()
@@ -256,6 +287,13 @@ def test_crlf_frontmatter_name_is_read(tmp_path):
     )
     context = eval_template._dependency_context("text-analyzer", skills_root=tmp_path)
     assert context["skill_name"] == "text-analyzer"
+
+
+def test_bom_prefixed_frontmatter_name_is_read(tmp_path):
+    skill = tmp_path / "text-analyzer"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(b"\xef\xbb\xbf---\nname: text-analyzer\ndescription: Count words.\n---\nBody\n")
+    assert eval_template._dependency_context("text-analyzer", skills_root=tmp_path)["skill_name"] == "text-analyzer"
 
 
 @pytest.mark.parametrize(

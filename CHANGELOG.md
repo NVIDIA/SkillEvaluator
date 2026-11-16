@@ -341,6 +341,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
   now say to install `skillevaluator[tier3]` instead of printing only
   `Error: No module named 'harbor'`.
+- Tier 3 benchmark headlines use the completed agent's quality verdict, matching
+  the Tier 3 status row even when another agent fails execution.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

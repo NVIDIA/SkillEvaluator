@@ -219,6 +219,36 @@ def test_missing_command_named_after_the_skill_is_agent_tool_choice(checker, tmp
 # Every spelling below is the same skill name to yaml.safe_load, which the schema validator uses.
 _DESCRIPTION = "description: Count words. Use when a request names text-analyzer.\n"
 _QUOTED_DESCRIPTION = 'description: Counts "words" in a file.\n'
+# A nested `name` must not be read as the skill name, whether it comes before or after the root `name`.
+# Anchors, tags and aliases belong to the node after them, so a quote right after one still opens a string.
+_NESTED_NAME_FRAGMENTS = {
+    "anchored-quoted-flow-value": 'metadata: {k: &value "closing } inside",\nname: other\n}\n',
+    "anchor-before-quoted-flow-value": 'meta: {k: &a "x}",\nname: other\n}\n',
+    "tag-before-quoted-flow-value": 'meta: {k: !!str "x}",\nname: other\n}\n',
+    "tag-then-anchor-before-quoted-value": 'meta: {k: !!str &a "x}",\nname: other\n}\n',
+    "anchor-then-tag-before-quoted-value": 'meta: {k: &a !!str "x}",\nname: other\n}\n',
+    "verbatim-tag-before-quoted-value": 'meta: {k: !<tag:yaml.org,2002:str> "x}",\nname: other\n}\n',
+    "single-quoted-value-with-tag-and-anchor": "meta: {k: !!str &a 'x}',\nname: other\n}\n",
+    "properties-before-quoted-sequence-items": 'tags: [&a "x]", !!str "y]",\nname: other]\n',
+    "anchored-quoted-flow-key": 'meta: {&a "k}": v,\nname: other\n}\n',
+    "tagged-quoted-flow-key": 'meta: {!!str "k}": v,\nname: other\n}\n',
+    "explicit-anchored-quoted-flow-key": 'meta: {? &a "k}": v,\nname: other\n}\n',
+    "explicit-quoted-key-in-flow-sequence": 'tags: [? "k]": v,\nname: other]\n',
+    "anchor-before-flow-mapping-with-quoted-brace": 'meta: {k: &a {x: "}"},\nname: other\n}\n',
+    "tag-before-flow-sequence-with-quoted-bracket": 'tags: [!!seq ["]"],\nname: other]\n',
+    "properties-before-top-level-flow-mapping": 'meta: &m !!map {k: "}",\nname: other\n}\n',
+    "anchored-empty-flow-value": "meta: {k: &x ,\nname: other\n}\n",
+    "anchor-then-newline-then-quoted-flow-value": 'meta: {k: &a\n"x}",\nname: other\n}\n',
+    "properties-before-block-literal": 'description: !!str |\n  {[" name: nope\n',
+    "properties-before-block-folded": "description: &d !!str >-\n  text {\n",
+    "properties-before-block-sequence-literal": "tags:\n- !!str |\n  { unclosed\n- b\n",
+    "anchored-multiline-double-quoted": 'description: &a "multi\nname: nope"\n',
+    "tagged-multiline-single-quoted": "description: !!str 'multi\nname: nope'\n",
+    "anchored-multiline-quoted-sequence-item": 'tags:\n- &a "x\nname: nope"\n',
+    "anchored-key-with-flow-value": '&a "k": {x: 1,\nname: other}\n',
+    "tagged-key-with-quoted-flow-value": "!!str k: {x: '}',\nname: other}\n",
+    "explicit-key-with-flow-value": "? meta\n: {x: 1,\nname: other}\n",
+}
 _TEXT_ANALYZER_FRONTMATTERS = {
     "double-quoted-value": f'name: "text-analyzer"\n{_DESCRIPTION}',
     "single-quoted-value": f"name: 'text-analyzer'\n{_DESCRIPTION}",
@@ -264,11 +294,35 @@ _TEXT_ANALYZER_FRONTMATTERS = {
     "json-style-flow-mapping": 'meta: {"a":"b",\n"name":"other"\n}\nname: text-analyzer\n',
     "quoted-key-and-value-in-flow-mapping": "meta: {\"name\": \"other\",\n'k': 'v'}\nname: text-analyzer\n",
     "quote-in-block-plain-text": "description: 5\" pipe and 'it' fine\nname: text-analyzer\n",
+    # Anchors, tags and aliases belong to the node that follows them, so a quote right after
+    # them still opens a string and its brackets stay inside it.
+    "anchored-name-key": "&a name: text-analyzer\n",
+    "tagged-name-key": "!!str name: text-analyzer\n",
+    "tagged-and-anchored-quoted-name-key": "!!str &a 'name': text-analyzer\n",
+    "tagged-name-value": 'name: !!str "text-analyzer"\n',
+    "anchored-name-value": "name: &n text-analyzer\n",
+    "tagged-name-on-next-line": "name: !!str\n  text-analyzer\n",
+    "tag-and-anchor-quoted-name-value": "name: !!str &n 'text-analyzer'\n",
+    "anchored-block-scalar-name": "name: &n >-\n  text-analyzer\n",
     # Brackets and quotes inside plain text or block scalars do not open anything.
     "unbalanced-brackets-in-plain-text": "description: Edits {file or [path, it's # not a comment\nname: text-analyzer\n",
     "brackets-in-block-scalar": "description: |\n  {[\"' # x\nname: text-analyzer\n",
     "plain-continuation-starting-with-bracket": 'description: Count words.\n  [optional] "Use when" asked.\nname: text-analyzer\n',
 }
+_TEXT_ANALYZER_FRONTMATTERS |= {
+    f"{case}-before-name": f"{fragment}name: text-analyzer\n" for case, fragment in _NESTED_NAME_FRAGMENTS.items()
+} | {f"{case}-after-name": f"name: text-analyzer\n{fragment}" for case, fragment in _NESTED_NAME_FRAGMENTS.items()}
+# The whole frontmatter can be one flow mapping.
+_TEXT_ANALYZER_FRONTMATTERS |= {
+    "root-flow-mapping": "{name: text-analyzer, description: Count words.}\n",
+    "root-flow-mapping-quoted": '{"name": \'text-analyzer\', description: "x}"}\n',
+    "root-flow-mapping-multiline": '{description: Count "words",\nname: text-analyzer,\nmetadata: {name: other}\n}\n',
+    "root-flow-mapping-nested-name-last": "{name: text-analyzer,\nmetadata: {name: other},\nlist: [name]}\n",
+    "root-flow-mapping-with-properties": "!!map &m {name: !!str &n 'text-analyzer', k: &a \"}\"}\n",
+}
+_TEXT_ANALYZER_FRONTMATTERS["alias-in-flow-mapping"] = (
+    'name: text-analyzer\nbase: &a "x}"\nmeta: {k: *a,\nname: other\n}\n'
+)
 
 
 @pytest.mark.parametrize("frontmatter", _TEXT_ANALYZER_FRONTMATTERS.values(), ids=_TEXT_ANALYZER_FRONTMATTERS.keys())

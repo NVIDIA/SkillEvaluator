@@ -43,6 +43,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
@@ -4165,16 +4166,21 @@ def write_reward_outputs(result, overall):
 
 
 _YAML_FRONTMATTER = re.compile(r"\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
-_YAML_LINE_PREFIX = re.compile(r"[ \t]*(?:[-?][ \t]+)*")
+_YAML_LINE_PREFIX = re.compile(r"[ \t]*(?:[-?:][ \t]+)*")
+# An anchor (`&a`), a tag (`!`, `!!str`, `!local`, `!<verbatim>`) or both, in either order. They belong to
+# the node that follows them, so a quote after them still opens a string.
+_YAML_PROPERTY = r"(?:&[^\s,\[\]{}]+|!<[^>\s]*>|![^\s,\[\]{}]*)(?=[\s,\[\]{}]|\Z)"
+_YAML_PROPERTIES = re.compile(rf"(?:{_YAML_PROPERTY}[ \t]*)+")
 _YAML_KEY = re.compile(
+    rf"""(?:{_YAML_PROPERTY}[ \t]+)*"""
     r"""(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\n]|'')*)'|([^\s#'"\-?:\[\]{}|>&*!%@`,][^:\n]*?))[ \t]*:(?=[ \t\r\n]|\Z)"""
 )
-_YAML_PROPERTIES = re.compile(r"(?:[&!]\S*[ \t]*)+")
 _YAML_QUOTED_BODY = {'"': re.compile(r"(?:[^\"\\]|\\.)*", re.DOTALL), "'": re.compile(r"(?:[^']|'')*")}
 _YAML_BLOCK_SCALAR = re.compile(r"([|>])[+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
 _YAML_FLOW_TOKEN = re.compile(
     r"""(?P<space>\s+)|(?P<comment>(?<!\S)\#[^\n]*)|(?P<open>[\[{])|(?P<close>[\]}])|(?P<comma>,)"""
-    r"""|(?P<colon>:(?=[\s,\[\]{}]|\Z))|(?P<quoted>"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')""",
+    r"""|(?P<colon>:(?=[\s,\[\]{}]|\Z))|(?P<explicit>\?(?=[\s,\[\]{}]|\Z))"""
+    rf"""|(?P<quoted>"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')|(?P<prop>{_YAML_PROPERTY})|(?P<alias>\*[^\s,\[\]{{}}]*)""",
     re.DOTALL,
 )
 _YAML_FLOW_PLAIN = re.compile(r"(?:[^\s,\[\]{}:]|:(?![\s,\[\]{}]|\Z))+")
@@ -4197,40 +4203,78 @@ def _yaml_line_end(text: str, position: int) -> int:
     return len(text) if end < 0 else end
 
 
-def _yaml_flow_end(text: str, start: int) -> int:
-    """Return the index just past the flow collection that opens at ``text[start]``.
+def _yaml_unquote(raw: str) -> str:
+    """Return the value of the single- or double-quoted scalar ``raw`` (quotes included)."""
+    body = re.sub(r"[ \t]*\r?\n[ \t]*", " ", raw[1:-1])
+    return _YAML_ESCAPE.sub(_yaml_unescape, body) if raw[0] == '"' else body.replace("''", "'")
+
+
+def _yaml_flow_tokens(text: str, start: int) -> Iterator[tuple[str, str, int, int]]:
+    """Yield ``(kind, token, depth, end)`` for the flow collection that opens at ``text[start]``.
 
     A flow collection may continue over lines whose keys are not indented, so
     brackets are counted while skipping quoted strings and comments. A quote
-    opens a string only where a node begins (after ``[``, ``{``, ``,`` or a
-    ``:`` indicator); inside a plain scalar it is an ordinary character.
+    opens a string only where a node begins: after ``[``, ``{``, ``,``, a
+    ``:`` or ``?`` indicator, or after the anchor and tag that belong to that
+    node. Inside a plain scalar it is an ordinary character. ``depth`` is the
+    nesting after the token.
     """
     depth, node_starts, closed, position = 0, True, False, start
     while position < len(text):
         if closed and text[position] == ":":  # JSON-style `"key":value`
             node_starts, closed, position = True, False, position + 1
+            yield "colon", ":", depth, position
             continue
         token = _YAML_FLOW_TOKEN.match(text, position)
         kind = token.lastgroup if token else None
-        if kind == "quoted" and not node_starts:
-            kind = None  # a quote inside a plain scalar, not a string
+        if kind in {"quoted", "prop", "alias", "explicit"} and not node_starts:
+            kind = None  # in the middle of a plain scalar these are ordinary characters
         if kind is None:
             plain = _YAML_FLOW_PLAIN.match(text, position)
-            position = plain.end() if plain else position + 1
+            end = plain.end() if plain else position + 1
             node_starts, closed = False, False
+            yield "plain", text[position:end], depth, end
+            position = end
             continue
         position = token.end()
         if kind in {"space", "comment"}:
             continue
-        node_starts = kind in {"open", "comma", "colon"}
         closed = kind in {"close", "quoted"}
-        if kind == "open":
-            depth += 1
-        elif kind == "close":
-            depth -= 1
-            if depth == 0:
-                return position
+        if kind != "prop":  # an anchor or tag leaves the node it belongs to still to begin
+            node_starts = kind in {"open", "comma", "colon", "explicit"}
+        depth += {"open": 1, "close": -1}.get(kind, 0)
+        yield kind, token.group(), depth, position
+        if depth == 0 and kind == "close":
+            return
+
+
+def _yaml_flow_end(text: str, start: int) -> int:
+    """Return the index just past the flow collection that opens at ``text[start]``."""
+    for kind, _token, depth, end in _yaml_flow_tokens(text, start):
+        if kind == "close" and depth == 0:
+            return end
     return len(text)
+
+
+def _yaml_flow_mapping_name(text: str, start: int) -> str:
+    """Return the string ``name`` entry of the flow mapping that opens at ``text[start]``."""
+    name, key, value, in_value, nested = "", [], [], False, False
+    for kind, token, depth, _end in _yaml_flow_tokens(text, start):
+        if kind == "open" and depth == 2:
+            nested = True
+        elif depth >= 2 or (kind == "close" and depth == 1):
+            continue  # inside a nested collection, or its end
+        elif kind in {"quoted", "plain"}:
+            (value if in_value else key).append(_yaml_unquote(token) if kind == "quoted" else token)
+        elif kind == "alias":
+            nested = True  # the anchored value is not resolved
+        elif kind == "colon":
+            in_value = True
+        elif kind in {"comma", "close"}:
+            if " ".join(key) == "name":
+                name = "" if nested else " ".join(value)
+            key, value, in_value, nested = [], [], False, False
+    return name
 
 
 def _yaml_node(text: str, start: int, parent: int, *, lookahead: bool = False) -> tuple[str | None, int]:
@@ -4247,14 +4291,14 @@ def _yaml_node(text: str, start: int, parent: int, *, lookahead: bool = False) -
     properties = _YAML_PROPERTIES.match(text, start)
     start = properties.end() if properties else start
     first = text[start : start + 1]
+    if first == "*":  # an alias is a whole node
+        return None, _yaml_line_end(text, start)
     if first in {'"', "'"}:
         body = _YAML_QUOTED_BODY[first].match(text, start + 1)
         end = body.end()
         if text[end : end + 1] != first:
             return None, len(text)  # unterminated: not valid YAML
-        value = re.sub(r"[ \t]*\r?\n[ \t]*", " ", body.group())
-        value = _YAML_ESCAPE.sub(_yaml_unescape, value) if first == '"' else value.replace("''", "'")
-        return value, _yaml_line_end(text, end + 1)
+        return _yaml_unquote(text[start : end + 1]), _yaml_line_end(text, end + 1)
     if first in {"[", "{"}:
         return None, _yaml_line_end(text, _yaml_flow_end(text, start))
     block = _YAML_BLOCK_SCALAR.match(text, start)
@@ -4312,13 +4356,15 @@ def _frontmatter_skill_name(content: str) -> str:
     so this does not import it. It reads just enough of the structure to tell
     a root key from text that merely sits on an unindented line: nested
     mappings and sequences, multi-line flow collections, quoted strings, and
-    plain or block scalars. A quote opens a string only where a node begins.
-    Like ``yaml.safe_load``, a later ``name`` key wins.
+    plain or block scalars, each with the anchor and tag that may precede it.
+    A quote opens a string only where a node begins. The whole frontmatter may
+    also be one flow mapping. Like ``yaml.safe_load``, a later ``name`` key
+    wins. An alias (``name: *anchor``) is not resolved.
     """
     frontmatter = _YAML_FRONTMATTER.match(content)
     if not frontmatter:
         return ""
-    text, name, position = frontmatter.group(1), "", 0
+    text, name, position, first_node = frontmatter.group(1), "", 0, True
     while position < len(text):
         end = _yaml_line_end(text, position)
         line = text[position:end]
@@ -4327,8 +4373,14 @@ def _frontmatter_skill_name(content: str) -> str:
             continue
         prefix = _YAML_LINE_PREFIX.match(line).group()
         value_start = position + len(prefix)
+        if first_node:  # the whole frontmatter may be one flow mapping
+            properties = _YAML_PROPERTIES.match(text, value_start)
+            brace = properties.end() if properties else value_start
+            if not prefix and text[brace : brace + 1] == "{":
+                return _yaml_flow_mapping_name(text, brace)
+            first_node = False
         key = _YAML_KEY.match(text, value_start)
-        marker = max(prefix.rfind("-"), prefix.rfind("?"))
+        marker = max(prefix.rfind(indicator) for indicator in "-?:")
         parent = len(prefix) if key else (marker if marker >= 0 else max(len(prefix) - 1, 0))
         root_name = bool(key) and not prefix and (key.group(1) or key.group(2) or key.group(3)) == "name"
         value, end = _yaml_node(text, key.end() if key else value_start, parent, lookahead=root_name)

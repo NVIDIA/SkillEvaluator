@@ -59,7 +59,7 @@ jobs:
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - name: Install dependencies
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv sync --all-extras --locked --python 3.12
@@ -122,7 +122,7 @@ jobs:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --all-extras --locked --python 3.13
       - name: Run tests
         run: uv run pytest -q -n auto
@@ -141,7 +141,7 @@ jobs:
           python-version: "3.14"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --all-extras --locked --python 3.14
       - name: Run tests
         run: uv run pytest -q -n auto
@@ -165,7 +165,7 @@ jobs:
           python-version: ${{ matrix.python-version }}
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --extra dev --locked --python "${{ matrix.python-version }}"
       - name: Run HTML parser compatibility tests
         run: >-
@@ -193,7 +193,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - name: Build the public wheel
         run: uv build --wheel --python 3.12 --no-sources
       - name: Install the isolated probe contract
@@ -240,7 +240,7 @@ jobs:
           persist-credentials: false
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - name: Verify the RHEL 8 glibc baseline
         run: test "$(getconf GNU_LIBC_VERSION)" = "glibc 2.28"
       - name: Build the wheel
@@ -278,7 +278,7 @@ jobs:
           python-version: "3.13"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - name: Build wheel and source distribution
         run: |
           rm -rf dist
@@ -359,7 +359,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --all-extras --locked
       - run: >-
           uv run pytest -q
@@ -385,7 +385,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --all-extras --locked
       - run: >-
           uv run pytest -q
@@ -410,7 +410,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - run: uv sync --all-extras --locked
       - run: >-
           uv run pytest -q
@@ -462,7 +462,7 @@ jobs:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
-          version: "0.11.27"
+          version: "0.13.8"
       - name: Install onboarding test dependencies
         run: uv sync --extra dev --locked --python 3.12
       - name: Test onboarding and native workflow writes
@@ -552,6 +552,8 @@ jobs:
         with:
           python-version: "3.12"
       - uses: astral-sh/setup-uv@d4b2f3b6ecc6e67c4457f6d3e41ec42d3d0fcb86 # v5
+        with:
+          version: "0.13.8"
       - run: uv sync --all-extras --locked
       - run: >-
           uv run pytest -q

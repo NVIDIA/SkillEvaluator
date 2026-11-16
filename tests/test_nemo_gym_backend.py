@@ -1133,6 +1133,19 @@ def test_custom_model_url_requires_its_own_key(monkeypatch: pytest.MonkeyPatch) 
     assert _model_endpoint("policy-model") == ("policy-model", "http://policy.example/v1", "EMPTY")
 
 
+def test_custom_model_url_requires_a_model_it_serves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.tier3.nemo_gym.runner import _model_endpoint
+
+    monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_MODEL_URL", "http://policy.example/v1")
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "EMPTY")
+    with pytest.raises(ValueError, match="--model"):
+        _model_endpoint(None)
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    result = _run_fake_gym(skill, tmp_path, model=None, skip_baseline=True)
+    assert any("--model" in error for error in result["error"])
+    assert not list((tmp_path / "results").rglob("result.json"))
+
+
 @pytest.mark.parametrize("value", ["abc", "0", "-5", "nan", "inf"])
 def test_invalid_gym_timeout_is_rejected_before_launch(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, value: str
@@ -1645,7 +1658,9 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
-    monkeypatch.setattr(gym_runner, "_model_endpoint", lambda model: (model or "m", "http://127.0.0.1:9/v1", "k"))
+    monkeypatch.setattr(
+        gym_runner, "_model_endpoint", lambda model, **_kwargs: (model or "m", "http://127.0.0.1:9/v1", "k")
+    )
     probes = []
 
     def endpoint_probe(url):
@@ -2283,7 +2298,7 @@ def test_doctor_fails_without_a_policy_endpoint_or_docker_daemon(
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(gym))
     monkeypatch.setattr(backend, "nemo_gym_version", lambda _bin: "0.7.0")
 
-    def no_endpoint(_model):
+    def no_endpoint(_model, **_kwargs):
         raise ValueError("--backend nemo-gym needs a model, an OpenAI-compatible base URL and an API key")
 
     monkeypatch.setattr(gym_runner, "_model_endpoint", no_endpoint)

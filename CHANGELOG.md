@@ -171,6 +171,10 @@ All notable changes to SkillEvaluator are documented in this file.
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
   rubric and LLM security verification did not run. The same default applies to
   SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- The `skillevaluator` agent skill now tells the agent that a gateway key works
+  through the `openai-compatible` provider, that a failed Tier 1 gate and a high
+  quality grade are two separate results, and that `Publication eligibility:
+  Incomplete` after a passing keyless run is expected.
 - SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
   to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
   the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;

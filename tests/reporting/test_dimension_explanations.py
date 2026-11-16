@@ -111,6 +111,19 @@ def test_benchmark_methodology_states_when_no_baseline_ran() -> None:
     assert _row(markdown, "Correctness").endswith("| 90.0% — baseline not run; uplift unavailable |")
 
 
+def test_benchmark_verdict_methodology_includes_with_skill_required_checks() -> None:
+    result = _validation_result_from_payload(_payload({"agent": _agent()}))
+    assert result is not None
+    markdown = BenchmarkReporter(include_timestamp=False).render_all([result])
+
+    assert "with no with-skill case failing a required goal-accuracy or security check" in markdown
+    assert (
+        "A scored unmet goal or security issue in any attempt fails its case and that agent's quality "
+        "verdict, even if all dimensions pass."
+    ) in markdown
+    assert "Baseline-arm required-check failures do not change this quality verdict." in markdown
+
+
 def test_html_verdict_methodology_includes_with_skill_required_checks() -> None:
     result = _validation_result_from_payload(_payload({"agent": _agent()}))
     assert result is not None

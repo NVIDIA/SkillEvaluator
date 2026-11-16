@@ -435,7 +435,8 @@ existing set — save the collection once and query candidates against it.
     ```
 
     `--save-catalog` builds a versioned JSON catalog from the supplied
-    collection.
+    collection. Catalogs use compact JSON so formatting whitespace does not
+    consume the 32 MiB file budget; vector values and the schema are unchanged.
   </Step>
   <Step title="Screen a candidate">
     ```bash title="Compare one candidate against the catalog"

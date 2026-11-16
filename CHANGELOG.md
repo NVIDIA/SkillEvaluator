@@ -296,6 +296,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
 - `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
   now say to install `skillevaluator[tier3]` instead of printing only
   `Error: No module named 'harbor'`.

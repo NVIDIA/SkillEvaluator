@@ -18,7 +18,7 @@ import os
 import stat
 from collections.abc import Callable, Iterable
 from itertools import islice
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
@@ -589,10 +589,14 @@ def logical_trial_reward_groups(rewards: list[dict[str, Any]]) -> list[list[dict
     groups: dict[str, list[dict[str, Any]]] = {}
     for index, reward in enumerate(rewards):
         identity = reward.get("trial_id")
-        valid_identity = isinstance(identity, str) and 0 < len(identity) <= 512
-        key = f"trial:{identity}" if valid_identity else f"row:{index}"
+        key = f"trial:{identity}" if _is_trial_identity(identity) else f"row:{index}"
         groups.setdefault(key, []).append(reward)
     return list(groups.values())
+
+
+def _is_trial_identity(value: object) -> bool:
+    """Whether ``value`` is a usable trial identity: a non-empty string of at most 512 characters."""
+    return isinstance(value, str) and 0 < len(value) <= 512
 
 
 def _nonnegative_counter(value: Any) -> int:
@@ -810,6 +814,31 @@ def _unscored_attempt_usage(trial_dir: Path) -> dict[str, Any]:
         counters = {name: final_metrics.get(f"total_{name}") for name in _USAGE_COUNTERS}
         attempt.update(_attempt_usage(counters, _invalid_token_counters(final_metrics)))
     return attempt
+
+
+def _with_trial_identity(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Return ``rewards`` with the trial directory as the identity of every row that has no usable one.
+
+    A failed arm keeps each scored reward twice: as a diagnostic report trial
+    and as a usage-only attempt. Token usage counts the attempt once by finding
+    both copies under the same ``trial_id``, but older artifacts carry none.
+    Nothing else tells the copies apart from two attempts: retries share a case
+    ID, and two attempts can use the same tokens. A trial directory holds one
+    attempt, so both copies name it and no two attempts share it. A reward with
+    a usable ``trial_id`` keeps it, so ``logical_trial_reward_groups`` groups it
+    as before. Only withheld arms need this, so the rewards of an arm that
+    succeeded are loaded exactly as they were read.
+    """
+    identified = []
+    for reward in rewards:
+        artifacts = reward.get("_activation_artifacts")
+        reward_path = artifacts.get("reward") if isinstance(artifacts, dict) else None
+        trial_dir = PurePosixPath(reward_path).parent.name if isinstance(reward_path, str) else ""
+        if _is_trial_identity(reward.get("trial_id")) or not _is_trial_identity(trial_dir):
+            identified.append(reward)
+        else:
+            identified.append({**reward, "trial_id": trial_dir})
+    return identified
 
 
 def _withheld_attempt_usage(rewards: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1187,8 +1216,11 @@ def load_agent_data(
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            # Both copies of a scored attempt, the diagnostic trial and the usage-only
+            # attempt below, come from the same rows, so they share one identity.
+            scored_rewards = _with_trial_identity(agent_info.get(fields[-1]) or [])
             agent_info[f"diagnostic_{fields[-1]}"] = [
-                *agent_info.get(fields[-1], []),
+                *scored_rewards,
                 *[
                     {"entry_id": row["entry_id"], "trial_id": row["trial_id"], "_unscored": True}
                     for row in agent_info.get(_USAGE_ONLY_KEYS[condition], [])
@@ -1196,7 +1228,7 @@ def load_agent_data(
             ]
             # The arm's scores are withheld below, but its scored attempts used tokens.
             agent_info[_USAGE_ONLY_KEYS[condition]] = [
-                *_withheld_attempt_usage(agent_info.get(fields[-1]) or []),
+                *_withheld_attempt_usage(scored_rewards),
                 *agent_info.get(_USAGE_ONLY_KEYS[condition], []),
             ]
             condition_info = condition_execution.get(condition, {})

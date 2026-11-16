@@ -224,6 +224,11 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
     for arm, _condition, key, usage_key in _ARMS:
         attempts[arm] = []
         usage_rows = _rows(agent.get(usage_key))
+        # A failed arm keeps a scored attempt as a diagnostic report trial and as
+        # a usage-only copy. The loader gives both the same ``trial_id`` (the
+        # trial directory, for rewards that carry none), and the usage-only copy
+        # is the one counted. Nothing else tells one attempt from two: retries
+        # share a case ID, and two attempts can use the same tokens.
         usage_trial_ids = {row["trial_id"] for row in usage_rows if isinstance(row.get("trial_id"), str)}
         for trial in _rows(agent.get(key)):
             trial_id = trial.get("trial_id")

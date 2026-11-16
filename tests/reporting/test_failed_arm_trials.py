@@ -26,8 +26,19 @@ def _write(path: Path, value: object) -> None:
 
 
 def _failed_run(
-    tmp_path: Path, arm: str, *, malformed: bool = False, empty: bool = False, failed_status: str | None = None
+    tmp_path: Path,
+    arm: str,
+    *,
+    malformed: bool = False,
+    empty: bool = False,
+    failed_status: str | None = None,
+    scored_trials: tuple[str, ...] = ("case__scored",),
+    legacy_ids: bool = False,
 ) -> dict:
+    """Write a run whose ``arm`` failed; ``legacy_ids`` leaves ``trial_id`` out of the failed arm's rewards.
+
+    ``scored_trials`` are the failed arm's scored attempts. The other arm keeps one.
+    """
     skill = tmp_path / "demo"
     skill.mkdir()
     run = tmp_path / "results"
@@ -47,22 +58,27 @@ def _failed_run(
         )
         if failed and empty:
             continue
-        trial = run / "codex" / variant / "trials" / "case__scored"
-        _write(
-            trial / "reward.json",
-            {
+        trials_dir = run / "codex" / variant / "trials"
+        for name in scored_trials if failed else ("case__scored",):
+            trial = trials_dir / name
+            reward = {
                 **dict.fromkeys(DEFAULT_METRICS, 1.0),
                 "metric_set": DEFAULT_METRIC_SET,
                 "entry_id": "case",
-                "trial_id": "case__scored",
+                "trial_id": name,
                 "skill_invoked": variant == "with-skill",
                 "invocation_evidence_source": "trajectory",
                 "invocation_evidence_scope": "logical_trial",
-            },
-        )
-        _write(trial / "trajectory.json", {"final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 2}})
+            }
+            if failed and legacy_ids:
+                # Older artifacts carry no collector-issued trial identity.
+                del reward["trial_id"]
+            _write(trial / "reward.json", reward)
+            _write(
+                trial / "trajectory.json", {"final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 2}}
+            )
         if failed:
-            error = trial.with_name("case__errored")
+            error = trials_dir / "case__errored"
             _write(error / "failure.json", {"entry_id": "case", "reason": "AgentTimeoutError: timed out"})
             _write(
                 error / "trajectory.json", {"final_metrics": {"total_prompt_tokens": 20, "total_completion_tokens": 3}}
@@ -104,6 +120,77 @@ def test_failed_arm_keeps_scored_trial_activation(tmp_path: Path, arm: str, key:
     assert usage["coverage"]["observed_attempts"] == 2
     assert usage["coverage"]["unscored_attempts"] == 1
     assert usage["totals"]["total_tokens"] == 35
+
+
+@pytest.mark.parametrize("arm,key", [("with-skill", "trials"), ("without-skill", "trials_baseline")])
+def test_failed_arm_rewards_without_trial_id_are_counted_once(tmp_path: Path, arm: str, key: str) -> None:
+    """Older rewards carry no ``trial_id``: the diagnostic trial and the usage-only copy are one attempt."""
+    (tmp_path / "with-ids").mkdir()
+    (tmp_path / "legacy").mkdir()
+    with_ids = _failed_run(tmp_path / "with-ids", arm)
+    legacy = _failed_run(tmp_path / "legacy", arm, legacy_ids=True)
+    scored = [row for row in legacy["agents"]["codex"][key] if row.get("scored") is not False]
+    assert len(scored) == 1
+    assert scored[0]["scores"]["goal_accuracy"] == 1.0
+    usage = legacy["token_usage"]["agents"]["codex"]["with_skill" if arm == "with-skill" else "baseline"]
+    assert usage["coverage"]["observed_attempts"] == 2
+    assert usage["coverage"]["measured_attempts"] == 2
+    assert usage["coverage"]["unscored_attempts"] == 1
+    totals = usage["totals"]
+    assert (totals["prompt_tokens"], totals["completion_tokens"], totals["total_tokens"]) == (30, 5, 35)
+    # The same run with trial IDs reports the same usage.
+    assert legacy["token_usage"] == with_ids["token_usage"]
+
+
+@pytest.mark.parametrize("legacy_ids", [True, False])
+def test_failed_arm_distinct_attempts_with_identical_usage_each_count(tmp_path: Path, legacy_ids: bool) -> None:
+    """Retries share a case ID, and these two also share their token counts. Each is still one attempt.
+
+    Attempts are told apart by the trial directory they ran in, never by case ID or usage.
+    """
+    payload = _failed_run(tmp_path, "with-skill", legacy_ids=legacy_ids, scored_trials=("case__first", "case__second"))
+    agent = payload["agents"]["codex"]
+    scored = [row for row in agent["trials"] if row.get("scored") is not False]
+    assert [row["entry_id"] for row in scored] == ["case", "case"]
+    usage = payload["token_usage"]["agents"]["codex"]["with_skill"]
+    assert usage["coverage"]["observed_attempts"] == 3
+    assert usage["coverage"]["unscored_attempts"] == 1
+    # Two scored attempts of 12 tokens each, and the errored attempt's 23.
+    assert usage["totals"]["total_tokens"] == 47
+
+
+@pytest.mark.parametrize("identity", ["absent", "", 7, "x" * 513])
+def test_withheld_rewards_without_a_valid_trial_id_share_their_directory_identity(
+    tmp_path: Path, identity: object
+) -> None:
+    _failed_run(tmp_path, "with-skill", legacy_ids=True, scored_trials=("case__a", "case__b"))
+    reward_path = tmp_path / "results" / "codex" / "with-skill" / "trials" / "case__a" / "reward.json"
+    reward = json.loads(reward_path.read_text())
+    if identity != "absent":
+        reward["trial_id"] = identity
+    _write(reward_path, reward)
+    # A reward that does carry a collector-issued identity keeps it.
+    other_path = reward_path.parents[1] / "case__b" / "reward.json"
+    _write(other_path, {**json.loads(other_path.read_text()), "trial_id": "collector-issued"})
+
+    agent = report_data.load_agent_data(tmp_path / "results")["codex"]
+
+    diagnostic = [row.get("trial_id") for row in agent["diagnostic_rewards"] if row.get("_unscored") is not True]
+    usage = [row["trial_id"] for row in agent["usage_only_attempts"] if row["scored"] is True]
+    assert diagnostic == usage == ["case__a", "collector-issued"]
+    assert agent["rewards"] == []
+
+
+def test_succeeded_arm_rewards_without_trial_id_load_unchanged(tmp_path: Path) -> None:
+    """Only a withheld arm needs a stand-in identity; a succeeded arm's legacy rewards stay identity-less."""
+    _failed_run(tmp_path, "")
+    trials = tmp_path / "results" / "codex" / "with-skill" / "trials"
+    for name in ("case__first", "case__second"):
+        reward = {**dict.fromkeys(DEFAULT_METRICS, 1.0), "metric_set": DEFAULT_METRIC_SET, "entry_id": "case"}
+        _write(trials / name / "reward.json", reward)
+    agent = report_data.load_agent_data(tmp_path / "results")["codex"]
+    assert [row.get("trial_id") for row in agent["rewards"]] == [None, "case__scored", None]
+    assert len(report_data.logical_trial_reward_groups(agent["rewards"])) == 3
 
 
 @pytest.mark.parametrize("artifact", ["missing-reward", "malformed-reward", "failed", "error"])

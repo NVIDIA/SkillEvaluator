@@ -301,6 +301,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Claude Code `harness` results count `when_to_use` toward the 1,536-character
   listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
   and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

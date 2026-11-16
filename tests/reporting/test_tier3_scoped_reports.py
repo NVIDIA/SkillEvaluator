@@ -95,18 +95,16 @@ def test_benchmark_headline_matches_completed_agent_row(peer_failed, quality_fai
         assert "Needs attention" in benchmark
 
 
-@pytest.mark.parametrize("run_verdict", ["neutral", None])
-def test_benchmark_headline_without_completed_agent_is_unchanged(run_verdict):
+@pytest.mark.parametrize("run_verdict", ["neutral", "pass", "fail", None])
+def test_benchmark_headline_without_completed_agent_names_missing_evidence(run_verdict):
     result = result_with_completed_peer()
     payload = result.metadata["agent_eval"]
     payload["agents"]["opencode"]["scored_attempts"] = 0
     payload["verdict"] = run_verdict
     assert completed_agent_result(payload) is None
     benchmark = BenchmarkReporter(report_scope="tier3").render(result)
-    if run_verdict is None:
-        assert benchmark.startswith("> **Tier 3: No complete agent result**")
-    else:
-        assert benchmark.startswith("> **Tier 3 completed-agent result: NEUTRAL**")
+    assert benchmark.startswith("> **Tier 3: No complete agent result**")
+    assert "Tier 3 completed-agent result:" not in benchmark
 
 
 def test_default_report_keeps_publication_gate_and_format():
@@ -117,6 +115,23 @@ def test_default_report_keeps_publication_gate_and_format():
     assert 'data-publication-status="fail"' in html
     assert "## Results at a Glance" in benchmark
     assert "## Tier Status" in benchmark
+
+
+@pytest.mark.parametrize("execution_status", ["succeeded", "failed"])
+def test_quality_failure_does_not_invent_execution_failure(execution_status):
+    result = result_with_completed_peer(peer_failed=False)
+    payload = result.metadata["agent_eval"]
+    payload["verdict"] = payload["summary"]["verdict"] = "fail"
+    payload["execution_status"] = payload["summary"]["execution_status"] = execution_status
+    payload["verdict_reason"] = "1 of 2 cases failed: 1 goal not met"
+
+    display = HTMLReporter._tier3_report_data([result])
+    html = HTMLReporter(report_scope="tier3").render(result)
+
+    assert display["verdict"] == "fail"
+    assert display["execution_status"] == display["summary"]["execution_status"] == execution_status
+    assert completed_agent_result(display)["needs_attention"] == (execution_status == "failed")
+    assert ("Other execution failures need attention" in html) == (execution_status == "failed")
 
 
 @pytest.mark.parametrize("corruption", ["bool", "nan", "missing", "errors", "coverage", "conditions"])

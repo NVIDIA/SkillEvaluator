@@ -185,6 +185,91 @@ These are the findings you are most likely to meet:
   so findings for the others stay out of your way.
 </Tip>
 
+## Two ways to run it
+
+<Tabs>
+  <Tab title="On its own">
+    Use `harness-check` when this is the only answer you want. It takes a skill
+    folder, a folder of skills, or a plugin folder, and it always exits `0`.
+
+    ```bash
+    skillevaluator harness-check ./my-skill
+    ```
+
+    ```bash title="Only the harnesses you ship to"
+    skillevaluator harness-check ./my-skill --harness codex,claude-code
+    ```
+
+    ```bash title="Every skill in a folder"
+    skillevaluator harness-check ./skills
+    ```
+
+    ```bash title="Save the result as JSON"
+    skillevaluator harness-check ./my-skill --json harness.json
+    ```
+  </Tab>
+  <Tab title="Inside validate">
+    `validate` runs the harness check as part of Tier 1, for all six harnesses.
+    You don't have to ask for it.
+
+    ```bash
+    skillevaluator validate ./my-skill --tiers 1
+    ```
+
+    To run only the harness check, and still get the report files:
+
+    ```bash
+    skillevaluator validate ./my-skill --tiers 1 --checks harness
+    ```
+
+    ```text
+    ╭─ Tier 1 · Static & Security ─────────────────────────────────────────────────────╮
+    │    checks      ! harness                                                         │
+    │    summary     1/1 checks passed                                                 │
+    │    harness     4 not loaded · 1 degraded  (see below)                            │
+    ╰────────────────────────────────────────────────────────────────── ✓ pass · 0.1s ─╯
+    ╭─ Harness compatibility ──────────────────────────────────────────────────────────╮
+    │  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
+    │                                                                                  │
+    │  ✓ claude-code  loads                                                    1 note  │
+    │  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
+    │                 or duplicate keys).                                              │
+    │  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
+    │                 parsing is strict.                                               │
+    │  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
+    │                 model sees the literal text.                                     │
+    │  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
+    │                 duplicate keys).                                                 │
+    │  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
+    │                 keys.                                                            │
+    │                                                                                  │
+    │  Doesn't change pass/fail.  Details and fixes: -v                                │
+    ╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
+    ╭──────────────────────────────────────────────────────────────────────────────────╮
+    │   ✓ PASS   Passed required checks  ·  exit 0                                     │
+    │  Tier 1: 1 of 1 checks passed; 0 failed, 0 incomplete, 0 skipped, 0 N/A          │
+    │  Tier 2: Not run (not requested)                                                 │
+    │  Tier 3: Not run (not requested)                                                 │
+    │  Publication eligibility: Incomplete                                             │
+    │                                                                                  │
+    │  ! harness: skill won't load in codex, copilot-cli, openclaw, opencode · skill   │
+    │  loads degraded in hermes                                                        │
+    ╰──────────────────────────────────────────────────────────────────────────────────╯
+    ```
+
+    The run still passes. The harness check shows up in four places: `! harness`
+    in the checks line, a `harness` line in the Tier 1 summary, the same panel
+    as above, and a note in the result box. `--harness` and `-v` work here too.
+  </Tab>
+</Tabs>
+
+| | `harness-check` | `validate` |
+| --- | --- | --- |
+| Runs | Only the harness check | Every Tier 1 check, and other tiers if you ask |
+| Exit code | Always `0` | Set by the other checks. The harness check does not change it |
+| Files | `--json FILE` | HTML, JSON and SARIF reports, each with the harness findings |
+| Model setup flags | Yes, see [Match your setup](#match-your-setup) | No |
+
 ## What it checks
 
 The rules cover everything between your folder and the model's context.

@@ -1012,73 +1012,20 @@ All notable changes to SkillEvaluator are documented in this file.
   rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
-- Tier 3 security finding evidence no longer keeps the credential in five
-  more command forms: an `auth=HTTPBasicAuth("bob", "...")` call value, also
-  one split over lines or with a `(` or `)` inside a quoted argument, which
-  was masked only up to the class name, and an `auth=("bob", "...")` tuple
-  value whose quoted argument holds a `(` or `)`, which was masked only up to
-  that parenthesis; a
-  credential name in a `sed` replacement, as in
-  `sed -i 's/password=.*/password=.../'`, also inside an `ssh`, `sh -c`, or
-  `eval` command string; a long flag with `_` between its words, such as
-  `--db_password` or `--api_key`; an `npm config set`, `yarn config set`, or
-  `git config` key that is quoted (also with its quotes JSON-escaped, as in
-  saved tool-call arguments) or follows `--`, or whose value follows
-  ` = `; and a shell `apply_patch` command whose 400-character cut split URL
-  user info before it was masked.
-  The `apply_patch` text is now masked before it is cut. A word with
-  parentheses in it is still masked whole. `--max_tokens` and `--token_limit`
-  keep their numbers, as their `-` spellings do, while other flags that name a
-  token, such as `--max_new_tokens`, are masked as their `-` spellings are.
-  A `_` flag joined to its value with `=`, as in `--api_key=...`, or followed
-  by a separator, as in `--api_key = ...`, is still read as an assignment, and
-  so is a quoted key or one after `--` whose value starts with a separator, as
-  in `npm config set -- password ='...'`. An unquoted value after a `_` flag
-  and a space, or after a quoted config key or one after `--`, ends at `;`,
-  `|`, or `&`, as an assignment's value does. A value of such a flag or key
-  that holds a credential name whose value runs past it, as in
-  `--set_secret API_TOKEN="..."`, or is already masked, as in
-  `--set_secret API_TOKEN=<redacted>`, is read as an assignment, so masking
-  such a value again keeps it as it is; any other value, as in
-  `--set_secret SLACK_TOKEN_URL=...` or `--db_password PASS=1234`, is masked
-  whole, as after the `-` spelling. A credential flag that takes no
-  value, in either spelling, still masks the next word as its value, but no
-  longer hides the password of a `mysql`, `sshpass`, `docker login`,
-  `aws configure set`, config set, or `.netrc` command that starts with that
-  word, as in `--use_token mysql -u root -p...`, nor an attached `-p...`
-  element after a `mysql` or `login` element it takes in an argv list. Nor
-  does it hide a `docker login` or `mysql` password when a flag value between
-  that word and the password holds a `-p` or `;`, as in
-  `--use_token docker login --token "x -p y" -p ...`, nor the value after a
-  config set key and ` = `, as in
-  `--use_token npm config set _auth = token="..."`. A
-  `docker login`, `.netrc`, or `/usr/bin/mysql` password after a `\n` inside
-  a flag value or right after it is masked too, and so is a `docker login`
-  password after a `\n` right after an argv list whose last element is
-  masked, as in `["wrap", "--use_token", "login"]\ndocker login -p ...`; the
-  plain `mysql`, `sshpass`, `aws configure set`, and config set rules do not
-  match after a `\n` escape. A flag value inside a `.netrc` password no longer
-  ends that password, and one that holds the only colon of a quoted `-u`
-  value, as in `-u "bob --api_key \"x a:..."`, no longer leaves that value
-  unmasked. A name, command, or `.netrc` phrase that such a password runs
-  into is masked as its own rule masks it, as in
-  `--use_token mysql -u root -p...password: ...`. A flag inside the quoted
-  value of an earlier `_` flag is read too, and the rest of its value past
-  that quote is masked, as is a name or command that rest runs into; a flag
-  inside the value of a `-` flag is not read. The argv rule also reads list
-  elements as they were before flag values were masked, so a masked value
-  that cuts an element, as in `--set_secret "auth_type=x ["mysql", "-p..."]`,
-  does not hide the credential after it. When text an earlier rule masked,
-  such as a flag value that runs over the JSON-escaped line break or quote at
-  which the value of an earlier name ended, lies inside that value before a
-  later credential name, the rest of the later name's own value is masked
-  too, as it is when that name is read on its own, as in
-  `\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
-  arguments repeated as JSON. So is a credential name at the start of a line
-  after a JSON-escaped line break that an unquoted value ran over, as in
-  `API_TOKEN=a\nauth=("bob", "...")`, where the next line's tuple, call, or
-  quoted value with spaces was left unmasked. Both the host checker and the
-  bundled Harbor verifier apply the fix.
+- Tier 3 security finding evidence and saved judge evidence now mask the
+  credential in five more forms that kept it: an `auth=` call value such as
+  `auth=HTTPBasicAuth("bob", "...")`, a credential name in a `sed`
+  substitution, a long flag with `_` between its words such as
+  `--db_password`, a quoted or `--` key of `npm config set`,
+  `yarn config set` or `git config`, and a credential name that starts the
+  line after a `\n` escape an unquoted value runs over, as in
+  `API_TOKEN=a\nauth=("bob", "...")`. A credential flag that takes no value,
+  such as `--use-token`, no longer hides the password of a command that
+  starts at the next word, such as `mysql -p...`. Shell `apply_patch`
+  finding evidence is now masked before its 400-character cut, so a cut inside
+  URL user info no longer keeps part of the password. Both the host checker
+  and the bundled Harbor verifier apply the fix, and the Tier 3 live
+  evaluation guide lists the exact forms.
 
 ## 0.9.0 - 2026-11-13
 

@@ -815,7 +815,14 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     rewritten = original.replace("0.8", "0.9")
     assert len(rewritten) == len(original)
     real_read = os.read
+    real_fstat = os.fstat
     rewritten_once = False
+
+    def fstat_with_advanced_ctime(fd: int) -> os.stat_result:
+        metadata = real_fstat(fd)
+        if rewritten_once and metadata.st_ino == summary_inode:
+            return os.stat_result(metadata, {"st_ctime_ns": summary_metadata.st_ctime_ns + 2_000_000_000})
+        return metadata
 
     def rewrite_during_read(fd: int, length: int) -> bytes:
         nonlocal rewritten_once
@@ -826,8 +833,12 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
         return real_read(fd, length)
 
     monkeypatch.setattr(results_location.os, "read", rewrite_during_read)
+    monkeypatch.setattr(results_location.os, "fstat", fstat_with_advanced_ctime)
 
     assert not _is_completed(run)
+    assert rewritten_once
+    assert summary.stat().st_ino == summary_inode
+    assert summary.stat().st_mtime_ns == summary_metadata.st_mtime_ns
 
 
 def test_rejects_summary_parent_swapped_to_link_before_read(

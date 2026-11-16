@@ -61,6 +61,9 @@ The Makefile wraps the standard tools, so you can run the underlying commands di
 
 ## Running tests
 
+The legacy-summary restored-mtime race test models an advanced ctime explicitly;
+it must exercise ctime detection even when the host clock has not ticked.
+
 `make test` runs the fast suite. Two pytest markers are excluded by default, so slow and credentialed tests never block the everyday loop:
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent

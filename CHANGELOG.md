@@ -354,7 +354,8 @@ All notable changes to SkillEvaluator are documented in this file.
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
   add checks to your repository with `skillevaluator ci init`, or install the
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
-  its guide on docs.nvidia.com.
+  its guide on docs.nvidia.com. The CI column starts by saying what the template
+  does: it checks every skill change, with no evaluation code to maintain.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

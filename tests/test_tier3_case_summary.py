@@ -1296,6 +1296,52 @@ def test_failed_negative_keeps_task_diagnostics(tmp_path: Path, activation_statu
         assert "omitted the requested total" in fix["what"]
 
 
+@pytest.mark.parametrize("routing", [{"expected_skill": None}, {"should_trigger": False}])
+@pytest.mark.parametrize("passed", [False, True])
+@pytest.mark.parametrize("use_llm", [False, True])
+def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
+    tmp_path: Path, monkeypatch, routing: dict, passed: bool, use_llm: bool
+) -> None:
+    monkeypatch.setattr(
+        "skillevaluator.tier3.case_summary._llm_actions",
+        lambda *_args: pytest.fail("Correct non-use must not request a skill-edit action"),
+    )
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", **routing}]}))
+    reward = _reward(False, "the answer omitted the requested total")
+    reward.update(skill_execution=1.0, goal_accuracy=0.0, skill_invoked=False, invocation_evidence_source="trajectory")
+    _trial(tmp_path, "a", "t0", reward)
+    agent = _agent({"negative": _case(passed)}, {})
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=use_llm)
+
+    assert fix["kind"] == "task outcome"
+    assert fix["source"] == "deterministic"
+    assert "correctly unused" in fix["action"]
+    assert "SKILL.md" not in fix["action"]
+    assert "requested total" in fix["what"] or "requested total" in " ".join(fix["reasons"])
+    assert fix["attempts_lost"] == 1
+
+
+@pytest.mark.parametrize("evidence", ["invoked", "unknown", "missing", "error", "custom"])
+def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Path, evidence: str) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
+    if evidence != "missing":
+        reward = _reward(False, "wrong total")
+        reward.update(skill_execution=1.0, skill_invoked=evidence == "invoked", invocation_evidence_source="trajectory")
+        if evidence == "unknown":
+            reward.pop("invocation_evidence_source")
+        elif evidence == "error":
+            reward["evaluation_status"] = "error"
+        elif evidence == "custom":
+            reward["metric_set"] = "custom-metrics"
+        _trial(tmp_path, "a", "t0", reward)
+    agent = _agent({"negative": _case(False)}, {})
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert all(fix["kind"] != "task outcome" for fix in fixes)
+
+
 @pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
 @pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
 def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(

@@ -22,6 +22,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.evaluation.insights_judge import _weakens_requirements
+from skillevaluator.evaluation.tier3_report import _trusted_observed_activation
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
@@ -1147,6 +1148,11 @@ def _evidence(run_dir: Path, trial_dir: Path | None, *, run_error: bool) -> str:
 
 def _fallback_action(issue: Mapping[str, Any]) -> str:
     kind = issue["kind"]
+    if kind == "task outcome":
+        return (
+            "Not a skill problem: the skill was correctly unused. Check the agent's answer against the existing "
+            "case requirements and re-run this case."
+        )
     if kind == "skill not used":
         request = f' such as "{_short(issue["prompt"], 120)}"' if issue.get("prompt") else ""
         return (
@@ -1285,6 +1291,34 @@ def _restates(prompt: str, description: str) -> bool:
     return SequenceMatcher(None, a, b, autojunk=False).find_longest_match(0, len(a), 0, len(b)).size >= _RESTATED_CHARS
 
 
+def _correctly_unused_negative(
+    run_dir: Path, agent_name: str, agent: Mapping[str, Any], case_id: str, entry: Mapping[str, Any]
+) -> bool:
+    if resolve_should_trigger(dict(entry)) is not False:
+        return False
+    case = _cases(agent, "with_skill").get(case_id)
+    if not isinstance(case, Mapping) or case.get("attempts_missing"):
+        return False
+    attempts = case.get("attempts") or []
+    if not attempts:
+        return False
+    for attempt in attempts:
+        if not isinstance(attempt, Mapping):
+            return False
+        trials = _trial_dirs(run_dir, agent_name, attempt.get("trial"))
+        if not trials:
+            return False
+        for trial in trials:
+            reward = _load_json(trial / "reward.json", root=run_dir)
+            if (
+                not isinstance(reward, dict)
+                or _evaluation_failed(reward)
+                or _trusted_observed_activation(reward) != "not_invoked"
+            ):
+                return False
+    return True
+
+
 def what_to_fix(
     result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None = None, use_llm: bool = True
 ) -> list[dict[str, Any]]:
@@ -1298,7 +1332,15 @@ def what_to_fix(
     grouped: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
-            for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
+            entry = dataset.get(case_id, {})
+            diagnosed = _diagnose_agent_case(run_dir, name, agent, case_id, entry=entry)
+            if any(issue["kind"] in ("skill", "skill hurts", "goal not met") for issue in diagnosed) and (
+                _correctly_unused_negative(run_dir, name, agent, case_id, entry)
+            ):
+                for issue in diagnosed:
+                    if issue["kind"] in ("skill", "skill hurts", "goal not met"):
+                        issue["kind"] = "task outcome"
+            for issue in diagnosed:
                 grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)
     issues = []
     for items in grouped.values():
@@ -1321,7 +1363,7 @@ def what_to_fix(
         entry = dataset.get(issue["case"], {})
         prompt = str(entry.get("question") or entry.get("prompt") or "")
         issue["prompt"] = prompt
-        if issue["kind"] != "run error" and _restates(prompt, description):
+        if issue["kind"] not in ("run error", "task outcome") and _restates(prompt, description):
             issue["kind"] = "eval case"
             issue["what"] = "the test prompt repeats the skill description instead of asking for a concrete task"
     issues = _merge_across_cases(issues, len(_case_ids(agents)))
@@ -1333,7 +1375,7 @@ def what_to_fix(
     actionable = [
         issue
         for issue in issues
-        if issue["kind"] not in ("run error", "eval case", "missing input", "skill not used")
+        if issue["kind"] not in ("run error", "eval case", "missing input", "skill not used", "task outcome")
         and not issue.get("asks_for_input")
     ]
     case_ids = {*dataset, *_case_ids(agents)}

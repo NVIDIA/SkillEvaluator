@@ -161,7 +161,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - The bundled `text-analyzer` example skill's description now says when to use it and
   lists sentence count and average word length, so Codex reads the skill before using it.
   The example's quality score is now 88.8/100 with 5 findings (was 86.2 with 6).
-
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the

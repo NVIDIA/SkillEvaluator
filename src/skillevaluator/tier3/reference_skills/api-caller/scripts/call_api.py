@@ -25,7 +25,7 @@ import argparse
 import json
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode, urlparse
 from urllib.request import Request, urlopen
 
 _UNSET = object()
@@ -147,7 +147,7 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
     for key, value in params.items():
         placeholder = "{" + key + "}"
         if placeholder in url_path:
-            url_path = url_path.replace(placeholder, str(value))
+            url_path = url_path.replace(placeholder, quote(str(value), safe=""))
         else:
             query_params[key] = value
 

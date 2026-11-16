@@ -8,6 +8,8 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 
+import pytest
+
 SCRIPTS_DIR = (
     Path(__file__).resolve().parents[1]
     / "src"
@@ -25,6 +27,26 @@ def _load_script(module_name: str):
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+@pytest.mark.parametrize(
+    ("value", "encoded"),
+    [
+        ("plain-id", "plain-id"),
+        (7, "7"),
+        ("red blue", "red%20blue"),
+        ("café", "caf%C3%A9"),
+        ("a/b?#c%", "a%2Fb%3F%23c%25"),
+        ("a%2Fb", "a%252Fb"),
+    ],
+)
+def test_openapi_path_values_are_encoded_as_segments(value: str | int, encoded: str) -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": "https://example.invalid/v1"}]}
+
+    result = caller.build_url_from_spec(spec, "/items/{id}", {"id": value, "limit": 2})
+
+    assert result == f"https://example.invalid/v1/items/{encoded}?limit=2"
 
 
 def test_api_caller_rejects_non_http_urls_without_opening_them() -> None:

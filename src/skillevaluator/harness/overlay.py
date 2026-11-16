@@ -409,7 +409,9 @@ def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
     ignored = []
     effort = data.get("effort")
     text = str(effort).strip().lower()
-    numeric = (isinstance(effort, int) and not isinstance(effort, bool)) or text.isdigit()
+    whole_number = isinstance(effort, int) and not isinstance(effort, bool)
+    whole_number = whole_number or (isinstance(effort, float) and effort.is_integer())
+    numeric = whole_number or text.isdigit()
     if effort is not None and not numeric and text not in _CLAUDE_EFFORTS:
         ignored.append(f"effort '{effort}' (use {', '.join(_CLAUDE_EFFORTS)} or a number)")
     shell = data.get("shell")

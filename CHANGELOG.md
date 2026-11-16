@@ -228,6 +228,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
@@ -283,6 +286,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
 - NeMo Gym runs refresh the policy model key between arms when
   `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
   `OPENAI_API_KEY`, so later arms no longer start with an expired token.

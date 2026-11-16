@@ -9,8 +9,10 @@ incomplete scanner. CI systems that ingest JUnit reports (GitLab merge-request
 test reports, Jenkins, Azure Pipelines, CircleCI, Buildkite) read this format.
 
 File paths are stored as repository- or scan-root-relative POSIX paths using the
-same resolution rules as the SARIF reporter. Characters XML 1.0 forbids are
-stripped before serialization.
+same resolution rules as the SARIF reporter, percent-encoded as SARIF does so a
+file name that is not valid UTF-8 stays distinct (``caf\\udce9.md`` becomes
+``caf%E9.md``). In other text, lone surrogates are written as backslash escapes,
+then characters XML 1.0 forbids are stripped before serialization.
 
 When the reporter knows the evaluated target, suite names and testcase
 classnames are qualified with its repository-relative path (for example
@@ -29,6 +31,7 @@ from skillevaluator.models.result import Severity
 from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped
 from skillevaluator.reporting.sarif_reporter import (
     _positive_start_line,
+    _quote_uri_path,
     _resolve_artifact_path,
     _workspace_relative_path,
 )
@@ -51,6 +54,19 @@ def _xml_char_allowed(character: str) -> bool:
     return 0x10000 <= code <= 0x10FFFF
 
 
+def _escape_surrogates(text: str) -> str:
+    """Return *text* with lone surrogates written as backslash escapes.
+
+    A file name that is not valid UTF-8 arrives with surrogate escapes, which
+    XML cannot hold; escaping them keeps ``caf\\udce9.md`` distinct from
+    ``caf.md`` (it becomes ``caf\\xe9.md``).
+    """
+    try:
+        return text.encode("utf-8", "surrogateescape").decode("utf-8", "backslashreplace")
+    except UnicodeEncodeError:
+        return text.encode("utf-8", "backslashreplace").decode("utf-8")
+
+
 def _xml_text(value: object) -> str:
     """Return *value* as XML 1.0 text, dropping characters the spec forbids."""
     if value is None:
@@ -59,7 +75,7 @@ def _xml_text(value: object) -> str:
         text = value
     else:
         text = str(value)
-    text = text.replace("\r\n", "\n").replace("\r", "\n")
+    text = _escape_surrogates(text).replace("\r\n", "\n").replace("\r", "\n")
     return "".join(character for character in text if _xml_char_allowed(character))
 
 
@@ -68,7 +84,7 @@ def _junit_file_path(
     workspace_root: Path | None,
     scan_root: Path | None,
 ) -> str:
-    """Return a POSIX path relative to the scanned workspace, matching SARIF."""
+    """Return a percent-encoded POSIX path relative to the scanned workspace, matching SARIF."""
     if not isinstance(file_path, str) or not file_path.strip():
         return ""
     raw = file_path.strip()
@@ -76,15 +92,15 @@ def _junit_file_path(
     if workspace_root is not None and (path.is_absolute() or path.root):
         relative = _workspace_relative_path(path, raw, workspace_root, scan_root)
         if relative is not None:
-            return _xml_text(relative.as_posix())
+            return _quote_uri_path(relative.as_posix())
     if scan_root is not None:
         try:
-            return _xml_text(path.resolve().relative_to(scan_root.resolve()).as_posix())
+            return _quote_uri_path(path.resolve().relative_to(scan_root.resolve()).as_posix())
         except ValueError:
             pass
     if path.is_absolute() or path.root:
-        return _xml_text(path.as_posix())
-    return _xml_text(raw.replace("\\", "/"))
+        return _quote_uri_path(path.as_posix())
+    return _quote_uri_path(raw.replace("\\", "/"))
 
 
 def _relative_posix(path: Path, root: Path | None) -> str | None:

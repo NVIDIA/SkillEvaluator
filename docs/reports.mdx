@@ -355,7 +355,9 @@ merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
 
 Counts on `testsuites` and each `testsuite` (`tests`, `failures`, `skipped`,
 `time`) match the cases they contain. File paths are relative to the scanned
-root, using the same resolution rules as SARIF. Characters XML 1.0 forbids are
+root, using the same resolution rules and percent-encoding as SARIF, so a file
+name that is not valid UTF-8 stays distinct (`caf%E9.md`). In other text such a
+name is backslash-escaped (`caf\xe9.md`), then characters XML 1.0 forbids are
 stripped. An incomplete scan is never emitted as an all-passed suite.
 
 ## HTML report

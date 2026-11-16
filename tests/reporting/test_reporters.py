@@ -3186,3 +3186,6 @@ def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, re
     assert "Unexpected" in text
     if report_format == "sarif":
         assert "skill/caf%E9.md" in text
+    if report_format == "junit":
+        assert 'file="skill/caf%E9.md"' in text
+        assert "Unexpected 'caf\\xe9.md' in skill root" in text

@@ -316,6 +316,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The Tier 1 validation guide now says that a PowerShell backtick before a
+  space does not count as a quoted or escaped space for the SkillSpector
+  missing-reference line check, so a labelled line such as
+  ``**Note:** run setup` h*.ps1`` passes when `setup helper.ps1` is left out.
 - The agent skill guide explicitly installs the CLI before the first check,
   so its setup flow also works with skill versions that do not bootstrap it.
 
@@ -401,11 +405,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `incomplete` and leave `summary.overall_lift` null, even when the best agent
   has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
   Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
-  is advisory. The page said only that HTML displays a failed run as
-  **Changes required** and that both payloads keep the best agent's lift.
+  is advisory. The page said that HTML displays a failed run as
+  **Changes required**, or **Failed (advisory)** when Tier 3 is advisory, and
+  that both payloads keep the best agent's lift.
 
 ### Fixed
 
+- Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
 - Partial Tier 3 evidence is retained only for valid reward identities and attempt
   coverage. Corrupt rewards or duplicate attempts still suppress arm scores;
   incomplete cases are reported as unresolved instead of failed.

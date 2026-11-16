@@ -1763,8 +1763,12 @@ def test_case_summary_import_does_not_load_the_report_module() -> None:
     import subprocess
     import sys
 
+    source = Path(__file__).resolve().parents[1] / "src"
     code = (
-        "import sys, skillevaluator.tier3.case_summary; "
+        "import sys; "
+        f"sys.path.insert(0, {str(source)!r}); "
+        "import skillevaluator.tier3.case_summary; "
+        f"assert skillevaluator.tier3.case_summary.__file__ == {str(source / 'skillevaluator/tier3/case_summary.py')!r}; "
         "sys.exit(1 if 'skillevaluator.evaluation.tier3_report' in sys.modules else 0)"
     )
     completed = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)

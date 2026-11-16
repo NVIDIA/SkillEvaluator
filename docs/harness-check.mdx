@@ -184,3 +184,60 @@ These are the findings you are most likely to meet:
   Only ship to some harnesses? Narrow the check with `--harness codex,claude-code`,
   so findings for the others stay out of your way.
 </Tip>
+
+## What it checks
+
+The rules cover everything between your folder and the model's context.
+
+| Area | What it looks for |
+| --- | --- |
+| Front matter | Duplicate keys, tab indentation, a UTF-8 BOM, a missing front matter block, and long custom fields that never reach the model. |
+| Description | Missing or empty descriptions, and descriptions a harness cuts in its skill list, such as Hermes at 60 characters or Copilot CLI at 1,024 UTF-16 units. |
+| Location | `SKILL.md` casing, nested or symlinked manifests, how deep a harness scans, and whether the skill sits in a folder the harness reads. |
+| Catalog | Your skill counted with the skills installed next to it: skill-list budgets, duplicate names, and near-identical descriptions. |
+| Delivery | Size limits when the model opens the skill, such as OpenCode's 51,200 bytes or 2,000 lines and Hermes's 100,000 characters. |
+| Placeholders | `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes. |
+| Invocation | `disable-model-invocation`, `allowed-tools` and Claude Code-only fields that other harnesses ignore. |
+| Gates | Hermes `platforms` and OpenClaw `metadata.openclaw.requires`, which hide the skill on hosts that don't match. |
+| Plugins | Which plugin formats each harness accepts, how plugin skills are named, and components a harness registers but doesn't deliver. |
+
+The full rule list, harness by harness, is in
+[Tier 1: Validation](/skills/skillevaluator/tier1-validation#the-checks) under **harness**.
+
+## Supported harnesses
+
+| Harness | Name for `--harness` |
+| --- | --- |
+| Claude Code | `claude-code` |
+| OpenAI Codex CLI | `codex` |
+| GitHub Copilot CLI | `copilot-cli` |
+| Hermes Agent | `hermes` |
+| OpenClaw | `openclaw` |
+| OpenCode | `opencode` |
+
+## Where the rules come from
+
+Each harness has a profile that ships with SkillEvaluator. The profiles come from
+repeated runs of each harness in which the request sent to the model was
+captured, so a rule describes what the harness did, not what its documentation says.
+
+Harnesses change between releases, so every profile records the release and date
+it was verified against, and `-v` shows them.
+
+- `--harness-version codex=0.170.0` adds a note when you run a release other than the verified one.
+- `--harness-profiles DIR` uses your own profile YAML files, so you can try newer profiles without waiting for a release.
+
+## Match your setup
+
+Some limits depend on how you run the harness. `harness-check` takes four flags for that:
+
+| Flag | What you are telling it |
+| --- | --- |
+| `--context-tokens N` | The context window of your model, in tokens. |
+| `--custom-provider` | Your model is served through a custom or OpenAI-compatible provider. |
+| `--explicit-invocation` | Skills are activated by an explicit mention, such as Codex `$skill`. |
+| `--headless` | The harness runs non-interactively, such as `claude -p` in CI. |
+
+Without them, the check assumes an unknown context window, a native provider, a
+model that opens the skill by itself, and an interactive session. See the
+[CLI reference](/skills/skillevaluator/cli-reference#harness-check) for every flag.

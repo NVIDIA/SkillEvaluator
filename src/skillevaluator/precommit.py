@@ -23,11 +23,13 @@ CHECKS = (CHECK_QUALITY, CHECK_SCHEMA, CHECK_LINT_SCRIPTS)
 
 
 def parse_hook_path(value: str | Path) -> Path:
-    """Interpret a pre-commit path, including Windows-style separators on POSIX."""
-    text = str(value)
-    if "\\" in text:
-        text = text.replace("\\", "/")
-    return Path(text)
+    """Interpret a pre-commit path in the host platform's own spelling.
+
+    pre-commit passes tracked paths as the host spells them. On POSIX a
+    backslash is a valid filename character, so it is kept as is; on Windows
+    ``Path`` already treats it as a separator.
+    """
+    return Path(value)
 
 
 def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:

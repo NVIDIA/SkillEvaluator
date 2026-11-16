@@ -4,8 +4,10 @@
 from __future__ import annotations
 
 import shlex
+import sys
 from pathlib import Path
 
+import pytest
 import yaml
 from click.testing import CliRunner
 
@@ -82,6 +84,7 @@ def test_skill_root_skips_deleted_skill(tmp_path: Path) -> None:
     assert skill_root_for(kept / "SKILL.md", cwd=tmp_path) == kept.resolve()
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="backslash is a separator only on Windows")
 def test_skill_root_accepts_windows_style_separators(tmp_path: Path) -> None:
     skill = _write_skill(tmp_path / "skills", "win-skill")
     script = skill / "scripts" / "run.py"
@@ -91,6 +94,27 @@ def test_skill_root_accepts_windows_style_separators(tmp_path: Path) -> None:
     mapped = skill_root_for(r"skills\win-skill\scripts\run.py", cwd=tmp_path)
     assert mapped == skill.resolve()
     assert skill_root_for(r"skills\win-skill\SKILL.md", cwd=tmp_path) == skill.resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is a valid filename character only on POSIX")
+def test_skill_root_keeps_literal_backslash_in_posix_path(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill = _write_skill(tmp_path, "literal\\skill", body="# Broken\n\nNo frontmatter.\n")
+    assert skill.name == "literal\\skill"
+    # A same-named slash path must not be found instead.
+    assert not (tmp_path / "literal" / "skill").exists()
+
+    relative = "literal\\skill/SKILL.md"
+    assert skill_root_for(relative, cwd=tmp_path) == skill.resolve()
+
+    code, lines = run_precommit("schema", [relative], cwd=tmp_path)
+    assert code == 1
+    assert len(lines) == 1
+    assert lines[0].startswith("FAIL  literal\\skill  schema")
+
+    monkeypatch.chdir(tmp_path)
+    result = CliRunner().invoke(cli, ["precommit-run", "schema", relative])
+    assert result.exit_code == 1, result.output
+    assert "FAIL  literal\\skill  schema" in result.output
 
 
 def test_collect_skill_roots_deduplicates_and_preserves_order(tmp_path: Path) -> None:

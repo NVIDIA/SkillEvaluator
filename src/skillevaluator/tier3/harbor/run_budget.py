@@ -451,6 +451,23 @@ def _budget_number(value: Any, *, cost: bool = False, missing: str = "not measur
     return f"{number:,}"
 
 
+def budget_fully_denied(metadata: object) -> bool:
+    """Return whether every planned attempt was explicitly denied before execution."""
+    if not isinstance(metadata, dict):
+        return False
+    planned = metadata.get("planned_attempts")
+    denied = metadata.get("not_run")
+    return (
+        isinstance(planned, int)
+        and planned > 0
+        and metadata.get("started_attempts") == 0
+        and metadata.get("attempts_not_run") == planned
+        and isinstance(denied, list)
+        and len(denied) == planned
+        and all(isinstance(row, dict) and row.get("reason") == "budget_exhausted" for row in denied)
+    )
+
+
 def budget_incomplete_reason(metadata: object) -> str | None:
     if not isinstance(metadata, dict) or not isinstance(metadata.get("not_run"), list) or not metadata["not_run"]:
         return None

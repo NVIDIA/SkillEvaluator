@@ -826,6 +826,20 @@ def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
     assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
 
 
+def test_claude_ignored_field_values_are_noted(tmp_path: Path):
+    bad = _skill(tmp_path / "bad", extra="effort: extreme\nshell: zsh\nbackground: true\nmaxTurns: 5\n")
+    good = _skill(tmp_path / "good", extra="effort: XHigh\nshell: powershell\ncontext: fork\nbackground: true\n")
+    numeric = _skill(tmp_path / "numeric", extra="effort: 3\n")
+
+    finding = next(f for r in evaluate_harnesses(bad, "claude-code") for f in r.findings if f["id"] == "CC-FIELD-VALUE")
+    assert finding["effect"] == "advisory"
+    for part in ("effort 'extreme'", "shell 'zsh'", "background without context: fork", "maxTurns"):
+        assert part in finding["message"]
+    assert _status(bad)["claude-code"] == "loads"
+    assert "CC-FIELD-VALUE" not in _rule_ids(good, "claude-code")
+    assert "CC-FIELD-VALUE" not in _rule_ids(numeric, "claude-code")
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)

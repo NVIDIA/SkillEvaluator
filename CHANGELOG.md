@@ -291,6 +291,10 @@ All notable changes to SkillEvaluator are documented in this file.
   error when all admitted attempts succeed, including stop-on-pass runs. Reused
   baselines are not promoted to overall scores when with-skill attempts are
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

@@ -10,6 +10,7 @@ import json
 import pytest
 
 from skillevaluator.evaluation import tier3_report
+from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
@@ -30,13 +31,17 @@ def _agents():
     }
 
 
-def _payload(monkeypatch, run_dir, **kwargs):
+def _result(monkeypatch, run_dir, **kwargs):
     monkeypatch.setattr(report_data, "load_agent_data", lambda *_args, **_kwargs: _agents())
     result = tier3_report.agent_eval_result_from_directory(
         run_dir / "demo", run_dir, env_mode="docker", use_llm_judge=False, **kwargs
     )
     assert result is not None
-    return result.metadata["agent_eval"]
+    return result
+
+
+def _payload(monkeypatch, run_dir, **kwargs):
+    return _result(monkeypatch, run_dir, **kwargs).metadata["agent_eval"]
 
 
 @pytest.mark.parametrize(
@@ -69,3 +74,51 @@ def test_payload_built_without_a_run_leaves_the_backend_unset():
 
     assert payload is not None
     assert payload["summary"]["execution_backend"] is None
+
+
+@pytest.mark.parametrize(
+    ("result_json", "label"),
+    [({}, "Harbor"), ({"execution_backend": {"name": "nemo-gym", "sandbox": "docker"}}, "NeMo Gym")],
+)
+def test_html_report_shows_the_backend_beside_the_environment(monkeypatch, tmp_path, result_json, label):
+    (tmp_path / "result.json").write_text(json.dumps(result_json))
+
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([_result(monkeypatch, tmp_path)])
+
+    assert f"<div><strong>Backend:</strong> {label}</div>" in html
+    assert "<div><strong>Environment:</strong> <code>docker</code></div>" in html
+
+
+@pytest.mark.parametrize(("backend", "label"), [("harbor", "Harbor"), ("nemo-gym", "NeMo Gym")])
+def test_dataset_header_shows_the_backend_beside_the_environment(backend, label):
+    agent = {
+        "execution_status": "succeeded",
+        "execution_errors": [],
+        "expected_attempts": 1,
+        "scored_attempts": 1,
+        "with_skill": {"security": 1.0, "goal_accuracy": 1.0},
+        "rewards": [{"entry_id": "case", "security": 1.0, "goal_accuracy": 1.0}],
+    }
+    payload = tier3_report.build_agent_eval_payload(
+        "demo",
+        {"codex": agent},
+        dataset=[{"id": "case", "prompt": "Add 2 and 3."}],
+        env_mode="docker",
+        execution_backend=backend,
+        use_llm_judge=False,
+    )
+    result = tier3_report._validation_result_from_payload(payload)
+
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
+
+    assert f'<span class="t3-ds-chip">Backend: <b>{label}</b></span>' in html
+    assert '<span class="t3-ds-chip">Environment: <b>docker</b></span>' in html
+
+
+def test_html_report_omits_an_unrecorded_backend():
+    payload = tier3_report.build_agent_eval_payload("demo", _agents(), use_llm_judge=False)
+    result = tier3_report._validation_result_from_payload(payload)
+
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
+
+    assert "Backend:" not in html

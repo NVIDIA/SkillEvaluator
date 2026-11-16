@@ -291,6 +291,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
+  and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

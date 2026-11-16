@@ -821,6 +821,7 @@ def _stat_with_advanced_ctime(metadata: os.stat_result, advance_ns: int) -> os.s
     return os.stat_result(tuple(metadata), extras)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="descriptor-anchored ctime validation only runs on POSIX")
 def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

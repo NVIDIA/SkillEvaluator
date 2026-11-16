@@ -5093,6 +5093,24 @@ def _partial_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _unscored_attempts_before_first_pass(
+    first_pass: int,
+    scored_ordinals: set[int],
+    recovered_ordinals: set[int],
+    admitted_ordinals: set[int] | None,
+) -> int:
+    """Count attempt slots up to the first pass that produced no scored result.
+
+    Stop-on-pass skips only the attempts after the first pass. A slot at or
+    before it ran (or was owed) and has no score, so it failed rather than
+    being skipped. Slots the budget never admitted are not owed.
+    """
+    covered = scored_ordinals | recovered_ordinals
+    if admitted_ordinals is not None:
+        return sum(1 for ordinal in admitted_ordinals if ordinal <= first_pass and ordinal not in covered)
+    return first_pass - sum(1 for ordinal in covered if 1 <= ordinal <= first_pass)
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -5102,6 +5120,7 @@ def _pass_summary(
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
+    expected_attempt_ordinals_by_case: Mapping[str, set[int]] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
     shared_metrics_by_case: Mapping[str, set[str]] | None = None,
@@ -5160,8 +5179,10 @@ def _pass_summary(
         attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
+        scored_ordinals: set[int] = set()
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
+            scored_ordinals.add(idx)
             score = round(overall, 4)
             applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
             verdict = attempt_verdict(
@@ -5219,8 +5240,24 @@ def _pass_summary(
             expected_attempts_by_case.get(entry_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
         )
         unscored = max(0, expected_attempt_count - len(attempts) - recovered_count)
-        skipped = unscored if stop_on_pass and case_passed else 0
-        missing = 0 if skipped else unscored
+        missing = unscored
+        if stop_on_pass and first_pass_attempt is not None:
+            # Only attempts after the first pass were skipped on purpose. An unscored
+            # attempt before it failed, and must not be hidden behind the pass.
+            missing = min(
+                unscored,
+                _unscored_attempts_before_first_pass(
+                    first_pass_attempt,
+                    scored_ordinals,
+                    {
+                        item["attempt"]
+                        for item in recovered_attempts or []
+                        if item["case_id"] == entry_id and type(item["attempt"]) is int
+                    },
+                    (expected_attempt_ordinals_by_case or {}).get(entry_id),
+                ),
+            )
+        skipped = unscored - missing
 
         # Every attempt, also past the published caps: pass^k counts all k of them.
         pairing_cases[entry_id] = {
@@ -7774,6 +7811,7 @@ def collect_harbor_results(
                 expected_cases=with_expected_cases,
                 expected_case_ids=with_expected_case_ids,
                 expected_attempts_by_case=with_expected_attempts,
+                expected_attempt_ordinals_by_case=with_expected_ordinals,
                 recovered_attempts=with_recovered,
             )
             with_execution = _condition_execution_summary(
@@ -8030,6 +8068,7 @@ def collect_harbor_results(
                     expected_cases=without_expected_cases,
                     expected_case_ids=without_expected_case_ids,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                     recovered_attempts=without_recovered,
                 )
                 without_execution = _condition_execution_summary(

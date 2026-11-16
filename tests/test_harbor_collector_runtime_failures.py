@@ -2336,6 +2336,88 @@ def test_stop_on_pass_rejects_failed_attempt_before_pass(tmp_path: Path) -> None
     assert result["agents"]["opencode"]["trial_failures"]["with_skill"]
 
 
+def _crash_attempt(jobs_dir: Path, *, variant: str, case_id: str, attempt: int) -> None:
+    """Leave one attempt as an unrecovered agent crash instead of a scored trial."""
+    _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=attempt, score=1.0)
+    failure = {"exception_info": {"exception_type": "TaskFailure", "exception_message": "attempt crashed"}}
+    (jobs_dir / f"demo-opencode-{variant}" / f"{case_id}_attempt{attempt:03d}" / "result.json").write_text(
+        json.dumps(failure), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("crashed_variant", ["with", "without"])
+def test_stop_on_pass_crash_before_pass_is_missing_not_skipped(tmp_path: Path, crashed_variant: str) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        if variant == crashed_variant:
+            _crash_attempt(jobs_dir, variant=variant, case_id="case-a", attempt=1)
+            _write_reward(jobs_dir, variant=variant, case_id="case-a", attempt=2, score=1.0)
+        else:
+            _write_reward(jobs_dir, variant=variant, case_id="case-a", attempt=1, score=1.0)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=3, stop_on_pass=True, expected_cases=1, expected_case_ids=["case-a"])
+
+    agent = result["agents"]["opencode"]
+    arm = f"{crashed_variant}_skill"
+    other_arm = "without_skill" if crashed_variant == "with" else "with_skill"
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert (agent["conditions"][arm]["scored_attempts"], agent["conditions"][arm]["expected_attempts"]) == (1, 2)
+    partial = agent["pass_at_k"][arm]
+    assert partial["rate"] is None
+    case = partial["cases"]["case-a"]
+    assert case["passed"] is True and case["first_pass_attempt"] == 2
+    assert case["attempts_used"] == 1
+    # Attempt 1 crashed (a failed attempt, not a skipped one); only attempt 3 was never needed.
+    assert case["attempts_missing"] == 1
+    assert case["attempts_skipped"] == 1
+    # A pass that needed no earlier retry still skips the unused attempts on the healthy arm.
+    healthy = agent["pass_at_k"][other_arm]["cases"]["case-a"]
+    assert (healthy["attempts_missing"], healthy["attempts_skipped"]) == (0, 2)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "denied", "missing", "skipped"),
+    [
+        pytest.param({1: "crash", 3: "pass"}, [2], 1, 0, id="crash-then-denied-slot-then-pass"),
+        pytest.param({2: "crash", 3: "pass"}, [1], 1, 0, id="denied-first-slot-then-crash-then-pass"),
+        pytest.param({1: "fail", 3: "pass"}, [2], 0, 0, id="scored-fail-then-denied-slot-then-pass"),
+        pytest.param({2: "pass"}, [1], 0, 1, id="denied-first-slot-then-pass"),
+        pytest.param({1: "pass"}, [2], 0, 1, id="pass-then-denied-slot"),
+    ],
+)
+def test_stop_on_pass_budget_denied_slots_are_neither_missing_nor_skipped(
+    tmp_path: Path, outcomes: dict[int, str], denied: list[int], missing: int, skipped: int
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for attempt, outcome in outcomes.items():
+        if outcome == "crash":
+            _crash_attempt(jobs_dir, variant="with", case_id="case-a", attempt=attempt)
+        else:
+            _write_reward(
+                jobs_dir, variant="with", case_id="case-a", attempt=attempt, score=1.0 if outcome == "pass" else 0.2
+            )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+    not_run = [
+        {"agent": "opencode", "arm": "with", "case_id": "case-a", "attempt": attempt, "reason": "budget_exhausted"}
+        for attempt in denied
+    ]
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+        budget_not_run=not_run,
+    )
+
+    case = result["agents"]["opencode"]["pass_at_k"]["with_skill"]["cases"]["case-a"]
+    assert case["passed"] is True
+    assert (case["attempts_missing"], case["attempts_skipped"]) == (missing, skipped)
+
+
 def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0, steps=("prepare",))

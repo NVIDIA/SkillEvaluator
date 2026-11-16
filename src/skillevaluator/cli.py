@@ -4014,6 +4014,10 @@ def evaluate(
     except (click.ClickException, click.exceptions.Exit):
         raise
     except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if not is_missing_tier3_extra(exc):
+            raise click.ClickException(str(exc)) from exc
         raise click.ClickException(
             "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
         ) from exc

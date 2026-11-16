@@ -950,6 +950,22 @@ def test_evaluate_without_the_tier3_extra_names_the_missing_extra(monkeypatch: p
     assert "Install skillevaluator[tier3]" in result.output
 
 
+def test_evaluate_keeps_an_unrelated_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def _broken_import(self, options, *, progress_reporter=None):
+        raise ModuleNotFoundError("No module named 'skillevaluator.tier3.missing'", name="skillevaluator.tier3.missing")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _broken_import, raising=True)
+    result = CliRunner().invoke(
+        cli, ["evaluate", str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "plain"]
+    )
+
+    assert result.exit_code == 1
+    assert "No module named 'skillevaluator.tier3.missing'" in result.output
+    assert "Install skillevaluator[tier3]" not in result.output
+
+
 def test_standalone_evaluate_refuses_a_non_canonical_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Refusing at the boundary beats a card that says the field was never recorded."""
     from skillevaluator.evaluation import EvaluationService

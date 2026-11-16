@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 from click.testing import CliRunner
-from tests.reporting.test_tier3_completed_agent_docs import _changelog_entry, _newer_than_0_9_0
+from tests.changelog_entries import changelog_entry, newer_than_0_9_0
 
 from skillevaluator.cli import cli
 from skillevaluator.tier3 import commands, workflow
@@ -236,11 +236,11 @@ def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shap
     # The entry is found by its opening words in any section, so a release that
     # moves Unreleased into a dated section keeps it valid. It must stay out of
     # 0.9.0 and older released sections.
-    release, subsection, entry = _changelog_entry(
+    release, subsection, entry = changelog_entry(
         "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
     )
     assert subsection == "### Documentation"
-    assert _newer_than_0_9_0(release), release
+    assert newer_than_0_9_0(release), release
     assert 'They reject it only in a `{"skill_name", "evals"}` dataset.' in entry
     assert (
         'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '

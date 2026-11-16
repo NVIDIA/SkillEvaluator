@@ -4659,8 +4659,17 @@
                             data: stepsData,
                             options: chartOptions({
                                 responsive: true,
-                                scales: { x: { ticks: { color: colors.tick, maxRotation: 45 }, grid: { color: colors.grid } }, y: { ticks: { color: colors.label }, grid: { display: false } } },
-                                plugins: { legend: { labels: { color: colors.label } } }
+                                scales: { x: { ticks: {
+                                    color: colors.tick, maxRotation: 0,
+                                    callback: function(value) {
+                                        var label = this.getLabelForValue(value);
+                                        return label.length > 24 ? (Number(value) + 1) + " · " + label.slice(0, 20) + "…" : label;
+                                    }
+                                }, grid: { color: colors.grid } }, y: { ticks: { color: colors.label }, grid: { display: false } } },
+                                plugins: {
+                                    legend: { labels: { color: colors.label } },
+                                    tooltip: { callbacks: { title: function(items) { return items.length ? items[0].label : ""; } } }
+                                }
                             })
                         });
                     }

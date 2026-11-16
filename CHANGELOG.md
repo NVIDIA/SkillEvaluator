@@ -230,6 +230,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The CI guide's `jq` quality gate fails when a report has no quality score
   (it passed before) and checks every skill's report in a folder run.
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
 
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
@@ -291,16 +293,25 @@ All notable changes to SkillEvaluator are documented in this file.
   error when all admitted attempts succeed, including stop-on-pass runs. Reused
   baselines are not promoted to overall scores when with-skill attempts are
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
 - Claude Code `harness` results count `when_to_use` toward the 1,536-character
   listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
   and cuts that whole text, so a long `when_to_use` loses its end.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.

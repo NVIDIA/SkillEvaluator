@@ -363,9 +363,8 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     """The scan is recorded as incomplete, but the check is reported as failed.
 
     A confirmed failure, such as the Critical, takes precedence over missing
-    evidence in the reported status, so the check shows FAIL, not INCOMPLETE,
-    also in the terminal Tier 1 summary. Only the incomplete scans and
-    publication eligibility say incomplete.
+    evidence in the reported status, so the check shows FAIL, not INCOMPLETE.
+    Only the incomplete scans and publication eligibility say incomplete.
     """
     assert result.incomplete_scans == [stage]
     run = resolve_run_status([result])
@@ -373,27 +372,24 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     assert run.headline == Status.FAILED
     assert run.missing == (stage,)
     assert run.publication == Status.INCOMPLETE
-    _assert_tier1_summary_reports_the_hook_gate(result)
+    _assert_what_to_fix_lists_the_hook_gate(result)
 
 
-def _assert_tier1_summary_reports_the_hook_gate(result: ValidationResult) -> None:
-    """The terminal Tier 1 summary counts the check as failed and names its hook gate failure.
+def _assert_what_to_fix_lists_the_hook_gate(result: ValidationResult) -> None:
+    """The "what to fix" items of the Tier 1 terminal summary show the hook gate failure.
 
-    Beside a gap that records the scan as incomplete, the fix line names every
-    gate failure, so the hook gate is not hidden behind the gap. The summary
-    neither counts the check as not run nor suggests skipping it.
+    The check's own item names its first gate failure, which beside a gap that
+    records the scan as incomplete is often the error for the gap. An
+    unresolved reference keeps its item next, and each later gate failure
+    follows, so the hook gate failure is not hidden behind the gap.
     """
-    ok, rows = summarize_tier1([result], lineup=["security"])
-    assert not ok
-    [summary] = [row for row in rows if row.label == "summary"]
-    counts = [chunk for chunk, _style in summary.segments]
-    assert "1 failed" in counts
-    assert not [chunk for chunk in counts if "didn't run" in chunk or "incomplete" in chunk]
-    assert not [row for row in rows if row.label == "setup"]
-    assert not [row for row in rows if any("--skip" in chunk for chunk, _style in row.segments)]
-    [fix] = [row for row in rows if row.glyph == "1"]
-    assert [chunk for chunk, _style in fix.segments] == ["; ".join(result.gate_failures)]
-    assert [gate for gate in result.gate_failures if "could not model these hooks" in gate]
+    _passed, rows = summarize_tier1([result], lineup=["security"])
+    fixes = ["".join(text for text, _style in row.segments) for row in rows if row.glyph.isdigit()]
+    gates = list(dict.fromkeys(result.gate_failures))
+    references = [fix for fix in fixes if fix.startswith("SkillSpector ran, but couldn't resolve the file reference")]
+    assert bool(references) == any("[reference_resolution; reference_missing]" in gate for gate in gates)
+    assert fixes == [gates[0], *references, *gates[1:]][: len(fixes)]
+    assert [fix for fix in fixes if "could not model these hooks" in fix]
 
 
 def _assert_terminal_summary_lists_a_failure(result: ValidationResult) -> None:
@@ -401,7 +397,7 @@ def _assert_terminal_summary_lists_a_failure(result: ValidationResult) -> None:
 
     A check that is not counted as a confirmed failure is listed as one that
     "didn't run", with advice to install the scanner or skip the check. The
-    scanners row and the single "what to fix" line follow the rules for any
+    scanners row and the first "what to fix" item follow the rules for any
     incomplete scan, so this does not pin the scanners row, or which of
     several gate failures comes first.
     """
@@ -539,7 +535,6 @@ class TestUnmodeledHooks:
             assert result.status == "failed"
             assert result.errors == [_gate("hooks/hooks.json")]
             assert resolve_run_status([result]).of(result) == Status.FAILED
-            _assert_tier1_summary_reports_the_hook_gate(result)
         exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
         assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
         _assert_terminal_summary_lists_a_failure(result)

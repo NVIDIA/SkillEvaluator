@@ -787,10 +787,10 @@ All notable changes to SkillEvaluator are documented in this file.
   failure are a confirmed failure, also when a `--policy` override lowers the
   Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
   a `static_parse_limit` row on the manifest, so that scan is recorded as
-  incomplete in the same way. In the terminal Tier 1 summary, the "what to
-  fix" line for a check that failed beside an incomplete scan names every gate
-  failure, not only the first one, so it shows the hook gate failure beside
-  the error for the gap.
+  incomplete in the same way. In the terminal Tier 1 summary, "what to fix"
+  for a check that failed beside an incomplete scan also lists its other gate
+  failures, after its first one and any unresolved file reference, so it
+  shows the hook gate failure, not only the error for the gap.
 
 - `validate` no longer repeats its header box in short terminal windows or
   when a log warning prints mid-run. Only the tier that is still running is

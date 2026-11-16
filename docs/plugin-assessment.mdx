@@ -97,7 +97,8 @@ run proceeds.
 
 ```bash
 skillevaluator tier3 evaluate-plugin ./my-plugin \
-  --agents claude-code --plugin-load wrapper -r json,html
+  --agents claude-code --plugin-load wrapper \
+  --results-dir ./runtime-results -r json,html
 ```
 
 A plugin run, from `tier3 evaluate-plugin` or the agent stage of `validate`, writes

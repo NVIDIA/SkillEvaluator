@@ -95,13 +95,26 @@ def run_context_optimization_check(
     llm_model: str | None = None,
     catalog: Path | None = None,
     llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> list[ValidationResult]:
+    from skillevaluator.deduplication.plugin.context_budget import validate_plugin_context_limits
     from skillevaluator.tier2.plugin_commands import plugin_target, run_public_plugin_dedup
 
+    validate_plugin_context_limits(max_chunks, max_scalar_comparisons)
     if (target := plugin_target(skill_path)) is not None:
         return run_public_plugin_dedup(
-            target, threshold=threshold, model=model, llm_model=llm_model, catalog=catalog, llm_verdict=llm_verdict
+            target,
+            threshold=threshold,
+            model=model,
+            llm_model=llm_model,
+            catalog=catalog,
+            llm_verdict=llm_verdict,
+            **({"max_chunks": max_chunks} if max_chunks is not None else {}),
+            **({"max_scalar_comparisons": max_scalar_comparisons} if max_scalar_comparisons is not None else {}),
         )
+    if max_chunks is not None or max_scalar_comparisons is not None:
+        raise ValueError("Plugin context limits require a plugin target")
 
     def _run() -> ValidationResult:
         validator = IntraSkillValidator(
@@ -122,6 +135,8 @@ def run_dedup_scan(
     model: str | None = None,
     catalog: Path | None = None,
     llm_verdict: bool = False,
+    max_chunks: int | None = None,
+    max_scalar_comparisons: int | None = None,
 ) -> list[ValidationResult]:
     return run_context_optimization_check(
         skill_path,
@@ -130,6 +145,8 @@ def run_dedup_scan(
         llm_model=llm_model,
         catalog=catalog,
         llm_verdict=llm_verdict,
+        **({"max_chunks": max_chunks} if max_chunks is not None else {}),
+        **({"max_scalar_comparisons": max_scalar_comparisons} if max_scalar_comparisons is not None else {}),
     )
 
 

@@ -398,6 +398,48 @@ def _tier2_skill_argument(func):
     return click.argument("skill_path", type=click.Path(exists=True, resolve_path=False, path_type=Path))(func)
 
 
+def _plugin_context_options(*, grouped=False):
+    from skillevaluator.deduplication.plugin.context_budget import (
+        PLUGIN_CONTEXT_CHUNK_CEILING,
+        PLUGIN_CONTEXT_SCALAR_CEILING,
+    )
+
+    def decorate(func):
+        style = {"cls": GroupedOption, "help_group": _TIER2_GROUP} if grouped else {}
+        func = click.option(
+            "--plugin-context-max-chunks",
+            type=click.IntRange(1, PLUGIN_CONTEXT_CHUNK_CEILING),
+            default=None,
+            help="Maximum context chunks across plugin members (default: 512).",
+            **style,
+        )(func)
+        return click.option(
+            "--plugin-context-max-scalar-comparisons",
+            type=click.IntRange(1, PLUGIN_CONTEXT_SCALAR_CEILING),
+            default=None,
+            help="Maximum aggregate plugin context pair comparisons times vector dimensions (default: 25000000).",
+            **style,
+        )(func)
+
+    return decorate
+
+
+def _plugin_context_overrides(max_chunks, max_scalar_comparisons):
+    return {
+        name: value
+        for name, value in (("max_chunks", max_chunks), ("max_scalar_comparisons", max_scalar_comparisons))
+        if value is not None
+    }
+
+
+def _require_plugin_context_target(path, options):
+    if options:
+        from skillevaluator.cli_core import detect_content_type
+
+        if detect_content_type(path) != "plugin":
+            raise click.UsageError("Plugin context limits require a plugin target.")
+
+
 def _reject_linked_tier2_root(path: Path) -> None:
     if is_link_or_reparse(path):
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
@@ -815,7 +857,7 @@ def _report_formats_explicit() -> bool:
     return False
 
 
-def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
+def _run_dedup_or_skip(target_path: Path, **context_options) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
     Dedup is on by default for ``validate`` but needs the ``tier2`` extra and an
@@ -857,7 +899,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         resolve_embedding_provider()
     except ProviderConfigurationError as exc:
         return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
-    return run_dedup_scan(target_path)
+    return run_dedup_scan(target_path, **context_options)
 
 
 def _partial_agent_eval_result(
@@ -2653,6 +2695,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 )
 @_plugin_static_options
 @_plugin_run_options
+@_plugin_context_options(grouped=True)
 @_report_options
 def validate(
     target_path: Path,
@@ -2675,6 +2718,8 @@ def validate(
     external: bool,
     policy_path: Path | None,
     dedup: bool,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
     block_on_agent_eval: bool | None,
@@ -2777,6 +2822,9 @@ def validate(
             if resolved_type != CONTENT_TYPE_PLUGIN and detect_content_type(target_path) == CONTENT_TYPE_PLUGIN:
                 resolved_type = CONTENT_TYPE_PLUGIN
     target_path = target_path.absolute() if resolved_type == CONTENT_TYPE_PLUGIN else target_path.resolve()
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    if context_options and resolved_type != CONTENT_TYPE_PLUGIN:
+        raise click.UsageError("Plugin context limits require a plugin target.")
     from skillevaluator.publication_identity import publication_target_name
 
     # A case- or normalization-insensitive filesystem lets an alias such as
@@ -3029,7 +3077,9 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path)
+        tier2_results = _run_dedup_or_skip(
+            plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path, **context_options
+        )
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:
@@ -3691,12 +3741,15 @@ def similarity_check(
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option("--llm-model", default=None, help="LLM model override.")
+@_plugin_context_options()
 @_report_options
 def context_optimization_check(
     skill_path: Path,
     threshold: float,
     model: str | None,
     llm_model: str | None,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -3704,8 +3757,12 @@ def context_optimization_check(
     from skillevaluator.tier2.commands import run_context_optimization_check
 
     _reject_linked_tier2_root(skill_path)
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    _require_plugin_context_target(skill_path, context_options)
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
+    results = run_context_optimization_check(
+        skill_path, threshold=threshold, model=model, llm_model=llm_model, **context_options
+    )
     sanitize_tier2_results(results, skill_path)
     if not emit_reports(
         results,
@@ -3730,6 +3787,7 @@ def context_optimization_check(
     help="Compare plugin members against a local catalog.",
 )
 @click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@_plugin_context_options()
 @_report_options
 def dedup_scan(
     skill_path: Path,
@@ -3738,6 +3796,8 @@ def dedup_scan(
     model: str | None,
     catalog: Path | None,
     llm_verdict: bool,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -3750,6 +3810,8 @@ def dedup_scan(
         if plugin_target(skill_path) is None:
             raise click.UsageError("--catalog and --llm require a plugin target.")
     _reject_linked_tier2_root(skill_path)
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    _require_plugin_context_target(skill_path, context_options)
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
     _reject_catalog_report_collisions(
         catalog, report_formats=report_formats, output_dir=output_dir, basename=report_basename("dedup")
@@ -3759,6 +3821,7 @@ def dedup_scan(
         threshold=threshold,
         llm_model=llm_model,
         model=model,
+        **context_options,
         **({"catalog": catalog, "llm_verdict": llm_verdict} if catalog is not None or llm_verdict else {}),
     )
     sanitize_tier2_results(results, skill_path, catalog)

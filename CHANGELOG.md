@@ -263,6 +263,9 @@ reviewed source revision.
   `environment`.
 - `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
   sandbox environment, in the agent evaluation summary and the evaluation dataset header.
+- Bounded plugin context resource options on `validate` and Tier 2 context
+  commands, with unchanged defaults, actual remaining aggregate work accounting,
+  consistent embedding dimensions, and configured/consumed budgets in reports.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
@@ -1587,6 +1590,18 @@ reviewed source revision.
   records explicit skips; malformed dependency parsing remains non-green.
   Aggregate limits are unchanged and reported with their observed counts.
 
+
+- Plugin context analysis shares measured aggregate work budgets across members
+  instead of dividing them equally. Explicit bounded chunk and scalar-comparison
+  allowances support larger bundles without changing the default limits, and
+  retained reports record configured and consumed work.
+- Retained aggregate Harbor jobs include a provenance log identifying their real
+  source jobs, allowing Harbor analysis to discover the merged trials without
+  implying an independent execution.
+- Plugin runtime preparation applies effective policy severity overrides. Saved
+  reports retain preparation limitations without live engine state, and MCP
+  environment grants are validated as CLI options before work starts. Plugin
+  documentation explains scoped grants and runtime output locations.
 
 ## 0.9.0 - 2026-11-13
 

@@ -135,6 +135,72 @@ def _live_report_source(tmp_path):
     return source
 
 
+@pytest.mark.parametrize("promote", [True, False], ids=["promoted-medium-blocks", "demoted-high-runs"])
+@pytest.mark.parametrize("surface", ["standalone", "combined"])
+def test_plugin_cli_policy_controls_runtime_preparation(tmp_path, monkeypatch, promote, surface):
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _live_report_source(tmp_path)
+    member = source / "skills/a/SKILL.md"
+    member.parent.mkdir(parents=True)
+    member.write_text("---\nname: a\ndescription: Fixture member.\n---\nBody.\n", encoding="utf-8")
+    (member.parent / "evals").mkdir()
+    (member.parent / "evals/evals.json").write_text('[{"id":"one","prompt":"Use a."}]', encoding="utf-8")
+    policy = tmp_path / "policy.yml"
+    if promote:
+        manifest = source / ".cursor-plugin/plugin.json"
+        manifest.parent.mkdir()
+        manifest.write_text('{"name":"other"}', encoding="utf-8")
+        policy.write_text("severity_overrides:\n  PLUGIN_SCHEMA.plugin_manifest_conflict: high\n", encoding="utf-8")
+    else:
+        (source / ".claude-plugin/plugin.json").write_text(
+            json.dumps({"name": "demo", "mcpServers": {"server": {"command": "npx", "args": ["demo@latest"]}}}),
+            encoding="utf-8",
+        )
+        policy.write_text("severity_overrides:\n  MCP_DECLARATION.*: low\n", encoding="utf-8")
+    engine_roots = []
+
+    def engine(self, options, *, progress_reporter=None):
+        engine_roots.append(options.skill_path)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    command = ["tier3", "evaluate-plugin"] if surface == "standalone" else ["validate"]
+    arguments = [
+        *command,
+        str(source),
+        "--agents",
+        "opencode",
+        "--policy",
+        str(policy),
+        "-r",
+        "cli",
+        "-o",
+        str(tmp_path / "reports"),
+    ]
+    if surface == "combined":
+        from skillevaluator.models.result import ValidationResult
+
+        # The runtime policy boundary is real; unrelated external Tier 1 scanners do not run in this test.
+        monkeypatch.setattr(
+            "skillevaluator.cli.run_validation",
+            lambda *_args, **_kwargs: [ValidationResult(validator_name="Static scanner boundary")],
+        )
+        arguments.extend(
+            ["--type", "plugin", "--tiers", "1,3", "--no-autopilot", "--continue-on-failure", "--block-on-agent-eval"]
+        )
+    else:
+        arguments.extend(["--progress", "off"])
+    result = CliRunner().invoke(cli, arguments)
+    if promote:
+        assert result.exit_code != 0 and "plugin_manifest_conflict" in result.output
+        assert engine_roots == []
+    else:
+        if surface == "standalone":
+            assert result.exit_code == 0, (result.output, result.exception)
+        assert len(engine_roots) == 1 and not engine_roots[0].exists()
+
+
 def _scored_run(results, run_id, score):
     run_dir = results / "demo" / run_id
     summary = run_dir / "opencode/with-skill/summary.json"

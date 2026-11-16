@@ -12,10 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import Any
 
-if TYPE_CHECKING:
-    from skillevaluator.validators.policy import ValidationPolicy
+# Public dataclass annotations must remain resolvable by API schema consumers.
+from skillevaluator.validators.policy import ValidationPolicy
 
 # Bounds on ``PluginOptions.probe_mcp_env``: how many grants, and the length of each.
 MAX_PROBE_MCP_ENV_GRANTS = 64
@@ -124,11 +124,9 @@ class PluginOptions:
 
     def __post_init__(self) -> None:
         from skillevaluator.validators.plugin_policy import normalize_plugin_allowlist
-        from skillevaluator.validators.policy import ValidationPolicy
 
         if self.policy is not None and not isinstance(self.policy, ValidationPolicy):
             raise ValueError("policy must be a ValidationPolicy")
-
         object.__setattr__(
             self,
             "allowed_private_hosts",

@@ -16,7 +16,10 @@ def test_public_retry_option_is_a_bounded_integer(value):
         PluginOptions(trial_retries=value)
 
 
-@pytest.mark.parametrize("field,value", [("plugin_load", "other"), ("lift_mode", "other"), ("probe_mcp", 1)])
+@pytest.mark.parametrize(
+    "field,value",
+    [("plugin_load", "other"), ("lift_mode", "other"), ("probe_mcp", 1), ("policy", {}), ("policy", "default")],
+)
 def test_public_options_validate_direct_api_values(field, value):
     with pytest.raises(ValueError, match=field):
         PluginOptions(**{field: value})
@@ -318,6 +321,44 @@ def test_policy_that_lowers_a_blocking_finding_lets_the_run_start(tmp_path, monk
 def test_plugin_policy_must_be_a_validation_policy(value):
     with pytest.raises(ValueError, match="policy"):
         PluginOptions(policy=value)
+
+
+@pytest.mark.parametrize("promote", [True, False], ids=["promoted-medium-blocks", "demoted-high-runs"])
+def test_runtime_preparation_uses_effective_policy_severity(tmp_path, monkeypatch, promote):
+    from skillevaluator.models.result import Severity
+    from skillevaluator.tier3.plugin_prepare import PreparationError
+    from skillevaluator.validators.policy import ValidationPolicy
+
+    root = _plugin(tmp_path / "plugin")
+    if promote:
+        manifest = root / ".cursor-plugin/plugin.json"
+        manifest.parent.mkdir()
+        manifest.write_text('{"name":"other"}', encoding="utf-8")
+        overrides = {"PLUGIN_SCHEMA.plugin_manifest_conflict": Severity.HIGH}
+    else:
+        (root / ".claude-plugin/plugin.json").write_text(
+            json.dumps({"name": "demo", "mcpServers": {"server": {"command": "npx", "args": ["demo@latest"]}}}),
+            encoding="utf-8",
+        )
+        overrides = {"MCP_DECLARATION.*": Severity.LOW}
+    engine_roots = []
+
+    def engine(self, options, *, progress_reporter=None):
+        engine_roots.append(options.skill_path)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    options = PluginOptions(policy=ValidationPolicy(severity_overrides=overrides))
+    if promote:
+        with pytest.raises(PreparationError, match="plugin_manifest_conflict"):
+            EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"), plugin_options=options)
+        assert engine_roots == []
+    else:
+        result = EvaluationService().evaluate_plugin(
+            EvaluationOptions(root, agents="claude-code"), plugin_options=options
+        )
+        assert result["execution_status"] == "succeeded"
+        assert len(engine_roots) == 1 and not engine_roots[0].exists()
 
 
 def _scored_run(run_dir):

@@ -88,6 +88,26 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         catalog_known = bool(members) and scope == "across"
         pairwise_only = bool(members) and scope == "across"
         for result in members:
+            budget = result.metadata.get("plugin_context_budget")
+            if isinstance(budget, dict):
+                limits, consumed = budget.get("limits"), budget.get("consumed")
+                if (
+                    isinstance(limits, dict)
+                    and isinstance(consumed, dict)
+                    and all(
+                        _count(source.get(key)) is not None
+                        for source, key in (
+                            (limits, "chunks"),
+                            (limits, "scalar_comparisons"),
+                            (consumed, "chunks_collected"),
+                            (consumed, "scalar_comparisons"),
+                        )
+                    )
+                ):
+                    notes.append(
+                        f"Plugin context budget: {consumed['chunks_collected']}/{limits['chunks']} chunks collected; "
+                        f"{consumed['scalar_comparisons']}/{limits['scalar_comparisons']} scalar comparisons consumed."
+                    )
             details = {detail.check_name: detail.metadata for detail in result.success_details}
             indexed = details.get("index_built")
             entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None

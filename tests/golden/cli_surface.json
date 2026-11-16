@@ -503,6 +503,22 @@
           "type": "text"
         },
         {
+          "name": "plugin_context_max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "plugin_context_max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -716,6 +732,22 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "name": "plugin_context_max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "plugin_context_max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
+          ],
+          "param_type": "option",
+          "type": "integer range"
         },
         {
           "choices": [
@@ -2685,6 +2717,22 @@
               "type": "text"
             },
             {
+              "name": "plugin_context_max_scalar_comparisons",
+              "opts": [
+                "--plugin-context-max-scalar-comparisons"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "plugin_context_max_chunks",
+              "opts": [
+                "--plugin-context-max-chunks"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -2767,6 +2815,22 @@
               ],
               "param_type": "option",
               "type": "boolean"
+            },
+            {
+              "name": "plugin_context_max_scalar_comparisons",
+              "opts": [
+                "--plugin-context-max-scalar-comparisons"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "name": "plugin_context_max_chunks",
+              "opts": [
+                "--plugin-context-max-chunks"
+              ],
+              "param_type": "option",
+              "type": "integer range"
             },
             {
               "choices": [
@@ -6090,6 +6154,22 @@
           "name": "trial_retries",
           "opts": [
             "--trial-retries"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "plugin_context_max_scalar_comparisons",
+          "opts": [
+            "--plugin-context-max-scalar-comparisons"
+          ],
+          "param_type": "option",
+          "type": "integer range"
+        },
+        {
+          "name": "plugin_context_max_chunks",
+          "opts": [
+            "--plugin-context-max-chunks"
           ],
           "param_type": "option",
           "type": "integer range"

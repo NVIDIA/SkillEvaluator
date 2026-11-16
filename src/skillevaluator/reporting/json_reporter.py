@@ -519,6 +519,9 @@ class JSONReporter(ReporterBase):
         work_limit = result.metadata.get("work_limit")
         if isinstance(work_limit, dict):
             data["work_limit"] = work_limit
+        context_budget = result.metadata.get("plugin_context_budget")
+        if isinstance(context_budget, dict):
+            data["plugin_context_budget"] = context_budget
 
         return data
 

@@ -377,9 +377,42 @@ entries when each skill has a directory and `SKILL.md`. Collections with more
 supporting files or deeper layouts may reach the path ceiling before the
 selected-entry budget.
 
+Selected manifests also share a fixed 8 MiB input-byte budget, with a 1 MiB
+per-manifest limit. Both apply to the complete manifest bytes even in the
+default description-only embedding mode; supporting files count toward
+discovered paths, but not these selected-manifest byte totals. For example,
+2,500 manifests averaging 4 KiB exceed the collection byte budget even though
+the entry count fits. Discovery stops with an explicit error before embedding;
+`--max-entries` and `--max-scalar-comparisons` do not raise either byte limit.
+Check total manifest sizes as well as path counts before planning a scale run.
+
 For a saved catalog query, `--max-entries` does not reduce the catalog's existing
 5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
 bounded by `--max-scalar-comparisons`.
+
+### Measured real-provider scale examples
+
+Qualification with public-skill fixtures and real 2,048-dimensional NVIDIA Build
+embeddings measured these examples, **not guaranteed entry-count limits**:
+
+| Workload | Measured example |
+| --- | --- |
+| Saved description-mode catalog within 32 MiB | About 1,000 entries; 1,024 independently built, saved, reloaded and queried |
+| Saved full-body catalog within 32 MiB | About 800 entries in serializer/reload replay; 512 independently built, saved, reloaded and queried |
+| In-memory pairwise comparison and candidate/text queries | Qualified to 5,000 description-mode entries, without saving that catalog |
+
+Replay of the retained provider vectors found fitting saved-catalog prefixes of
+1,283 description-mode and 827 full-body entries. These storage measurements are
+fixture-dependent, not additional end-to-end provider runs. Metadata, paths,
+dimensions and vector float representations affect serialized size. The public
+5,000-entry fixture used manifest projections and relocated copies, not 5,000
+distinct full skill bodies.
+
+The 5,000-entry pairwise run explicitly allowed 25,594,880,000 scalar comparisons
+and 5,000 selected entries; it did not fit the default comparison budget. Its
+saved catalog exceeded 32 MiB. In-memory qualification does **not** qualify dense
+persistence at that size. No file format or limit changes follow from these
+measurements; check your own workload against every independent budget.
 
 ### Reproduce scale and limit measurements
 
@@ -426,7 +459,8 @@ existing set — save the collection once and query candidates against it.
     ```
 
     `--save-catalog` builds a versioned JSON catalog from the supplied
-    collection.
+    collection. Catalogs use compact JSON so formatting whitespace does not
+    consume the 32 MiB file budget; vector values and the schema are unchanged.
   </Step>
   <Step title="Screen a candidate">
     ```bash title="Compare one candidate against the catalog"

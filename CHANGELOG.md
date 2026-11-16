@@ -6,6 +6,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document measured real-provider saved-catalog scale separately from 5,000-entry
+  in-memory qualification, as fixture-dependent examples rather than guarantees.
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
+  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -149,11 +160,27 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `skillevaluator` agent skill now asks the user before installing an
+  extra, using a credential, spending on a Tier 3 run or using `--env-mode
+  local`. It also asks for real tasks and outcomes before writing eval cases,
+  explains that Tier 3 needs its own provider key, and reports no verdict for a
+  tier that could not run. Its own `evals/evals.json` gains eight cases
+  covering these prompts, including consent before cold scanner provisioning.
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
+- The bundled `text-analyzer` example skill's description now says when to use it and
+  lists sentence count and average word length, so Codex reads the skill before using it.
+  The example's quality score is now 88.8/100 with 5 findings (was 86.2 with 6).
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
   rubric and LLM security verification did not run. The same default applies to
   SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- The `skillevaluator` agent skill now tells the agent that a gateway key works
+  through the `openai-compatible` provider, that a failed Tier 1 gate and a high
+  quality grade are two separate results, and that `Publication eligibility:
+  Incomplete` after a passing keyless run is expected.
 - SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
   to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
   the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
@@ -228,6 +255,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
 - The CI guide's `jq` quality gate fails when a report has no quality score
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
@@ -235,6 +265,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - The GitHub Actions CI recipe in `ci-integration.mdx` verifies the downloaded
   Gitleaks archive against a pinned SHA-256 digest before extracting it.
 
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
@@ -251,10 +286,11 @@ All notable changes to SkillEvaluator are documented in this file.
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
-  directly (`pip install skillevaluator`, then
-  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
-  with `skillevaluator ci init` or a CI template, or install the agent skill with
-  `npx skills add NVIDIA/SkillEvaluator`.
+  directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
+  in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
+  add checks to your repository with `skillevaluator ci init`, or install the
+  agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
+  its guide on docs.nvidia.com.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -290,6 +326,64 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The bundled skill's implicit dataset case expects clarification when real
+  requests and outcomes are missing, matching the skill's case-authoring rule.
+
+- Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
+- HTML reports retain budget context for fully budget-denied runs without
+  restoring untrusted score evidence.
+- A trial where the agent runs the skill's own name as a shell command (for example
+  `text-analyzer input.txt`, `command not found`) is now scored as the agent's tool
+  choice instead of an undeclared environment dependency, unless the skill declares a
+  tool by that name.
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
+- `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
+  as "not supported". As on Harbor, the parse error is logged and the run continues
+  without MCP servers; a file that declares servers is still rejected.
+- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
+  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
+  yet, and OpenCode currently fails in Gym's agent setup.
+- `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
+  and errors. Provider, model and base-URL names stay readable, as on Harbor.
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
+- Benchmark methodology describes the Overall row's shared comparison basis
+  rather than the headline with-skill score, in Tier 3 and publication cards.
+- BENCHMARK cards explain the required with-skill goal and security case checks
+- HTML reports explain the required with-skill goal and security case checks
+  that can fail quality even when all dimensions pass.
+- `--backend nemo-gym` with `SKILL_EVAL_NEMO_GYM_MODEL_URL` set now requires a
+  model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
+  run starts. It no longer sends the evaluator provider's default model name to
+  that endpoint.
+- Make the directory-snapshot mutation test independent of filesystem timestamp
+  granularity while preserving the late-entry race.
+- Make the MCP-staging restored-mtime race regression independent of filesystem
+  clock granularity by modeling an advanced ctime.
+- HTML reports preserve successful execution when Tier 3 quality fails, avoiding
+  spurious notices that other execution failures need attention.
+- Make the same-inode read-race regression use an observable mtime change without
+  depending on filesystem clock granularity.
+- Make the onboarding URL-rewrite test use its temporary global Git config even
+  when the caller sets `GIT_CONFIG_GLOBAL`.
+- The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
+  and 1 MiB per-manifest limit, including in description-only embedding mode.
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
+- `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
+  now say to install `skillevaluator[tier3]` instead of printing only
+  `Error: No module named 'harbor'`.
+- Tier 3 benchmark headlines use the completed agent's quality verdict, matching
+  the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused
@@ -300,6 +394,18 @@ All notable changes to SkillEvaluator are documented in this file.
 - Claude Code `harness` results count `when_to_use` toward the 1,536-character
   listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
   and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.
@@ -637,6 +743,16 @@ All notable changes to SkillEvaluator are documented in this file.
   reports show budget exhaustion, not-run attempts, overruns, and unverified
   usage. Budget-stopped runs have an incomplete summary verdict; admitted
   scores remain visible and their lift is not a complete-run skill-effect claim.
+- Tier 3 security grading no longer reads a shell startup file as written
+  when a command only sources it, or names a longer path that contains its
+  name without a redirection, `tee` or `sed -i` into that path:
+  `source ~/.bashrc; npm test 2>&1 | tail -20` and
+  `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
+  Security 0.0 and now score 1.0, in both the host checker and the bundled
+  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` still
+  scores 0.0. This amends the 0.9.0 note that every command that scored 0.0
+  in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
+  `cat ~/.bashrc 2>/dev/null`, still score 0.0.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized
@@ -812,6 +928,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `--pii-waivers` entry that accepted such an address now matches no finding,
   so it is reported as a LOW `stale-pii-waiver` instead of an INFO
   `applied-pii-waiver` and can be removed.
+- A Tier 3 trial that fails because Docker has no free network address pools
+  now names that cause, and how to clean up, right after the exception type in
+  its failure reason, which used to cut Docker's error off after the long
+  Compose command. The documented cleanup for interrupted or killed runs now
+  also lists and removes the trials' leftover Compose networks, which are what
+  use up the pools.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded
@@ -934,6 +1056,17 @@ All notable changes to SkillEvaluator are documented in this file.
   rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
+- `validate path/to/SKILL.md` and `validate path/to/workflow-rules.mdc` now
+  validate the folder that holds the file, as passing the folder does, so a
+  file inside a symlinked folder is now refused unless `--no-dedup` is passed,
+  as that folder is. Before, Tier 1 and Tier 2 received the file itself:
+  `schema`, `version` and `quality` failed with `No skills found` for a skill,
+  and `schema` with `No workflow directories found` for a workflow; a run
+  narrowed with `--checks` could pass without scanning the skill's other files;
+  and a run from inside the skill wrote its reports into it. Tier 3 also
+  received a `workflow-rules.mdc` file itself; it now receives the workflow
+  folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
+  when the file is a symlink to a file with another name.
 
 ## 0.9.0 - 2026-11-13
 

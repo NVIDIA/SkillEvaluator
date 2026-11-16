@@ -411,6 +411,10 @@ class JSONReporter(ReporterBase):
         if result.metadata.get("confirmed_failure") is True:
             data["confirmed_failure"] = True
 
+        optional_skip = result.metadata.get("optional_skip")
+        if type(optional_skip) is bool:
+            data["optional_skip"] = optional_skip
+
         for key in (TIER1_REQUIRED_CHECKS_KEY, TIER1_UNSCANNED_PATHS_KEY):
             if key in result.metadata:
                 data[key] = _tier1_scope_strings(result.metadata[key], key)

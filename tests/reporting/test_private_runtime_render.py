@@ -6,6 +6,7 @@ from __future__ import annotations
 import html
 import importlib
 import json
+import re
 import subprocess
 import sys
 from copy import deepcopy
@@ -112,9 +113,6 @@ def test_all_six_formats_compose_static_and_runtime_without_losing_shared_facts(
             "Plugin runtime evidence",
             "runtime-demo",
             "retained-run-7",
-            "Execution status: succeeded",
-            "Evidence status: incomplete",
-            "Advisory observations do not change scores or validation gates.",
             "docs-server",
             "unverified",
             "Wrapper effect",
@@ -123,6 +121,12 @@ def test_all_six_formats_compose_static_and_runtime_without_losing_shared_facts(
             "static-demo",
         ):
             assert marker in document, (name, marker)
+        if name == "html":
+            assert "Evidence incomplete · execution succeeded · advisory snapshot" in document
+        else:
+            assert "Execution status: succeeded" in document
+            assert "Evidence status: incomplete" in document
+            assert "Advisory observations do not change scores or validation gates." in document
     assert 'id="plugin-runtime-evidence"' in output["html"]
     assert 'class="contributor-table plugin-runtime-table"' in output["html"]
     assert output["html"].count('id="plugin-static-evidence"') == 1
@@ -151,9 +155,21 @@ def test_runtime_markup_stays_inert_in_html_markdown_and_rich(monkeypatch, force
     raw["sections"][0]["notes"] = ['<iframe src="javascript:alert(1)"></iframe>']
     output = renderers().render_plugin_runtime_reports(bundle(), report=RetainedReport(raw), reporters=reporters())
 
-    fragment = output["html"].split('id="plugin-runtime-evidence"', 1)[1].split("</main>", 1)[0]
+    fragment = "".join(
+        re.findall(
+            r'<(?:section|details)\b[^>]*\bid="plugin-runtime-[^"]+"[^>]*>.*?</(?:section|details)>',
+            output["html"],
+            flags=re.DOTALL,
+        )
+    )
+    assert fragment
     assert "<script>" not in fragment and "<img " not in fragment and "<iframe " not in fragment
-    assert "&lt;script&gt;" in fragment and "&lt;img " in fragment and "&lt;iframe " in fragment
+    metadata = re.search(r'<details\b[^>]*id="run-metadata"[^>]*>.*?</details>', output["html"], re.DOTALL)
+    assert metadata is not None
+    assert " open" not in metadata.group().split(">", 1)[0]
+    assert "&lt;script&gt;" in fragment and "&lt;iframe " in fragment
+    assert "&lt;img " in metadata.group()
+    assert "<script>" not in metadata.group() and "<img " not in metadata.group()
     for name in ("markdown", "benchmark"):
         runtime = output[name].split("## Plugin runtime evidence", 1)[1]
         assert "<script>" not in runtime and "<img " not in runtime and "<iframe " not in runtime

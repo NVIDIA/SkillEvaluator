@@ -11,10 +11,37 @@ from urllib.parse import parse_qsl, urlsplit
 
 def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str, Any]:
     """Return display-safe Harbor links from a canonical Tier 3 payload."""
-    raw = agent_eval.get("harbor_viewer")
-    if not isinstance(raw, dict):
-        summary = agent_eval.get("summary")
-        raw = summary.get("harbor_viewer") if isinstance(summary, dict) else {}
+    primary = _normalize_harbor_viewer(agent_eval.get("harbor_viewer"))
+    if primary:
+        return primary
+    summary = agent_eval.get("summary")
+    return _normalize_harbor_viewer(summary.get("harbor_viewer") if isinstance(summary, dict) else None)
+
+
+def _normalize_harbor_upload_jobs(raw: object) -> list[dict[str, str]]:
+    """Project recorded upload URLs without deriving links or changing source data."""
+    jobs: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for upload in raw if isinstance(raw, list) else []:
+        if not isinstance(upload, dict):
+            continue
+        url = safe_url(upload.get("viewer_url") or upload.get("job_url"))
+        if not url or url in seen:
+            continue
+        seen.add(url)
+        job = {"url": url}
+        analysis = safe_url(upload.get("analysis_url"))
+        if analysis:
+            job["analysis_url"] = analysis
+        name = upload.get("uploaded_job_name") or upload.get("job_name") or upload.get("original_job_name")
+        if isinstance(name, str) and name.strip():
+            job["name"] = name.strip()
+        jobs.append(job)
+    return jobs
+
+
+def _normalize_harbor_viewer(raw: object) -> dict[str, Any]:
+    """Normalize one source before choosing primary or legacy summary evidence."""
     if not isinstance(raw, dict):
         return {}
 
@@ -43,6 +70,16 @@ def normalize_harbor_viewer_for_display(agent_eval: dict[str, Any]) -> dict[str,
         if item.get("name"):
             job["name"] = str(item["name"])
         jobs.append(job)
+    by_url = {job["url"]: job for job in jobs}
+    for uploaded in _normalize_harbor_upload_jobs(raw.get("uploads")):
+        retained = by_url.get(uploaded["url"])
+        if retained is None:
+            jobs.append(uploaded)
+            by_url[uploaded["url"]] = uploaded
+        else:
+            # Canonical metadata wins; enrich only the same validated job URL.
+            for key, value in uploaded.items():
+                retained.setdefault(key, value)
     if jobs:
         out["jobs"] = jobs
         out.setdefault("job_url", jobs[0]["url"])
@@ -93,6 +130,49 @@ def harbor_job_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
             job.pop("analysis_url", None)
         elif analysis:
             seen_analysis.add(analysis)
+    return jobs
+
+
+def harbor_job_display_links(agent_eval: dict[str, Any]) -> list[dict[str, str]]:
+    """Use exact recorded job associations for concise labels, retaining identifiers."""
+    labels: dict[str, list[str]] = {}
+
+    def record(trial: object, name: object, condition: str) -> None:
+        if not isinstance(name, str) or not name:
+            return
+        viewer = trial.get("harbor_viewer") if isinstance(trial, dict) else None
+        url = safe_url(viewer.get("job_url")) if isinstance(viewer, dict) else None
+        if url:
+            associated = labels.setdefault(url, [])
+            label = f"{name} · {condition}"
+            if label not in associated:
+                associated.append(label)
+
+    trials = agent_eval.get("trials")
+    if isinstance(trials, list):
+        for trial in trials:
+            if isinstance(trial, dict):
+                record(
+                    trial,
+                    trial.get("agent"),
+                    "Without skill" if agent_eval.get("mode") == "baseline_only" else "With skill",
+                )
+    agents = agent_eval.get("agents")
+    if isinstance(agents, dict):
+        for name, agent in agents.items():
+            if not isinstance(agent, dict):
+                continue
+            for key, condition in (("trials", "With skill"), ("trials_baseline", "Without skill")):
+                trials = agent.get(key)
+                if not isinstance(trials, list):
+                    continue
+                for trial in trials:
+                    record(trial, name, condition)
+    jobs = harbor_job_links(agent_eval)
+    for index, job in enumerate(jobs, 1):
+        job["display_label"] = "; ".join(labels.get(job.get("url", ""), [])) or (
+            "Run analysis" if job.get("name") == "Run analysis" else f"Job {index}"
+        )
     return jobs
 
 

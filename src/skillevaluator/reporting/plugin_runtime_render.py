@@ -6,7 +6,15 @@ from __future__ import annotations
 import json
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.plugin_static_render import _cli, _markdown, render_plugin_static_reports
+from skillevaluator.reporting.plugin_static import project_plugin_static
+from skillevaluator.reporting.plugin_static_render import (
+    _augment as _augment_static,
+)
+from skillevaluator.reporting.plugin_static_render import (
+    _cli,
+    _markdown,
+    render_plugin_static_reports,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Iterable
@@ -30,10 +38,7 @@ def _augment(reporter: ReporterBase, document: str, payload: dict) -> str:
         data["runs"][0].setdefault("properties", {})["pluginRuntime"] = payload
         return json.dumps(data, indent=reporter.indent, ensure_ascii=True, allow_nan=False)
     if reporter.name == "html":
-        fragment = reporter._env.get_template("plugin_runtime_sections.html.j2").render(plugin_runtime=payload)
-        if "</main>" not in document:
-            raise ValueError("The HTML reporter did not provide its main content boundary")
-        return document.replace("</main>", fragment + "\n</main>", 1)
+        raise ValueError("HTML runtime evidence must be supplied to render_all before rendering")
     options = {
         "title": _TITLE,
         "notice": _NOTICE,
@@ -52,7 +57,7 @@ def _augment(reporter: ReporterBase, document: str, payload: dict) -> str:
 def render_plugin_runtime_reports(
     results: list[ValidationResult],
     *,
-    report: RuntimePluginReport | None,
+    report: RuntimePluginReport | dict | None,
     reporters: Iterable[ReporterBase],
 ) -> dict[str, str]:
     """Compose static and runtime evidence without collecting or changing results.
@@ -61,8 +66,18 @@ def render_plugin_runtime_reports(
     does not add public dispatch or require an optional execution dependency.
     """
     selected = tuple(reporters)
-    rendered = render_plugin_static_reports(results, reporters=selected)
     if report is None:
-        return rendered
-    payload = report.payload()
-    return {reporter.name: _augment(reporter, rendered[reporter.name], payload) for reporter in selected}
+        return render_plugin_static_reports(results, reporters=selected)
+    projection = project_plugin_static(results)
+    static = projection.payload() if projection is not None else None
+    payload = report if isinstance(report, dict) else report.payload()
+    rendered = {}
+    for reporter in selected:
+        if reporter.name == "html":
+            rendered[reporter.name] = reporter.render_all(results, plugin_static=static, plugin_runtime=payload)
+            continue
+        document = reporter.render_all(results)
+        if projection is not None:
+            document = _augment_static(reporter, document, results, projection, static)
+        rendered[reporter.name] = _augment(reporter, document, payload)
+    return rendered

@@ -194,6 +194,20 @@ def test_incomplete_arm_states_and_counts(scored: int | None, expected: int, sta
         (["Missing scored attempts for cases: ParseError", "Scored attempt coverage is 1/2"], None),
         (["Excess scored attempts for cases: ParseError", TIMEOUT_ERROR], "agent timeout error"),
         (["Unexpected scored cases: ValueError"], None),
+        (
+            [
+                "Harbor evaluation statistics account for 1/2 completed trials; "
+                "trial case-1__attempt2 recorded RewardFileNotFoundError: reward.json missing",
+                TIMEOUT_ERROR,
+            ],
+            "reward file not found error",
+        ),
+        (
+            ["Without skill aggregate job: trial case-1 recorded harbor.trial.errors.VerifierTimeoutError"],
+            "verifier timeout error",
+        ),
+        (["trial case-1 recorded reward.json missing"], None),
+        (["trial FakeError recorded reward.json missing"], None),
         (["Scored attempt coverage is 1/2", "Unscoreable reward in case-1__attempt2: judge failed"], None),
         ("AgentTimeoutError: not a list", None),
     ],
@@ -503,7 +517,7 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
     assert notice["message"] not in compact
     assert "baseline incomplete" not in compact
 
-    docs = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
+    docs = _doc_block("docs/reports.mdx", "The HTML report keeps a short coverage cue near the Tier 3 result")
     changelog = _doc_block("CHANGELOG.md", "- Tier 3 reports no longer say `baseline not run`")
     for name, text in (("docs/reports.mdx", docs), ("CHANGELOG.md", changelog)):
         assert "`validate --verbose`" in text, name
@@ -512,8 +526,8 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
         assert "`validate` prints" not in text, name
 
 
-def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_docs_say_so() -> None:
-    """Only the callout tells a baseline that ran and failed from one that was skipped."""
+def test_html_agent_details_distinguish_an_unavailable_baseline_from_a_skipped_one() -> None:
+    """Unavailable aggregate quality must not imply the recorded baseline never ran."""
     _, _, _, report = _render(
         {
             "claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR])),
@@ -523,13 +537,15 @@ def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_d
 
     kpi_subs = re.findall(r'<div class="t3-kpi-sub">(.*?)</div>', report)
     assert kpi_subs.count("baseline N/A") == 2
-    assert kpi_subs.count("no baseline") == 2
+    assert kpi_subs.count("no baseline") == 1
+    assert kpi_subs.count("Overall baseline unavailable") == 1
     (note,) = _html_coverage_notes(report)
     assert note.startswith("claude-code baseline incomplete")
 
     definition = _doc_block("docs/reports.mdx", "When the HTML report has no lift for an agent or dimension")
-    assert "**no baseline** means" in definition
-    assert "a baseline arm that ran but failed" in definition
+    assert "**Overall baseline unavailable**" in definition
+    assert "**no baseline**" in definition
+    assert "aggregate quality score is missing" in definition
     assert "**Agent coverage notes**" in definition
-    details = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
-    assert "**no baseline** and `baseline N/A`" in details
+    details = _doc_block("docs/reports.mdx", "The HTML report keeps a short coverage cue near the Tier 3 result")
+    assert "**Overall baseline unavailable**" in details and "`baseline N/A`" in details

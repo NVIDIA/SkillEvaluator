@@ -8627,8 +8627,10 @@ class TestSpdxAndIpFalsePositiveHardening:
             + "".join(f'{name} = "4.4.0.{index}"\n' for index, name in enumerate(labels, 1)),
             encoding="utf-8",
         )
+        # Keep the child on this checkout even if its interpreter has another editable install.
         code = (
             "import json, sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / 'src')!r})\n"
             "from pathlib import Path\n"
             "from skillevaluator.validators.security import SecurityValidator\n"
             "result = SecurityValidator().validate_pii_only(Path(sys.argv[1]))\n"

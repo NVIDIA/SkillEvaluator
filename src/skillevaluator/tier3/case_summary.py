@@ -12,6 +12,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 from itertools import islice
 from pathlib import Path
@@ -27,6 +28,7 @@ from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
+from skillevaluator.tier3.harbor.report_data import _harbor_task_directory, _recorded_case_id
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
@@ -167,23 +169,92 @@ def _case_comparable(agent: Mapping[str, Any], with_case: Any, without_case: Any
 # ---------------------------------------------------------------- per-case data
 
 
+# The rows rebuilt for a failed condition while what_to_fix runs, by agent and condition. Rebuilding
+# reads every trial's files, and what_to_fix asks for an agent's rows several times for each case.
+_REBUILT_CASES: ContextVar[dict[tuple[int, str], tuple[Mapping[str, Any], Mapping[str, Any]]] | None] = ContextVar(
+    "_REBUILT_CASES", default=None
+)
+
+
 def _cases(agent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     pass_at_k = agent.get("pass_at_k")
     variant = pass_at_k.get(key) if isinstance(pass_at_k, Mapping) else None
     cases = variant.get("cases") if isinstance(variant, Mapping) else None
     if isinstance(cases, Mapping) and cases:
         return cases
+    rebuilt_cases = _REBUILT_CASES.get()
+    if rebuilt_cases is not None:
+        # The agent itself is kept with its rows, so a later agent that reuses its id gets no stale rows.
+        cached = rebuilt_cases.get((id(agent), key))
+        if cached is not None and cached[0] is agent:
+            return cached[1]
+    rebuilt = _rebuilt_cases(agent, key)
+    if rebuilt_cases is not None:
+        rebuilt_cases[(id(agent), key)] = (agent, rebuilt)
+    return rebuilt
+
+
+def _rebuilt_cases(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
     # A failed condition persists no pass@k cases; rebuild them from its trial rewards and errors.
     failures = agent.get("trial_failures")
     failed = failures.get(key) if isinstance(failures, Mapping) else None
     errored = Counter(
-        str(f["trial"]).split("__", 1)[0] for f in failed or [] if isinstance(f, Mapping) and f.get("trial")
+        _failed_trial_case_id(agent, key, str(f["trial"]))
+        for f in failed or []
+        if isinstance(f, Mapping) and f.get("trial")
     )
     rebuilt = _scored_trials(agent, key)
     for case_id, n in errored.items():
         case = rebuilt.setdefault(case_id, {"attempts": []})
         case["attempts_missing"] = max(n, case.get("attempts_missing", 0))
     return rebuilt
+
+
+def _trial_case_id(trial: Path, reward: Any) -> str:
+    """Return the case a persisted trial ran.
+
+    Harbor names a trial after the first 32 characters of its task directory.
+    So the name before ``__`` is not the case for a native or NeMo Gym task,
+    whose directory is not named after its case, or for a longer case ID. The
+    collector records the case it resolved from the task each attempt ran:
+    ``entry_id`` in ``failure.json`` for an unscored attempt and in
+    ``reward.json`` for a scored one, unless it rejected that reward's case.
+    The token usage report reads the same record. Without one, or for a run
+    from before that record, the case falls back to the task directory
+    the trial's ``result.json`` or ``config.json`` names, then to the name.
+    The caller has checked that ``trial`` is not reached through a link.
+    """
+    entry_id = reward.get("entry_id") if isinstance(reward, Mapping) and not _identity_rejected(reward) else None
+    return (
+        _recorded_case_id(trial)
+        or (entry_id if isinstance(entry_id, str) and entry_id.strip() else None)
+        or _harbor_task_directory(trial)
+        or trial.name.split("__", 1)[0]
+    )
+
+
+def _identity_rejected(reward: Mapping[str, Any]) -> bool:
+    """Return whether the collector refused this reward's case, so its ``entry_id`` names no case.
+
+    A trial stopped before Harbor wrote its ``result.json`` names no task the
+    collector can map to a case. The collector then fails the reward with this
+    reason and records the placeholder ``entry_id`` "unknown", which must not
+    move the trial away from the case its task directory or name gives.
+    """
+    from skillevaluator.tier3.harbor.collector import UNSAFE_REWARD_IDENTITY_REASON
+
+    errors = reward.get("evaluation_errors")
+    return isinstance(errors, Mapping) and errors.get("collector") == UNSAFE_REWARD_IDENTITY_REASON
+
+
+def _failed_trial_case_id(agent: Mapping[str, Any], key: str, trial: str) -> str:
+    """Return the case of a trial the collector listed as failed, read from the trial's persisted directory."""
+    output_dir = agent.get("output_dir")
+    agent_dir = Path(str(output_dir)) if output_dir else None
+    path = _trial_dir(agent_dir.parent, agent_dir.name, dict(_VARIANTS)[key], trial) if agent_dir else None
+    if path is None:
+        return trial.split("__", 1)[0]
+    return _trial_case_id(path, _load_json(path / "reward.json", root=agent_dir))
 
 
 def _evaluation_failed(reward: Any) -> bool:
@@ -252,14 +323,15 @@ def _scored_trials(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, An
     )
     cases: dict[str, dict[str, Any]] = {}
     for trial in sorted(trials.iterdir()):
+        # Only a trial whose reward this read returned has its case read, and this read never follows a link.
         reward = _load_json(trial / "reward.json", root=Path(str(output_dir)))
         if _evaluation_failed(reward):
-            case = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})
+            case = cases.setdefault(_trial_case_id(trial, reward), {"attempts": []})
             case["attempts_missing"] = case.get("attempts_missing", 0) + 1
             continue
         score = reward.get("overall") if isinstance(reward, Mapping) else None
         if isinstance(score, int | float) and not isinstance(score, bool):
-            attempts = cases.setdefault(trial.name.split("__", 1)[0], {"attempts": []})["attempts"]
+            attempts = cases.setdefault(_trial_case_id(trial, reward), {"attempts": []})["attempts"]
             verdict = attempt_verdict(
                 score,
                 threshold,
@@ -959,6 +1031,19 @@ def _run_error(trial_dir: Path, run_dir: Path) -> str:
     return _short(f"{error.get('type', 'error')}: {detail}", 160)
 
 
+def _trials_by_case(run_dir: Path, agent: str) -> dict[str, list[Path]]:
+    """Group an agent's with-skill trial directories by the case each one ran."""
+    trials = run_dir / agent / "with-skill" / "trials"
+    by_case: dict[str, list[Path]] = {}
+    if not _SAFE_TRIAL.fullmatch(agent) or not trials.is_dir():
+        return by_case
+    for candidate in sorted(trials.iterdir()):
+        if (trial := _trial_dir(run_dir, agent, "with-skill", candidate.name)) is not None:
+            reward = _load_json(trial / "reward.json", root=run_dir)
+            by_case.setdefault(_trial_case_id(trial, reward), []).append(trial)
+    return by_case
+
+
 def _diagnose_agent_case(
     run_dir: Path,
     agent_name: str,
@@ -966,23 +1051,26 @@ def _diagnose_agent_case(
     case_id: str,
     *,
     entry: Mapping[str, Any] | None = None,
+    trials_by_agent: dict[str, dict[str, list[Path]]] | None = None,
 ) -> list[dict[str, Any]]:
     with_case = _cases(agent, "with_skill").get(case_id)
     with_marks, without_marks = _marks(with_case), _marks(_cases(agent, "without_skill").get(case_id))
     wp, wn = _attempt_rate(with_marks)
     bp, bn = _attempt_rate(without_marks)
     errors = with_marks.count(ERROR)
+    case_trials: list[Path] = []
+    if errors:
+        # A trial's name need not start with its case, so each trial's case is read from its records:
+        # once per agent when the caller shares trials_by_agent across cases.
+        trials_by_agent = {} if trials_by_agent is None else trials_by_agent
+        if agent_name not in trials_by_agent:
+            trials_by_agent[agent_name] = _trials_by_case(run_dir, agent_name)
+        case_trials = trials_by_agent[agent_name].get(case_id, [])
     failed_evaluations: dict[str, list[tuple[Path, str]]] = {}
-    with_trials = run_dir / agent_name / "with-skill" / "trials"
-    if errors and with_trials.is_dir() and _SAFE_TRIAL.fullmatch(agent_name):
-        for d in sorted(with_trials.iterdir()):
-            if (
-                d.name.split("__", 1)[0] == case_id
-                and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
-                and _evaluation_failed(reward := _load_json(d / "reward.json", root=run_dir))
-            ):
-                cause, reason = _evaluation_failure(reward)
-                failed_evaluations.setdefault(cause, []).append((d, reason))
+    for d in case_trials:
+        if _evaluation_failed(reward := _load_json(d / "reward.json", root=run_dir)):
+            cause, reason = _evaluation_failure(reward)
+            failed_evaluations.setdefault(cause, []).append((d, reason))
     evaluation_issues = []
     for cause, failed in failed_evaluations.items():
         lost_unscored = min(errors, len(failed))
@@ -1017,16 +1105,7 @@ def _diagnose_agent_case(
             failed_trials.extend(
                 (attempt.get("score"), d) for d in _trial_dirs(run_dir, agent_name, attempt.get("trial"))
             )
-    errored_trials = []
-    with_trials = run_dir / agent_name / "with-skill" / "trials"
-    if errors and with_trials.is_dir() and _SAFE_TRIAL.match(agent_name):
-        errored_trials = [
-            d
-            for d in sorted(with_trials.iterdir())
-            if d.name.split("__", 1)[0] == case_id
-            and _trial_dir(run_dir, agent_name, "with-skill", d.name) is not None
-            and (d / "failure.json").is_file()
-        ]
+    errored_trials = [d for d in case_trials if (d / "failure.json").is_file()] if errors else []
 
     lost = (wn - wp) + errors
     hurts = (
@@ -1289,6 +1368,17 @@ def what_to_fix(
     result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None = None, use_llm: bool = True
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
+    # A failed condition's rows are rebuilt from its trials once for this call, not for every case.
+    rebuilt_cases = _REBUILT_CASES.set({})
+    try:
+        return _what_to_fix(result, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+    finally:
+        _REBUILT_CASES.reset(rebuilt_cases)
+
+
+def _what_to_fix(
+    result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None, use_llm: bool
+) -> list[dict[str, Any]]:
     agents = {
         str(k): dict(v, attempt_policy=result.get("attempt_policy") or v.get("attempt_policy"))
         for k, v in (result.get("agents") or {}).items()
@@ -1296,9 +1386,12 @@ def what_to_fix(
     }
     dataset = _dataset_entries(run_dir)
     grouped: dict[tuple[str, str, str | None], list[dict[str, Any]]] = {}
+    trials_by_agent: dict[str, dict[str, list[Path]]] = {}
     for case_id in _case_ids(agents):
         for name, agent in agents.items():
-            for issue in _diagnose_agent_case(run_dir, name, agent, case_id, entry=dataset.get(case_id, {})):
+            for issue in _diagnose_agent_case(
+                run_dir, name, agent, case_id, entry=dataset.get(case_id, {}), trials_by_agent=trials_by_agent
+            ):
                 grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)
     issues = []
     for items in grouped.values():
@@ -1526,10 +1619,13 @@ def live_case_marks(
         for trial in islice(sorted(job.iterdir()), _MAX_TRIAL_PATHS_SCANNED):
             if "__" not in trial.name or not _SAFE_TRIAL.match(trial.name) or trial.is_symlink():
                 continue
-            case_id = trial.name.split("__", 1)[0]
             if (agent, key, trial.name) in seen or not trial.is_dir():
                 continue
             seen.add((agent, key, trial.name))
+            # Staged cases are keyed by task directory, but Harbor names a trial after only the
+            # directory's first 32 characters; the config Harbor writes as the trial starts names it whole.
+            task = _harbor_task_directory(trial)
+            case_id = task if task and _SAFE_TRIAL.fullmatch(task) else trial.name.split("__", 1)[0]
             mark = _live_mark(trial, run_dir, pass_threshold)
             case = marks.setdefault(agent, {}).setdefault(key, {}).setdefault(case_id, [])
             if mark is None:

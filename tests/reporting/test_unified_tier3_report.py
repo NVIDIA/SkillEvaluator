@@ -11,6 +11,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
+from report_markup_assertions import text_content
 
 from skillevaluator.evaluation.tier3_report import (
     _attach_harbor_evidence_to_conclusions,
@@ -849,8 +850,16 @@ def test_no_skill_baseline_dimension_na_explains_why_in_html() -> None:
         cell_start = html.index(f'<td title="{title}">')
         cell_end = html.index("</td>", cell_start)
         cell = html[cell_start:cell_end]
-        assert "N/A" in cell
-        assert '<div class="t3-dim-hint">baseline not scored</div>' in cell
+        assert '<span title="baseline quality unavailable">N/A</span>' in cell
+        row_start = html.rfind("<tr>", 0, cell_start)
+        row_end = html.index("</tr>", cell_end)
+        details = re.search(
+            r'<details class="t3-table-detail"><summary>Details</summary>(.*?)</details>',
+            html[row_start:row_end],
+            re.DOTALL,
+        )
+        assert details is not None
+        assert "baseline quality unavailable" in text_content(details.group(1))
 
 
 def test_trial_report_omits_token_chart_for_incomplete_agent_telemetry() -> None:
@@ -1027,7 +1036,8 @@ def test_trial_charts_preserve_token_and_step_counter_semantics() -> None:
     html = _render_agent_payload(payload)
     trials_html = _tier3_page(html, "trials", "agents")
 
-    assert 'id="tier3-token-chart"' in trials_html
+    assert 'id="tier3-recorded-token-chart"' in trials_html
+    assert 'id="tier3-token-chart"' not in trials_html
     assert '{ label: "Prompt (total)"' in html
     assert '{ label: "Cached (included in prompt)"' in html
     steps_chart = re.search(r"function stepsByCaseDatasets\(\) \{.*?var chart = (.*?);\n", html, re.DOTALL)
@@ -1540,8 +1550,8 @@ def test_canonical_report_prefers_agentskills_dataset_fields() -> None:
 
     dataset_html = _tier3_page(_render_agent_payload(payload), "dataset", "suggestions")
 
-    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
-    assert "1 AgentSkills eval case used for this Tier 3 run." in dataset_html
+    assert "<h2>Evaluation Dataset</h2>" in dataset_html
+    assert "1 eval case used for this Tier 3 run." in dataset_html
     assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
     assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
     assert '<span class="t3-ds-label">Assertions</span>' in dataset_html
@@ -1577,7 +1587,7 @@ def test_standalone_report_loads_staged_legacy_dataset_with_agentskills_labels(t
     report = render_agent_eval_html_report(skill, run_dir, use_llm_judge=False)
     dataset_html = _tier3_page(report.read_text(encoding="utf-8"), "dataset", "suggestions")
 
-    assert "<h2>AgentSkills Dataset</h2>" in dataset_html
+    assert "<h2>Evaluation Dataset</h2>" in dataset_html
     assert '<span class="t3-ds-label">Prompt</span>' in dataset_html
     assert '<span class="t3-ds-label">Expected Output</span>' in dataset_html
     assert '<span class="t3-ds-label">Assertions</span>' in dataset_html
@@ -3138,7 +3148,7 @@ def test_standalone_failed_tier3_report_shows_error_without_score(tmp_path: Path
     html = report.read_text(encoding="utf-8")
 
     assert "No Harbor job result" in html
-    assert "No successfully scored agent is available" in html
+    assert "Quality measurements unavailable" in html
     assert ">N/A<" in html
     assert "Default agent is the top performer" not in html
     assert 'onclick="tier3CopyText(this, "' not in html
@@ -3328,11 +3338,11 @@ def _render_paired_comparison(paired_comparison: object) -> str:
 @pytest.mark.parametrize("paired_comparison", [[1], "bad"], ids=["list", "string"])
 def test_pass_at_k_render_drops_nonmapping_paired_comparison(paired_comparison: object) -> None:
     html = _render_paired_comparison(paired_comparison)
-    sanitized = _embedded_tier3_payload(html)
+    retained = _embedded_tier3_payload(html)
 
     assert "Paired cases:" not in html
     assert "Exact McNemar p=" not in html
-    assert "paired_comparison" not in sanitized["agents"]["codex"]["pass_at_k"]["lift"]
+    assert retained["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"] == paired_comparison
 
 
 @pytest.mark.parametrize(
@@ -3564,7 +3574,7 @@ def test_pass_at_k_render_derives_paired_delta_from_validated_outcomes() -> None
     paired = embedded["agents"]["codex"]["pass_at_k"]["lift"]["paired_comparison"]
 
     assert "Paired pass-rate delta: +25.0%." in html
-    assert paired["paired_rate_delta"] == 0.25
+    assert paired["paired_rate_delta"] == -1.0  # Export preserves original; visible delta above is validated.
 
 
 def test_pass_at_k_render_preserves_rounded_subnormal_mcnemar_probability() -> None:
@@ -3829,7 +3839,13 @@ def test_pass_at_k_final_column_has_a_narrow_viewport_scroll_contract() -> None:
     assert re.search(r"<th>Pass-rate difference</th>\s*</tr>", region.group("table"))
     assert "Pass@1 (supporting reliability)" in html
     assert "attempt passes at Overall ≥ 0.50" in html
-    assert SKILL_LIFT_DEFINITION in html
+    number_key = re.search(r'<details[^>]*id="tier3-number-key">(.*?)</details>', html, re.DOTALL)
+    assert number_key is not None
+    assert "<summary>What each number means</summary>" in number_key.group(1)
+    lift_note = re.search(r"<li><strong>Skill Lift</strong>:(.*?)</li>", number_key.group(1), re.DOTALL)
+    assert lift_note is not None
+    assert text_content(lift_note.group(1)).strip().startswith(SKILL_LIFT_DEFINITION.removeprefix("Skill Lift "))
+    assert '<a href="#tier3-number-key">How lift is measured</a>' in html
     assert ".table-scroll { max-width: 100%; overflow-x: auto;" in html
     assert ".pass-at-k-table { min-width: 720px; }" in html
 

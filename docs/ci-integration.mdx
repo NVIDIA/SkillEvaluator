@@ -347,10 +347,14 @@ A single-skill target writes its report at the top of `reports/`, and a folder t
   <Accordion title="overall_status is 'incomplete'">
     A required scanner is missing or returned no evidence. Check the report for
     the named scanner: Semgrep, SkillSpector, and Gitleaks are all separate
-    executables, and installing SkillEvaluator alone does not install them. The
-    scanners fail closed: `validate` exits non-zero and the report stays
-    non-green until every required scanner is installed and returns valid
-    evidence. See the workflow above or
+    executables. When SkillSpector or Gitleaks is not installed, the first
+    Tier 1 run downloads its pinned, checksum-verified release (Gitleaks on
+    Linux and macOS only), so the runner needs network access to GitHub, and
+    to PyPI for SkillSpector. Semgrep is optional and never downloaded; a
+    missing Semgrep makes the run incomplete only when
+    `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set. The scanners fail closed:
+    `validate` exits non-zero and the report stays non-green until every
+    required scanner runs and returns valid evidence. See the workflow above or
     [Installation: System tools](/skills/skillevaluator/installation#system-tools).
   </Accordion>
   <Accordion title="Claude answers HTTP 400 'is not a valid fallback target'">

@@ -5,6 +5,7 @@
 
 import json
 import os
+import re
 import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -868,7 +869,9 @@ class TestRubricEvalValidator:
             finding.check_name == "rubric_overall" and finding.severity.value == "high" for finding in result.findings
         )
         html = HTMLReporter(include_timestamp=False).render_all([result])
-        assert '"would_block": true' in html
+        match = re.search(r'<script id="report-data" type="application/json">(.*?)</script>', html, re.DOTALL)
+        assert match is not None
+        assert json.loads(match.group(1))["gating"]["would_block"] is True
 
     def test_empty_checks_use_local_incomplete_diagnostic(self, tmp_path):
         skill_dir = _write_skill(tmp_path)
@@ -1335,9 +1338,12 @@ class TestInvalidReplyRetry:
 
         result, requests = _validate_with(tmp_path, _reply(checks), _reply(checks))
 
-        problem = requests[1]["user"].removeprefix(requests[0]["user"]).removeprefix(
-            f"\n{_RETRY_MARKER}"
-        ).removesuffix(f". {_RETRY_TAIL}")
+        problem = (
+            requests[1]["user"]
+            .removeprefix(requests[0]["user"])
+            .removeprefix(f"\n{_RETRY_MARKER}")
+            .removesuffix(f". {_RETRY_TAIL}")
+        )
         assert "invented" in problem and "FORGED" in problem
         assert problem.isprintable()
         assert "  " not in problem

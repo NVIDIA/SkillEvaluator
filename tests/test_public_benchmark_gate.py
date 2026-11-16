@@ -1235,7 +1235,7 @@ _DESTRUCTIVE_FINDING = {
 }
 _TIER3_CARD_VERDICT = r'tier-card-label">Tier 3</span>\s*<span class="tier-card-verdict">([^<]+)</span>'
 # The Tier 3 overview lead of a run whose attempts were all scored.
-_TIER3_LEAD_VERDICT = r"Verdict at a glance:</strong>\s*([^<]+?) with an overall score"
+_TIER3_LEAD_VERDICT = r"<strong>Live quality: ([^<]+)\.</strong>"
 # What the lead says when another execution failure needs attention.
 _TIER3_ATTENTION_NOTICE = "Other execution failures need attention"
 

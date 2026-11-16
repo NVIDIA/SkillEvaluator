@@ -259,6 +259,61 @@ All notable changes to SkillEvaluator are documented in this file.
   the half blocks of the two-row one, so they get the plain title at 60-75
   columns.
 
+- Standalone HTML reports use one NVIDIA presentation across all three tiers,
+  with consistent typography, a green header, numbered Insights cards, and
+  plugin evidence inside the relevant tier. Clickable tier cards replace the
+  left sidebar and sticky mobile tier bar. Reports containing Tier 3 default
+  to dark and other reports to light, instead of following the device theme;
+  saved Light, Dark and System choices still take precedence. The renderer
+  gives saved incomplete runs concise coverage and actions, with full errors
+  in Diagnostics. Newly saved failed-run conclusions and recommendations
+  keep their existing raw error text.
+  Agents with diagnostic-only trial evidence are excluded from lift panels;
+  their trial rows and canonical exports remain available.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
+  The native header scale and visible tool versions, consolidated baseline
+  comparison with Overall and partial-comparison details, clickable agent
+  scorecards, and Harbor results/analysis actions are retained. Empty primary
+  viewer metadata no longer hides usable recorded summary links.
+  Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
+  snapshots add supplied plugin evidence. CLI JSON validator rows now include
+  a recorded boolean `optional_skip`, which the retained JSON reader
+  round-trips without changing gate policy. Shared plugin composition supplies
+  static and retained runtime evidence before the HTML template renders.
+  Recorded Harbor upload links survive saved-run regeneration. The renderer
+  version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
+  the aligned desktop report is slightly wider. Long scanner versions wrap
+  within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
+  text contrast in the light and dark themes.
+- HTML Overview combines execution status, scored/unscored coverage and the
+  recorded next action. The baseline comparison stays open with its scores,
+  lift and Overall visible; signals and reasoning use adjacent disclosures.
+  Compact Definition disclosures beneath each dimension name explain the metric,
+  including unavailable scores and no-JavaScript viewing, without repeating its
+  definition in a separate guide or the Reasoning column.
+  Native agent cards, versions and typography remain. Dataset diagnostics
+  share exact structured explanations within an attempt and status while
+  retaining every assertion, requirement and evidence association. Missing
+  pass@k case outcomes show N/A alongside retained attempt counts; measured
+  zero success remains 0%. Harbor actions use concise recorded labels and
+  retain exact job identities in Diagnostics.
+- HTML can display optional retained native dependency completeness,
+  composition/ablation, Harbor delivery status, provider refusal/mixed-model
+  comparison basis, and recovery notes. Active warnings stay visible; routine
+  evidence is folded in the relevant view with local omission and shortening
+  notices. These are passive display fields, not new backend coverage;
+  hook/canary runtime summaries still need separate producer integration.
+  Public recovery, MCP and comparison projections remain. No scoring, gate,
+  CLI, canonical payload or newly produced insight behavior changes.
+- Embedded HTML JSON uses compact whitespace and charts receive only their
+  consumed data. Charts initialize for visible views after applying the theme,
+  reuse instances, and prepare closed views synchronously for print. Print
+  includes retained Dataset cases hidden by screen filters and restores the
+  screen's disclosure and filter state afterward. Downloads preserve the
+  retained snapshot and existing safety bounds.
+
 ### Documentation
 
 - The agent skill guide explicitly installs the CLI before the first check,
@@ -268,6 +323,11 @@ All notable changes to SkillEvaluator are documented in this file.
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
+- The CI guide's troubleshooting note for an `incomplete` status no longer
+  says SkillEvaluator never installs the scanners. The first Tier 1 run
+  downloads pinned SkillSpector and Gitleaks releases when they are missing, so
+  the note now points to network access, and it says a missing Semgrep counts
+  only when `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
 
 - "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
   install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
@@ -328,8 +388,24 @@ All notable changes to SkillEvaluator are documented in this file.
   "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
   request".
 
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results now covers a failed Tier 3 run whose budget left planned
+  attempts not run. Its JSON `tier3` object and full Tier 3 download record
+  `incomplete` and leave `summary.overall_lift` null, even when the best agent
+  has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
+  Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+  is advisory. The page said only that HTML displays a failed run as
+  **Changes required** and that both payloads keep the best agent's lift.
+
 ### Fixed
 
+- Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
@@ -371,6 +447,13 @@ All notable changes to SkillEvaluator are documented in this file.
   when the caller sets `GIT_CONFIG_GLOBAL`.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
+- Terminal quality headlines and check-count comparisons exclude execution-failed arms.
+  Multi-agent summaries also withhold a failed agent's quality headline, and the
+  `RUN QUALITY VERDICT` line no longer reads that agent: an agent that failed
+  cannot make the run PASS, and a run where no agent can be read reads
+  INCOMPLETE with a reason that names the arm that failed (with-skill, baseline
+  or both). A baseline-only multi-agent run (`--skip-with-skill`) prints no run
+  verdict instead of PASS.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
@@ -860,10 +943,14 @@ All notable changes to SkillEvaluator are documented in this file.
   folder or plugin, still records the SkillSpector scan as incomplete
   (`incomplete_scans` in the JSON report, and publication eligibility
   `Incomplete`), with an error that names only that gap. The check itself is
-  reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed
-  failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
+  reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate
+  failure are a confirmed failure, also when a `--policy` override lowers the
+  Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
   a `static_parse_limit` row on the manifest, so that scan is recorded as
-  incomplete in the same way.
+  incomplete in the same way. In the terminal Tier 1 summary, "what to fix"
+  for a check that failed beside an incomplete scan also lists its other gate
+  failures, after its first one and any unresolved file reference, so it
+  shows the hook gate failure, not only the error for the gap.
 
 - `validate` no longer repeats its header box in short terminal windows or
   when a log warning prints mid-run. Only the tier that is still running is
@@ -1070,6 +1157,48 @@ All notable changes to SkillEvaluator are documented in this file.
   received a `workflow-rules.mdc` file itself; it now receives the workflow
   folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
   when the file is a symlink to a file with another name.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. So do such a label and `$` on a line with a space or shell delimiter
+  between two of the same quote or after a backslash, as written or decoded,
+  such as `setup' 'helper.sh` or `setup\ h*.sh`, where a shell may join words
+  that the check reads apart. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
+
+- With `--progress rich` when standard error is not a terminal, such as when
+  it is redirected to a file or piped to another program, the Tier 3 progress
+  table now ends its last line. Before, the next output, such as a log line,
+  the shell prompt, or the line saying that progress stopped after a drawing
+  error, was printed on the same line as the table's bottom border. Output to
+  a terminal is unchanged.
+
+- The Tier 3 "How to improve" list now finds the failed attempts of a case
+  whose trial directory names do not start with its case ID: a native or NeMo
+  Gym task whose `[metadata] entry_id` differs from its directory, or a case
+  ID longer than the 32 characters Harbor keeps in a trial name. Before, such a
+  case's run error said only "1 attempt(s) never produced a score", with no
+  cause and no evidence file, and a failed judge got the generic run error
+  advice instead of the judge remedy. Each attempt's case is now the
+  `entry_id` the collector recorded in its `failure.json` or `reward.json`,
+  as for token usage. The case rows rebuilt for a failed arm use the same
+  case instead of the task directory, and the live case grid during a run
+  counts a long-named case's attempts in its own row instead of a second row
+  with the cut name.
+
+- With `--progress rich` and `TTY_INTERACTIVE=1` when standard error is not a
+  terminal, the Tier 3 progress table is now drawn once, when the run ends, as
+  it is without `TTY_INTERACTIVE`. Before, a copy of the table was also
+  printed under each plan line that changed during the run, and the next plan
+  line or table started on the same line as that copy's bottom border. Output
+  to a terminal is unchanged.
 - Tier 3 security finding evidence and saved judge evidence mask the
   credential in more command forms (`auth=` call values, `sed` replacements,
   `_` long flags, quoted or `--` config keys, values in escaped single quotes

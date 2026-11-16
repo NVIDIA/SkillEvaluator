@@ -1,0 +1,52 @@
+{# Presentation of retained judgments; group only exact explanations within an attempt/status. #}
+{% macro render_case_diagnostics(diagnostics, case_id, shared_errors, case_index=0) %}
+{% for diagnostic in diagnostics if diagnostic.entry_id == case_id %}
+{% set diagnostic_index = loop.index0 %}
+<div class="t3-ds-field">
+    <span class="t3-ds-label">Expectation diagnostics</span>
+    {% for attempt in diagnostic.attempts %}
+    {% set attempt_index = loop.index0 %}
+    <details class="t3-details">
+        <summary>{{ attempt.agent }} · {{ 'With skill' if attempt.condition == 'with_skill' else 'Without skill' }} · {{ attempt.trial_id or 'No matched trial' }}</summary>
+        <div class="t3-details-body">
+            {% set shared = namespace(present=false) %}
+            {% for error in attempt.errors %}
+            {% if error in shared_errors %}{% set shared.present = true %}{% else %}<p>{{ error }}</p>{% endif %}
+            {% endfor %}
+            {% if shared.present %}<p><a href="#tier3-execution-errors">Shared run execution errors in Diagnostics</a></p>{% endif %}
+            {% if attempt.judge_note %}<p>{{ attempt.judge_note }}</p>{% endif %}
+            {% for status_group in attempt.status_groups %}
+            {% set status_index = loop.index0 %}
+            <h4>{{ status_group.status | replace('_', ' ') | title }} ({{ status_group.count }})</h4>
+            {% for group in status_group.groups %}
+            {% set explanation_number = loop.index %}
+            {% set explanation_id = 'tier3-diagnostic-' ~ case_index ~ '-' ~ diagnostic_index ~ '-' ~ attempt_index ~ '-' ~ status_index ~ '-' ~ loop.index0 %}
+            <div id="{{ explanation_id }}">
+                <p><b>Explanation {{ explanation_number }}</b> · {{ group.judgments | length }} requirement{{ 's' if group.judgments | length != 1 else '' }}</p>
+                <div>{{ group.reason }}</div>
+                {% if status_group.status != 'met' %}<div>Next diagnostic step: {{ group.next_step }}</div>{% endif %}
+            </div>
+            <ul class="t3-ds-diagnostics">
+            {% for judgment in group.judgments %}
+                <li>
+                    {% set matched = namespace(present=false) %}
+                    {% for requirement in diagnostic.requirements if requirement.expectation_id == judgment.expectation_id %}
+                    {% set matched.present = true %}
+                    <div><b>{{ requirement.expectation_id }}</b>: <span style="white-space:pre-wrap;">{{ requirement.requirement }}</span></div>
+                    {% endfor %}
+                    {% if not matched.present %}<div><b>{{ judgment.expectation_id }}</b></div>{% endif %}
+                    <div><a href="#{{ explanation_id }}">Explanation {{ explanation_number }}</a></div>
+                    {% if judgment.unmet_checks %}<div>Unmet rubric checks: {{ judgment.unmet_checks | join(', ') }}</div>{% endif %}
+                    {% if judgment.inapplicable_checks %}<div>Inapplicable rubric checks: {{ judgment.inapplicable_checks | join(', ') }}</div>{% endif %}
+                    {% for excerpt in judgment.evidence %}<div><code>{{ excerpt }}</code></div>{% endfor %}
+                </li>
+            {% endfor %}
+            </ul>
+            {% endfor %}
+            {% endfor %}
+        </div>
+    </details>
+    {% endfor %}
+</div>
+{% endfor %}
+{% endmacro %}

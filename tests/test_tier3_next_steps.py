@@ -199,20 +199,24 @@ def test_cli_prints_next_steps_after_the_case_summary(tmp_path: Path) -> None:
     assert "check: With 5 or more skill cases the verdict keeps its direction." in output
 
 
-def test_html_report_shows_next_steps_under_the_case_fixes(tmp_path: Path) -> None:
+def test_html_insights_owns_full_next_steps_under_case_fixes(tmp_path: Path) -> None:
     run = _run(tmp_path, goal_accuracy=1.0)
 
     html = render_agent_eval_html_report(tmp_path, run, use_llm_judge=False).read_text(encoding="utf-8")
 
-    preview = " ".join(
-        html.split('id="tier3-next-steps-preview"', 1)[1].split("</ol>\n            </div>", 1)[0].split()
+    insights = " ".join(
+        html.split('id="tier3-page-suggestions"', 1)[1].split('id="tier3-page-provenance"', 1)[0].split()
     )
-    assert preview.index("Nothing to fix in the available case evidence.") < preview.index("Next steps for the run:")
+    assert insights.index("Nothing to fix in the available case evidence.") < insights.index("Next steps for the run:")
     assert (
         "<strong>each case ran once, so a single attempt decides every pass or fail mark</strong> [evaluation]:"
-        in preview
+        in insights
     )
-    assert "Check: With 5 or more skill cases the verdict keeps its direction. Evidence: case" in preview
+    assert "Check: With 5 or more skill cases the verdict keeps its direction. Evidence: case" in insights
+    preview = html.split('id="tier3-next-steps-preview"', 1)[1].split('id="tier3-number-key"', 1)[0]
+    assert 'href="#tier3-page-suggestions"' in preview
+    assert "Next steps for the run:" not in preview
+    assert "each case ran once, so a single attempt decides every pass or fail mark" not in preview
 
 
 def test_markdown_report_renders_next_step_strength() -> None:

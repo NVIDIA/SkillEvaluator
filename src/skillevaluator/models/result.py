@@ -597,6 +597,44 @@ class ValidationResult:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
 
+    def recalculate_keeping_independent(
+        self,
+        errors: list[str],
+        warnings: list[str],
+        *,
+        keep_all_errors: bool = False,
+        keep_repeated_warnings: bool = False,
+    ) -> None:
+        """Rebuild from findings, then put back the errors and warnings that no finding repeats.
+
+        :meth:`recalculate_from_findings` drops every error and warning that no
+        finding repeats. Pass what :meth:`independent_errors` and
+        :meth:`independent_warnings` returned *before* the finding severities
+        changed, because a line that a finding repeats names its old severity.
+
+        Warnings that no finding repeats, such as why a scanner did not
+        complete, always go back, each once. Errors that no finding repeats go
+        back only for an incomplete scan, which fails anyway and whose errors
+        say why. Any other such error, such as the note on a stale SkillSpector
+        baseline, may explain a blocker that the change has just lowered.
+
+        Args:
+            errors: Independent errors read before the change.
+            warnings: Independent warnings read before the change.
+            keep_all_errors: Put every error back, for a change that lowers
+                nothing, such as dropping a repeated finding.
+            keep_repeated_warnings: Put a warning back as often as it was
+                recorded, not once.
+        """
+        self.recalculate_from_findings()
+        if keep_all_errors or self.is_incomplete:
+            for error in errors:
+                if error not in self.errors:
+                    self.add_error(error)
+        for warning in warnings:
+            if keep_repeated_warnings or warning not in self.warnings:
+                self.add_warning(warning)
+
     def _finding_legacy_lines(self) -> set[str]:
         """Return the legacy error and warning lines that only repeat a structured finding."""
         represented = {finding.to_legacy_string() for finding in self.findings}
@@ -750,6 +788,10 @@ class ValidationResult:
         gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
+        # A member's confirmed failure outranks an incomplete scan in the
+        # merged result's reported status, as it does in the member's own.
+        if other.metadata.get("confirmed_failure") is True:
+            self.metadata["confirmed_failure"] = True
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
         # Keep each skill's unparsed files, prefixed like errors and findings so

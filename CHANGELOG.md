@@ -330,6 +330,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
@@ -371,6 +372,13 @@ All notable changes to SkillEvaluator are documented in this file.
   when the caller sets `GIT_CONFIG_GLOBAL`.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
+- Terminal quality headlines and check-count comparisons exclude execution-failed arms.
+  Multi-agent summaries also withhold a failed agent's quality headline, and the
+  `RUN QUALITY VERDICT` line no longer reads that agent: an agent that failed
+  cannot make the run PASS, and a run where no agent can be read reads
+  INCOMPLETE with a reason that names the arm that failed (with-skill, baseline
+  or both). A baseline-only multi-agent run (`--skip-with-skill`) prints no run
+  verdict instead of PASS.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

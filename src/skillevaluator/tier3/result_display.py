@@ -132,14 +132,92 @@ def _run_verdict_agents(agents: Mapping[str, Any]) -> list[Mapping[str, Any]]:
 
     An agent kept by --tolerate-baseline-timeouts is set aside whenever an
     agent with a complete baseline ranks, so it never decides the verdict.
+    An agent that did not run its with-skill arm to completion is never read:
+    the canonical report sets execution-failed agents aside, and the per-agent
+    headline withholds its quality verdict, so the run verdict must not read it.
     """
     raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
     complete = [raw for raw in raw_agents if not kept_with_failed_baseline(raw)]
-    if len(complete) == len(raw_agents):
-        return raw_agents
-    if any(_ranks_like_the_canonical_report(raw) for raw in complete):
-        return complete
-    return raw_agents
+    readable = raw_agents
+    if len(complete) != len(raw_agents) and any(_ranks_like_the_canonical_report(raw) for raw in complete):
+        readable = complete
+    return [raw for raw in readable if _counts_toward_run_verdict(raw)]
+
+
+def _counts_toward_run_verdict(raw: Mapping[str, Any]) -> bool:
+    """Return whether the run verdict may read this agent's with-skill quality."""
+    return raw.get("execution_status") == "succeeded" and _condition_usable(raw, "with_skill")
+
+
+def _run_verdict_from_agents(agents: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the multi-agent run verdict and, when it is incomplete, why.
+
+    The verdict is read from the agents that ran their with-skill arm and is
+    ``pass``, ``fail`` or ``inconclusive`` as in the canonical report. It is
+    ``incomplete`` when no agent can be read, with a reason naming the arm that
+    failed, and empty for a baseline-only run (``--skip-with-skill``), which
+    gives no skill verdict.
+    """
+    verdict_agents = _run_verdict_agents(agents)
+    if not verdict_agents:
+        arm_failures = _arm_failures(agents)
+        return ("", "") if arm_failures is None else ("incomplete", _incomplete_run_reason(arm_failures))
+    agent_verdicts = []
+    for raw in verdict_agents:
+        explicit = str(raw.get("verdict") or "").casefold()
+        if explicit in {"pass", "fail", "neutral", "inconclusive"}:
+            agent_verdicts.append(explicit)
+            continue
+        raw_pass = raw.get("pass_at_k")
+        raw_with = raw_pass.get("with_skill") if isinstance(raw_pass, Mapping) else None
+        raw_checks = raw_with.get("required_checks") if isinstance(raw_with, Mapping) else None
+        agent_verdicts.append(
+            "inconclusive" if _never_activated(raw) else "fail" if required_check_failure_reason(raw_checks) else "pass"
+        )
+    if "pass" in agent_verdicts:
+        return "pass", ""
+    if all(item == "inconclusive" for item in agent_verdicts):
+        return "inconclusive", ""
+    return "fail", ""
+
+
+def _arm_failures(agents: Mapping[str, Any]) -> set[str] | None:
+    """Name how each agent missed the run verdict, or None for a baseline-only run.
+
+    ``both`` is an agent that completed neither arm, ``with_skill`` one whose
+    with-skill arm did not complete, and ``baseline`` one whose with-skill arm
+    completed but whose baseline did not (and was not tolerated), so the agent
+    still failed.
+    """
+    raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
+    if all(_condition_status(raw, "with_skill") == "skipped" for raw in raw_agents):
+        return None
+    failures = set()
+    for raw in raw_agents:
+        if _condition_usable(raw, "with_skill"):
+            failures.add("baseline")
+        elif _condition_usable(raw, "without_skill") or _condition_status(raw, "without_skill") == "skipped":
+            failures.add("with_skill")
+        else:
+            failures.add("both")
+    return failures
+
+
+def _incomplete_run_reason(arm_failures: set[str]) -> str:
+    """Say which arm kept every agent out of the run verdict, in the budget reason's plain style."""
+    if arm_failures == {"both"}:
+        return "no agent completed either arm; there is no quality verdict to report"
+    if arm_failures <= {"both", "with_skill"}:
+        return "no agent completed its with-skill arm; there is no quality verdict to report"
+    if arm_failures == {"baseline"}:
+        return (
+            "no agent completed its baseline arm, so the run has no complete agent result; "
+            "per-agent verdicts cover the with-skill arm only"
+        )
+    return (
+        "no agent completed both arms (with-skill arm failed for some, baseline arm for the rest); "
+        "there is no quality verdict to report"
+    )
 
 
 def _ranks_like_the_canonical_report(raw: Mapping[str, Any]) -> bool:
@@ -521,8 +599,8 @@ def _agent_score_headlines(
 ) -> list[Text]:
     """Build the compact verdict, lift, and per-arm check-count summary."""
     pass_at_k = data.get("pass_at_k")
-    with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
-    without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
+    with_pass = pass_at_k.get("with_skill") if with_usable and isinstance(pass_at_k, Mapping) else None
+    without_pass = pass_at_k.get("without_skill") if baseline_usable and isinstance(pass_at_k, Mapping) else None
     required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
     verdict_reason = required_check_failure_reason(required_checks)
     headlines = []
@@ -534,7 +612,7 @@ def _agent_score_headlines(
     budget_partial = budget_incomplete_reason(result.get("budget")) is not None
     if budget_partial:
         agent_verdict = "incomplete"
-    if multiple_agents or verdict_reason:
+    if with_usable and (multiple_agents or verdict_reason):
         verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
         reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
         color = "yellow" if agent_verdict == "inconclusive" else RED if agent_verdict == "fail" else GREEN
@@ -1140,32 +1218,14 @@ def render_evaluation_result(
     if isinstance(agents, Mapping) and agents and not incomplete:
         if len(agents) > 1 and not budget_reason:
             run_verdict = str(result.get("verdict") or "").casefold()
+            run_verdict_reason = ""
             if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
-                agent_verdicts = []
-                for raw in _run_verdict_agents(agents):
-                    explicit = str(raw.get("verdict") or "").casefold()
-                    if explicit in {"pass", "fail", "neutral", "inconclusive"}:
-                        agent_verdicts.append(explicit)
-                        continue
-                    raw_pass = raw.get("pass_at_k")
-                    raw_with = raw_pass.get("with_skill") if isinstance(raw_pass, Mapping) else None
-                    raw_checks = raw_with.get("required_checks") if isinstance(raw_with, Mapping) else None
-                    agent_verdicts.append(
-                        "inconclusive"
-                        if _never_activated(raw)
-                        else "fail"
-                        if required_check_failure_reason(raw_checks)
-                        else "pass"
-                    )
-                run_verdict = (
-                    "pass"
-                    if "pass" in agent_verdicts
-                    else "inconclusive"
-                    if agent_verdicts and all(item == "inconclusive" for item in agent_verdicts)
-                    else "fail"
-                )
-            style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
-            console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
+                run_verdict, run_verdict_reason = _run_verdict_from_agents(agents)
+            if run_verdict:
+                style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
+                console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
+                if run_verdict_reason:
+                    console.print(Text(run_verdict_reason, style="yellow"))
         if not verbose:
             for agent, raw in agents.items():
                 if not isinstance(raw, Mapping):

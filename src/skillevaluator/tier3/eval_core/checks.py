@@ -3779,6 +3779,19 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
     "\\'": re.compile(r"(?:\\(?![n'])|[^'\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
     '\\"': re.compile(r"(?:\\(?![n\"])|[^\"\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
 }
+# The value of a config set NAME after a separator word inside a quoted string
+# is the rest of a shell command there, so it also ends at a shell operator
+# and at an escaped quote, with the spaces before them: the command after it
+# stays readable, and a password quoted with escaped quotes after it is left
+# to its own rule ("os.system('npm config set _auth = token=\"...\" && mysql
+# -u root -p\'VALUE\' db')").
+_FINDING_EVIDENCE_CONFIG_REST_SPACES = r"[ \t]+(?=[^\s'\"\\;|&]|\\(?![n'\"]))"
+_FINDING_EVIDENCE_CONFIG_QUOTED_REST_RES = {
+    opening: re.compile(
+        r"(?:\\(?![n'\"\r\n])|[^" + opening[-1] + r"\\;|&\s]|" + _FINDING_EVIDENCE_CONFIG_REST_SPACES + ")+"
+    )
+    for opening in _FINDING_EVIDENCE_QUOTED_REST_RES
+}
 # A name need not open its quoted string ('  password: VALUE',
 # "username=bob&password=VALUE", "export DB_PASSWORD=VALUE"). Quotes are read
 # forward from the start of each line in one pass over the text: a backslash
@@ -4597,6 +4610,7 @@ class _AssignmentValues:
     def __init__(self, text: str) -> None:
         self.text = text
         self._quotes: tuple[list[int], list[int | None]] | None = None
+        self._config_name_ends: set[int] | None = None
         # For each pattern, the runs read so far: their starts, in order, and their ends.
         self._runs: dict[re.Pattern[str], tuple[list[int], list[int]]] = {}
 
@@ -4659,7 +4673,11 @@ class _AssignmentValues:
         """
         if _assignment_name_is_kept(self.text, match):
             return None
-        return _assignment_value_reading(self.text, match, self._string_open)
+        if self._config_name_ends is None:
+            self._config_name_ends = _config_separator_name_ends(self.text)
+        return _assignment_value_reading(
+            self.text, match, self._string_open, config_value=match.end(1) in self._config_name_ends
+        )
 
     def _reading_end(self, reading: tuple[re.Pattern[str] | None, int, re.Match[str] | None]) -> int | None:
         """Return where the value read as *reading* (see _value_reading) ends, or None when there is none."""
@@ -4825,7 +4843,13 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             continue
         if _assignment_name_is_kept(text, match):
             continue
-        reading = _assignment_value_reading(text, match, string_open, preserve_header_format=preserve_header_format)
+        reading = _assignment_value_reading(
+            text,
+            match,
+            string_open,
+            preserve_header_format=preserve_header_format,
+            config_value=match.end(1) in config_name_ends,
+        )
         if reading is None:
             continue
         pattern, start, header_prefix = reading
@@ -4909,14 +4933,16 @@ def _assignment_value_reading(
     string_open: Callable[[int], int | None],
     *,
     preserve_header_format: bool = False,
+    config_value: bool = False,
 ) -> tuple[re.Pattern[str] | None, int, re.Match[str] | None] | None:
     """Return how the assignment rule reads the value after the name *match*: (pattern, start, header value prefix).
 
     The value is *pattern* matched at *start*, or, when *pattern* is None,
     read at *start* by _assignment_value_match. *string_open* returns where
     the quoted string open at a position starts (None: none is), as the
-    quote scan reads it. None is returned when the rule reads no value there,
-    as after a host and port ("host.example:8443").
+    quote scan reads it. *config_value* says that the name is a config set
+    NAME that a separator word follows. None is returned when the rule reads
+    no value there, as after a host and port ("host.example:8443").
     """
     name, name_quote, separator = match.group(1, 2, 3)
     start = match.end()
@@ -4965,8 +4991,10 @@ def _assignment_value_reading(
         return None
     if in_quotes and not shell_string and not text.startswith(("'", '"', "\\'", '\\"', "("), start):
         # The value is the rest of the quoted string, which may hold
-        # spaces ('password: correct horse battery staple').
-        return _FINDING_EVIDENCE_QUOTED_REST_RES[("\\" if escaped else "") + opening], start, None
+        # spaces ('password: correct horse battery staple'), or for a config
+        # set NAME after a separator word the rest of its command there.
+        rests = _FINDING_EVIDENCE_CONFIG_QUOTED_REST_RES if config_value else _FINDING_EVIDENCE_QUOTED_REST_RES
+        return rests[("\\" if escaped else "") + opening], start, None
     return None, start, None
 
 

@@ -3808,6 +3808,62 @@ def test_a_config_set_command_after_an_escaped_line_break_keeps_its_value_masked
     assert kept in evidence
 
 
+# Inside a quoted string the value of a config set key after a separator word
+# is the rest of its shell command there: it ends at a shell operator or an
+# escaped quote, so a password quoted with escaped quotes after it is masked
+# by its own rule.
+_PYTHON_CONFIG_THEN_MYSQL = (
+    f"os.system('npm config set _auth = token=\"{_API_TOKEN}\""
+    f" && mysql -h db -u root -p\\'{_BASIC_PASSWORD}\\' mydb')"
+)
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+def test_a_config_value_in_a_quoted_string_ends_at_a_shell_operator(copy: str) -> None:
+    command = f"python3 - <<'EOF'\nimport os\n{_PYTHON_CONFIG_THEN_MYSQL}\nEOF\nrm -rf /srv/app"
+    result = _security(copy, {"action": "Bash", "action_input": {"command": command}})
+
+    assert [finding["type"] for finding in result["findings"]] == ["destructive_command"]
+    for secret in (_API_TOKEN, _BASIC_PASSWORD):
+        assert secret not in json.dumps(result)
+    assert "npm config set _auth = <redacted> && mysql -h db -u root -p<redacted> mydb')" in json.dumps(
+        result["findings"][0]["evidence"]
+    )
+    judge = eval_template._redact_judge_evidence(json.dumps({"command": command}))
+    for secret in (_API_TOKEN, _BASIC_PASSWORD):
+        assert secret not in judge
+
+
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            _PYTHON_CONFIG_THEN_MYSQL,
+            "os.system('npm config set _auth = <redacted> && mysql -h db -u root -p<redacted> mydb')",
+            id="escaped-quotes-after-an-operator",
+        ),
+        pytest.param(
+            "echo 'npm config set _authToken = correct horse battery' >> f",
+            "echo 'npm config set _authToken = <redacted>' >> f",
+            id="spaced-value-to-the-closing-quote",
+        ),
+        pytest.param(
+            f"echo 'npm config set _auth = {_API_TOKEN};ls'", "echo 'npm config set _auth = <redacted>;ls'", id="semicolon"
+        ),
+        pytest.param(
+            f"echo 'npm config set _auth = {_API_TOKEN} | tee f'",
+            "echo 'npm config set _auth = <redacted> | tee f'",
+            id="pipe",
+        ),
+    ],
+)
+def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
+    copy: str, text: str, expected: str
+) -> None:
+    assert _mask_as(copy, text) == expected
+
+
 class _CountingPattern:
     """Count the searches of a compiled pattern."""
 

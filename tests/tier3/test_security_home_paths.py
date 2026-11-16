@@ -417,6 +417,13 @@ BENIGN_ACTIONS = [
     pytest.param(_bash("ls /opt/conda/etc/profile.d 2>&1"), id="read-opt-conda-profile-d"),
     pytest.param(_bash("ls /opt/$X/etc/profile.d 2>&1"), id="read-variable-dir-profile-d"),
     pytest.param(_bash("ls x$X/etc/sudoers.d 2>&1"), id="read-variable-suffix-dir-sudoers-d"),
+    pytest.param(_bash("ls /opt/conda-$V/etc/profile.d 2>&1"), id="read-hyphen-joined-variable-dir-profile-d"),
+    pytest.param(_bash("ls /opt/x.$V/etc/profile.d 2>&1"), id="read-dot-joined-variable-dir-profile-d"),
+    # The file a source command reads stays skipped when a variable starts it.
+    pytest.param(
+        _bash("source $CONDA_PREFIX/etc/profile.d/conda.sh && python train.py 2>&1"),
+        id="source-variable-prefix-profile-d",
+    ),
     # Reads of protected files: stderr or fd redirects and writes to other files are not writes.
     pytest.param(_bash("cat ~/.gitconfig 2>/dev/null"), id="read-gitconfig-stderr-devnull"),
     pytest.param(_bash("ls ~/.claude/settings.json 2>&1"), id="ls-claude-settings-fd-dup"),

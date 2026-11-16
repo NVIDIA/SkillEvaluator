@@ -1049,7 +1049,10 @@ def load_agent_data(
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
                     reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
-                    if not isinstance(reward, dict):
+                    if not isinstance(reward, dict) or str(reward.get("evaluation_status") or "").casefold() in {
+                        "error",
+                        "failed",
+                    }:
                         rewards_complete = False
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue

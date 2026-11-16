@@ -20,7 +20,9 @@ def _write(path: Path, value: object) -> None:
     path.write_text(json.dumps(value))
 
 
-def _failed_run(tmp_path: Path, arm: str, *, malformed: bool = False, empty: bool = False) -> dict:
+def _failed_run(
+    tmp_path: Path, arm: str, *, malformed: bool = False, empty: bool = False, failed_status: str | None = None
+) -> dict:
     skill = tmp_path / "demo"
     skill.mkdir()
     run = tmp_path / "results"
@@ -62,6 +64,20 @@ def _failed_run(tmp_path: Path, arm: str, *, malformed: bool = False, empty: boo
             )
             if malformed:
                 (error / "reward.json").write_text("{")
+            if failed_status:
+                _write(
+                    error / "reward.json",
+                    {
+                        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+                        "metric_set": DEFAULT_METRIC_SET,
+                        "entry_id": "case",
+                        "trial_id": "case__errored",
+                        "evaluation_status": failed_status,
+                        "skill_invoked": False,
+                        "invocation_evidence_source": "trajectory",
+                        "invocation_evidence_scope": "logical_trial",
+                    },
+                )
     result = agent_eval_result_from_directory(skill, run, use_llm_judge=False)
     assert result is not None
     return result.metadata["agent_eval"]
@@ -85,13 +101,19 @@ def test_failed_arm_keeps_scored_trial_activation(tmp_path: Path, arm: str, key:
     assert usage["totals"]["total_tokens"] == 35
 
 
-@pytest.mark.parametrize("malformed", [False, True], ids=["missing-reward", "malformed-reward"])
-def test_errored_trial_has_unknown_activation(tmp_path: Path, malformed: bool) -> None:
-    agent = _failed_run(tmp_path, "with-skill", malformed=malformed)["agents"]["codex"]
+@pytest.mark.parametrize("artifact", ["missing-reward", "malformed-reward", "failed", "error"])
+def test_errored_trial_has_unknown_activation(tmp_path: Path, artifact: str) -> None:
+    agent = _failed_run(
+        tmp_path,
+        "with-skill",
+        malformed=artifact == "malformed-reward",
+        failed_status=artifact if artifact in {"failed", "error"} else None,
+    )["agents"]["codex"]
     error = next((row for row in agent["trials"] if row["trial_id"] == "case__errored"), None)
     assert error is not None
     assert error["activation_validation"]["observed_activation"] == "unknown"
     assert error["activation_validation"]["expectation_status"] == "unknown"
+    assert error["scored"] is False
     assert error["scores"] == {}
     assert error["overall"] is None
 

@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shutil
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -12,7 +13,7 @@ from click.testing import CliRunner
 
 from skillevaluator.cli import cli
 from skillevaluator.models import Finding, Severity, ValidationResult
-from skillevaluator.reporting.junit_reporter import JUnitReporter
+from skillevaluator.reporting.junit_reporter import JUnitReporter, junit_target_identity
 from skillevaluator.tier1.commands import emit_reports
 
 _TEXT_ANALYZER = (
@@ -335,3 +336,67 @@ def test_quality_check_cli_writes_junit_xml(tmp_path: Path) -> None:
     assert int(root.attrib["tests"]) >= 1
     _assert_counts_match(root)
     ET.fromstring(matches[0].read_text(encoding="utf-8"))
+
+
+def test_target_identity_qualifies_suite_and_classname() -> None:
+    result = ValidationResult(validator_name="SCHEMA")
+    result.add_success("manifest_exists", "Found SKILL.md")
+
+    root = ET.fromstring(JUnitReporter(target_identity="group-a/demo").render_all([result]))
+    suite = root.find("testsuite")
+    assert suite is not None
+    assert suite.attrib["name"] == "group-a/demo::SCHEMA"
+    case = suite.find("testcase")
+    assert case is not None
+    assert case.attrib["classname"] == "group-a/demo::SCHEMA"
+    assert case.attrib["name"] == "manifest_exists"
+
+
+def test_target_identity_prefers_repository_then_catalog_then_name(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "group-a" / "demo"
+    skill.mkdir(parents=True)
+
+    assert junit_target_identity(skill, repo, repo / "skills") == "skills/group-a/demo"
+    # A non-Git catalog validates each skill with the skill itself as its root.
+    assert junit_target_identity(skill, skill, repo / "skills") == "group-a/demo"
+    assert junit_target_identity(skill, skill) == "demo"
+    assert junit_target_identity(None) == ""
+
+
+def test_catalog_with_repeated_leaf_names_keeps_identities_distinct(tmp_path: Path) -> None:
+    catalog = tmp_path / "catalog"
+    for group in ("group-a", "group-b"):
+        shutil.copytree(_TEXT_ANALYZER, catalog / group / "demo")
+    reports = tmp_path / "reports"
+
+    CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(catalog),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--workers",
+            "1",
+            "--no-autopilot",
+            "-r",
+            "junit",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    files = sorted(reports.rglob("*.junit.xml"))
+    assert [path.relative_to(reports).parent.as_posix() for path in files] == ["group-a/demo", "group-b/demo"]
+    identities: list[tuple[str, str]] = []
+    classnames: set[str] = set()
+    for path in files:
+        for case in _cases(ET.fromstring(path.read_text(encoding="utf-8"))):
+            identities.append((case.attrib["classname"], case.attrib["name"]))
+            classnames.add(case.attrib["classname"].split("::", 1)[0])
+    assert identities
+    assert len(identities) == len(set(identities))
+    assert classnames == {"group-a/demo", "group-b/demo"}

@@ -47,6 +47,7 @@ from skillevaluator.reporting import (
     MarkdownReporter,
     SARIFReporter,
 )
+from skillevaluator.reporting.junit_reporter import junit_target_identity
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context
 from skillevaluator.reporting.run_status import result_tier
@@ -655,6 +656,7 @@ def emit_reports(
     sarif_repository_root: Path | None = None,
     scan_root: Path | None = None,
     repository_root: Path | None = None,
+    catalog_root: Path | None = None,
     requested_tiers: tuple[int, ...] | None = None,
     displayed_tiers: tuple[int, ...] | None = None,
     presentation_context: FinalRenderContext | None = None,
@@ -707,9 +709,12 @@ def emit_reports(
                 scan_root=sarif_scan_root,
             )
         elif fmt == "junit":
+            junit_workspace = repository_root if repository_root is not None else sarif_repository_root
+            junit_scan = scan_root if scan_root is not None else sarif_scan_root
             reporter = reporter_cls(
-                workspace_root=repository_root if repository_root is not None else sarif_repository_root,
-                scan_root=scan_root if scan_root is not None else sarif_scan_root,
+                workspace_root=junit_workspace,
+                scan_root=junit_scan,
+                target_identity=junit_target_identity(junit_scan, junit_workspace, catalog_root),
             )
         elif fmt == "json":
             reporter = reporter_cls(

@@ -3060,6 +3060,7 @@ def validate(
         sarif_repository_root=sarif_repository_root,
         scan_root=target_path,
         repository_root=sarif_repository_root,
+        catalog_root=catalog_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
     if harness_rows and "json" in effective_formats:

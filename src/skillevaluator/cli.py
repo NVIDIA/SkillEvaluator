@@ -2582,6 +2582,7 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    requested_path = target_path
     if harness:
         from skillevaluator.harness import load_profiles
 
@@ -2610,6 +2611,8 @@ def validate(
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_WORKFLOWS,
+        SKILL_MANIFEST_FILE,
+        WORKFLOWS_MANIFEST_FILE,
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
@@ -2627,10 +2630,29 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    # A file passed as SKILL.md or workflow-rules.mdc is a manifest by the name it was passed
+    # under. Auto-detection must not read the file a link points to: SKILL.md may be a link
+    # to shared/guide.md, which names no content type.
+    manifest_type = None
+    if target_path.is_file():
+        if requested_path.name.upper() == SKILL_MANIFEST_FILE.upper():
+            manifest_type = CONTENT_TYPE_SKILL
+        elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
+            manifest_type = CONTENT_TYPE_WORKFLOWS
+    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as a SKILL.md already
+    # does for Tier 3, so every tier, the report names, and the default report location
+    # match the directory form. Take the folder from the path as given: resolving first
+    # would move a linked manifest to the folder its link points into. That folder is
+    # now the Tier 2 root, so refuse a linked one as the directory form does.
+    if manifest_type is not None and resolved_type == manifest_type:
+        if dedup:
+            _reject_linked_tier2_root(requested_path.absolute().parent)
+        target_path = requested_path.absolute().parent.resolve()
+        publication_name = publication_target_name(target_path) or target_path.name
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still

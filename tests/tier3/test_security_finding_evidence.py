@@ -12,8 +12,10 @@ entry points are exercised.
 
 from __future__ import annotations
 
+import gc
 import importlib.util
 import json
+import math
 import random
 import re
 import sys
@@ -1681,20 +1683,36 @@ def test_only_adds_markers_rejects_a_marker_taken_back() -> None:
     ],
 )
 def test_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
-    def elapsed(size: int) -> float:
-        text = unit * (size // len(unit))
-        times = []
-        for _ in range(3):
-            started = time.perf_counter()
-            eval_core_checks._mask_finding_evidence_credentials(text)
-            times.append(time.perf_counter() - started)
-        return min(times)
-
-    small, large = elapsed(25_000), elapsed(250_000)
+    small, large = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, unit, 25_000, 250_000)
     # Ten times the text takes about ten times as long. A step quadratic in
     # the number of markers took twenty times as long on the escaped quotes
     # between markers. The margin allows for a slow CI runner.
     assert large < 16 * small + 0.05
+
+
+def _masking_seconds(mask: Callable[[str], object], unit: str, small: int, large: int) -> tuple[float, float]:
+    """Return the CPU seconds *mask* takes on *unit* repeated to *small* and to *large* characters.
+
+    The two texts are masked in turn, three times each, and the fastest time
+    of each counts, so a burst of load on a busy CI runner slows both rather
+    than only the large one. The time is this thread's CPU time with garbage
+    collection paused: neither another process or thread holding the CPU nor
+    a collection of the test worker's whole heap is counted.
+    """
+    texts = (unit * (small // len(unit)), unit * (large // len(unit)))
+    fastest = [math.inf, math.inf]
+    collecting = gc.isenabled()
+    gc.disable()
+    try:
+        for _ in range(3):
+            for index, text in enumerate(texts):
+                started = time.thread_time()
+                mask(text)
+                fastest[index] = min(fastest[index], time.thread_time() - started)
+    finally:
+        if collecting:
+            gc.enable()
+    return fastest[0], fastest[1]
 
 
 @pytest.mark.parametrize(

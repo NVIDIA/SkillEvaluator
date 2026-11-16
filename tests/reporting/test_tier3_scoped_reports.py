@@ -117,6 +117,23 @@ def test_default_report_keeps_publication_gate_and_format():
     assert "## Tier Status" in benchmark
 
 
+@pytest.mark.parametrize("execution_status", ["succeeded", "failed"])
+def test_quality_failure_does_not_invent_execution_failure(execution_status):
+    result = result_with_completed_peer(peer_failed=False)
+    payload = result.metadata["agent_eval"]
+    payload["verdict"] = payload["summary"]["verdict"] = "fail"
+    payload["execution_status"] = payload["summary"]["execution_status"] = execution_status
+    payload["verdict_reason"] = "1 of 2 cases failed: 1 goal not met"
+
+    display = HTMLReporter._tier3_report_data([result])
+    html = HTMLReporter(report_scope="tier3").render(result)
+
+    assert display["verdict"] == "fail"
+    assert display["execution_status"] == display["summary"]["execution_status"] == execution_status
+    assert completed_agent_result(display)["needs_attention"] == (execution_status == "failed")
+    assert ("Other execution failures need attention" in html) == (execution_status == "failed")
+
+
 @pytest.mark.parametrize("corruption", ["bool", "nan", "missing", "errors", "coverage", "conditions"])
 def test_no_completed_summary_for_invalid_agent_evidence(corruption):
     result = result_with_completed_peer()

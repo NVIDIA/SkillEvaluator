@@ -934,6 +934,22 @@ def test_standalone_evaluate_forwards_the_evaluated_source(monkeypatch: pytest.M
     }
 
 
+@pytest.mark.parametrize("command", [["evaluate"], ["tier3", "evaluate"]])
+def test_evaluate_without_the_tier3_extra_names_the_missing_extra(monkeypatch: pytest.MonkeyPatch, command) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def _missing_harbor(self, options, *, progress_reporter=None):
+        raise ModuleNotFoundError("No module named 'harbor'", name="harbor")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _missing_harbor, raising=True)
+    result = CliRunner().invoke(
+        cli, [*command, str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "plain"]
+    )
+
+    assert result.exit_code == 1
+    assert "Install skillevaluator[tier3]" in result.output
+
+
 def test_standalone_evaluate_refuses_a_non_canonical_revision(monkeypatch: pytest.MonkeyPatch) -> None:
     """Refusing at the boundary beats a card that says the field was never recorded."""
     from skillevaluator.evaluation import EvaluationService

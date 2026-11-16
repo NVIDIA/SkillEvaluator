@@ -228,6 +228,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
 - The CI guide's `jq` quality gate fails when a report has no quality score
   (it passed before) and checks every skill's report in a folder run.
 

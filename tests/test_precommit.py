@@ -89,6 +89,33 @@ def test_skill_root_skips_deleted_skill(tmp_path: Path) -> None:
     assert skill_root_for(kept / "SKILL.md", cwd=tmp_path) == kept.resolve()
 
 
+def test_skill_root_skips_version_snapshot_manifest(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path / "skills", "demo-skill")
+    snapshot = _write_skill(skill / ".versions", "1.0.0")
+
+    assert skill_root_for(snapshot / "SKILL.md", cwd=tmp_path) == skill.resolve()
+    assert skill_root_for("skills/demo-skill/.versions/1.0.0/SKILL.md", cwd=tmp_path) == skill.resolve()
+    assert run_precommit("schema", [snapshot / "SKILL.md"], cwd=tmp_path) == (0, ["PASS  demo-skill  schema"])
+
+
+def test_skill_root_skips_eval_fixture_manifest(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path / "skills", "demo-skill")
+    fixture = _write_skill(skill / "evals" / "fixtures", "Bad_Fixture", body="not a valid manifest\n")
+    data = fixture / "data.json"
+    data.write_text("{}\n", encoding="utf-8")
+
+    assert skill_root_for(fixture / "SKILL.md", cwd=tmp_path) == skill.resolve()
+    assert skill_root_for(data, cwd=tmp_path) == skill.resolve()
+    assert collect_skill_roots([fixture / "SKILL.md", data], cwd=tmp_path) == [skill.resolve()]
+
+
+def test_skill_root_ignores_excluded_dir_names_above_cwd(tmp_path: Path) -> None:
+    repo = tmp_path / "results" / "repo"
+    skill = _write_skill(repo / "skills", "demo-skill")
+
+    assert skill_root_for(skill / "SKILL.md", cwd=repo) == skill.resolve()
+
+
 def test_collect_skill_roots_lists_each_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skills = tmp_path / "skills"
     alpha = _write_skill(skills, "alpha")

@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SKILL_MANIFEST_VARIANTS
+from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.tier1.commands import run_lint_scripts, run_quality_check
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -51,6 +51,19 @@ def _has_skill_manifest(directory: Path, cache: dict[Path, bool] | None = None) 
     return found
 
 
+def _in_excluded_dir(directory: Path, limit: Path) -> bool:
+    """Return True when *directory*, relative to *limit*, sits in a ``SCAN_EXCLUDED_DIRS`` folder.
+
+    Folder-mode validation skips manifests under these folders (eval fixtures,
+    version snapshots, results), so the hook does the same.
+    """
+    try:
+        relative = directory.resolve().relative_to(limit)
+    except (OSError, ValueError):
+        return False
+    return any(part in SCAN_EXCLUDED_DIRS for part in relative.parts)
+
+
 def skill_root_for(
     path: str | Path,
     *,
@@ -62,7 +75,9 @@ def skill_root_for(
 
     Deleted skills and paths that never sit under a skill are ignored. Search
     stops at *cwd* (the repository root pre-commit runs from) so a stray
-    manifest above the project is not treated as a skill root.
+    manifest above the project is not treated as a skill root. A manifest in
+    a ``SCAN_EXCLUDED_DIRS`` folder (``evals/``, ``.versions/``, ...) is not
+    a skill root either; the walk continues up to the real skill.
 
     ``_cache`` and ``_manifest_cache`` let ``collect_skill_roots`` share
     lookups across paths so each directory is listed once per invocation.
@@ -88,7 +103,7 @@ def skill_root_for(
 
     root: Path | None = None
     for ancestor in [start, *start.parents]:
-        if _has_skill_manifest(ancestor, _manifest_cache):
+        if not _in_excluded_dir(ancestor, limit) and _has_skill_manifest(ancestor, _manifest_cache):
             try:
                 root = ancestor.resolve()
             except OSError:

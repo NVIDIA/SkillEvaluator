@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `harness` results flag a skill whose description has nearly the same words as another
   skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
   request to the wrong one of the two.
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
+  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -155,6 +158,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
@@ -234,11 +240,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
 - The CI guide's `jq` quality gate fails when a report has no quality score
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
 
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
@@ -299,6 +313,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
   indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
   compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
 - `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
   now say to install `skillevaluator[tier3]` instead of printing only
   `Error: No module named 'harbor'`.

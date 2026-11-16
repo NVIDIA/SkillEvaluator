@@ -4319,7 +4319,18 @@ def _run_doctor(
     exit_codes = []
     for selected in selected_tiers:
         if selected == "3":
-            from skillevaluator.tier3.commands import doctor as tier3_doctor
+            try:
+                from skillevaluator.tier3.commands import doctor as tier3_doctor
+            except ImportError as exc:
+                from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+                if not is_missing_tier3_extra(exc):
+                    raise
+                click.echo(
+                    "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
+                )
+                exit_codes.append(1)
+                continue
 
             exit_codes.append(
                 tier3_doctor(

@@ -3992,16 +3992,27 @@ def _masker_reading(text: str) -> tuple[str, array[int] | None]:
 
 
 def _masked_spans(text: str, masked: str) -> list[tuple[int, int]]:
-    """Return the spans of *text* that *masked*, a masker's output for it, masks for certain."""
+    """Return the spans of *text* that *masked*, a masker's output for it, masks in any placement of what it keeps.
+
+    Where the text kept on both sides of a marker is placed for certain, the
+    span is what lies between. A piece of kept text that fits in more than
+    one place (" -p " in 'docker login -u bot --token "x -p y" -p VALUE', once
+    the token value and the password are masked) gives the span from where
+    the piece before it ends at the earliest to where the piece after it
+    starts at the latest, so the span holds what was masked in every
+    placement, and what lies between those places too.
+    """
     read, read_starts = _masker_reading(text)
     kept = _MASKED_MARKERS_RE.split(masked)[::2]
-    starts = _place_kept_text(read, kept)
+    places = _kept_text_places(read, kept)
+    if places is None:
+        return []
+    early, late = places
     spans: list[tuple[int, int]] = []
-    for index in range(len(kept) - 1 if starts else 0):
-        start, end = starts[index], starts[index + 1]
-        if start < 0 or end < 0 or start + len(kept[index]) >= end:
+    for index in range(len(kept) - 1):
+        start, end = early[index] + len(kept[index]), late[index + 1]
+        if start >= end:
             continue
-        start += len(kept[index])
         spans.append((start, end) if read_starts is None else (read_starts[start], read_starts[end - 1] + 1))
     return spans
 
@@ -4009,11 +4020,24 @@ def _masked_spans(text: str, masked: str) -> list[tuple[int, int]]:
 def _place_kept_text(read: str, kept: list[str]) -> list[int] | None:
     """Return where each piece of *kept*, the text a masker kept between its markers, starts in *read*, the text it read.
 
-    The pieces are placed in order, once as early and once as late as they
-    fit. A piece placed at the same index both times is there in every
-    placement; any other is -1. A first piece that starts *read* and a last
-    piece that ends it are placed there, as a masker at most strips whitespace
-    from the ends of its result. None: a piece is missing.
+    A piece placed at the same index as early and as late as it fits (see
+    _kept_text_places) is there in every placement; any other is -1. None: a
+    piece is missing.
+    """
+    places = _kept_text_places(read, kept)
+    if places is None:
+        return None
+    early, late = places
+    return [start if start == late[index] else -1 for index, start in enumerate(early)]
+
+
+def _kept_text_places(read: str, kept: list[str]) -> tuple[list[int], list[int]] | None:
+    """Return where each piece of *kept*, the text a masker kept between its markers, starts at the earliest and latest.
+
+    The pieces are placed in order in *read*, the text the masker read, once
+    as early and once as late as they fit. A first piece that starts *read*
+    and a last piece that ends it are placed there, as a masker at most strips
+    whitespace from the ends of its result. None: a piece is missing.
     """
     count = len(kept)
     early: list[int] = []
@@ -4037,7 +4061,7 @@ def _place_kept_text(read: str, kept: list[str]) -> list[int] | None:
         pos = found + len(kept[index])
     if read.startswith(kept[0]):
         late[0] = 0
-    return [start if start == late[index] else -1 for index, start in enumerate(early)]
+    return early, late
 
 
 def _mask_spans(text: str, masked: str, spans: list[tuple[int, int]]) -> str:

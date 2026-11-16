@@ -1544,9 +1544,10 @@ def test_finding_evidence_places_the_text_a_reading_keeps_before_its_first_marke
 
 # A reading's markers are mapped back by the text kept between them. Where
 # that text fits the reading in more than one way, the span of the reading
-# that a marker stands for is not known, and nothing is masked for it; a
-# marker whose kept text fits one way is masked.
-def test_masking_escaped_again_skips_a_marker_its_kept_text_does_not_place() -> None:
+# that a marker stands for is not known, so everything between the earliest
+# and the latest place of that text is masked; a marker whose kept text fits
+# one way is masked as its span.
+def test_masking_escaped_again_masks_every_place_a_marker_can_stand_for() -> None:
     text = "pw: one\\ntwo\\nthree\\nfour"
 
     def mask(masked_reading: str) -> Callable[[str], str]:
@@ -1554,9 +1555,9 @@ def test_masking_escaped_again_skips_a_marker_its_kept_text_does_not_place() -> 
 
     # "one\ntwo" and "three", or "one" and "two\nthree".
     ambiguous = mask("pw: <redacted>\n<redacted>\nfour")
-    assert eval_core_checks._mask_unescaped_views(text, text, ambiguous) == text
-    placed = mask("pw: <redacted>\nfour")
-    assert eval_core_checks._mask_unescaped_views(text, text, placed) == "pw: <redacted>\\nfour"
+    assert eval_core_checks._mask_unescaped_views(text, text, ambiguous) == "pw: <redacted>\\nfour"
+    placed = mask("pw: <redacted>\nthree\nfour")
+    assert eval_core_checks._mask_unescaped_views(text, text, placed) == "pw: <redacted>\\nthree\\nfour"
 
 
 _MARKERS = re.compile(r"(?:(?:jwt-)?<redacted>|<redacted private key>|\[REDACTED\])+")
@@ -2258,6 +2259,71 @@ def test_a_p_inside_a_flag_value_does_not_hide_the_password_after_a_masked_comma
     ):
         assert eval_core_checks._redact_finding_evidence(evidence_text) == evidence_masked
         assert eval_template._redact_judge_evidence(evidence_text) == evidence_masked
+
+
+def _ragas_prompt(command: str) -> str:
+    """Return a RAGAS prompt that holds a Bash call running *command*, as the judge sends it."""
+    trajectory = {"steps": [{"source": "agent", "tool_calls": [{"function_name": "Bash", "arguments": {"command": command}}]}]}
+    agent_text = eval_template.build_conversation_summary(trajectory, "Deploy the app.")
+    return "Judge whether the agent reached the goal.\ninput: " + json.dumps(
+        {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
+    )
+
+
+# In text escaped twice (a tool call's JSON arguments repeated as JSON, as in a
+# RAGAS prompt) the decoy "-p" is read in the readings with escapes removed,
+# where the text kept around the masked values (" -p ") fits in two places.
+# Everything between those places is masked.
+@pytest.mark.parametrize("flag", ["--use_token", "--no_token", "--with_password"])
+@pytest.mark.parametrize(
+    "shape",
+    [
+        pytest.param(lambda command: json.dumps(json.dumps({"command": command})), id="json-in-json"),
+        pytest.param(_ragas_prompt, id="ragas-prompt"),
+    ],
+)
+def test_a_p_inside_a_flag_value_escaped_twice_does_not_hide_the_password(flag: str, shape: Any) -> None:
+    command = f'./ci {flag} docker login -u bot --token "x -p y" -p {_API_TOKEN} registry.example.com\nls'
+    text = shape(command)
+
+    for evidence in (eval_template._redact_judge_evidence(text), eval_core_checks._mask_finding_evidence_credentials(text)):
+        assert _API_TOKEN not in evidence
+        assert f"{flag} <redacted> login -u bot --token <redacted> registry.example.com" in evidence
+
+
+# A spaced call value in text escaped twice, with a later "\n" escape and the
+# same flag twice around it: the text a reading keeps (" --password ") fits
+# in more than one place.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param(
+            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && ./deploy --password P2'
+            " && API_TOKEN=abc\n./deploy --password P3",
+            id="attribute-call-before-flags",
+        ),
+        pytest.param(
+            f'auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p P2 r'
+            " && API_TOKEN=abc\ndocker login -u bot -p P3 r",
+            id="call-before-logins",
+        ),
+        pytest.param(
+            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p P2 r'
+            " && API_TOKEN=abc\ndocker login -u bot -p P3 r",
+            id="attribute-call-before-logins",
+        ),
+    ],
+)
+def test_a_spaced_call_value_escaped_twice_keeps_its_arguments_masked(copy: str, command: str) -> None:
+    text = json.dumps(json.dumps({"command": command}))
+    evidence = (
+        eval_template._redact_judge_evidence(text)
+        if copy == "template"
+        else eval_core_checks._mask_finding_evidence_credentials(text)
+    )
+
+    assert _BASIC_PASSWORD not in evidence
 
 
 @pytest.mark.parametrize("flag", ["--use_token", "--use-token"])

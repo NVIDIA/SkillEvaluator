@@ -1271,6 +1271,14 @@ def _ensure_autopilot_dataset(
         return dataset_note
     except click.ClickException:
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if is_missing_tier3_extra(exc):
+            raise click.ClickException(
+                "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+            ) from exc
+        raise click.ClickException(str(exc)) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -4013,6 +4021,14 @@ def evaluate(
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if not is_missing_tier3_extra(exc):
+            raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+        ) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 

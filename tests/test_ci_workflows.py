@@ -26,7 +26,6 @@ REQUIRED_CI_JOBS = {
     "test-python-314": "Tests (Python 3.14)",
     "package": "Package",
     "rhel8-security-install": "RHEL 8 security install",
-    "tier2-macos": "Tier 2 (macos-latest)",
     "tier2-windows": "Tier 2 (windows-latest)",
     "tier3-macos": "Tier 3 macOS contract and progress",
     "native-windows-local-mode": "Native Windows local mode fails closed",
@@ -213,13 +212,16 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     assert jobs["test-python-314"]["runs-on"] == "ubuntu-latest"
     assert "uv sync --all-extras --locked --python 3.14" in _runs(jobs["test-python-314"])
     assert "uv run pytest -q" in _runs(jobs["test-python-314"])
-    assert jobs["tier2-macos"]["runs-on"] == "macos-latest"
     assert jobs["tier2-windows"]["runs-on"] == "windows-latest"
-    assert "tests/embedding" in _runs(jobs["tier2-macos"])
     assert "tests/embedding" in _runs(jobs["tier2-windows"])
     assert "tests/test_harbor_runner_status.py" in _runs(jobs["tier2-windows"])
     assert jobs["tier3-macos"]["runs-on"] == "macos-latest"
     assert "tests/test_tier3_progress.py" in _runs(jobs["tier3-macos"])
+    # The macOS Tier 2 tests share the Tier 3 macOS job and run even when its own tests fail.
+    macos_test_steps = [step for step in jobs["tier3-macos"]["steps"] if "pytest" in step.get("run", "")]
+    assert [step["name"] for step in macos_test_steps] == ["Run Tier 3 contract and progress tests", "Run Tier 2 tests"]
+    assert "tests/embedding" in macos_test_steps[1]["run"]
+    assert macos_test_steps[1]["if"] == RUN_UNLESS_CANCELLED_IF
     assert jobs["native-windows-local-mode"]["runs-on"] == "windows-latest"
     assert "tests/test_harbor_local_mode.py" in _runs(jobs["native-windows-local-mode"])
     assert jobs["rhel8-security-install"]["container"] == "rockylinux/rockylinux:8.10"

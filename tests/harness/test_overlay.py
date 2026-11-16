@@ -12,7 +12,7 @@ from click.testing import CliRunner
 
 from skillevaluator.cli import cli
 from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
-from skillevaluator.harness.overlay import PROFILES_DIR
+from skillevaluator.harness.overlay import PROFILES_DIR, _description_words
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
 from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
@@ -990,6 +990,81 @@ def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
 
     assert "CC-ALLOWED-TOOLS-HEADLESS" not in _rule_ids(skill, "claude-code")
     assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
+
+
+def test_lookalike_descriptions_are_flagged(tmp_path: Path):
+    def write(name: str, description: str) -> Path:
+        skill = tmp_path / ".agents" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n")
+        return skill
+
+    same = (
+        "Generate PDF reports from spreadsheet data. Use when the user asks for a report, summary PDF, or chart export."
+    )
+    builder = write("report-builder", same)
+    write("report-generator", same.lower().replace(", or", " or"))
+    hr = write("hr-headcount", "Count employees per department from the HR roster. Use for headcount questions.")
+    write("sales-pipeline", "Summarize open deals by stage from the CRM export. Use for sales pipeline questions.")
+
+    facts = facts_for([builder, hr])
+    assert facts[builder]["lookalike_names"] == "report-generator"
+    assert facts[hr]["lookalike_names"] == ""
+    finding = next(f for r in evaluate_harnesses(builder, "codex") for f in r.findings if f["id"] == "CX-LOOKALIKE")
+    assert finding["effect"] == "advisory"
+    assert "report-generator" in finding["message"]
+
+
+def _lookalikes(tmp_path: Path, first: str, second: str) -> str:
+    skills = []
+    for name, description in (("skill-one", first), ("skill-two", second)):
+        skill = tmp_path / ".agents" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n", "utf-8")
+        skills.append(skill)
+    return facts_for(skills)[skills[0]]["lookalike_names"]
+
+
+@pytest.mark.parametrize(
+    "description",
+    [
+        "Создаёт отчёты сотрудников по отделам из таблиц компании",
+        "従業員の部署別レポートを会社の表データから作成します。人事の質問に使います",
+        "为公司表格中的员工生成按部门划分的报告\uff0c用于人事问题",
+    ],
+)
+def test_lookalike_non_latin_descriptions_are_flagged(tmp_path: Path, description: str):
+    assert _lookalikes(tmp_path, description, description) == "skill-two"
+
+
+def test_lookalike_different_non_latin_descriptions_are_not_flagged(tmp_path: Path):
+    russian = _lookalikes(
+        tmp_path / "ru",
+        "Создаёт отчёты сотрудников по отделам из таблиц компании",
+        "Считает остатки товаров на складе по артикулам из выгрузки учёта",
+    )
+    japanese = _lookalikes(
+        tmp_path / "ja",
+        "従業員の部署別レポートを会社の表データから作成します。人事の質問に使います",
+        "商品の在庫数を倉庫ごとに集計します。物流の質問に使います。出荷の遅れも確認します",
+    )
+
+    assert russian == japanese == ""
+
+
+def test_lookalike_mixed_language_descriptions_keep_distinguishing_words(tmp_path: Path):
+    hr = "Generate PDF reports from spreadsheet data for 人事部門."
+    sales = "Generate PDF reports from spreadsheet data for 営業部門."
+
+    assert _lookalikes(tmp_path / "different", hr, sales) == ""
+    assert _lookalikes(tmp_path / "same", hr, hr) == "skill-two"
+
+
+def test_description_words_keep_unicode_letters_and_ascii_behavior():
+    assert _description_words("Use when PDF_reports meet v2, don't") == {"pdf", "reports", "meet", "v2", "don", "t"}
+    assert _description_words("Straße CAFÉ") == _description_words("strasse café") == {"strasse", "café"}
+    assert _description_words("кра\u0438\u0306") == _description_words("кра\u0439") == {"край"}
+    assert _description_words("हिन्दी भाषा") == {"हिन्दी", "भाषा"}
 
 
 def test_claude_ignored_field_values_are_noted(tmp_path: Path):

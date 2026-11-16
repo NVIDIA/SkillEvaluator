@@ -8,7 +8,9 @@ import ast
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -457,6 +459,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     platforms = data.get("platforms")
     name = _skill_name(skill_path, data)
     duplicates = catalog.duplicates(skill_path, name) if catalog else []
+    lookalikes = catalog.lookalikes(skill_path) if catalog else []
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
@@ -517,7 +520,71 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
         "duplicate_name": bool(duplicates),
         "duplicate_paths": ", ".join(duplicates[:3]),
+        "lookalike_names": ", ".join(lookalikes[:3]),
     }
+
+
+_LOOKALIKE_OVERLAP = 0.95
+_LOOKALIKE_MIN_WORDS = 4
+_STOP_WORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "this",
+        "that",
+        "to",
+        "use",
+        "used",
+        "user",
+        "uses",
+        "when",
+        "with",
+        "you",
+        "your",
+    ]
+)
+
+
+# Scripts written without spaces between words (Han, kana, Thai, Lao): compared as character pairs.
+_UNSPACED_RUN = re.compile(r"([\u0e00-\u0eff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+)")
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or unicodedata.category(char).startswith("M")
+
+
+def _description_words(text: str) -> frozenset[str]:
+    """Letters and digits in any script, lowercased, split on everything else, minus common English words."""
+    words: set[str] = set()
+    for keep, chars in groupby(unicodedata.normalize("NFKC", text).casefold(), _is_word_char):
+        if not keep:
+            continue
+        for i, piece in enumerate(_UNSPACED_RUN.split("".join(chars))):
+            if i % 2:
+                words.update({piece[j : j + 2] for j in range(len(piece) - 1)} or {piece})
+            elif piece and piece not in _STOP_WORDS:
+                words.add(piece)
+    return frozenset(words)
+
+
+def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
 
 
 @dataclass
@@ -528,16 +595,33 @@ class Catalog:
     size: int
     desc_chars: int
     base: Path | None = None
+    descriptions: dict[Path, str] | None = None
 
     @classmethod
     def of(cls, skills: list[Path], base: Path | None = None) -> Catalog:
-        names, chars = {}, 0
+        names, descriptions, chars = {}, {}, 0
         for skill in skills:
             _, _, _, _, data = _read_manifest(skill)
             names[skill.resolve()] = _skill_name(skill, data)
             description = data.get("description")
             chars += len(description) if isinstance(description, str) else 0
-        return cls(names=names, size=len(skills), desc_chars=chars, base=base)
+            descriptions[skill.resolve()] = description if isinstance(description, str) else ""
+        return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
+
+    def lookalikes(self, skill: Path) -> list[str]:
+        """Other skills here whose description has nearly the same words as this one's."""
+        descriptions = self.descriptions or {}
+        own = skill.resolve()
+        words = _description_words(descriptions.get(own, ""))
+        if len(words) < _LOOKALIKE_MIN_WORDS:
+            return []
+        return [
+            self.names[other]
+            for other, text in descriptions.items()
+            if other != own
+            and self.names.get(other) != self.names.get(own)
+            and _jaccard(words, _description_words(text)) >= _LOOKALIKE_OVERLAP
+        ]
 
     def duplicates(self, skill: Path, name: str) -> list[str]:
         own = skill.resolve()

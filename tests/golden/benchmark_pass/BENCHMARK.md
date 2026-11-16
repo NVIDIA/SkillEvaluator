@@ -98,7 +98,7 @@ Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92
 
 - Dimension bands: PASS at 50% or above; NEUTRAL from 40% to below 50%; FAIL below 40%.
 - Overall Tier 3 lift: PASS at +5 points or more; FAIL at -10 points or less; values between those bands are NEUTRAL.
-- Overall verdict: PASS only when every configured dimension passes for at least one supported agent. Lift is reported as diagnostic evidence and does not override this gate.
+- Overall verdict: PASS only when every configured dimension passes for at least one supported agent, with no with-skill case failing a required goal-accuracy or security check. A scored unmet goal or security issue in any attempt fails its case and that agent's quality verdict, even if all dimensions pass. Baseline-arm required-check failures do not change this quality verdict. Lift is reported as diagnostic evidence and does not override this gate.
 - The 50% attempt pass threshold is a separate per-task gate; it is not the dimension pass threshold.
 - Effectiveness is the equal-weight mean of goal completion (`goal_accuracy`) and expected workflow adherence (`behavior_check`).
 - Token efficiency is a separate report-only signal. It does not change a dimension score or the overall verdict.

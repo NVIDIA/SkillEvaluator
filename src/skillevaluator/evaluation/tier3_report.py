@@ -653,6 +653,8 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
     if isinstance(run_id, str):
         result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
+    from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         if payload.get("mode") == "baseline_only":
             result.add_success(
@@ -667,6 +669,12 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
                 f"best agent {best}",
             )
         result.passed = True
+    elif (
+        payload.get("execution_status") == "skipped"
+        and not payload.get("execution_errors")
+        and budget_fully_denied(payload.get("budget"))
+    ):
+        result.mark_scan_incomplete("Tier 3 run budget")
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:

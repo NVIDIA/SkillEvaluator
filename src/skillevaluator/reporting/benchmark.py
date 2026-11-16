@@ -207,8 +207,6 @@ class BenchmarkReporter(ReporterBase):
         assessment = _publication_assessment(results, ae, expected_skill_name=expected_skill_name)
         status = _assessment_status(assessment)
 
-        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
-        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
         budget = ae.get("budget") if isinstance(ae, dict) else None
         budget_reason = None
         if isinstance(budget, dict):
@@ -217,10 +215,6 @@ class BenchmarkReporter(ReporterBase):
             budget_reason = budget_incomplete_reason(budget)
         if budget_reason:
             tier3_callout = f"> **Tier 3: INCOMPLETE** — {budget_reason}"
-        elif self.report_scope == "tier3" and isinstance(run_verdict, str):
-            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
-                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
-            )
         else:
             tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
@@ -1028,7 +1022,11 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 (
                     "- Overall verdict: PASS only when every configured dimension passes for at least one "
-                    "supported agent. Lift is reported as diagnostic evidence and does not override this gate."
+                    "supported agent, with no with-skill case failing a required goal-accuracy or security check. "
+                    "A scored unmet goal or security issue in any attempt fails its case and that agent's quality "
+                    "verdict, even if all dimensions pass. "
+                    "Baseline-arm required-check failures do not change this quality verdict. "
+                    "Lift is reported as diagnostic evidence and does not override this gate."
                 ),
             ]
         )

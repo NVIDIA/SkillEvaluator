@@ -1725,7 +1725,7 @@
             {% endif %}
         {% endfor %}
         {% set hero_metric_count = ((tier3.metric_ids or tier3.evaluators or {}) | length) if has_tier3 else 0 %}
-        <section class="agent-hero" aria-labelledby="report-title">
+        <section class="agent-hero" aria-labelledby="report-title" data-verdict="{{ verdict_key }}">
             <div class="agent-hero-top">
                 <div class="agent-hero-title-block">
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
@@ -2899,7 +2899,7 @@
                 <summary>What each number means</summary>
                 <div class="t3-details-body">
                 <ul class="t3-reasoning-list">
-                    <li><strong>Verdict</strong>: the live-evaluation result from the five dimensions. It passes when one agent scores at least {{ "%.2f" | format(tier3_dimension_pass_threshold) }} on every dimension with the skill.</li>
+                    <li><strong>Verdict</strong>: the live-evaluation result from the five dimensions and required case checks. It passes when one agent scores at least {{ "%.2f" | format(tier3_dimension_pass_threshold) }} on every dimension with the skill and has no with-skill case failing a required goal-accuracy or security check. A scored unmet goal or security issue in any attempt fails its case and that agent's quality verdict, even if all dimensions pass. Baseline-arm required-check failures do not change this quality verdict.</li>
                     <li><strong>Overall Score</strong>: the equal-weight mean of the five dimension scores with the skill, from 0.00 to 1.00.</li>
                     <li><strong>Skill Lift</strong>: compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. It shows whether the skill helped and does not change the verdict; N/A means no comparable baseline, not zero.</li>
                     <li><strong>pass@k</strong> (Trials): the share of eval cases with at least one passing attempt out of k. It measures how repeatable success is.</li>

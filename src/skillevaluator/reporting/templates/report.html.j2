@@ -2766,9 +2766,21 @@
             {% if tier3_display_dimensions or t3_na_dimensions or t3_peer_only_dimensions %}
             {% set t3_baseline_only = tier3.get('mode') == 'baseline_only' %}
             {% set t3_signal_evidence = tier3.signal_evidence or {} %}
+            {% set t3_definition_ids = [] %}
+            {% for dimension_id in t3_present_dimension_ids %}{% if t3_dim_hints.get(dimension_id) %}{% set _ = t3_definition_ids.append(dimension_id) %}{% endif %}{% endfor %}
             <details class="t3-details" id="tier3-dimension-lift" open>
                 <summary>Dimension Scores and Skill Lift{% if t3_best_name %} (Best Performing Agent: {{ t3_best_name }}){% endif %}</summary>
                 <div class="t3-details-body">
+                {% if t3_definition_ids %}
+                <details class="t3-method" id="tier3-dimension-definitions">
+                    <summary>Dimension definitions</summary>
+                    <ul class="t3-reasoning-list">
+                        {% for dimension_id in t3_definition_ids %}
+                        <li><strong>{{ "Skill Efficiency" if dimension_id == "efficiency" else (dimension_id | title) }}</strong>: {{ t3_dim_hints.get(dimension_id) }}</li>
+                        {% endfor %}
+                    </ul>
+                </details>
+                {% endif %}
                 <div class="table-scroll" id="tier3-multi-agent-dimension-table">
                 <table class="summary-table" id="tier3-dimension-table">
                     <caption class="t3-comparison-caption">N/A means unavailable. Expand Details for the recorded scope and evidence.</caption>

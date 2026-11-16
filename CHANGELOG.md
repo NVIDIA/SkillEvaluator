@@ -178,6 +178,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - HTML Overview combines execution status, scored/unscored coverage and the
   recorded next action. The baseline comparison stays open with its scores,
   lift and Overall visible; signals and reasoning use adjacent disclosures.
+  A named Dimension definitions guide beside the comparison explains recorded
+  dimensions even when their scores are unavailable, including without JavaScript.
   Native agent cards, versions and typography remain. Dataset diagnostics
   share exact structured explanations within an attempt and status while
   retaining every assertion, requirement and evidence association. Missing

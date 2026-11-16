@@ -821,6 +821,35 @@ def test_no_javascript_keeps_all_recorded_evidence_readable(browser, reports):
         context.close()
 
 
+@pytest.mark.parametrize("javascript", [True, False])
+def test_dimension_definitions_open_natively_beside_comparison(browser, reports, javascript):
+    directory, _, _ = reports
+    context = browser.new_context(java_script_enabled=javascript, viewport={"width": 390, "height": 1000})
+    context.route("https://**/*", lambda route: route.abort())
+    context.route("http://**/*", lambda route: route.abort())
+    try:
+        tab = context.new_page()
+        tab.goto((directory / "full.html").as_uri())
+        if javascript:
+            _tier(tab, "tier3")
+        comparison = tab.locator("#tier3-dimension-lift")
+        assert comparison.get_attribute("open") is not None
+        definitions = comparison.locator("#tier3-dimension-definitions")
+        assert definitions.get_attribute("open") is None
+        assert definitions.locator("li").count() == 5
+        assert not definitions.locator("li").first.is_visible()
+
+        definitions.get_by_text("Dimension definitions", exact=True).click()
+
+        assert definitions.get_attribute("open") is not None
+        assert all(item.is_visible() for item in definitions.locator("li").all())
+        assert "Produces factually accurate output." in definitions.inner_text()
+        assert "Skill Efficiency" in definitions.inner_text()
+        assert tab.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
+    finally:
+        context.close()
+
+
 @pytest.mark.parametrize("theme", ["light", "dark"])
 @pytest.mark.parametrize("width", [1440, 390])
 def test_native_controls_have_readable_computed_contrast_in_each_state(page, reports, theme, width):

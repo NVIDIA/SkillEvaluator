@@ -180,14 +180,20 @@ def run_precommit(
 
     Returns ``(exit_code, lines)``. Exit code is 1 when any skill fails and 0
     otherwise, including when every path is outside a skill or the skill was
-    deleted.
+    deleted. A check that raises for one skill is reported as a FAIL line for
+    that skill and the remaining skills are still checked.
     """
     if check not in CHECKS:
         raise ValueError(f"Unknown check: {check}")
     lines: list[str] = []
     failed = False
     for root in collect_skill_roots(paths, cwd=cwd):
-        results = run_check(check, root, min_score=min_score)
+        try:
+            results = run_check(check, root, min_score=min_score)
+        except Exception as exc:  # one broken skill must not hide the others
+            lines.append(f"FAIL  {root.name}  {check}  error: {type(exc).__name__}: {exc}")
+            failed = True
+            continue
         line = format_result_line(root.name, check, results, min_score=min_score)
         lines.append(line)
         if check == CHECK_LINT_SCRIPTS:

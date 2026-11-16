@@ -245,6 +245,23 @@ def test_precommit_fails_when_an_earlier_skill_fails(tmp_path: Path) -> None:
     assert lines[1] == "PASS  valid-skill  schema"
 
 
+def test_precommit_reports_skill_that_raises_and_checks_the_rest(tmp_path: Path) -> None:
+    broken = tmp_path / "latin1-skill"
+    broken.mkdir()
+    text = _VALID_SKILL_MD.format(name="latin1-skill", title="Caf\u00e9 Skill")
+    (broken / "SKILL.md").write_bytes(text.encode("latin-1"))
+    valid = _write_skill(tmp_path, "valid-skill")
+
+    code, lines = run_precommit(
+        "quality", [str(broken / "SKILL.md"), str(valid / "SKILL.md")], min_score=0, cwd=tmp_path
+    )
+
+    assert code == 1
+    assert len(lines) == 2
+    assert lines[0].startswith("FAIL  latin1-skill  quality  error: UnicodeDecodeError: ")
+    assert lines[1].startswith("PASS  valid-skill  quality")
+
+
 def test_skill_root_finds_repo_root_skill_from_relative_path(tmp_path: Path) -> None:
     (tmp_path / "SKILL.md").write_text(_VALID_SKILL_MD.format(name="root-skill", title="Root Skill"), encoding="utf-8")
     (tmp_path / "scripts").mkdir()

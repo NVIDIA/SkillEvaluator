@@ -15,8 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
   skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
   request to the wrong one of the two.
 - The `skillevaluator` agent skill now tells the agent to check for the CLI
-  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
-  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
+  and, with the user's permission, install it when missing (`uv tool install`,
+  `pipx`, pip in a Python 3.12-3.14 virtual environment, or `uvx`), and adds a
+  CLI-missing Tier 3 case. The case's target skill is inlined in its prompt, so
+  the installed skill folder carries no second `SKILL.md`.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -160,6 +162,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `skillevaluator` agent skill now asks the user before installing the
+  CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
+  run or using `--env-mode local` (trusted skills only; it does not reuse the
+  user's agent logins). It also asks for real tasks, outcomes and input files
+  before writing eval cases, explains that Tier 3 needs its own provider key,
+  and reports no verdict for a tier that could not run. Its own
+  `evals/evals.json` gains nine cases (010-018) covering these prompts,
+  including consent before cold scanner provisioning and writing a dataset from
+  the user's requests; the implicit dataset case now expects clarification and
+  accepts a labeled draft.
 - The CI guide's recipe installs SkillSpector from the commit behind its release
   tag and checks the Gitleaks archive against the published SHA-256 before
   unpacking it, matching the repository's own workflows.
@@ -348,12 +360,18 @@ All notable changes to SkillEvaluator are documented in this file.
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
   that endpoint.
+- Make the directory-snapshot mutation test independent of filesystem timestamp
+  granularity while preserving the late-entry race.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding
   spurious notices that other execution failures need attention.
 - Make the same-inode read-race regression use an observable mtime change without
   depending on filesystem clock granularity.
+- Make the onboarding URL-rewrite test use its temporary global Git config even
+  when the caller sets `GIT_CONFIG_GLOBAL`.
+- Model a changed ctime explicitly in the restored-mtime summary regression so
+  it does not depend on two writes crossing a filesystem clock tick.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
@@ -729,6 +747,16 @@ All notable changes to SkillEvaluator are documented in this file.
   reports show budget exhaustion, not-run attempts, overruns, and unverified
   usage. Budget-stopped runs have an incomplete summary verdict; admitted
   scores remain visible and their lift is not a complete-run skill-effect claim.
+- Tier 3 security grading no longer reads a shell startup file as written
+  when a command only sources it, or names a longer path that contains its
+  name without a redirection, `tee` or `sed -i` into that path:
+  `source ~/.bashrc; npm test 2>&1 | tail -20` and
+  `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
+  Security 0.0 and now score 1.0, in both the host checker and the bundled
+  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` still
+  scores 0.0. This amends the 0.9.0 note that every command that scored 0.0
+  in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
+  `cat ~/.bashrc 2>/dev/null`, still score 0.0.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized
@@ -1032,6 +1060,17 @@ All notable changes to SkillEvaluator are documented in this file.
   rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
+- `validate path/to/SKILL.md` and `validate path/to/workflow-rules.mdc` now
+  validate the folder that holds the file, as passing the folder does, so a
+  file inside a symlinked folder is now refused unless `--no-dedup` is passed,
+  as that folder is. Before, Tier 1 and Tier 2 received the file itself:
+  `schema`, `version` and `quality` failed with `No skills found` for a skill,
+  and `schema` with `No workflow directories found` for a workflow; a run
+  narrowed with `--checks` could pass without scanning the skill's other files;
+  and a run from inside the skill wrote its reports into it. Tier 3 also
+  received a `workflow-rules.mdc` file itself; it now receives the workflow
+  folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
+  when the file is a symlink to a file with another name.
 
 ## 0.9.0 - 2026-11-13
 

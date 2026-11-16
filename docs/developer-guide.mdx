@@ -76,8 +76,15 @@ mtime: two same-size writes can otherwise share a filesystem clock tick.
 | `integration` | End-to-end integration tests; may need fixtures or longer runtime | `pytest -m integration` |
 | `live` | Live tests against the in-process Harbor backend; requires the `tier3` extra and `NVIDIA_API_KEY` | `pytest -m live` |
 
-The MCP-staging restored-mtime regression models an advanced ctime explicitly,
-so its source-change assertion does not depend on the host clock ticking.
+The MCP-staging and legacy-summary restored-mtime regressions model an advanced
+ctime explicitly, so their source-change assertions do not depend on the host
+clock ticking.
+
+The directory-snapshot race regression explicitly advances directory mtime when
+inserting its late entry, rather than assuming creation crosses a clock tick.
+
+Git URL-rewrite tests point `GIT_CONFIG_GLOBAL` at their temporary configuration,
+so caller-level Git isolation does not suppress the rewrite being tested.
 
 The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 

@@ -158,6 +158,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
@@ -305,6 +308,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
@@ -312,6 +318,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
   indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
   compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

@@ -15,8 +15,10 @@ All notable changes to SkillEvaluator are documented in this file.
   skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
   request to the wrong one of the two.
 - The `skillevaluator` agent skill now tells the agent to check for the CLI
-  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
-  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
+  and, with the user's permission, install it when missing (`uv tool install`,
+  `pipx`, pip in a Python 3.12-3.14 virtual environment, or `uvx`), and adds a
+  CLI-missing Tier 3 case. The case's target skill is inlined in its prompt, so
+  the installed skill folder carries no second `SKILL.md`.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -160,12 +162,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
-- The `skillevaluator` agent skill now asks the user before installing an
-  extra, using a credential, spending on a Tier 3 run or using `--env-mode
-  local`. It also asks for real tasks and outcomes before writing eval cases,
-  explains that Tier 3 needs its own provider key, and reports no verdict for a
-  tier that could not run. Its own `evals/evals.json` gains eight cases
-  covering these prompts, including consent before cold scanner provisioning.
+- The `skillevaluator` agent skill now asks the user before installing the
+  CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
+  run or using `--env-mode local` (trusted skills only; it does not reuse the
+  user's agent logins). It also asks for real tasks, outcomes and input files
+  before writing eval cases, explains that Tier 3 needs its own provider key,
+  and reports no verdict for a tier that could not run. Its own
+  `evals/evals.json` gains nine cases (010-018) covering these prompts,
+  including consent before cold scanner provisioning and writing a dataset from
+  the user's requests; the implicit dataset case now expects clarification and
+  accepts a labeled draft.
 - The CI guide's recipe installs SkillSpector from the commit behind its release
   tag and checks the Gitleaks archive against the published SHA-256 before
   unpacking it, matching the repository's own workflows.
@@ -377,9 +383,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- The bundled skill's implicit dataset case expects clarification when real
-  requests and outcomes are missing, matching the skill's case-authoring rule.
-
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
@@ -419,6 +422,8 @@ All notable changes to SkillEvaluator are documented in this file.
   depending on filesystem clock granularity.
 - Make the onboarding URL-rewrite test use its temporary global Git config even
   when the caller sets `GIT_CONFIG_GLOBAL`.
+- Model a changed ctime explicitly in the restored-mtime summary regression so
+  it does not depend on two writes crossing a filesystem clock tick.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

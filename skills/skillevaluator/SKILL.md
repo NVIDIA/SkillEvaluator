@@ -43,8 +43,8 @@ existing benchmark into a custom grader, read
 
 - A target directory containing `SKILL.md` (or a folder of skills, `.mdc`
   rules, or a plugin manifest).
-- The CLI on Python 3.12-3.14. If it is missing, install it yourself (Workflow
-  step 1). Extras: `llm` (rubric), `security` (scanners), `tier2`, `tier3`,
+- The CLI on Python 3.12-3.14. If it is missing, ask before installing it
+  (Workflow step 1). Extras: `llm` (rubric), `security` (scanners), `tier2`, `tier3`,
   `all`, `dashboard`. From a source checkout use
   `uv run --python 3.13 --extra all skillevaluator ...`.
 - No key for keyless commands (`quality-check`, `security-scan`, `pii-scan`,
@@ -58,8 +58,11 @@ existing benchmark into a custom grader, read
 - Tier 3 does not use the model of the agent you are running in. It starts
   separate agent processes in a sandbox, with and without the skill, and an LLM
   judge scores them. It therefore needs a provider key exported on the host even
-  when you launch it from inside Claude Code, Codex or OpenCode. One key
-  (`NVIDIA_API_KEY` from https://build.nvidia.com) covers the agents and the judge.
+  when you launch it from inside Claude Code, Codex or OpenCode. With `nv_build`
+  in `--env-mode docker` or `local`, one key (`NVIDIA_API_KEY` from
+  https://build.nvidia.com) covers the agents and the judge; other backends and
+  native Claude or GPT agent models need that vendor's key
+  ([references/providers.md](references/providers.md)).
 - For Tier 3: an agent (`opencode`, `codex`, or `claude-code`) and a sandbox.
   Harbor is installed with the `tier3` extra; you do not run it yourself.
   The default `--env-mode docker` needs a Docker daemon. Without Docker, use
@@ -73,10 +76,10 @@ Never print, echo, or commit API keys; keep them in the host environment.
 | User goal | Command | Needs |
 | --- | --- | --- |
 | Fast keyless quality score | `skillevaluator quality-check <skill-dir>` | nothing |
-| Full static gate for one skill | `skillevaluator tier1 <skill-dir> --no-llm` | scanners (auto-installed) |
+| Full static gate for one skill | `skillevaluator tier1 <skill-dir> --no-llm` | scanners (downloaded if missing; ask first) |
 | Static gate plus LLM rubric and security review | `skillevaluator tier1 <skill-dir>` | provider |
 | LLM rubric only | `skillevaluator rubric-eval <skill-dir>` | provider, `llm` extra |
-| Security / PII scan only | `skillevaluator security-scan <skill-dir>`, `skillevaluator pii-scan <skill-dir>` | nothing |
+| Security / PII scan only | `skillevaluator security-scan <skill-dir>`, `skillevaluator pii-scan <skill-dir>` | SkillSpector for `security-scan` (downloaded if missing; ask first) |
 | Repeated content inside one skill | `skillevaluator tier2 <skill-dir>` | provider with embeddings |
 | Overlap across a collection | `skillevaluator similarity-check <skills-dir>` | embeddings |
 | Does the skill help an agent? | `skillevaluator tier3 <skill-dir>` | provider, agent, Docker |
@@ -91,23 +94,31 @@ Full flag tables: [Tier 1](references/commands-tier1.md),
 
 ## Ask The User First
 
-Run keyless, read-only commands without asking only when their tools are already
-available. Keyless scans can auto-install missing scanners, so get permission
-before launching a command that would provision them. Reuse the user's explicit
+Keyless, read-only commands need no permission when their tools are already
+available. Keyless scans and `health-check --tier 1` download missing scanners,
+so get permission before launching a command that would provision them. Reuse the user's explicit
 authorization for the same installation rather than asking again. Otherwise,
 stop and ask one short question before any of these:
 
 - **Installing.** A missing CLI, extra (`tier2`, `tier3`) or scanner changes the
   user's environment. Name what is missing and the install command, then ask.
-- **Credentials.** Check by name whether a provider variable is exported. If
-  none is, list the options (`NVIDIA_API_KEY` from https://build.nvidia.com,
-  `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) and ask which the user wants to set.
+- **Credentials and model spend.** Check by name whether a provider variable is
+  exported. If none is, list the options (`NVIDIA_API_KEY` from
+  https://build.nvidia.com, `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`) and ask which
+  the user wants to set. If one is, name the provider and, unless the user asked
+  for that run, ask before the first command that calls it (`tier1` without
+  `--no-llm`, `rubric-eval`, `tier2`, `create-eval-dataset`, Tier 3). If several
+  keys are exported, ask which provider to use and set `SKILL_EVAL_LLM_PROVIDER`.
   Never search files for keys and never print one.
 - **Spending.** Before a Tier 3 run, state trials = cases x attempts x agents x 2
-  and run `--max-cases 1` first.
-- **Running on the host.** `--env-mode local` runs the agent on the user's
-  machine with their logins. Offer it only when the skill cannot change real
-  systems; otherwise ask the user to start Docker.
+  (fewer with `--skip-baseline` or `--skip-with-skill`), each also scored by
+  judge calls. Propose a `--max-cases 1` smoke run first, ask again before the
+  full run, and pass `--max-attempts-total N` when the user sets a limit.
+- **Running on the host.** `--env-mode local` runs the agent CLI installed on the
+  host under Bubblewrap (Linux) or the weaker Seatbelt (macOS), with network
+  access on by default. It does not use the user's CLI logins: each trial gets a
+  private home directory and only the provider key exported on the host. Offer
+  it only for skills the user trusts; otherwise ask the user to start Docker.
 
 When a tier cannot run, say which requirement is missing and what the user must
 do. Report no score, lift or verdict for that tier.
@@ -119,16 +130,19 @@ do. Report no score, lift or verdict for that tier.
    authorized, install it in the first way that works, then run the version
    check again:
    - `uv tool install --python 3.13 "skillevaluator[all]"` (isolated, preferred)
-   - `pipx install "skillevaluator[all]"`
+   - `pipx install --python python3.13 "skillevaluator[all]"`
    - `python3 -m pip install --upgrade "skillevaluator[all]"` inside an active
-     virtual environment
+     virtual environment whose Python is 3.12-3.14 (on an older Python, pip
+     installs an empty `0.0.0a0` placeholder with no `skillevaluator` command)
    - with no install, prefix each command with `uvx --python 3.13 --from "skillevaluator[all]"`
 
-   The same permission rule covers isolated installs, `uvx` provisioning and
-   upgrades as well as system or shared Python. Never use `sudo pip`. If the
-   binary is installed but not on `PATH`, run
-   `uv tool update-shell` or add `~/.local/bin` to `PATH`. If a documented
-   command or flag is unknown, upgrade: `uv tool upgrade skillevaluator`. If
+   The same permission rule covers isolated installs, `uvx` provisioning,
+   upgrades and `uv tool update-shell` (it edits shell startup files), as well
+   as system or shared Python. Never use `sudo pip`. If the binary is installed
+   but not on `PATH`, add `~/.local/bin` to `PATH` for this session, or ask
+   before running `uv tool update-shell`. If a documented command or flag is
+   unknown, upgrade with the installer that was used (`uv tool upgrade
+   skillevaluator`, `pipx upgrade skillevaluator`, or pip `--upgrade`). If
    installation fails (no network, no Python 3.12+), stop and report the
    exact error and the install command instead of guessing results.
 2. **Locate the target.** Confirm the path has `SKILL.md` and that its
@@ -137,22 +151,31 @@ do. Report no score, lift or verdict for that tier.
 3. **Check readiness.** Run `skillevaluator health-check --tier 1`
    for scanners, `skillevaluator doctor --tier 2` for providers, and
    `skillevaluator doctor --env-mode docker` (add `--verify-models`) for Tier 3.
-   Scanner readiness probes can provision a managed scanner runtime. Get
-   installation permission before probing or scanning when its tools are missing.
+   `health-check --tier 1` and keyless scans download pinned SkillSpector and
+   Gitleaks when they are missing. Get installation permission before probing
+   or scanning when those tools are missing.
    Fix every failing row first.
 4. **Start keyless.** Run `skillevaluator tier1 <skill-dir> --no-llm`. Fix
    CRITICAL and HIGH findings before anything else; `lint` findings are advisory.
-5. **Add LLM checks** when a provider is set: `skillevaluator tier1 <skill-dir>`
-   (rubric, LLM security, verification) and `skillevaluator tier2 <skill-dir>`.
+5. **Add LLM checks** when a provider is set and the user agreed to model
+   spend: `skillevaluator tier1 <skill-dir>` (rubric, LLM security,
+   verification) and `skillevaluator tier2 <skill-dir>`.
 6. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, ask
    the user for three to five real requests the skill should handle, what a
-   good result looks like for each, and one request that should not trigger it.
-   Write those into `<skill-dir>/evals/EVAL.md`; headings alone do not qualify.
-   Do not invent the cases yourself; if the user asks for a draft, label it a
-   draft and have them review it. If the skill directory is not yours to change
-   (an installed skill, `~/.claude/skills`), copy it and evaluate the copy. For
-   skills that act on real systems, phrase prompts as "give the commands, do not
-   run them". Generate with
+   good result looks like for each, one request that should not trigger it, and
+   any input files those requests use. Record their answers in
+   `<skill-dir>/evals/EVAL.md`; headings alone do not qualify. Do not invent the
+   cases yourself; if the user asks for a draft, label it a draft and have them
+   review it. `tier3 <skill-dir>` and `validate <skill-dir>` generate one
+   starter case when none exists, so run them only after the user's cases are
+   in place. If the user has not agreed to adding `evals/` to the skill (for
+   example one installed by `npx skills add` or a plugin), copy the whole
+   directory to `<scratch>/skills/<name>/`, keeping the directory name equal to
+   the frontmatter `name`, and evaluate the copy. For skills that act on real
+   systems, keep cases runnable with fixtures or sidecars (`evals/files/`,
+   `evals/environment/`); only when that is impossible, and with the user's
+   agreement, phrase a prompt as "give the commands, do not run them", knowing
+   that Tier 3 then scores the advice, not the execution. Generate with
    `skillevaluator create-eval-dataset <skill-dir> --full --prompt <skill-dir>/evals/EVAL.md`,
    then review it. The default prefers author guidance, then matching retained
    traces; existing datasets need `--force` or `--refine`. Skill-only
@@ -241,11 +264,11 @@ skillevaluator tier3 evaluate <skill-dir> --skip-with-skill
 | --- | --- | --- |
 | `skillevaluator: command not found` | CLI not installed or not on `PATH` | Workflow step 1: install with `uv tool install`, `pipx`, or `pip` in a virtual environment, or use `uvx` |
 | Exit `2` | Unknown flag, bad value, or missing path | Check `skillevaluator <command> --help`; prefix paths named like commands with `./` |
-| Check shows `INCOMPLETE` | A scanner is missing or failed | Run `skillevaluator health-check --tier 1`; install the `security` extra or the missing scanner |
+| Check shows `INCOMPLETE` | A scanner is missing or failed | Run `skillevaluator health-check --tier 1`; ask first, then install the `security` extra or the missing scanner |
 | "provider is required" / exit `1` before reports | No `SKILL_EVAL_LLM_PROVIDER` or key, or several keys exported | Set exactly one provider and its key; see providers reference |
 | Quality below 70 | Missing `## Prerequisites`, `## Limitations`, `## Troubleshooting`, vague description, no examples | Read each finding's suggestion; do not stuff keywords |
 | `INCONCLUSIVE: skill never activated` | Description does not match the prompts | Make the description name the tasks; add explicit-bucket cases |
-| `doctor` prints a traceback ending in `No module named 'harbor'` | The `tier3` extra is not installed | `pip install "skillevaluator[tier3]"` (ask first), then rerun `doctor` |
+| `doctor` says `Tier 3 dependencies are not installed` (0.9.0 and older: a traceback ending in `No module named 'harbor'`) | The `tier3` extra is not installed | Ask first, then reinstall with the extra the way the CLI was installed (`uv tool install --python 3.13 --reinstall "skillevaluator[all]"`, `pipx install --force --python python3.13 "skillevaluator[all]"`, or pip in the same virtual environment), then rerun `doctor` |
 | Docker trials fail to start | Daemon down or outdated engine | `docker info`; rerun `skillevaluator doctor --env-mode docker` |
 | Agent model rejected | Default model not valid for that agent | `--agent-model AGENT=MODEL`, verify with `doctor --verify-models` |
 | Run incomplete (`Scored attempt coverage is n/m`) | A trial errored or timed out | Rerun; raise `--timeout-multiplier`; inspect with `--harbor-keep-jobs` |

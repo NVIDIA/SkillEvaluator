@@ -337,6 +337,9 @@ MAIN_WRITES = [
     pytest.param(_bash('cp /tmp/x "$ROOT/etc/sudoers" 2>&1'), id="quoted-variable-prefix-sudoers"),
     pytest.param(_bash("cp /tmp/x $1/etc/sudoers 2>&1"), id="positional-parameter-prefix-sudoers"),
     pytest.param(_bash("cp x.sh $DESTDIR$PREFIX/etc/profile.d/a.sh 2>&1"), id="two-variables-prefix-profile-d"),
+    # So may a variable right after a short option.
+    pytest.param(_bash("cp -t$ROOT/etc/sudoers.d /tmp/agent 2>&1"), id="attached-short-option-variable-prefix"),
+    pytest.param(_bash("tar -xzf t.tgz -C$DESTDIR/etc/profile.d 2>&1"), id="attached-short-option-destdir-prefix"),
     # A read the keyword rule still flags, as documented.
     pytest.param(_bash("cat ~/.bashrc 2>/dev/null"), id="keyword-rule-read"),
 ]

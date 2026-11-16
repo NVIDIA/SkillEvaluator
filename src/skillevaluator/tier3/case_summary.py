@@ -23,11 +23,11 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.evaluation.insights_judge import _weakens_requirements
-from skillevaluator.evaluation.tier3_report import _trusted_observed_activation
 from skillevaluator.reporting.summary_copy import pass_at_k_summary
 from skillevaluator.reporting.terminal_styles import AMBER
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
+from skillevaluator.tier3.harbor.metrics import trusted_observed_activation
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.report_data import _harbor_task_directory, _recorded_case_id
 from skillevaluator.utils.redaction import redact_sensitive_text
@@ -1418,7 +1418,7 @@ def _correctly_unused_negative(
             not isinstance(reward, dict)
             or _evaluation_failed(reward)
             or reward.get("invocation_evidence_scope") != "logical_trial"
-            or _trusted_observed_activation(reward) != "not_invoked"
+            or trusted_observed_activation(reward) != "not_invoked"
         ):
             return False
     return True

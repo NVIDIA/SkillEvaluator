@@ -1723,6 +1723,48 @@ def test_negative_task_outcomes_merge_without_hiding_a_skill_fix(tmp_path: Path)
     assert any(fix["case"] == "positive" and fix["kind"] == "skill" for fix in fixes)
 
 
+def test_trusted_observed_activation_is_a_public_metrics_helper() -> None:
+    from skillevaluator.tier3 import case_summary
+    from skillevaluator.tier3.harbor import metrics
+
+    helper = metrics.trusted_observed_activation
+    trusted = {"skill_execution": 1.0, "invocation_evidence_source": "trajectory"}
+    assert helper({**trusted, "skill_invoked": True}) == "invoked"
+    assert helper({**trusted, "skill_invoked": False}) == "not_invoked"
+    assert helper({**trusted, "skill_invoked": "no"}) == "unknown"
+    assert helper({"skill_execution": 1.0, "skill_invoked": False}) == "unknown"
+    assert helper({**trusted, "skill_invoked": False, "metric_set": "custom-metrics"}) == "unknown"
+    assert helper({"invocation_evidence_source": "trajectory", "skill_invoked": False}) == "unknown"
+    assert case_summary.trusted_observed_activation is helper
+
+
+def test_report_activation_validation_uses_the_shared_trusted_helper(monkeypatch) -> None:
+    from skillevaluator.evaluation.tier3_report import _trial_activation_validation
+    from skillevaluator.tier3.harbor import metrics
+
+    monkeypatch.setattr(metrics, "trusted_observed_activation", lambda _reward: "shared-helper")
+    reward = {"invocation_evidence_scope": "logical_trial"}
+    trial = {"scores": {}}
+
+    validation = _trial_activation_validation([reward], trial)
+
+    assert validation["observed_activation"] == "shared-helper"
+    assert validation["evidence_scopes"][0]["observed_activation"] == "shared-helper"
+
+
+def test_case_summary_import_does_not_load_the_report_module() -> None:
+    import subprocess
+    import sys
+
+    code = (
+        "import sys, skillevaluator.tier3.case_summary; "
+        "sys.exit(1 if 'skillevaluator.evaluation.tier3_report' in sys.modules else 0)"
+    )
+    completed = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
 @pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
 def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(

@@ -461,6 +461,23 @@ def metric_set_for_reward(reward: dict[str, Any]) -> tuple[str, tuple[str, ...]]
     return DEFAULT_METRIC_SET, DEFAULT_METRICS
 
 
+def trusted_observed_activation(reward: dict[str, Any]) -> str:
+    """Project collector-issued invocation evidence; never inspect trajectory or scores as proof."""
+    standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
+    declared = reward.get("metric_set") or reward.get("metric_set_version")
+    metric_set, metrics = metric_set_for_reward(reward)
+    if (
+        (declared and str(declared) not in standard_sets)
+        or metric_set not in standard_sets
+        or "skill_execution" not in metrics
+        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
+        or reward.get("invocation_evidence_source") != "trajectory"
+    ):
+        return "unknown"
+    invoked = reward.get("skill_invoked")
+    return ("invoked" if invoked else "not_invoked") if type(invoked) is bool else "unknown"
+
+
 def rewards_have_mixed_metric_contracts(rewards: object) -> bool:
     """Return whether physical reward rows declare distinct metric contracts."""
     if not isinstance(rewards, list):

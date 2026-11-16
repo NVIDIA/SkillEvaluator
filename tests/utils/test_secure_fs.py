@@ -204,6 +204,8 @@ def test_same_inode_mutation_during_read_fails_closed(tmp_path: Path, monkeypatc
         nonlocal mutated
         if not mutated:
             target.write_text("EVIL-CONTENT")
+            metadata = files[0].metadata
+            os.utime(target, ns=(metadata.st_atime_ns, metadata.st_mtime_ns + 2_000_000_000))
             mutated = True
         return real_read(descriptor, count)
 
@@ -212,6 +214,8 @@ def test_same_inode_mutation_during_read_fails_closed(tmp_path: Path, monkeypatc
     with SecureRoot(root) as secure_root, pytest.raises(SecurePathError, match=r"changed|identity|mutation"):
         secure_root.read_bytes(files[0].relative_path, 1024, expected=files[0].metadata)
     assert mutated
+    assert target.stat().st_ino == files[0].metadata.st_ino
+    assert target.stat().st_size == files[0].metadata.st_size
 
 
 def test_directory_swap_to_external_link_is_never_traversed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -456,6 +460,7 @@ def test_directory_mutation_after_scandir_snapshot_fails_closed(
     root = tmp_path / "root"
     root.mkdir()
     (root / "safe.md").write_text("safe")
+    root_metadata = root.stat()
     real_scandir = os.scandir
     mutated = False
 
@@ -480,6 +485,7 @@ def test_directory_mutation_after_scandir_snapshot_fails_closed(
             except StopIteration:
                 if not mutated:
                     (root / "late.md").write_text("late")
+                    os.utime(root, ns=(root_metadata.st_atime_ns, root_metadata.st_mtime_ns + 2_000_000_000))
                     mutated = True
                 raise
 

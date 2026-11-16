@@ -1234,6 +1234,10 @@ _DESTRUCTIVE_FINDING = {
     "score_impact": True,
 }
 _TIER3_CARD_VERDICT = r'tier-card-label">Tier 3</span>\s*<span class="tier-card-verdict">([^<]+)</span>'
+# The Tier 3 overview lead of a run whose attempts were all scored.
+_TIER3_LEAD_VERDICT = r"Verdict at a glance:</strong>\s*([^<]+?) with an overall score"
+# What the lead says when another execution failure needs attention.
+_TIER3_ATTENTION_NOTICE = "Other execution failures need attention"
 
 
 def _no_ground_truth_payload(
@@ -1374,8 +1378,11 @@ def test_no_ground_truth_low_efficiency_reads_failed_in_tier3_status(
     assert context.tiers[3].status == Status.FAILED
     assert context.publication_label == "Not eligible"
     assert re.findall(_TIER3_CARD_VERDICT, html) == [tier3_card]
-    assert "Completed-agent result: FAIL." in html
-    assert "Verdict at a glance:" not in html
+    # Every attempt ran and was scored, so the lead reads the failed verdict the card shows
+    # and does not claim that another execution failure needs attention.
+    assert re.findall(_TIER3_LEAD_VERDICT, html) == [tier3_card]
+    assert "Completed-agent result" not in html
+    assert _TIER3_ATTENTION_NOTICE not in html
     # --format markdown
     assert "**Publication status:** ❌ FAIL" in markdown
     assert "| ❌ Failed | 1 |" in markdown
@@ -1400,7 +1407,9 @@ def test_no_ground_truth_low_efficiency_fails_in_tier3_evaluate_report(
     benchmark = report_path.with_name("tier3-benchmark.md").read_text(encoding="utf-8")
 
     assert re.findall(_TIER3_CARD_VERDICT, html) == ["Changes required"]
-    assert "Completed-agent result: FAIL." in html
+    assert re.findall(_TIER3_LEAD_VERDICT, html) == ["Changes required"]
+    assert "Completed-agent result" not in html
+    assert _TIER3_ATTENTION_NOTICE not in html
     assert "> **Tier 3 completed-agent result: FAIL**" in benchmark
     assert "| Tier 3 | Live agent evaluation | **FAIL** |" in benchmark
 

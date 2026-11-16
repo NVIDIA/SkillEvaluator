@@ -432,6 +432,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
         "install_root": root,
+        "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
         "nested_skill_md": bool(nested),
@@ -545,12 +546,15 @@ def _catalog_of(group: list[Path]) -> Catalog:
     return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
 
 
-def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
+def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
     A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
     measured against everything installed in that folder, and skills in different folders are separate
     installations. Skills outside any skills folder that are given together form their own catalog.
+
+    ``profiles`` are the harnesses being checked: only the user-level skills folders they read are searched for
+    same-named copies (every known folder when omitted).
     """
     groups: dict[Path | None, list[Path]] = {}
     for skill in skills:
@@ -559,16 +563,43 @@ def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
         catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+    user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
     user_skills: dict[Path, dict[Path, str]] = {}
     facts = {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
     for skill_facts_ in facts.values():
-        skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills)
+        skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills, user_roots)
     return facts
 
 
-def _user_copies(facts: dict[str, Any], cache: dict[Path, dict[Path, str]]) -> list[tuple[str, str]]:
-    """``(root, path)`` of same-named skills in the user-level roots, for a skill installed in a project root."""
-    if facts["install_root"] is None or facts["install_root"].startswith("~/"):
+def _project_root(facts: dict[str, Any]) -> str | None:
+    """The root a project skill is installed in: a harness root, or an OpenClaw workspace ``skills/`` folder."""
+    return "skills" if facts["workspace_skills"] else facts["install_root"]
+
+
+def _named_skills(folder: Path) -> dict[Path, str]:
+    """Skills under a folder and their names; one that cannot be read is left out."""
+    try:
+        found = _find_skills(folder) if folder.is_dir() else []
+    except OSError:
+        return {}
+    names = {}
+    for skill in found:
+        try:
+            names[skill] = _skill_name(skill, _read_manifest(skill)[4])
+        except OSError:
+            continue
+    return names
+
+
+def _user_copies(
+    facts: dict[str, Any], cache: dict[Path, dict[Path, str]], user_roots: set[str] | None = None
+) -> list[tuple[str, str, int]]:
+    """``(root, path, depth)`` of same-named skills in the user-level roots, for a skill installed in a project root.
+
+    ``depth`` counts the grouping folders between the root and the copy. ``user_roots`` limits which roots are searched.
+    """
+    project_root = _project_root(facts)
+    if project_root is None or project_root.startswith("~/"):
         return []
     try:
         home = Path.home()
@@ -576,15 +607,15 @@ def _user_copies(facts: dict[str, Any], cache: dict[Path, dict[Path, str]]) -> l
         return []
     copies = []
     for root in _KNOWN_ROOTS:
+        if user_roots is not None and f"~/{root}" not in user_roots:
+            continue
         folder = home / root
         if folder not in cache:
-            found = _find_skills(folder) if folder.is_dir() else []
-            cache[folder] = {skill: _skill_name(skill, _read_manifest(skill)[4]) for skill in found}
-        copies += [
-            (f"~/{root}", f"~/{root}/{skill.relative_to(folder).as_posix()}")
-            for skill, name in cache[folder].items()
-            if name == facts["skill_name"]
-        ]
+            cache[folder] = _named_skills(folder)
+        for skill, name in cache[folder].items():
+            if name == facts["skill_name"]:
+                parts = skill.relative_to(folder).parts
+                copies.append((f"~/{root}", f"~/{root}/{'/'.join(parts)}", len(parts) - 1))
     return copies
 
 
@@ -740,6 +771,16 @@ def version_finding(profile: dict[str, Any], declared: str) -> dict[str, str] | 
     }
 
 
+def _finds_at_depth(profile: dict[str, Any], facts: dict[str, Any], depth: int) -> bool:
+    """Whether the profile's grouping rules still let it find a skill that deep below a skills root."""
+    names = {**facts, "grouping_depth": depth}
+    return not any(
+        rule["effect"] == "not_loaded" and _Rule.evaluate(str(rule["when"]), names)
+        for rule in profile.get("rules", [])
+        if "grouping_depth" in str(rule["when"])
+    )
+
+
 def evaluate_profile(
     profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
 ) -> HarnessResult:
@@ -753,8 +794,12 @@ def evaluate_profile(
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
     setup = model_config(profile, config)
     user_copies = (
-        [path for root, path in facts.get("user_copies", []) if root in roots.get("user", [])]
-        if facts["install_root"] in roots.get("project", [])
+        [
+            path
+            for root, path, depth in facts.get("user_copies", [])
+            if root in roots.get("user", []) and _finds_at_depth(profile, facts, depth)
+        ]
+        if _project_root(facts) in roots.get("project", [])
         else []
     )
     facts = {
@@ -826,5 +871,6 @@ def evaluate_harnesses(
     config: dict[str, Any] | None = None,
 ) -> list[HarnessResult]:
     """Evaluate one skill (and the catalog it is installed in) against the selected profiles."""
-    facts = facts_for([skill_path])[skill_path]
-    return [evaluate_profile(profile, facts, config) for profile in load_profiles(harnesses, profiles_dir)]
+    profiles = load_profiles(harnesses, profiles_dir)
+    facts = facts_for([skill_path], profiles)[skill_path]
+    return [evaluate_profile(profile, facts, config) for profile in profiles]

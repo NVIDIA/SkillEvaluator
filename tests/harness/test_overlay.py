@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, skill_facts
+from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
 from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
@@ -477,6 +477,75 @@ def test_user_level_copy_of_a_project_skill_is_flagged(tmp_path: Path, monkeypat
     assert "~/.agents/skills/report, ~/.claude/skills/report" in copies["opencode"]
     assert copies["codex"] == copies["hermes"] == copies["openclaw"] == ""
     assert not _rows(home / ".claude/skills/report")["claude-code"]["findings"]
+
+
+def test_only_the_user_roots_a_harness_reads_are_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    searched = []
+    find_skills = overlay._find_skills
+    monkeypatch.setattr(overlay, "_find_skills", lambda folder: searched.append(folder) or find_skills(folder))
+    for folder in (home / ".claude" / "skills", home / ".codex" / "skills", home / ".agents" / "skills"):
+        _install(folder, "report")
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+
+    evaluate_harnesses(skill, "claude-code")
+
+    assert [f for f in searched if home in f.parents] == [home / ".claude" / "skills"]
+
+
+def test_unreadable_user_skill_does_not_abort_the_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills", "broken")
+    _install(home / ".claude" / "skills", "report")
+    read_manifest = overlay._read_manifest
+
+    def read(path: Path):
+        if path.name == "broken":
+            raise PermissionError(13, "Permission denied")
+        return read_manifest(path)
+
+    monkeypatch.setattr(overlay, "_read_manifest", read)
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+
+    rows = _rows(skill)
+
+    assert "CC-USER-COPY" in _ids(rows, "claude-code")
+
+
+def test_user_copy_in_a_folder_the_harness_does_not_scan_is_not_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills" / "group", "report")
+    _install(home / ".codex" / "skills" / "a" / "b" / "c" / "d" / "e" / "f", "report")  # six folders down: past Codex
+    claude = _install(project / ".claude" / "skills", "report")
+    codex = _install(project / ".codex" / "skills", "report")
+
+    claude_rows, codex_rows = _rows(claude), _rows(codex)
+
+    assert "CC-USER-COPY" not in _ids(claude_rows, "claude-code")
+    opencode = next(f["message"] for f in claude_rows["opencode"]["findings"] if f["id"] == "OC-USER-COPY")
+    assert "~/.claude/skills/group/report" in opencode
+    assert "CX-USER-COPY" not in _ids(codex_rows, "codex")
+
+
+def test_openclaw_workspace_skill_is_checked_against_both_user_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for folder in (home / ".agents" / "skills", home / ".openclaw" / "skills", home / ".claude" / "skills"):
+        _install(folder, "report")
+    workspace = _install(project / "skills", "report")
+    loose = _install(project / "loose", "report")
+
+    rows = _rows(workspace)
+
+    message = next(f["message"] for f in rows["openclaw"]["findings"] if f["id"] == "OW-USER-COPY")
+    assert "~/.agents/skills/report, ~/.openclaw/skills/report;" in message
+    assert not any(f["id"].endswith("-USER-COPY") for h, r in rows.items() if h != "openclaw" for f in r["findings"])
+    assert facts_for([loose])[loose]["user_copies"] == []
 
 
 def test_listed_description_projection(tmp_path: Path):

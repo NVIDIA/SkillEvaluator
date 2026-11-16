@@ -1272,6 +1272,7 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         )
     items = [item for r in broken for item in _tier1_fixes(r)]
     items += [item for r in failed for item in _unresolved_reference_fixes(r)]
+    items += [item for r in broken for item in _later_gate_fixes(r)]
     if setup := [r for r in incomplete if not _only_llm_stages_missing(r) and not _unresolved_reference_fixes(r)]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
@@ -1299,6 +1300,17 @@ def _unresolved_reference_fixes(result: ValidationResult) -> list[FixItem]:
     return []
 
 
+def _later_gate_fixes(result: ValidationResult) -> list[FixItem]:
+    """One item for each gate failure after the first of a check that failed beside an incomplete scan.
+
+    The check's own item names only its first gate failure, which is often the error for the gap. Listing
+    the others keeps a failure that outranks the gap, such as the hook gate, from being hidden behind it.
+    """
+    if not result.is_incomplete:
+        return []
+    return [_tier1_fix(result, gate) for gate in list(dict.fromkeys(result.gate_failures))[1:]]
+
+
 def _tier1_fixes(result: ValidationResult) -> list[FixItem]:
     """One item per distinct critical/high finding, so a check that failed on several shows each one."""
     serious = [
@@ -1316,8 +1328,8 @@ def _tier1_fixes(result: ValidationResult) -> list[FixItem]:
     return items
 
 
-def _tier1_fix(result: ValidationResult) -> FixItem:
-    problem = _first_error(result) or f"{result.validator_name} failed"
+def _tier1_fix(result: ValidationResult, problem: str = "") -> FixItem:
+    problem = problem or _first_error(result) or f"{result.validator_name} failed"
     action = next((f.suggestion for f in result.findings if f.message == problem and f.suggestion), None)
     if action is None and not result.gate_failures:
         action = first_fix([result])

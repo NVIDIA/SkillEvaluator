@@ -750,6 +750,10 @@ class ValidationResult:
         gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
+        # A member's confirmed failure outranks an incomplete scan in the
+        # merged result's reported status, as it does in the member's own.
+        if other.metadata.get("confirmed_failure") is True:
+            self.metadata["confirmed_failure"] = True
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
         # Keep each skill's unparsed files, prefixed like errors and findings so

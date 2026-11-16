@@ -785,6 +785,40 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     return ""
 
 
+# Compose's prefix when it cannot create a project network, ahead of Docker's error.
+_COMPOSE_NETWORK_CREATE_FAILURE = "failed to create network"
+# Docker's errors when every default address pool already backs a network.
+_DOCKER_ADDRESS_POOL_MARKERS = (
+    "all predefined address pools have been fully subnetted",
+    "could not find an available, non-overlapping ipv4 address pool",
+)
+_DOCKER_ADDRESS_POOL_NOTE = (
+    "Docker has no free network address pools. List leftover trial Compose containers and networks "
+    "(`docker ps -a --filter label=com.docker.compose.project`, "
+    "`docker network ls --filter label=com.docker.compose.project`), check their names, and remove "
+    "the containers with `docker rm -f` before the networks with `docker network rm`; "
+    "or lower --n-concurrent or --max-agents."
+)
+
+
+def _is_compose_address_pool_failure(exception_type: str, exception_message: str) -> bool:
+    """Return true when Compose could not create a trial network because Docker's pools ran out.
+
+    Agent failures carry the agent's own output, which can quote Docker's error,
+    so they keep their reason as recorded.
+    """
+    if (
+        exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
+        or exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES
+    ):
+        return False
+    message = exception_message.casefold()
+    network_failure_start = message.find(_COMPOSE_NETWORK_CREATE_FAILURE)
+    return network_failure_start >= 0 and any(
+        marker in message[network_failure_start:] for marker in _DOCKER_ADDRESS_POOL_MARKERS
+    )
+
+
 def _exception_details(exception_info: Any) -> tuple[str, str]:
     """Return one Harbor exception type and bounded display reason."""
     if not isinstance(exception_info, dict):
@@ -792,6 +826,9 @@ def _exception_details(exception_info: Any) -> tuple[str, str]:
 
     exception_type = str(exception_info.get("exception_type") or "").strip()
     exception_message = str(exception_info.get("exception_message") or "").strip()
+    # Docker's own line follows the long Compose command and falls past the cut.
+    if _is_compose_address_pool_failure(exception_type, exception_message):
+        exception_message = f"{_DOCKER_ADDRESS_POOL_NOTE} {exception_message}"
     if exception_type and exception_message:
         return exception_type, f"{exception_type}: {exception_message}"[:600]
     return exception_type, (exception_type or exception_message)[:600]

@@ -320,6 +320,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
   as "not supported". As on Harbor, the parse error is logged and the run continues
   without MCP servers; a file that declares servers is still rejected.
+- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
+  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
+  yet, and OpenCode currently fails in Gym's agent setup.
 - `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
   and errors. Provider, model and base-URL names stay readable, as on Harbor.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
@@ -348,6 +351,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Error: No module named 'harbor'`.
 - Tier 3 benchmark headlines use the completed agent's quality verdict, matching
   the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

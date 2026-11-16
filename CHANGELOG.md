@@ -171,6 +171,10 @@ All notable changes to SkillEvaluator are documented in this file.
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
   rubric and LLM security verification did not run. The same default applies to
   SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- The `skillevaluator` agent skill now tells the agent that a gateway key works
+  through the `openai-compatible` provider, that a failed Tier 1 gate and a high
+  quality grade are two separate results, and that `Publication eligibility:
+  Incomplete` after a passing keyless run is expected.
 - SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
   to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
   the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
@@ -274,10 +278,11 @@ All notable changes to SkillEvaluator are documented in this file.
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
-  directly (`pip install skillevaluator`, then
-  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
-  with `skillevaluator ci init` or a CI template, or install the agent skill with
-  `npx skills add NVIDIA/SkillEvaluator`.
+  directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
+  in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
+  add checks to your repository with `skillevaluator ci init`, or install the
+  agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
+  its guide on docs.nvidia.com.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -342,6 +347,8 @@ All notable changes to SkillEvaluator are documented in this file.
   clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding
   spurious notices that other execution failures need attention.
+- Make the same-inode read-race regression use an observable mtime change without
+  depending on filesystem clock granularity.
 - Make the onboarding URL-rewrite test use its temporary global Git config even
   when the caller sets `GIT_CONFIG_GLOBAL`.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
@@ -894,6 +901,12 @@ All notable changes to SkillEvaluator are documented in this file.
   `--pii-waivers` entry that accepted such an address now matches no finding,
   so it is reported as a LOW `stale-pii-waiver` instead of an INFO
   `applied-pii-waiver` and can be removed.
+- A Tier 3 trial that fails because Docker has no free network address pools
+  now names that cause, and how to clean up, right after the exception type in
+  its failure reason, which used to cut Docker's error off after the long
+  Compose command. The documented cleanup for interrupted or killed runs now
+  also lists and removes the trials' leftover Compose networks, which are what
+  use up the pools.
 
 - A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
   the patch as a bare string is decoded instead of being discarded. The bounded

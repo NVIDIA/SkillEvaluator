@@ -67,6 +67,9 @@ The Makefile wraps the standard tools, so you can run the underlying commands di
 evaluation framework used by Tier 3; the `live` marker exercises its in-process
 backend.
 
+The POSIX same-inode read-race test explicitly advances the modified file's
+mtime: two same-size writes can otherwise share a filesystem clock tick.
+
 | Marker | What it covers | Run it with |
 | --- | --- | --- |
 | *(none)* | Fast unit tests — the default selection | `pytest` |

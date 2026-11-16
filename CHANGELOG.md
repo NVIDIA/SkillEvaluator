@@ -320,6 +320,8 @@ All notable changes to SkillEvaluator are documented in this file.
   or no final newline. The duplicate table made the file fail to parse.
 - Benchmark methodology describes the Overall row's shared comparison basis
   rather than the headline with-skill score, in Tier 3 and publication cards.
+- BENCHMARK cards explain the required with-skill goal and security case checks
+  that can fail quality even when all dimensions pass.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

@@ -2137,6 +2137,44 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert result.status == "passed"
         assert result.errors == []
 
+    @pytest.mark.parametrize("incomplete", [True, False])
+    def test_llm_verify_downgrade_keeps_independent_errors_only_for_an_incomplete_scan(
+        self, incomplete: bool, tmp_path: Path
+    ) -> None:
+        """A downgrade rebuilds the result: a gate failure stays, other errors only when incomplete, a warning once."""
+        result = ValidationResult(validator_name="Security Scan")
+        result.add_structured_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="Prompt Injection",
+                message="Ignore prior instructions",
+                file_path="SKILL.md",
+                line_number=8,
+            )
+        )
+        result.add_error("scanner report was cut short")
+        result.fail_gate("scanner status is unknown")
+        result.add_warning("scanner skipped one file")
+        result.add_warning("scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("skillspector")
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+            }
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.findings[0].metadata["downgraded"] is True
+        expected = ["scanner status is unknown"]
+        if incomplete:
+            expected.append("scanner report was cut short")
+        assert result.errors == expected
+        assert result.summary.errors == len(expected)
+        assert result.warnings == [result.findings[0].to_legacy_string(), "scanner skipped one file"]
+        assert result.summary.warnings == 2
+
     @patch("skillevaluator.validators.security.Tools")
     def test_rule_only_skillspector_baseline_ignores_scanner_version(
         self, mock_tools, sample_skill_dir: Path, tmp_path: Path
@@ -9395,6 +9433,32 @@ class TestSkillspectorMissingReferences:
         assert result.summary.errors == 2
         assert result.is_incomplete
         assert not result.passed
+
+    @pytest.mark.parametrize("incomplete", [True, False])
+    def test_finding_deduplication_keeps_every_independent_error_and_lists_a_warning_once(
+        self, incomplete: bool
+    ) -> None:
+        """Dropping a repeated finding lowers nothing, so every error stays, complete scan or not."""
+        result = ValidationResult()
+        finding = Finding(
+            category="SECURITY", severity=Severity.LOW, check_name="advisory", message="Repeated", file_path="SKILL.md"
+        )
+        result.add_structured_finding(finding, is_error=False)
+        result.add_structured_finding(finding, is_error=False)
+        result.add_error("Scanner omitted evidence")
+        result.add_warning("Scanner skipped one file")
+        result.add_warning("Scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("skillspector")
+
+        SecurityValidator._deduplicate_skillspector_findings(result)
+
+        assert len(result.findings) == 1
+        assert result.errors == ["Scanner omitted evidence"]
+        assert result.summary.errors == 1
+        assert result.warnings == [finding.to_legacy_string(), "Scanner skipped one file"]
+        assert result.summary.warnings == 2
+        assert result.is_incomplete is incomplete
 
     @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
     @pytest.mark.parametrize(

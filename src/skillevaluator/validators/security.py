@@ -3560,13 +3560,8 @@ class SecurityValidator(ValidatorBase):
             errors = result.independent_errors()
             warnings = result.independent_warnings()
             result.findings = unique
-            result.recalculate_from_findings()
-            for error in errors:
-                if error not in result.errors:
-                    result.add_error(error)
-            for warning in warnings:
-                if warning not in result.warnings:
-                    result.add_warning(warning)
+            # Dropping a repeated finding lowers nothing, so every error stays.
+            result.recalculate_keeping_independent(errors, warnings, keep_all_errors=True)
 
     @staticmethod
     def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
@@ -6769,8 +6764,8 @@ class SecurityValidator(ValidatorBase):
                 suppressed += 1
 
         if suppressed:
-            # An error no finding repeats, such as a stale-baseline note, may
-            # explain blockers that are gone, so it stays only on an incomplete scan.
+            # An error that no finding repeats stays only for an incomplete scan: any other
+            # such error, such as a stale-baseline note, explains blockers that may be gone.
             result.recalculate_keeping_independent(errors, warnings)
             target_severity = finding_verification_policy.DOWNGRADE_SEVERITY.value.upper()
             verdict_label = finding_verification_policy.DOWNGRADE_VERDICT.replace("_", " ")

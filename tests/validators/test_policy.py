@@ -259,3 +259,27 @@ def test_override_keeps_why_an_incomplete_scan_failed(incomplete: bool) -> None:
     assert result.errors == expected
     assert result.summary.errors == len(expected)
     assert result.warnings == [result.findings[0].to_legacy_string(), "scanner skipped one file"]
+
+
+def test_override_keeps_a_warning_as_often_as_it_was_recorded() -> None:
+    """A warning no finding repeats goes back as often as it was recorded; the LLM downgrade lists it once."""
+    result = ValidationResult(validator_name="Security Scan")
+    result.add_structured_finding(
+        Finding(
+            category="SECURITY",
+            severity=Severity.HIGH,
+            check_name="Prompt Injection",
+            message="Ignore all previous instructions",
+            file_path="SKILL.md",
+            line_number=8,
+        )
+    )
+    result.add_warning("scanner skipped one file")
+    result.add_warning("scanner skipped one file")
+
+    apply_policy([result], ValidationPolicy(severity_overrides={"SECURITY.*": Severity.LOW}))
+
+    assert result.warnings == [result.findings[0].to_legacy_string(), *["scanner skipped one file"] * 2]
+    assert result.summary.warnings == 3
+    assert result.errors == []
+    assert result.passed

@@ -396,7 +396,12 @@ def apply_policy(
                     independent_warnings = result.independent_warnings()
                 finding.severity = new_severity
         if independent_warnings is not None:
-            result.recalculate_keeping_independent(independent_errors, independent_warnings)
+            # Rebuilding from findings drops every error and warning that no finding
+            # mirrors, such as why a scanner did not complete. An error that explains
+            # blockers the policy has just lowered stays only for an incomplete scan.
+            result.recalculate_keeping_independent(
+                independent_errors, independent_warnings, keep_repeated_warnings=True
+            )
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

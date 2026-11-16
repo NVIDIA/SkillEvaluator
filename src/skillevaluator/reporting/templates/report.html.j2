@@ -1745,7 +1745,7 @@
                 <div class="hero-side">
                 {% if has_tier3 %}
                 {% set tier3_environment = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
-                {% set tier3_backend = {'harbor': 'Harbor', 'nemo-gym': 'NeMo Gym'}.get(tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) %}
+                {% set tier3_backend = (tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) | tier3_backend_label %}
                 {% if tier3_is_skipped %}
                     <span class="verdict-chip warn">Tier 3 quality: {{ verdict_words['skipped'] }}</span>
                     <div class="agent-hero-detail">
@@ -3911,7 +3911,7 @@
                     <span class="t3-ds-chip">{{ content_label }}: <b>{{ tier3.skill_name or 'unknown' }}</b></span>
                     {% if t3_best_name %}<span class="t3-ds-chip">Best Performing Agent: <b>{{ t3_best_name }}</b></span>{% endif %}
                     {% set t3_env = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
-                    {% set t3_backend = {'harbor': 'Harbor', 'nemo-gym': 'NeMo Gym'}.get(tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) %}
+                    {% set t3_backend = (tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) | tier3_backend_label %}
                     {% if t3_backend %}<span class="t3-ds-chip">Backend: <b>{{ t3_backend }}</b></span>{% endif %}
                     {% if t3_env %}<span class="t3-ds-chip">Environment: <b>{{ t3_env }}</b></span>{% endif %}
                     <span class="t3-ds-chip">Schema: <b>v{{ tier3.schema_version or '2.0' }}</b></span>

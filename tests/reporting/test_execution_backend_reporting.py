@@ -89,8 +89,8 @@ def test_html_report_shows_the_backend_beside_the_environment(monkeypatch, tmp_p
     assert "<div><strong>Environment:</strong> <code>docker</code></div>" in html
 
 
-@pytest.mark.parametrize(("backend", "label"), [("harbor", "Harbor"), ("nemo-gym", "NeMo Gym")])
-def test_dataset_header_shows_the_backend_beside_the_environment(backend, label):
+def _dataset_result(backend):
+    """A Tier 3 result with a dataset, so the report renders the dataset header too."""
     agent = {
         "execution_status": "succeeded",
         "execution_errors": [],
@@ -107,9 +107,12 @@ def test_dataset_header_shows_the_backend_beside_the_environment(backend, label)
         execution_backend=backend,
         use_llm_judge=False,
     )
-    result = tier3_report._validation_result_from_payload(payload)
+    return tier3_report._validation_result_from_payload(payload)
 
-    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
+
+@pytest.mark.parametrize(("backend", "label"), [("harbor", "Harbor"), ("nemo-gym", "NeMo Gym")])
+def test_dataset_header_shows_the_backend_beside_the_environment(backend, label):
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([_dataset_result(backend)])
 
     assert f'<span class="t3-ds-chip">Backend: <b>{label}</b></span>' in html
     assert '<span class="t3-ds-chip">Environment: <b>docker</b></span>' in html
@@ -122,3 +125,46 @@ def test_html_report_omits_an_unrecorded_backend():
     html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
 
     assert "Backend:" not in html
+
+
+# The report payload is untyped metadata, so the backend can arrive as anything.
+_NOT_A_BACKEND_NAME = [
+    pytest.param({"name": "nemo-gym", "sandbox": "docker"}, id="dict"),
+    pytest.param(["nemo-gym"], id="list"),
+    pytest.param(7, id="int"),
+    pytest.param(None, id="none"),
+    pytest.param("", id="empty"),
+    pytest.param("  ", id="whitespace"),
+    pytest.param("some-other-backend", id="unknown-name"),
+]
+
+
+@pytest.mark.parametrize("backend", _NOT_A_BACKEND_NAME)
+def test_html_report_omits_a_backend_that_is_not_a_known_name(backend):
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([_dataset_result(backend)])
+
+    assert "Backend:" not in html
+    assert "<div><strong>Environment:</strong> <code>docker</code></div>" in html
+    assert '<span class="t3-ds-chip">Environment: <b>docker</b></span>' in html
+
+
+@pytest.mark.parametrize("backend", _NOT_A_BACKEND_NAME)
+def test_html_report_omits_a_malformed_backend_on_an_untrusted_payload(backend):
+    # A failed result with no execution evidence takes the display path that rebuilds the payload.
+    result = _dataset_result(backend)
+    result.add_error("Tier 3 evaluation failed")
+
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
+
+    assert "Backend:" not in html
+
+
+def test_html_report_still_shows_a_string_backend_next_to_malformed_ones():
+    reporter = HTMLReporter(report_scope="tier3", include_timestamp=False)
+
+    html = reporter.render_all([_dataset_result({"name": "nemo-gym"})])
+    assert "Backend:" not in html
+
+    html = reporter.render_all([_dataset_result("nemo-gym")])
+    assert "<div><strong>Backend:</strong> NeMo Gym</div>" in html
+    assert '<span class="t3-ds-chip">Backend: <b>NeMo Gym</b></span>' in html

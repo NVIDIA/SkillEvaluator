@@ -529,6 +529,19 @@ def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool
     return not_applicable_reason(str(metric), with_skill=with_skill is True)
 
 
+_TIER3_BACKEND_LABELS = {"harbor": "Harbor", "nemo-gym": "NeMo Gym"}
+
+
+def _tier3_backend_label(value: object) -> str | None:
+    """Return the display name of a recorded execution backend id, or ``None``.
+
+    The payload is untyped metadata, so a dict, list or other non-string value
+    can sit where the id should be; it counts as no backend rather than being
+    used as a lookup key (an unhashable one would raise inside the template).
+    """
+    return _TIER3_BACKEND_LABELS.get(value) if isinstance(value, str) else None
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -2259,6 +2272,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
         environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
+        environment.filters["tier3_backend_label"] = _tier3_backend_label
         return environment
 
     @staticmethod

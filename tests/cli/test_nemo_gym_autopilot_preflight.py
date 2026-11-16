@@ -73,8 +73,21 @@ def test_keyed_gym_generates_with_its_endpoint_and_one_compatibility_probe(
         lambda _self, options, **_kwargs: evaluated.append(options) or {"execution_status": "succeeded"},
     )
 
+    # A custom policy URL needs a model that endpoint serves, so name one.
     result = CliRunner().invoke(
-        cli, [*command, str(skill), "--backend", "nemo-gym", "--agents", "claude-code", "--progress", "off"]
+        cli,
+        [
+            *command,
+            str(skill),
+            "--backend",
+            "nemo-gym",
+            "--agents",
+            "claude-code",
+            "--model",
+            "policy-model",
+            "--progress",
+            "off",
+        ],
     )
 
     assert result.exit_code == 0, result.output

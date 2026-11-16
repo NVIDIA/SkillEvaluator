@@ -987,7 +987,18 @@ def test_skillspector_install_instructions_pin_one_release() -> None:
         flags=re.MULTILINE,
     )
 
-    assert install_specs == {f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE}"}
+    tag_spec = f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE}"
+    commit_spec = f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE_COMMIT}"
+    ci_recipe_specs = set(
+        re.findall(
+            r"git\+https://github\.com/NVIDIA/SkillSpector\.git[^\s`\"]*",
+            (REPO_ROOT / "docs" / "ci-integration.mdx").read_text(encoding="utf-8"),
+        )
+    )
+    # The copy-paste CI recipe pins the release commit so a moved tag cannot change what a job installs;
+    # everything else pins the release tag. Both name the same release.
+    assert ci_recipe_specs == {commit_spec}
+    assert install_specs == {tag_spec, commit_spec}
     assert archive_refs == {SKILLSPECTOR_RELEASE_COMMIT}
     assert notice_rows == [(SKILLSPECTOR_RELEASE_COMMIT[:7], SKILLSPECTOR_RELEASE_COMMIT)]
 

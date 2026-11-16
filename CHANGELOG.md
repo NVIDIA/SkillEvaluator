@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document measured real-provider saved-catalog scale separately from 5,000-entry
+  in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
   skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
   copy, Codex lists both, and the other harnesses use the project copy.
@@ -308,9 +310,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.
+- Benchmark methodology describes the Overall row's shared comparison basis
+  rather than the headline with-skill score, in Tier 3 and publication cards.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
@@ -322,6 +328,9 @@ All notable changes to SkillEvaluator are documented in this file.
   say to install `skillevaluator[tier3]` for the live evaluation check instead
   of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
   Tiers 1 and 2 first.
+- `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
+  now say to install `skillevaluator[tier3]` instead of printing only
+  `Error: No module named 'harbor'`.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

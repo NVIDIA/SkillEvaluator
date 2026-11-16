@@ -2029,6 +2029,11 @@ def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(
             [],
             "username or password",
         ),
+        (
+            {"SKILL_EVAL_NEMO_GYM_MODEL_URL": "http://127.0.0.1:9/v1", MODEL_API_KEY_ENV: "EMPTY"},
+            ["--agents", "codex"],
+            "choose a model it serves",
+        ),
         ({}, ["--override-cpus", "0"], "--override-cpus"),
         ({}, ["--override-memory-mb", "0"], "--override-memory-mb"),
     ]

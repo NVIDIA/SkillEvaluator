@@ -160,6 +160,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `skillevaluator` agent skill now asks the user before installing an
+  extra, using a credential, spending on a Tier 3 run or using `--env-mode
+  local`. It also asks for real tasks and outcomes before writing eval cases,
+  explains that Tier 3 needs its own provider key, and reports no verdict for a
+  tier that could not run. Its own `evals/evals.json` gains eight cases
+  covering these prompts, including consent before cold scanner provisioning.
 - The CI guide's recipe installs SkillSpector from the commit behind its release
   tag and checks the Gitleaks archive against the published SHA-256 before
   unpacking it, matching the repository's own workflows.
@@ -317,6 +323,9 @@ All notable changes to SkillEvaluator are documented in this file.
   request".
 
 ### Fixed
+
+- The bundled skill's implicit dataset case expects clarification when real
+  requests and outcomes are missing, matching the skill's case-authoring rule.
 
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

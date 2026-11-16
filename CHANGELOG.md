@@ -347,6 +347,8 @@ All notable changes to SkillEvaluator are documented in this file.
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
   that endpoint.
+- Make the directory-snapshot mutation test independent of filesystem timestamp
+  granularity while preserving the late-entry race.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding

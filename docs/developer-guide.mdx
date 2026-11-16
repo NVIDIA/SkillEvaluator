@@ -85,6 +85,9 @@ The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 pytest -n auto
 ```
 
+The directory-snapshot race regression explicitly advances directory mtime when
+inserting its late entry, rather than assuming creation crosses a clock tick.
+
 ### Check the HTML report in a browser
 
 `tests/reporting/browser_navigation_checks.py` opens the HTML report in a headless browser and checks navigation, focus, themes, print view and layout at three screen widths. pytest doesn't collect it, and it needs Playwright:

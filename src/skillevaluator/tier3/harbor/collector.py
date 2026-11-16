@@ -7554,12 +7554,16 @@ def collect_harbor_results(
     def budget_expectations(
         agent: str,
         arm: str,
-    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, bool]:
         matching = [
-            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+            item
+            for item in budget_not_run
+            if item.get("agent") == agent
+            and item.get("arm") in {arm, f"{arm}_skill"}
+            and item.get("reason") in {None, "budget_exhausted"}
         ]
         if not matching:
-            return expected_trials, expected_case_ids, expected_cases, None
+            return expected_trials, expected_case_ids, expected_cases, None, False
         attempts_by_case: dict[str, int] = {}
         for item in matching:
             selector = str(item.get("case_id") or "")
@@ -7578,7 +7582,28 @@ def collect_harbor_results(
                 case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
             }
         actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
-        return actual_trials, active_case_ids, active_cases, attempt_counts
+        denied_slots = {
+            (
+                (case_id_by_task_selector or {}).get(str(item.get("case_id") or ""), str(item.get("case_id") or "")),
+                attempt,
+            )
+            for item in matching
+            if item.get("reason") == "budget_exhausted"
+            and type(attempt := item.get("attempt")) is int
+            and 1 <= attempt <= n_attempts
+        }
+        denied_cases = {
+            case_id
+            for case_id, _ in denied_slots
+            if case_id and all((case_id, attempt) in denied_slots for attempt in range(1, n_attempts + 1))
+        }
+        if expected_case_ids:
+            budget_denied = set(expected_case_ids) <= denied_cases
+        elif expected_cases is not None:
+            budget_denied = expected_cases > 0 and len(denied_cases) == expected_cases
+        else:
+            budget_denied = bool(expected_trials and len(denied_cases) * n_attempts == expected_trials)
+        return actual_trials, active_case_ids, active_cases, attempt_counts, budget_denied
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -7614,12 +7639,20 @@ def collect_harbor_results(
     tolerance_rejected: dict[str, str] = {}
 
     for agent in agents:
-        with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
-            agent, "with"
-        )
-        without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
-            budget_expectations(agent, "without")
-        )
+        (
+            with_expected_trials,
+            with_expected_case_ids,
+            with_expected_cases,
+            with_expected_attempts,
+            with_budget_denied,
+        ) = budget_expectations(agent, "with")
+        (
+            without_expected_trials,
+            without_expected_case_ids,
+            without_expected_cases,
+            without_expected_attempts,
+            without_budget_denied,
+        ) = budget_expectations(agent, "without")
         if skip_baseline:
             agent_expected_case_ids = with_expected_case_ids
         elif with_expected_case_ids is not None and without_expected_case_ids is not None:
@@ -7635,7 +7668,7 @@ def collect_harbor_results(
 
         with_job_name = f"{skill_name}-{agent}-with"
         # A skipped arm never adopts a stale job left in a reused jobs directory.
-        with_job_dir = None if skip_with_skill else _find_job_dir(jobs_dir, with_job_name)
+        with_job_dir = None if skip_with_skill or with_budget_denied else _find_job_dir(jobs_dir, with_job_name)
 
         with_collected_rewards: list[dict[str, Any]] = []
         with_rewards: list[dict[str, Any]] = []
@@ -7799,7 +7832,7 @@ def collect_harbor_results(
                 len(with_logical_rewards),
                 with_scores,
             )
-        elif not skip_with_skill:
+        elif not skip_with_skill and not with_budget_denied:
             with_job_failure = f"No Harbor job found for {with_job_name}"
             logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
             prefix = f"{agent} with-skill Harbor run failed: "
@@ -7817,10 +7850,12 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
-                skipped=skip_with_skill,
+                skipped=skip_with_skill or with_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
+        if with_budget_denied:
+            with_execution["skip_reason"] = "budget_exhausted"
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
         # A with-skill job that never started records the requested grading
@@ -7878,7 +7913,7 @@ def collect_harbor_results(
         without_job_dir: Path | None = None
         without_slots: dict[str, dict[str, Any]] = {}
         without_identity: dict[str, Any] = {}
-        if not skip_baseline:
+        if not skip_baseline and not without_budget_denied:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = (
                 reused_baseline_dir / agent / "without-skill"
@@ -8079,11 +8114,13 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 runtime_failures=without_runtime_failures,
-                skipped=skip_baseline,
+                skipped=skip_baseline or without_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=without_expected_attempts,
             )
+        if without_budget_denied:
+            without_execution["skip_reason"] = "budget_exhausted"
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)

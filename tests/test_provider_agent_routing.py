@@ -46,19 +46,19 @@ def _provider(name: str, model: str) -> ProviderConfig:
         (_provider("openai", "gpt-5.5"), "opencode", "openai/gpt-5.5"),
         (_provider("anthropic", "claude-opus-5"), "claude-code", "claude-opus-5"),
         (
-            _provider("nv_build", "nvidia/nemotron-3-super-120b-a12b"),
+            _provider("nv_build", "nvidia/nemotron-3.5-lightning-30b-a3b"),
             "opencode",
-            "nvidia/nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b",
         ),
         (
             _provider("nv_build", "nvidia/nemotron-3-nano-30b-a3b"),
             "codex",
-            "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
         ),
         (
             _provider("nv_build", "nvidia/nemotron-3-nano-30b-a3b"),
             "claude-code",
-            "nvidia/nemotron-3-super-120b-a12b",
+            "nvidia/nemotron-3.5-lightning-30b-a3b",
         ),
     ],
 )

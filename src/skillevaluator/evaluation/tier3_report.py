@@ -910,7 +910,9 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
-    statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
+    statuses = [
+        agent.get("execution_status") for agent in agent_payloads.values() if agent.get("execution_status") != "skipped"
+    ]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
     elif any(status == "failed" for status in statuses):
@@ -1206,7 +1208,7 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "budget": budget_metadata,
-        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
+        "budget_summary": budget_line(budget_metadata, agents=agents) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
         "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
@@ -4396,7 +4398,8 @@ def _apply_case_findings(
                 if part
             ),
             "severity": "fail" if fix["kind"] == "skill hurts" else "warn",
-            "source": "deterministic",
+            "source": fix.get("source") or "deterministic",
+            **({"fallback_reason": fix["fallback_reason"]} if fix.get("fallback_reason") else {}),
         }
         for fix in fixes
     ]
@@ -4753,7 +4756,11 @@ def _evaluation_mode(agents: dict[str, dict[str, Any]]) -> str:
         for info in agents.values():
             conditions = info.get("conditions")
             arm = conditions.get(condition) if isinstance(conditions, dict) else None
-            statuses.append(arm.get("execution_status") if isinstance(arm, dict) else None)
+            statuses.append(
+                ("not_run" if arm.get("skip_reason") == "budget_exhausted" else arm.get("execution_status"))
+                if isinstance(arm, dict)
+                else None
+            )
         return statuses
 
     with_statuses = arm_statuses("with_skill")

@@ -4,12 +4,13 @@
 """Case-first Tier 3 summary and How-to-improve ranking."""
 
 import json
+import time
 from pathlib import Path
 
 import pytest
 from rich.console import Console
 
-from skillevaluator.tier3.case_summary import render_case_summary, verdict, what_to_fix
+from skillevaluator.tier3.case_summary import _weakens_requirements, render_case_summary, verdict, what_to_fix
 from skillevaluator.tier3.result_display import render_result
 
 
@@ -50,6 +51,644 @@ def _reward(activated: bool, reason: str) -> dict:
             "behavior_check": {"results": [{"passed": False, "reason": reason}]},
         },
     }
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        "In evals/evals.json, remove the expectation for syllable_count from the syllable-positive case.",
+        "Loosen the assertion in evals/evals.json.",
+        "Drop the syllable_count expectation from evals/evals.json.",
+        "The assertion should be removed from the dataset.",
+        "Lower the pass threshold to make this case pass.",
+        "Remove the `expectation` for syllable_count from the dataset.",
+        "Drop the `syllable_count` `expectation` from evals/evals.json.",
+        "Loosen the `assertion` in evals/evals.json.",
+        "The `expectation` should be removed from the dataset.",
+        "The expectation for `syllable_count` should be removed from the dataset.",
+        "The `pass threshold` for the syllable-positive case should be lowered.",
+        "Remove the expected output mismatch by dropping the assertion from evals/evals.json.",
+        "Remove the expected output for syllable_count from evals/evals.json.",
+        "Remove the expected output mismatch by deleting the syllable-positive case from evals/evals.json.",
+        "Remove the assertion failure by dropping the `syllable-positive` case from evals/evals.json.",
+        "Remove the expected output mismatch by implementing syllable_count, then delete the syllable-positive case.",
+        "Fix the mismatch by removing the syllable-positive entry from evals/evals.json.",
+        "Remove the expected output mismatch by deleting the syllable-positive test case.",
+        "Remove the failure by commenting out the syllable-positive case in evals/evals.json.",
+        "Remove the mismatch by disabling the dataset entry for syllable-positive.",
+        "Delete the syllable-positive row from the dataset.",
+        "Skip the syllable-positive case in evals/evals.json.",
+        "The syllable-positive case should be deleted from evals/evals.json.",
+        "The syllable-positive entry in evals/evals.json should be removed.",
+        "The syllable-positive test case must be dropped.",
+        "Do not remove the expectation; delete the syllable-positive case from the dataset.",
+        "Delete the syllable-positive case from evals/evals.json.",
+        "Remove the test case from the dataset.",
+        "Drop the eval case.",
+        "The test case should be deleted.",
+        "Remove the special case from evals/evals.json.",
+        "In evals/evals.json, remove the special case for syllable-positive.",
+        "In the dataset, delete the edge case.",
+        "The special case in evals/evals.json should be removed.",
+    ],
+)
+def test_case_action_rejects_requirement_weakening(tmp_path, monkeypatch, action):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({"syllable-positive": _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["source"] == "deterministic"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Delete the case for positive-001 so it stops failing."),
+        ("positive-001", "Remove the case named positive-001 so the run passes."),
+        ("positive-001", "Delete case positive-001."),
+        ("positive-001", "Delete test case positive-001."),
+        ("positive-001", "Fix the mismatch by deleting the case for positive-001."),
+        ("positive-001", "Delete the entry for positive-001."),
+        ("positive-001", "Remove positive-001 from evals/evals.json."),
+        ("negative-007", "Remove the case for `negative-007`"),
+        ("negative-007", 'Drop the "negative-007" case.'),
+        ("syllable-count", "Delete the syllable-count case."),
+        ("syllable-count", "Remove the case for syllable-count."),
+        ("smoke", "Delete the smoke case."),
+        ("smoke", "Remove the case for smoke so it stops failing."),
+        ("positive-001", "The case for positive-001 should be deleted."),
+        ("positive-001", "The positive-001 entry should be deleted."),
+        ("positive-001", "The case for positive-001 in evals/evals.json can be removed."),
+        ("syllable-count", "The syllable-count case should be removed."),
+        ("smoke", "The smoke case must be dropped."),
+        ("positive-001", "Exclude the case for positive-001 from the run."),
+        ("positive-001", "Omit the case for positive-001."),
+        ("positive-001", "Get rid of the positive-001 case."),
+        ("positive-001", "Take out the case for positive-001."),
+        ("positive-001", "Take positive-001 out of the dataset."),
+        ("positive-001", "Take the positive-001 case out of evals/evals.json."),
+        ("syllable-count", "Leave out the syllable-count case."),
+        ("smoke", "Leave the smoke case out of the dataset."),
+        ("positive-001", "Filter out the case for positive-001."),
+        ("positive-001", "Filter positive-001 out of evals/evals.json."),
+        ("smoke", "Discard the smoke case."),
+        ("positive-001", "Strip the case for positive-001 from evals/evals.json."),
+        ("positive-001", "Ignore the case for positive-001."),
+        ("smoke", "Ignore the smoke case."),
+        ("positive-001", "Stop running the case for positive-001."),
+        ("syllable-count", "Retire the syllable-count case."),
+        ("positive-001", "Replace the positive-001 case with an easier one."),
+        ("positive-001", "Replace the case for positive-001 in evals/evals.json with a simpler one."),
+        ("positive-001", "Replace positive-001 with a simpler case."),
+        ("smoke", "Swap out the smoke case for an easier one."),
+        ("positive-001", "Instead of keeping the case for positive-001, move on to the next one."),
+        ("positive-001", "The positive-001 case should be excluded."),
+        ("positive-001", "The case for positive-001 should be replaced with an easier one."),
+        ("syllable-count", "The syllable-count case should be discarded."),
+        ("smoke", "The smoke case can be left out."),
+        ("positive-001", "The case for positive-001 should be ignored."),
+        ("positive-001", "The positive-001 case should be taken out of the dataset."),
+        ("syllable-count", "The syllable-count case must be filtered out."),
+        ("positive-001", "The case for positive-001 can be stripped from evals/evals.json."),
+        ("smoke", "The smoke case should be retired."),
+    ],
+)
+def test_case_action_rejects_deleting_a_dataset_case_named_by_its_id(tmp_path, monkeypatch, case_id, action):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({case_id: _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["source"] == "deterministic"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+def test_case_action_rejects_deleting_another_case_named_in_the_dataset_snapshot(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "syllable-positive", "question": "q"}, {"id": "smoke", "question": "q"}]})
+    )
+    action = "Delete the smoke case so syllable-positive stops failing."
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({"syllable-positive": _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Remove the special case in parser.py for positive-001 and implement the general rule."),
+        ("positive-001", "Remove the special case for positive-001 in parser.py and implement the general rule."),
+        ("positive-001", "Remove the case for positive-001 from analyze_text.py and implement the general rule."),
+        ("syllable-count", "Remove the syllable-count case in analyze_text.py and implement it generally."),
+        ("smoke", "Remove the smoke case in analyze_text.py and implement it generally."),
+        ("positive-001", "Remove the test case failure for positive-001 by implementing the rule in SKILL.md"),
+        ("positive-001", "Do not delete the case for positive-001; implement syllable_count in analyze_text.py."),
+        ("syllable-count", "Never remove the syllable-count case; implement syllable_count in analyze_text.py."),
+        ("smoke", "Do not drop the smoke case; implement syllable_count in analyze_text.py."),
+        ("positive-001", "Remove the special case for zero-length input in analyze_text.py."),
+        ("positive-001", "Remove the special case for zero-length input and implement syllable_count generally."),
+    ],
+)
+def test_case_action_keeps_advice_that_names_a_case_id_but_edits_the_implementation(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({case_id: _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Do not exclude the case for positive-001; implement the rule in SKILL.md."),
+        ("positive-001", "Never replace the case for positive-001 with an easier one; implement the rule in SKILL.md."),
+        ("smoke", "Never replace the smoke case; implement the missing step in SKILL.md."),
+        ("syllable-count", "Don't ignore the syllable-count case; implement the counting rule in SKILL.md."),
+        ("positive-001", "Do not take positive-001 out of the dataset; implement the rule in SKILL.md."),
+        ("positive-001", "Instead of deleting the case for positive-001, implement the rounding rule in SKILL.md."),
+        ("syllable-count", "Instead of removing the syllable-count case, implement the counting rule in SKILL.md."),
+        ("smoke", "Implement the missing step in SKILL.md instead of dropping the smoke case."),
+        ("positive-001", "Fix the rounding step rather than excluding the case for positive-001."),
+        ("positive-001", "Make positive-001 pass without deleting the case for positive-001."),
+        ("positive-001", "Discard the special case in parser.py for positive-001 and implement the general rule."),
+        ("syllable-count", "Exclude the syllable-count case in analyze_text.py and implement it generally."),
+        ("positive-001", "Take the special case for positive-001 out of parser.py and implement the general rule."),
+        ("smoke", "Retire the smoke case from analyze_text.py and implement it generally."),
+        ("positive-001", "Discard the test case failure for positive-001 by implementing the rule in SKILL.md."),
+        ("positive-001", "Ignore case when comparing units, as positive-001 expects."),
+        ("positive-001", "Strip whitespace from the answer, as positive-001 expects."),
+        ("positive-001", "Take the case for positive-001 into account in SKILL.md."),
+        ("positive-001", "Replace the special case for positive-001 in parser.py with the general rounding rule."),
+    ],
+)
+def test_case_action_keeps_negated_instead_of_and_implementation_advice_for_the_wider_verbs(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    source = {"agents": {"a": _agent({case_id: _case(False)}, {})}}
+    [fix] = what_to_fix(source, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Run without failures by deleting the positive-001 case from evals/evals.json."),
+        ("positive-001", "Make the run pass without failures by dropping the case for positive-001."),
+        ("smoke", "Get a green run without extra work by excluding the smoke case."),
+        ("positive-001", "Rather than a fix, delete the case for positive-001."),
+        ("positive-001", "Instead of the old approach, delete the case for positive-001 from the dataset."),
+    ],
+)
+def test_case_action_rejects_a_removal_when_the_negation_word_governs_something_else(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("positive-001", "Make positive-001 pass without deleting the case for positive-001."),
+        ("positive-001", "Make positive-001 pass without simply removing the case for positive-001."),
+        ("positive-001", "Fix the rounding step for positive-001 without ever dropping its case."),
+        ("syllable-count", "Implement the counting rule instead of just dropping the syllable-count case."),
+        ("smoke", "Fix the missing step in SKILL.md rather than excluding the smoke case."),
+        ("positive-001", "Remove the special case for UTF-8 and use the standard decoder for positive-001."),
+        ("positive-001", "Drop the special case for ISO-8859 input and use the standard decoder for positive-001."),
+        ("positive-001", "Delete the utf-16 case and decode with the standard library for positive-001."),
+        ("positive-001", "Remove the UNIX case and normalise line endings generally for positive-001."),
+        ("positive-001", "Remove the v2-api case and call the current endpoint for positive-001."),
+        (
+            "positive-001",
+            "Exclude the base-64 case from the encoder and handle positive-001 with the standard library.",
+        ),
+    ],
+)
+def test_case_action_keeps_advice_whose_negation_or_identifier_is_not_about_a_dataset_case(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+def test_case_action_rejects_an_unlisted_identifier_when_the_action_points_at_the_dataset(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    action = "Delete the utf-16 case from evals/evals.json, then implement syllable_count."
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({"syllable-positive": _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+def test_case_action_with_a_long_list_of_known_case_ids_is_checked_in_bounded_time(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    ids = [f"case-{i:02d}" for i in range(20)]
+    dataset = [{"id": case_id, "question": "q"} for case_id in ids + [f"case-{i:03d}" for i in range(230)]]
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": dataset}))
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    actions = {
+        "Remove the " + ", ".join(ids) + " overrides in parser.py and implement the general rule.": "llm",
+        "Remove " + " ".join(["a-b-c-d-e-f-g"] * 50) + " case": "llm",
+        "Delete the " + ", ".join(ids[:5]) + " cases.": "deterministic",
+    }
+    for action, expected_source in actions.items():
+        monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, action=action, **_k: (json.dumps([action]), None))
+        started = time.perf_counter()
+        [fix] = what_to_fix({"agents": {"a": _agent({"case-00": _case(False)}, {})}}, run_dir=tmp_path)
+        assert time.perf_counter() - started < 1.0
+        assert fix["source"] == expected_source
+
+
+def test_case_action_fallback_text_with_a_long_judge_reason_is_checked_in_bounded_time(tmp_path):
+    ids = [f"case-{i:03d}" for i in range(250)]
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": i, "question": "q"} for i in ids]}))
+    reason = "Missing " + ", ".join(ids[:100]) + " and " + " ".join(["a-b-c-d-e-f-g"] * 200)
+    _trial(tmp_path, "a", "t0", _reward(True, reason))
+    started = time.perf_counter()
+    [fix] = what_to_fix({"agents": {"a": _agent({"case-000": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert time.perf_counter() - started < 1.0
+    assert fix["source"] == "deterministic"
+
+
+# Verb modifiers a negator may govern: "without first deleting", "without ever having to delete the case".
+_NEGATION_CHAINS = (
+    "",
+    "first",
+    "outright",
+    "ever",
+    "even",
+    "actually",
+    "simply",
+    "just",
+    "also",
+    "then",
+    "again",
+    "entirely",
+    "completely",
+    "fully",
+    "altogether",
+    "necessarily",
+    "directly",
+    "having to",
+    "needing to",
+    "need to",
+    "the need to",
+    "having to first",
+    "being forced to",
+    "being asked to",
+    "trying to",
+    "attempting to",
+    "ever having to",
+    "ever even having to first",
+)
+# (negator, whether the verb after it is in its base form): "without first deleting", "do not first delete".
+_STRICT_NEGATORS = (
+    ("without", False),
+    ("instead of", False),
+    ("rather than", False),
+    ("there is no need to", True),
+    ("should not", True),
+)
+_ALL_NEGATORS = (*_STRICT_NEGATORS, ("do not", True), ("never", True), ("don't", True), ("avoid", False))
+
+
+# "not only deleting the case but also fixing the parser" recommends the deletion, so after "not", "do not",
+# "should not", "never", "don't" or "avoid" these words void the negation. "without simply removing the case" and
+# "instead of just dropping it" are different: there the negator governs the verb.
+_ADDITIVE_WORDS = ("only", "just", "merely", "simply", "solely", "exclusively", "purely")
+_ADDITIVE_PREFIXES = (*_ADDITIVE_WORDS, "necessarily just", "necessarily only", "even just")
+_NOT_NEGATORS = (
+    ("not", False),
+    ("do not", True),
+    ("should not", True),
+    ("never", True),
+    ("don't", True),
+    ("avoid", False),
+)
+
+
+def _negated_advice(negators: tuple[tuple[str, bool], ...], case_subject: str) -> list[str]:
+    sentences = []
+    for negator, base_form in negators:
+        for chain in _NEGATION_CHAINS:
+            if negator in dict(_NOT_NEGATORS) and set(chain.split()) & set(_ADDITIVE_WORDS):
+                continue
+            base = base_form or chain.endswith(" to")
+            for verb, subject in (("delete", case_subject), ("lower", "the pass threshold")):
+                form = verb if base else verb.replace("lower", "lowering").replace("delete", "deleting")
+                sentences.append(" ".join(f"Fix the parser {negator} {chain} {form} {subject}.".split()))
+    return sentences
+
+
+def _unrelated_negation_advice(negators: tuple[tuple[str, bool], ...], case_subject: str) -> list[str]:
+    """A noun between the negator (and its modifiers) and the verb: the negator governs the noun, not the removal."""
+    return [
+        " ".join(f"Fix the parser {negator} {chain} {noun} by {verb} {subject}.".split())
+        for negator, _ in negators
+        for chain in _NEGATION_CHAINS
+        for noun in ("failures", "errors")
+        for verb, subject in (("deleting", case_subject), ("lowering", "the pass threshold"))
+    ]
+
+
+def _additive_advice(case_subject: str) -> list[str]:
+    """Additive wording ("not only lowering the threshold but also fixing the parser") still recommends the removal."""
+    sentences = []
+    for negator, base_form in _NOT_NEGATORS:
+        for additive in _ADDITIVE_PREFIXES:
+            for verb, subject in (("delete", case_subject), ("lower", "the pass threshold")):
+                form = verb if base_form else verb.replace("lower", "lowering").replace("delete", "deleting")
+                sentences.append(f"Fix the parser and {negator} {additive} {form} {subject} but also add a test.")
+    return sentences
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "Implement the missing field without having to delete the smoke case."),
+        ("smoke", "Fix the parser without first deleting the smoke case."),
+        ("smoke", "Fix the parser without outright deleting the smoke case."),
+        ("smoke", "Fix the parser without ever having to delete the smoke case."),
+        ("smoke", "Fix the parser without even needing to drop the smoke case."),
+        ("smoke", "Fix the parser without being forced to exclude the smoke case."),
+        ("smoke", "Fix the parser instead of first deleting the smoke case."),
+        ("smoke", "Fix the parser rather than simply dropping the smoke case."),
+        ("smoke", "Do not first delete the smoke case; fix the parser."),
+        ("smoke", "There is no need to delete the smoke case once the parser is fixed."),
+        ("smoke", "You should not delete the smoke case; fix the parser."),
+        ("positive-001", "Fix the parser without trying to delete the case for positive-001."),
+        ("smoke", "Get smoke to pass without first lowering the pass threshold."),
+        ("smoke", "Fix the parser so smoke passes without having to loosen the expected output."),
+        ("smoke", "Make smoke pass without ever relaxing the assertions."),
+        ("smoke", "Make smoke pass instead of outright softening the ground truth."),
+    ],
+)
+def test_case_action_keeps_advice_whose_negator_governs_the_verb_through_modifiers(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "Run without failures by deleting the smoke case from evals/evals.json."),
+        ("smoke", "Run without errors by removing the smoke case from evals/evals.json."),
+        ("positive-001", "Pass without errors by removing the positive-001 case from evals/evals.json."),
+        ("smoke", "Pass without regressions by dropping the smoke case."),
+        ("smoke", "Fix the parser without delay, deleting the smoke case."),
+        ("smoke", "Fix the parser without having to wait, delete the smoke case."),
+        ("smoke", "Fix the parser without ever fixing the parser by deleting the smoke case."),
+        ("smoke", "Fix the parser without first fixing the parser. Delete the smoke case."),
+        ("smoke", "Get smoke to pass without failures by lowering the pass threshold."),
+        ("smoke", "Get smoke to pass without errors by loosening the expected output."),
+        ("smoke", "Get smoke to pass without first fixing the parser, then relax the assertions."),
+    ],
+)
+def test_case_action_rejects_a_removal_that_a_negator_with_modifiers_does_not_govern(
+    tmp_path, monkeypatch, case_id, action
+):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize("known", [("smoke",), ()])
+def test_a_negator_and_its_verb_modifiers_negate_the_removal_and_the_weakening(known):
+    subject = "the smoke case" if known else "the case for positive-001"
+    offenders = [s for s in _negated_advice(_ALL_NEGATORS, subject) if _weakens_requirements(s, known)]
+    assert offenders == []
+
+
+@pytest.mark.parametrize("known", [("smoke",), ()])
+def test_a_noun_between_the_negator_and_the_verb_breaks_the_negation(known):
+    subject = "the smoke case from evals/evals.json" if known else "the case for positive-001 from evals/evals.json"
+    missed = [s for s in _unrelated_negation_advice(_STRICT_NEGATORS, subject) if not _weakens_requirements(s, known)]
+    assert missed == []
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "Make smoke pass by not only lowering the pass threshold but also fixing the parser."),
+        ("smoke", "Not only delete the smoke case but also fix the parser."),
+        ("smoke", "Make smoke pass by not just lowering the pass threshold but also fixing the parser."),
+        ("smoke", "Make smoke pass by not merely relaxing the assertions but also fixing the parser."),
+        ("smoke", "Make smoke pass by not simply loosening the expected output but also fixing the parser."),
+        ("smoke", "Make smoke pass by not solely lowering the pass threshold but also fixing the parser."),
+        ("smoke", "Make smoke pass by not exclusively softening the ground truth but also fixing the parser."),
+        ("smoke", "Make smoke pass by not necessarily just lowering the pass threshold but also fixing the parser."),
+        ("smoke", "Make smoke pass by not necessarily only lowering the pass threshold but also fixing the parser."),
+        ("smoke", "Fix the parser by not only dropping the smoke case but also adding a unit test."),
+        ("smoke", "Not just removing the smoke case but also fixing the parser."),
+        ("smoke", "Fix the parser by not merely excluding the smoke case but also adding a unit test."),
+        ("positive-001", "Not simply delete the case for positive-001 but also fix the parser."),
+        ("smoke", "Do not only lower the pass threshold for smoke but also fix the parser."),
+        ("smoke", "Do not just delete the smoke case, fix the parser."),
+        ("smoke", "Don't simply delete the smoke case; fix the parser."),
+    ],
+)
+def test_case_action_rejects_additive_wording_that_still_recommends_the_removal(tmp_path, monkeypatch, case_id, action):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == "Address in SKILL.md: Missing syllable_count"
+    assert fix["fallback_reason"] == "requirement_weakening"
+
+
+@pytest.mark.parametrize(
+    "case_id,action",
+    [
+        ("smoke", "You should not lower the pass threshold for smoke; fix the parser."),
+        ("smoke", "You must not delete the smoke case; fix the parser."),
+        ("smoke", "Do not lower the pass threshold for smoke."),
+        ("smoke", "Do not delete the smoke case but also fix the parser."),
+        ("smoke", "Fix the parser and do not delete the smoke case."),
+        ("smoke", "Fix the parser; it should not drop the smoke case."),
+        ("smoke", "Fix the parser without simply removing the smoke case."),
+        ("smoke", "Fix the parser instead of just dropping the smoke case."),
+        ("smoke", "Fix the parser rather than merely excluding the smoke case."),
+    ],
+)
+def test_case_action_keeps_genuine_prohibitions_next_to_additive_wording(tmp_path, monkeypatch, case_id, action):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), None))
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(False)}, {})}}, run_dir=tmp_path)
+
+    assert fix["action"] == action
+    assert fix["source"] == "llm"
+    assert "fallback_reason" not in fix
+
+
+@pytest.mark.parametrize("known", [("smoke",), ()])
+def test_additive_not_only_wording_does_not_negate_the_removal_or_the_weakening(known):
+    subject = "the smoke case" if known else "the case for positive-001"
+    missed = [s for s in _additive_advice(subject) if not _weakens_requirements(s, known)]
+    assert missed == []
+
+
+@pytest.mark.parametrize(
+    "action,error,expected_source,expected_fallback",
+    [
+        ("Implement syllable_count in analyze_text.py.", None, "llm", None),
+        ("Do not remove the expectation; implement it in analyze_text.py.", None, "llm", None),
+        ("Do not remove the `expectation`; implement it in analyze_text.py.", None, "llm", None),
+        ("Never drop the `expected output` for syllable_count; implement it in analyze_text.py.", None, "llm", None),
+        ("Remove the expected output mismatch by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove the assertion failure by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove the `expected output` mismatch by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        (
+            "The requirement violation should be removed by implementing syllable_count in analyze_text.py.",
+            None,
+            "llm",
+            None,
+        ),
+        ("Remove temporary files after analysis.", None, "llm", None),
+        ("Do not delete the case; implement syllable_count in analyze_text.py.", None, "llm", None),
+        (
+            "Never remove the syllable-positive entry from evals/evals.json; fix analyze_text.py instead.",
+            None,
+            "llm",
+            None,
+        ),
+        (
+            "Remove the expected output mismatch by implementing syllable_count in analyze_text.py; "
+            "keep the syllable-positive case in evals/evals.json.",
+            None,
+            "llm",
+            None,
+        ),
+        ("In this case, implement syllable_count in analyze_text.py.", None, "llm", None),
+        ("The edge case should be handled in analyze_text.py.", None, "llm", None),
+        ("Delete the cache entry, then implement syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove temp files per case, then implement syllable_count in analyze_text.py.", None, "llm", None),
+        (
+            "Remove the special case in parser.py for positive-001 and implement the general rounding algorithm.",
+            None,
+            "llm",
+            None,
+        ),
+        (
+            "Remove the test case failure for positive-001 by implementing the rounding rule in SKILL.md",
+            None,
+            "llm",
+            None,
+        ),
+        ("Remove the special case in the script and implement syllable_count generally.", None, "llm", None),
+        ("Delete the default case branch in analyze_text.py; implement syllable_count.", None, "llm", None),
+        ("Remove the case mismatch by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        ("Remove the test case violation by implementing syllable_count in analyze_text.py.", None, "llm", None),
+        (
+            "The test case failure should be removed by implementing syllable_count in analyze_text.py.",
+            None,
+            "llm",
+            None,
+        ),
+        ("Never remove the test case; implement syllable_count in analyze_text.py.", None, "llm", None),
+        (None, "Connection error", "deterministic", "llm_unavailable_or_invalid"),
+        ("", None, "deterministic", "llm_unavailable_or_invalid"),
+    ],
+)
+def test_case_action_provenance_reaches_canonical_recommendation(
+    tmp_path, monkeypatch, action, error, expected_source, expected_fallback
+):
+    from skillevaluator.evaluation.tier3_report import _apply_case_findings
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    monkeypatch.setattr(llm_judge, "call_public_llm", lambda *_a, **_k: (json.dumps([action]), error))
+    source = {"agents": {"a": _agent({"syllable-positive": _case(False)}, {"syllable-positive": _case(False)})}}
+    payload = {}
+    _apply_case_findings(payload, source, tmp_path, tmp_path, use_llm=True)
+    [fix] = json.loads((tmp_path / "what_to_fix.json").read_text())
+    [recommendation] = payload["recommendations"]
+
+    for record in (fix, recommendation):
+        assert record["source"] == expected_source
+        assert record.get("fallback_reason") == expected_fallback
+    assert fix["action"] in recommendation["message"]
+
+
+def test_case_action_disabled_is_not_a_failed_llm_fallback(tmp_path, monkeypatch):
+    from skillevaluator.tier3.eval_core import llm_judge
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("LLM should not be called")
+
+    monkeypatch.setattr(llm_judge, "call_public_llm", unexpected)
+    _trial(tmp_path, "a", "t0", _reward(True, "Missing syllable_count"))
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert fix["source"] == "deterministic"
+    assert "fallback_reason" not in fix
+
+
+def test_case_action_deterministic_remedy_does_not_repeat_weakening_reason(tmp_path):
+    _trial(tmp_path, "a", "t0", _reward(True, "Remove the expectation for syllable_count"))
+    [fix] = what_to_fix({"agents": {"a": _agent({"c": _case(False)}, {})}}, run_dir=tmp_path, use_llm=False)
+    assert "Remove the expectation" not in fix["action"]
 
 
 @pytest.mark.parametrize("source", ["result", "saved", "provenance", "variant", "other_variant", "default"])

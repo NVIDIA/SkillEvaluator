@@ -162,7 +162,7 @@ automatically valid for every agent. Override the model per agent with
 
 ```bash title="Per-agent model override"
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
 ```
 
 To make an override persistent, set it in `evals/config.yml` under
@@ -201,9 +201,9 @@ orchestration and server tools Build cannot execute — `WebFetch`,
 ### Models on the one-key path
 
 With `nv_build` and no explicit model override, every supported agent defaults
-to `nvidia/nemotron-3-super-120b-a12b`. The provider-native agent selection is
+to `nvidia/nemotron-3.5-lightning-30b-a3b`. The provider-native agent selection is
 OpenCode. Its model is automatically qualified with the `nvidia/` adapter
-namespace, so it renders as `nvidia/nvidia/nemotron-3-super-120b-a12b` in run
+namespace, so it renders as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` in run
 output — the doubled prefix is the adapter namespace plus the catalog publisher,
 not a bug.
 
@@ -730,10 +730,12 @@ hard-unsupported and fails closed before agent-runtime discovery —
 directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
 and `opencode` can run in local mode.
 
-Local mode does not install the pinned CLI releases. Each trial checks the
-installed version against the selected model instead and fails before the agent
-starts when it is too old: Claude 5.5 and later models need Claude Code 2.1.280
-or newer, and GPT-6 models need Codex 0.159.1 or newer.
+When the selected agent's CLI is missing, a local-mode run offers to install it
+under `SKILLEVALUATOR_RUNTIME_DIR`, at the release Harbor installs; without a
+terminal it prints the `npm install` command instead. Each trial checks the
+installed version against the selected model and fails before the agent starts
+when it is too old: Claude 5.5 and later models need Claude Code 2.1.280 or
+newer, and GPT-6 models need Codex 0.159.1 or newer.
 
 The sandbox policy is controlled by environment variables:
 

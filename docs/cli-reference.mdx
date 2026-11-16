@@ -663,8 +663,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 Without a `--model`/`--agent-model` override, agent execution uses
 `gpt-6.1-sol` for OpenAI (OpenCode: `openai/gpt-5.6-sol` unless
 `SKILL_EVAL_LLM_MODEL` is set), `claude-opus-5-5` for Anthropic, and
-`nvidia/nemotron-3-super-120b-a12b` for NVIDIA Build. OpenCode displays the
-last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
+`nvidia/nemotron-3.5-lightning-30b-a3b` for NVIDIA Build. OpenCode displays the
+last value as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its adapter
 namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.

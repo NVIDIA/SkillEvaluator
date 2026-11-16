@@ -654,7 +654,7 @@ def test_nvidia_build_claude_client_scope_wins_outer_agent_env(
     environment = _MergingRecordingEnvironment(tmp_path)
     agent = SkillEvaluatorNvidiaBuildClaudeCode(
         logs_dir=tmp_path,
-        model_name="nvidia/nemotron-3-super-120b-a12b",
+        model_name="nvidia/nemotron-3.5-lightning-30b-a3b",
         extra_env={
             "ANTHROPIC_API_KEY": "external-anthropic-key",
             "ANTHROPIC_BASE_URL": "https://external-anthropic.example",

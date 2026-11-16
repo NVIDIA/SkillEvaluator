@@ -289,6 +289,10 @@ def test_gitleaks_single_value_allowlists_are_exactly_scoped() -> None:
             r"^us\.anthropic\.claude-opus-5$",
             r"^tests/validators/test_security\.py$",
         ),
+        "Claude Opus 5.5 Bedrock model ID that follows a credential name in SkillSpector bridge tests": (
+            r"^us\.anthropic\.claude-opus-5-5$",
+            r"^tests/validators/test_security\.py$",
+        ),
         "Bedrock model ID in the merge-leftover SkillSpector bridge test copy from commit e8aa35d6a": (
             r"^us\.anthropic\.claude-opus-5$",
             r"^tests/validators/test_security\.py\.orig$",

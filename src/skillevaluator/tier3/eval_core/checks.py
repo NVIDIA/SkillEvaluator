@@ -4931,20 +4931,6 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
         value = _assignment_value_match(text, start) if pattern is None else pattern.match(text, start)
         if value is None:
             continue
-        value_end = value.end()
-        if (
-            name_sed_end
-            and pattern is not None
-            and pattern is not _FINDING_EVIDENCE_STUCK_VALUE_RE
-            and value_end > name_sed_end
-            and text[name_sed_end - 1] == "/"
-        ):
-            # A value read as the rest of a quoted string ends with the sed
-            # expression its name starts a part of, when that expression ends
-            # with its closing "/". Inside a JSON string the rest of the string
-            # past the shell quote that closes the expression would otherwise
-            # read as part of the value, and so would the command after it.
-            value_end = name_sed_end
         if not name_sed_end:
             plain_end = match.end(3) if match.end(1) in config_name_ends else _flat_value_end(text, value)
         if overlapped:
@@ -4963,7 +4949,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             # for each name in it. A name inside a call or tuple value past
             # its first word or parenthesis is read again too, so its value
             # may run past the call's ")" ("auth=f(u, token='a) b')").
-            pos = max(pos, value_end)
+            pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
         replacement = "<redacted>"
@@ -4977,7 +4963,7 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             replacement = opening + scheme + replacement + closing
         parts.append(replacement)
         masked_start = value.start()
-        pos = value_end
+        pos = value.end()
         sed_end = name_sed_end
     parts.append(text[pos:])
     return "".join(parts)

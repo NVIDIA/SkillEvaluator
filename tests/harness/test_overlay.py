@@ -459,6 +459,19 @@ def test_reload_guidance_reaches_findings(tmp_path: Path):
     assert {r["status"] for r in rows.values()} == {"loads"}
 
 
+def test_claude_listing_cut_counts_when_to_use(tmp_path: Path):
+    desc = "Use when building reports."
+    over = _rows(_skill(tmp_path / "over", extra=f"when_to_use: {'w' * 1520}\n", desc=desc))["claude-code"]
+    under = _rows(_skill(tmp_path / "under", extra=f"when_to_use: {'w' * 1500}\n", desc=desc))["claude-code"]
+
+    cut = next(f for f in over["findings"] if f["id"] == "CC-DESC-CUT")
+    assert "1,549 with when_to_use" in cut["message"]
+    assert over["listed"]["mode"] == "cut"
+    assert over["listed"]["text"].startswith(f"{desc} - www")
+    assert "CC-DESC-CUT" not in {f["id"] for f in under["findings"]}
+    assert under["listed"]["mode"] == "full"
+
+
 def test_listed_description_projection(tmp_path: Path):
     desc = "Use when " + "a" * 1600
     rows = _rows(_skill(tmp_path, desc=desc))

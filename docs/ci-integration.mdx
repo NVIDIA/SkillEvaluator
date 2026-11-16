@@ -317,10 +317,11 @@ if [ "${#reports[@]}" -eq 0 ]; then
   echo "No SkillEvaluator JSON report under reports/" >&2
   exit 1
 fi
-jq -se 'all(.[]; [.quality_summary[]?.overall_score] | length > 0 and min >= 80)' "${reports[@]}"
+jq -se --argjson n "${#reports[@]}" \
+  'length == $n and all(.[]; [.quality_summary[]?.overall_score] | length > 0 and min >= 80)' "${reports[@]}"
 ```
 
-A single-skill target writes its report at the top of `reports/`, and a folder target writes one per skill under `reports/<skill>/`, so the step checks every report it finds; write them to an empty `reports/` folder. The gate fails closed: a run with no report, or a report without a quality score, fails it. `jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](/skills/skillevaluator/reports).
+A single-skill target writes its report at the top of `reports/`, and a folder target writes one per skill under `reports/<skill>/`, so the step checks every report it finds; write them to an empty `reports/` folder. The gate fails closed: a run with no report, an empty report file, or a report without a quality score fails it. `jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](/skills/skillevaluator/reports).
 
 ## Troubleshooting
 

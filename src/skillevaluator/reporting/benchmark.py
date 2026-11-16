@@ -287,7 +287,7 @@ class BenchmarkReporter(ReporterBase):
         if budget_reason and self.report_scope != "tier3":
             lines.extend([tier3_callout, ""])
         if isinstance(budget, dict):
-            lines.extend([f"> {budget_line(budget)}", ""])
+            lines.extend([f"> {budget_line(budget, agents=ae.get('agents'))}", ""])
 
         tolerated_lines = []
         for tolerated in tolerated_baseline_agents(ae):

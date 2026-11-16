@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
+  artifacts. One testsuite is emitted per check group, failures include
+  file:line when recorded, and incomplete or unrun checks are skipped rather
+  than reported as passed.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level

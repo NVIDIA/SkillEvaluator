@@ -39,7 +39,14 @@ from skillevaluator.publication_identity import (
     publication_paths_skipped_by_scan,
     publication_target_from_path,
 )
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
+from skillevaluator.reporting import (
+    CLIReporter,
+    HTMLReporter,
+    JSONReporter,
+    JUnitReporter,
+    MarkdownReporter,
+    SARIFReporter,
+)
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context
 from skillevaluator.reporting.run_status import result_tier
@@ -153,6 +160,7 @@ REPORTERS = {
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
     "sarif": SARIFReporter,
+    "junit": JUnitReporter,
 }
 
 
@@ -645,6 +653,8 @@ def emit_reports(
     announce_paths: bool = True,
     sarif_scan_root: Path | None = None,
     sarif_repository_root: Path | None = None,
+    scan_root: Path | None = None,
+    repository_root: Path | None = None,
     requested_tiers: tuple[int, ...] | None = None,
     displayed_tiers: tuple[int, ...] | None = None,
     presentation_context: FinalRenderContext | None = None,
@@ -695,6 +705,11 @@ def emit_reports(
             reporter = reporter_cls(
                 workspace_root=sarif_repository_root,
                 scan_root=sarif_scan_root,
+            )
+        elif fmt == "junit":
+            reporter = reporter_cls(
+                workspace_root=repository_root if repository_root is not None else sarif_repository_root,
+                scan_root=scan_root if scan_root is not None else sarif_scan_root,
             )
         elif fmt == "json":
             reporter = reporter_cls(

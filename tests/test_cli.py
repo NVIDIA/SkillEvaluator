@@ -343,6 +343,7 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
         (".html", "json,html,markdown"),
         (".md", "json,html,markdown"),
         (".sarif.json", "sarif"),
+        (".junit.xml", "junit"),
     ],
 )
 def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(

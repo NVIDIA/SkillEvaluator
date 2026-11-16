@@ -45,6 +45,16 @@ YAML multiline string.
 The job evaluates changed skills, shows the result in the pipeline, and retains
 reports as job artifacts, including when a check fails.
 
+To publish SkillEvaluator findings as a native GitLab merge-request test report,
+write JUnit XML (`-r junit`) and attach it with `artifacts:reports:junit`:
+
+```yaml title="JUnit test report artifact"
+artifacts:
+  when: always
+  reports:
+    junit: reports/*.junit.xml
+```
+
 </Steps>
 
 The generated file has this shape; the release fills in the immutable pins:

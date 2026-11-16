@@ -85,6 +85,7 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `html` | Standalone HTML report (default) | A human needs to review or archive a run |
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
+| `junit` | JUnit XML | CI systems that show native test reports need a JUnit artifact |
 
 HTML reports use a shared NVIDIA presentation across all three tiers, with
 numbered Insights cards, expandable findings, and tables alongside charts.
@@ -94,8 +95,8 @@ Saved Light, Dark and System choices take precedence when browser storage is
 available; System follows changes to the device preference.
 Reports, including charts, work without a network connection.
 
-```bash title="One run, four report files"
-skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
+```bash title="One run, five report files"
+skillevaluator validate ./my-skill -r json,html,markdown,sarif,junit -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](/skills/skillevaluator/ci-integration).
@@ -332,11 +333,30 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`); the `cli` format
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` format
 prints to the terminal and never writes a file. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
 and never clobbers the previous run.
+
+## JUnit report
+
+`-r junit` writes one XML file for CI test-report consumers such as GitLab
+merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
+
+| JUnit element | SkillEvaluator source |
+| --- | --- |
+| `testsuites` | One document per run |
+| `testsuite` | One check group (`ValidationResult`) |
+| `testcase` | One check, finding, gate failure, or incomplete scanner |
+| `failure` | A failing finding or an independent gate failure, with `file:line` when recorded |
+| `skipped` | A check that did not run, or a scanner that did not complete |
+| `system-out` | Score and threshold when recorded, and non-failing finding text |
+
+Counts on `testsuites` and each `testsuite` (`tests`, `failures`, `skipped`,
+`time`) match the cases they contain. File paths are relative to the scanned
+root, using the same resolution rules as SARIF. Characters XML 1.0 forbids are
+stripped. An incomplete scan is never emitted as an all-passed suite.
 
 ## HTML report
 

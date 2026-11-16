@@ -417,6 +417,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
 - Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
 - Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.
+- Partial Tier 3 evidence is retained only for valid reward identities and attempt
+  coverage. Corrupt rewards or duplicate attempts still suppress arm scores;
+  incomplete cases are reported as unresolved instead of failed.
+
+- Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
@@ -847,10 +852,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `source ~/.bashrc; npm test 2>&1 | tail -20` and
   `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
   Security 0.0 and now score 1.0, in both the host checker and the bundled
-  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` still
-  scores 0.0. This amends the 0.9.0 note that every command that scored 0.0
-  in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
-  `cat ~/.bashrc 2>/dev/null`, still score 0.0.
+  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` and
+  `cp -t$ROOT/etc/sudoers.d /tmp/agent 2>&1` still score 0.0. This amends the
+  0.9.0 note that every command that scored 0.0 in 0.8.0 still does; most
+  other commands the 0.8.0 rule flags, such as `cat ~/.bashrc 2>/dev/null`,
+  still score 0.0.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized
@@ -1211,6 +1217,13 @@ All notable changes to SkillEvaluator are documented in this file.
   printed under each plan line that changed during the run, and the next plan
   line or table started on the same line as that copy's bottom border. Output
   to a terminal is unchanged.
+- Tier 3 security finding evidence and saved judge evidence mask the
+  credential in more command forms (`auth=` call values, `sed` replacements,
+  `_` long flags, quoted or `--` config keys, values in escaped single quotes
+  or quoted with the `'"'"'` idiom, a name after an escaped line break), also
+  in text escaped twice; a value-less credential flag no longer hides the next
+  command's password, and shell `apply_patch` evidence is masked before its
+  400-character cut. The Tier 3 live evaluation guide lists the exact forms.
 
 ## 0.9.0 - 2026-11-13
 

@@ -1017,13 +1017,14 @@ All notable changes to SkillEvaluator are documented in this file.
   prompt such as `$ python run.py`, as a wildcard for every file left out of
   the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
   was left out. A wildcard elsewhere in the line, or a label inside code, still
-  counts. So do such a label and `$` on a line with a quoted or escaped space
-  or shell delimiter, such as `setup' 'helper.sh` or `setup\ h*.sh`, where a
-  shell may join words that the check reads apart. With `validate --workers`
-  above 1, a skill of a folder that is also a plugin is judged against the
-  folder, as with one worker, so a line naming a file elsewhere in the folder
-  keeps it `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the
-  accepted missing-reference warning, or the error that says why a scan is
+  counts. So do such a label and `$` on a line with a space or shell delimiter
+  between two of the same quote or after a backslash, as written or decoded,
+  such as `setup' 'helper.sh` or `setup\ h*.sh`, where a shell may join words
+  that the check reads apart. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
   `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
   drops that error either.
 

@@ -429,6 +429,37 @@ def test_blocking_tier3_that_could_not_run_reports_the_reason() -> None:
     assert skipped.attrib["message"] == "ANTHROPIC_API_KEY is not set; Tier 3 did not run"
 
 
+def test_blocking_skip_that_fails_run_status_is_a_failure() -> None:
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+    from skillevaluator.reporting.run_status import Status, result_status
+
+    result = advisory_skip_result("Tier 3 skipped with --skip")
+    result.passed = True
+    result.metadata["skipped"] = True
+    result.metadata["skip_reason"] = "Tier 3 skipped with --skip"
+    result.metadata["gating"] = {"tier": 3, "blocking": True}
+    assert result_status(result) == Status.FAILED
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    cases = _cases(root)
+    assert all(case.find("skipped") is None for case in cases)
+    failure = root.find("testsuite/testcase[@name='gate_failure']/failure")
+    assert failure is not None
+    assert failure.attrib["message"] == "Tier 3 skipped with --skip"
+    assert int(root.attrib["failures"]) == 1
+    assert int(root.attrib["skipped"]) == 0
+    _assert_counts_match(root)
+
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
+    assert result_status(result) == Status.SKIPPED
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    skipped = root.find("testsuite/testcase/skipped")
+    assert skipped is not None
+    assert skipped.attrib["message"] == "Tier 3 skipped with --skip"
+    assert int(root.attrib["failures"]) == 0
+    _assert_counts_match(root)
+
+
 def test_advisory_tier2_findings_and_errors_are_not_failures() -> None:
     result = ValidationResult(validator_name="CONTENT_DEDUP")
     result.add_finding(

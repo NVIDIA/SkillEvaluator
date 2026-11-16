@@ -33,7 +33,7 @@ from skillevaluator.reporting.base import (
     is_cleanly_skipped,
     passes_required_gate,
 )
-from skillevaluator.reporting.run_status import finding_blocks
+from skillevaluator.reporting.run_status import Status, finding_blocks, result_status
 from skillevaluator.reporting.sarif_reporter import (
     _positive_start_line,
     _quote_uri_path,
@@ -261,7 +261,9 @@ def _cases_for_result(
     validator = _xml_text(result.validator_name) or "check"
     classname = _qualified(target, validator)
     used: set[str] = set()
-    if is_cleanly_skipped(result):
+    # A skip that run status reports as failed (a blocking gate that did not run)
+    # falls through to the gate_failure case below rather than a <skipped> case.
+    if is_cleanly_skipped(result) and result_status(result) == Status.SKIPPED:
         return [
             _Case(
                 name=_unique_name(validator, used),

@@ -313,6 +313,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- HTML reports retain budget context for fully budget-denied runs without
+  restoring untrusted score evidence.
 - Fully budget-denied runs exit successfully and finish progress without an
   execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`

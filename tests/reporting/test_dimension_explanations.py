@@ -9,6 +9,7 @@ import re
 from copy import deepcopy
 from pathlib import Path
 
+import pytest
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
 from skillevaluator.constants import DIMENSION_HINTS, SIGNAL_EVIDENCE_SOURCES
@@ -121,6 +122,20 @@ def test_benchmark_verdict_methodology_includes_with_skill_required_checks() -> 
         "verdict, even if all dimensions pass."
     ) in markdown
     assert "Baseline-arm required-check failures do not change this quality verdict." in markdown
+
+
+@pytest.mark.parametrize("scope", ["publication", "tier3"])
+@pytest.mark.parametrize("baseline", [True, False])
+def test_overall_row_methodology_describes_comparison_basis(scope: str, baseline: bool) -> None:
+    result = _validation_result_from_payload(_payload({"agent": _agent(baseline=baseline)}))
+    markdown = BenchmarkReporter(report_scope=scope, include_timestamp=False).render(result)
+
+    assert (
+        "**Overall** row: when comparable baseline scores are available, the two scores used for published "
+        "Skill Lift, on the metrics and cases both arms scored comparably. Otherwise, the available arm "
+        "Overall score(s). These can differ from the headline with-skill score."
+    ) in markdown
+    assert "**Overall** row: the equal-weight mean of the five dimension scores with the skill." not in markdown
 
 
 def test_unscored_dimension_is_explained_not_zero(tmp_path: Path) -> None:

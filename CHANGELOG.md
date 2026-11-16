@@ -262,8 +262,6 @@ All notable changes to SkillEvaluator are documented in this file.
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
-- The GitHub Actions CI recipe in `ci-integration.mdx` verifies the downloaded
-  Gitleaks archive against a pinned SHA-256 digest before extracting it.
 
 - "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
   install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude

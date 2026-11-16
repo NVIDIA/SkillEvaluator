@@ -1980,6 +1980,8 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
         "probe_mcp": "plugin-only MCP probes do not apply to skill catalog children",
         "probe_mcp_env": "plugin-only MCP grants do not apply to skill catalog children",
         "trial_retries": "plugin-only setup retries do not apply to skill catalog children",
+        "plugin_context_max_chunks": "plugin-only chunk limits do not apply to skill catalog children",
+        "plugin_context_max_scalar_comparisons": "plugin-only scalar limits do not apply to skill catalog children",
     }
     source = inspect.getsource(_catalog_child_argv_from_ctx)
 

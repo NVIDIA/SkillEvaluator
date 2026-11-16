@@ -1603,6 +1603,10 @@ reviewed source revision.
   environment grants are validated as CLI options before work starts. Plugin
   documentation explains scoped grants and runtime output locations.
 
+- Custom grader reward validation keeps numeric range checks compatible with
+  Python 3.9 while continuing to reject boolean, non-finite and out-of-range
+  scores.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

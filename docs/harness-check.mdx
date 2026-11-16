@@ -3,13 +3,17 @@ title: "Harness Check"
 description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
 ---
 
-No LLM. No agent run. No API key. In about a second, the harness check tells you
+No LLM. No agent run. No API key. In about a second, the harness check predicts
 whether each agent harness **loads** your skill, **degrades** it, or **drops** it,
 and what to change.
 
 ```bash
 skillevaluator harness-check ./my-skill
 ```
+
+Results use versioned harness profiles. Add `-v` to see their verified versions
+and dates, or `--harness-version HARNESS=VERSION` to flag a different release.
+See the [CLI reference](/skills/skillevaluator/cli-reference#harness-check) for all options.
 
 A skill can follow the [Agent Skills specification](https://agentskills.io/) and
 still never reach the model. Every harness has its own loader, with its own YAML
@@ -69,7 +73,7 @@ Each harness gets one of three verdicts:
 
 | Mark | Verdict | What it means |
 | --- | --- | --- |
-| `✓` | `loads` | The harness finds the skill and the model gets it as written. |
+| `✓` | `loads` | No loading or degradation rule matched. Read any notes: another installed copy may take precedence. |
 | `!` | `degraded` | The skill loads, but something is cut, hidden or ignored. |
 | `✗` | `not_loaded` | The harness drops the skill. The model never sees it. |
 

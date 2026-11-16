@@ -802,6 +802,25 @@ def test_rejects_legacy_run_config_replaced_before_open(
     assert not _is_completed(run)
 
 
+def _stat_with_advanced_ctime(metadata: os.stat_result, advance_ns: int) -> os.stat_result:
+    """Copy every stat field and advance only ``st_ctime_ns``.
+
+    ``os.stat_result(sequence, extras)`` fills the fields that are not part of
+    the 10-item sequence (``st_mtime_ns``, ``st_ctime_ns``, ...) only from
+    ``extras`` and leaves the rest ``None``, so each one is copied explicitly.
+    Otherwise a missing ``st_mtime_ns`` would be rejected by the mtime
+    comparison and hide whether the ctime comparison works.
+    """
+    sequence_fields = set(os.stat_result.__match_args__)
+    extras = {
+        name: getattr(metadata, name)
+        for name in dir(metadata)
+        if name.startswith("st_") and name not in sequence_fields
+    }
+    extras["st_ctime_ns"] += advance_ns
+    return os.stat_result(tuple(metadata), extras)
+
+
 def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -814,14 +833,42 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     original = summary.read_text(encoding="utf-8")
     rewritten = original.replace("0.8", "0.9")
     assert len(rewritten) == len(original)
+    # Same device, inode, mode, link count, size and restored mtime as the file
+    # the reader opened; only the ctime moved, so only a ctime comparison can
+    # reject the read.
+    advanced_ctime_metadata = _stat_with_advanced_ctime(summary_metadata, 2_000_000_000)
+    assert advanced_ctime_metadata.st_ctime_ns != summary_metadata.st_ctime_ns
+    for attribute in dir(summary_metadata):
+        if attribute.startswith("st_") and "ctime" not in attribute:
+            assert getattr(advanced_ctime_metadata, attribute) == getattr(summary_metadata, attribute), attribute
+    assert os.path.samestat(advanced_ctime_metadata, summary_metadata)
     real_read = os.read
     real_fstat = os.fstat
+    real_lstat = Path.lstat
     rewritten_once = False
+    post_read_fstat_done = False
 
     def fstat_with_advanced_ctime(fd: int) -> os.stat_result:
+        # The first descriptor stat after the rewrite is secure_fs's post-read
+        # check and reports the advanced ctime. Later observations (the
+        # re-read that results_location does to confirm its snapshot) report
+        # the original stat, so no other ctime comparison can reject the run.
+        nonlocal post_read_fstat_done
         metadata = real_fstat(fd)
+        if not rewritten_once or metadata.st_ino != summary_inode:
+            return metadata
+        if post_read_fstat_done:
+            return summary_metadata
+        post_read_fstat_done = True
+        return advanced_ctime_metadata
+
+    def lstat_with_original_ctime(path: Path) -> os.stat_result:
+        # results_location compares the path's lstat ctime after the read too.
+        # On a host whose clock ticked between the two writes that comparison
+        # would reject the rewrite on its own and hide the secure_fs check.
+        metadata = real_lstat(path)
         if rewritten_once and metadata.st_ino == summary_inode:
-            return os.stat_result(metadata, {"st_ctime_ns": summary_metadata.st_ctime_ns + 2_000_000_000})
+            return summary_metadata
         return metadata
 
     def rewrite_during_read(fd: int, length: int) -> bytes:
@@ -834,9 +881,11 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
 
     monkeypatch.setattr(results_location.os, "read", rewrite_during_read)
     monkeypatch.setattr(results_location.os, "fstat", fstat_with_advanced_ctime)
+    monkeypatch.setattr(Path, "lstat", lstat_with_original_ctime)
 
     assert not _is_completed(run)
     assert rewritten_once
+    assert post_read_fstat_done
     assert summary.stat().st_ino == summary_inode
     assert summary.stat().st_mtime_ns == summary_metadata.st_mtime_ns
 

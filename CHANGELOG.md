@@ -255,6 +255,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The bundled skill's implicit dataset case expects clarification when real
+  requests and outcomes are missing, matching the skill's case-authoring rule.
+
 - The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
   of `harness-check` no longer show internal test notes in their messages.
 - The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`

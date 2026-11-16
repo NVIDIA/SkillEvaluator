@@ -28,12 +28,12 @@
     {
       "id": "skillevaluator-003-implicit-dataset",
       "prompt": "I need test cases so an agent benchmark can tell whether my 'csv-cleaner' agent skill gets used correctly. Write the evals/evals.json file for it with three cases: one that names the skill, one that only describes the task, and one prompt where the skill should NOT be used.",
-      "expected_output": "A valid evals/evals.json with top-level skill_name 'csv-cleaner' and an evals array of three cases each having id, prompt, expected_output (optionally assertions), where the negative case sets expected_skill to null.",
+      "expected_output": "Asks for three to five real requests csv-cleaner should handle, the observable good result for each, any required input files, and one request where the skill should not be used. Explains that the reviewed cases will go in evals/evals.json, but does not invent or write a finished dataset before the user supplies those details.",
       "assertions": [
-        "Output has top-level skill_name and evals keys",
-        "Every case has id, prompt, and expected_output",
-        "Includes one explicit and one implicit positive case",
-        "The negative case sets expected_skill to null"
+        "Asks for real requests csv-cleaner should handle and what a good observable result looks like for each",
+        "Asks for one request that should not trigger the skill and any input files the cases need",
+        "Explains that reviewed cases will go in evals/evals.json",
+        "Does not invent or write a finished dataset before getting the missing requests and outcomes"
       ],
       "expected_skill": "skillevaluator"
     },

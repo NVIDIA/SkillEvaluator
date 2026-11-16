@@ -237,11 +237,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
 - The CI guide's `jq` quality gate fails when a report has no quality score
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
 
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 

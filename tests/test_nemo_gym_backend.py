@@ -2059,6 +2059,32 @@ def test_malformed_mcp_servers_toml_is_handled_as_on_harbor(tmp_path: Path, capl
     assert invalid and "sk-not-a-table-1234" not in invalid[0]
 
 
+def test_gym_redacts_only_credentials_not_provider_or_model_names(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3.harbor.progress import NullProgressReporter
+
+    class _Recorder(NullProgressReporter):
+        def __init__(self) -> None:
+            super().__init__()
+            self.secrets: set[str] = set()
+
+        def set_secret_values(self, values) -> None:
+            self.secrets |= set(values)
+
+    config = (
+        "schema_version: 1\nharbor:\n  runtime_env:\n"
+        "    SERVICE_SETTING: ${SERVICE_SETTING}\n    SERVICE_FLAG: ${SERVICE_FLAG}\n"
+    )
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    monkeypatch.setenv("SERVICE_SETTING", "runtime-value-123")
+    monkeypatch.setenv("SERVICE_FLAG", "on")
+    reporter = _Recorder()
+    _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1, progress_reporter=reporter)
+    assert {"judge-key", "policy-key", "runtime-value-123"} <= reporter.secrets
+    assert not {"openai", "gpt-4.1-mini", "policy-model", "on"} & reporter.secrets
+
+
 def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

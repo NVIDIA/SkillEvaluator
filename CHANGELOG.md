@@ -324,6 +324,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
   Codex has completed live runs on the pinned Gym, Claude Code has not been run live
   yet, and OpenCode currently fails in Gym's agent setup.
+- `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
+  and errors. Provider, model and base-URL names stay readable, as on Harbor.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.
@@ -338,6 +340,8 @@ All notable changes to SkillEvaluator are documented in this file.
   that endpoint.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
+- HTML reports preserve successful execution when Tier 3 quality fails, avoiding
+  spurious notices that other execution failures need attention.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget

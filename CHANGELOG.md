@@ -320,13 +320,21 @@ All notable changes to SkillEvaluator are documented in this file.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
   as "not supported". As on Harbor, the parse error is logged and the run continues
   without MCP servers; a file that declares servers is still rejected.
+- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
+  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
+  yet, and OpenCode currently fails in Gym's agent setup.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.
 - Benchmark methodology describes the Overall row's shared comparison basis
   rather than the headline with-skill score, in Tier 3 and publication cards.
 - BENCHMARK cards explain the required with-skill goal and security case checks
+- HTML reports explain the required with-skill goal and security case checks
   that can fail quality even when all dimensions pass.
+- `--backend nemo-gym` with `SKILL_EVAL_NEMO_GYM_MODEL_URL` set now requires a
+  model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
+  run starts. It no longer sends the evaluator provider's default model name to
+  that endpoint.
 - Terminal quality headlines and check-count comparisons exclude execution-failed arms.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
@@ -342,6 +350,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Error: No module named 'harbor'`.
 - Tier 3 benchmark headlines use the completed agent's quality verdict, matching
   the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

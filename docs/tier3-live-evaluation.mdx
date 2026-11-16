@@ -709,7 +709,7 @@ collector, but requires a Gym interface that is not available in the checked pub
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex has completed live runs on the pinned Gym. Claude Code has not been run live yet, and OpenCode currently fails in Gym's agent setup before either arm starts. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex and Claude Code have completed live runs on the pinned Gym. OpenCode currently fails in Gym's agent setup before either arm starts. |
 
 **Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
 That release's `gym eval run` takes JSONL inputs and configured environments; it has
@@ -718,17 +718,20 @@ Removing that flag alone does not provide the required execution or verifier con
 The immutable public source candidate
 [`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
 declares the `TARGET` task-folder argument and the seven required flags. This source
-inspection establishes an interface candidate, not a supported runtime installation.
-Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs and
-input-file handling still need independent qualification. Codex, Claude Code and
-OpenCode mappings remain experimental and do not establish end-to-end agent support.
+inspection alone does not establish full runtime support. Beyond the specific live runs
+summarized above, broader agent/grading combinations, paired small/custom-Dockerfile
+runs and input-file handling still need independent qualification, including their
+native execution and verifier artifacts. The agent mappings remain experimental.
 
 The Claude Code mapping uses the same pinned runtime version as Harbor, installed
 by Gym inside the sandbox. It enables native discovery and projects staged skills
 into the task workdir's `.claude/skills/` directory because Gym uses a private
 Claude configuration directory. The baseline uses the same discovery settings
 without the target skill. Gym's required Anthropic credential field receives only
-a placeholder; policy credentials remain in the model-server environment.
+a placeholder; policy credentials remain in the model-server environment. Claude Code
+takes its policy endpoint from the same settings as Codex: `SKILL_EVAL_NEMO_GYM_MODEL_URL`,
+`SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` and a model from `--model` or
+`--agent-model claude-code=MODEL`.
 
 Install the pinned Gym in its own Python 3.13.14+ environment, separate from
 SkillEvaluator's, and check that its `gym eval run --help` lists `TARGET` and `--sandbox`:
@@ -786,9 +789,9 @@ Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
 be collected. The Gym implementation must execute inside Docker and resolve task
 environment templates; a host-only agent harness does not meet this contract.
 
-Subject to that unverified runtime contract, the adapter maps `codex`, `claude-code`
-and `opencode` and accepts `default`, `default_plus_custom` and `custom_only` grading
-modes. These are adapter capabilities, not independently validated live combinations.
+The adapter maps `codex`, `claude-code` and `opencode` and accepts `default`,
+`default_plus_custom` and `custom_only` grading modes. These are adapter capabilities;
+the live-run status in the table above does not qualify every combination.
 Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
 not supported on the NeMo Gym path and is rejected before the run starts; use
 `--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:

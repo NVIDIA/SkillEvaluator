@@ -1279,6 +1279,25 @@ def test_timeout_multiplier_scales_staged_task_timeouts(tmp_path: Path) -> None:
     assert "timeout_sec = 1\n" in data["instruction"]
 
 
+@pytest.mark.parametrize(
+    "header",
+    ["[verifier.env] # judge\n", "  [verifier.env]\n", "[ verifier . env ]\n", "[verifier.env]"],
+)
+def test_staging_adds_judge_env_to_an_existing_verifier_env_table(tmp_path: Path, header: str) -> None:
+    import tomllib
+
+    from skillevaluator.tier3.nemo_gym.runner import stage_for_gym
+
+    task = tmp_path / "case-1"
+    task.mkdir()
+    body = 'FOO = "1"\n' if header.endswith("\n") else ""
+    (task / "task.toml").write_text(f"[environment]\n\n{header}{body}")
+    stage_for_gym(tmp_path, {"SKILL_EVAL_LLM_MODEL": "${SKILL_EVAL_LLM_MODEL}"}, agent="codex")
+    env = tomllib.loads((task / "task.toml").read_text())["verifier"]["env"]
+    assert env["SKILL_EVAL_LLM_MODEL"] == "${SKILL_EVAL_LLM_MODEL}"
+    assert env.get("FOO", "1") == "1"
+
+
 def test_timeout_multiplier_is_validated_and_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:

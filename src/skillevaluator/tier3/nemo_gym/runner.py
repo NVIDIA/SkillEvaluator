@@ -108,7 +108,11 @@ def stage_for_gym(
             if name not in existing
         )
         if lines:
-            header = re.search(r"^\[verifier\.env\][ \t]*\n", staged, re.MULTILINE)
+            if not staged.endswith("\n"):
+                staged += "\n"
+            header = re.search(
+                r"^[ \t]*\[[ \t]*verifier[ \t]*\.[ \t]*env[ \t]*\][ \t]*(?:#[^\n]*)?\n", staged, re.MULTILINE
+            )
             if header:
                 staged = staged[: header.end()] + lines + staged[header.end() :]
             else:

@@ -1183,6 +1183,13 @@ def load_agent_data(
             condition_status = _condition_status(agent_info, condition)
             if condition_status == "succeeded":
                 continue
+            agent_info[f"diagnostic_{fields[-1]}"] = [
+                *agent_info.get(fields[-1], []),
+                *[
+                    {"entry_id": row["entry_id"], "trial_id": row["trial_id"], "_unscored": True}
+                    for row in agent_info.get(_USAGE_ONLY_KEYS[condition], [])
+                ],
+            ]
             # The arm's scores are withheld below, but its scored attempts used tokens.
             agent_info[_USAGE_ONLY_KEYS[condition]] = [
                 *_withheld_attempt_usage(agent_info.get(fields[-1]) or []),

@@ -2521,9 +2521,11 @@ def _build_agent(
     pass_with_skill = info.get("pass_with_skill")
     pass_threshold = _finite_float(pass_with_skill.get("pass_threshold")) if isinstance(pass_with_skill, dict) else None
     pass_threshold = pass_threshold if pass_threshold is not None else 0.5
-    trials = _normalize_trials(info.get("rewards") or [], with_metrics, pass_threshold=pass_threshold)
+    trials = _normalize_trials(
+        info.get("diagnostic_rewards", info.get("rewards")) or [], with_metrics, pass_threshold=pass_threshold
+    )
     baseline_trials = _normalize_trials(
-        info.get("rewards_baseline") or [],
+        info.get("diagnostic_rewards_baseline", info.get("rewards_baseline")) or [],
         baseline_metrics,
         pass_threshold=pass_threshold,
     )
@@ -2532,8 +2534,8 @@ def _build_agent(
     from skillevaluator.tier3.harbor.resource_usage import resource_comparison
 
     resources = resource_comparison(
-        trials,
-        baseline_trials,
+        trials if with_quality_available else [],
+        baseline_trials if baseline_quality_available else [],
         with_complete=with_quality_available and info.get("rewards_complete") is True,
         baseline_complete=baseline_quality_available and info.get("rewards_baseline_complete") is True,
     )
@@ -3567,6 +3569,8 @@ def _normalize_trials(
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
+        if reward.get("_unscored") is True:
+            trial["scored"] = False
         verdict = attempt_verdict(trial["overall"], pass_threshold, reward=reward)
         trial["attempt_verdict"] = {
             "passed": verdict.passed,

@@ -305,6 +305,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
+
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

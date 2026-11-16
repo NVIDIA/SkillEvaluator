@@ -703,7 +703,7 @@ collector, but requires a Gym interface that is not available in the checked pub
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Public Gym 0.7.0 is incompatible and fails preflight. A public source candidate exposes the interface; independent live validation is still required. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex has completed live runs on the pinned Gym. Claude Code has not been run live yet, and OpenCode currently fails in Gym's agent setup before either arm starts. |
 
 **Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
 That release's `gym eval run` takes JSONL inputs and configured environments; it has
@@ -737,7 +737,7 @@ uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
 Then point SkillEvaluator at it and run:
 
 ```bash
-# Requires a separately verified, pinned Gym task-folder implementation.
+# Requires the pinned Gym install described below.
 export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
 # Codex needs an endpoint that serves the OpenAI Responses API; NVIDIA Build does not.
 export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://api.openai.com/v1

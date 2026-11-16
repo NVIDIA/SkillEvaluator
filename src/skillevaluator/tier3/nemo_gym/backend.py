@@ -314,22 +314,24 @@ def uses_native_harbor_tasks(skill_path: Path, task_source: object) -> bool:
     return not has_evals_file and (skill_path / "evals" / "harbor").is_dir()
 
 
-def mcp_servers_declared(skill_path: Path) -> bool:
-    """Return True when ``evals/environment/mcp_servers.toml`` declares any MCP server."""
-    from skillevaluator.tier3.harbor.adapter import _load_mcp_servers
-
-    if not (skill_path / "evals" / "environment" / "mcp_servers.toml").is_file():
-        return False
-    try:
-        return bool(_load_mcp_servers(skill_path))
-    except Exception:
-        return True
-
-
 MCP_SERVERS_ERROR = "evals/environment/mcp_servers.toml is not supported with --backend nemo-gym yet"
 NATIVE_MCP_SERVERS_ERROR = (
     "[[environment.mcp_servers]] in a native task.toml is not supported with --backend nemo-gym yet"
 )
+
+
+def mcp_servers_error(skill_path: Path) -> str | None:
+    """Return why ``evals/environment/mcp_servers.toml`` blocks a Gym run, or None when it does not."""
+    from skillevaluator.tier3.harbor.adapter import _load_mcp_servers
+
+    if not (skill_path / "evals" / "environment" / "mcp_servers.toml").is_file():
+        return None
+    try:
+        declared = bool(_load_mcp_servers(skill_path))
+    except Exception as exc:
+        # The message can quote raw field values, including credentials: name only the error type.
+        return f"evals/environment/mcp_servers.toml is invalid ({type(exc).__name__})"
+    return MCP_SERVERS_ERROR if declared else None
 
 
 def native_mcp_servers_declared(skill_path: Path) -> bool:
@@ -377,8 +379,8 @@ def nemo_gym_config_errors(
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
-    if mcp_servers_declared(skill_path):
-        errors.append(MCP_SERVERS_ERROR)
+    if mcp_error := mcp_servers_error(skill_path):
+        errors.append(mcp_error)
     if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")) and native_mcp_servers_declared(
         skill_path
     ):

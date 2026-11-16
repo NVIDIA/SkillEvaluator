@@ -385,7 +385,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Negative controls with confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits.
+- Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

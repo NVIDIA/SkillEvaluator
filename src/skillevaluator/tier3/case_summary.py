@@ -1297,11 +1297,21 @@ def _correctly_unused_negative(
     if resolve_should_trigger(dict(entry)) is not False:
         return False
     case = _cases(agent, "with_skill").get(case_id)
-    if not isinstance(case, Mapping) or case.get("attempts_missing"):
+    if (
+        not isinstance(case, Mapping)
+        or case.get("attempts_missing")
+        or case.get("attempts_recovered")
+        or case.get("attempt_details_truncated")
+    ):
         return False
-    attempts = case.get("attempts") or []
-    if not attempts:
+    attempts = case.get("attempts")
+    if not isinstance(attempts, list) or not attempts:
         return False
+    # A retained sample cannot establish non-use by every logical attempt.
+    # Older reports may omit counts; present counts must describe these rows.
+    for key in ("attempts_used", "attempt_details_total", "attempt_details_shown"):
+        if key in case and (type(case[key]) is not int or case[key] != len(attempts)):
+            return False
     for attempt in attempts:
         if not isinstance(attempt, Mapping):
             return False

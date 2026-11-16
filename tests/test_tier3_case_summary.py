@@ -1357,6 +1357,73 @@ def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Pa
     assert all(fix["kind"] != "task outcome" for fix in fixes)
 
 
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"attempt_details_truncated": True},
+        {"attempts_recovered": 1},
+        {"attempts_missing": 1},
+        *({key: value} for key in ("attempts_used", "attempt_details_total", "attempt_details_shown")
+          for value in (2, -1, True, 1.0, "1", None)),
+    ],
+)
+def test_negative_non_use_requires_complete_attempt_details(tmp_path: Path, metadata: dict) -> None:
+    from skillevaluator.tier3.case_summary import _correctly_unused_negative
+
+    reward = _reward(False, "wrong total")
+    reward.update(
+        skill_execution=1.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
+    _trial(tmp_path, "a", "t0", reward)
+    case = {**_case(False), **metadata}
+    agent = _agent({"negative": case}, {})
+
+    assert not _correctly_unused_negative(tmp_path, "a", agent, "negative", {"expected_skill": None})
+
+
+def test_collector_capped_attempts_do_not_claim_complete_negative_non_use(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX, _pass_summary
+
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    rewards = []
+    for index in range(PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX + 1):
+        reward = _reward(False, "wrong total")
+        reward.update(
+            entry_id="negative",
+            _trial_name=f"t{index}",
+            skill_execution=1.0,
+            skill_invoked=index == PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX,
+            invocation_evidence_source="trajectory",
+            invocation_evidence_scope="logical_trial",
+        )
+        rewards.append(reward)
+        _trial(tmp_path, "a", f"t{index}", reward)
+    summary = _pass_summary(
+        rewards,
+        n_attempts=len(rewards),
+        pass_threshold=0.5,
+        expected_cases=1,
+        expected_case_ids=["negative"],
+        scorer=lambda _reward: 0.2,
+    )
+    case = summary["cases"]["negative"]
+    assert case["attempt_details_truncated"]
+    assert len(case["attempts"]) == PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX
+    assert case["attempts_used"] == len(rewards)
+    agent = _agent({}, {})
+    agent["pass_at_k"]["with_skill"] = summary
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert fixes
+    assert all(fix["kind"] != "task outcome" and "correctly unused" not in fix["action"] for fix in fixes)
+
+
 def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path: Path) -> None:
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
     for name, attempts in (("A", 2), ("B", 1)):

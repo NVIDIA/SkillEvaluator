@@ -313,6 +313,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
 - A trial where the agent runs the skill's own name as a shell command (for example
@@ -339,6 +340,8 @@ All notable changes to SkillEvaluator are documented in this file.
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
   that endpoint.
+- Make the MCP-staging restored-mtime race regression independent of filesystem
+  clock granularity by modeling an advanced ctime.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
@@ -353,6 +356,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Error: No module named 'harbor'`.
 - Tier 3 benchmark headlines use the completed agent's quality verdict, matching
   the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

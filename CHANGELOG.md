@@ -323,6 +323,11 @@ All notable changes to SkillEvaluator are documented in this file.
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
+- The CI guide's troubleshooting note for an `incomplete` status no longer
+  says SkillEvaluator never installs the scanners. The first Tier 1 run
+  downloads pinned SkillSpector and Gitleaks releases when they are missing, so
+  the note now points to network access, and it says a missing Semgrep counts
+  only when `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
 
 - "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
   install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude

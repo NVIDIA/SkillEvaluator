@@ -435,8 +435,8 @@ All notable changes to SkillEvaluator are documented in this file.
   as "not supported". As on Harbor, the parse error is logged and the run continues
   without MCP servers; a file that declares servers is still rejected.
 - The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
-  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
-  yet, and OpenCode currently fails in Gym's agent setup.
+  Codex and Claude Code have completed live runs on the pinned Gym, and OpenCode
+  currently fails in Gym's agent setup.
 - `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
   and errors. Provider, model and base-URL names stay readable, as on Harbor.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a

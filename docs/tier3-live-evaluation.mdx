@@ -709,7 +709,7 @@ collector, but requires a Gym interface that is not available in the checked pub
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex has completed live runs on the pinned Gym. Claude Code has not been run live yet, and OpenCode currently fails in Gym's agent setup before either arm starts. |
+| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex and Claude Code have completed live runs on the pinned Gym. OpenCode currently fails in Gym's agent setup before either arm starts. |
 
 **Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
 That release's `gym eval run` takes JSONL inputs and configured environments; it has

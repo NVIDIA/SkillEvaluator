@@ -728,17 +728,17 @@ Install the pinned Gym in its own Python 3.13.14+ environment, separate from
 SkillEvaluator's, and check that its `gym eval run --help` lists `TARGET` and `--sandbox`:
 
 ```bash
-uv venv --python ">=3.13.14,<3.14" /opt/nemo-gym/.venv
-uv pip install --python /opt/nemo-gym/.venv/bin/python \
+uv venv --python ">=3.13.14,<3.14" "$HOME/nemo-gym/.venv"
+uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
   "nemo-gym @ git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
-/opt/nemo-gym/.venv/bin/gym eval run --help
+"$HOME/nemo-gym/.venv/bin/gym" eval run --help
 ```
 
 Then point SkillEvaluator at it and run:
 
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
-export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
+export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
 export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
 export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
 skillevaluator tier3 doctor --backend nemo-gym --agents codex

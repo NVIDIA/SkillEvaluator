@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -302,6 +305,9 @@ All notable changes to SkillEvaluator are documented in this file.
   (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
   a `shell` other than bash or powershell, `background` without `context: fork`, and
   `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
 - `validate` on a folder of skills no longer says "security didn't run: skillspector not
   installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
   a folder run counts as an incomplete scan. The scanners row now shows

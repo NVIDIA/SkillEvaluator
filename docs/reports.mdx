@@ -360,6 +360,15 @@ name that is not valid UTF-8 stays distinct (`caf%E9.md`). In other text such a
 name is backslash-escaped (`caf\xe9.md`), then characters XML 1.0 forbids are
 stripped. An incomplete scan is never emitted as an all-passed suite.
 
+Failures follow the same gate as the exit code. When `validate` marks a group
+as blocking and it fails the gate with no failing case of its own, for example
+a scored Tier 3 verdict of FAIL or NEUTRAL under `--block-on-agent-eval`, the
+suite gets a `gate_failure` case whose message is the cause: the first error,
+the Tier 3 verdict, or the skip reason. An advisory group (Tier 3 without
+`--block-on-agent-eval`, Tier 2 with `--no-block-on-dedup`) never adds a
+`failure`; its findings and errors are kept in `system-out` with an
+`Advisory, does not gate:` prefix.
+
 ## HTML report
 
 The HTML report is one self-contained file. It opens on the answer and puts

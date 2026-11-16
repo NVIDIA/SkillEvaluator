@@ -27,7 +27,12 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped
+from skillevaluator.reporting.base import (
+    ReporterBase,
+    get_skip_reason,
+    is_cleanly_skipped,
+    passes_required_gate,
+)
 from skillevaluator.reporting.run_status import finding_blocks
 from skillevaluator.reporting.sarif_reporter import (
     _positive_start_line,
@@ -216,6 +221,27 @@ class _Case:
     system_out: str = ""
 
 
+def _gating(result: ValidationResult) -> dict | None:
+    """Return the gate ``validate`` stamped on *result*, or None when it has none."""
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    gating = metadata.get("gating")
+    return gating if isinstance(gating, dict) else None
+
+
+def _failure_reason(result: ValidationResult) -> str:
+    """Return the real cause of a failed result for a synthetic failure case."""
+    if result.errors:
+        return _xml_text(result.errors[0])
+    metadata = result.metadata if isinstance(result.metadata, dict) else {}
+    payload = metadata.get("agent_eval")
+    if isinstance(payload, dict) and payload.get("execution_status") == "succeeded" and payload.get("verdict"):
+        return _xml_text(f"Tier 3 verdict {str(payload['verdict']).upper()} does not pass the required gate")
+    provenance = payload.get("provenance") if isinstance(payload, dict) else None
+    if metadata.get("skip_reason") or result.warnings or (isinstance(provenance, dict) and provenance.get("message")):
+        return _xml_text(get_skip_reason(result))
+    return "failed"
+
+
 def _cases_for_result(
     result: ValidationResult,
     workspace_root: Path | None,
@@ -286,25 +312,40 @@ def _cases_for_result(
                 body=_xml_text(reason),
             )
         )
-    if not cases:
-        if result.passed:
-            cases.append(_Case(name=validator, classname=classname, system_out="passed"))
-        else:
-            message = _xml_text(result.errors[0] if result.errors else "failed")
-            cases.append(
-                _Case(name=validator, classname=classname, failed=True, message=message, body=message)
+    gating = _gating(result)
+    if gating is not None and not gating.get("blocking", True):
+        # An advisory result never fails the exit gate, so it fails no case here.
+        cases = [
+            _Case(
+                name=case.name,
+                classname=case.classname,
+                skipped=case.skipped,
+                message=case.message if case.skipped else "",
+                body=case.body if case.skipped else "",
+                file_path=case.file_path,
+                line=case.line,
+                system_out=f"Advisory, does not gate: {case.body}" if case.failed else case.system_out,
             )
-    elif not result.passed and not any(case.failed or case.skipped for case in cases):
-        message = _xml_text(result.errors[0] if result.errors else "failed")
+            for case in cases
+        ]
+    if gating is not None:
+        needs_failure = not passes_required_gate(result) and not any(case.failed for case in cases)
+    else:
+        needs_failure = not passes_required_gate(result) and not any(case.failed or case.skipped for case in cases)
+    if needs_failure:
+        message = _failure_reason(result)
         cases.append(
             _Case(
-                name=_unique_name("error", used),
+                name=_unique_name("gate_failure" if gating is not None else "error", used),
                 classname=classname,
                 failed=True,
                 message=message,
                 body=message,
             )
         )
+    elif not cases:
+        note = _failure_reason(result) if not result.passed else "passed"
+        cases.append(_Case(name=validator, classname=classname, system_out=note))
     return cases
 
 

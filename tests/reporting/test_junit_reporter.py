@@ -331,6 +331,85 @@ def test_medium_finding_recorded_as_blocking_is_a_failure() -> None:
     _assert_counts_match(root)
 
 
+def _scored_tier3(verdict: str, *, blocking: bool) -> ValidationResult:
+    result = ValidationResult(validator_name="AGENT_EVAL")
+    result.metadata["agent_eval"] = {"execution_status": "succeeded", "verdict": verdict, "overall_score": 41.0}
+    result.add_success("agent_eval", f"Tier 3 evaluation complete: verdict {verdict.upper()}; best agent demo")
+    result.passed = True
+    result.metadata["gating"] = {"tier": 3, "blocking": blocking}
+    return result
+
+
+def test_blocking_tier3_verdict_that_fails_the_gate_is_a_failure() -> None:
+    for verdict in ("fail", "neutral"):
+        root = ET.fromstring(JUnitReporter().render_all([_scored_tier3(verdict, blocking=True)]))
+        cases = {case.attrib["name"]: case for case in _cases(root)}
+        assert cases["agent_eval"].find("failure") is None
+        failure = cases["gate_failure"].find("failure")
+        assert failure is not None
+        assert failure.attrib["message"] == f"Tier 3 verdict {verdict.upper()} does not pass the required gate"
+        assert int(root.attrib["failures"]) == 1
+        _assert_counts_match(root)
+
+
+def test_advisory_tier3_verdict_is_not_a_failure() -> None:
+    root = ET.fromstring(JUnitReporter().render_all([_scored_tier3("fail", blocking=False)]))
+    assert all(case.find("failure") is None for case in _cases(root))
+    assert int(root.attrib["failures"]) == 0
+    _assert_counts_match(root)
+
+
+def test_blocking_tier3_that_could_not_run_reports_the_reason() -> None:
+    from skillevaluator.evaluation.tier3_report import advisory_skip_result
+
+    result = advisory_skip_result("ANTHROPIC_API_KEY is not set; Tier 3 did not run")
+    result.metadata["gating"] = {"tier": 3, "blocking": True}
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    failures = [case.find("failure") for case in _cases(root) if case.find("failure") is not None]
+    assert len(failures) == 1
+    assert failures[0].attrib["message"] == "ANTHROPIC_API_KEY is not set; Tier 3 did not run"
+    _assert_counts_match(root)
+
+    result.metadata["gating"] = {"tier": 3, "blocking": False}
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    assert all(case.find("failure") is None for case in _cases(root))
+    skipped = root.find("testsuite/testcase/skipped")
+    assert skipped is not None
+    assert skipped.attrib["message"] == "ANTHROPIC_API_KEY is not set; Tier 3 did not run"
+
+
+def test_advisory_tier2_findings_and_errors_are_not_failures() -> None:
+    result = ValidationResult(validator_name="CONTENT_DEDUP")
+    result.add_finding(
+        Finding(
+            category="CONTENT_DEDUP",
+            severity=Severity.HIGH,
+            check_name="duplicate_section",
+            message="Section duplicates references/guide.md",
+            file_path="SKILL.md",
+            line_number=12,
+        )
+    )
+    result.add_error("Similarity model returned no scores")
+    result.metadata["gating"] = {"tier": 2, "blocking": False}
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    cases = {case.attrib["name"]: case for case in _cases(root)}
+    assert all(case.find("failure") is None for case in cases.values())
+    finding_out = cases["duplicate_section"].find("system-out")
+    assert finding_out is not None
+    assert (finding_out.text or "").startswith("Advisory, does not gate: SKILL.md:12: Section duplicates")
+    assert int(root.attrib["failures"]) == 0
+    _assert_counts_match(root)
+
+    result.metadata["gating"] = {"tier": 2, "blocking": True}
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    assert int(root.attrib["failures"]) == 2
+    assert "gate_failure" not in {case.attrib["name"] for case in _cases(root)}
+    _assert_counts_match(root)
+
+
 def test_paths_are_relative_to_scanned_root(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     skill = repo / "skills" / "demo"

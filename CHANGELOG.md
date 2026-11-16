@@ -308,6 +308,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- A trial where the agent runs the skill's own name as a shell command (for example
+  `text-analyzer input.txt`, `command not found`) is now scored as the agent's tool
+  choice instead of an undeclared environment dependency, unless the skill declares a
+  tool by that name.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.

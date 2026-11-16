@@ -190,6 +190,48 @@ def test_dependency_context_records_modules_provided_by_skill(tmp_path):
     assert "rasterio" in context["script_imports"]
 
 
+def _skill_named_text_analyzer(tmp_path, apt: str | None = None) -> dict:
+    skill = tmp_path / "text-analyzer"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: text-analyzer\ndescription: Count words. Use when a request names text-analyzer.\n---\n"
+        "Run scripts/analyze_text.py; pipe the result to jq if needed.\n"
+    )
+    if apt is not None:
+        (skill / "scripts" / "apt-packages.txt").write_text(apt)
+    context = eval_template._dependency_context("text-analyzer", skills_root=tmp_path)
+    assert context["skill_name"] == "text-analyzer"
+    return context
+
+
+def test_missing_command_named_after_the_skill_is_agent_tool_choice(checker, tmp_path):
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path),
+    )
+    assert result["failures"][0]["fault"] == "agent"
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+    assert result["environment_faults"] == 0
+
+
+def test_declared_tool_named_after_the_skill_stays_environment_fault(checker, tmp_path):
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path, apt="text-analyzer\n"),
+    )
+    assert result["failures"][0]["fault_kind"] == "declared_dependency_unavailable"
+    assert result["environment_faults"] == 1
+
+
+def test_other_command_mentioned_by_the_skill_stays_undeclared_dependency(checker, tmp_path):
+    result = checker(
+        [_call("jq . out.json", "bash: line 1: jq: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path),
+    )
+    assert result["failures"][0]["fault_kind"] == "undeclared_dependency"
+    assert result["environment_faults"] == 1
+
+
 def test_environment_failure_reason_retains_agent_failure(checker):
     result = checker(
         [

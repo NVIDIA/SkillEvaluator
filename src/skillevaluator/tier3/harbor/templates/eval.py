@@ -4170,6 +4170,7 @@ def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skil
         "apt": [],
         "pip": [],
         "skill_text": "",
+        "skill_name": "",
         "skill_dirs": [],
         "skill_modules": set(),
         "script_imports": set(),
@@ -4217,6 +4218,10 @@ def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skil
             )
         else:
             context["skill_text"] += "\n" + content
+            frontmatter = re.match(r"---[ \t]*\r?\n(.*?)^---", content, re.MULTILINE | re.DOTALL)
+            name = frontmatter and re.search(r"^name:[ \t]*['\"]?([^'\"\s#]+)", frontmatter.group(1), re.MULTILINE)
+            if relative.as_posix().lower() == "skill.md" and name:
+                context["skill_name"] = name.group(1)
             if "scripts" in relative.parts and path.suffix == ".py":
                 imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
                 context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)

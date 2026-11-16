@@ -321,6 +321,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
+- A trial where the agent runs the skill's own name as a shell command (for example
+  `text-analyzer input.txt`, `command not found`) is now scored as the agent's tool
+  choice instead of an undeclared environment dependency, unless the skill declares a
+  tool by that name.
 - Fully budget-denied runs exit successfully and finish progress without an
   execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`

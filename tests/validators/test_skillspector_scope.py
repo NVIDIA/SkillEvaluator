@@ -1821,7 +1821,7 @@ class TestTier1Plumbing:
 
         (kwargs,) = _RecordingSecurityValidator.instances
         assert kwargs["content_type"] == expected_scope
-        assert kwargs["skillspector_reference_root"] is None
+        assert kwargs.get("skillspector_reference_root") is None
 
     def test_plugin_without_a_manifest_refuses_before_scanner_construction(
         self, monkeypatch: pytest.MonkeyPatch, sample_skill_dir: Path

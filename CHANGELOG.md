@@ -291,6 +291,11 @@ All notable changes to SkillEvaluator are documented in this file.
   error when all admitted attempts succeed, including stop-on-pass runs. Reused
   baselines are not promoted to overall scores when with-skill attempts are
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

@@ -305,7 +305,7 @@ def test_an_explicit_empty_environment_is_not_the_host_environment(
     entry = probe_mcp_server(target, allowed_private_hosts=LOCAL, expand_env=("DOCS_TOKEN",), environ={})
 
     assert seen == [{}]
-    assert "headers skipped because unset: DOCS_TOKEN" in entry["detail"]
+    assert "headers skipped because unset or empty: DOCS_TOKEN" in entry["detail"]
 
 
 def test_probe_connects_only_to_policy_checked_addresses(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -705,11 +705,47 @@ def test_a_failed_probe_names_its_grants_before_the_error(monkeypatch: pytest.Mo
     )
 
     assert entry["status"] == "unreachable"
-    # An empty variable is unset, so its header is left out.
-    note = "granted DOCS_TOKEN for docs.example.com" if value else "headers skipped because unset: DOCS_TOKEN"
+    # An empty variable leaves its header out, like an unset one.
+    note = "granted DOCS_TOKEN for docs.example.com" if value else "headers skipped because unset or empty: DOCS_TOKEN"
     assert f" probe failed; {note}; error: OSError: connection refused by the remote host" in entry["detail"]
     assert len(entry["detail"]) == MAX_DETAIL_CHARS
     assert "sent" not in entry["detail"]
+
+
+@pytest.mark.parametrize(
+    ("addresses", "detail"),
+    [(None, "DNS resolution failed: gaierror"), ([], "DNS resolution returned no addresses")],
+    ids=["dns-error", "no-addresses"],
+)
+def test_a_dns_failure_names_no_grants(
+    monkeypatch: pytest.MonkeyPatch, addresses: list[str] | None, detail: str
+) -> None:
+    """A host that does not resolve is never contacted, so its detail names no variables."""
+    import skillevaluator.tier3.mcp_proof as proof
+
+    def resolver(_host: str, _port: int) -> list[str]:
+        if addresses is None:
+            raise socket.gaierror(socket.EAI_NONAME, "name does not resolve")
+        return addresses
+
+    async def never(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("a host that does not resolve is never contacted")
+
+    monkeypatch.setattr(proof, "_probe_session", never)
+    target = {
+        "name": "docs",
+        "url": "https://docs.example.com/mcp",
+        "headers": {"Authorization": "Bearer ${DOCS_TOKEN}"},
+    }
+
+    entry = probe_mcp_server(
+        target,
+        expand_env=("DOCS_TOKEN=docs.example.com",),
+        environ={"DOCS_TOKEN": "tok-123"},
+        resolver=resolver,
+    )
+
+    assert entry == {"status": "unreachable", "tools": [], "detail": detail}
 
 
 @pytest.mark.parametrize(

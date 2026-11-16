@@ -154,11 +154,13 @@ are repeatable, require `--probe-mcp`, and take three forms:
 
 The plugin author chooses both the server URLs and the header templates, so a
 bare `NAME` sends the variable's value to every server whose headers ask for it,
-wherever that server is. Prefer `NAME=HOST` or `NAME@SERVER`. Each server's probe
-detail names the variables granted for its host, and any granted variable left
-out because it is unset or empty, before any error text. A probe that fails may
-not have sent them. Host reachability and agent-observed execution are separate
-evidence.
+wherever that server is. Prefer `NAME=HOST` or `NAME@SERVER`. Once a server's
+host resolves and passes the endpoint policy, its probe detail names, before any
+error text, the granted variables its headers carry for that host and any granted
+variable left out because it is unset or empty. A probe that fails may not have
+sent them. A DNS failure or a server that is not probed names no variables,
+because nothing was sent. Host reachability and agent-observed execution are
+separate evidence.
 
 `--trial-retries N` accepts 0–5 setup-only retries, defaulting to zero. In-task
 failures are never retried. Retry reasons and counts remain in retained evidence.

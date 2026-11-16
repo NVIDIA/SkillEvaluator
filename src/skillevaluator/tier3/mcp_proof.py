@@ -19,12 +19,13 @@ The plugin chooses both the URL and the header template, so a ``${VAR}`` or
 grants that variable through ``EvidenceOptions.env_grants`` (``NAME`` for every server,
 ``NAME=HOST`` or ``NAME@SERVER`` for one); a header that references any other
 variable is not sent, and the variable is never read. A granted variable that
-is unset or empty leaves its header out. Each server's detail names the
-variables granted for its host, before any error text, as a probe that fails
-may not have sent them. The whole probe, DNS lookup
-included, runs under one deadline, and a transport error that the ``mcp``
-client only logs (an oversized body, an off-origin SSE endpoint) ends the
-probe at once.
+is unset or empty leaves its header out. Once the host resolves and passes the
+endpoint policy, each server's detail names the granted variables its headers
+carry for that host, before any error text, as a probe that fails may not have
+sent them; a DNS failure or a server that is not probed names none, as nothing
+was sent. The whole probe, DNS lookup included, runs under one deadline, and a
+transport error that the ``mcp`` client only logs (an oversized body, an
+off-origin SSE endpoint) ends the probe at once.
 
 After the run, :func:`apply_in_agent_mcp_proof` updates each server from the
 with-plugin arm's ``plugin_signals_summary.mcp_calls.by_server`` and each
@@ -252,20 +253,20 @@ def declared_mcp_proof(targets: Iterable[Mapping[str, Any]], detail: str = NOT_R
 def _resolve_headers(
     headers: Mapping[str, Any], environ: Mapping[str, str], expand_env: Iterable[str] = ()
 ) -> tuple[dict[str, str], list[str], list[str], list[str]]:
-    """Return ``(headers to send, unset variables, withheld variables, sent variables)``.
+    """Return ``(headers to send, unset variables, withheld variables, variables placed in headers)``.
 
     A header whose ``${VAR}``/``$VAR`` references all name variables in
     ``expand_env`` (the names opted in for this server) is sent with them
-    resolved from ``environ``; one that references an opted-in but unset
-    variable is dropped (``unset``). A header that references any variable not
-    opted in for this server is dropped without reading that variable
-    (``withheld``). Literal headers are sent as declared.
+    resolved from ``environ``; one that references an opted-in but unset or
+    empty variable is dropped (``unset``). A header that references any
+    variable not opted in for this server is dropped without reading that
+    variable (``withheld``). Literal headers are sent as declared.
     """
     allowed = frozenset(expand_env)
     resolved: dict[str, str] = {}
     missing: list[str] = []
     withheld: list[str] = []
-    sent: list[str] = []
+    placed: list[str] = []
     for key, value in headers.items():
         if not isinstance(key, str) or not isinstance(value, str):
             continue
@@ -279,8 +280,8 @@ def _resolve_headers(
             missing.extend(unset)
             continue
         resolved[key] = _HEADER_REF_RE.sub(lambda match: environ[match.group(1) or match.group(2)], value)
-        sent.extend(names)
-    return resolved, sorted(set(missing)), sorted(set(withheld)), sorted(set(sent))
+        placed.extend(names)
+    return resolved, sorted(set(missing)), sorted(set(withheld)), sorted(set(placed))
 
 
 def _header_note(missing: list[str], withheld: list[str], granted: list[str] | None = None, host: str = "") -> str:
@@ -294,7 +295,7 @@ def _header_note(missing: list[str], withheld: list[str], granted: list[str] | N
             f"for this server: {', '.join(withheld)}"
         )
     if missing:
-        note += f"; headers skipped because unset: {', '.join(missing)}"
+        note += f"; headers skipped because unset or empty: {', '.join(missing)}"
     return note
 
 
@@ -721,9 +722,11 @@ def probe_mcp_server(
     server), ``NAME=HOST`` (servers whose URL host is HOST) or ``NAME@SERVER``
     (that server). Only names opted in for this server are read from
     ``environ`` (the process environment when ``None``) into its declared
-    headers. The detail names the variables granted for this server's host,
-    and those left out because they are unset or empty, before any error
-    text, so that cutting a long error to ``MAX_DETAIL_CHARS`` keeps them.
+    headers. Once the host resolves and passes the endpoint policy, the
+    detail names the granted variables this server's headers carry for its
+    host, and those left out because they are unset or empty, before any
+    error text, so that cutting a long error to ``MAX_DETAIL_CHARS`` keeps
+    them. A DNS failure or a refused endpoint names none, as nothing was sent.
     ``total_timeout`` bounds the whole probe, DNS lookup included.
     """
     url = str(target.get("url") or "")

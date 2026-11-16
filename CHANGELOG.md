@@ -295,6 +295,9 @@ All notable changes to SkillEvaluator are documented in this file.
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
 - Hermes `harness` results no longer say Hermes uses one of two same-named
   skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
 - `validate` on a folder of skills no longer says "security didn't run: skillspector not
   installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
   a folder run counts as an incomplete scan. The scanners row now shows

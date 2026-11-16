@@ -815,6 +815,29 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
+    # One unchanged skill with invalid frontmatter stops the CI comparison catalog.
+    ci_catalog = "`name: 2048`, `name: yes`, or `description: [Draft]`, stops that catalog"
+    assert ci_catalog in " ".join(guide.split())
+    # CI builds that catalog only from more than one skill; the release note says so too.
+    condition = "When the configured skill roots hold more than one skill, CI"
+    assert condition in " ".join(guide.split())
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    lead = "- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison catalog"
+    entries = [" ".join(entry.split()) for entry in re.split(r"\n(?=- )|\n\s*\n", changelog)]
+    catalog_entries = [entry for entry in entries if entry.startswith(lead)]
+    assert len(catalog_entries) == 1
+    assert f"{condition} builds the catalog from all of them" in catalog_entries[0]
+    assert "With one skill there is no catalog, and such frontmatter does not stop Tier 2." in catalog_entries[0]
+    # The edge-case table states the same condition.
+    assert "In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog" in guide
+    # A limit error stops at its own skill, so CI then names no invalid skill.
+    unnamed = "no skill, not even one whose frontmatter is invalid"
+    assert f"the diagnostics then name {unnamed}" in " ".join(guide.split())
+    assert f"the log then names {unnamed}." in catalog_entries[0]
+    # A SKILL.md that is not UTF-8 is named with them, under the same reason.
+    encoding = "that is not valid UTF-8, such as one saved as UTF-16 or as Windows-1252 with an accented letter"
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in " ".join(guide.split())
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in catalog_entries[0]
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 
@@ -827,13 +850,13 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert f"`{CHAT_DEFAULT_OPENAI}`" in public_docs
     assert "gpt-5.4-mini" in public_docs
     assert f"`{CHAT_DEFAULT_ANTHROPIC}`" in public_docs
-    assert "nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "Nemotron Super" in public_docs
+    assert "nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "Nemotron 3.5 Lightning" in public_docs
     assert "meta/llama-3.1-8b-instruct" in public_docs
-    assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
     assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
     assert "skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
     assert "skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker\n" in tier3

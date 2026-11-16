@@ -27,9 +27,10 @@ No model override is needed. Defaults are pinned in the installed release,
 not automatically selected as the latest available model. Set
 `SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
 standard judge inherits it unless a judge override is set. Embeddings use their
-own model, and Tier 3 agent selection is separate. With NVIDIA Build, OpenCode
-follows `SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Super
-default unless you override their models.
+own model, and Tier 3 agent selection is separate. With NVIDIA Build, all three
+agents default to Nemotron 3.5 Lightning. OpenCode follows
+`SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Lightning default
+unless you override their models.
 
 Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
@@ -115,7 +116,7 @@ Set `SKILL_EVAL_LLM_PROVIDER` to one of `openai`, `anthropic`, `nv_build`, `bedr
     export NVIDIA_API_KEY='nvapi-...'
     ```
 
-    Default model: `nvidia/nemotron-3-super-120b-a12b`, shared by evaluator chat, Tier 3's default OpenCode agent, and the standard judge. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
+    Default model: `nvidia/nemotron-3.5-lightning-30b-a3b`, shared by evaluator chat, Tier 3's default OpenCode agent, and the standard judge. The endpoint is fixed to `https://integrate.api.nvidia.com/v1` — `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_EMBEDDING_BASE_URL` do not override it. To point at a custom or self-hosted endpoint, use the `openai-compatible` provider instead.
 
     The previous default, `nvidia/nemotron-3-nano-30b-a3b`, has a deprecated public endpoint. If you explicitly pinned that model in `SKILL_EVAL_LLM_MODEL`, remove the override to use the current default. Explicit model selections are preserved; SkillEvaluator does not silently switch models after a failed request.
 
@@ -321,7 +322,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 
 The subprocess environment is isolated. Only the selected provider settings and basic process environment variables (`PATH`, `HOME`, TLS bundles, temp dirs) pass through — other ambient credentials in your shell are never forwarded. Your SkillSpector model settings (`SKILLSPECTOR_MODEL_<SLOT>`, `SKILLSPECTOR_MODEL_REGISTRY`, `SKILLSPECTOR_REASONING_EFFORT`) pass through too; `SKILLSPECTOR_TEMPERATURE` does not.
 
-SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. On Anthropic and Bedrock it stays on Claude Opus 5 while the chat default is Claude Opus 5.5. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. SkillSpector v2.13.3 does not return structured output for Claude 5.5 models: if `SKILL_EVAL_LLM_MODEL` names one, also set `SKILLSPECTOR_MODEL` to a supported model such as `claude-opus-5` (Bedrock: `us.anthropic.claude-opus-5`), or the `--llm` security stage is reported incomplete. See [SkillSpector bridge](/skills/skillevaluator/environment-variables#skillspector-bridge) for the defaults.
+SkillSpector sends its own structured-output requests, so it has its own default model per provider instead of following the chat default. On Anthropic and Bedrock the default is Claude Opus 5.5, the same as the chat default; SkillSpector 2.13.4 returns structured output for Claude 5.5 models. An explicit `SKILL_EVAL_LLM_MODEL` still reaches SkillSpector, and `SKILLSPECTOR_MODEL` overrides both. See [SkillSpector bridge](/skills/skillevaluator/environment-variables#skillspector-bridge) for the defaults.
 
 Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name a supported public provider (`openai`, `anthropic`, or `bedrock` — or `nv_build` to force the Build mapping); anything else fails closed and the subprocess receives no credential.
 
@@ -345,10 +346,10 @@ Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name 
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 2: Deduplication" icon="copy" href="tier2-deduplication.mdx">
+  <Card title="Tier 2: Deduplication" icon="copy" href="/skills/skillevaluator/tier2-deduplication">
     Put your embedding provider to work — find overlap within and across skills.
   </Card>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Run a live agent evaluation with the two-credential setup above.
   </Card>
 </CardGroup>

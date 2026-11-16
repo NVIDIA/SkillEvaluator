@@ -503,7 +503,7 @@ def test_template_last_resort_judge_follows_the_selected_provider(judge_env, pro
         "claude-3-5-sonnet-20241022",
         "claude-mythos-preview",
         "anthropic/claude-mythos-preview",
-        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
     ],
 )
 def test_template_model_capabilities_match_provider_config(model):

@@ -1,6 +1,6 @@
 # Report presentation parity implementation plan
 
-Approved specification: the user's “Bring GitHub SkillEvaluator reports to GitLab report parity” plan in this chat. This file records its implementation boundaries and task interfaces.
+Approved specification: the report presentation plan for this branch. This file records its implementation boundaries and task interfaces.
 
 **Goal:** reuse the verified native report presentation, with all three tiers and all six Tier 3 tabs, while preserving public result, gate, safety, and retained-evidence contracts.
 

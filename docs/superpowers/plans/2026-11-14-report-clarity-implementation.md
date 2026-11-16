@@ -20,7 +20,7 @@
 - Keep validation, quality, execution, publication and completed-agent scopes distinct, with visible blockers and comparison limitations.
 - Preserve deep links/search/keyboard/print/no-JS/offline/mobile behavior, CI direct canonical artifact links and installed-wheel packaging.
 - Synthetic committed fixtures only; private reports/artifacts remain ignored. No fresh evaluations or rescoring.
-- Same branch `codex/report-gitlab-parity`; sign off commits; push feature branch and create PR only after local review/verification. No merge.
+- Same feature branch as the earlier report work; sign off commits; push feature branch and create PR only after local review/verification. No merge.
 
 ## Review Focus
 
@@ -78,4 +78,4 @@
 - [ ] Run lint, OSS source/wheel/sdist scan, package build and installed-wheel Chromium outside checkout; validate docs with pinned Fern.
 - [ ] Replay retained actual/native samples offline with no rescoring; preserve rows, canonical/projections and 28/36,12/20. Capture new before/after desktop/mobile views and word/disclosure metrics against the approved audit baseline.
 - [ ] Final independent review; one scoped fix wave if needed. Record final verification and any pre-existing full-suite limitations honestly.
-- [ ] Verify sign-offs/clean tracked tree, push feature branch and open a PR with repository-template verification, BEFORE/AFTER table, safety/data preservation and test evidence. Do not include private data/internal repository URLs or local file links in the public PR. Do not merge.
+- [ ] Verify sign-offs/clean tracked tree, push feature branch and open a PR with repository-template verification, BEFORE/AFTER table, safety/data preservation and test evidence. Do not include private data, private URLs or local file links in the public PR. Do not merge.

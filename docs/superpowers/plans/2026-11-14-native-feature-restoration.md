@@ -14,7 +14,7 @@
 
 ## Constraints and review focus
 
-- Restore the native consolidated comparison and Overall row, using recorded public score/lift authorities. Never recompute scores or substitute the internal scoring formula.
+- Restore the native consolidated comparison and Overall row, using recorded public score/lift authorities. Never recompute scores or substitute a different scoring formula.
 - Incomplete runs show configured standard dimensions with unavailable values. Custom-only evaluations show their recorded metrics, never a fabricated five-dimension score grid.
 - Preserve missing/zero/not-applicable, partial comparison explanations, failed-agent scopes, source rejection, activation limits and baseline eligibility.
 - Show the renderer's SkillEvaluator version even without a timestamp, and only recorded SkillSpector versions. Keep model IDs, paths and routine provenance quiet.

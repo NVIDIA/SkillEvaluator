@@ -2089,7 +2089,7 @@ saved judge evidence use the same credential masker:
   (`\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
   arguments repeated as JSON, where that value runs to the end of the outer
   string). A credential name at the start of a line after a JSON-escaped line
-  break that an unquoted value ran over is read on its own too
+  break that an unquoted assignment value ran over is read on its own too
   (`API_TOKEN=a\nauth=("bob", "...")`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
@@ -2166,7 +2166,9 @@ password after an unknown flag or in a here-string (`--password-stdin <<<
 credential (`s/PASSWORD/.../`) or uses another delimiter inside a `sh -c` or
 `ssh` command string (`s#token: .*#token: ...#`), a `mysql` password after a
 `;` inside a flag value that names no credential, an `auth=` call whose
-arguments are quoted with nested `'"'"'` idioms, an unquoted `PASS: value`, an
+arguments are quoted with nested `'"'"'` idioms, a tuple or call value on the
+line after a `\n` escape that a flag or config value runs over
+(`--password K1\nauth=("bob", "...")`), an unquoted `PASS: value`, an
 `npm config set` option with a separate value (`--location global`), or all
 but the first word of a value with spaces on an unquoted here-document line
 or inside a `sh -c` or `ssh` command string. Escaped text is read with at most two levels of

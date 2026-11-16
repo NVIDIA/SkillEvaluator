@@ -564,6 +564,27 @@ def test_unresolved_reference_is_explained_in_what_to_fix():
     assert "validate this skill on its own" in text
 
 
+def test_unresolved_reference_keeps_spaces_in_the_path():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    security = ValidationResult(validator_name="Security Scan", passed=False)
+    security.metadata["incomplete_scans"] = ["skillspector"]
+    security.metadata["scanners"] = {"skillspector": "2.13.4"}
+    security.add_error(
+        "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+        "scripts/run.py:3 [runtime_limit; analyzers=sc8]; "
+        "reference docs/setup.md:8 [reference_resolution; reference_missing]; "
+        "my skill/notes v2.md:12 [reference_resolution; reference_missing]; "
+        "security scan did not complete"
+    )
+
+    _ok, rows = summarize_tier1([security])
+    text = _text(rows)
+    assert "at reference docs/setup.md:8, my skill/notes v2.md:12," in text
+    assert "scripts/run.py" not in text
+
+
 def test_tier1_summary_counts_validators_and_their_sub_checks():
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.reporting.console_ui import summarize_tier1

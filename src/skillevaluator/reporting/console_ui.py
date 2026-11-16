@@ -1279,7 +1279,9 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     return not failed, rows + fix_section_rows(items)
 
 
-_UNRESOLVED_REFERENCE = re.compile(r"(\S+:\d+) \[reference_resolution; reference_missing\]")
+# Scanner diagnostics list each ledger row as ``path:line [phase; reason]``, rows joined by "; " and the
+# first one following "): ". A path may hold spaces, so it runs from that boundary up to its ``:line``.
+_UNRESOLVED_REFERENCE = re.compile(r"(?:^|; |\): )((?:(?!; |\): ).)+?:\d+) \[reference_resolution; reference_missing\]")
 
 
 def _unresolved_reference_fixes(result: ValidationResult) -> list[FixItem]:

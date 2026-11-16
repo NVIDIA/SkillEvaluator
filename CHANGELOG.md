@@ -355,6 +355,8 @@ All notable changes to SkillEvaluator are documented in this file.
   spurious notices that other execution failures need attention.
 - Make the same-inode read-race regression use an observable mtime change without
   depending on filesystem clock granularity.
+- Make the onboarding URL-rewrite test use its temporary global Git config even
+  when the caller sets `GIT_CONFIG_GLOBAL`.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget

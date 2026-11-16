@@ -900,6 +900,63 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     )
 
 
+def test_printed_verdict_ignores_an_untolerated_failed_agent_like_the_reports(tmp_path: Path) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # Without tolerance opencode's baseline timeout fails the agent, although its with-skill
+    # arm passes everything. The reports set it aside and read only codex, which misses its
+    # goals, so the printed run verdict must not turn PASS from the failed agent's with-skill arm.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    failing = {**dict.fromkeys(SCORES, 0.3), "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=failing, details=_activation(True))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=failing)
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)], tolerate_baseline_timeouts=False)
+    assert results["agents"]["opencode"]["execution_status"] == "failed"
+    assert results["agents"]["opencode"]["conditions"]["with_skill"]["execution_status"] == "succeeded"
+
+    payload, benchmark, _html, _message = _render_reports_and_message(tmp_path, results)
+
+    assert payload["best_agent"] == "codex"
+    assert "> **Tier 3 completed-agent result: FAIL**" in benchmark
+    terminal = render_result(results)
+    assert [line for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        "RUN QUALITY VERDICT: FAIL"
+    ]
+
+
+def test_printed_verdict_names_the_baseline_when_every_agent_fails_only_its_baseline(tmp_path: Path) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # Both agents score their with-skill arms, but each baseline times out and is not
+    # tolerated. The reports read no completed agent (verdict neutral, "No complete agent
+    # result"), so the printed run verdict is INCOMPLETE, and it blames the baseline arm,
+    # never the with-skill arm that ran.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    jobs = tmp_path / "jobs"
+    for agent in ("opencode", "codex"):
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+        _arm(jobs, agent, "without", [("case-001", "scored"), ("case-002", "timeout")])
+    errors = [LAUNCH_ERROR.format(agent=agent, count=1) for agent in ("opencode", "codex")]
+    results = _collect(tmp_path, errors, tolerate_baseline_timeouts=False)
+    for agent in results["agents"].values():
+        assert agent["execution_status"] == "failed"
+        assert agent["conditions"]["with_skill"]["execution_status"] == "succeeded"
+
+    payload, benchmark, _html, _message = _render_reports_and_message(tmp_path, results)
+
+    assert payload["verdict"] == "neutral"
+    assert "> **Tier 3: No complete agent result**" in benchmark
+    lines = render_result(results).splitlines()
+    index = lines.index("RUN QUALITY VERDICT: INCOMPLETE")
+    assert lines[index + 1] == (
+        "no agent completed its baseline arm, so the run has no complete agent result; "
+        "per-agent verdicts cover the with-skill arm only"
+    )
+
+
 @pytest.mark.parametrize("field", ["with_skill", "without_skill", "dimensions_with_skill"])
 def test_printed_verdict_reads_every_agent_when_the_complete_peer_cannot_rank(tmp_path: Path, field: str) -> None:
     from skillevaluator.tier3.result_display import render_result

@@ -308,6 +308,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.

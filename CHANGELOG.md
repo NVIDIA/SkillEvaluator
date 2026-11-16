@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document measured real-provider saved-catalog scale separately from 5,000-entry
+  in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
   skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
   copy, Codex lists both, and the other harnesses use the project copy.
@@ -161,6 +163,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The CI guide's recipe installs SkillSpector from the commit behind its release
   tag and checks the Gitleaks archive against the published SHA-256 before
   unpacking it, matching the repository's own workflows.
+- The bundled `text-analyzer` example skill's description now says when to use it and
+  lists sentence count and average word length, so Codex reads the skill before using it.
+  The example's quality score is now 88.8/100 with 5 findings (was 86.2 with 6).
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
@@ -308,9 +313,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.
+- Benchmark methodology describes the Overall row's shared comparison basis
+  rather than the headline with-skill score, in Tier 3 and publication cards.
+- BENCHMARK cards explain the required with-skill goal and security case checks
+  that can fail quality even when all dimensions pass.
 - `--backend nemo-gym` with `SKILL_EVAL_NEMO_GYM_MODEL_URL` set now requires a
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
@@ -324,6 +335,9 @@ All notable changes to SkillEvaluator are documented in this file.
   say to install `skillevaluator[tier3]` for the live evaluation check instead
   of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
   Tiers 1 and 2 first.
+- `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
+  now say to install `skillevaluator[tier3]` instead of printing only
+  `Error: No module named 'harbor'`.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

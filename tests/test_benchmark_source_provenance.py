@@ -900,7 +900,7 @@ class TestPassDetection:
     """The verdict line is honoured whether or not the card blockquotes it."""
 
     _POLICY_BULLET = (
-        "- Overall verdict: PASS only when every configured dimension passes for at least one supported agent."
+        "- Overall verdict: PASS only when every configured dimension passes for at least one supported agent"
     )
     _UNRECORDED_REASONS = (
         "publication PASS without recorded evaluated source",
@@ -934,13 +934,19 @@ class TestPassDetection:
         bullet as the verdict charges it with three offences it never committed.
         """
         card = _pass_card(_ABSENT).replace("> **Overall verdict: PASS**", f"> **Overall verdict: {verdict}**", 1)
-        card = f"{card}\n## Scoring Policy\n\n{self._POLICY_BULLET}\n"
+        card = f"{card}\n## Scoring Policy\n\n{self._POLICY_BULLET}.\n"
         assert self._unrecorded(_scan(tmp_path, card, require=True)) == ()
 
-    def test_the_published_card_carries_that_bullet_and_is_still_detected(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("historical", [False, True], ids=["current-wording", "historical-wording"])
+    def test_the_published_card_carries_that_bullet_and_is_still_detected(
+        self, tmp_path: Path, historical: bool
+    ) -> None:
         """Excluding bullets must not blind the check on the card the reporter writes."""
         card = (Path(__file__).parent / "golden" / "benchmark_pass" / "BENCHMARK.md").read_text(encoding="utf-8")
         assert self._POLICY_BULLET in card
+        if historical:
+            policy_line = next(line for line in card.splitlines() if line.startswith(self._POLICY_BULLET))
+            card = card.replace(policy_line, self._POLICY_BULLET + ".", 1)
         assert _scan(tmp_path, card, require=True) == []
 
         stripped = "\n".join(

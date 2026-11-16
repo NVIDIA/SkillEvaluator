@@ -147,31 +147,34 @@ jobs:
         run: uv run pytest -q -n auto
 
   html-parser-compatibility:
-    name: HTML parser compatibility (Python ${{ matrix.python-version }})
+    name: HTML parser compatibility (Python 3.12.11 and 3.13.5)
     needs: classify-changes
     if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
     # These older Python patch releases have setup-python builds for Ubuntu 24.04.
     runs-on: ubuntu-24.04
-    strategy:
-      fail-fast: false
-      matrix:
-        python-version: ["3.12.11", "3.13.5"]
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
-          python-version: ${{ matrix.python-version }}
+          python-version: |
+            3.12.11
+            3.13.5
       - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
           version: "0.11.27"
-      - run: uv sync --extra dev --locked --python "${{ matrix.python-version }}"
-      - name: Run HTML parser compatibility tests
-        run: >-
-          uv run --python "${{ matrix.python-version }}" pytest -q
-          tests/validators/test_markdown.py
-          tests/test_cli_html_parser_compat.py
+      # One job runs both patch releases in turn. The second still runs when the
+      # first fails, so the log shows a result for each.
+      - name: Run HTML parser compatibility tests on Python 3.12.11
+        run: |
+          uv sync --extra dev --locked --python 3.12.11
+          uv run --python 3.12.11 pytest -q tests/validators/test_markdown.py tests/test_cli_html_parser_compat.py
+      - name: Run HTML parser compatibility tests on Python 3.13.5
+        if: ${{ !cancelled() }}
+        run: |
+          uv sync --extra dev --locked --python 3.13.5
+          uv run --python 3.13.5 pytest -q tests/validators/test_markdown.py tests/test_cli_html_parser_compat.py
 
   mcp-sdk-compatibility:
     name: MCP probe compatibility (SDK ${{ matrix.mcp-version }})

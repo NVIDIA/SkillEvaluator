@@ -305,6 +305,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
+  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
+  yet, and OpenCode currently fails in Gym's agent setup.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

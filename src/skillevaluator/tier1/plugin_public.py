@@ -45,6 +45,14 @@ def run_public_plugin_validation(
 ) -> list[ValidationResult]:
     """Run the bounded plugin checks with the options of a Tier 1 skill run.
 
+    The ``security`` check scans the root of the plugin and each nested skill
+    as separate units. The root unit, which holds every file that no nested
+    skill owns, accepts SkillSpector missing references as a skill scan does:
+    it is judged against the plugin's source tree, whose listing marks a file
+    left out of the staged copy, or a file of a nested skill, as not inspected,
+    so a line that names one stays incomplete. The unit of a nested skill
+    accepts none, because its lines may name a file elsewhere in the plugin.
+
     *target_root* is the folder that the plugin belongs to when a caller
     validates that folder one skill at a time, as ``validate`` does for a
     folder of skills. The ``security`` check then accepts no SkillSpector
@@ -78,8 +86,8 @@ def run_public_plugin_validation(
         from skillevaluator.validators.security import _rewrite_path_prefix
 
         snapshot_by_view = {view.resolve(): (snapshot / unit).resolve() for unit, view in views.items()}
-        # With no skill below the root, the root scan unit is the whole plugin.
-        whole_plugin_view = views["."].resolve() if len(views) == 1 else None
+        # The root scan unit holds every file that no nested skill owns.
+        root_view = views["."].resolve() if "." in views else None
         plugin_root = Path(source_root).resolve()
 
         class SnapshotSecurityValidator(public.SecurityValidator):
@@ -95,12 +103,14 @@ def run_public_plugin_validation(
                 )
 
             def _validate_skillspector_report(self, *args, scanned_root=None, reference_root=None, **kwargs):
-                # A scan of the whole plugin accepts missing references as a skill
-                # scan does. Like the artifact-free copy of a skill scan, it is
-                # judged against the source tree, whose listing also names what
-                # the staged copy left out. A part of a plugin, or a plugin in a
-                # folder validated part by part (target_root), still accepts none.
-                if whole_plugin_view is not None and scanned_root == whole_plugin_view:
+                # The root scan unit accepts missing references as a skill scan
+                # does, also beside nested skills. Like the artifact-free copy of
+                # a skill scan, it is judged against the source tree, whose
+                # listing also names what the staged copy left out and the files
+                # of each nested skill, which the root scan did not inspect. The
+                # scan unit of a nested skill, or a plugin in a folder validated
+                # part by part (target_root), still accepts none.
+                if root_view is not None and scanned_root == root_view:
                     scanned_root, reference_root = plugin_root, self.target_root or plugin_root
                 return super()._validate_skillspector_report(
                     *args, scanned_root=scanned_root, reference_root=reference_root, **kwargs

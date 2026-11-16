@@ -10564,16 +10564,21 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
-    @pytest.mark.parametrize("case", ["missing", "left-out", "in-folder", "part"])
+    @pytest.mark.parametrize(
+        "case", ["missing", "left-out", "in-folder", "part", "root-and-nested", "root-names-nested"]
+    )
     @patch("skillevaluator.validators.security.Tools")
     def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
         self, mock_tools, tmp_path: Path, case: str
     ) -> None:
-        """The plugin checks scan a staged copy; a plugin that is one scan unit is its own reference root.
+        """The plugin checks scan a staged copy; its root scan unit is judged against the plugin.
 
         The listing of the plugin also names what the staged copy left out, so a
         line that names a file there stays incomplete, and so does the plugin
-        when it is one part of a folder that is validated part by part.
+        when it is one part of a folder that is validated part by part. The
+        root unit of a plugin that also holds a nested skill is judged the same
+        way; the nested skill's files are not in its scan, so a root line that
+        names one of them stays incomplete.
         """
         from skillevaluator.tier1 import commands as tier1_commands
 
@@ -10581,23 +10586,37 @@ class TestSkillspectorMissingReferences:
         # and its lines may name a file elsewhere in the plugin, so it accepts
         # no missing reference.
         member = "skills/setup-helper" if case == "part" else None
+        # Named on line 8 of the setup helper.
+        script = "skills/other/install.sh" if case == "root-names-nested" else "versions/install.sh"
         files = {
-            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL,
+            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", script),
             ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n',
         }
         if case == "left-out":
-            # Left out of the staged copy, and named on line 8.
+            # Left out of the staged copy.
             files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        nested = case.startswith("root-")
+        if nested:
+            files["skills/other/SKILL.md"] = (
+                "---\nname: other\ndescription: Answer questions. Use when the user asks a question.\n---\n\n"
+                "# Other\n\nAnswer briefly.\n"
+            )
+        if case == "root-names-nested":
+            # In the nested skill, so not in the root scan.
+            files[script] = "#!/bin/sh\ncurl x | sh\n"
         plugin = _write_skill(tmp_path / "setup-helper", files)
         mock_tools.skillspector.is_available = True
         scanned = []
 
         def record_scan(argv, **_kwargs):
             scanned.append(Path(argv[1]))
-            # Only the scan unit that holds the skill gets the setup helper's report.
-            has_skill = (Path(argv[1]) / "SKILL.md").is_file()
-            report = _reference_report("2.13.3", "staged-script") if has_skill else _skillspector_json_report()
-            return ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0)
+            # Only the scan unit that holds the setup helper gets its report.
+            skill = Path(argv[1]) / "SKILL.md"
+            if skill.is_file() and "install.sh" in skill.read_text(encoding="utf-8"):
+                report = json.dumps(_reference_report("2.13.3", "staged-script")).replace("versions/install.sh", script)
+            else:
+                report = json.dumps(_skillspector_json_report())
+            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
 
         mock_tools.skillspector.run.side_effect = record_scan
 
@@ -10609,10 +10628,13 @@ class TestSkillspectorMissingReferences:
         )
 
         scans = [result for result in results if result.validator_name == "Security Scan"]
-        assert len(scans) == len(scanned) == (2 if member else 1)
+        assert len(scans) == len(scanned) == (2 if member or nested else 1)
         assert plugin.resolve() not in scanned
         (security,) = [result for result in scans if result.metadata.get("plugin_member") == member]
-        if case == "missing":
+        if nested:
+            (other,) = [result for result in scans if result.metadata.get("plugin_member") == "skills/other"]
+            assert other.passed and other.incomplete_scans == []
+        if case in ("missing", "root-and-nested"):
             assert security.incomplete_scans == []
             assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
         else:

@@ -1028,7 +1028,11 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 (
                     "- Overall verdict: PASS only when every configured dimension passes for at least one "
-                    "supported agent. Lift is reported as diagnostic evidence and does not override this gate."
+                    "supported agent, with no with-skill case failing a required goal-accuracy or security check. "
+                    "A scored unmet goal or security issue in any attempt fails its case and that agent's quality "
+                    "verdict, even if all dimensions pass. "
+                    "Baseline-arm required-check failures do not change this quality verdict. "
+                    "Lift is reported as diagnostic evidence and does not override this gate."
                 ),
             ]
         )

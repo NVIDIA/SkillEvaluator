@@ -1308,7 +1308,13 @@ def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
     )
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", **routing}]}))
     reward = _reward(False, "the answer omitted the requested total")
-    reward.update(skill_execution=1.0, goal_accuracy=0.0, skill_invoked=False, invocation_evidence_source="trajectory")
+    reward.update(
+        skill_execution=1.0,
+        goal_accuracy=0.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
     _trial(tmp_path, "a", "t0", reward)
     agent = _agent({"negative": _case(passed)}, {})
 
@@ -1322,24 +1328,59 @@ def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
     assert fix["attempts_lost"] == 1
 
 
-@pytest.mark.parametrize("evidence", ["invoked", "unknown", "missing", "error", "custom"])
+@pytest.mark.parametrize("evidence", ["invoked", "unknown", "missing", "error", "custom", "step", "missing scope"])
 def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Path, evidence: str) -> None:
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
     if evidence != "missing":
         reward = _reward(False, "wrong total")
-        reward.update(skill_execution=1.0, skill_invoked=evidence == "invoked", invocation_evidence_source="trajectory")
+        reward.update(
+            skill_execution=1.0,
+            skill_invoked=evidence == "invoked",
+            invocation_evidence_source="trajectory",
+            invocation_evidence_scope="logical_trial",
+        )
         if evidence == "unknown":
             reward.pop("invocation_evidence_source")
         elif evidence == "error":
             reward["evaluation_status"] = "error"
         elif evidence == "custom":
             reward["metric_set"] = "custom-metrics"
+        elif evidence == "step":
+            reward["invocation_evidence_scope"] = "step"
+        elif evidence == "missing scope":
+            reward.pop("invocation_evidence_scope")
         _trial(tmp_path, "a", "t0", reward)
     agent = _agent({"negative": _case(False)}, {})
 
     fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
 
     assert all(fix["kind"] != "task outcome" for fix in fixes)
+
+
+def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path: Path) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
+    for name, attempts in (("A", 2), ("B", 1)):
+        for i in range(attempts):
+            reward = _reward(False, "wrong total" if name == "A" else "correct total")
+            reward.update(
+                skill_execution=1.0,
+                goal_accuracy=0.0 if name == "A" else 1.0,
+                skill_invoked=False,
+                invocation_evidence_source="trajectory",
+                invocation_evidence_scope="logical_trial",
+            )
+            _trial(tmp_path, name, f"t{i}", reward)
+    agents = {
+        "A": _agent({"negative": _case(False, True)}, {}),
+        "B": _agent({"negative": _case(True)}, {}),
+    }
+
+    [fix] = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert fix["kind"] == "task outcome"
+    assert fix["scope"] == "A only"
+    assert fix["scope"].count("A") == 1
+    assert fix["attempts_lost"] == 2
 
 
 @pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])

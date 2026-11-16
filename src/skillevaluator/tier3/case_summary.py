@@ -1313,6 +1313,7 @@ def _correctly_unused_negative(
             if (
                 not isinstance(reward, dict)
                 or _evaluation_failed(reward)
+                or reward.get("invocation_evidence_scope") != "logical_trial"
                 or _trusted_observed_activation(reward) != "not_invoked"
             ):
                 return False
@@ -1344,7 +1345,7 @@ def what_to_fix(
                 grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)
     issues = []
     for items in grouped.values():
-        names = [item["agent"] for item in items]
+        names = list(dict.fromkeys(item["agent"] for item in items))
         merged = dict(items[0])
         merged["asks_for_input"] = all(item.get("asks_for_input") for item in items)
         merged.update(

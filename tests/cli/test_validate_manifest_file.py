@@ -184,12 +184,13 @@ def test_skill_manifest_linked_to_a_file_with_another_name_is_refused_without_no
     assert "symlink or reparse point: SKILL.md" in result.output
 
 
+@pytest.mark.parametrize("type_args", [(), ("--type", "workflows")], ids=["auto-type", "workflows-type"])
 def test_workflow_manifest_linked_to_a_file_with_another_name_validates_the_folder(
-    tmp_path: Path, sample_workflow_dir: Path
+    tmp_path: Path, sample_workflow_dir: Path, type_args: tuple[str, ...]
 ) -> None:
     # The link points at shared/rules.mdc, which reads as a rules file, not as a workflow manifest.
     _link_manifest_to_another_name(sample_workflow_dir / "workflow-rules.mdc", tmp_path / "shared", "rules.mdc")
-    args = ("--no-dedup", "--checks", "schema")
+    args = ("--no-dedup", "--checks", "schema", *type_args)
 
     folder = _validate(sample_workflow_dir, tmp_path / "folder-reports", *args)
     manifest = _validate(sample_workflow_dir / "workflow-rules.mdc", tmp_path / "manifest-reports", *args)
@@ -294,3 +295,29 @@ def test_other_file_in_a_skill_is_validated_as_given(monkeypatch: pytest.MonkeyP
 
     assert result.exit_code == 0, result.output
     assert seen == [(script.resolve(), "skill")]
+
+
+@pytest.mark.parametrize(
+    ("manifest_name", "forced_type"),
+    [("SKILL.md", "workflows"), ("workflow-rules.mdc", "rules")],
+    ids=["skill-as-workflows", "workflow-as-rules"],
+)
+def test_manifest_file_with_another_type_is_validated_as_given(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, manifest_name: str, forced_type: str
+) -> None:
+    # --type names another type, so the manifest name no longer stands for its folder.
+    manifest = tmp_path / "sample" / manifest_name
+    manifest.parent.mkdir()
+    manifest.write_text("---\nname: sample\ndescription: Sample\n---\n", encoding="utf-8")
+    seen = []
+    monkeypatch.setattr(
+        cli_module, "run_validation", lambda path, **kwargs: seen.append((path, kwargs["content_type"])) or []
+    )
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        ["validate", str(manifest), "--type", forced_type, "--tiers", "1", "-o", str(tmp_path / "reports")],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert seen == [(manifest.resolve(), forced_type)]

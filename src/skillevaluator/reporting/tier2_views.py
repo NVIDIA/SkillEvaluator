@@ -6,10 +6,16 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import additional_errors, is_cleanly_skipped
+from skillevaluator.reporting.base import additional_errors, get_skip_reason, is_cleanly_skipped
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
+
+
+@dataclass(frozen=True)
+class Tier2SkipView:
+    reason: str
+    results: tuple[ValidationResult, ...]
 
 
 @dataclass(frozen=True)
@@ -24,6 +30,7 @@ class Tier2ScopeView:
     notes: tuple[str, ...]
     catalog_not_applicable: bool = False
     not_run: bool = False
+    skips: tuple[Tier2SkipView, ...] = ()
 
 
 def _count(value: object) -> int | None:
@@ -37,6 +44,14 @@ def _scope(result: ValidationResult) -> str | None:
     if "dedup" in name or "context optimization" in name:
         return "within"
     return None
+
+
+def _skip_views(results: tuple[ValidationResult, ...]) -> tuple[Tier2SkipView, ...]:
+    groups: dict[str, list[ValidationResult]] = {}
+    for result in results:
+        if is_cleanly_skipped(result):
+            groups.setdefault(get_skip_reason(result), []).append(result)
+    return tuple(Tier2SkipView(reason, tuple(group)) for reason, group in groups.items())
 
 
 def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, ...]:
@@ -176,13 +191,22 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 tuple(dict.fromkeys(notes)),
                 scope == "within" or pairwise_only,
                 not_run,
+                _skip_views(members),
             )
         )
     unknown = tuple(result for result in results if _scope(result) is None)
     if unknown:
         views.append(
             Tier2ScopeView(
-                "other", "Other recorded checks", unknown, None, None, None, None, ("Comparison scope unavailable.",)
+                "other",
+                "Other recorded checks",
+                unknown,
+                None,
+                None,
+                None,
+                None,
+                ("Comparison scope unavailable.",),
+                skips=_skip_views(unknown),
             )
         )
     return tuple(views)

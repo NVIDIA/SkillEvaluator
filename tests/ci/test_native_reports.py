@@ -469,5 +469,28 @@ def test_native_tier_navigation_remains_within_static_trusted_code():
     assert set(parser.handlers + parser.scripts) <= _trusted_inline_code()
     constrained = constrain_native_html(document)
     for tier in (1, 2, 3):
-        assert f'href="#tab-tier{tier}" data-report-tier="tier{tier}"' in constrained
-        assert f'data-target-tab="tier{tier}"' in constrained
+        card = re.search(rf'<div class="tier-card\b[^>]*data-target-tab="tier{tier}"[^>]*>', constrained)
+        assert card is not None
+        markup = card.group()
+        assert 'role="button"' in markup
+        assert 'tabindex="0"' in markup
+        assert f'aria-controls="tab-tier{tier}"' in markup
+        if tier == 1:
+            assert f"onclick=\"showTab('tier{tier}')\"" in markup
+            assert (
+                f"onkeydown=\"if(event.key==='Enter'||event.key===' '){{event.preventDefault();showTab('tier{tier}');}}\""
+                in markup
+            )
+        else:
+            assert 'data-report-tier-tile="true"' in markup
+            tile_script = next(code for code in parser.scripts if "[data-report-tier-tile]" in code)
+            assert (
+                "tile.addEventListener('click', function() { activateReportTier(tile.dataset.targetTab); });"
+                in tile_script
+            )
+            assert "tile.addEventListener('keydown', function(event)" in tile_script
+            assert "(event.key === 'Enter' || event.key === ' ') && event.target === tile" in tile_script
+    constrained_code = _InlineCode()
+    constrained_code.feed(constrained)
+    assert set(constrained_code.handlers + constrained_code.scripts) <= _trusted_inline_code()
+    assert not constrained_code.external_script

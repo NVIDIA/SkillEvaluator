@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -795,8 +796,8 @@ def test_reports_rank_tolerated_agents_below_their_complete_peer(tmp_path: Path)
     assert ".t3-overview-lead .tolerated-baseline { display:block;" in html
     for agent in ("claude-code", "opencode"):
         assert f"Baseline incomplete for <strong>{agent}</strong> (1 of 2 attempts scored)" in html
-    assert html.count("<code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.") == 2
-    assert "not reported.</span><span" not in html
+    assert html.count("<code>--tolerate-baseline-timeouts</code>; baseline and uplift unavailable.") == 2
+    assert "unavailable.</span><span" not in html
 
 
 def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
@@ -867,15 +868,45 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
     assert lead in html
-    # The HTML overview says once that the tolerated baseline needs attention:
-    # in the completed-agent lead, or in its own note when the lead reads
-    # inconclusive, as BENCHMARK.md does in both cases.
-    overview = html.split('<div class="t3-overview-lead">', 1)[1].split("</div>", 1)[0]
-    lead_attention = "Other execution failures need attention."
-    tolerated_attention = "<strong>Needs attention:</strong> baseline timeouts were tolerated."
+
+    # The completed-agent lead names other execution failures when its verdict
+    # fails. Each tolerated baseline keeps one scoped coverage/limitation cue,
+    # including when another complete agent never activated the skill.
+    class OverviewSummary(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth = 0
+            self.matches = 0
+            self.parts: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "div" and (self.depth or dict(attrs).get("id") == "tier3-overview-summary"):
+                if not self.depth:
+                    self.matches += 1
+                self.depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "div" and self.depth:
+                self.depth -= 1
+
+        def handle_data(self, data: str) -> None:
+            if self.depth:
+                self.parts.append(data)
+
+    # The summary includes nested divs before the tolerated-baseline notice.
+    summary = OverviewSummary()
+    summary.feed(html)
+    summary.close()
+    assert summary.matches == 1
+    assert summary.depth == 0
+    overview = " ".join("".join(summary.parts).split())
+    assert lead.removeprefix("<strong>").removesuffix("</strong>") in overview
+    lead_attention = "Other execution failures need attention;"
+    tolerated_attention = "baseline timeouts were tolerated by"
     assert (lead_attention in overview) is (verdict == "fail")
-    assert (tolerated_attention in overview) is (verdict == "inconclusive")
-    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in overview
+    assert overview.count(tolerated_attention) == 1
+    assert "Baseline incomplete for opencode (1 of 2 attempts scored)" in overview
+    assert "--tolerate-baseline-timeouts; baseline and uplift unavailable." in overview
     assert "**Needs attention:** other execution failures remain." in benchmark
     if verdict == "inconclusive":
         # The tolerated agent did activate the skill, so Insights names whose trials never did.
@@ -1376,9 +1407,8 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
     assert benchmark.count("**Needs attention:**") == 1
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
     attention = "**Needs attention:** baseline timeouts were tolerated."
-    html_attention = (
-        '<span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>'
-    )
+    html_attention = "baseline timeouts were tolerated by"
+    assert html.count(html_attention) == 1
     if codex_short:
         # Nothing before the note names other failures, so it names the cause.
         assert "Completed agent: **codex**" not in benchmark
@@ -1395,9 +1425,9 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
         # The completed-agent lead already says that other failures need attention.
         assert "Completed agent: **codex**" in benchmark
         assert "**Needs attention:** other execution failures remain." in benchmark
-        assert "Other execution failures need attention. This is not a whole-run or publication PASS." in html
+        assert "Other execution failures need attention; not a whole-run or publication PASS." in html
         assert attention not in benchmark
-        assert html_attention not in html
+        assert "<strong>Needs attention:</strong> baseline timeouts were tolerated." not in html
 
 
 # -- pure rules -----------------------------------------------------------------

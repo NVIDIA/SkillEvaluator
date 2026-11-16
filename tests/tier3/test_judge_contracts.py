@@ -8,7 +8,6 @@ from __future__ import annotations
 import json
 import random
 import string
-import time
 from pathlib import Path
 from types import ModuleType
 from typing import Any
@@ -21,6 +20,7 @@ from tests.tier3.test_security_finding_evidence import (
     _KEY_BLOCK,
     _READINGS_THAT_START_THE_TEXT,
     _generated_texts,
+    _masking_seconds,
     _only_adds_markers,
 )
 
@@ -1768,16 +1768,7 @@ def test_judge_evidence_masking_escaped_again_only_adds_markers(monkeypatch: pyt
     ],
 )
 def test_judge_evidence_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
-    def elapsed(size: int) -> float:
-        text = unit * (size // len(unit))
-        times = []
-        for _ in range(2):
-            started = time.perf_counter()
-            eval_template._redact_judge_evidence(text)
-            times.append(time.perf_counter() - started)
-        return min(times)
-
-    small, large = elapsed(20_000), elapsed(200_000)
+    small, large = _masking_seconds(eval_template._redact_judge_evidence, unit, 20_000, 200_000)
     # Ten times the text takes about ten times as long. The margin allows for
     # a slow CI runner.
     assert large < 16 * small + 0.05

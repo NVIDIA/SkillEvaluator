@@ -26,6 +26,26 @@ from skillevaluator.tier3.harbor.adapter import (
     _stage_task_inputs,
     generate_harbor_tasks,
 )
+from skillevaluator.utils.secure_fs import SecurePathError
+
+
+def _stat_with_advanced_ctime(metadata: os.stat_result, advance_ns: int) -> os.stat_result:
+    """Copy every stat field and advance only ``st_ctime_ns``.
+
+    ``os.stat_result(sequence, extras)`` fills the fields that are not part of
+    the 10-item sequence (``st_mtime_ns``, ``st_ctime_ns``, ...) only from
+    ``extras`` and leaves the rest ``None``, so each one is copied explicitly.
+    Otherwise a missing ``st_mtime_ns`` would be rejected by the mtime
+    comparison and hide whether the ctime comparison works.
+    """
+    sequence_fields = set(os.stat_result.__match_args__)
+    extras = {
+        name: getattr(metadata, name)
+        for name in dir(metadata)
+        if name.startswith("st_") and name not in sequence_fields
+    }
+    extras["st_ctime_ns"] += advance_ns
+    return os.stat_result(tuple(metadata), extras)
 
 
 def _make_skill(tmp_path: Path) -> tuple[Path, Path, Path]:
@@ -562,14 +582,43 @@ class TestLoadMcpServersSafety:
         assert len(original_payload) == len(replacement_payload)
         config.write_text(original_payload, encoding="utf-8")
         original_metadata = config.stat()
+        # Same device, inode, mode, link count, size and restored mtime as the
+        # file the reader opened; only the ctime moved, so only a ctime
+        # comparison can reject the read.
+        advanced_ctime_metadata = _stat_with_advanced_ctime(original_metadata, 2_000_000_000)
+        assert advanced_ctime_metadata.st_ctime_ns != original_metadata.st_ctime_ns
+        for attribute in dir(original_metadata):
+            if attribute.startswith("st_") and "ctime" not in attribute:
+                assert getattr(advanced_ctime_metadata, attribute) == getattr(original_metadata, attribute), attribute
+        assert os.path.samestat(advanced_ctime_metadata, original_metadata)
         original_read = adapter_module.os.read
         original_fstat = adapter_module.os.fstat
+        original_lstat = Path.lstat
         mutated = False
+        post_read_fstat_done = False
 
         def fstat_with_advanced_ctime(descriptor: int) -> os.stat_result:
+            # The first descriptor stat after the rewrite is secure_fs's
+            # post-read check and reports the advanced ctime. Anything later
+            # reports the original stat, so no other comparison can reject
+            # the run first.
+            nonlocal post_read_fstat_done
             metadata = original_fstat(descriptor)
+            if not mutated or metadata.st_ino != original_metadata.st_ino:
+                return metadata
+            if post_read_fstat_done:
+                return original_metadata
+            post_read_fstat_done = True
+            return advanced_ctime_metadata
+
+        def lstat_with_original_ctime(path: Path) -> os.stat_result:
+            # _read_regular_evals_file compares the named path's lstat (ctime
+            # included) with the descriptor stat after the read. The real
+            # rewrite moves the real ctime, so that comparison would reject
+            # the rewrite on its own and hide the secure_fs check.
+            metadata = original_lstat(path)
             if mutated and metadata.st_ino == original_metadata.st_ino:
-                return os.stat_result(metadata, {"st_ctime_ns": original_metadata.st_ctime_ns + 2_000_000_000})
+                return original_metadata
             return metadata
 
         def rewrite_named_source(descriptor: int, size: int) -> bytes:
@@ -590,10 +639,18 @@ class TestLoadMcpServersSafety:
 
         monkeypatch.setattr(adapter_module.os, "read", rewrite_named_source)
         monkeypatch.setattr(adapter_module.os, "fstat", fstat_with_advanced_ctime)
+        monkeypatch.setattr(Path, "lstat", lstat_with_original_ctime)
 
-        with pytest.raises(ValueError, match="changed while it was read"):
+        with pytest.raises(ValueError, match="changed while it was read") as excinfo:
             _load_mcp_servers(skill)
+        # The wrapper message is the same for every rejection path, so check the
+        # cause is secure_fs's post-read comparison rather than a path re-stat.
+        assert isinstance(excinfo.value.__cause__, SecurePathError)
+        assert "changed identity or contents while being opened" in str(excinfo.value.__cause__)
         assert mutated
+        assert post_read_fstat_done
+        assert config.stat().st_ino == original_metadata.st_ino
+        assert config.stat().st_mtime_ns == original_metadata.st_mtime_ns
 
     def test_mcp_configuration_replaced_during_read_is_rejected(
         self,

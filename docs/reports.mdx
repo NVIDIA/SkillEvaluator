@@ -57,7 +57,7 @@ stops before any check and asks for an explicit `-o`/`--output-dir`.
 
 Ownership is tied to a key stored in your home directory (see
 `SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` in
-[Environment Variables](environment-variables.mdx)). Report folders written
+[Environment Variables](/skills/skillevaluator/environment-variables)). Report folders written
 with another key, for example by another account or by a container whose home
 directory was discarded, count as unowned. Pass `-o` in those setups.
 
@@ -124,6 +124,39 @@ no counters show **retained rows**, which are observations rather than complete
 scored totals. Preview limits and physical retry rows do not replace recorded
 attempt counts. These are display projections; canonical JSON and evaluation
 payloads are unchanged.
+
+### Tier 3 declarative-check coverage
+
+Runs with declarative checks include a **Declarative-check coverage** section in
+terminal summaries, HTML reports, and both benchmark Markdown cards. Run
+`result.json` and exported report JSON retain the same structured evidence under
+each agent's `declarative_checks`, separated into `with_skill` and
+`without_skill` arms. Reports without declarative checks add no section.
+
+Each arm shows checked totals (passed and failed), judged requirements, and
+not-checked checks. Evidence entries identify the case, trial, check type,
+expected target, verdict, and reason, including passing checks and checks that
+were not applicable without the skill. Not checked is not a pass or a failure.
+
+The behavior-check denominator for each reward is **checked + judged**;
+not-checked checks are excluded. Reports show both per-reward denominators and
+their sum across an arm. That sum is coverage, not a pooled behavior score:
+existing trial averaging and scoring remain unchanged. A judge error still
+produces no behavior score, even when its recorded denominator is nonzero.
+Missing judgment counts are unavailable rather than assumed to be zero.
+
+Coverage uses the reward artifacts already loaded by reporting, not a new
+evaluation or a fresh judgment. Failed trials without reward evidence do not
+gain invented checks. For retained runs, only available reward evidence can be
+reconstructed; existing report truncation notices still apply.
+
+A very large run can make this evidence exceed the result and report size
+limits. Then `result.json` and the report keep at most 200 check rows per arm,
+failed and not-checked rows first, and leave out the rest. Totals, judged
+counts, and per-reward denominators stay exact. Each trimmed arm records
+`omitted_checks`, the summary says how many rows were left out, and the report
+notes them as `declarative_check_rows` under `report_truncation.omitted`. The
+full rows remain in each trial's `reward.json`.
 
 ### Tier 2 comparison scopes and evidence
 
@@ -351,13 +384,18 @@ are treated according to the host filesystem, while a case-distinct authored
 name on a case-sensitive filesystem remains covered. A same-named file below
 another authored directory is still included. Tier 3 runtime projection and
 full `--copy-repo` staging omit the same generated inputs so excluded generated
-bytes inside the target cannot affect evaluation evidence. Tier 1 and Tier 2
-skip the generated-artifact names (`results`, `versions`, `evals`, their dot
-variants, `BENCHMARK.md`, `skill-card.md`, and `skill.oms.sig`) at any depth.
-When one of those names appears below the target root, the digest would certify
-content that no scan read, so the Tier 1 run records the path and publication
-stays `INCOMPLETE` until it is renamed. The root `evals/` directory holds Tier 3
-inputs and is outside the Tier 1 scans by design.
+bytes inside the target cannot affect evaluation evidence. The Tier 1
+file-walk checks and Tier 2 skip the generated-artifact names (`results`,
+`versions`, `evals`, their dot variants, `BENCHMARK.md`, `skill-card.md`, and
+`skill.oms.sig`) at any depth. When one of those names appears below the target
+root, the digest would certify content that those checks never read, so the
+Tier 1 run records the path and publication stays `INCOMPLETE` until it is
+renamed. The root `evals/` directory holds Tier 3 inputs. The Tier 1 file-walk
+checks skip it by design, while the Gitleaks secret scan and SkillSpector read
+its authored files. Both still skip generated output such as `evals/results`.
+Gitleaks also skips every file under a `tests/`, `examples/`, `fixtures/`, or
+`mocks/` folder, or the singular form, such as a Harbor task grader in
+`evals/harbor/<case>/tests/`.
 Split-job results must match this identity exactly. Tier 3 runs that stage any
 linked/full repository context or external reference/workspace skills, or task
 inputs and custom environments that carry `.git`, `.venv`, `__pycache__`, or
@@ -989,6 +1027,16 @@ count as activation opportunities; missing or unsupported evidence remains
 unknown. Eligibility is determined separately for each agent, so another
 agent with observed activation can still contribute a comparison.
 
+Budget-stopped runs are different from evaluated failures. If `budget.not_run`
+contains attempts, the canonical run summary verdict is `incomplete`, with a
+reason naming the budget and the planned attempts left not run. Terminal,
+HTML, `tier3-benchmark.md`, and the full benchmark card show the budget summary.
+Admitted attempts retain their scores, but any Skill Lift is labelled as
+covering admitted attempts only, not a complete-run claim that the skill helps.
+An overrun alone keeps the verdict and adds the budget warning. All reports
+use final accounting; rebuilding older runs prefers `result.json.budget` over
+a stale `run_config.json` snapshot. Execution status and exit codes are unchanged.
+
 An arm that ran but failed, for example because one baseline attempt hit the
 agent timeout, fails the agent and the run unless `--tolerate-baseline-timeouts`
 keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)),
@@ -1472,8 +1520,7 @@ score without a baseline or lift. If the best agent's evidence is incomplete,
 the reports do not fall back to another agent. When no agent qualifies, for
 example because every agent failed or the agents were scored on different
 metric sets, no completed-agent score is shown. The benchmark's leading
-verdict follows the run, so a neutral run still reads
-**Tier 3 completed-agent result: NEUTRAL** when no agent qualifies.
+callout reads **Tier 3: No complete agent result** when no agent qualifies.
 
 When the run has a best agent, the HTML report names it as **Best performing
 agent**, and its **Skill Lift** card and the **Best-agent lift** line under

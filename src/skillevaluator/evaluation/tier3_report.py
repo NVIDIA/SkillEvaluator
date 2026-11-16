@@ -51,6 +51,11 @@ from skillevaluator.evaluation.tier3_findings import (
 from skillevaluator.evidence import evidence_ref_identity
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.source_identity import resolve_evaluated_source
+from skillevaluator.tier3.declarative_coverage import (
+    COMPACT_CHECK_ROWS_PER_ARM,
+    agent_declarative_checks,
+    compact_declarative_checks,
+)
 from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions
 
 logger = logging.getLogger(__name__)
@@ -200,6 +205,7 @@ class _ReportBudget:
                 "raw_metrics_per_reward": _MAX_RAW_METRICS_PER_REWARD,
                 "custom_metric_name_visits_per_reward": _MAX_CUSTOM_METRIC_NAME_VISITS_PER_REWARD,
                 "unpaired_case_id_samples": _MAX_UNPAIRED_CASE_IDS_IN_REPORT,
+                "declarative_check_rows_per_arm": COMPACT_CHECK_ROWS_PER_ARM,
             },
             "omitted": dict(sorted(self.omitted.items())),
         }
@@ -536,13 +542,19 @@ def agent_eval_result_from_directory(
     skill_name = (
         persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
     )
+    run_config = _read_run_config(run_dir)
+    result_truth = engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir)
+    if not isinstance(result_truth, dict) or not isinstance(result_truth.get("budget"), dict):
+        result_truth = _persisted_run_result(run_dir)
+    if isinstance(result_truth, dict) and isinstance(result_truth.get("budget"), dict):
+        run_config = {**(run_config or {}), "budget": result_truth["budget"]}
     payload = build_agent_eval_payload(
         skill_name,
         agents,
         dataset=dataset,
         attempt_policy=attempt_policy,
         historical_missing_score_policy="score_policy" not in attempt_policy,
-        run_config=_read_run_config(run_dir),
+        run_config=run_config,
         env_mode=env_mode,
         runtime_seconds=_runtime_seconds(engine_result),
         harbor_viewer=_harbor_viewer_from_engine_result(engine_result),
@@ -637,6 +649,8 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
     if isinstance(run_id, str):
         result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
+    from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         if payload.get("mode") == "baseline_only":
             result.add_success(
@@ -651,6 +665,12 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
                 f"best agent {best}",
             )
         result.passed = True
+    elif (
+        payload.get("execution_status") == "skipped"
+        and not payload.get("execution_errors")
+        and budget_fully_denied(payload.get("budget"))
+    ):
+        result.mark_scan_incomplete("Tier 3 run budget")
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:
@@ -698,6 +718,9 @@ def render_agent_eval_html_report(
         # Restored feedback and fresh findings both join after the initial size budget.
         fit_token_usage(canonical_payload)
     if engine_result is not None and isinstance(canonical_payload, dict):
+        if canonical_payload.get("verdict") == "incomplete" and (canonical_payload.get("budget") or {}).get("not_run"):
+            engine_result["summary"] = dict(canonical_payload["summary"])
+            engine_result["verdict"] = "incomplete"
         # Persist only the compact feedback contract needed by the CLI. The
         # complete canonical payload remains in the HTML report and can be much
         # larger because it duplicates trials, datasets, agents, and provenance.
@@ -850,6 +873,12 @@ def build_agent_eval_payload(
             baseline_only=baseline_only,
         )
 
+        coverage = info.get("declarative_checks") or agent_declarative_checks(
+            info.get("rewards") or [], info.get("rewards_baseline") or []
+        )
+        if coverage:
+            agent_payloads[name]["declarative_checks"] = coverage
+
     if not agent_payloads:
         return None
 
@@ -889,7 +918,9 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
-    statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
+    statuses = [
+        agent.get("execution_status") for agent in agent_payloads.values() if agent.get("execution_status") != "skipped"
+    ]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
     elif any(status == "failed" for status in statuses):
@@ -1116,7 +1147,13 @@ def build_agent_eval_payload(
     )
 
     budget_metadata = (run_config or {}).get("budget")
-    from skillevaluator.tier3.harbor.run_budget import budget_line
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
+
+    if reason := budget_incomplete_reason(budget_metadata):
+        verdict = "incomplete"
+        summary.update(verdict=verdict, verdict_reason=reason, overall_lift=None)
+        overall_lift = None
+        deterministic_conclusions = [{"severity": "warn", "title": "Evaluation incomplete", "message": reason}]
 
     payload = {
         "schema_version": _SCHEMA_VERSION,
@@ -1179,7 +1216,7 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "budget": budget_metadata,
-        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
+        "budget_summary": budget_line(budget_metadata, agents=agents) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
         "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
@@ -1536,6 +1573,25 @@ def _prune_pass_at_k_pairing_diagnostics(payload: dict[str, Any], report_budget:
     report_budget.omit("unpaired_case_ids", omitted)
 
 
+def _prune_declarative_check_rows(payload: dict[str, Any], report_budget: _ReportBudget) -> None:
+    """Cap per-check coverage rows when the payload is over its limits; counts stay exact.
+
+    Coverage grows with every check of every reward, so it goes before any scored detail.
+    """
+    agents = [
+        agent
+        for agent in (payload.get("agents") or {}).values()
+        if isinstance(agent, dict) and isinstance(agent.get("declarative_checks"), dict)
+    ]
+    if not agents or _within_report_limits(payload):
+        return
+    omitted = 0
+    for agent in agents:
+        agent["declarative_checks"], dropped = compact_declarative_checks(agent["declarative_checks"])
+        omitted += dropped
+    report_budget.omit("declarative_check_rows", omitted)
+
+
 def _enforce_report_payload_budget(
     payload: dict[str, Any], report_budget: _ReportBudget, *, enforce_size: bool = True
 ) -> None:
@@ -1557,7 +1613,11 @@ def _enforce_report_payload_budget(
     # best-agent and top-level projections.
     _prune_pass_at_k_pairing_diagnostics(payload, report_budget)
     refresh_signal()
-    if not enforce_size or _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
+    if not enforce_size:
+        return
+    _prune_declarative_check_rows(payload, report_budget)
+    refresh_signal()
+    if _serialized_payload_size(payload) <= _MAX_EMBEDDED_REPORT_BYTES:
         return
 
     # Built failure reasons and excerpts only explain scores the payload already
@@ -1737,17 +1797,22 @@ def _report_omissions(payload: dict[str, Any]) -> dict[str, Any] | None:
     return omitted if isinstance(omitted, dict) else None
 
 
-def _token_usage_fits(payload: dict[str, Any]) -> bool:
+def _within_report_limits(payload: dict[str, Any]) -> bool:
+    """Whether the payload fits the embedded size budget and the reporters' node, depth and text limits."""
     from skillevaluator.reporting.base import agent_eval_report_serialization_issue
 
-    # The minimal last-resort payload carries no details.
-    if "payload_sections" in (_report_omissions(payload) or {}):
-        return False
     try:
         size = _serialized_payload_size(payload)
     except (TypeError, ValueError):
         return False
     return size <= _MAX_EMBEDDED_REPORT_BYTES and agent_eval_report_serialization_issue(payload) is None
+
+
+def _token_usage_fits(payload: dict[str, Any]) -> bool:
+    # The minimal last-resort payload carries no details.
+    if "payload_sections" in (_report_omissions(payload) or {}):
+        return False
+    return _within_report_limits(payload)
 
 
 def _record_token_usage_omission(payload: dict[str, Any], section: str, count: int) -> bool:
@@ -4261,7 +4326,11 @@ def _apply_saved_feedback(
     """
     saved = {field: list(saved_feedback[field]) for field in _TIER3_FEEDBACK_FIELDS if field in saved_feedback}
     fixes = _saved_case_fixes(run_dir)
-    if any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
+    if (payload.get("budget") or {}).get("not_run"):
+        saved.pop("conclusions", None)
+        payload.update(saved)
+        _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
+    elif any(_is_case_verdict(item) for item in saved.get("conclusions", [])):
         _apply_case_findings(payload, engine_result, run_dir, skill_path, use_llm=False, fixes=fixes)
         payload.update(saved)
     else:
@@ -4299,6 +4368,10 @@ def _apply_case_findings(
         logger.debug("Case findings skipped", exc_info=True)
         return
     label, detail = case_verdict(source["agents"])
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(payload.get("budget")):
+        label, detail = "incomplete", reason
     if not label:
         return
     message = f"per-case result: {label} ({detail})."
@@ -4333,7 +4406,8 @@ def _apply_case_findings(
                 if part
             ),
             "severity": "fail" if fix["kind"] == "skill hurts" else "warn",
-            "source": "deterministic",
+            "source": fix.get("source") or "deterministic",
+            **({"fallback_reason": fix["fallback_reason"]} if fix.get("fallback_reason") else {}),
         }
         for fix in fixes
     ]
@@ -4690,7 +4764,11 @@ def _evaluation_mode(agents: dict[str, dict[str, Any]]) -> str:
         for info in agents.values():
             conditions = info.get("conditions")
             arm = conditions.get(condition) if isinstance(conditions, dict) else None
-            statuses.append(arm.get("execution_status") if isinstance(arm, dict) else None)
+            statuses.append(
+                ("not_run" if arm.get("skip_reason") == "budget_exhausted" else arm.get("execution_status"))
+                if isinstance(arm, dict)
+                else None
+            )
         return statuses
 
     with_statuses = arm_statuses("with_skill")

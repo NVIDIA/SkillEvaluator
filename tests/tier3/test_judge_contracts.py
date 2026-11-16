@@ -14,6 +14,15 @@ from typing import Any
 
 import pytest
 from tests.conftest import load_harbor_eval_template
+from tests.tier3.test_security_finding_evidence import (
+    _CONFIGURED_CREDENTIAL,
+    _JWT,
+    _KEY_BLOCK,
+    _READINGS_THAT_START_THE_TEXT,
+    _generated_texts,
+    _masking_seconds,
+    _only_adds_markers,
+)
 
 from skillevaluator.tier3.eval_core import atif_helpers, llm_judge
 from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
@@ -1412,6 +1421,27 @@ def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: l
         # The same with the quotes escaped twice, after a plain MySQL client element.
         'run(["mysql", "-e", "x"]); '
         + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
+        # Ordinary argv flags with the quotes escaped twice, also one element
+        # per line, and in a quoted Python string, plain and JSON-escaped.
+        json.dumps(json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]')),
+        json.dumps(json.dumps('["rsync", "-u", "host:/data", "."]; ["ssh", "-p", "2222", "host"]')),
+        json.dumps(json.dumps('["find", ".", "-path", "x"]; ["tool", "--token", "--verbose"]')),
+        json.dumps(json.dumps('["tool", "--password-file", "pw.txt"]; ["curl", "-b", "jar.txt"]')),
+        json.dumps(json.dumps('subprocess.run([\n    "date",\n    "-u",\n    "+%H:%M",\n])')),
+        "code = '[\\'date\\', \\'-u\\', \\'+%H:%M\\'] + [\\'mkdir\\', \\'-p\\', \\'out\\']'",
+        json.dumps("code = '[\\'date\\', \\'-u\\', \\'+%H:%M\\'] + [\\'ssh\\', \\'-p\\', \\'2222\\']'"),
+        # Quoted flag values escaped twice that hold no credential: a URL, a
+        # remote path and a date format after -u, -u values with no colon, and
+        # a flag that names no credential.
+        json.dumps(
+            json.dumps(
+                'pip install -U "git+https://github.com/org/repo" && rsync -u "host:/data" . && date -u "+%H:%M"'
+            )
+        ),
+        json.dumps(json.dumps('curl -u "bot" https://x && git push -u "origin" main && judge --token-limit "5 10"')),
+        # An escaped backslash before a closing quote, in JSON escaped once and twice.
+        json.dumps({"path": "C:\\tmp\\", "cmd": "tool --password-file C:\\tmp\\pw.txt", "note": "keep me"}),
+        json.dumps(json.dumps({"path": "C:\\tmp\\", "cmd": 'echo "C:\\new\\" && ls', "note": "keep me"})),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:
@@ -1457,6 +1487,291 @@ def test_judge_evidence_masks_twice_escaped_attached_password(context: str) -> N
     text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
 
     assert eval_template._redact_judge_evidence(text) == text.replace(_QUOTED_SECRET, "<redacted>")
+
+
+def _escaped_twice(text: str) -> str:
+    return json.dumps(json.dumps({"command": text}))
+
+
+def _in_quoted_python_string(text: str) -> str:
+    """Write *text*, a list with double-quoted elements, as a single-quoted list inside a single-quoted string."""
+    source = text.replace('"', "'")
+    return "code = '" + source.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an argv list there has three backslashes before each quote
+# ([\\\"tool\\\", \\\"--password\\\", \\\"VALUE\\\"]). A list inside a quoted
+# Python string has one before each quote ([\'tool\', \'--password\',
+# \'VALUE\']), two once that string is JSON. Each list is masked as in plain
+# text, with its other elements and escapes intact, also when the value holds
+# an escaped quote or ends in a backslash.
+@pytest.mark.parametrize(
+    ("argv", "masked"),
+    [
+        pytest.param(
+            f'["tool", "--password", "{_QUOTED_SECRET}"]', '["tool", "--password", <redacted>]', id="password"
+        ),
+        pytest.param(f'["curl", "-u", "admin:{_QUOTED_SECRET}", url]', '["curl", "-u", <redacted>, url]', id="user"),
+        pytest.param(
+            f'["docker", "login", "-u", "bot", "-p", "{_QUOTED_SECRET}"]',
+            '["docker", "login", "-u", "bot", "-p", <redacted>]',
+            id="login",
+        ),
+        pytest.param(
+            f'["sshpass", "-p", "{_QUOTED_SECRET}", "ssh", "host"]',
+            '["sshpass", "-p", <redacted>, "ssh", "host"]',
+            id="sshpass",
+        ),
+        pytest.param(f'["curl", "-b", "sid={_QUOTED_SECRET}", url]', '["curl", "-b", <redacted>, url]', id="cookie"),
+        pytest.param(
+            f'["mysql", "-uroot", "-p{_QUOTED_SECRET}"]', '["mysql", "-uroot", "-p<redacted>"]', id="mysql-attached"
+        ),
+        pytest.param(
+            f'["docker", "login", "-p{_QUOTED_SECRET}"]', '["docker", "login", "-p<redacted>"]', id="login-attached"
+        ),
+        pytest.param(
+            f'["tool", "--token", "{_QUOTED_SECRET}\\\\", "next"]',
+            '["tool", "--token", <redacted>, "next"]',
+            id="value-ends-in-backslash",
+        ),
+    ],
+)
+def test_judge_evidence_masks_argv_lists_escaped_again(argv: str, masked: str) -> None:
+    for form in (_escaped_twice, _in_quoted_python_string, lambda text: json.dumps(_in_quoted_python_string(text))):
+        text = form(f"subprocess.run({argv})")
+
+        assert eval_template._redact_judge_evidence(text) == form(f"subprocess.run({masked})")
+
+
+# A double-quoted element that holds an escaped quote is masked whole in an
+# argv list escaped twice, where that quote follows seven backslashes.
+def test_judge_evidence_masks_an_argv_value_with_an_escaped_quote_escaped_twice() -> None:
+    text = _escaped_twice(f'subprocess.run(["tool", "--token", "a\\"b {_QUOTED_SECRET}", "next"])')
+
+    assert eval_template._redact_judge_evidence(text) == _escaped_twice(
+        'subprocess.run(["tool", "--token", <redacted>, "next"])'
+    )
+
+
+# An argv list escaped twice may hold one element per line, where a line
+# break is the three characters "\\n".
+def test_judge_evidence_masks_argv_lines_escaped_twice() -> None:
+    argv = f'[\n    "tool",\n    "--token",\n    "{_QUOTED_SECRET}",\n]'
+    masked = '[\n    "tool",\n    "--token",\n    <redacted>,\n]'
+
+    assert eval_template._redact_judge_evidence(_escaped_twice(f"subprocess.run({argv})")) == _escaped_twice(
+        f"subprocess.run({masked})"
+    )
+
+
+# A RAGAS request that repeats a Write call writes the file's JSON content as
+# JSON twice. The value of a member named for a credential is masked as in JSON
+# escaped once: with its quotes, or between them after a scheme word for a
+# header. The other members are kept.
+def test_judge_evidence_masks_credentials_in_json_content_escaped_twice() -> None:
+    def prompt(content: str) -> str:
+        arguments = json.dumps({"file_path": "config.json", "content": content})
+        return "input: " + json.dumps(
+            {"user_input": [{"content": f"Agent called: Write({arguments})", "type": "ai"}]}, indent=4
+        )
+
+    content = json.dumps(
+        {"token": _QUOTED_SECRET, "token_type": "bearer", "headers": {"Authorization": f"Bearer {_PASSPHRASE_WORD}"}}
+    )
+    masked = content.replace(f'"{_QUOTED_SECRET}"', "<redacted>").replace(_PASSPHRASE_WORD, "<redacted>")
+
+    assert eval_template._redact_judge_evidence(prompt(content)) == prompt(masked)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so a double-quoted shell value there opens and closes with a run
+# of three backslashes and a quote (\\\"VALUE\\\"), or seven when the command
+# is itself a quoted shell string or the request is quoted once more. The whole
+# value is masked, also past a space, and the text around it is kept.
+@pytest.mark.parametrize(
+    ("text", "value", "times"),
+    [
+        pytest.param(f'tool --password "{_QUOTED_SECRET} two" -x', f'"{_QUOTED_SECRET} two"', 2, id="password-flag"),
+        pytest.param(f'tool --password "{_QUOTED_SECRET} two" -x', f'"{_QUOTED_SECRET} two"', 3, id="password-flag-3"),
+        pytest.param(f'deploy --token "a {_QUOTED_SECRET}" -x', f'"a {_QUOTED_SECRET}"', 2, id="token-flag"),
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 2, id="user-flag"),
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 3, id="user-flag-3"),
+        pytest.param(
+            f'curl --user="admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 2, id="user-flag-equals"
+        ),
+        pytest.param(
+            f'curl --proxy-user "admin:{_QUOTED_SECRET} two" https://x',
+            f'"admin:{_QUOTED_SECRET} two"',
+            2,
+            id="proxy-user-flag",
+        ),
+        pytest.param(f'sshpass -p "{_QUOTED_SECRET} two" ssh host', f'"{_QUOTED_SECRET} two"', 2, id="sshpass"),
+        pytest.param(
+            f'docker login -u bot -p "{_QUOTED_SECRET} two" registry.example.com',
+            f'"{_QUOTED_SECRET} two"',
+            2,
+            id="login-password",
+        ),
+        pytest.param(f'mysql -uroot -p"{_QUOTED_SECRET} two" app', f'"{_QUOTED_SECRET} two"', 2, id="mysql-password"),
+        pytest.param(
+            f'machine db login bot password "{_QUOTED_SECRET} two"', f'"{_QUOTED_SECRET} two"', 2, id="netrc-password"
+        ),
+        pytest.param(
+            f'bash -c "tool --password \\"{_QUOTED_SECRET} two\\" -x"',
+            f'\\"{_QUOTED_SECRET} two\\"',
+            2,
+            id="shell-string-2",
+        ),
+    ],
+)
+def test_judge_evidence_masks_quoted_values_escaped_again(text: str, value: str, times: int) -> None:
+    escaped = json.dumps({"command": text})
+    expected = json.dumps({"command": text.replace(value, "<redacted>")})
+    for _ in range(times - 1):
+        escaped, expected = json.dumps(escaped), json.dumps(expected)
+
+    assert eval_template._redact_judge_evidence(escaped) == expected
+    assert eval_template._redact_judge_evidence(f"ok\n{escaped}\ndone") == f"ok\n{expected}\ndone"
+
+
+# An argv value escaped twice that the passes mask only in part, at a token
+# that ends it, is masked whole: the marker of its reading and the token's
+# marker are one marker, and none of the token is kept.
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("{token}", id="token"),
+        pytest.param("word {token}", id="word-and-token"),
+        pytest.param("user:{token}", id="user-and-token"),
+    ],
+)
+def test_judge_evidence_masks_a_partly_masked_value_escaped_twice_as_one_value(value: str) -> None:
+    token = "gh" + "p_" + "Ab3" * 12
+    text = _escaped_twice(f'subprocess.run(["tool", "--token", "{value.format(token=token)}"], check=True)')
+
+    assert eval_template._redact_judge_evidence_as_written(text) != text
+    assert eval_template._redact_judge_evidence(text) == _escaped_twice(
+        'subprocess.run(["tool", "--token", <redacted>], check=True)'
+    )
+
+
+# A value of a reading ends at the quote that ends the string it was read
+# from. A double-quoted value that does not close before the end of its JSON
+# string is masked to that end, and the quote and the members after it stay.
+@pytest.mark.parametrize("times", [1, 2])
+def test_judge_evidence_masks_an_unclosed_quoted_value_to_the_end_of_its_string(times: int) -> None:
+    escaped = json.dumps({"command": f'tool --password "{_QUOTED_SECRET} two && echo done', "note": "keep me"})
+    masked = json.dumps({"command": "tool --password <redacted>", "note": "keep me"})
+    for _ in range(times - 1):
+        escaped, masked = json.dumps(escaped), json.dumps(masked)
+
+    assert eval_template._redact_judge_evidence(escaped) == masked
+
+
+# A double quote after an escaped backslash ends a JSON string, also in the
+# readings: a line continuation that ends a string after a credential flag is
+# masked, and the string's closing quote and the members after it stay.
+def test_judge_evidence_keeps_the_quote_after_a_continuation_that_ends_a_string() -> None:
+    text = json.dumps({"lines": ["tool --token \\", "  --verbose"], "note": "keep me"})
+
+    assert eval_template._redact_judge_evidence(text) == json.dumps(
+        {"lines": ["tool --token <redacted>", "  --verbose"], "note": "keep me"}
+    )
+
+
+# Tool output with a NUL byte reaches a RAGAS prompt as \u0000, which the
+# readings keep as written, so a tool call elsewhere in the prompt is still
+# read with its escapes removed.
+def test_judge_evidence_reads_a_prompt_with_an_escaped_nul_again() -> None:
+    def prompt(command: str) -> str:
+        call = json.dumps({"command": command})
+        return "input: " + json.dumps(
+            {
+                "user_input": [
+                    {"content": f"Agent called: Bash({call})", "type": "ai"},
+                    {"content": "tool output: bin\x00ary", "type": "tool"},
+                ]
+            }
+        )
+
+    text = prompt(f'tool --password "{_QUOTED_SECRET} two" && echo done')
+
+    assert "\\u0000" in text
+    assert eval_template._redact_judge_evidence(text) == prompt("tool --password <redacted> && echo done")
+
+
+# The readings place what they mask by the text kept between markers, so a
+# JWT's jwt-<redacted>, a private key's marker and the [REDACTED] written for a
+# configured credential are read as markers too: a value escaped again in the
+# same prompt is still masked.
+@pytest.mark.parametrize(
+    ("output", "masked_output"),
+    [
+        pytest.param(f"session {_JWT} saved", "session jwt-<redacted> saved", id="jwt"),
+        pytest.param(f"key:\n{_KEY_BLOCK}\ndone", "key:\n<redacted private key>\ndone", id="private-key"),
+        pytest.param(
+            f"auth failed for {_CONFIGURED_CREDENTIAL}", "auth failed for [REDACTED]", id="configured-credential"
+        ),
+    ],
+)
+def test_judge_evidence_masks_a_value_escaped_again_next_to_a_marker_of_another_kind(
+    output: str, masked_output: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _CONFIGURED_CREDENTIAL)
+
+    def prompt(value: str, output: str) -> str:
+        call = json.dumps({"command": f'subprocess.run(["tool", "--password", {value}])'})
+        return json.dumps({"call": call, "output": output})
+
+    text = prompt(f'"{_QUOTED_SECRET}"', output)
+
+    assert _QUOTED_SECRET in eval_template._redact_judge_evidence_as_written(text)
+    assert eval_template._redact_judge_evidence(text) == prompt("<redacted>", masked_output)
+
+
+# The text that a reading keeps before its first marker is placed at the
+# start of the reading, also when it is found again inside the masked value
+# or is empty (see test_security_finding_evidence.py).
+@pytest.mark.parametrize(("text", "expected"), _READINGS_THAT_START_THE_TEXT)
+def test_judge_evidence_places_the_text_a_reading_keeps_before_its_first_marker(text: str, expected: str) -> None:
+    assert eval_template._redact_judge_evidence_as_written(text) != expected
+    assert eval_template._redact_judge_evidence(text) == expected
+
+
+# Reading the text with its escapes removed only adds markers to what the
+# judge evidence passes write for the text as written, also next to the
+# [REDACTED] written for a configured credential.
+def test_judge_evidence_masking_escaped_again_only_adds_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _CONFIGURED_CREDENTIAL)
+    changed = 0
+    for text in _generated_texts(400):
+        as_written = eval_template._redact_judge_evidence_as_written(text)
+        masked = eval_template._redact_judge_evidence(text)
+
+        assert _only_adds_markers(as_written, masked), (text, as_written, masked)
+        changed += masked != as_written
+    assert changed > 50
+
+
+# The judge passes read whole prompts and replies, with no scan window, so
+# their readings also take time in proportion to the text's length on long
+# adversarial input.
+@pytest.mark.parametrize(
+    "unit",
+    [
+        pytest.param('\\\\\\"', id="escaped-quotes"),
+        pytest.param("\\n\\t\\u00e4\\/\\'", id="escape-runs"),
+        pytest.param('password=\\\\\\"', id="credential-names-before-escaped-quotes"),
+        pytest.param('--password \\\\\\"a b\\\\\\" ', id="values-escaped-twice"),
+        pytest.param('<redacted>\\\\\\"', id="markers-and-escaped-quotes"),
+    ],
+)
+def test_judge_evidence_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
+    small, large = _masking_seconds(eval_template._redact_judge_evidence, unit, 20_000, 200_000)
+    # Ten times the text takes about ten times as long. The margin allows for
+    # a slow CI runner.
+    assert large < 16 * small + 0.05
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:

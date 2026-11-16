@@ -20,6 +20,7 @@ import json
 import posixpath
 import re
 import shlex
+from array import array
 from collections.abc import Callable, Mapping
 from fnmatch import fnmatchcase
 from typing import Any
@@ -402,7 +403,8 @@ _UNAUTHORIZED_PATHS = [
     *_HOME_CREDENTIAL_PATHS,
 ]
 
-# Shell startup and privilege files. A shell command that names one and has a
+# Shell startup and privilege files. A shell command that names one where a path
+# starts, other than as the file a source or . command reads, and has a
 # redirection, tee or sed -i anywhere counts as a write (the keyword rule in
 # check_security).
 _SENSITIVE_WRITE_PATHS = [
@@ -1151,15 +1153,68 @@ def _sensitive_write_target(command: str) -> str | None:
     )
 
 
+# The keyword rule reads an entry only where a path starts, as an apply_patch
+# header is read, so /opt/conda/etc/profile.d/conda.sh does not name
+# /etc/profile.d, while ../etc/sudoers names /etc/sudoers and the default word
+# of "${DEST:-/etc/sudoers.d}" names /etc/sudoers.d. A path attached to a short
+# option or a cluster of them, as in "cp -t/etc/sudoers.d",
+# "curl -4fsSLo/etc/profile.d/x.sh" or "OPTS=-t/etc/sudoers.d", starts after
+# the option letters and digits when the option follows whitespace, a quote or
+# "=". A variable that starts the word, as in "$ROOT/etc/sudoers", may hold
+# the leading part, so it also starts the path, while a variable inside a
+# longer path, as in /opt/$X/etc/profile.d, does not. The entry is group 1 of
+# the pattern.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$])|(?<=[\s'\"=])-[a-z0-9]+|(?<![\w~$/.-])(?:\$\w+)+)"
+# The file a source or . command reads: its first operand. The command starts
+# the text, a line (also after a "\n" escape, as an argv list prints a
+# newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens
+# a string (the script of a "bash -c"), after at most one shell keyword such
+# as "then" or "do". A "." anywhere else, as in "cp -r . /etc/profile.d" or
+# 'cp -r "$SRC" . /etc/profile.d', is an operand of another command.
+_SOURCED_FILE_RE = re.compile(
+    r"(?:^|\\n|[\n;&|({`]|(?<![^\s\[,=(])['\"])[ \t]*(?:(?:if|then|elif|else|do|while|until)[ \t]+)?"
+    r"(?:source|\.)[ \t]+(['\"]?)([^\s;&|()<>'\"`]+)\1(?=$|[\s;&|()<>'\"`])"
+)
+
+
+def _keyword_rule_entry(lowered: str) -> str | None:
+    """Return the longest entry the keyword rule finds in lowercased command text.
+
+    An entry counts where a path starts, except inside the file a source or .
+    command reads, so "source ~/.bashrc; npm test 2>&1" names none while
+    ". ./patch.sh ~/.bashrc 2>/dev/null" still names ~/.bashrc.
+    """
+    # The sourced files are in order and do not overlap, so only the last one
+    # that starts at or before a mention can hold it.
+    sourced = [match.span(2) for match in _SOURCED_FILE_RE.finditer(lowered)]
+    starts = [start for start, _ in sourced]
+
+    def outside_sourced_file(mention: re.Match[str]) -> bool:
+        index = bisect.bisect_right(starts, mention.start(1)) - 1
+        return index < 0 or sourced[index][1] < mention.end(1)
+
+    return max(
+        (
+            entry
+            for entry in _SENSITIVE_WRITE_PATHS
+            if any(
+                outside_sourced_file(mention)
+                for mention in re.finditer(f"{_KEYWORD_PATH_START}({re.escape(entry)})", lowered)
+            )
+        ),
+        key=len,
+        default=None,
+    )
+
+
 def _sensitive_command_write_match(
     tool_call: dict[str, Any], path_text: str, action_text_lower: str, *, shell_patch: bool
 ) -> str | None:
     """Return the longest protected entry matched by the legacy or home-path write rule."""
-    lowered = path_text.lower()
     legacy_entry = None
-    # Preserve the earlier raw-substring rule, including its legacy spellings.
+    # The earlier keyword rule, in its legacy spellings (_keyword_rule_entry).
     if re.search(r"(>>|>\s*|tee\b|sed\s+-i|cat\s+>|printf\s+.*>)", action_text_lower):
-        legacy_entry = max((entry for entry in _SENSITIVE_WRITE_PATHS if entry in lowered), key=len, default=None)
+        legacy_entry = _keyword_rule_entry(path_text.lower())
     texts = [path_text] if shell_patch else _shell_write_texts(tool_call)
     entries = [legacy_entry, *(_sensitive_write_target(text) for text in texts)]
     return max((entry for entry in entries if entry is not None), key=len, default=None)
@@ -3263,7 +3318,9 @@ def _security_finding(
 # assigned to a credential name (_authToken=..., api_key: ..., DB_PASS=...);
 # and common token prefixes. Only the first _FINDING_EVIDENCE_SCAN_CHARS
 # characters are scanned, and each pass reads that text in linear time. A
-# quoted value ends at its closing quote or at the end of its line.
+# quoted value ends at its closing quote or at the end of its line. The same
+# forms are masked in text whose quotes are escaped up to three times, as tool
+# calls repeated in a RAGAS prompt are (see _mask_unescaped_views).
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
@@ -3637,6 +3694,41 @@ _FINDING_EVIDENCE_TOKEN_PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(gh[pousr]_|github_pat_|glpat-|npm_|xox[abeoprs]-|hf_)([A-Za-z0-9_-]{8,})"
 )
 _FINDING_EVIDENCE_IDENTIFIER_BODY_RE = re.compile(r"[a-z]+(?:_[a-z]+)+")
+# Tool-call arguments are JSON, and a RAGAS request writes them into its prompt
+# as JSON again, so a command can reach evidence with each quote escaped twice
+# ([\\\"--password\\\", \\\"VALUE\\\"], --password \\\"VALUE MORE\\\") or three
+# times. The patterns above read a quote with at most one backslash before it,
+# so they kept such a value, or masked only its first word. They did the same
+# with a single-quoted value whose quotes are escaped once, as in Python source
+# (\'--password\', \'VALUE\'; --password \'VALUE MORE\'), JSON or not.
+# So the text is also read with one level of string escapes removed, and then
+# with two: \\, \", \', \/, \n, \r, \t and \uXXXX are decoded wherever they
+# appear, inside a quoted string or not, and any other backslash is read as
+# written, as is \u0000, since the Harbor verifier's masker drops NUL
+# characters. A double quote after an even run of backslashes (none, or an
+# escaped backslash: "C:\\tmp\\") ends a string of the text it is read from,
+# so that run is kept as written. Decoded, the quote would read as escaped in
+# the first reading, and a value that the second reading masks there would not
+# end at that string's end: a JSON string that ends in a shell line
+# continuation, "tool --token \\", would lose its closing quote. Each reading
+# is masked with the same patterns, and what they mask there is masked in the
+# text as written too, where that still reads in clear (see
+# _mask_unescaped_views). Nothing the text as written masks is kept, so a
+# reading only adds markers.
+_BACKSLASH_RUN_RE = re.compile(r"(\\+)(u[0-9A-Fa-f]{4}|[\s\S])?")
+# A double quote after an even run of backslashes, which ends (or opens) a
+# string of the text it is in.
+_STRING_END_RE = re.compile(r'(?<!\\)(?:\\\\)*"')
+_UNESCAPED_CHARS = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "'": "'", "/": "/"}
+_UNESCAPE_LEVELS = 2
+# A masker only replaces values with markers, so the text it keeps between two
+# markers is found in the text it read, in order, and what lies between was
+# masked. The JWT pattern writes "jwt-" before its marker, the Harbor verifier
+# writes [REDACTED] for a credential its process holds, and markers next to
+# each other are read as one.
+_MASKED_MARKERS_RE = re.compile(
+    r"((?:(?:jwt-)?<redacted>|" + re.escape(_FINDING_EVIDENCE_PRIVATE_KEY_MARKER) + r"|\[REDACTED\])+)"
+)
 
 
 def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
@@ -3660,6 +3752,210 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
 
 
 def _mask_finding_evidence_credentials(text: str, *, preserve_header_format: bool = False) -> str:
+    """Mask supported credential forms, also in text escaped again, without imposing a caller's evidence budget."""
+
+    def mask(view: str) -> str:
+        return _mask_finding_evidence_credentials_as_written(view, preserve_header_format=preserve_header_format)
+
+    return _mask_unescaped_views(text, mask(text), mask)
+
+
+def _mask_unescaped_views(text: str, masked: str, mask: Callable[[str], str]) -> str:
+    """Return *masked*, which *mask* wrote for *text*, also masking what *mask* masks in *text* unescaped.
+
+    *text* is read with one level of escapes removed, then with two. A span is
+    masked only where the text that *masked* keeps around it places it for
+    certain, and only where *masked* still keeps it: a marker is never taken
+    back, and a span next to a marker joins it.
+    """
+    # The Harbor verifier's masker drops NUL characters, so the text it keeps
+    # would no longer be found in the text it read. A reading keeps \u0000 as
+    # written, so it holds a NUL only where the text does.
+    if "\\" not in text or "\x00" in text:
+        return masked
+    spans: list[tuple[int, int]] = []
+    view = text
+    view_starts: list[array[int]] = []
+    for _ in range(_UNESCAPE_LEVELS):
+        source = view
+        view, starts = _unescaped(source)
+        if starts is None:
+            break
+        string_ends: list[int] | None = None
+        for start, end in _masked_spans(view, mask(view)):
+            start, end = starts[start], starts[end]
+            # The text the reading decodes lies inside strings of the text it
+            # was read from, so a value of the reading ends at a quote that
+            # ends such a string, and one that starts right after that quote
+            # was read from the text around the strings.
+            if string_ends is None:
+                string_ends = [match.end() - 1 for match in _STRING_END_RE.finditer(source)]
+            index = bisect.bisect_left(string_ends, start - 1)
+            if index < len(string_ends) and string_ends[index] == start - 1:
+                continue
+            if index < len(string_ends) and string_ends[index] < end:
+                end = string_ends[index]
+            if start == end:
+                continue
+            # Back through each earlier reading to the text as written.
+            for level_starts in reversed(view_starts):
+                start, end = level_starts[start], level_starts[end]
+            spans.append((start, end))
+        view_starts.append(starts)
+        if "\\" not in view:
+            break
+    return _mask_spans(text, masked, spans) if spans else masked
+
+
+def _unescaped(text: str) -> tuple[str, array[int] | None]:
+    """Return *text* with one level of string escapes decoded, and where each of its characters starts in *text*.
+
+    The starts end with len(text), so the span [start, end) of the result is
+    [starts[start], starts[end]) in *text*. They are None when no escape is
+    decoded.
+    """
+    parts: list[str] = []
+    starts = array("q")
+    pos = 0
+    for match in _BACKSLASH_RUN_RE.finditer(text):
+        run, after = match.group(1), match.group(2) or ""
+        escapes = len(run) % 2 == 1 and (after in _UNESCAPED_CHARS or (len(after) == 5 and after != "u0000"))
+        if (len(run) == 1 and not escapes) or (after == '"' and len(run) % 2 == 0):
+            continue
+        parts.append(text[pos : match.start()])
+        starts.extend(range(pos, match.start()))
+        # Each escaped backslash is one backslash, and an odd one escapes the
+        # character after it.
+        parts.append("\\" * (len(run) // 2))
+        starts.extend(range(match.start(), match.start() + len(run) - 1, 2))
+        pos = match.start() + len(run) // 2 * 2
+        if escapes:
+            parts.append(chr(int(after[1:], 16)) if len(after) == 5 else _UNESCAPED_CHARS[after])
+            starts.append(pos)
+            pos = match.end()
+    if not parts:
+        return text, None
+    parts.append(text[pos:])
+    starts.extend(range(pos, len(text) + 1))
+    return "".join(parts), starts
+
+
+def _masker_reading(text: str) -> tuple[str, array[int] | None]:
+    """Return *text* as the masker reads it, without shell line continuations, and where each of its characters is.
+
+    The positions are None when *text* holds no line continuation.
+    """
+    if _LINE_CONTINUATION_RE.search(text) is None:
+        return text, None
+    starts = array("q")
+    pos = 0
+    for match in _LINE_CONTINUATION_RE.finditer(text):
+        starts.extend(range(pos, match.start()))
+        pos = match.end()
+    starts.extend(range(pos, len(text)))
+    return _LINE_CONTINUATION_RE.sub("", text), starts
+
+
+def _masked_spans(text: str, masked: str) -> list[tuple[int, int]]:
+    """Return the spans of *text* that *masked*, a masker's output for it, masks for certain."""
+    read, read_starts = _masker_reading(text)
+    kept = _MASKED_MARKERS_RE.split(masked)[::2]
+    starts = _place_kept_text(read, kept)
+    spans: list[tuple[int, int]] = []
+    for index in range(len(kept) - 1 if starts else 0):
+        start, end = starts[index], starts[index + 1]
+        if start < 0 or end < 0 or start + len(kept[index]) >= end:
+            continue
+        start += len(kept[index])
+        spans.append((start, end) if read_starts is None else (read_starts[start], read_starts[end - 1] + 1))
+    return spans
+
+
+def _place_kept_text(read: str, kept: list[str]) -> list[int] | None:
+    """Return where each piece of *kept*, the text a masker kept between its markers, starts in *read*, the text it read.
+
+    The pieces are placed in order, once as early and once as late as they
+    fit. A piece placed at the same index both times is there in every
+    placement; any other is -1. A first piece that starts *read* and a last
+    piece that ends it are placed there, as a masker at most strips whitespace
+    from the ends of its result. None: a piece is missing.
+    """
+    count = len(kept)
+    early: list[int] = []
+    pos = 0
+    for index, piece in enumerate(kept):
+        found = read.find(piece, pos)
+        if index == count - 1 and read.endswith(piece):
+            found = len(read) - len(piece) if len(read) - len(piece) >= pos else -1
+        if found < 0:
+            return None
+        early.append(found)
+        pos = found + len(piece)
+    # The latest places are found from the end, in the reversed text, so that
+    # each search reads it once.
+    backwards = read[::-1]
+    late = [0] * count
+    pos = 0
+    for index in range(count - 1, -1, -1):
+        found = backwards.find(kept[index][::-1], pos)
+        late[index] = len(read) - found - len(kept[index])
+        pos = found + len(kept[index])
+    if read.startswith(kept[0]):
+        late[0] = 0
+    return [start if start == late[index] else -1 for index, start in enumerate(early)]
+
+
+def _mask_spans(text: str, masked: str, spans: list[tuple[int, int]]) -> str:
+    """Return *masked*, a masker's output for *text*, with the parts of *spans* (of *text*) that it keeps masked."""
+    read, read_starts = _masker_reading(text)
+    if read_starts is not None:
+        spans = [(bisect.bisect_left(read_starts, start), bisect.bisect_left(read_starts, end)) for start, end in spans]
+    merged: list[list[int]] = []
+    for start, end in sorted(span for span in spans if span[0] < span[1]):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    pieces = _MASKED_MARKERS_RE.split(masked)
+    starts = _place_kept_text(read, pieces[::2]) if merged else None
+    if starts is None:
+        return masked
+    parts: list[str] = []
+    # Whether the result so far ends with a marker, and whether that marker
+    # is one this function added. A marker that follows another one joins it.
+    marked = added = False
+    first_span = 0
+    for index, piece in enumerate(pieces):
+        if index % 2:
+            if added:
+                parts.pop()
+            if not marked or added:
+                parts.append(piece)
+            marked, added = True, False
+            continue
+        start = starts[index // 2]
+        pos = 0
+        if start >= 0:
+            while first_span < len(merged) and merged[first_span][1] <= start:
+                first_span += 1
+            probe = first_span
+            while probe < len(merged) and merged[probe][0] < start + len(piece):
+                cut_start, cut_end = max(merged[probe][0] - start, 0), min(merged[probe][1] - start, len(piece))
+                probe += 1
+                if cut_start > pos:
+                    parts.append(piece[pos:cut_start])
+                    marked = added = False
+                if not marked:
+                    parts.append("<redacted>")
+                    marked = added = True
+                pos = cut_end
+        if pos < len(piece):
+            parts.append(piece[pos:])
+            marked = added = False
+    return "".join(parts)
+
+
+def _mask_finding_evidence_credentials_as_written(text: str, *, preserve_header_format: bool = False) -> str:
     """Mask supported credential forms without imposing a caller's evidence budget."""
     # Remove shell continuations before matching values: they can join an
     # attached password to its flag. Ordinary line breaks stay intact.
@@ -6018,7 +6314,10 @@ def _classify_execution_failure(
     }
     declared_names = {normalized(str(name)) for name in dependencies}
     declared = normalized(missing) in declared_names or normalized(aliases.get(missing.lower(), "")) in declared_names
-    used = bool(re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", "")))
+    skill_name = normalized(str(context.get("skill_name") or ""))
+    used = skill_name != normalized(missing) and bool(
+        re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", ""))
+    )
     used = (
         used or missing in context.get("script_imports", []) or _command_executes_skill(command, expected_script, paths)
     )

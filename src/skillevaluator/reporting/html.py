@@ -80,6 +80,13 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
+from skillevaluator.reporting.declarative_coverage import (
+    DENOMINATOR_NOTE,
+    attempt_denominators,
+    check_status,
+    coverage_summary,
+    declarative_coverage_groups,
+)
 from skillevaluator.reporting.finding_summary import (
     describe_issue_counts,
     finding_counts,
@@ -2941,7 +2948,7 @@ class HTMLReporter(ReporterBase):
         ) -> bool:
             if agent_eval_publication_evidence_complete(candidate):
                 return True
-            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive"}:
+            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive", "incomplete"}:
                 return False
             execution_status = payload_execution_status(candidate)
             if execution_status == "succeeded":
@@ -3060,6 +3067,15 @@ class HTMLReporter(ReporterBase):
                     display["summary"]["harbor_viewer"] = preserved["summary"]["harbor_viewer"]
                 if preserved.get("_serialization_truncated") is True:
                     display["_serialization_truncated"] = True
+                from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+                if (
+                    selected_execution_status == "skipped"
+                    and not preserved.get("execution_errors")
+                    and budget_fully_denied(preserved.get("budget"))
+                ):
+                    display["budget"] = preserved["budget"]
+                    display["budget_summary"] = preserved.get("budget_summary")
 
             result_errors = [error for result in results for error in result.errors]
             result_diagnostics = [
@@ -3122,7 +3138,7 @@ class HTMLReporter(ReporterBase):
             if verdict == "fail" or execution_status == "failed":
                 return normalized_payload(
                     forced_verdict="fail",
-                    forced_execution_status="failed",
+                    forced_execution_status=execution_status or "failed",
                     scrub_untrusted_evidence=not (has_trustworthy_payload or has_explicit_failure_payload),
                 )
             if execution_status == "incomplete":
@@ -3621,6 +3637,13 @@ class HTMLReporter(ReporterBase):
             tier3_truncation=tier3_truncation,
             tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            declarative_coverage_groups=declarative_coverage_groups(
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {}
+            ),
+            declarative_coverage_summary=coverage_summary,
+            declarative_check_status=check_status,
+            declarative_attempt_denominators=attempt_denominators,
+            declarative_denominator_note=DENOMINATOR_NOTE,
             # Measured, not scored. From the full display payload, with its own
             # per-agent cap: the preview walk can blank strings of late keys.
             tier3_token_usage=token_usage_table(

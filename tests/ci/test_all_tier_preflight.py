@@ -98,6 +98,23 @@ def test_local_bootstrap_installs_the_opencode_release_docker_runs_pin(monkeypat
     assert runner._harbor_agent_kwargs("opencode", None, "docker") == {"version": runner.OPENCODE_VERSION}
 
 
+def test_local_bootstrap_runs_the_pinned_install_that_local_setup_offers(monkeypatch):
+    from skillevaluator.tier3.harbor import local_runtime
+
+    def managed_install_argv(agent):
+        return ["npm", "install", f"{agent}-cli@0.0.1"]
+
+    monkeypatch.setattr(local_runtime, "managed_install_argv", managed_install_argv)
+    bootstrap = module("bootstrap_tiers")
+    calls = []
+    monkeypatch.setattr(
+        bootstrap.subprocess, "run", lambda args, **_kwargs: calls.append(args) or subprocess.CompletedProcess(args, 0)
+    )
+    for agent in local_runtime.LOCAL_RUNTIME_AGENTS:
+        bootstrap.install_agent(agent)
+    assert calls == [managed_install_argv(agent) for agent in local_runtime.LOCAL_RUNTIME_AGENTS]
+
+
 def test_gitlab_admission_rejects_forks_and_stale_heads():
     gate = module("eligible_gitlab")
     env = {

@@ -1252,6 +1252,7 @@
     {% set tier3_is_skipped = tier3_execution_status == 'skipped' or (tier3_provenance_data.get('advisory') and tier3_provenance_data.get('reason') == 'skipped') %}
     {% set tier3_skip_message = tier3_provenance_data.get('message') or 'Live evaluation did not run.' %}
     {% set tier3_verdict = (tier3_effective_status or tier3.get('verdict') or 'unknown') | lower if has_tier3 else 'unknown' %}
+    {% if has_tier3 and tier3.budget and tier3.budget.not_run %}{% set tier3_verdict = 'incomplete' %}{% endif %}
     {#- A failing tier whose gate does not block is "Failed (advisory)", never "Changes required". -#}
     {% set tier3_advisory_fail = tier3_verdict == 'fail' and 'tier3' in nonblocking_tiers %}
     {% set has_t12_tab = tabs | selectattr('id', 'in', ['tier1', 'tier2']) | list | length > 0 %}
@@ -1319,7 +1320,7 @@
                 <div class="agent-hero-title-block">
                     <span class="agent-hero-eyebrow">{{ content_label }} evaluation</span>
                     <h1 class="agent-hero-title" id="report-title">{{ hero_title }}</h1>
-                    <p class="hero-command-status verdict-chip {{ verdict_class }}">{{ presentation.command_label }}</p>
+                    <p class="hero-command-status verdict-chip {{ 'warn' if has_tier3 and tier3.budget and tier3.budget.not_run and report_scope == 'tier3' else verdict_class }}">{{ 'Incomplete' if has_tier3 and tier3.budget and tier3.budget.not_run and report_scope == 'tier3' else presentation.command_label }}</p>
                     {% if presentation.required_failed or presentation.required_incomplete %}<p class="hero-decision-reason">{{ presentation.required_failed }} failed · {{ presentation.required_incomplete }} incomplete required check(s). See tier evidence for reasons.</p>{% endif %}
                     {% if presentation.advisory_unfavorable %}<p class="hero-decision-reason">{{ presentation.advisory_unfavorable }} advisory check(s) failed or incomplete; advisory checks do not change the required result.</p>{% endif %}
                     {#-
@@ -1354,8 +1355,9 @@
                     </div>
                 {% else %}
                     {% set t3_key = tier3_verdict if tier3_verdict in ['pass', 'fail', 'neutral'] else 'incomplete' %}
+                    {% if tier3.budget and tier3.budget.not_run %}{% set t3_key = 'incomplete' %}{% endif %}
                     <span class="verdict-chip {{ {'pass': 'pass', 'fail': 'fail'}.get(t3_key, 'warn') }}">Tier 3 quality: {{ advisory_fail_word if tier3_advisory_fail else verdict_words[t3_key] }}</span>
-                    {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3_status_reason }}</p>{% endif %}
+                    {% if t3_key == 'incomplete' and tier3_status_reason %}<p class="hero-reason">{{ tier3.verdict_reason if tier3.budget and tier3.budget.not_run else tier3_status_reason }}</p>{% endif %}
                     <div class="agent-hero-score {{ 'score-pass' if hero_score is not none and hero_score >= 0.8 else ('score-warn' if hero_score is not none and hero_score >= 0.6 else 'score-fail') }}">{{ "%.2f" | format(hero_score) if hero_score is not none else "N/A" }}<span class="hero-score-label">{{ presentation.score_scope }}{{ ' (baseline)' if tier3.get('mode') == 'baseline_only' else '' }}</span></div>
                     <div class="agent-hero-detail">
                         <div><strong>Best performing agent:</strong> {{ tier3.best_agent or 'N/A' }}</div>
@@ -2208,9 +2210,10 @@
         {% set t3_evidence_links = t3_harbor.get('evidence_links') or [] %}
         {% set t3_agent_anchor_ids = {} %}
         {% set t3_agent_panel_ids = {} %}
-        {% if tier3.budget_summary and (t3_budget.status == 'exhausted' or 'overrun observed' in tier3.budget_summary or 'not fully verified' in tier3.budget_summary) %}
+        {% if tier3.budget_summary and (t3_budget.status == 'exhausted' or t3_budget.partial or t3_budget.not_run or 'overrun observed' in tier3.budget_summary or 'not fully verified' in tier3.budget_summary) %}
             <p class="warning">{{ tier3.budget_summary }}</p>
         {% endif %}
+        {% if t3_budget.not_run %}<p class="warning">All scores and Skill Lift below cover admitted attempts only, not the complete planned run.</p>{% endif %}
         {% for name, _agent in t3_agents.items() %}
             {% set _ = t3_agent_anchor_ids.update({name: 'tier3-agent-anchor-' ~ loop.index0}) %}
             {% set _ = t3_agent_panel_ids.update({name: 'tier3-agent-panel-' ~ loop.index0}) %}
@@ -2687,7 +2690,7 @@
                 <summary>What each number means</summary>
                 <div class="t3-details-body">
                 <ul class="t3-reasoning-list">
-                    <li><strong>Verdict</strong>: the live-evaluation result from the five dimensions. It passes when one agent scores at least {{ "%.2f" | format(tier3_dimension_pass_threshold) }} on every dimension with the skill.</li>
+                    <li><strong>Verdict</strong>: the live-evaluation result from the five dimensions and required case checks. It passes when one agent scores at least {{ "%.2f" | format(tier3_dimension_pass_threshold) }} on every dimension with the skill and has no with-skill case failing a required goal-accuracy or security check. A scored unmet goal or security issue in any attempt fails its case and that agent's quality verdict, even if all dimensions pass. Baseline-arm required-check failures do not change this quality verdict.</li>
                     <li><strong>Overall Score</strong>: the equal-weight mean of the five dimension scores with the skill, from 0.00 to 1.00.</li>
                     <li><strong>Skill Lift</strong>: compares Overall on the metrics and cases both arms scored, so it can differ from subtracting the displayed Overall scores. It shows whether the skill helped and does not change the verdict; N/A means no comparable baseline, not zero.</li>
                     <li><strong>pass@k</strong> (Trials): the share of eval cases with at least one passing attempt out of k. It measures how repeatable success is.</li>
@@ -3220,6 +3223,22 @@
                 {% endif %}
                 </div>
             </details>
+            {% endif %}
+
+            {% if declarative_coverage_groups %}
+            <h3>Declarative-check coverage</h3>
+            <p class="t3-section-hint">{{ declarative_denominator_note }}</p>
+            {% for group in declarative_coverage_groups %}
+            <h4>{{ group.agent }} / {{ group.arm }}</h4>
+            <p>{{ declarative_coverage_summary(group) }}</p>
+            <p class="t3-section-hint">Per-reward denominators: {{ declarative_attempt_denominators(group) }}</p>
+            <div class="table-scroll"><table class="summary-table">
+                <thead><tr><th>Case / trial</th><th>Check</th><th>Expected</th><th>Status</th><th>Reason</th></tr></thead>
+                <tbody>{% for item in group.results %}
+                <tr><td>{{ item.case_id }} / {{ item.trial_id }}</td><td>{{ item.type }}</td><td>{{ item.expected }}</td><td>{{ declarative_check_status(item) }}</td><td>{{ item.reason }}</td></tr>
+                {% endfor %}</tbody>
+            </table></div>
+            {% endfor %}
             {% endif %}
 
             {% if t3_condition_trial_rows %}

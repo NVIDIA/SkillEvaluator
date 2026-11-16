@@ -296,6 +296,26 @@ def nemo_gym_preflight_errors(skill_path: Path, params: dict[str, Any]) -> list[
     for url in (os.environ.get(MODEL_URL_ENV, "").strip(), str(params.get("model") or "")):
         if url and (url_error := model_url_credential_error(url)) and url_error not in errors:
             errors.append(url_error)
+    if os.environ.get(MODEL_URL_ENV, "").strip() and not params.get("model") and params.get("agents"):
+        from skillevaluator.tier3.commands import parse_agent_model_overrides
+        from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+
+        try:
+            overrides = parse_agent_model_overrides(tuple(params.get("agent_model") or ()))
+            config_agents = (load_evals_config(skill_path)[0].get("harbor") or {}).get("agents") or {}
+        except (ValueError, EvalsConfigError):
+            config_agents = None  # Reported by the option and config checks.
+        if config_agents is not None and (
+            missing := [
+                agent
+                for agent in parse_agents(params["agents"])
+                if not overrides.get(agent) and not (config_agents.get(agent) or {}).get("model")
+            ]
+        ):
+            errors.append(
+                f"{MODEL_URL_ENV} is set, so also choose a model it serves "
+                f"(--model, --agent-model, or harbor.agents.<agent>.model) for: {', '.join(missing)}"
+            )
     for name in ("override_cpus", "override_memory_mb"):
         value = params.get(name)
         if value is not None and value <= 0:

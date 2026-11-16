@@ -369,29 +369,100 @@ _GENERIC_TASK = "handle a typical request"
 _BARE_SKILL_MD_RE = re.compile(
     r"(?:\b(?:the|its|this|that|own|skill['\u2019]s)\s+)*(?<![\w./-])skill\.md\b", re.IGNORECASE
 )
+# Generic wording right before a SKILL.md, which `tier3 validate` checks before
+# the skill's name: a read verb, the/its/this/that/own/skill's, "the contents of".
+_GENERIC_SKILL_MD_RE = re.compile(
+    rf"(?:\b{evals_spec._READ_VERB_RE}\s+)?(?:\b{evals_spec._SKILL_MD_QUALIFIER_RE}\s+)*"
+    r"(?:(?:the\s+)?contents\s+of\s+)?['\"*_\[]*skill\.md\b",
+    re.IGNORECASE,
+)
 
 
 def _template_task(skill: dict[str, Any]) -> tuple[str, str | None]:
     """The task template prompts ask for, and the outcome their graded text quotes.
 
-    Both come from the description. A bare SKILL.md in it becomes "my SKILL.md",
-    so the prompt names the user's file rather than the skill's; a description
-    that still points at the skill's files (skills/<name>, <name>/SKILL.md)
-    gives a generic task. The outcome is None, and graded text generic, when
-    quoting the task would grade skill use: "The release-review skill checks
-    manifests" or "Runs review.py on ..." names the skill or its script, and
-    the no-skill baseline is graded on the expected output and assertions too.
+    Both come from the description. When it reads, opens, loads, consults or
+    follows SKILL.md with no path before it, or otherwise points at the
+    skill's own SKILL.md as a prompt `tier3 validate` flags would ("cat
+    SKILL.md", "uses the skill's SKILL.md"), each bare SKILL.md in it becomes
+    "my SKILL.md", so the prompt names the user's file rather than the
+    skill's. Reading SKILL.md does not count when the wording means another
+    SKILL.md or the file format: "a SKILL.md", "the following SKILL.md", or a
+    format noun such as files, format, spec or template right after it or
+    after one other word ("reads SKILL.md files", "follows the SKILL.md
+    frontmatter format"). That other word cannot be and, or, then, but,
+    before, after, to, for or with, so "reads SKILL.md for format errors" is
+    still renamed but "reads SKILL.md on format errors" is not. Reading also
+    does not count when in, of, from, under or inside comes right after
+    SKILL.md, unless the skill itself follows (the skill, the installed skill,
+    its own skill or the skill's name), as in "in ./pdf-tools" or "in full".
+    Other place words, such as at or within, do not count: "reads SKILL.md at
+    ./pdf-tools" is still renamed. A description that only names SKILL.md
+    without reading it ("validates SKILL.md frontmatter") keeps it too. Once
+    one SKILL.md counts, every bare SKILL.md in the description is renamed,
+    even one that would not count by itself ("a SKILL.md", "SKILL.md in
+    ./pdf-tools"). When the description still points at the skill's files
+    after the rename (<name>/SKILL.md, skills/<name>, "uses the installed
+    skill"), calls the skill "the <name> skill" ("the release-review skill
+    checks manifests"), or when one SKILL.md counts and the skill's name, "the
+    <name> skill's" or "the installed skill's" comes right before any SKILL.md
+    in the description ("reads <name>'s SKILL.md", "reads SKILL.md, then
+    validates <name>'s SKILL.md frontmatter"), the task is the generic "handle
+    a typical request" and the outcome is None. When no SKILL.md counts, the
+    description keeps such a SKILL.md ("validates <name>'s SKILL.md
+    frontmatter"). Generic wording comes first, as in tier3 validate: for a
+    skill named read or own, "read SKILL.md" and "its own SKILL.md" are
+    renamed as for any other skill. The outcome is also None, and graded text generic, when
+    quoting the task would grade skill use or name one of the skill's scripts:
+    "Uses release-review for manifests" grades skill use, and "Checks
+    manifests with review.py" names a script the no-skill baseline does not
+    have, which is graded on the expected output and assertions too.
     """
     name = skill["name"]
     task = _description_lower(skill)
     script_names = _script_file_names(skill)
     if evals_spec._prompt_skill_files_match(task, name, script_names):
+        if _skill_owns_skill_md(task, name):
+            return _GENERIC_TASK, None
         task = _BARE_SKILL_MD_RE.sub("my SKILL.md", task)
         if evals_spec._prompt_skill_files_match(task, name, script_names):
             return _GENERIC_TASK, None
-    if evals_spec._skill_use_match(task, name, _script_file_names(skill)):
+    if evals_spec._skill_use_match(task, name, script_names) or _names_skill_script(task, script_names):
         return task, None
     return task, task
+
+
+def _skill_owns_skill_md(text: str, name: str) -> bool:
+    """Whether the skill's name, "the <name> skill's" or "the installed skill's" comes right before a SKILL.md.
+
+    That SKILL.md is the skill's own; renamed, it would read "<name>'s my SKILL.md".
+    As in `tier3 validate`, generic wording comes first: for a skill named
+    read, skill, own or of, "read SKILL.md", "the skill's SKILL.md", "its own
+    SKILL.md" and "the contents of SKILL.md" are not the name.
+    """
+    text = evals_spec._normalized_match_text(text)
+    name = re.escape(evals_spec._normalized_match_text(name))
+    owner = rf"(?:(?<![\w-]){name}(?:\s+skill)?|\binstalled(?:\s+{name})?\s+skill)" if name else r"\binstalled\s+skill"
+    owned = rf"{owner}(?:['\u2019]s)?(?:\s+own)?\s+['\"*_\[]*skill\.md\b"
+    # Start of the generic wording that ends at each SKILL.md; it explains an owner match it covers.
+    generic = {match.end(): match.start() for match in _GENERIC_SKILL_MD_RE.finditer(text)}
+    owners = re.finditer(owned, text, re.IGNORECASE)
+    return any(generic.get(match.end(), match.end()) > match.start() for match in owners)
+
+
+def _names_skill_script(text: str, scripts: Sequence[str]) -> bool:
+    """Whether text names one of the skill's script files, run or not ("checks manifests with review.py").
+
+    The text and names are also checked as `tier3 validate` normalizes them,
+    so a zero-width or fullwidth spelling of a script name counts too.
+    """
+    texts = {text, evals_spec._normalized_match_text(text)}
+    names = {name for script in scripts for name in (script, evals_spec._normalized_match_text(script))}
+    return any(
+        re.search(rf"(?<![\w.-]){re.escape(name)}(?![\w-]|\.\w)", candidate, re.IGNORECASE)
+        for name in names
+        for candidate in texts
+    )
 
 
 def _outcome_ground_truth(outcome: str | None) -> str:

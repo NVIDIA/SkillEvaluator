@@ -270,7 +270,7 @@ def run_harness_check(
         )
         console.print()
         block[f"{target} (plugin)"] = rows
-    all_facts = facts_for(skills)
+    all_facts = facts_for(skills, profiles)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]
 

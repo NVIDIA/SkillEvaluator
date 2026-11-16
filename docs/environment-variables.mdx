@@ -21,12 +21,12 @@ contract. None belongs to either SkillEvaluator prefix.
 
 ## LLM provider
 
-These variables select and configure the provider used for LLM-backed checks and judging. The setup walkthrough, including per-provider export blocks and default models, is in [Providers & Credentials](configuration.mdx).
+These variables select and configure the provider used for LLM-backed checks and judging. The setup walkthrough, including per-provider export blocks and default models, is in [Providers & Credentials](/skills/skillevaluator/configuration).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SKILL_EVAL_LLM_PROVIDER` | auto-selected (see below) | Provider for chat and judging: `openai`, `anthropic`, `nv_build`, `bedrock`, or `openai-compatible`. |
-| `SKILL_EVAL_LLM_MODEL` | OpenAI: `gpt-6.1-sol`; Anthropic: `claude-opus-5-5`; NVIDIA Build: `nvidia/nemotron-3-super-120b-a12b`; OpenAI-compatible: `nvidia/nvidia/nemotron-3-super-120b-long-ctx`; Bedrock: `us.anthropic.claude-opus-5-5` | Chat model override. For gateways, use the exact catalog ID when it differs from the default. Setting it to an empty string is a configuration error. For a lower-cost OpenAI option, use `gpt-5.4-mini`. |
+| `SKILL_EVAL_LLM_MODEL` | OpenAI: `gpt-6.1-sol`; Anthropic: `claude-opus-5-5`; NVIDIA Build: `nvidia/nemotron-3.5-lightning-30b-a3b`; OpenAI-compatible: `nvidia/nvidia/nemotron-3-super-120b-long-ctx`; Bedrock: `us.anthropic.claude-opus-5-5` | Chat model override. For gateways, use the exact catalog ID when it differs from the default. Setting it to an empty string is a configuration error. For a lower-cost OpenAI option, use `gpt-5.4-mini`. |
 | `SKILL_EVAL_LLM_BASE_URL` | provider default endpoint | Endpoint override; takes precedence over `OPENAI_BASE_URL` and `ANTHROPIC_BASE_URL`. Required for `openai-compatible`. Ignored by `nv_build`, whose endpoint is fixed to `https://integrate.api.nvidia.com/v1` — point a custom endpoint at the `openai-compatible` provider instead. |
 | `SKILL_EVAL_LLM_API_KEY` | — | API key for the `openai-compatible` provider (local servers still require it to be set). |
 | `SKILL_EVAL_MODEL_CATALOG_ALLOW_HTTP_HOSTS` | unset | Comma-separated hosts whose model catalog may be read over plain HTTP. Catalog reads otherwise require HTTPS unless the host is loopback, because the request carries a bearer token. Use this only when the transport is already encrypted and authenticated below HTTP — a WireGuard or comparable tunnel peer, for example — where the tool cannot see that the link is protected. Each entry matches one whole host as written, with no resolution, no suffix matching, and no wildcards. A plain-HTTP request to an accepted host also bypasses any inherited HTTP proxy, so the bearer token is never offered to an intermediary. The transport rechecks authorization before dispatch and rejects hosts that are no longer allowed. HTTPS routing is unchanged. |
@@ -108,7 +108,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 | Variable | Default | Effect |
 | --- | --- | --- |
 | `SKILLSPECTOR_PROVIDER` | bridged from your provider | Overrides the provider SkillSpector uses. Must name a supported public provider (`openai`, `anthropic`, `bedrock`, or `nv_build`) — only that provider's credential variables are forwarded. Any other value fails closed: SkillSpector runs without a credential. |
-| `SKILLSPECTOR_MODEL` | `SKILL_EVAL_LLM_MODEL` when set, else the SkillSpector default for your provider | Model SkillSpector uses for its LLM analysis. SkillSpector defaults: OpenAI `gpt-6.1-sol`, Anthropic `claude-opus-5`, Bedrock `us.anthropic.claude-opus-5`, NVIDIA Build `nvidia/nemotron-3-super-120b-a12b`, OpenAI-compatible `nvidia/nvidia/nemotron-3-super-120b-long-ctx`. They track the models the pinned SkillSpector release supports, not the chat defaults. |
+| `SKILLSPECTOR_MODEL` | `SKILL_EVAL_LLM_MODEL` when set, else the SkillSpector default for your provider | Model SkillSpector uses for its LLM analysis. SkillSpector defaults: OpenAI `gpt-6.1-sol`, Anthropic `claude-opus-5-5`, Bedrock `us.anthropic.claude-opus-5-5`, NVIDIA Build `nvidia/nemotron-3.5-lightning-30b-a3b`, OpenAI-compatible `nvidia/nvidia/nemotron-3-super-120b-long-ctx`. They track the models the pinned SkillSpector release supports, not the chat defaults. |
 | `SKILLSPECTOR_MODEL_<SLOT>` | unset | Per-analyzer model override, such as `SKILLSPECTOR_MODEL_META_ANALYZER`. Forwarded as set. |
 | `SKILLSPECTOR_MODEL_REGISTRY` | unset | Path to a complete custom SkillSpector model registry, for model IDs the bundled registry does not list. Forwarded as set. |
 | `SKILLSPECTOR_REASONING_EFFORT` | `medium` for GPT-6 models, else unset | Reasoning effort for every SkillSpector analyzer. Your value wins. SkillEvaluator sets it only when every SkillSpector model, including `SKILLSPECTOR_MODEL_<SLOT>` overrides, is a GPT-6 model, so never for Claude. |
@@ -116,7 +116,7 @@ The `--llm` security analysis runs [SkillSpector](https://github.com/NVIDIA/Skil
 
 ## Embeddings
 
-Tier 2 semantic checks use an OpenAI-compatible embeddings API. Workflow context lives in [Providers & Credentials](configuration.mdx#embeddings) and [Tier 2: Deduplication](tier2-deduplication.mdx).
+Tier 2 semantic checks use an OpenAI-compatible embeddings API. Workflow context lives in [Providers & Credentials](/skills/skillevaluator/configuration#embeddings) and [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -127,7 +127,7 @@ Tier 2 semantic checks use an OpenAI-compatible embeddings API. Workflow context
 
 ## Validation (Tier 1)
 
-These variables tune the static and security checks. The check-by-check guide is [Tier 1: Validation](tier1-validation.mdx).
+These variables tune the static and security checks. The check-by-check guide is [Tier 1: Validation](/skills/skillevaluator/tier1-validation).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -148,9 +148,9 @@ The scanner path overrides fail closed: a value that is not an absolute, executa
 ## Live evaluation (Tier 3)
 
 These variables control where results land and how Harbor confines local mode.
-The run workflow is [Tier 3: Live Evaluation](tier3-live-evaluation.mdx);
+The run workflow is [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation);
 execution environments are covered in
-[Agents & Sandboxes](agents-and-sandboxes.mdx).
+[Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
 
 | Variable | Default | Effect |
 | --- | --- | --- |
@@ -158,7 +158,7 @@ execution environments are covered in
 | `SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` | macOS: `~/Library/Application Support/skillevaluator/output-provenance.key`; Linux: `$XDG_STATE_HOME/skillevaluator/output-provenance.key` (`~/.local/state` when `XDG_STATE_HOME` is unset); Windows: `%LOCALAPPDATA%\skillevaluator\output-provenance.key` | Local key that authenticates the markers SkillEvaluator writes into its generated output directories; a directory is replaced only when its marker verifies for that path. The key is created on first use. It must be outside every evaluated skill and generated output tree. On macOS and Linux, the file and its directory must be owned by the current user and not accessible to group or other users. |
 | `SKILLEVALUATOR_LOCAL_SANDBOX` | `require` | Local-mode sandbox policy. `require` fails closed when no OS sandbox backend (Bubblewrap on Linux, Seatbelt on macOS) is usable; `prefer` degrades to advisory-only guardrails with a loud warning; `off` skips sandbox probing entirely — for skills you fully trust. Any other value is rejected. No value enables native Windows: local mode fails closed there before anything runs — use WSL2 or `--env-mode docker`. |
 | `SKILL_EVAL_NEMO_GYM_BIN` | `gym` on `PATH` | Path to the experimental task-folder adapter's pinned Gym executable. Public `nemo-gym==0.7.0` is incompatible; the public source candidate still needs native runtime qualification. See [Execution backends](/skills/skillevaluator/tier3-live-evaluation#execution-backends). |
-| `SKILL_EVAL_NEMO_GYM_MODEL_URL` | provider base URL | OpenAI-compatible base URL (ending in `/v1`) of the policy model for `--backend nemo-gym`. |
+| `SKILL_EVAL_NEMO_GYM_MODEL_URL` | provider base URL | OpenAI-compatible base URL (ending in `/v1`) of the policy model for `--backend nemo-gym`. When set, also choose a model it serves with `--model`, `--agent-model` or `harbor.agents.<agent>.model`. |
 | `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` | provider key, only when the URL is also the provider's | API key for that policy model. Required when `SKILL_EVAL_NEMO_GYM_MODEL_URL` is set; use `EMPTY` for a keyless server. Passed to Gym through the environment, never on the command line. |
 | `SKILL_EVAL_NEMO_GYM_HOST` | — | Address of this host that the Gym sandbox can reach (for example the Docker bridge gateway). Needed when the host name resolves to a loopback address. |
 | `SKILL_EVAL_NEMO_GYM_SANDBOX` | `docker` | NeMo Gym sandbox provider for `--backend nemo-gym`. |
@@ -167,15 +167,15 @@ execution environments are covered in
 | `SKILLEVALUATOR_LOCAL_STRICT_READS` | `false` | Tightens the sandbox's read-only view of the host system to a stricter path set. |
 | `SKILLEVALUATOR_LOCAL_INHERIT_AGENT_KEYS` | `false` | When true, local-mode trials inherit the host's agent credential variables into their ambient environment. Off by default so a hostile skill command cannot read credentials — agents and verifiers receive credentials per-exec instead. |
 | `SKILLEVALUATOR_RUNTIME_DIR` | `~/.local/share/skillevaluator/runtimes` | Where local mode looks for managed agent CLIs. Must be a dedicated subdirectory — not the home directory or one of its parents. |
-| `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS` | unset (custom backends enabled) | Set to `1`, `true`, or `yes` (case-insensitive, with surrounding whitespace ignored) to hide every installed custom execution backend and reject its mode. Other values leave discovery enabled. Built-in modes remain available. See [Custom execution backends](agents-and-sandboxes.mdx#custom-execution-backends). |
+| `SKILLEVALUATOR_DISABLE_CUSTOM_BACKENDS` | unset (custom backends enabled) | Set to `1`, `true`, or `yes` (case-insensitive, with surrounding whitespace ignored) to hide every installed custom execution backend and reject its mode. Other values leave discovery enabled. Built-in modes remain available. See [Custom execution backends](/skills/skillevaluator/agents-and-sandboxes#custom-execution-backends). |
 | `SKILLEVALUATOR_ALLOWED_MCP_HOSTS` | unset | Comma-separated hostnames approved for MCP endpoints receiving environment-variable references or authentication headers from skill-authored MCP declarations. Matching uses the whole hostname, case-insensitively; supply hostnames, not URLs or wildcard patterns. |
 | `SKILLEVALUATOR_ALLOWED_MCP_SECRETS` | unset | Comma-separated, case-sensitive environment-variable names approved for references such as `${DEDICATED_MCP_TOKEN}` in skill-authored MCP declarations and `harbor.runtime_env`. Export the dedicated non-LLM credential on the host; literal secret values remain prohibited. Remote declarations also require the endpoint in `SKILLEVALUATOR_ALLOWED_MCP_HOSTS`. This allowlist cannot authorize operator-owned agent or provider credentials. |
 | `SKILL_EVAL_HARBOR_PREBUILD_TASK_ENVS` | unset | Set to exactly `1` to opt in to pre-building Harbor task environment images before trials start (other truthy spellings are not honored). Opt-in because concurrent trial cleanup can remove a shared prebuilt image that sibling trials still need. |
 | `SKILL_EVAL_JUDGE_MODEL` | falls back to `SKILL_EVAL_LLM_MODEL` | Operator-controlled model override for the Tier 3 dimension judge in standard grading. `LLM_JUDGE_MODEL` is honored as a higher-precedence spelling; when neither is set, the judge uses `SKILL_EVAL_LLM_MODEL`, then the built-in judge default. Both spellings change only the model used with the configured `SKILL_EVAL_LLM_PROVIDER`; they do not select a separate judge provider, so the model must be supported by that provider. Standard grading makes both spellings resolve to the selected override in Harbor's parent process, then forwards them through its verifier-only job layer, which takes precedence over task and step verifier declarations. Neither name is injected into the evaluated agent's initial environment; attempts to set or reference one from skill-authored `runtime_env` or native `[environment.env]` tables are rejected. Native custom-only graders keep ownership of their verifier configuration. Shared agent/verifier containers are a process boundary, not a confidentiality boundary; use a separate verifier environment when the model name itself must be hidden from untrusted agent processes. `run_config.json` records the configured judge provider, model, source, `override_applied`, reasoning effort, and catalog-verification status separately from agent models; an allowed provider fallback may use a different model for an individual judge call. When `override_applied` is false for a native Harbor task, `effective_model_source` is `native_harbor_runtime` and catalog verification is explicitly inconclusive because an authored task or step verifier declaration may supersede the recorded fallback. |
 | `LLM_JUDGE_FALLBACK_MODELS` | unset | Comma-separated fallback models for the Tier 3 standard judges in the Harbor verifier. When the provider rejects the judge model as not found, invalid, or not accessible to the key, the verifier tries each fallback in order with the same provider. Fallback applies to the `openai`, `nv_build`, and `openai-compatible` providers. A safety refusal or an empty reply from the judge model also moves to the next fallback, on every provider. The value is forwarded only to standard verifier jobs, never to the agent environment or `custom_only` runs. |
 | `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` | `claude-opus-4-8` | Model named as the server-side refusal fallback on requests to Claude 5.5 or later models on the native Claude API; on Bedrock, the Tier 3 judge's refusal retry uses it. On Bedrock, a bare name such as `claude-opus-4-8` gets the judge model's geography prefix (`us.anthropic.`, `global.anthropic.`), and a full Bedrock ID such as `global.anthropic.claude-opus-4-8` is used as given. Set `none`, `off`, `disabled`, `false` or `0` to send no fallback, for example when the API answers HTTP 400 `is not a valid fallback target` for your model. An empty value counts as unset, and a fallback equal to the request model is never sent. Forwarded to standard verifier jobs like `LLM_JUDGE_FALLBACK_MODELS`. The reusable SkillEvaluator CI workflows do not take this variable; their provider-backed jobs keep the default. |
-| `LLM_JUDGE_FALLBACK_POLICY` | `append` | Opt-in limit on which models may answer a Tier 3 standard judge. `append` keeps the built-in refusal fallback, which sends a refused Claude 5.5 or later judge to `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` (default `claude-opus-4-8`, off with `none`, never sent when it equals the judge model). `replace` turns it off, so only the judge model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.fallback_policy` in `run_config.json` when set. See [Judge fallback and retry policies](tier3-live-evaluation.mdx#judge-fallback-and-retry-policies). |
-| `LLM_JUDGE_RETRY_POLICY` | `legacy` | Opt-in retry policy for the Tier 3 standard judges. `strict` tries at most three models (the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries) with at most two requests each within the per-judge time budget, moves on only when a model is unavailable, ends the judge on a refusal or a quota, budget, safety, or security error, and scores only a first completed reply that is exactly one JSON object. `legacy` keeps the standard retries, fallbacks, format retry, and salvage. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.retry_policy` in `run_config.json` when set. See [Judge fallback and retry policies](tier3-live-evaluation.mdx#judge-fallback-and-retry-policies). |
+| `LLM_JUDGE_FALLBACK_POLICY` | `append` | Opt-in limit on which models may answer a Tier 3 standard judge. `append` keeps the built-in refusal fallback, which sends a refused Claude 5.5 or later judge to `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` (default `claude-opus-4-8`, off with `none`, never sent when it equals the judge model). `replace` turns it off, so only the judge model and the `LLM_JUDGE_FALLBACK_MODELS` entries answer. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.fallback_policy` in `run_config.json` when set. See [Judge fallback and retry policies](/skills/skillevaluator/tier3-live-evaluation#judge-fallback-and-retry-policies). |
+| `LLM_JUDGE_RETRY_POLICY` | `legacy` | Opt-in retry policy for the Tier 3 standard judges. `strict` tries at most three models (the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries) with at most two requests each within the per-judge time budget, moves on only when a model is unavailable, ends the judge on a refusal or a quota, budget, safety, or security error, and scores only a first completed reply that is exactly one JSON object. `legacy` keeps the standard retries, fallbacks, format retry, and salvage. Values are case-insensitive; any other value stops a run with standard grading before trials start, and the verifier fails every standard judge on it before a request is sent. Forwarded like `LLM_JUDGE_FALLBACK_MODELS`, and recorded as `judge.retry_policy` in `run_config.json` when set. See [Judge fallback and retry policies](/skills/skillevaluator/tier3-live-evaluation#judge-fallback-and-retry-policies). |
 | `SKILLEVALUATOR_HARBOR_DIAGNOSTIC_ARTIFACT_MAX_BYTES` | `5242880` (5 MiB) | Size cap per diagnostic artifact copied from a Harbor trial into the results directory. Values are bounded to 0–67108864 bytes (64 MiB); `0` skips non-empty artifacts. Oversized artifacts are skipped and recorded in the artifact manifest. |
 | `SKILLEVALUATOR_GKE_CLUSTER`, `SKILLEVALUATOR_GKE_REGION`, `SKILLEVALUATOR_GKE_NAMESPACE`, `SKILLEVALUATOR_GKE_REGISTRY_LOCATION`, `SKILLEVALUATOR_GKE_REGISTRY_NAME` | — | Target cluster, region, namespace, and Artifact Registry coordinates for `--env-mode gke` when not supplied via `--ek`. |
 | `SKILLEVALUATOR_GKE_ALLOW_WORKLOAD_IDENTITY` | `false` | Opt in (`1`, `true`, `yes`) to single-pod GKE Workload Identity (`CLAUDE_CODE_USE_VERTEX=1` or a GCP-bound Kubernetes ServiceAccount). Restricted to trusted skills because the pod ServiceAccount and GCE/GKE metadata server are shared with evaluated skill commands. |
@@ -194,7 +194,7 @@ directory with `.env` loading and Harbor telemetry disabled:
 - An evaluation run passes Harbor only an allowlisted environment: basic
   process, locale, and temporary-directory variables such as `PATH`, `HOME`,
   `LANG`, and `TMPDIR`; proxy and CA-bundle variables; the selected backend's
-  own variables (see [Agents & Sandboxes](agents-and-sandboxes.mdx)); the
+  own variables (see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes)); the
   evaluator provider's settings and credential, plus the `AWS_*` chain for
   `bedrock`; each selected agent's credentials; validated `runtime_env`
   values; and the Tier 3 judge, retry, and evidence-budget variables on this
@@ -206,7 +206,7 @@ directory with `.env` loading and Harbor telemetry disabled:
   so Docker Desktop can discover Compose. `PYTHONUTF8` and
   `PYTHONIOENCODING` are also forwarded when set; use `PYTHONUTF8=1` and
   `PYTHONIOENCODING=utf-8` for a non-UTF-8 locale. See the
-  [PowerShell setup](agents-and-sandboxes.mdx#windows-hosts).
+  [PowerShell setup](/skills/skillevaluator/agents-and-sandboxes#windows-hosts).
 - Setting `HARBOR_TELEMETRY` or `PYTHON_DOTENV_DISABLED` yourself has no
   effect; SkillEvaluator always overrides both.
 - Tier 3 needs python-dotenv 1.2.0 or newer, which the `tier3` extra installs.
@@ -220,7 +220,7 @@ to standard Tier 3 judge prompts. It is off by default; `true`, `yes`, and `on`
 also enable it (case-insensitive). This operator-owned setting is forwarded only
 to standard verifier jobs, never to agent environments or `custom_only` jobs.
 When configured, its value is recorded as `judge.character_facts` in
-`run_config.json`. See [character-sensitive judging](tier3-live-evaluation.mdx#character-sensitive-judging)
+`run_config.json`. See [character-sensitive judging](/skills/skillevaluator/tier3-live-evaluation#character-sensitive-judging)
 for scope, limits, and the effect on the goal-accuracy route.
 
 Before the Harbor verifier calls the `accuracy`, `goal_accuracy`, and
@@ -241,7 +241,7 @@ Setting `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` below `SKILL_EVAL_BEHAVIOR_FINAL_RESP
 plus 1600 is honoured, but logs a warning: the final response will not fit
 beside any tool history, and `behavior_check` then reports incomplete evidence
 instead of a score (see
-[behavior evidence completeness](tier3-live-evaluation.mdx#evidence-budgets)).
+[behavior evidence completeness](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets)).
 Lower the final-response limit alongside the budget to cap the judge prompt
 without losing the answer.
 
@@ -262,7 +262,7 @@ In standard grading, a required judge transport, authentication, timeout, HTTP, 
 
 ## In-container grader contract
 
-The `HARBOR_*` variables are read by your custom grader *inside* the task container — you never set them yourself, and each has a fixed in-container default. The full reward contract, with defaults and examples, lives in [Custom Graders & Tasks](custom-graders.mdx).
+The `HARBOR_*` variables are read by your custom grader *inside* the task container — you never set them yourself, and each has a fixed in-container default. The full reward contract, with defaults and examples, lives in [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 
 | Variable | What it carries |
 | --- | --- |
@@ -277,14 +277,14 @@ The `HARBOR_*` variables are read by your custom grader *inside* the task contai
 ## Set at runtime, not committed
 
 <Warning>
-Keep credentials out of skill repositories and CI configuration files. Export provider keys as masked secrets at runtime. Agent credentials for Tier 3 come only from the host environment — `evals/config.yml` `runtime_env` carries non-credential values, and any entry that names or references an operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, their base-URL variables, `CLAUDE_CODE_USE_BEDROCK`, and the `AWS_*` credential variables) is rejected at run time, as are names that control the host process (`PATH`, `DOCKER_*`, proxy variables, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, and similar). See the blocked-names table in [Providers & Credentials](configuration.mdx#tier-3-credentials-two-roles). With NVIDIA Build, one exported `NVIDIA_API_KEY` covers both the evaluator and the agents in the `docker`, `kata`, and `local` env-modes.
+Keep credentials out of skill repositories and CI configuration files. Export provider keys as masked secrets at runtime. Agent credentials for Tier 3 come only from the host environment — `evals/config.yml` `runtime_env` carries non-credential values, and any entry that names or references an operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, their base-URL variables, `CLAUDE_CODE_USE_BEDROCK`, and the `AWS_*` credential variables) is rejected at run time, as are names that control the host process (`PATH`, `DOCKER_*`, proxy variables, `SKILL_EVAL_*`, `SKILLEVALUATOR_*`, and similar). See the blocked-names table in [Providers & Credentials](/skills/skillevaluator/configuration#tier-3-credentials-two-roles). With NVIDIA Build, one exported `NVIDIA_API_KEY` covers both the evaluator and the agents in the `docker`, `kata`, and `local` env-modes.
 </Warning>
 
 ## See also
 
-- [Providers & Credentials](configuration.mdx) — the setup walkthrough behind the provider variables
-- [CLI Reference](cli-reference.mdx) — the per-run flags that override many of these variables
-- [Gate Your CI](ci-integration.mdx) — supplying these variables as masked CI secrets
+- [Providers & Credentials](/skills/skillevaluator/configuration) — the setup walkthrough behind the provider variables
+- [CLI Reference](/skills/skillevaluator/cli-reference) — the per-run flags that override many of these variables
+- [Gate Your CI](/skills/skillevaluator/ci-integration) — supplying these variables as masked CI secrets
 
 
 ## GitLab all-tier admission

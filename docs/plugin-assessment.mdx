@@ -100,6 +100,15 @@ skillevaluator tier3 evaluate-plugin ./my-plugin \
   --agents claude-code --plugin-load wrapper -r json,html
 ```
 
+A plugin run, from `tier3 evaluate-plugin` or the agent stage of `validate`, writes
+its results, including per-trial agent traces, inside the plugin tree by default:
+`<plugin>/results/<plugin-folder>/<run-id>`, where `<plugin-folder>` is the name of
+the plugin directory. In a plugin repository, a plain `git add` would then pick the
+run up. To write elsewhere, pass `--results-dir DIR`, which writes the run to
+`DIR/<plugin-folder>/<run-id>`, or set `SKILLEVALUATOR_RESULTS_DIR` to a directory,
+which works the same way and which `--results-dir` overrides. Otherwise, ignore
+`results/` in the plugin repository.
+
 `validate ./my-plugin --tiers 1,2,3` includes the agent stage in the combined
 pipeline. Plugins use static and deduplication stages by default. Tier 3 becomes
 blocking in `validate` only with `--block-on-agent-eval`.

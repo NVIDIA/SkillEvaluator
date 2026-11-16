@@ -79,6 +79,40 @@ def test_public_workflow_uses_real_preparation_and_cleans_up(tmp_path, monkeypat
     assert result["plugin_provenance"]["attempts"] == 1
 
 
+@pytest.mark.parametrize("configured", ["default", "environment", "option", "both"])
+def test_plugin_run_results_location_matches_the_documentation(tmp_path, monkeypatch, configured):
+    from skillevaluator.tier3.plugin_execution import runtime_source_path
+    from skillevaluator.tier3.results_location import ENV_RESULTS_DIR, resolve_results_root
+
+    root = _plugin(tmp_path / "my-plugin")
+    environment, option = tmp_path / "environment-results", tmp_path / "option-results"
+    monkeypatch.delenv(ENV_RESULTS_DIR, raising=False)
+    if configured in {"environment", "both"}:
+        monkeypatch.setenv(ENV_RESULTS_DIR, str(environment))
+    seen = {}
+
+    def engine(self, options, *, progress_reporter=None):
+        # The per-plugin root the engine creates each run directory under.
+        seen["root"] = resolve_results_root(runtime_source_path(options.skill_path), options.results_dir)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    EvaluationService().evaluate_plugin(
+        EvaluationOptions(root, agents="claude-code", results_dir=option if configured in {"option", "both"} else None)
+    )
+    base = {"default": root / "results", "environment": environment, "option": option, "both": option}[configured]
+    assert seen["root"] == base.resolve() / "my-plugin"
+
+    docs = " ".join((Path(__file__).parents[2] / "docs/plugin-assessment.mdx").read_text(encoding="utf-8").split())
+    assert "inside the plugin tree by default: `<plugin>/results/<plugin-folder>/<run-id>`" in docs
+    assert "pass `--results-dir DIR`, which writes the run to `DIR/<plugin-folder>/<run-id>`" in docs
+    assert (
+        "set `SKILLEVALUATOR_RESULTS_DIR` to a directory, which works the same way and which `--results-dir` overrides"
+        in docs
+    )
+    assert "a plain `git add` would then pick the run up" in docs
+
+
 def test_root_dataset_and_authored_config_survive_staging(tmp_path, monkeypatch):
     import yaml
 

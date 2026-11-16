@@ -3138,7 +3138,7 @@ class HTMLReporter(ReporterBase):
             if verdict == "fail" or execution_status == "failed":
                 return normalized_payload(
                     forced_verdict="fail",
-                    forced_execution_status="failed",
+                    forced_execution_status=execution_status or "failed",
                     scrub_untrusted_evidence=not (has_trustworthy_payload or has_explicit_failure_payload),
                 )
             if execution_status == "incomplete":

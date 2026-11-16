@@ -73,6 +73,9 @@ backend.
 | `integration` | End-to-end integration tests; may need fixtures or longer runtime | `pytest -m integration` |
 | `live` | Live tests against the in-process Harbor backend; requires the `tier3` extra and `NVIDIA_API_KEY` | `pytest -m live` |
 
+Git URL-rewrite tests point `GIT_CONFIG_GLOBAL` at their temporary configuration,
+so caller-level Git isolation does not suppress the rewrite being tested.
+
 The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 
 ```bash title="Run tests in parallel"

@@ -21,6 +21,7 @@ rules:
   - {id: CC-CASING, when: "not manifest_name_exact", effect: degraded, message: "Non-canonical name (skill.md/Skill.md): loaded on case-insensitive filesystems (macOS default APFS, 3/3), ignored on case-sensitive Linux (3/3). Works or breaks depending on the OS.", fix: "Rename the file to SKILL.md (exact casing).", confidence: high}
   - {id: CC-CODEX-POLICY, when: "codex_implicit_disabled and not disable_model_invocation", effect: degraded, message: "agents/openai.yaml implicit-invocation policy is Codex-only: here the model can still use this skill on its own.", fix: "Also set disable-model-invocation: true (Claude Code, Copilot and OpenClaw honour it).", confidence: high}
   - {id: CC-FM-STRIPPED, when: "custom_field_chars > 200", effect: advisory, message: "Frontmatter is stripped when the skill is used, so the text in {custom_fields} never reaches the model.", fix: "Move instructions from frontmatter into the SKILL.md body.", confidence: medium}
+  - {id: CC-FIELD-VALUE, when: "claude_ignored_values != ''", effect: advisory, message: "Loaded, but Claude Code ignores {claude_ignored_values}.", fix: "Use a value Claude Code accepts, or remove the field.", confidence: high}
 notes:
   - "Follows symlinked skill folders and symlinked SKILL.md files, inside or outside the root."
   - "Nested SKILL.md, CRLF, BOM, tabs, uppercase names: no effect observed."

@@ -400,6 +400,30 @@ def _openclaw_gates(data: dict[str, Any]) -> str:
     return "; ".join(gates)
 
 
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_CLAUDE_SHELLS = ("bash", "powershell")
+
+
+def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
+    """Claude Code skill fields whose value it ignores, each with what it accepts."""
+    ignored = []
+    effort = data.get("effort")
+    text = str(effort).strip().lower()
+    whole_number = isinstance(effort, int) and not isinstance(effort, bool)
+    whole_number = whole_number or (isinstance(effort, float) and effort.is_integer())
+    numeric = whole_number or text.isdigit()
+    if effort is not None and not numeric and text not in _CLAUDE_EFFORTS:
+        ignored.append(f"effort '{effort}' (use {', '.join(_CLAUDE_EFFORTS)} or a number)")
+    shell = data.get("shell")
+    if shell is not None and str(shell).strip().lower() not in ("", *_CLAUDE_SHELLS):
+        ignored.append(f"shell '{shell}' (use bash or powershell; Claude Code falls back to bash)")
+    if _is_true(data.get("background")) and data.get("context") != "fork":
+        ignored.append("background without context: fork")
+    if "maxTurns" in data:
+        ignored.append("maxTurns (an agent field, not a skill field)")
+    return ignored
+
+
 def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
@@ -469,6 +493,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
+        "claude_ignored_values": "; ".join(_claude_ignored_values(data)),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "platforms": ", ".join(map(str, platforms)) if isinstance(platforms, list) else str(platforms or ""),

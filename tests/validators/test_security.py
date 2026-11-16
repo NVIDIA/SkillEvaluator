@@ -8592,7 +8592,8 @@ class TestSpdxAndIpFalsePositiveHardening:
     @pytest.mark.parametrize(
         "prefix",
         [
-            "a" * 79,
+            # the "/" gives the IP pattern's \b a boundary, so the value reaches the version-label check
+            "a" * 79 + "/",
             "toolshed.g2.bx.psu.edu/repos/devteam/picard/picard_RevertOriginalBaseQualitiesAndAddMateCigar/",
         ],
         ids=["lowercase-run", "galaxy-tool-id"],

@@ -559,7 +559,33 @@ def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
         catalogs.update(dict.fromkeys(group, _catalog_of(group)))
-    return {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    user_skills: dict[Path, dict[Path, str]] = {}
+    facts = {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    for skill_facts_ in facts.values():
+        skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills)
+    return facts
+
+
+def _user_copies(facts: dict[str, Any], cache: dict[Path, dict[Path, str]]) -> list[tuple[str, str]]:
+    """``(root, path)`` of same-named skills in the user-level roots, for a skill installed in a project root."""
+    if facts["install_root"] is None or facts["install_root"].startswith("~/"):
+        return []
+    try:
+        home = Path.home()
+    except (KeyError, RuntimeError):
+        return []
+    copies = []
+    for root in _KNOWN_ROOTS:
+        folder = home / root
+        if folder not in cache:
+            found = _find_skills(folder) if folder.is_dir() else []
+            cache[folder] = {skill: _skill_name(skill, _read_manifest(skill)[4]) for skill in found}
+        copies += [
+            (f"~/{root}", f"~/{root}/{skill.relative_to(folder).as_posix()}")
+            for skill, name in cache[folder].items()
+            if name == facts["skill_name"]
+        ]
+    return copies
 
 
 def _utf16_units(value: Any) -> int:
@@ -726,7 +752,17 @@ def evaluate_profile(
     roots = profile.get("roots", {})
     all_roots = [*roots.get("project", []), *roots.get("user", [])]
     setup = model_config(profile, config)
-    facts = {**facts, "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"])}
+    user_copies = (
+        [path for root, path in facts.get("user_copies", []) if root in roots.get("user", [])]
+        if facts["install_root"] in roots.get("project", [])
+        else []
+    )
+    facts = {
+        **facts,
+        "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"]),
+        "user_copy": bool(user_copies),
+        "user_copy_paths": ", ".join(user_copies[:3]),
+    }
     names = {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
     findings: list[dict[str, str]] = []
     worst = -1

@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and

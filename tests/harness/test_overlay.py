@@ -458,6 +458,26 @@ def test_reload_guidance_reaches_findings(tmp_path: Path):
     assert {r["status"] for r in rows.values()} == {"loads"}
 
 
+def test_user_level_copy_of_a_project_skill_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for folder in (project / ".claude/skills", home / ".claude/skills", home / ".agents/skills"):
+        (folder / "report").mkdir(parents=True)
+        (folder / "report" / "SKILL.md").write_text(
+            f"---\nname: report\ndescription: Use when testing copies.\n---\n{BODY}"
+        )
+    rows = _rows(project / ".claude/skills/report")
+
+    copies = {
+        h: next((f["message"] for f in r["findings"] if f["id"].endswith("-USER-COPY")), "") for h, r in rows.items()
+    }
+    assert "~/.claude/skills/report; Claude Code uses that user-level copy" in copies["claude-code"]
+    assert "~/.agents/skills/report; Copilot CLI uses this project copy" in copies["copilot-cli"]
+    assert "~/.agents/skills/report, ~/.claude/skills/report" in copies["opencode"]
+    assert copies["codex"] == copies["hermes"] == copies["openclaw"] == ""
+    assert not _rows(home / ".claude/skills/report")["claude-code"]["findings"]
+
+
 def test_listed_description_projection(tmp_path: Path):
     desc = "Use when " + "a" * 1600
     rows = _rows(_skill(tmp_path, desc=desc))

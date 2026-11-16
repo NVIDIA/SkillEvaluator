@@ -2878,6 +2878,15 @@ def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> Non
             f'./tool --use_token "y z w --set_secret "\\n DB_PASSWORD=x ["mysql", "-u", "root", "-p{_API_TOKEN}"]',
             id="argv-element-cut-by-the-flag",
         ),
+        pytest.param(
+            "ssh host './deploy --access_token '\"'\"'x --password p'\"'\"'"
+            f" client.auth=HTTPDigestAuth(\"bob\", \"{_API_TOKEN}\")'",
+            id="call-after-a-quote-idiom-value",
+        ),
+        pytest.param(
+            f"ssh host './deploy --access_token '\"'\"'x --password p'\"'\"' auth=(\"bob\", \"{_API_TOKEN}\")'",
+            id="tuple-after-a-quote-idiom-value",
+        ),
     ],
 )
 @pytest.mark.parametrize("judge", [False, True])
@@ -3927,6 +3936,45 @@ def test_a_config_value_in_a_quoted_string_ends_at_a_shell_operator(copy: str) -
 def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
     copy: str, text: str, expected: str
 ) -> None:
+    assert _mask_as(copy, text) == expected
+
+
+# Inside a single-quoted command string a flag value quoted with the '"'"' or
+# '\'' idiom runs to the next such idiom, so the words after its first one
+# are masked, and the text after it is read in the string it is in.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f"ssh host './deploy --password '\"'\"'{_API_TOKEN} {_BASIC_PASSWORD}'\"'\"' && rm -rf /srv/app'",
+            "ssh host './deploy --password <redacted> && rm -rf /srv/app'",
+            id="dashed-flag",
+        ),
+        pytest.param(
+            f"ssh host './deploy --db_password '\"'\"'{_API_TOKEN} {_BASIC_PASSWORD}'\"'\"' && rm -rf /srv/app'",
+            "ssh host './deploy --db_password <redacted> && rm -rf /srv/app'",
+            id="underscored-flag",
+        ),
+        pytest.param(
+            f"ssh host './deploy --password '\\''{_API_TOKEN} {_BASIC_PASSWORD}'\\'' && rm -rf /srv/app'",
+            "ssh host './deploy --password <redacted> && rm -rf /srv/app'",
+            id="backslash-idiom",
+        ),
+        pytest.param(
+            f"bash -c 'sshpass -p '\"'\"'{_API_TOKEN}'\"'\"' ssh host'",
+            "bash -c 'sshpass -p <redacted> ssh host'",
+            id="sshpass",
+        ),
+        pytest.param(
+            "ssh host './deploy --access_token '\"'\"'x --password p'\"'\"'"
+            f" client.auth=HTTPDigestAuth(\"bob\", \"{_API_TOKEN}\")'",
+            "ssh host './deploy --access_token <redacted> client.auth=<redacted>'",
+            id="call-after-the-value",
+        ),
+    ],
+)
+def test_a_flag_value_quoted_with_a_quote_idiom_is_masked_whole(copy: str, text: str, expected: str) -> None:
     assert _mask_as(copy, text) == expected
 
 

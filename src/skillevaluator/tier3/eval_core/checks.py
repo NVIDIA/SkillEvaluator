@@ -3363,13 +3363,23 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # --with-token < token.txt" the flag or key has no value on the command line.
 # A double-quoted value whose quotes are JSON-escaped (\"VALUE\"), as a shell
 # string reads in tool-call arguments and other JSON text, ends at the escaped
-# closing quote or the end of the line.
+# closing quote or the end of the line. Inside a single-quoted command string
+# ("ssh host '...'", "bash -c '...'") a value quoted with the '"'"' or '\''
+# idiom, which closes that string, writes a quote and opens it again, runs to
+# the next such idiom or the end of the line, so the words after its first
+# one and the quoting of the text after it are read as the shell reads them
+# ("ssh host './deploy --password '"'"'two words'"'"' && ...'").
 _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?"
+_FINDING_EVIDENCE_QUOTE_IDIOM = r"'(?:\"'\"|\\')'"
 _FINDING_EVIDENCE_QUOTED_FLAG_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + "|"
     + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
-    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
 )
 _FINDING_EVIDENCE_FLAG_VALUE = "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 # Any long flag whose name holds a credential word ("--password", "--db-password",

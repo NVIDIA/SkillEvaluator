@@ -2024,6 +2024,26 @@ def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.M
     assert all(secret not in path.read_text() for path in run_dir.rglob("*.json"))
 
 
+def test_malformed_mcp_servers_toml_is_handled_as_on_harbor(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import MCP_SERVERS_ERROR, nemo_gym_config_errors
+
+    skill = tmp_path / "calc"
+    (skill / "evals" / "environment").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: calc\ndescription: Adds numbers.\n---\n# Calc\n")
+    mcp = skill / "evals" / "environment" / "mcp_servers.toml"
+    mcp.write_text('[[mcp_servers]\nname = "x"\n')
+    # Harbor logs the parse error and runs without MCP servers; Gym does the same.
+    assert MCP_SERVERS_ERROR not in nemo_gym_config_errors(skill)
+    assert "Failed to parse" in caplog.text
+    mcp.write_text('[[mcp_servers]]\nname = "x"\nurl = "http://127.0.0.1:9/mcp"\n')
+    assert MCP_SERVERS_ERROR in nemo_gym_config_errors(skill)
+    mcp.write_text(
+        '[[mcp_servers]]\nname = "x"\nurl = "http://127.0.0.1:9/mcp"\nheaders = "Bearer sk-not-a-table-1234"\n'
+    )
+    invalid = [error for error in nemo_gym_config_errors(skill) if "mcp_servers.toml is invalid" in error]
+    assert invalid and "sk-not-a-table-1234" not in invalid[0]
+
+
 def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:

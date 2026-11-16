@@ -2338,10 +2338,9 @@ def test_bedrock_model_probe_classifies_real_invalid_region_as_fatal(
         region="not a region",
     )
 
-    # This is the first test in the file to load the real AWS SDK, and that cold start
-    # counts against the probe deadline. The region is rejected before any request is
-    # sent, so the deadline only guards against a hang: use the budget of the other
-    # real-SDK tests below instead of one a busy runner can miss.
+    # Real SDK initialization counts against the probe deadline. The invalid region
+    # is rejected before any request is sent, so allow the same setup budget as the
+    # other real-SDK classification tests instead of measuring one-second throughput.
     result = runtime_preflight.probe_model(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"

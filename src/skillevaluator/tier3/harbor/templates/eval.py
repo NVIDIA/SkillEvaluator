@@ -4173,8 +4173,11 @@ _YAML_PROPERTIES = re.compile(r"(?:[&!]\S*[ \t]*)+")
 _YAML_QUOTED_BODY = {'"': re.compile(r"(?:[^\"\\]|\\.)*", re.DOTALL), "'": re.compile(r"(?:[^']|'')*")}
 _YAML_BLOCK_SCALAR = re.compile(r"([|>])[+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
 _YAML_FLOW_TOKEN = re.compile(
-    r"""([\[{])|([\]}])|(?<![^\s\[{,:])(?:"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')|(?<!\S)#[^\n]*""", re.DOTALL
+    r"""(?P<space>\s+)|(?P<comment>(?<!\S)\#[^\n]*)|(?P<open>[\[{])|(?P<close>[\]}])|(?P<comma>,)"""
+    r"""|(?P<colon>:(?=[\s,\[\]{}]|\Z))|(?P<quoted>"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')""",
+    re.DOTALL,
 )
+_YAML_FLOW_PLAIN = re.compile(r"(?:[^\s,\[\]{}:]|:(?![\s,\[\]{}]|\Z))+")
 _YAML_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)", re.DOTALL)
 _YAML_SIMPLE_ESCAPES = {"0": "\0", "n": "\n", "r": "\r", "t": "\t"}
 
@@ -4198,16 +4201,35 @@ def _yaml_flow_end(text: str, start: int) -> int:
     """Return the index just past the flow collection that opens at ``text[start]``.
 
     A flow collection may continue over lines whose keys are not indented, so
-    brackets are counted while skipping quoted strings and comments.
+    brackets are counted while skipping quoted strings and comments. A quote
+    opens a string only where a node begins (after ``[``, ``{``, ``,`` or a
+    ``:`` indicator); inside a plain scalar it is an ordinary character.
     """
-    depth = 0
-    for token in _YAML_FLOW_TOKEN.finditer(text, start):
-        if token.group(1):
+    depth, node_starts, closed, position = 0, True, False, start
+    while position < len(text):
+        if closed and text[position] == ":":  # JSON-style `"key":value`
+            node_starts, closed, position = True, False, position + 1
+            continue
+        token = _YAML_FLOW_TOKEN.match(text, position)
+        kind = token.lastgroup if token else None
+        if kind == "quoted" and not node_starts:
+            kind = None  # a quote inside a plain scalar, not a string
+        if kind is None:
+            plain = _YAML_FLOW_PLAIN.match(text, position)
+            position = plain.end() if plain else position + 1
+            node_starts, closed = False, False
+            continue
+        position = token.end()
+        if kind in {"space", "comment"}:
+            continue
+        node_starts = kind in {"open", "comma", "colon"}
+        closed = kind in {"close", "quoted"}
+        if kind == "open":
             depth += 1
-        elif token.group(2):
+        elif kind == "close":
             depth -= 1
             if depth == 0:
-                return token.end()
+                return position
     return len(text)
 
 
@@ -4286,12 +4308,12 @@ def _yaml_node(text: str, start: int, parent: int, *, lookahead: bool = False) -
 def _frontmatter_skill_name(content: str) -> str:
     """Read the top-level ``name`` of a SKILL.md the way ``yaml.safe_load`` does.
 
-    The verifier image does not guarantee PyYAML, and loading skill-authored
-    YAML there would also expand its aliases, so this reads just enough of the
-    structure to tell a root key from text that merely sits on an unindented
-    line: nested mappings and sequences, multi-line flow collections, quoted
-    strings, and plain or block scalars. Like ``yaml.safe_load``, a later
-    ``name`` key wins.
+    The verifier image gets PyYAML only as a dependency of the RAGAS packages,
+    so this does not import it. It reads just enough of the structure to tell
+    a root key from text that merely sits on an unindented line: nested
+    mappings and sequences, multi-line flow collections, quoted strings, and
+    plain or block scalars. A quote opens a string only where a node begins.
+    Like ``yaml.safe_load``, a later ``name`` key wins.
     """
     frontmatter = _YAML_FRONTMATTER.match(content)
     if not frontmatter:

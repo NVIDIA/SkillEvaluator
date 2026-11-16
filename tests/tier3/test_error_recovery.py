@@ -218,6 +218,7 @@ def test_missing_command_named_after_the_skill_is_agent_tool_choice(checker, tmp
 
 # Every spelling below is the same skill name to yaml.safe_load, which the schema validator uses.
 _DESCRIPTION = "description: Count words. Use when a request names text-analyzer.\n"
+_QUOTED_DESCRIPTION = 'description: Counts "words" in a file.\n'
 _TEXT_ANALYZER_FRONTMATTERS = {
     "double-quoted-value": f'name: "text-analyzer"\n{_DESCRIPTION}',
     "single-quoted-value": f"name: 'text-analyzer'\n{_DESCRIPTION}",
@@ -250,6 +251,19 @@ _TEXT_ANALYZER_FRONTMATTERS = {
     "multiline-quoted-in-block-sequence": 'name: text-analyzer\ntags:\n- "x\nname: other"\n',
     "block-sequence-of-mappings": "name: text-analyzer\nitems:\n- name: other\n- name: another\n",
     "name-after-multiline-flow-mapping": f"metadata: {{a: 1,\nb: 2}}\nname: text-analyzer\n{_DESCRIPTION}",
+    # A quote starts a string only where a node starts, never inside a plain scalar.
+    "inch-mark-in-flow-mapping": f'metadata: {{size: 5 "}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "adjacent-inch-mark-in-flow-mapping": f'metadata: {{size: 5"}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "quote-inside-flow-sequence-item": f'tags: [a "b]\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "apostrophe-in-flow-mapping-value": f"meta: {{k: it's}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}",
+    "spaced-apostrophe-in-flow-mapping": "meta: {k: rock 'n roll}\nname: text-analyzer\nnote: 'quoted'\n",
+    "inch-mark-in-multiline-flow-mapping": f'meta: {{size: 5 ",\nname: other\n}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "inch-mark-before-multiline-flow-close": f'meta: {{a: 1 "\n,\nname: other\n}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "quoted-string-hides-brace-in-flow-mapping": "meta: {k: \"closing } inside\",\nname: other,\nj: 'it''s ]'\n}\nname: text-analyzer\n",
+    "quoted-strings-in-multiline-flow-sequence": "tags: [\"a, b\",\n'c' ,\nname: other]\nname: text-analyzer\n",
+    "json-style-flow-mapping": 'meta: {"a":"b",\n"name":"other"\n}\nname: text-analyzer\n',
+    "quoted-key-and-value-in-flow-mapping": "meta: {\"name\": \"other\",\n'k': 'v'}\nname: text-analyzer\n",
+    "quote-in-block-plain-text": "description: 5\" pipe and 'it' fine\nname: text-analyzer\n",
     # Brackets and quotes inside plain text or block scalars do not open anything.
     "unbalanced-brackets-in-plain-text": "description: Edits {file or [path, it's # not a comment\nname: text-analyzer\n",
     "brackets-in-block-scalar": "description: |\n  {[\"' # x\nname: text-analyzer\n",

@@ -298,6 +298,71 @@ def test_validate_plugin_policy_override_lets_a_lowered_finding_run(tmp_path, mo
     assert "policy blocks" not in report.read_text(encoding="utf-8")
 
 
+_GRANT_COMMANDS = {
+    "validate": ["validate", "--tiers", "1"],
+    "evaluate-plugin": ["tier3", "evaluate-plugin", "--agents", "opencode", "--progress", "off"],
+}
+
+
+@pytest.mark.parametrize("command", list(_GRANT_COMMANDS))
+@pytest.mark.parametrize(
+    "grants,message",
+    [
+        (["bad name!"], "'bad name!' is not an environment variable name (NAME, NAME=HOST or NAME@SERVER)"),
+        (["TOKEN=mcp.example.com:8443"], "give the host without a port"),
+        (["TOKEN=mcp.example.com/path"], "is not a host name or address"),
+        (["A" * 513], "each grant is at most 512 characters"),
+        ([f"VAR_{index}" for index in range(65)], "at most 64 grants are accepted; got 65"),
+    ],
+    ids=["malformed", "host-with-port", "host-with-path", "too-long", "too-many"],
+)
+def test_probe_mcp_env_grants_are_checked_when_the_command_line_is_parsed(
+    tmp_path, monkeypatch, command, grants, message
+):
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _live_report_source(tmp_path)
+    monkeypatch.setattr(
+        EvaluationService, "evaluate_plugin", lambda *_a, **_kw: pytest.fail("Invalid grant reached execution")
+    )
+    prefix = _GRANT_COMMANDS[command]
+    options = [part for grant in grants for part in ("--probe-mcp-env", grant)]
+    result = CliRunner().invoke(
+        cli, [*prefix, str(source), "--probe-mcp", *options, "-r", "json", "-o", str(tmp_path / "reports")]
+    )
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert isinstance(result.exception, SystemExit)
+    output = " ".join(result.output.split())
+    assert "Invalid value for '--probe-mcp-env'" in output
+    assert message in output
+
+
+@pytest.mark.parametrize("command", list(_GRANT_COMMANDS))
+def test_probe_mcp_env_accepts_bare_host_and_server_grants(tmp_path, monkeypatch, command):
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _live_report_source(tmp_path)
+    seen = []
+
+    def execute(self, options, *, plugin_options=None, progress_reporter=None):
+        seen.append(plugin_options.probe_mcp_env)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate_plugin", execute)
+    grants = ("TOKEN", "TOKEN=MCP.Example.com", "TOKEN=[::1]", "TOKEN@docs server", "A" * 512)
+    prefix = [*_GRANT_COMMANDS[command]]
+    if command == "validate":
+        prefix[2:3] = ["1,3", "--agents", "opencode"]
+    options = [part for grant in grants for part in ("--probe-mcp-env", grant)]
+    result = CliRunner().invoke(
+        cli, [*prefix, str(source), "--probe-mcp", *options, "-r", "json", "-o", str(tmp_path / "reports")]
+    )
+
+    assert "Invalid value" not in result.output, result.output
+    assert seen == [grants], (result.output, result.exception)
+
+
 def _live_json_report(source, engine_result, results, output):
     report = project_plugin_runtime(engine_result, provenance={"plugin": "demo", "runtime_evidence": {}})
     assert report is not None

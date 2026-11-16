@@ -510,6 +510,27 @@ def _report_options(func):
     )(func)
 
 
+def _check_probe_mcp_env(ctx: click.Context, param: click.Parameter, values: tuple[str, ...]) -> tuple[str, ...]:
+    """Refuse malformed or unbounded MCP environment grants before any tier runs."""
+    if not values:
+        return values
+    from skillevaluator.evaluation.options import MAX_PROBE_MCP_ENV_GRANT_CHARS, MAX_PROBE_MCP_ENV_GRANTS
+    from skillevaluator.tier3.mcp_proof import parse_env_grant
+
+    if len(values) > MAX_PROBE_MCP_ENV_GRANTS:
+        raise click.BadParameter(f"at most {MAX_PROBE_MCP_ENV_GRANTS} grants are accepted; got {len(values)}.")
+    for value in values:
+        if len(value) > MAX_PROBE_MCP_ENV_GRANT_CHARS:
+            raise click.BadParameter(
+                f"each grant is at most {MAX_PROBE_MCP_ENV_GRANT_CHARS} characters; got one of {len(value)}."
+            )
+        try:
+            parse_env_grant(value)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return values
+
+
 def _plugin_run_options(func):
     """Reuse the same plugin controls for combined and standalone runs."""
     options = (
@@ -530,7 +551,11 @@ def _plugin_run_options(func):
         (("--probe-mcp/--no-probe-mcp",), {"help": "Opt into policy-checked MCP host probes."}),
         (
             ("--probe-mcp-env",),
-            {"multiple": True, "help": "Explicit environment grant for an MCP host probe (repeatable)."},
+            {
+                "multiple": True,
+                "callback": _check_probe_mcp_env,
+                "help": "Explicit environment grant for an MCP host probe (repeatable).",
+            },
         ),
         (
             ("--trial-retries",),

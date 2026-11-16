@@ -17,6 +17,10 @@ from typing import TYPE_CHECKING, Any
 if TYPE_CHECKING:
     from skillevaluator.validators.policy import ValidationPolicy
 
+# Bounds on ``PluginOptions.probe_mcp_env``: how many grants, and the length of each.
+MAX_PROBE_MCP_ENV_GRANTS = 64
+MAX_PROBE_MCP_ENV_GRANT_CHARS = 512
+
 
 @dataclass
 class EvaluationOptions:
@@ -146,7 +150,11 @@ class PluginOptions:
             raise ValueError("trial_retries must be an integer between 0 and 5")
         if (
             not isinstance(self.probe_mcp_env, tuple)
-            or len(self.probe_mcp_env) > 64
-            or any(not isinstance(value, str) or len(value) > 512 for value in self.probe_mcp_env)
+            or len(self.probe_mcp_env) > MAX_PROBE_MCP_ENV_GRANTS
+            or any(
+                not isinstance(value, str) or len(value) > MAX_PROBE_MCP_ENV_GRANT_CHARS for value in self.probe_mcp_env
+            )
         ):
-            raise ValueError("probe_mcp_env must contain at most 64 bounded environment grants")
+            raise ValueError(
+                f"probe_mcp_env must contain at most {MAX_PROBE_MCP_ENV_GRANTS} bounded environment grants"
+            )

@@ -563,7 +563,14 @@ class TestLoadMcpServersSafety:
         config.write_text(original_payload, encoding="utf-8")
         original_metadata = config.stat()
         original_read = adapter_module.os.read
+        original_fstat = adapter_module.os.fstat
         mutated = False
+
+        def fstat_with_advanced_ctime(descriptor: int) -> os.stat_result:
+            metadata = original_fstat(descriptor)
+            if mutated and metadata.st_ino == original_metadata.st_ino:
+                return os.stat_result(metadata, {"st_ctime_ns": original_metadata.st_ctime_ns + 2_000_000_000})
+            return metadata
 
         def rewrite_named_source(descriptor: int, size: int) -> bytes:
             nonlocal mutated
@@ -582,9 +589,11 @@ class TestLoadMcpServersSafety:
             return payload
 
         monkeypatch.setattr(adapter_module.os, "read", rewrite_named_source)
+        monkeypatch.setattr(adapter_module.os, "fstat", fstat_with_advanced_ctime)
 
         with pytest.raises(ValueError, match="changed while it was read"):
             _load_mcp_servers(skill)
+        assert mutated
 
     def test_mcp_configuration_replaced_during_read_is_rejected(
         self,

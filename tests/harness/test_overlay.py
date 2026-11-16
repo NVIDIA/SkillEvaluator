@@ -532,6 +532,69 @@ def test_user_copy_in_a_folder_the_harness_does_not_scan_is_not_flagged(
     assert "CX-USER-COPY" not in _ids(codex_rows, "codex")
 
 
+def _custom_grouping_profile(tmp_path: Path, grouping: str) -> Path:
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "acme.yaml").write_text(
+        "harness: acme\n"
+        "roots: {project: [.claude/skills], user: [~/.claude/skills]}\n"
+        "rules:\n"
+        f'  - {{id: AC-GROUPING, when: "{grouping}", effect: not_loaded, message: "Grouping is not searched."}}\n'
+        '  - {id: AC-USER-COPY, when: "user_copy", effect: advisory, message: "Also at {user_copy_paths}."}\n',
+        encoding="utf-8",
+    )
+    return profiles
+
+
+def _custom_user_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grouping: str, config: dict | None = None
+) -> set[str]:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills", "report")
+    _install(home / ".claude" / "skills" / "group", "report")
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+    profiles = _custom_grouping_profile(tmp_path, grouping)
+
+    (result,) = evaluate_harnesses(skill, "acme", profiles, config)
+
+    message = next((f["message"] for f in result.findings if f["id"] == "AC-USER-COPY"), "")
+    return set(message.removeprefix("Also at ").removesuffix(".").split(", ")) - {""}
+
+
+def test_custom_grouping_rule_can_name_roots_when_looking_for_a_user_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    both = {"~/.claude/skills/report", "~/.claude/skills/group/report"}
+
+    # The rule is read for the user copy's root: it hides the grouped copy and keeps the direct one.
+    user_rule = "install_root in roots.user and grouping_depth > 0"
+    assert _custom_user_copies(tmp_path / "user", monkeypatch, user_rule) == {"~/.claude/skills/report"}
+    # A project-only rule says nothing about a copy in a user root, even though the project skill sits in a project root.
+    project_rule = "install_root in roots.project and grouping_depth > 0"
+    assert _custom_user_copies(tmp_path / "project", monkeypatch, project_rule) == both
+
+
+def test_custom_grouping_rule_can_name_the_configuration_when_looking_for_a_user_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rule = "custom_provider and grouping_depth > 0"
+
+    hidden = _custom_user_copies(tmp_path / "hidden", monkeypatch, rule, {"custom_provider": True})
+    shown = _custom_user_copies(tmp_path / "shown", monkeypatch, rule)
+
+    assert hidden == {"~/.claude/skills/report"}
+    assert shown == {"~/.claude/skills/report", "~/.claude/skills/group/report"}
+
+
+def test_unevaluable_grouping_rule_does_not_stop_the_user_copy_lookup():
+    rule = {"id": "X", "when": "grouping_depth > 0 and nope", "effect": "not_loaded"}
+    profile = {"harness": "acme", "roots": {}, "rules": [rule]}
+    names = overlay._rule_names(profile, {"install_root": None, "catalog_size": 0}, {"native_root": False})
+
+    assert overlay._finds_at_depth(profile, names, "~/.claude/skills", 1)
+
+
 def test_openclaw_workspace_skill_is_checked_against_both_user_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     home, project = tmp_path / "home", tmp_path / "project"
     monkeypatch.setattr(Path, "home", lambda: home)

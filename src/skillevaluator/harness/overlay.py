@@ -778,14 +778,39 @@ def version_finding(profile: dict[str, Any], declared: str) -> dict[str, str] | 
     }
 
 
-def _finds_at_depth(profile: dict[str, Any], facts: dict[str, Any], depth: int) -> bool:
-    """Whether the profile's grouping rules still let it find a skill that deep below a skills root."""
-    names = {**facts, "grouping_depth": depth}
-    return not any(
-        rule["effect"] == "not_loaded" and _Rule.evaluate(str(rule["when"]), names)
-        for rule in profile.get("rules", [])
-        if "grouping_depth" in str(rule["when"])
-    )
+def _rule_names(profile: dict[str, Any], facts: dict[str, Any], setup: dict[str, Any]) -> dict[str, Any]:
+    """Everything a profile rule can name: skill facts, the model setup, ``always`` and ``roots`` (every root, with
+    ``roots.project`` and ``roots.user`` for the groups)."""
+    roots = profile.get("roots", {})
+    all_roots = [*roots.get("project", []), *roots.get("user", [])]
+    return {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
+
+
+def _rule_fires(rule: dict[str, Any], names: dict[str, Any]) -> bool:
+    expression = str(rule["when"])
+    if "install_root" in expression and (names["install_root"] is None or names["native_root"]):
+        return False
+    if "catalog_" in expression and not names["catalog_size"]:
+        return False
+    return expression == "always" or _Rule.evaluate(expression, names)
+
+
+def _finds_at_depth(profile: dict[str, Any], names: dict[str, Any], root: str, depth: int) -> bool:
+    """Whether the profile's grouping rules still let it find a skill ``depth`` folders below the user root ``root``.
+
+    The rules read the same names as in :func:`evaluate_profile`, with the install root and depth of that copy.
+    A rule that cannot be evaluated is ignored here so it cannot stop a user-copy lookup.
+    """
+    copy = {**names, "install_root": root, "workspace_skills": False, "grouping_depth": depth}
+    for rule in profile.get("rules", []):
+        if rule["effect"] != "not_loaded" or "grouping_depth" not in str(rule["when"]):
+            continue
+        try:
+            if _rule_fires(rule, copy):
+                return False
+        except (KeyError, SyntaxError, TypeError, ValueError):
+            continue
+    return True
 
 
 def evaluate_profile(
@@ -798,33 +823,29 @@ def evaluate_profile(
     unknown context, a native provider, model-initiated activation and an interactive session.
     """
     roots = profile.get("roots", {})
-    all_roots = [*roots.get("project", []), *roots.get("user", [])]
     setup = model_config(profile, config)
+    facts = {
+        **facts,
+        "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"]),
+        "user_copy": False,
+        "user_copy_paths": "",
+    }
+    names = _rule_names(profile, facts, setup)
     user_copies = (
         [
             path
             for root, path, depth in facts.get("user_copies", [])
-            if root in roots.get("user", []) and _finds_at_depth(profile, facts, depth)
+            if root in roots.get("user", []) and _finds_at_depth(profile, names, root, depth)
         ]
         if _project_root(facts) in roots.get("project", [])
         else []
     )
-    facts = {
-        **facts,
-        "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"]),
-        "user_copy": bool(user_copies),
-        "user_copy_paths": ", ".join(user_copies[:3]),
-    }
-    names = {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
+    facts = {**facts, "user_copy": bool(user_copies), "user_copy_paths": ", ".join(user_copies[:3])}
+    names = _rule_names(profile, facts, setup)
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in profile.get("rules", []):
-        expression = str(rule["when"])
-        if "install_root" in expression and (facts["install_root"] is None or names["native_root"]):
-            continue
-        if "catalog_" in expression and not facts["catalog_size"]:
-            continue
-        if expression != "always" and not _Rule.evaluate(expression, names):
+        if not _rule_fires(rule, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "versions", "outcome", "confidence"):

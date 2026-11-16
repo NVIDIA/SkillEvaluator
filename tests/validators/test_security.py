@@ -10564,7 +10564,7 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
-    @pytest.mark.parametrize("case", ["missing", "left-out", "in-folder"])
+    @pytest.mark.parametrize("case", ["missing", "left-out", "in-folder", "part"])
     @patch("skillevaluator.validators.security.Tools")
     def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
         self, mock_tools, tmp_path: Path, case: str
@@ -10577,18 +10577,27 @@ class TestSkillspectorMissingReferences:
         """
         from skillevaluator.tier1 import commands as tier1_commands
 
-        files = {"SKILL.md": _SETUP_HELPER_SKILL, ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'}
+        # On purpose, a skill below the plugin root is a scan unit of its own,
+        # and its lines may name a file elsewhere in the plugin, so it accepts
+        # no missing reference.
+        member = "skills/setup-helper" if case == "part" else None
+        files = {
+            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL,
+            ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n',
+        }
         if case == "left-out":
             # Left out of the staged copy, and named on line 8.
             files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
         plugin = _write_skill(tmp_path / "setup-helper", files)
-        report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
         scanned = []
 
         def record_scan(argv, **_kwargs):
-            scanned.append(argv[1])
-            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
+            scanned.append(Path(argv[1]))
+            # Only the scan unit that holds the skill gets the setup helper's report.
+            has_skill = (Path(argv[1]) / "SKILL.md").is_file()
+            report = _reference_report("2.13.3", "staged-script") if has_skill else _skillspector_json_report()
+            return ToolResult(success=True, stdout=json.dumps(report), stderr="", exit_code=0)
 
         mock_tools.skillspector.run.side_effect = record_scan
 
@@ -10599,9 +10608,10 @@ class TestSkillspectorMissingReferences:
             target_root=tmp_path if case == "in-folder" else None,
         )
 
-        (security,) = [result for result in results if result.validator_name == "Security Scan"]
-        (scan_root,) = scanned
-        assert Path(scan_root) != plugin.resolve()
+        scans = [result for result in results if result.validator_name == "Security Scan"]
+        assert len(scans) == len(scanned) == (2 if member else 1)
+        assert plugin.resolve() not in scanned
+        (security,) = [result for result in scans if result.metadata.get("plugin_member") == member]
         if case == "missing":
             assert security.incomplete_scans == []
             assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]

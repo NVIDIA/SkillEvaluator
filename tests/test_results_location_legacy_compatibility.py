@@ -846,6 +846,7 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     real_read = os.read
     real_fstat = os.fstat
     real_lstat = Path.lstat
+    real_stat = os.stat
     rewritten_once = False
     post_read_fstat_done = False
 
@@ -872,6 +873,15 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
             return summary_metadata
         return metadata
 
+    def stat_with_original_ctime(path, *args, **kwargs) -> os.stat_result:
+        # The confirmation re-read also checks the path with os.stat before
+        # opening it. Hide the real rewrite's ctime there too, so removing
+        # only the post-read ctime check makes this regression fail.
+        metadata = real_stat(path, *args, **kwargs)
+        if rewritten_once and metadata.st_ino == summary_inode:
+            return summary_metadata
+        return metadata
+
     def rewrite_during_read(fd: int, length: int) -> bytes:
         nonlocal rewritten_once
         if not rewritten_once and os.fstat(fd).st_ino == summary_inode:
@@ -883,6 +893,7 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     monkeypatch.setattr(results_location.os, "read", rewrite_during_read)
     monkeypatch.setattr(results_location.os, "fstat", fstat_with_advanced_ctime)
     monkeypatch.setattr(Path, "lstat", lstat_with_original_ctime)
+    monkeypatch.setattr(results_location.os, "stat", stat_with_original_ctime)
 
     assert not _is_completed(run)
     assert rewritten_once

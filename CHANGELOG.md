@@ -160,6 +160,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `skillevaluator` agent skill now asks the user before installing an
+  extra, using a credential, spending on a Tier 3 run or using `--env-mode
+  local`. It also asks for real tasks and outcomes before writing eval cases,
+  explains that Tier 3 needs its own provider key, and reports no verdict for a
+  tier that could not run. Its own `evals/evals.json` gains eight cases
+  covering these prompts, including consent before cold scanner provisioning.
 - The CI guide's recipe installs SkillSpector from the commit behind its release
   tag and checks the Gitleaks archive against the published SHA-256 before
   unpacking it, matching the repository's own workflows.
@@ -318,6 +324,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The bundled skill's implicit dataset case expects clarification when real
+  requests and outcomes are missing, matching the skill's case-authoring rule.
+
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
@@ -347,12 +356,16 @@ All notable changes to SkillEvaluator are documented in this file.
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
   that endpoint.
+- Make the directory-snapshot mutation test independent of filesystem timestamp
+  granularity while preserving the late-entry race.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding
   spurious notices that other execution failures need attention.
 - Make the same-inode read-race regression use an observable mtime change without
   depending on filesystem clock granularity.
+- Make the onboarding URL-rewrite test use its temporary global Git config even
+  when the caller sets `GIT_CONFIG_GLOBAL`.
 - Terminal quality headlines and check-count comparisons exclude execution-failed arms. Multi-agent summaries also withhold a failed agent's quality headline.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.

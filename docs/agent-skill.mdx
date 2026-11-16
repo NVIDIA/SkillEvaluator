@@ -162,7 +162,7 @@ you get running SkillEvaluator by hand or in CI.
 | "Is my skill any good?" | `skillevaluator tier1 <skill-dir> --no-llm` | Pass or fail, with security, PII, schema, and quality findings |
 | "Score the quality of this SKILL.md" | `skillevaluator quality-check` and `rubric-eval` | Quality score and grade, rubric feedback |
 | "Does it overlap with my other skills?" | `skillevaluator tier2` | Duplicate and similarity findings |
-| "Write eval cases for my skill" | `skillevaluator create-eval-dataset`, then `tier3 validate <skill-dir> --strict` | A reviewed `evals/evals.json` with positive and negative cases |
+| "Write eval cases for my skill" | Ask for real tasks and outcomes, write `<skill-dir>/evals/EVAL.md`, run `skillevaluator create-eval-dataset <skill-dir> --full --prompt <skill-dir>/evals/EVAL.md`, then `tier3 validate <skill-dir> --strict` | A reviewed `evals/evals.json` with positive and negative cases |
 | "Does my skill actually make the agent better?" | `skillevaluator tier3 evaluate`, with and without the skill | Verdict, five dimension scores, and Skill Lift |
 | "Gate skills in our CI" | `skillevaluator ci init` | A setup PR with the right checks |
 
@@ -170,6 +170,14 @@ you get running SkillEvaluator by hand or in CI.
   The first row needs no key. The rubric, Tier 2, and Tier 3 need one provider key;
   see [Providers & Credentials](/skills/skillevaluator/configuration).
 </Tip>
+
+Keyless checks run without asking when their tools are already installed. Before
+installing the CLI, an extra or a missing scanner, the agent names the change and
+asks for permission unless you already authorized it. It also asks before using
+credentials, spending model tokens, or running an agent on your machine. For eval
+cases it asks which real tasks matter and what a good result looks like instead
+of inventing them. Live evaluation starts separate agent processes and a judge,
+so it needs a provider key on the host even when launched from inside your agent.
 
 ## Good to know
 

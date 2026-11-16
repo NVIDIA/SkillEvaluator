@@ -291,6 +291,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

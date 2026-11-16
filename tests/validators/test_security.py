@@ -10887,6 +10887,11 @@ class TestSkillspectorMissingReferences:
             ('**Say "hi there":** in `output/notes.md`.', "evals", True),
             ('Run sh "a$ b*" now.', "ab", True),
             ('$ sh "setup h"*.sh > output/notes.md', "evals", True),
+            # So also when the label or "$" shows only once the line is decoded
+            # and the escaped space only as written, or the other way round.
+            ("Run &\\#36; sh setup\\ h*.sh now.", "setup helper.sh", True),
+            ("&\\#42;&\\#42;Note:&\\#42;&\\#42; sh setup\\ h*.sh", "setup helper.sh", True),
+            ("Run $ sh setup&#39; &#39;h*.sh now.", "setup helper.sh", True),
             # Quotes around no space or delimiter, or a lone apostrophe, join no words.
             ("**What's new:** write `output/notes.md`.", "evals", False),
             ('**Say "hi":** in `output/notes.md`.', "evals", False),

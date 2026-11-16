@@ -2279,23 +2279,25 @@ def _skillspector_shell_patterns(texts: Iterable[str]) -> set[str]:
     its ``*``, is also a pattern that is not split at ``=``, ``:`` or ``,``
     (:func:`_skillspector_markdown_labels`). So ``**Note:**`` stands only for
     names that hold ``note:``, and ``**Step 1:**`` for names that end in
-    ``step`` or start with ``1:``. A text with a quoted or escaped space or
-    delimiter (:data:`_SKILLSPECTOR_QUOTED_SPLIT_RE`), such as
-    ``setup' 'helper.sh``, is read without these two steps: a shell may join
-    its words, which these words do not, so its labels and ``$`` keep their
-    meaning as globs and expansions, and the text is read no more narrowly
-    than before. Any other wildcard keeps its meaning, so ``bash *`` or
-    ``--include=*`` may name every uninspected file.
+    ``step`` or start with ``1:``. When any text of *texts* has a quoted or
+    escaped space or delimiter (:data:`_SKILLSPECTOR_QUOTED_SPLIT_RE`), such
+    as ``setup' 'helper.sh``, every text is read without these two steps: a
+    shell may join its words, which these words do not, so the labels and
+    ``$`` of each keep their meaning as globs and expansions, also where
+    decoding removed that escape or showed that label or ``$``, and the texts
+    are read no more narrowly than before. Any other wildcard keeps its
+    meaning, so ``bash *`` or ``--include=*`` may name every uninspected file.
     """
     split_words: set[str] = set()
     label_words: set[str] = set()
     texts = tuple(texts)
     # Without a free stand-in, such a "$" is read as an expansion.
     literal_dollar = _skillspector_stand_in(texts)
+    narrow = all(_SKILLSPECTOR_QUOTED_SPLIT_RE.search(text) is None for text in texts)
     for text in texts:
         text = _SKILLSPECTOR_LIST_MARKER_RE.sub("", text, count=1)
         labels: list[str] = []
-        if _SKILLSPECTOR_QUOTED_SPLIT_RE.search(text) is None:
+        if narrow:
             if literal_dollar is not None:
                 text = _SKILLSPECTOR_LITERAL_DOLLAR_RE.sub(literal_dollar, text)
             text, labels = _skillspector_markdown_labels(text)

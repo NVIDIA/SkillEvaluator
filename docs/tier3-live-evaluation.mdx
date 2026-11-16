@@ -1029,6 +1029,11 @@ created for that arm. It is reported as skipped with `skip_reason:
 budget_exhausted`, zero expected and scored attempts, and no execution error.
 The run remains incomplete because the budget left planned attempts not run.
 An empty Harbor job that was expected to execute attempts still fails validation.
+This also applies with `--stop-on-pass`: every planned case and attempt must have
+an explicit budget denial before an arm is considered not run. A reused baseline
+remains baseline evidence when the with-skill arm is denied; it does not become
+the run's overall score. Records with an explicit non-budget reason do not reduce
+the required attempt coverage.
 
 Reservation reduces but does not eliminate in-flight overshoot. Estimates can
 grow, an attempt can exceed its estimate, and the calibration unit is

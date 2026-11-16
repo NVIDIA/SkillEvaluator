@@ -7519,7 +7519,11 @@ def collect_harbor_results(
         arm: str,
     ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, bool]:
         matching = [
-            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+            item
+            for item in budget_not_run
+            if item.get("agent") == agent
+            and item.get("arm") in {arm, f"{arm}_skill"}
+            and item.get("reason") in {None, "budget_exhausted"}
         ]
         if not matching:
             return expected_trials, expected_case_ids, expected_cases, None, False
@@ -7541,11 +7545,27 @@ def collect_harbor_results(
                 case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
             }
         actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
-        budget_denied = bool(
-            expected_trials
-            and actual_trials == 0
-            and all(item.get("reason") == "budget_exhausted" for item in matching)
-        )
+        denied_slots = {
+            (
+                (case_id_by_task_selector or {}).get(str(item.get("case_id") or ""), str(item.get("case_id") or "")),
+                attempt,
+            )
+            for item in matching
+            if item.get("reason") == "budget_exhausted"
+            and type(attempt := item.get("attempt")) is int
+            and 1 <= attempt <= n_attempts
+        }
+        denied_cases = {
+            case_id
+            for case_id, _ in denied_slots
+            if case_id and all((case_id, attempt) in denied_slots for attempt in range(1, n_attempts + 1))
+        }
+        if expected_case_ids:
+            budget_denied = set(expected_case_ids) <= denied_cases
+        elif expected_cases is not None:
+            budget_denied = expected_cases > 0 and len(denied_cases) == expected_cases
+        else:
+            budget_denied = bool(expected_trials and len(denied_cases) * n_attempts == expected_trials)
         return actual_trials, active_case_ids, active_cases, attempt_counts, budget_denied
 
     # Unscored conditions keep the requested grading policy instead of

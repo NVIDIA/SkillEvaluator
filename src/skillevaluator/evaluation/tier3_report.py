@@ -4756,7 +4756,11 @@ def _evaluation_mode(agents: dict[str, dict[str, Any]]) -> str:
         for info in agents.values():
             conditions = info.get("conditions")
             arm = conditions.get(condition) if isinstance(conditions, dict) else None
-            statuses.append(arm.get("execution_status") if isinstance(arm, dict) else None)
+            statuses.append(
+                ("not_run" if arm.get("skip_reason") == "budget_exhausted" else arm.get("execution_status"))
+                if isinstance(arm, dict)
+                else None
+            )
         return statuses
 
     with_statuses = arm_statuses("with_skill")

@@ -521,8 +521,8 @@ def _agent_score_headlines(
 ) -> list[Text]:
     """Build the compact verdict, lift, and per-arm check-count summary."""
     pass_at_k = data.get("pass_at_k")
-    with_pass = pass_at_k.get("with_skill") if isinstance(pass_at_k, Mapping) else None
-    without_pass = pass_at_k.get("without_skill") if isinstance(pass_at_k, Mapping) else None
+    with_pass = pass_at_k.get("with_skill") if with_usable and isinstance(pass_at_k, Mapping) else None
+    without_pass = pass_at_k.get("without_skill") if baseline_usable and isinstance(pass_at_k, Mapping) else None
     required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
     verdict_reason = required_check_failure_reason(required_checks)
     headlines = []

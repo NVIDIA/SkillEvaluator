@@ -158,6 +158,50 @@ def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference()
     assert output.index("SECURITY CLEAN") < output.index("With Skill")
 
 
+@pytest.mark.parametrize("failed_arm", [None, "with_skill", "without_skill", "empty"])
+def test_check_headlines_require_usable_arms(failed_arm: str | None) -> None:
+    data = {
+        "execution_status": "failed" if failed_arm in {"with_skill", "without_skill"} else "succeeded",
+        "conditions": {
+            arm: {"execution_status": "failed" if arm == failed_arm else "succeeded"}
+            for arm in ("with_skill", "without_skill")
+        },
+        "pass_at_k": {
+            "with_skill": {
+                "required_checks": {"passed": 0, "scored": 1, "wrong_answer": 1, "security": 0},
+                "correct_answers": {"correct": 0, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+            "without_skill": {
+                "required_checks": {"passed": 1, "scored": 1, "wrong_answer": 0, "security": 0},
+                "correct_answers": {"correct": 1, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+        },
+    }
+    if failed_arm == "empty":
+        data["pass_at_k"] = {}
+    result = {"agents": {"codex": data}}
+    original = deepcopy(result)
+
+    output = render_result(result)
+
+    if failed_arm in {"with_skill", "empty"}:
+        assert "QUALITY VERDICT" not in output
+        expected = ("N/A", "N/A", "N/A")
+    else:
+        assert "QUALITY VERDICT: FAIL — 1 of 1 cases failed: 1 goal not met" in output
+        expected = (
+            ("0/1 | N/A | N/A", "0/1 | N/A | N/A", "1/1 | N/A | N/A")
+            if failed_arm == "without_skill"
+            else ("0/1 | 1/1 | -1", "0/1 | 1/1 | -1", "1/1 | 1/1 | +0")
+        )
+    for label, counts in zip(("REQUIRED CHECKS PASSED", "GOALS MET", "SECURITY CLEAN"), expected, strict=True):
+        [line] = [line.strip(" │") for line in output.splitlines() if label in line]
+        assert line == f"{label}   {counts}"
+    assert result == original
+
+
 def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
     def agent(passed: int, *, case_id: str) -> dict:
         return {

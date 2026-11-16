@@ -9,6 +9,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `harness` results flag a project skill that has a same-named copy in a user-level
   skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
   copy, Codex lists both, and the other harnesses use the project copy.
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
 - The `skillevaluator` agent skill now tells the agent to check for the CLI
   and install it when missing (`uv tool install`, `pipx`, pip in a virtual
   environment, or `uvx`), and adds a CLI-missing Tier 3 case.
@@ -311,6 +314,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
   check, not only the first: a security scan with several SkillSpector findings
   shows them one per line, up to three, then "+N more in detailed reports".
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

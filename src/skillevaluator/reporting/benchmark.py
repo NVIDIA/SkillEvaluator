@@ -1063,7 +1063,11 @@ class BenchmarkReporter(ReporterBase):
                     "- **Dimension score**: how well the agent did on one question above when it had the skill, "
                     "from 0% to 100%."
                 ),
-                "- **Overall** row: the equal-weight mean of the five dimension scores with the skill.",
+                (
+                    "- **Overall** row: when comparable baseline scores are available, the two scores used for "
+                    "published Skill Lift, on the metrics and cases both arms scored comparably. Otherwise, "
+                    "the available arm Overall score(s). These can differ from the headline with-skill score."
+                ),
                 (
                     "- **Uplift**: the displayed skill score minus the displayed no-skill baseline score. "
                     "Published Skill Lift compares Overall only on the metrics and cases both arms scored, "

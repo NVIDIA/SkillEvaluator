@@ -718,10 +718,10 @@ Removing that flag alone does not provide the required execution or verifier con
 The immutable public source candidate
 [`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
 declares the `TARGET` task-folder argument and the seven required flags. This source
-inspection establishes an interface candidate, not a supported runtime installation.
-Native agent execution, verifier artifacts, paired small/custom-Dockerfile runs and
-input-file handling still need independent qualification. Codex, Claude Code and
-OpenCode mappings remain experimental and do not establish end-to-end agent support.
+inspection alone does not establish full runtime support. Beyond the specific live runs
+summarized above, broader agent/grading combinations, paired small/custom-Dockerfile
+runs and input-file handling still need independent qualification, including their
+native execution and verifier artifacts. The agent mappings remain experimental.
 
 The Claude Code mapping uses the same pinned runtime version as Harbor, installed
 by Gym inside the sandbox. It enables native discovery and projects staged skills
@@ -786,9 +786,9 @@ Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
 be collected. The Gym implementation must execute inside Docker and resolve task
 environment templates; a host-only agent harness does not meet this contract.
 
-Subject to that unverified runtime contract, the adapter maps `codex`, `claude-code`
-and `opencode` and accepts `default`, `default_plus_custom` and `custom_only` grading
-modes. These are adapter capabilities, not independently validated live combinations.
+The adapter maps `codex`, `claude-code` and `opencode` and accepts `default`,
+`default_plus_custom` and `custom_only` grading modes. These are adapter capabilities;
+the live-run status in the table above does not qualify every combination.
 Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
 not supported on the NeMo Gym path and is rejected before the run starts; use
 `--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:

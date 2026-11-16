@@ -13,6 +13,7 @@ import json
 import logging
 import os
 import re
+import selectors
 import shlex
 import signal
 import socket
@@ -161,6 +162,57 @@ def _initialized_local_environment(
     )
 
 
+def _assert_process_exits(pid: int, *, timeout: float = 5.0) -> None:
+    """Assert that a process signalled by cleanup leaves the process table.
+
+    Cleanup returns once its group probe finds no live member. On macOS that
+    probe reports EPERM while a SIGKILLed descendant is still finishing its
+    exit, and until then ``kill(pid, 0)`` still succeeds for that PID. A single
+    immediate probe races that teardown, so allow bounded exit completion.
+
+    This polls without yielding to the event loop, so cleanup cannot run in the
+    meantime: a descendant it never signalled is still alive at the deadline.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            os.kill(pid, 0)
+        except ProcessLookupError:
+            return
+        assert time.monotonic() < deadline, "a descendant survived process-group cleanup"
+        time.sleep(0.01)
+
+
+class _ManualClockSelector(selectors.DefaultSelector):
+    """Advance a manual clock by each requested wait instead of sleeping."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.now = 0.0
+
+    def select(self, timeout: float | None = None) -> list[tuple[selectors.SelectorKey, int]]:
+        if timeout is None:
+            return super().select(None)
+        self.now += max(timeout, 0.0)
+        return super().select(0)
+
+
+class _ManualClockEventLoop(asyncio.SelectorEventLoop):
+    """Event loop whose timers elapse on a manual clock instead of the host's.
+
+    Time advances only by the delay the loop asked to wait for, so a bound on
+    timer-driven code counts the timeouts that code requested and not how long
+    a loaded host descheduled the loop.
+    """
+
+    def __init__(self) -> None:
+        self._manual_clock = _ManualClockSelector()
+        super().__init__(self._manual_clock)
+
+    def time(self) -> float:
+        return self._manual_clock.now
+
+
 def _provider(name: str, *, api_key: str = "k", base_url: str | None = None) -> ProviderConfig:
     return ProviderConfig(provider=name, model="m", api_key=api_key, base_url=base_url, litellm_model="m", region=None)
 
@@ -282,8 +334,7 @@ def test_local_output_limit_fails_closed_and_reaps_process_group(
     assert processes[0].returncode is not None
     assert child_pid_path.is_file()
     child_pid = int(child_pid_path.read_text(encoding="ascii"))
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    _assert_process_exits(child_pid)
     assert len("".join(callback_chunks).encode()) <= 8
     assert overflow_value not in "".join(callback_chunks)
     assert overflow_value not in str(caught.value)
@@ -741,7 +792,7 @@ def test_local_nvidia_build_bridge_closes_if_cancelled_during_startup(
     from skillevaluator.tier3.harbor import local_agents
 
     agent = object.__new__(local_agents.SkillEvaluatorLocalNvidiaBuildClaudeCode)
-    agent.model_name = "nvidia/nemotron-3-super-120b-a12b"
+    agent.model_name = "nvidia/nemotron-3.5-lightning-30b-a3b"
     agent._extra_env = {}
     worker_started = threading.Event()
     release_worker = threading.Event()
@@ -2840,8 +2891,7 @@ def test_streamed_timeout_callback_matches_result_and_contains_descendants(tmp_p
     )
     assert secret not in callback_stdout
     child_pid = int(child_pid_path.read_text(encoding="ascii"))
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    _assert_process_exits(child_pid)
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -3184,7 +3234,9 @@ def test_exec_cancellation_terminates_background_descendants(tmp_path: Path) -> 
         # An interrupted sleep must not itself count as a surviving child.
         "(printf ready > cancel-child-ready; sleep 30 && "
         "printf survived > cancel-child-survived) & "
-        "printf '%s' \"$!\" > cancel-child-pid; wait"
+        # Existence signals readiness, so publish only the complete PID.
+        "printf '%s' \"$!\" > cancel-child-pid.tmp && "
+        "mv cancel-child-pid.tmp cancel-child-pid; wait"
     )
     environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
 
@@ -3275,8 +3327,7 @@ def test_streamed_exec_cancellation_reaps_descendants(
 
     assert callback_chunks
     assert secret not in "".join(callback_chunks)
-    with pytest.raises(ProcessLookupError):
-        os.kill(child_pid, 0)
+    _assert_process_exits(child_pid)
 
 
 @pytest.mark.skipif(os.name != "posix", reason=_NATIVE_WINDOWS_LOCAL_REASON)
@@ -3308,8 +3359,8 @@ def test_streamed_exec_cancellation_during_final_flush_reaps_descendants(
             assert child_pid_path.exists()
             assert not environment._active_processes
             child_pid = int(child_pid_path.read_text(encoding="ascii"))
-            with pytest.raises(ProcessLookupError):
-                os.kill(child_pid, 0)
+            # The final callback is still blocked, so containment came first.
+            _assert_process_exits(child_pid)
             task.cancel()
             if repeat_cancellation:
                 await asyncio.sleep(0)
@@ -3321,8 +3372,7 @@ def test_streamed_exec_cancellation_during_final_flush_reaps_descendants(
     child_pid: int | None = None
     try:
         child_pid = asyncio.run(exercise())
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        _assert_process_exits(child_pid)
     finally:
         if child_pid is None and child_pid_path.exists():
             child_pid = int(child_pid_path.read_text(encoding="ascii"))
@@ -3340,17 +3390,27 @@ def test_cancellation_during_timeout_reap_preserves_cancellation_and_containment
     environment = _initialized_local_environment(tmp_path)
     environment._local_command_guardrail_reason = lambda *_args: ""  # type: ignore[method-assign]
     child_pid_path = environment._workspace / "timeout-reap-cancel-child-pid"
+    child_pid_tmp_path = child_pid_path.with_name(f"{child_pid_path.name}.tmp")
     reap_entered = asyncio.Event()
     original_terminate = environment._terminate_process_tree
     command = (
         "(trap '' TERM; exec >/dev/null 2>&1; sleep 30) & "
-        f"printf '%s' \"$!\" > {shlex.quote(child_pid_path.name)}; wait"
+        # Existence signals readiness, so publish only the complete PID.
+        f"printf '%s' \"$!\" > {shlex.quote(child_pid_tmp_path.name)} && "
+        f"mv {shlex.quote(child_pid_tmp_path.name)} {shlex.quote(child_pid_path.name)}; wait"
     )
 
     async def observed_terminate(
         proc: asyncio.subprocess.Process,
         communication: asyncio.Task[tuple[bytes, bytes]] | None = None,
     ) -> tuple[bytes, bytes]:
+        # The exec timeout can expire before a loaded host has started the
+        # descendant. Hold the reap until its PID is published, so that the
+        # cancellation always interrupts the reap of a live descendant.
+        for _ in range(400):
+            if child_pid_path.exists():
+                break
+            await asyncio.sleep(0.01)
         reap_entered.set()
         return await original_terminate(proc, communication)
 
@@ -3383,8 +3443,7 @@ def test_cancellation_during_timeout_reap_preserves_cancellation_and_containment
         outcome, child_pid, retained = asyncio.run(exercise())
         assert isinstance(outcome, asyncio.CancelledError)
         assert not retained
-        with pytest.raises(ProcessLookupError):
-            os.kill(child_pid, 0)
+        _assert_process_exits(child_pid)
     finally:
         if child_pid is None and child_pid_path.exists():
             child_pid = int(child_pid_path.read_text(encoding="ascii"))
@@ -3664,7 +3723,9 @@ def test_process_tree_cleanup_stays_bounded_when_communication_ignores_cancellat
         await cleanup
         return finished_within_bound, communication.cancelled()
 
-    assert asyncio.run(run_cleanup()) == (True, True)
+    # On the manual clock the 0.1s bound counts only the waits that cleanup
+    # asked for, not the time a loaded host keeps the event loop descheduled.
+    assert asyncio.run(run_cleanup(), loop_factory=_ManualClockEventLoop) == (True, True)
 
 
 def test_stop_reaps_all_tracked_processes(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -5521,7 +5582,7 @@ def test_doctor_local_codex_ignores_native_credentials_and_accepts_explicit_buil
         tier3_commands.doctor(
             agents="codex",
             env_mode="local",
-            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
+            agent_model=("codex=nvidia/nemotron-3.5-lightning-30b-a3b",),
         )
         == 0
     )
@@ -5553,7 +5614,7 @@ def test_doctor_accepts_isolated_docker_bridge_and_direct_agents(
         tier3_commands.doctor(
             agents="codex,opencode",
             env_mode="docker",
-            agent_model=("codex=nvidia/nemotron-3-super-120b-a12b",),
+            agent_model=("codex=nvidia/nemotron-3.5-lightning-30b-a3b",),
         )
         == 0
     )

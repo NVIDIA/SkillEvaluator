@@ -17,12 +17,14 @@ import os
 import re
 import signal
 import subprocess
+import sys
 import time
 import tomllib
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.progress import (
     MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
@@ -68,15 +70,16 @@ def stage_for_gym(
     arm_dir: Path,
     verifier_env: dict[str, str] | None = None,
     *,
+    agent: str | None = None,
     timeout_multiplier: float = 1.0,
     resource_overrides: dict[str, int] | None = None,
 ) -> None:
     """Adapt Harbor-format tasks for Gym's agents and verifier.
 
     Drops Harbor's ``skills_dir`` task hook, which Gym's CLI agents reject. The task image
-    already carries the skills at each agent's native location (``/root/.agents/skills``,
-    ``/root/.claude/skills``, ...), so the with-skill arm is unchanged and the baseline image
-    still has none. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
+    already carries the skills at each agent's native location. Claude and OpenCode also get
+    project skills because Gym isolates their user configuration directories. The baseline has
+    no target skill. Adds ``verifier_env`` (``${NAME}`` templates) to ``[verifier.env]``: Harbor
     passes the judge overrides at job level, and Gym has no job-level verifier env. Scales the
     agent, verifier and environment-build timeouts by ``timeout_multiplier``, as Harbor's
     ``--timeout-multiplier`` does, because Gym enforces the task's own timeouts. Writes the
@@ -85,8 +88,18 @@ def stage_for_gym(
     """
     for task_toml in arm_dir.glob("*/task.toml"):
         text = task_toml.read_text(encoding="utf-8")
-        if (tomllib.loads(text).get("environment") or {}).get("mcp_servers"):
+        environment = tomllib.loads(text).get("environment") or {}
+        if environment.get("mcp_servers"):
             raise ValueError(f"{task_toml.parent.name}: {NATIVE_MCP_SERVERS_ERROR}")
+        project_directory = {"opencode": ".agents", "claude-code": ".claude"}.get(agent or "")
+        if project_directory:
+            dockerfile = task_toml.parent / "environment" / "Dockerfile"
+            if dockerfile.is_file() and (dockerfile.parent / "skills").is_dir():
+                workdir = environment.get("workdir") or "/workspace"
+                projection = "COPY " + json.dumps(["skills/", f"{workdir.rstrip('/')}/{project_directory}/skills/"])
+                docker_text = dockerfile.read_text(encoding="utf-8")
+                if not docker_text.rstrip().endswith("\n" + projection):
+                    dockerfile.write_text(docker_text.rstrip("\n") + "\n" + projection + "\n", encoding="utf-8")
         staged = _SKILLS_DIR_LINE.sub("", text)
         existing = set((tomllib.loads(staged).get("verifier") or {}).get("env") or {})
         lines = "".join(
@@ -95,9 +108,21 @@ def stage_for_gym(
             if name not in existing
         )
         if lines:
-            header = re.search(r"^\[verifier\.env\][ \t]*\n", staged, re.MULTILINE)
-            if header:
-                staged = staged[: header.end()] + lines + staged[header.end() :]
+            if not staged.endswith("\n"):
+                staged += "\n"
+            added = set(verifier_env or {}) - existing
+            for header in re.finditer(
+                r"^[ \t]*\[[ \t]*verifier[ \t]*\.[ \t]*env[ \t]*\][ \t]*(?:#[^\n]*)?\n", staged, re.MULTILINE
+            ):
+                # A header-like line can also sit inside a multiline string: keep the real table.
+                candidate = staged[: header.end()] + lines + staged[header.end() :]
+                try:
+                    candidate_env = (tomllib.loads(candidate).get("verifier") or {}).get("env") or {}
+                except tomllib.TOMLDecodeError:
+                    continue
+                if added <= set(candidate_env):
+                    staged = candidate
+                    break
             else:
                 staged = staged.rstrip("\n") + "\n\n[verifier.env]\n" + lines
         if timeout_multiplier != 1.0:
@@ -382,6 +407,16 @@ def gym_eval_command(
     ]
     if n_concurrent:
         command += ["--concurrency", str(n_concurrent)]
+    if agent == "claude-code":
+        command += [
+            "++anthropic_api_key=EMPTY",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+            "{type:responses_api_models,name:policy_model}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+            "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+            + PINNED_RUNTIME_VERSIONS["claude-code"],
+        ]
     if inherit_sandbox_environment:
         # Gym's Codex agent starts Codex with only its own variables unless told to keep the sandbox's.
         gym_agent = NEMO_GYM_AGENTS[agent]
@@ -437,6 +472,104 @@ def _signals_raise_keyboard_interrupt() -> Any:
             signal.signal(getattr(signal, name), handler)
 
 
+@contextlib.contextmanager
+def _defer_termination_signals() -> Any:
+    import threading
+
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    pending = False
+
+    def _handler(_signum: int, _frame: object) -> None:
+        nonlocal pending
+        pending = True
+
+    previous = {
+        getattr(signal, name): signal.signal(getattr(signal, name), _handler)
+        for name in ("SIGTERM", "SIGHUP")
+        if hasattr(signal, name)
+    }
+    try:
+        yield
+    finally:
+        for signum, handler in previous.items():
+            signal.signal(signum, handler)
+        if pending:
+            raise KeyboardInterrupt
+
+
+def _gym_run_processes(token: str, leader_group: int) -> list[int]:
+    try:
+        snapshot = subprocess.run(
+            ["ps", "axeww", "-o", "pid=,pgid=,stat=,command="],
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=5,
+            check=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise GymCleanupError("Cannot inspect NeMo Gym's detached processes; check host process access.") from exc
+    marker = re.compile(r"(?:^|\s)SKILL_EVAL_NEMO_GYM_RUN_TOKEN=" + re.escape(token) + r"(?:\s|$)")
+    owned = []
+    for line in snapshot.stdout.splitlines():
+        fields = line.split(None, 3)
+        if len(fields) != 4 or not fields[0].isdigit() or not fields[1].isdigit():
+            continue
+        if int(fields[1]) != leader_group and not fields[2].startswith("Z") and marker.search(fields[3]):
+            owned.append(int(fields[0]))
+    return owned
+
+
+def _stop_detached_gym_processes(token: str, leader_group: int, *, force: bool = False) -> None:
+    from skillevaluator.tier3.harbor.runner import _HARBOR_RUN_CANCEL_POLL_SECONDS, _HARBOR_RUN_REAP_SECONDS
+
+    seen: set[int] = set()
+
+    def signal_owned(sig: int) -> list[int]:
+        owned = _gym_run_processes(token, leader_group)
+        seen.update(owned)
+        for pid in owned:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, sig)
+        return owned
+
+    try:
+        for sig, budget in (
+            (signal.SIGKILL if force else signal.SIGTERM, _GYM_SHUTDOWN_GRACE_SECONDS if not force else 0),
+            (signal.SIGKILL, _HARBOR_RUN_REAP_SECONDS),
+        ):
+            deadline = time.monotonic() + budget
+            while signal_owned(sig):
+                if time.monotonic() >= deadline:
+                    break
+                time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
+            else:
+                return
+        if _gym_run_processes(token, leader_group):
+            raise GymCleanupError(
+                "NeMo Gym's detached servers could not be stopped; stop this run's servers before retrying."
+            )
+    except KeyboardInterrupt:
+        signal_owned(signal.SIGKILL)
+        raise
+    finally:
+        deadline = time.monotonic() + _HARBOR_RUN_REAP_SECONDS
+        while seen:
+            for pid in tuple(seen):
+                try:
+                    reaped, _status = os.waitpid(pid, os.WNOHANG)
+                except ChildProcessError:
+                    seen.remove(pid)
+                else:
+                    if reaped:
+                        seen.remove(pid)
+            if not seen or time.monotonic() >= deadline:
+                break
+            time.sleep(_HARBOR_RUN_CANCEL_POLL_SECONDS)
+
+
 def _run_gym(
     command: list[str],
     *,
@@ -465,11 +598,13 @@ def _run_gym(
     )
     from skillevaluator.tier3.harbor.stream_redaction import StreamingLogRedactor
 
+    run_token = os.urandom(16).hex()
+    force_detached_cleanup = False
     try:
         process = subprocess.Popen(
             command,
             cwd=cwd,
-            env=env,
+            env={**env, "SKILL_EVAL_NEMO_GYM_RUN_TOKEN": run_token},
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
@@ -529,6 +664,7 @@ def _run_gym(
             ) from cause
 
     def _stop() -> None:
+        nonlocal force_detached_cleanup
         # A second interrupt anywhere in here still SIGKILLs the group before it propagates.
         try:
             if reporter is not None:
@@ -554,7 +690,10 @@ def _run_gym(
                     _kill_group()
             except (OSError, RuntimeError) as exc:
                 _confirm_stopped(exc)
+            if reporter is not None:
+                reporter.emit(ProgressEvent(stage="cleanup", state="complete", detail="NeMo Gym stopped"))
         except KeyboardInterrupt:
+            force_detached_cleanup = True
             _kill_group()
             process.wait()
             raise
@@ -578,7 +717,20 @@ def _run_gym(
                     raise interrupt from stop_error
                 raise
     finally:
-        reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
+        pending_interrupt = sys.exception()
+        try:
+            with _defer_termination_signals():
+                try:
+                    _stop_detached_gym_processes(run_token, process.pid, force=force_detached_cleanup)
+                except GymCleanupError as cleanup_error:
+                    if reporter is not None:
+                        with contextlib.suppress(Exception):
+                            reporter.emit(ProgressEvent(stage="cleanup", state="failed", detail=str(cleanup_error)))
+                    if isinstance(pending_interrupt, KeyboardInterrupt):
+                        raise pending_interrupt from cleanup_error
+                    raise
+        finally:
+            reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 
 
 def _redacted_row(row: dict[str, Any], secrets: set[str]) -> dict[str, Any]:
@@ -627,8 +779,8 @@ def _refresh_adc_credentials(
     """Mint a fresh Vertex ADC token for one Gym launch and cap the launch to its lifetime.
 
     Mirrors the Harbor runner: the token is refreshed before every launch, reused as the
-    policy key when the policy has no key of its own, and the launch timeout is
-    capped by ``compute_adc_job_timeout``. Raises ``RuntimeError``/``ValueError`` on failure.
+    policy key when the policy has no key of its own or its key is the provider token being
+    replaced, and the launch timeout is capped by ``compute_adc_job_timeout``. Raises ``RuntimeError``/``ValueError`` on failure.
     """
     from skillevaluator.provider_config import (
         CREDENTIAL_EXPIRY_ENV,
@@ -644,12 +796,14 @@ def _refresh_adc_credentials(
     from skillevaluator.tier3.harbor.runner import VERTEX_ADC_JOB_TIMEOUT_ENV
 
     refreshed = dict(credentials)
+    previous_provider_key = (credentials.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
     fresh = refresh_host_vertex_adc_environment(
         refreshed, fallback_env=os.environ, fail_on_expired=True, token_getter=_get_google_access_token
     )
     if fresh:
         refreshed["OPENAI_API_KEY"] = fresh
-        if policy_uses_provider_key:
+        policy_key = refreshed.get(MODEL_API_KEY_ENV, "").strip()
+        if policy_uses_provider_key or (previous_provider_key and policy_key == previous_provider_key):
             refreshed[MODEL_API_KEY_ENV] = fresh
     source = refreshed.get(CREDENTIAL_SOURCE_ENV) or os.environ.get(CREDENTIAL_SOURCE_ENV)
     base_url = refreshed.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")
@@ -1006,6 +1160,7 @@ def run_nemo_gym_eval(
                     stage_for_gym(
                         arm_dir,
                         judge_job_env,
+                        agent=agent,
                         timeout_multiplier=effective_timeout,
                         # Generated tasks already carry them; native tasks get Harbor's job-level override.
                         resource_overrides={

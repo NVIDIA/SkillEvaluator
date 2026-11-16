@@ -539,7 +539,9 @@ def test_explicit_adverse_row_has_no_invented_baseline_delta() -> None:
     assert len(comparison_rows(data.rows)) == 1
 
 
-@pytest.mark.parametrize("omitted", ["evidence_entries", "raw_trial_rewards", "non_best_agent_details"])
+@pytest.mark.parametrize(
+    "omitted", ["evidence_entries", "raw_trial_rewards", "non_best_agent_details", "declarative_check_rows"]
+)
 def test_diagnostic_truncation_preserves_complete_trial_comparisons(omitted: str) -> None:
     report = _report()
     report["report_truncation"] = {"truncated": True, "omitted": {omitted: 50}}

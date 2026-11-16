@@ -20,6 +20,7 @@ CHECK_QUALITY = "quality"
 CHECK_SCHEMA = "schema"
 CHECK_LINT_SCRIPTS = "lint-scripts"
 CHECKS = (CHECK_QUALITY, CHECK_SCHEMA, CHECK_LINT_SCRIPTS)
+LINT_FINDINGS_SHOWN = 3
 
 
 def parse_hook_path(value: str | Path) -> Path:
@@ -95,11 +96,28 @@ def _quality_score(results: Sequence[ValidationResult]) -> float | None:
     return None
 
 
+def _strip_location(message: str) -> str:
+    return message.split(" in /", 1)[0]
+
+
 def _first_error(results: Sequence[ValidationResult]) -> str:
     for result in results:
         for message in (*result.gate_failures, *result.errors):
-            return message.split(" in /", 1)[0]
+            return _strip_location(message)
     return ""
+
+
+def _lint_findings(results: Sequence[ValidationResult]) -> list[str]:
+    return [_strip_location(message) for result in results for message in (*result.errors, *result.warnings)]
+
+
+def format_lint_findings(results: Sequence[ValidationResult], *, limit: int = LINT_FINDINGS_SHOWN) -> list[str]:
+    """Return indented lines for the first *limit* script lint findings."""
+    findings = _lint_findings(results)
+    lines = [f"    {message}" for message in findings[:limit]]
+    if len(findings) > limit:
+        lines.append(f"    ... and {len(findings) - limit} more (run `skillevaluator lint-scripts` for all)")
+    return lines
 
 
 def format_result_line(
@@ -119,6 +137,9 @@ def format_result_line(
             extra = f"  {score:.1f}/100"
             if not passed:
                 extra += f"  (min {min_score})"
+    elif check == CHECK_LINT_SCRIPTS:
+        count = len(_lint_findings(results))
+        extra = f"  {count} finding{'' if count == 1 else 's'}"
     elif not passed:
         detail = _first_error(results)
         if detail:
@@ -158,6 +179,8 @@ def run_precommit(
         results = run_check(check, root, min_score=min_score)
         line = format_result_line(root.name, check, results, min_score=min_score)
         lines.append(line)
+        if check == CHECK_LINT_SCRIPTS:
+            lines.extend(format_lint_findings(results))
         if not all(result.passed for result in results):
             failed = True
     return (1 if failed else 0, lines)

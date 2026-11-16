@@ -116,7 +116,10 @@ default quality bar of 70.
 
 Each hook prints one compact line per skill (`PASS` or `FAIL`) and exits
 non-zero when any skill fails. Script lint findings are advisory, so that hook
-does not fail the commit on style warnings.
+does not fail the commit on style warnings. It prints the finding count and the
+first three findings for each skill, and sets `verbose: true` so pre-commit
+shows that output even though the hook passes. Run `skillevaluator lint-scripts`
+on the skill to see every finding.
 
 ### What the hooks do not run
 

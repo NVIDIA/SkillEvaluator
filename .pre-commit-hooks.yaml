@@ -24,4 +24,6 @@
   description: Advisory lint of Python scripts in a touched skill. Offline; no API key, network, Docker, or scanner download.
   entry: skillevaluator precommit-run lint-scripts
   language: python
+  # Findings are advisory and never fail the commit; verbose shows them anyway.
+  verbose: true
   files: '(^|/)(SKILL\.md$|(scripts|references|evals)/)'

@@ -180,7 +180,30 @@ def test_precommit_lint_scripts_is_advisory_pass(tmp_path: Path) -> None:
 
     code, lines = run_precommit("lint-scripts", [str(script)], cwd=tmp_path)
     assert code == 0
-    assert lines == ["PASS  lint-skill  lint-scripts"]
+    assert lines[0].startswith("PASS  lint-skill  lint-scripts  ")
+    assert lines[0].endswith(" findings")
+
+
+def test_precommit_lint_scripts_prints_count_and_first_findings(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path, "lint-skill")
+    script = skill / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text("x = 42\nprint(x * 3600)\n", encoding="utf-8")
+
+    code, lines = run_precommit("lint-scripts", [str(script)], cwd=tmp_path)
+    assert code == 0
+    assert lines[0] == "PASS  lint-skill  lint-scripts  4 findings"
+    assert len(lines) == 5
+    assert all(line.startswith("    ") for line in lines[1:])
+    assert all(" in /" not in line for line in lines[1:])
+    assert any("SCRIPT_LINT" in line for line in lines[1:4])
+    assert lines[4] == "    ... and 1 more (run `skillevaluator lint-scripts` for all)"
+
+
+def test_lint_scripts_hook_is_verbose() -> None:
+    hooks = yaml.safe_load((REPO / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
+    by_id = {hook["id"]: hook for hook in hooks}
+    assert by_id["skillevaluator-lint-scripts"]["verbose"] is True
 
 
 def test_precommit_ignores_unrelated_and_deleted_paths(tmp_path: Path) -> None:

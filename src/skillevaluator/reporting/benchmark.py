@@ -217,7 +217,7 @@ class BenchmarkReporter(ReporterBase):
             budget_reason = budget_incomplete_reason(budget)
         if budget_reason:
             tier3_callout = f"> **Tier 3: INCOMPLETE** — {budget_reason}"
-        elif self.report_scope == "tier3" and isinstance(run_verdict, str):
+        elif self.report_scope == "tier3" and completed is None and isinstance(run_verdict, str):
             tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
                 f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
             )

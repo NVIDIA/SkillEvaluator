@@ -2263,7 +2263,9 @@ def test_a_p_inside_a_flag_value_does_not_hide_the_password_after_a_masked_comma
 
 def _ragas_prompt(command: str) -> str:
     """Return a RAGAS prompt that holds a Bash call running *command*, as the judge sends it."""
-    trajectory = {"steps": [{"source": "agent", "tool_calls": [{"function_name": "Bash", "arguments": {"command": command}}]}]}
+    trajectory = {
+        "steps": [{"source": "agent", "tool_calls": [{"function_name": "Bash", "arguments": {"command": command}}]}]
+    }
     agent_text = eval_template.build_conversation_summary(trajectory, "Deploy the app.")
     return "Judge whether the agent reached the goal.\ninput: " + json.dumps(
         {"user_input": [{"content": agent_text, "type": "ai"}]}, indent=4
@@ -2286,7 +2288,10 @@ def test_a_p_inside_a_flag_value_escaped_twice_does_not_hide_the_password(flag: 
     command = f'./ci {flag} docker login -u bot --token "x -p y" -p {_API_TOKEN} registry.example.com\nls'
     text = shape(command)
 
-    for evidence in (eval_template._redact_judge_evidence(text), eval_core_checks._mask_finding_evidence_credentials(text)):
+    for evidence in (
+        eval_template._redact_judge_evidence(text),
+        eval_core_checks._mask_finding_evidence_credentials(text),
+    ):
         assert _API_TOKEN not in evidence
         assert f"{flag} <redacted> login -u bot --token <redacted> registry.example.com" in evidence
 
@@ -2299,18 +2304,18 @@ def test_a_p_inside_a_flag_value_escaped_twice_does_not_hide_the_password(flag: 
     "command",
     [
         pytest.param(
-            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && ./deploy --password P2'
-            " && API_TOKEN=abc\n./deploy --password P3",
+            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && ./deploy --password pw2'
+            " && API_TOKEN=abc\n./deploy --password pw3",
             id="attribute-call-before-flags",
         ),
         pytest.param(
-            f'auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p P2 r'
-            " && API_TOKEN=abc\ndocker login -u bot -p P3 r",
+            f'auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p pw2 r'
+            " && API_TOKEN=abc\ndocker login -u bot -p pw3 r",
             id="call-before-logins",
         ),
         pytest.param(
-            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p P2 r'
-            " && API_TOKEN=abc\ndocker login -u bot -p P3 r",
+            f'session.auth = HTTPBasicAuth("bob", "{_BASIC_PASSWORD}") && docker login -u bot -p pw2 r'
+            " && API_TOKEN=abc\ndocker login -u bot -p pw3 r",
             id="attribute-call-before-logins",
         ),
     ],
@@ -2699,7 +2704,9 @@ def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> 
     "make_text",
     [
         pytest.param(lambda n: "--db_password a" + "\\ -token=a" * n, id="names-in-the-word"),
-        pytest.param(lambda n: "--db_password a" + "\\ -token=a" * n + "\\ " + "A" * 50_000, id="names-then-a-long-word"),
+        pytest.param(
+            lambda n: "--db_password a" + "\\ -token=a" * n + "\\ " + "A" * 50_000, id="names-then-a-long-word"
+        ),
         pytest.param(lambda n: "npm config set -- _authToken a" + ",token=a" * n, id="names-in-a-config-value"),
     ],
 )
@@ -2711,15 +2718,16 @@ def test_a_long_underscored_flag_word_does_not_read_each_name_in_it(
     # "=" to a value that starts as a word reads the rest of that same word,
     # so it is not read, and masking a long word stays close to linear.
     real = eval_core_checks._assignment_value_reading
+    calls: list[int] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eval_core_checks, "_assignment_value_reading", counted)
     counts = []
     for repeats in (100, 1000):
-        calls = []
-
-        def counted(*args: Any, **kwargs: Any) -> Any:
-            calls.append(1)
-            return real(*args, **kwargs)
-
-        monkeypatch.setattr(eval_core_checks, "_assignment_value_reading", counted)
+        calls.clear()
         evidence = eval_core_checks._mask_finding_evidence_credentials(make_text(repeats))
         assert "token=a" not in evidence
         counts.append(len(calls))
@@ -2912,7 +2920,7 @@ def test_a_flag_inside_an_earlier_flag_value_keeps_its_own_value_masked() -> Non
         ),
         pytest.param(
             "ssh host './deploy --access_token '\"'\"'x --password p'\"'\"'"
-            f" client.auth=HTTPDigestAuth(\"bob\", \"{_API_TOKEN}\")'",
+            f' client.auth=HTTPDigestAuth("bob", "{_API_TOKEN}")\'',
             id="call-after-a-quote-idiom-value",
         ),
         pytest.param(
@@ -3892,7 +3900,7 @@ def test_a_scheme_name_after_a_config_separator_stays_masked_in_judge_evidence(c
             id="assignment-after",
         ),
         pytest.param(
-            f"echo done\\nnpm config set _auth = token=\"{_API_TOKEN}\""
+            f'echo done\\nnpm config set _auth = token="{_API_TOKEN}"'
             f" && aws configure set aws_secret_access_key {_BASIC_PASSWORD}",
             " && aws configure set aws_secret_access_key <redacted>",
             id="aws-configure-after",
@@ -3920,8 +3928,7 @@ def test_a_config_set_command_after_an_escaped_line_break_keeps_its_value_masked
 # escaped quote, so a password quoted with escaped quotes after it is masked
 # by its own rule.
 _PYTHON_CONFIG_THEN_MYSQL = (
-    f"os.system('npm config set _auth = token=\"{_API_TOKEN}\""
-    f" && mysql -h db -u root -p\\'{_BASIC_PASSWORD}\\' mydb')"
+    f"os.system('npm config set _auth = token=\"{_API_TOKEN}\" && mysql -h db -u root -p\\'{_BASIC_PASSWORD}\\' mydb')"
 )
 
 
@@ -3956,7 +3963,9 @@ def test_a_config_value_in_a_quoted_string_ends_at_a_shell_operator(copy: str) -
             id="spaced-value-to-the-closing-quote",
         ),
         pytest.param(
-            f"echo 'npm config set _auth = {_API_TOKEN};ls'", "echo 'npm config set _auth = <redacted>;ls'", id="semicolon"
+            f"echo 'npm config set _auth = {_API_TOKEN};ls'",
+            "echo 'npm config set _auth = <redacted>;ls'",
+            id="semicolon",
         ),
         pytest.param(
             f"echo 'npm config set _auth = {_API_TOKEN} | tee f'",
@@ -4000,7 +4009,7 @@ def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
         ),
         pytest.param(
             "ssh host './deploy --access_token '\"'\"'x --password p'\"'\"'"
-            f" client.auth=HTTPDigestAuth(\"bob\", \"{_API_TOKEN}\")'",
+            f' client.auth=HTTPDigestAuth("bob", "{_API_TOKEN}")\'',
             "ssh host './deploy --access_token <redacted> client.auth=<redacted>'",
             id="call-after-the-value",
         ),

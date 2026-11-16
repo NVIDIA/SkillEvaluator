@@ -5064,11 +5064,7 @@ def _assignment_value_reading(
     )
     if header_prefix is not None:
         return None, header_prefix.start(1), header_prefix
-    if (
-        in_quotes
-        and text.startswith(closers, start)
-        and _FINDING_EVIDENCE_QUOTE_IDIOM_RE.match(text, start) is None
-    ):
+    if in_quotes and text.startswith(closers, start) and _FINDING_EVIDENCE_QUOTE_IDIOM_RE.match(text, start) is None:
         # The value is empty and the quote after it closes the string that
         # opened before the name ('grep "token=" ...', "printf 'password: '"),
         # so it is not the opening quote of a value, unless that quote starts

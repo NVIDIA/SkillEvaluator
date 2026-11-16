@@ -259,6 +259,61 @@ All notable changes to SkillEvaluator are documented in this file.
   the half blocks of the two-row one, so they get the plain title at 60-75
   columns.
 
+- Standalone HTML reports use one NVIDIA presentation across all three tiers,
+  with consistent typography, a green header, numbered Insights cards, and
+  plugin evidence inside the relevant tier. Clickable tier cards replace the
+  left sidebar and sticky mobile tier bar. Reports containing Tier 3 default
+  to dark and other reports to light, instead of following the device theme;
+  saved Light, Dark and System choices still take precedence. The renderer
+  gives saved incomplete runs concise coverage and actions, with full errors
+  in Diagnostics. Newly saved failed-run conclusions and recommendations
+  keep their existing raw error text.
+  Agents with diagnostic-only trial evidence are excluded from lift panels;
+  their trial rows and canonical exports remain available.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
+  The native header scale and visible tool versions, consolidated baseline
+  comparison with Overall and partial-comparison details, clickable agent
+  scorecards, and Harbor results/analysis actions are retained. Empty primary
+  viewer metadata no longer hides usable recorded summary links.
+  Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
+  snapshots add supplied plugin evidence. CLI JSON validator rows now include
+  a recorded boolean `optional_skip`, which the retained JSON reader
+  round-trips without changing gate policy. Shared plugin composition supplies
+  static and retained runtime evidence before the HTML template renders.
+  Recorded Harbor upload links survive saved-run regeneration. The renderer
+  version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
+  the aligned desktop report is slightly wider. Long scanner versions wrap
+  within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
+  text contrast in the light and dark themes.
+- HTML Overview combines execution status, scored/unscored coverage and the
+  recorded next action. The baseline comparison stays open with its scores,
+  lift and Overall visible; signals and reasoning use adjacent disclosures.
+  Compact Definition disclosures beneath each dimension name explain the metric,
+  including unavailable scores and no-JavaScript viewing, without repeating its
+  definition in a separate guide or the Reasoning column.
+  Native agent cards, versions and typography remain. Dataset diagnostics
+  share exact structured explanations within an attempt and status while
+  retaining every assertion, requirement and evidence association. Missing
+  pass@k case outcomes show N/A alongside retained attempt counts; measured
+  zero success remains 0%. Harbor actions use concise recorded labels and
+  retain exact job identities in Diagnostics.
+- HTML can display optional retained native dependency completeness,
+  composition/ablation, Harbor delivery status, provider refusal/mixed-model
+  comparison basis, and recovery notes. Active warnings stay visible; routine
+  evidence is folded in the relevant view with local omission and shortening
+  notices. These are passive display fields, not new backend coverage;
+  hook/canary runtime summaries still need separate producer integration.
+  Public recovery, MCP and comparison projections remain. No scoring, gate,
+  CLI, canonical payload or newly produced insight behavior changes.
+- Embedded HTML JSON uses compact whitespace and charts receive only their
+  consumed data. Charts initialize for visible views after applying the theme,
+  reuse instances, and prepare closed views synchronously for print. Print
+  includes retained Dataset cases hidden by screen filters and restores the
+  screen's disclosure and filter state afterward. Downloads preserve the
+  retained snapshot and existing safety bounds.
+
 ### Documentation
 
 - The agent skill guide explicitly installs the CLI before the first check,

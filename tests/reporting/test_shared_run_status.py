@@ -73,9 +73,12 @@ def test_report_surfaces_share_failure_precedence():
     terminal = re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result]))
     assert "[FAIL]" in terminal
     assert "**Status:** ❌ FAILED" in MarkdownReporter().render_all([result])
-    assert '"status": "failed"' in HTMLReporter().render_all([result]) or "FAILED" in HTMLReporter().render_all(
-        [result]
-    )
+    html = HTMLReporter().render_all([result])
+    embedded = re.search(r'<script id="report-data" type="application/json">(.*?)</script>', html, re.DOTALL)
+    assert embedded is not None
+    html_data = json.loads(embedded.group(1))
+    assert html_data["summary"]["status"] == "failed"
+    assert html_data["results"][0]["status"] == "failed"
     sarif = json.loads(SARIFReporter().render_all([result]))
     assert sarif["runs"][0]["properties"]["status"] == "failed"
 

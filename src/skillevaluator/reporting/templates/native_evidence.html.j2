@@ -1,0 +1,34 @@
+{# Optional native fields use the same disclosures and tables as public evidence. #}
+{% macro render_native_warnings(evidence) -%}
+{% if evidence.warnings %}
+<div class="t3-other-agent-notes" id="tier3-native-notices" role="status">
+  {% for notice in evidence.warnings %}<p><strong>{{ notice.title }}.</strong> {{ notice.message }} <a href="#native-{{ notice.target }}">Recorded details</a></p>{% endfor %}
+</div>
+{% endif %}
+{%- endmacro %}
+
+{% macro render_native_section(section) -%}
+<details class="t3-details" id="native-{{ section.key }}">
+  <summary>{{ section.title }}{% if section.omitted_rows %} · {{ section.omitted_rows }} rows omitted{% endif %}{% if section.omitted_notes %} · {{ section.omitted_notes }} notes omitted{% endif %}{% if section.omitted_groups %} · {{ section.omitted_groups }} component groups omitted{% endif %}{% if section.text_shortened %} · text shortened{% endif %}</summary>
+  <div class="t3-details-body">
+    {% for note in section.notes %}<p>{{ note }}</p>{% endfor %}
+    {% if section.rows %}
+    <div class="table-scroll" tabindex="0" role="region" aria-label="{{ section.title }}">
+      <table class="summary-table">
+        <thead><tr>{% for column in section.columns %}<th scope="col">{{ column }}</th>{% endfor %}</tr></thead>
+        <tbody>{% for row in section.rows %}<tr>{% for cell in row %}<td>{% if cell.url %}<a href="{{ cell.url }}" target="_blank" rel="noopener noreferrer">{{ cell.text }}</a>{% else %}{{ cell.text }}{% endif %}</td>{% endfor %}</tr>{% endfor %}</tbody>
+      </table>
+    </div>
+    {% endif %}
+    {% if section.omitted_rows %}<p>{{ section.omitted_rows }} rows omitted from this display.</p>{% endif %}
+    {% if section.omitted_notes %}<p>{{ section.omitted_notes }} notes omitted from this display.</p>{% endif %}
+    {% if section.omitted_groups %}<p>{{ section.omitted_groups }} component groups omitted from this display.</p>{% endif %}
+    {% if section.text_shortened %}<p>Some text shortened for display; the canonical export retains the recorded evidence.</p>{% endif %}
+  </div>
+</details>
+{%- endmacro %}
+
+{% macro render_native_evidence(evidence, slot) -%}
+{% for section in evidence[slot] %}{{ render_native_section(section) }}{% endfor %}
+{% if slot == 'provenance' and evidence.omitted_agents %}<p>{{ evidence.omitted_agents }} agents omitted from optional native evidence display; consult the canonical export.</p>{% endif %}
+{%- endmacro %}

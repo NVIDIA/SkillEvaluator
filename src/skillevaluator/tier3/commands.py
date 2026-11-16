@@ -1224,7 +1224,7 @@ def _nemo_gym_doctor_rows(
         checked_endpoints: set[str] = set()
         for agent in agents:
             try:
-                _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0])
+                _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0], require_model=False)
             except (ValueError, ProviderConfigurationError) as exc:
                 errors.append(f"{agent}: {exc}")
                 continue

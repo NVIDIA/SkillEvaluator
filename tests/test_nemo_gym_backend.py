@@ -2000,6 +2000,11 @@ def test_malformed_mcp_servers_toml_is_handled_as_on_harbor(tmp_path: Path, capl
     assert "Failed to parse" in caplog.text
     mcp.write_text('[[mcp_servers]]\nname = "x"\nurl = "http://127.0.0.1:9/mcp"\n')
     assert MCP_SERVERS_ERROR in nemo_gym_config_errors(skill)
+    mcp.write_text(
+        '[[mcp_servers]]\nname = "x"\nurl = "http://127.0.0.1:9/mcp"\nheaders = "Bearer sk-not-a-table-1234"\n'
+    )
+    invalid = [error for error in nemo_gym_config_errors(skill) if "mcp_servers.toml is invalid" in error]
+    assert invalid and "sk-not-a-table-1234" not in invalid[0]
 
 
 def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(

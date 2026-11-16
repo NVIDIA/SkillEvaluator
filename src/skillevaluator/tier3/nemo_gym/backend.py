@@ -329,7 +329,8 @@ def mcp_servers_error(skill_path: Path) -> str | None:
     try:
         declared = bool(_load_mcp_servers(skill_path))
     except Exception as exc:
-        return f"evals/environment/mcp_servers.toml could not be loaded: {exc}"
+        # The message can quote raw field values, including credentials: name only the error type.
+        return f"evals/environment/mcp_servers.toml is invalid ({type(exc).__name__})"
     return MCP_SERVERS_ERROR if declared else None
 
 

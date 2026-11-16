@@ -295,6 +295,9 @@ All notable changes to SkillEvaluator are documented in this file.
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
 - Hermes `harness` results no longer say Hermes uses one of two same-named
   skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
 - `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
   check, not only the first: a security scan with several SkillSpector findings
   shows them one per line, up to three, then "+N more in detailed reports".
@@ -306,6 +309,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
 - The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI

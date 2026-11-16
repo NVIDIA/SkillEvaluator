@@ -197,18 +197,33 @@ def _trial_case_id(trial: Path, reward: Any) -> str:
     whose directory is not named after its case, or for a longer case ID. The
     collector records the case it resolved from the task each attempt ran:
     ``entry_id`` in ``failure.json`` for an unscored attempt and in
-    ``reward.json`` for a scored one. The token usage report reads the same
-    record. A run from before that record falls back to the task directory
+    ``reward.json`` for a scored one, unless it rejected that reward's case.
+    The token usage report reads the same record. Without one, or for a run
+    from before that record, the case falls back to the task directory
     the trial's ``result.json`` or ``config.json`` names, then to the name.
     The caller has checked that ``trial`` is not reached through a link.
     """
-    entry_id = reward.get("entry_id") if isinstance(reward, Mapping) else None
+    entry_id = reward.get("entry_id") if isinstance(reward, Mapping) and not _identity_rejected(reward) else None
     return (
         _recorded_case_id(trial)
         or (entry_id if isinstance(entry_id, str) and entry_id.strip() else None)
         or _harbor_task_directory(trial)
         or trial.name.split("__", 1)[0]
     )
+
+
+def _identity_rejected(reward: Mapping[str, Any]) -> bool:
+    """Return whether the collector refused this reward's case, so its ``entry_id`` names no case.
+
+    A trial stopped before Harbor wrote its ``result.json`` names no task the
+    collector can map to a case. The collector then fails the reward with this
+    reason and records the placeholder ``entry_id`` "unknown", which must not
+    move the trial away from the case its task directory or name gives.
+    """
+    from skillevaluator.tier3.harbor.collector import UNSAFE_REWARD_IDENTITY_REASON
+
+    errors = reward.get("evaluation_errors")
+    return isinstance(errors, Mapping) and errors.get("collector") == UNSAFE_REWARD_IDENTITY_REASON
 
 
 def _failed_trial_case_id(agent: Mapping[str, Any], key: str, trial: str) -> str:

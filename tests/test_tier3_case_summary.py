@@ -1174,6 +1174,39 @@ def test_failed_condition_rebuilds_native_task_rows_under_the_case_the_collector
     ]
 
 
+@pytest.mark.parametrize(
+    "records",
+    [{}, {"config.json": {"task": {"path": "/run/_harbor-tasks/a/with/plain-case"}}}],
+    ids=["no-harbor-files", "config-written-at-trial-start"],
+)
+def test_trial_whose_reward_identity_the_collector_rejected_keeps_its_own_case(tmp_path: Path, records: dict) -> None:
+    from skillevaluator.tier3.case_summary import _cases
+    from skillevaluator.tier3.harbor.collector import UNSAFE_REWARD_IDENTITY_REASON
+
+    # A trial stopped before Harbor wrote result.json names no task the collector can map to a case, so
+    # the collector rejects its reward and records the placeholder entry_id "unknown", which is no case.
+    rejected = {
+        "overall": 0.9,
+        "evaluation_status": "failed",
+        "evaluation_errors": {"collector": UNSAFE_REWARD_IDENTITY_REASON},
+        "entry_id": "unknown",
+    }
+    trial = "plain-case__Zx81kQa"
+    _trial_records(tmp_path / "a" / "with-skill" / "trials", trial, {"reward.json": rejected, **records})
+    failed_arm = _agent({}, {})
+    failed_arm.update(
+        output_dir=str(tmp_path / "a"),
+        trial_failures={"with_skill": [{"trial": trial, "reason": "Required judge evaluation failed"}]},
+    )
+    scored_arm = _agent({"plain-case": _case(missing=1)}, {})
+
+    assert set(_cases(failed_arm, "with_skill")) == {"plain-case"}
+    for agent in (failed_arm, scored_arm):
+        [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+        assert (fix["case"], fix["kind"], fix.get("cause")) == ("plain-case", "run error", "collector")
+        assert fix["evidence"] == f"a/with-skill/trials/{trial}/reward.json"
+
+
 def test_recorded_case_is_not_read_through_a_link(tmp_path: Path) -> None:
     from skillevaluator.tier3.case_summary import _cases
 

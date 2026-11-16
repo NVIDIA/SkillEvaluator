@@ -534,7 +534,7 @@ def _agent_score_headlines(
     budget_partial = budget_incomplete_reason(result.get("budget")) is not None
     if budget_partial:
         agent_verdict = "incomplete"
-    if multiple_agents or verdict_reason:
+    if with_usable and (multiple_agents or verdict_reason):
         verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
         reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
         color = "yellow" if agent_verdict == "inconclusive" else RED if agent_verdict == "fail" else GREEN

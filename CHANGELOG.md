@@ -342,7 +342,7 @@ All notable changes to SkillEvaluator are documented in this file.
   clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding
   spurious notices that other execution failures need attention.
-- Terminal quality headlines and check-count comparisons exclude execution-failed arms.
+- Terminal quality headlines and check-count comparisons exclude execution-failed arms. Multi-agent summaries also withhold a failed agent's quality headline.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

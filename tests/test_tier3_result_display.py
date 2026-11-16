@@ -202,6 +202,32 @@ def test_check_headlines_require_usable_arms(failed_arm: str | None) -> None:
     assert result == original
 
 
+@pytest.mark.parametrize("failed_agent", ["codex", "opencode"])
+def test_failed_agent_has_no_quality_headline_in_multi_agent_summary(failed_agent):
+    agents = {
+        name: {
+            "execution_status": "failed" if name == failed_agent else "succeeded",
+            "conditions": {
+                "with_skill": {"execution_status": "failed" if name == failed_agent else "succeeded"},
+                "without_skill": {"execution_status": "succeeded"},
+            },
+            "pass_at_k": {
+                "with_skill": {
+                    "required_checks": {"passed": 0, "scored": 1, "wrong_answer": 1, "security": 0},
+                },
+            },
+        }
+        for name in ("codex", "opencode")
+    }
+    result = {"agents": agents}
+    original = deepcopy(result)
+    output = render_result(result)
+    usable_agent = "opencode" if failed_agent == "codex" else "codex"
+    assert f"QUALITY VERDICT ({failed_agent}):" not in output
+    assert f"QUALITY VERDICT ({usable_agent}): FAIL" in output
+    assert result == original
+
+
 def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
     def agent(passed: int, *, case_id: str) -> dict:
         return {

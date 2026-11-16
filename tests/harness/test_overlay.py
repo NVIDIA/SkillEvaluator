@@ -393,6 +393,7 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
         f["id"] for r in rows.values() for f in r["findings"]
     }
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
+    assert "lists both" in next(f["message"] for f in rows["hermes"]["findings"] if f["id"] == "HM-DUP-NAME")
 
 
 def _install(folder: Path, dirname: str, name: str | None = None) -> Path:

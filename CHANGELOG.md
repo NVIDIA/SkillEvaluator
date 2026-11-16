@@ -1022,6 +1022,19 @@ All notable changes to SkillEvaluator are documented in this file.
   error, was printed on the same line as the table's bottom border. Output to
   a terminal is unchanged.
 
+- The Tier 3 "How to improve" list now finds the failed attempts of a case
+  whose trial directory names do not start with its case ID: a native or NeMo
+  Gym task whose `[metadata] entry_id` differs from its directory, or a case
+  ID longer than the 32 characters Harbor keeps in a trial name. Before, such a
+  case's run error said only "1 attempt(s) never produced a score", with no
+  cause and no evidence file, and a failed judge got the generic run error
+  advice instead of the judge remedy. Each attempt's case is now the
+  `entry_id` the collector recorded in its `failure.json` or `reward.json`,
+  as for token usage. The case rows rebuilt for a failed arm use the same
+  case instead of the task directory, and the live case grid during a run
+  counts a long-named case's attempts in its own row instead of a second row
+  with the cut name.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

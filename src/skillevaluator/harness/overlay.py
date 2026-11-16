@@ -8,7 +8,9 @@ import ast
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -526,8 +528,26 @@ _STOP_WORDS = frozenset(
 )
 
 
+# Scripts written without spaces between words (Han, kana, Thai, Lao): compared as character pairs.
+_UNSPACED_RUN = re.compile(r"([\u0e00-\u0eff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+)")
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or unicodedata.category(char).startswith("M")
+
+
 def _description_words(text: str) -> frozenset[str]:
-    return frozenset(w for w in re.findall(r"[a-z0-9]+", text.lower()) if w not in _STOP_WORDS)
+    """Letters and digits in any script, lowercased, split on everything else, minus common English words."""
+    words: set[str] = set()
+    for keep, chars in groupby(unicodedata.normalize("NFKC", text).casefold(), _is_word_char):
+        if not keep:
+            continue
+        for i, piece in enumerate(_UNSPACED_RUN.split("".join(chars))):
+            if i % 2:
+                words.update({piece[j : j + 2] for j in range(len(piece) - 1)} or {piece})
+            elif piece and piece not in _STOP_WORDS:
+                words.add(piece)
+    return frozenset(words)
 
 
 def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:

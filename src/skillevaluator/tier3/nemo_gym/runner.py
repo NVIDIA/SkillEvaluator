@@ -306,7 +306,7 @@ def _task_case_ids(arm_dir: Path) -> dict[str, str]:
     return mapping
 
 
-def _model_endpoint(model: str | None) -> tuple[str, str, str]:
+def _model_endpoint(model: str | None, *, require_model: bool = True) -> tuple[str, str, str]:
     """Return ``(model, base_url, api_key)`` for Gym's OpenAI-compatible policy model server."""
     from skillevaluator.provider_config import resolve_llm_provider
 
@@ -315,6 +315,12 @@ def _model_endpoint(model: str | None) -> tuple[str, str, str]:
     if url and not key:
         # Never send the evaluator's provider key to a policy server it was not issued for.
         raise ValueError(f"{MODEL_URL_ENV} is set, so also set {MODEL_API_KEY_ENV} (use EMPTY for a keyless server)")
+    if url and not model and require_model:
+        # The provider's default model name is rarely served by a separate policy endpoint.
+        raise ValueError(
+            f"{MODEL_URL_ENV} is set, so also choose a model it serves "
+            "(--model, --agent-model, or harbor.agents.<agent>.model)"
+        )
     resolved_model = model
     if not url or not key or not resolved_model:
         provider = resolve_llm_provider()
@@ -1038,7 +1044,10 @@ def run_nemo_gym_eval(
     for agent in agents:
         cli_model = (agent_models or {}).get(agent) or model
         config_model = (config_agents.get(agent) or {}).get("model")
-        endpoints[agent] = _model_endpoint(cli_model or config_model)
+        try:
+            endpoints[agent] = _model_endpoint(cli_model or config_model)
+        except ValueError as exc:
+            return _config_failure(str(exc))
         source = "CLI" if cli_model else "evals/config.yml" if config_model else "public provider default"
         resolved_models[agent] = {"agent": agent, "model": endpoints[agent][0], "source": source}
         if url_error := model_url_credential_error(endpoints[agent][1]):

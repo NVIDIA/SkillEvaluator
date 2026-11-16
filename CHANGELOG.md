@@ -328,6 +328,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - BENCHMARK cards explain the required with-skill goal and security case checks
 - HTML reports explain the required with-skill goal and security case checks
   that can fail quality even when all dimensions pass.
+- `--backend nemo-gym` with `SKILL_EVAL_NEMO_GYM_MODEL_URL` set now requires a
+  model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
+  run starts. It no longer sends the evaluator provider's default model name to
+  that endpoint.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense

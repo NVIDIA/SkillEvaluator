@@ -340,6 +340,8 @@ All notable changes to SkillEvaluator are documented in this file.
   that endpoint.
 - Make the MCP-staging restored-mtime race regression independent of filesystem
   clock granularity by modeling an advanced ctime.
+- HTML reports preserve successful execution when Tier 3 quality fails, avoiding
+  spurious notices that other execution failures need attention.
 - Make the same-inode read-race regression use an observable mtime change without
   depending on filesystem clock granularity.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget

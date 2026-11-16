@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Document measured real-provider saved-catalog scale separately from 5,000-entry
+  in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
   skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
   copy, Codex lists both, and the other harnesses use the project copy.

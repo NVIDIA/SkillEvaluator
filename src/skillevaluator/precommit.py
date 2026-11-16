@@ -33,24 +33,39 @@ def parse_hook_path(value: str | Path) -> Path:
     return Path(value)
 
 
-def _has_skill_manifest(directory: Path) -> bool:
+def _has_skill_manifest(directory: Path, cache: dict[Path, bool] | None = None) -> bool:
     """Return True when *directory* holds a manifest named exactly as in ``SKILL_MANIFEST_VARIANTS``.
 
     Names are compared as stored on disk, so the result is the same on
     case-insensitive (macOS, Windows) and case-sensitive (Linux) filesystems.
+    When *cache* is given, each directory is listed at most once per cache.
     """
+    if cache is not None and directory in cache:
+        return cache[directory]
     try:
-        return any(child.name in SKILL_MANIFEST_VARIANTS and child.is_file() for child in directory.iterdir())
+        found = any(child.name in SKILL_MANIFEST_VARIANTS and child.is_file() for child in directory.iterdir())
     except OSError:
-        return False
+        found = False
+    if cache is not None:
+        cache[directory] = found
+    return found
 
 
-def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:
+def skill_root_for(
+    path: str | Path,
+    *,
+    cwd: Path | None = None,
+    _cache: dict[Path, Path | None] | None = None,
+    _manifest_cache: dict[Path, bool] | None = None,
+) -> Path | None:
     """Return the nearest ancestor of *path* that contains ``SKILL.md`` or ``skill.md``.
 
     Deleted skills and paths that never sit under a skill are ignored. Search
     stops at *cwd* (the repository root pre-commit runs from) so a stray
     manifest above the project is not treated as a skill root.
+
+    ``_cache`` and ``_manifest_cache`` let ``collect_skill_roots`` share
+    lookups across paths so each directory is listed once per invocation.
     """
     cwd = Path.cwd() if cwd is None else Path(cwd)
     candidate = parse_hook_path(path)
@@ -63,32 +78,41 @@ def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:
     else:
         start = candidate.parent
 
+    if _cache is not None and start in _cache:
+        return _cache[start]
+
     try:
         limit = cwd.resolve()
     except OSError:
         limit = cwd
 
+    root: Path | None = None
     for ancestor in [start, *start.parents]:
-        if _has_skill_manifest(ancestor):
+        if _has_skill_manifest(ancestor, _manifest_cache):
             try:
-                return ancestor.resolve()
+                root = ancestor.resolve()
             except OSError:
-                return ancestor
+                root = ancestor
+            break
         try:
             if ancestor.resolve() == limit:
                 break
         except OSError:
             if ancestor == cwd:
                 break
-    return None
+    if _cache is not None:
+        _cache[start] = root
+    return root
 
 
 def collect_skill_roots(paths: Iterable[str | Path], *, cwd: Path | None = None) -> list[Path]:
     """Return unique skill roots for *paths*, in first-seen order."""
     roots: list[Path] = []
     seen: set[Path] = set()
+    start_cache: dict[Path, Path | None] = {}
+    manifest_cache: dict[Path, bool] = {}
     for raw in paths:
-        root = skill_root_for(raw, cwd=cwd)
+        root = skill_root_for(raw, cwd=cwd, _cache=start_cache, _manifest_cache=manifest_cache)
         if root is None or root in seen:
             continue
         seen.add(root)

@@ -89,6 +89,41 @@ def test_skill_root_skips_deleted_skill(tmp_path: Path) -> None:
     assert skill_root_for(kept / "SKILL.md", cwd=tmp_path) == kept.resolve()
 
 
+def test_collect_skill_roots_lists_each_directory_once(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skills = tmp_path / "skills"
+    alpha = _write_skill(skills, "alpha")
+    beta = _write_skill(alpha, "beta")
+    alpha_scripts = alpha / "scripts"
+    beta_scripts = beta / "scripts"
+    alpha_scripts.mkdir()
+    beta_scripts.mkdir()
+    staged: list[Path] = []
+    for index in range(200):
+        for folder in (alpha_scripts, beta_scripts):
+            script = folder / f"run_{index}.py"
+            script.write_text("print(0)\n", encoding="utf-8")
+            staged.append(script.relative_to(tmp_path))
+    stray = tmp_path / "docs" / "guide.md"
+    stray.parent.mkdir()
+    stray.write_text("guide\n", encoding="utf-8")
+    staged.append(Path("docs/guide.md"))
+
+    listed: list[Path] = []
+    real_iterdir = Path.iterdir
+
+    def counting_iterdir(self: Path):
+        listed.append(self)
+        return real_iterdir(self)
+
+    monkeypatch.setattr(Path, "iterdir", counting_iterdir)
+
+    roots = collect_skill_roots(staged, cwd=tmp_path)
+
+    assert roots == [alpha.resolve(), beta.resolve()]
+    assert len(listed) == len(set(listed))
+    assert len(listed) <= 8
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="backslash is a separator only on Windows")
 def test_skill_root_accepts_windows_style_separators(tmp_path: Path) -> None:
     skill = _write_skill(tmp_path / "skills", "win-skill")

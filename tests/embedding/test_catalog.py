@@ -74,6 +74,37 @@ def _write_catalog(path: Path, data: dict | None = None) -> Path:
 
 
 class TestCatalogPersistence:
+    def test_dense_catalog_uses_compact_json_with_exact_byte_limit(self, tmp_path: Path, monkeypatch) -> None:
+        data = _catalog_data()
+        data["vector_dimension"] = 128
+        data["entries"][0]["embedding"] = [(index + 1) / 129 for index in range(128)]
+        registry = EmbeddingRegistry(_client())
+        registry.load_catalog(_write_catalog(tmp_path / "input.json", data))
+        clock = MagicMock(wraps=registry_module.datetime)
+        clock.now.return_value = registry_module.datetime.fromisoformat(data["created_at"])
+        monkeypatch.setattr(registry_module, "datetime", clock)
+        compact_bytes = len(json.dumps(data, separators=(",", ":")).encode("utf-8"))
+        indented_bytes = len(json.dumps(data, indent=2).encode("utf-8"))
+        monkeypatch.setattr(registry_module, "MAX_CATALOG_BYTES", (compact_bytes + indented_bytes) // 2)
+
+        output = tmp_path / "output.json"
+        registry.save_catalog(output)
+        encoded = output.read_bytes()
+        assert len(encoded) < indented_bytes
+        assert json.loads(encoded)["entries"] == data["entries"]
+
+        monkeypatch.setattr(registry_module, "MAX_CATALOG_BYTES", len(encoded))
+        restored = EmbeddingRegistry(_client())
+        restored.load_catalog(output)
+        assert restored._entries == registry._entries
+        registry.save_catalog(output)
+
+        previous = output.read_bytes()
+        monkeypatch.setattr(registry_module, "MAX_CATALOG_BYTES", len(previous) - 1)
+        with pytest.raises(ValueError, match="Catalog size limit exceeded"):
+            registry.save_catalog(output)
+        assert output.read_bytes() == previous
+
     @pytest.mark.parametrize("full_body", [False, True])
     @pytest.mark.parametrize(
         ("style", "description"),

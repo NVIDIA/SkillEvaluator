@@ -377,6 +377,15 @@ entries when each skill has a directory and `SKILL.md`. Collections with more
 supporting files or deeper layouts may reach the path ceiling before the
 selected-entry budget.
 
+Selected manifests also share a fixed 8 MiB input-byte budget, with a 1 MiB
+per-manifest limit. Both apply to the complete manifest bytes even in the
+default description-only embedding mode; supporting files count toward
+discovered paths, but not these selected-manifest byte totals. For example,
+2,500 manifests averaging 4 KiB exceed the collection byte budget even though
+the entry count fits. Discovery stops with an explicit error before embedding;
+`--max-entries` and `--max-scalar-comparisons` do not raise either byte limit.
+Check total manifest sizes as well as path counts before planning a scale run.
+
 For a saved catalog query, `--max-entries` does not reduce the catalog's existing
 5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
 bounded by `--max-scalar-comparisons`.
@@ -426,7 +435,8 @@ existing set — save the collection once and query candidates against it.
     ```
 
     `--save-catalog` builds a versioned JSON catalog from the supplied
-    collection.
+    collection. Catalogs use compact JSON so formatting whitespace does not
+    consume the 32 MiB file budget; vector values and the schema are unchanged.
   </Step>
   <Step title="Screen a candidate">
     ```bash title="Compare one candidate against the catalog"

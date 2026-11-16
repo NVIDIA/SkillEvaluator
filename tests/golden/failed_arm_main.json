@@ -1,0 +1,11 @@
+{
+  "source_revision": "2ec6364f4fa69d6ee25566462c556841766880b4",
+  "with-skill": {
+    "report_sha256": "baf9945c5c89db59cc62273e922784f1d1344fda9ef320f2b39a0a288698a4bf",
+    "benchmark_sha256": "8b8fd1281e3e895a701788d188614932e344b25aa6edab888be19f00ecc344df"
+  },
+  "without-skill": {
+    "report_sha256": "9334c535edff0ad0c45abedcbba01f669b3dfba2e9d693c2fc09543a0e5288ee",
+    "benchmark_sha256": "c0ff12684ba1b18b8b6a502a6442f77e279a0d83b1797df19d4dda544a50efbd"
+  }
+}

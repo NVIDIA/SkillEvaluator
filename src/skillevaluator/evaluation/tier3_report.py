@@ -970,7 +970,10 @@ def build_agent_eval_payload(
     dataset_summary = (
         dict(persisted_dataset_summary)
         if isinstance(persisted_dataset_summary, dict)
-        else _dataset_summary(public_dataset, canonical_trials)
+        else _dataset_summary(
+            public_dataset,
+            [trial for trial in canonical_trials if "diagnostic_rewards" not in agents.get(trial["agent"], {})],
+        )
     )
     from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
 
@@ -3641,6 +3644,10 @@ def _normalize_trials(
         if harbor_viewer:
             trial["harbor_viewer"] = harbor_viewer
         trial["activation_validation"] = _trial_activation_validation(group, trial)
+        if trial.get("scored") is False:
+            trial["activation_validation"]["diagnostics"] = [
+                {"code": "attempt_unscored", "message": "Attempt errored or was unscored; activation is unknown."}
+            ]
         out.append(trial)
     return out
 

@@ -5,12 +5,17 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 from pathlib import Path
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+from skillevaluator.evaluation.tier3_report import (
+    _validation_result_from_payload,
+    agent_eval_result_from_directory,
+)
+from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage
 
@@ -113,6 +118,7 @@ def test_errored_trial_has_unknown_activation(tmp_path: Path, artifact: str) -> 
     assert error is not None
     assert error["activation_validation"]["observed_activation"] == "unknown"
     assert error["activation_validation"]["expectation_status"] == "unknown"
+    assert error["activation_validation"]["diagnostics"][0]["code"] == "attempt_unscored"
     assert error["scored"] is False
     assert error["scores"] == {}
     assert error["overall"] is None
@@ -149,3 +155,27 @@ def test_diagnostic_trials_do_not_double_count_usage() -> None:
     assert arm["coverage"]["observed_attempts"] == 2
     assert arm["coverage"]["unscored_attempts"] == 1
     assert arm["totals"]["total_tokens"] == 35
+
+
+def _score_bearing_outputs(payload: dict) -> dict:
+    result = _validation_result_from_payload(payload)
+    assert result is not None
+    report = {key: value for key, value in payload.items() if key not in {"trials", "agents"}}
+    report["agents"] = {
+        name: {key: value for key, value in agent.items() if key not in {"trials", "trials_baseline"}}
+        for name, agent in payload["agents"].items()
+    }
+    report["provenance"] = {**report["provenance"], "run_dir": "<run-dir>"}
+    benchmark = BenchmarkReporter(include_timestamp=False, report_scope="tier3").render_all([result])
+    return {
+        "report_sha256": hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest(),
+        "benchmark_sha256": hashlib.sha256(benchmark.encode()).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("arm,key", [("with-skill", "trials"), ("without-skill", "trials_baseline")])
+def test_failed_arm_score_bearing_outputs_match_main(tmp_path: Path, arm: str, key: str) -> None:
+    expected = json.loads((Path(__file__).parents[1] / "golden" / "failed_arm_main.json").read_text())
+    payload = _failed_run(tmp_path, arm)
+    assert _score_bearing_outputs(payload) == expected[arm]
+    assert len(payload["agents"]["codex"][key]) == 2

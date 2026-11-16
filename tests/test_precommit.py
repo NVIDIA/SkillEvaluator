@@ -218,13 +218,51 @@ def test_precommit_ignores_unrelated_and_deleted_paths(tmp_path: Path) -> None:
     assert lines == []
 
 
-def test_precommit_does_not_write_reports(tmp_path: Path, monkeypatch) -> None:
+@pytest.mark.parametrize("check", CHECKS)
+def test_precommit_does_not_write_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, check: str) -> None:
     monkeypatch.chdir(tmp_path)
     skill = _write_skill(tmp_path, "sample-skill")
-    code, _lines = run_precommit("quality", [str(skill / "SKILL.md")], min_score=0, cwd=tmp_path)
+    script = skill / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text("print(1)\n", encoding="utf-8")
+    before = sorted(tmp_path.rglob("*"))
+
+    code, _lines = run_precommit(check, [str(skill / "SKILL.md"), str(script)], min_score=0, cwd=tmp_path)
+
     assert code == 0
-    assert not (tmp_path / "reports").exists()
-    assert list(tmp_path.glob("skillevaluator-output*")) == []
+    assert sorted(tmp_path.rglob("*")) == before
+
+
+def test_precommit_fails_when_an_earlier_skill_fails(tmp_path: Path) -> None:
+    broken = _write_skill(tmp_path, "broken-skill", body="# Broken\n\nNo frontmatter.\n")
+    valid = _write_skill(tmp_path, "valid-skill")
+
+    code, lines = run_precommit("schema", [str(broken / "SKILL.md"), str(valid / "SKILL.md")], cwd=tmp_path)
+
+    assert code == 1
+    assert len(lines) == 2
+    assert lines[0].startswith("FAIL  broken-skill  schema")
+    assert lines[1] == "PASS  valid-skill  schema"
+
+
+def test_skill_root_finds_repo_root_skill_from_relative_path(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text(_VALID_SKILL_MD.format(name="root-skill", title="Root Skill"), encoding="utf-8")
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts" / "a.py").write_text("print(1)\n", encoding="utf-8")
+
+    assert skill_root_for("scripts/a.py", cwd=tmp_path) == tmp_path.resolve()
+    assert skill_root_for("SKILL.md", cwd=tmp_path) == tmp_path.resolve()
+
+
+def test_skill_root_ignores_manifest_above_cwd(tmp_path: Path) -> None:
+    (tmp_path / "SKILL.md").write_text(_VALID_SKILL_MD.format(name="outside", title="Outside"), encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / "scripts").mkdir(parents=True)
+    (repo / "scripts" / "a.py").write_text("print(1)\n", encoding="utf-8")
+
+    assert skill_root_for("scripts/a.py", cwd=repo) is None
+    assert skill_root_for(repo / "scripts" / "a.py", cwd=repo) is None
+    assert run_precommit("schema", ["scripts/a.py"], cwd=repo) == (0, [])
 
 
 def test_precommit_cli_exit_codes(tmp_path: Path) -> None:
@@ -253,6 +291,27 @@ def test_precommit_cli_exit_codes(tmp_path: Path) -> None:
     )
     assert interleaved.exit_code == 1, interleaved.output
     assert "(min 100)" in interleaved.output
+
+
+def test_precommit_cli_maps_relative_paths_from_cwd(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_skill(tmp_path / "skills", "valid-skill")
+    _write_skill(tmp_path / "skills", "broken-skill", body="# Broken\n\nNo frontmatter.\n")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+
+    passed = runner.invoke(cli, ["precommit-run", "schema", "skills/valid-skill/SKILL.md", "README.md"])
+    assert passed.exit_code == 0, passed.output
+    assert passed.output.splitlines() == ["PASS  valid-skill  schema"]
+
+    failed = runner.invoke(
+        cli,
+        ["precommit-run", "schema", "skills/broken-skill/SKILL.md", "skills/valid-skill/SKILL.md"],
+    )
+    assert failed.exit_code == 1, failed.output
+    output = failed.output.splitlines()
+    assert len(output) == 2
+    assert output[0].startswith("FAIL  broken-skill  schema")
+    assert output[1] == "PASS  valid-skill  schema"
 
 
 def test_precommit_run_is_hidden_from_main_help() -> None:

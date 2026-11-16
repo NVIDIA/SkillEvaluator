@@ -24,12 +24,11 @@ def _plain(output: str) -> str:
 
 
 def _assert_html_verdict_is_incomplete(output: str) -> None:
-    """The header verdict and the summary verdict both say Incomplete, and nothing says Passed."""
-    header = output.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    """The primary result and the evidence summary say Incomplete, without a passing claim."""
+    hero = output.split('<section class="agent-hero"', 1)[1].split("</section>", 1)[0]
     summary = output.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
 
-    assert 'data-verdict="incomplete"' in header
-    assert '<span class="sr-only">Verdict: </span>Incomplete</span>' in header
+    assert 'hero-command-status verdict-chip warn">Incomplete</p>' in hero
     assert '<span class="verdict-chip warn">Incomplete</span>' in summary
     assert 'data-verdict="pass"' not in output
     assert "verdict-chip pass" not in output

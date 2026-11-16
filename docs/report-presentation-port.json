@@ -1,0 +1,61 @@
+{
+  "schema_version": 1,
+  "template": "src/skillevaluator/reporting/templates/report.html.j2",
+  "style_snapshot_scope": "Comment-free digests of the unchanged base and Tier 3 inline style blocks in this repository template; shared report_ui.css.j2 presentation adaptations are listed separately and are not covered by these two baseline hashes.",
+  "native_styles": [
+    {
+      "block": "base",
+      "comment_free_sha256": "e09704d0a4a030b3fd7de5e063a5247c0770733ad8c5b380a24e194829c0364e"
+    },
+    {
+      "block": "tier3",
+      "comment_free_sha256": "2f7d5555e6ff116aa4f95c0e3a4b620a549267c9ec38c95a7dd3a30fd9a04bc6"
+    }
+  ],
+  "intentional_adaptations": [
+    "Public scores, gates, applicability, source identity and publication assessments remain authoritative.",
+    "Chart.js 4.5.1 and its existing MIT notices remain pinned.",
+    "Canonical retained exports are separate from bounded, sanitized display projections.",
+    "CLI JSON validator rows add a recorded boolean optional_skip, and the retained reader round-trips it; the retained Tier 3 object remains unchanged.",
+    "Clickable tier cards replace the previous left sidebar and sticky mobile tier bar.",
+    "Reports containing Tier 3 default to dark and other reports to light, replacing the device-theme default; saved Light, Dark and System choices take precedence.",
+    "Typed passive plugin evidence is routed into tier sections before rendering.",
+    "Overview summarizes recorded outcomes/actions; full Insights cards render once.",
+    "Concise failed-run summaries are a renderer-only projection; newly persisted failure conclusions and recommendations keep their existing raw error text.",
+    "Routine metadata, passive evidence and resource methods use closed disclosures.",
+    "Recorded token/latency adapters support native-shaped and current public evidence without collection or rescoring.",
+    "Accessible active-control contrast, wrapped mobile controls, keyboard navigation, search, deep links, no-JS and print behavior are retained.",
+    "Collection similarity counts use public validator identities.",
+    "Canonical public product branding is SkillEvaluator.",
+    "The full-size native header scrolls on narrow screens so it does not obscure report evidence.",
+    "Configured standard metrics remain explicitly unavailable in incomplete comparison tables; custom-only runs use their recorded metric names and values.",
+    "Harbor viewer fallback selects a usable sanitized primary or recorded summary without combining unrelated jobs or inferring URLs.",
+    "Renderer version sits beside the brand, with recorded SkillSpector versions in the Tier 1 tile; aligned screen content widens to 1280px while native typography and print sizing remain intact.",
+    "Recorded Harbor upload URLs survive shared display projection and directory regeneration, with live metadata taking precedence for the same job URL.",
+    "Overview combines recorded execution status, scored/unscored coverage and a next action; full diagnostics and authored Insights remain accessible in their owning views.",
+    "The native baseline comparison stays open with scores, baseline, lift, Overall and agent context visible; signal lists, definitions and detailed reasoning use closed adjacent disclosures.",
+    "A baseline aggregate missing after execution is labeled baseline quality unavailable; baseline not run requires a recorded skipped arm.",
+    "Native agent cards, renderer/scanner version placement and existing body, header and metric type scales are preserved; compact mobile changes adjust arrangement and spacing.",
+    "Dataset diagnostics group identical structured causes only within the same attempt and status, retaining all assertion IDs, requirement text, rubric checks and evidence associations within existing preview bounds.",
+    "Absent, null and empty pass-at-k case outcomes display N/A with retained attempt counts; explicit recorded zero outcomes remain zero without recomputing scores or denominators.",
+    "Concise Harbor labels use recorded agent and condition associations; exact job identifiers remain in Diagnostics and URLs are never inferred.",
+    "Optional recorded native plugin completeness, composition, delivery, refusal/comparison basis and recovery notes use bounded typed display adapters; only active warnings appear in Overview and routine detail stays closed in Agent Details, Trials or Diagnostics.",
+    "Native compatibility does not add backend execution, collection, scoring, gate policy or public producer coverage; hook census and canary runtime summaries remain a separate producer integration gap.",
+    "MCP failed-call and connected-unused interpretations require explicit recorded counts/status; missing measurements never become zero.",
+    "Scope-level catalog skip reasons and repeated passive evidence qualifications have one owner, while local row/note omissions and shortened text remain disclosed.",
+    "Embedded report JSON is compact and chart literals contain only consumed fields; canonical download reconstruction and escaping remain unchanged.",
+    "Charts initialize after theme selection when visible, reuse instances, and prepare all print charts synchronously; print reveals retained Dataset cases hidden by screen filters and restores screen disclosure/filter state.",
+    "Bounded native agent identities retain attribution after content-budget exhaustion; unused composition components retain their recorded kind and disclose omitted kind groups."
+  ],
+  "drift_checks": [
+    "tests/reporting/test_report_redesign.py::test_report_style_blocks_match_recorded_digests",
+    "tests/reporting/test_telemetry_view.py",
+    "tests/reporting/test_report_browser.py",
+    "tests/reporting/test_report_readability.py",
+    "tests/reporting/test_diagnostic_view.py",
+    "tests/reporting/test_native_evidence.py",
+    "tests/reporting/test_report_efficiency.py",
+    "tests/reporting/test_report_efficiency_browser.py"
+  ],
+  "reference_reports_or_private_datasets_included": false
+}

@@ -606,7 +606,7 @@ class EmbeddingRegistry:
             "created_at": datetime.now(tz=UTC).isoformat(),
             "entries": entries,
         }
-        serialized = json.dumps(data, indent=2, allow_nan=False) + "\n"
+        serialized = json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n"
         if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
             raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
         _write_catalog_atomically(catalog_path, serialized.encode("utf-8"))

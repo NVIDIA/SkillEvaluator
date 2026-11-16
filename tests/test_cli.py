@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import json
 from pathlib import Path
@@ -68,12 +69,12 @@ def test_quickstart_quality_check_matches_documented_result(
     payload = json.loads((reports / "skillevaluator-quality.json").read_text(encoding="utf-8"))
     assert len(payload["results"]) == 1
     quality_result = payload["results"][0]
-    assert quality_result["quality"]["overall_score"] == 86.2
+    assert quality_result["quality"]["overall_score"] == 88.8
     assert quality_result["quality"]["grade"] == "B"
-    assert len(quality_result["findings"]) == 6
+    assert len(quality_result["findings"]) == 5
     assert payload["overall_passed"] is (expected_exit_code == 0)
     assert payload["publication_status"] == ("incomplete" if expected_exit_code == 0 else "fail")
-    assert "86.2/100" in result.output
+    assert "88.8/100" in result.output
 
 
 def test_top_level_help_groups_commands_by_workflow() -> None:
@@ -720,6 +721,75 @@ def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> N
     assert tiers == ["1", "2", "3"]
 
 
+def _fail_tier3_commands_import(monkeypatch, *, missing: str) -> None:
+    real_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise ModuleNotFoundError(f"No module named '{missing}'", name=missing)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+
+@pytest.mark.parametrize("args", [["doctor"], ["doctor", "--tier", "3"], ["tier3", "doctor"]])
+def test_doctor_without_the_tier3_extra_names_the_missing_extra(monkeypatch, args) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, ImportError)
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_all_without_the_tier3_extra_still_checks_lower_tiers(monkeypatch, command) -> None:
+    import skillevaluator.doctor as readiness
+
+    tiers: list[str] = []
+    monkeypatch.setattr(readiness, "doctor", lambda **options: tiers.append(options["tier"]) or 0)
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, [command, "--tier", "all"])
+
+    assert result.exit_code == 1, result.output
+    assert tiers == ["1", "2"]
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("cannot import name 'GKEExecStreamClosedError'", name="harbor.environments.gke"),
+        ModuleNotFoundError("No module named 'harbor.missing'", name="harbor.missing"),
+    ],
+)
+def test_doctor_preserves_an_installed_dependency_import_failure(monkeypatch, error) -> None:
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise error
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exception is error
+    assert "dependencies are not installed" not in result.output
+
+
+def test_doctor_keeps_an_unrelated_import_error(monkeypatch) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="skillevaluator.tier3.missing")
+
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "3"])
+
+    assert isinstance(result.exception, ModuleNotFoundError)
+    assert result.exception.name == "skillevaluator.tier3.missing"
+    assert "Install skillevaluator[tier3]" not in result.output
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -932,6 +1002,85 @@ def test_standalone_evaluate_forwards_the_evaluated_source(monkeypatch: pytest.M
         "commit": _EVALUATED_COMMIT,
         "evaluator_container_revision": _EVALUATOR_CONTAINER,
     }
+
+
+@pytest.mark.parametrize("command", [["evaluate"], ["tier3", "evaluate"]])
+def test_evaluate_without_the_tier3_extra_names_the_missing_extra(monkeypatch: pytest.MonkeyPatch, command) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def _missing_harbor(self, options, *, progress_reporter=None):
+        raise ModuleNotFoundError("No module named 'harbor'", name="harbor")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _missing_harbor, raising=True)
+    result = CliRunner().invoke(
+        cli, [*command, str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "plain"]
+    )
+
+    assert result.exit_code == 1
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("cannot import name 'GKEExecStreamClosedError'", name="harbor.environments.gke"),
+        ModuleNotFoundError("No module named 'harbor.missing'", name="harbor.missing"),
+    ],
+)
+def test_evaluate_preserves_an_installed_dependency_import_failure(monkeypatch, error) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def broken_evaluate(self, options, *, progress_reporter=None):
+        raise error
+
+    monkeypatch.setattr(EvaluationService, "evaluate", broken_evaluate)
+    result = CliRunner().invoke(
+        cli, ["evaluate", str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "off"]
+    )
+
+    assert result.exit_code == 1
+    assert str(error) in result.output
+    assert "dependencies are not installed" not in result.output
+
+
+@pytest.mark.parametrize("env_mode", ["docker", "local"])
+def test_evaluate_autopilot_without_tier3_extra_names_it_before_generation(monkeypatch, tmp_path, env_mode) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Use for testing diagnostics.\n---\n# Demo\n")
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "placeholder-for-offline-import-test")
+    real_import = builtins.__import__
+
+    def missing_workflow(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.workflow":
+            raise ModuleNotFoundError("No module named 'harbor'", name="harbor")
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", missing_workflow)
+    result = CliRunner().invoke(
+        cli, ["tier3", "evaluate", str(skill), "--autopilot", "--env-mode", env_mode, "--progress", "off"]
+    )
+
+    assert result.exit_code == 1
+    assert "Install skillevaluator[tier3]" in result.output
+    assert not (skill / "evals").exists()
+
+
+def test_evaluate_keeps_an_unrelated_import_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator.evaluation import EvaluationService
+
+    def _broken_import(self, options, *, progress_reporter=None):
+        raise ModuleNotFoundError("No module named 'skillevaluator.tier3.missing'", name="skillevaluator.tier3.missing")
+
+    monkeypatch.setattr(EvaluationService, "evaluate", _broken_import, raising=True)
+    result = CliRunner().invoke(
+        cli, ["evaluate", str(Path(__file__).parent / "fixtures" / "skills" / "simple"), "--progress", "plain"]
+    )
+
+    assert result.exit_code == 1
+    assert "No module named 'skillevaluator.tier3.missing'" in result.output
+    assert "Install skillevaluator[tier3]" not in result.output
 
 
 def test_standalone_evaluate_refuses_a_non_canonical_revision(monkeypatch: pytest.MonkeyPatch) -> None:

@@ -2183,6 +2183,30 @@ def test_adc_refresh_follows_the_policy_key_source(monkeypatch: pytest.MonkeyPat
     assert refreshed[MODEL_API_KEY_ENV] == "token-a"
 
 
+def test_adc_refresh_renews_an_explicit_policy_key_that_is_the_provider_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import provider_config
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(provider_config, "refresh_host_vertex_adc_environment", lambda *_args, **_kwargs: "token-new")
+    shared = {"OPENAI_API_KEY": "token-old", MODEL_API_KEY_ENV: "token-old"}
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(shared, policy_uses_provider_key=False, timeout_s=60)
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new" and refreshed["OPENAI_API_KEY"] == "token-new"
+    assert shared[MODEL_API_KEY_ENV] == "token-old"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-old")
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "token-old"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new"
+
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "policy-own-key"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "policy-own-key"
+
+
 def test_second_interrupt_during_stop_still_kills_the_gym_group(tmp_path: Path) -> None:
     import sys
     import time

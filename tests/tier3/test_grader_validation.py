@@ -76,6 +76,105 @@ def test_invalid_suite(suite_dir, mutation, message):
         gv.load_suite(suite_dir)
 
 
+def test_suite_accepts_declarative_entry_checks(suite_dir):
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    case = suite["cases"][0]
+    case["entry"]["checks"] = [{"type": "output_matches", "pattern": r"\A[0-9]+\Z"}]
+    case["expected"]["metrics"]["behavior_check"] = "pass"
+    write_suite(suite_dir, suite)
+
+    loaded = gv.load_suite(suite_dir)
+
+    assert loaded["cases"][0]["entry"]["checks"] == case["entry"]["checks"]
+
+
+@pytest.mark.parametrize(
+    "checks",
+    [
+        None,
+        {},
+        [{"type": "output_matches", "pattern": "["}],
+        [{"type": "output_matches", "pattern": r"\A1\Z", "extra": True}],
+        [{"type": "unknown", "pattern": "1"}],
+    ],
+)
+def test_suite_validates_declarative_entry_checks(suite_dir, checks):
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    suite["cases"][0]["entry"]["checks"] = checks
+    suite["cases"][0]["expected"]["metrics"]["behavior_check"] = "pass"
+    write_suite(suite_dir, suite)
+
+    with pytest.raises(ValueError, match=r"entry.checks"):
+        gv.load_suite(suite_dir)
+
+
+def test_suite_rejects_behavior_label_list_with_declarative_checks(suite_dir):
+    # The verifier folds direct checks into one Behavior score, so a list label that covers only the
+    # judged behaviors would compare different things: a passing judged step plus a correctly
+    # failing direct check scores 0.5, an expected list pass against an observed aggregate fail.
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    case = suite["cases"][0]
+    case["entry"]["checks"] = [{"type": "output_matches", "pattern": r"\AX\Z"}]
+    assert len(case["entry"]["expected_behavior"]) == len(case["expected"]["metrics"]["behavior_check"])
+    write_suite(suite_dir, suite)
+
+    with pytest.raises(ValueError, match=r"behavior label list cannot be combined with entry\.checks"):
+        gv.load_suite(suite_dir)
+
+    case["entry"]["checks"] = []
+    write_suite(suite_dir, suite)
+    assert gv.load_suite(suite_dir)["cases"][0]["expected"]["metrics"]["behavior_check"] == [True, True]
+
+
+@pytest.mark.parametrize("path", ["README.md", "out/report.md"])
+def test_suite_rejects_workspace_file_checks(suite_dir, path):
+    # Qualification records only the trajectory. A file_exists check would otherwise inspect the
+    # caller's directory, passing for an unrelated host file and failing for a missing artifact.
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    suite["cases"][0]["entry"]["checks"] = [{"type": "file_exists", "path": path}]
+    suite["cases"][0]["expected"]["metrics"]["behavior_check"] = "pass"
+    write_suite(suite_dir, suite)
+
+    with pytest.raises(ValueError, match=r"entry\.checks: file_exists inspects the agent's workspace files"):
+        gv.load_suite(suite_dir)
+
+
+@pytest.mark.parametrize(("response", "passed"), [("999", True), ("14\n", False), ("Result: 14", False)])
+def test_qualification_runs_anchored_output_check(judge_server, suite_dir, tmp_path, response, passed):
+    suite = json.loads((suite_dir / "suite.json").read_text())
+    case = next(case for case in suite["cases"] if case["id"] == "arithmetic")
+    case["entry"]["checks"] = [{"type": "output_matches", "pattern": r"\A[+-]?\d+(?:\.\d+)?\Z"}]
+    case["entry"]["expected_behavior"] = []
+    case["expected"]["metrics"] = {"behavior_check": "pass" if passed else "fail"}
+    case["label"].update(method="reviewed", checks=[])
+    (suite_dir / case["trajectory"]).write_text(json.dumps({"steps": [{"source": "agent", "message": response}]}))
+    write_suite(suite_dir, suite)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "validate-grader",
+            str(suite_dir),
+            "--case",
+            "arithmetic",
+            "--repeats",
+            "1",
+            "-o",
+            str(tmp_path / "qualification"),
+            "--json",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    attempt = json.loads(result.output)["attempts"][0]
+    assert attempt["returncode"] == 0
+    behavior = attempt["reward"]["details"]["behavior_check"]
+    assert behavior["declarative_checks"]["results"][0]["passed"] is passed
+    assert behavior["declarative_checks"]["judged_count"] == 0
+    assert behavior["score"] == float(passed)
+
+
 def test_symlink_escape(suite_dir, tmp_path):
     outside = tmp_path / "outside.json"
     outside.write_text('{"steps":[]}')

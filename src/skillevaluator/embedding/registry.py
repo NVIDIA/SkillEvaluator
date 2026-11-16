@@ -49,6 +49,7 @@ from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
     ExtractionResult,
+    ManifestEncodingError,
     discover_and_extract_detailed,
     extract_from_skill,
 )
@@ -103,6 +104,16 @@ _CATALOG_ENTRY_FIELDS = frozenset(
         "embedding",
     }
 )
+
+
+class InvalidExplicitSkillError(ValueError):
+    """Explicit skills have no root UTF-8 ``SKILL.md`` with valid name and description frontmatter.
+
+    :meth:`EmbeddingRegistry.build_from_paths` raises it before any embedding
+    request. The message names every such skill, in sorted order, only by its
+    path under the checkout root, so callers can show it without exposing host
+    directories.
+    """
 
 
 @dataclass
@@ -255,6 +266,10 @@ class EmbeddingRegistry:
         if not unique or len(unique) > self._max_entries:
             raise ValueError("Explicit skill collection exceeds its supported entry count")
         entries = []
+        # Every skill is checked, so one error names all skills whose frontmatter
+        # needs fixing, including a SKILL.md that is not UTF-8. Limit and link
+        # errors still stop at their own skill.
+        invalid = []
         for path in unique:
             try:
                 relative = path.absolute().relative_to(root)
@@ -267,10 +282,19 @@ class EmbeddingRegistry:
                     raise ValueError("Explicit skill paths must not contain links or parent traversal")
             if not current.resolve(strict=True).is_relative_to(root):
                 raise ValueError("An explicit skill is outside the checkout root")
-            entry = extract_from_skill(current)
+            try:
+                entry = extract_from_skill(current)
+            except ManifestEncodingError:
+                entry = None
             if entry is None:
-                raise ValueError("Each explicit path must contain a valid SKILL.md")
-            entries.append(entry)
+                invalid.append(relative.as_posix())
+            else:
+                entries.append(entry)
+        if invalid:
+            raise InvalidExplicitSkillError(
+                "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+                f"mapping with a non-empty string name and description: {', '.join(invalid)}"
+            )
         return self._build_entries(root, entries, 1, False)
 
     def _build_entries(
@@ -582,7 +606,7 @@ class EmbeddingRegistry:
             "created_at": datetime.now(tz=UTC).isoformat(),
             "entries": entries,
         }
-        serialized = json.dumps(data, indent=2, allow_nan=False) + "\n"
+        serialized = json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n"
         if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
             raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
         _write_catalog_atomically(catalog_path, serialized.encode("utf-8"))

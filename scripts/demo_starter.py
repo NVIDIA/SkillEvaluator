@@ -14,6 +14,7 @@ import sys
 from datetime import UTC, datetime
 from importlib.metadata import version
 from importlib.resources import as_file, files
+from importlib.util import find_spec
 from pathlib import Path
 
 FIXTURES = Path(__file__).resolve().parents[1] / "examples" / "starter"
@@ -65,8 +66,26 @@ def check_quality(report: dict, expected: dict) -> None:
     )
 
 
-def demo(output: Path) -> dict:
+def load_expected() -> dict:
+    """Return the expected results for the evaluator that runs the demo.
+
+    The top-level values are what the release pinned in the starter guide reports.
+    When the evaluator is this checkout's own source, the ``checkout`` values
+    replace them, because the source can score the starter differently until a
+    release includes its changes.
+    """
     expected = json.loads((FIXTURES / "expected.json").read_text(encoding="utf-8"))
+    checkout = expected.pop("checkout", {})
+    evaluator = find_spec("skillevaluator")
+    source = (FIXTURES.parents[1] / "src").resolve()
+    if evaluator and evaluator.origin and Path(evaluator.origin).resolve().is_relative_to(source):
+        for label, values in checkout.items():
+            expected[label] |= values
+    return expected
+
+
+def demo(output: Path) -> dict:
+    expected = load_expected()
     output.mkdir(parents=True, exist_ok=False)
     skill = output / "text-analyzer"
     reference = files("skillevaluator.tier3.reference_skills").joinpath("text-analyzer")

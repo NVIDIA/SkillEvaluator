@@ -833,6 +833,7 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     summary_inode = summary_metadata.st_ino
     original = summary.read_text(encoding="utf-8")
     rewritten = original.replace("0.8", "0.9")
+    assert rewritten != original
     assert len(rewritten) == len(original)
     # Same device, inode, mode, link count, size and restored mtime as the file
     # the reader opened; only the ctime moved, so only a ctime comparison can
@@ -898,8 +899,15 @@ def test_rejects_same_inode_summary_rewrite_with_restored_mtime(
     assert not _is_completed(run)
     assert rewritten_once
     assert post_read_fstat_done
-    assert summary.stat().st_ino == summary_inode
-    assert summary.stat().st_mtime_ns == summary_metadata.st_mtime_ns
+    # The patched os.stat, Path.lstat and os.fstat above report the original
+    # metadata for this inode, so a plain ``summary.stat()`` here would only echo
+    # that back. Check the real file with the stat captured before patching to
+    # show the rewrite happened and the mtime really was restored.
+    final_metadata = real_stat(summary)
+    assert final_metadata.st_ino == summary_inode
+    assert final_metadata.st_size == summary_metadata.st_size
+    assert final_metadata.st_mtime_ns == summary_metadata.st_mtime_ns
+    assert summary.read_text(encoding="utf-8") == rewritten
 
 
 def test_rejects_summary_parent_swapped_to_link_before_read(

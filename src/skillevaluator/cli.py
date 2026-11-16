@@ -1271,6 +1271,14 @@ def _ensure_autopilot_dataset(
         return dataset_note
     except click.ClickException:
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if is_missing_tier3_extra(exc):
+            raise click.ClickException(
+                "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+            ) from exc
+        raise click.ClickException(str(exc)) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -2002,7 +2010,8 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        state = "didn't run" if only.is_incomplete else "failed"
+        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
+        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -4012,6 +4021,14 @@ def evaluate(
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if not is_missing_tier3_extra(exc):
+            raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+        ) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -4302,7 +4319,18 @@ def _run_doctor(
     exit_codes = []
     for selected in selected_tiers:
         if selected == "3":
-            from skillevaluator.tier3.commands import doctor as tier3_doctor
+            try:
+                from skillevaluator.tier3.commands import doctor as tier3_doctor
+            except ImportError as exc:
+                from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+                if not is_missing_tier3_extra(exc):
+                    raise
+                click.echo(
+                    "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
+                )
+                exit_codes.append(1)
+                continue
 
             exit_codes.append(
                 tier3_doctor(

@@ -26,6 +26,21 @@
       "expected_skill": "skillevaluator"
     },
     {
+      "id": "skillevaluator-009-explicit-cli-missing",
+      "prompt": "Use SkillEvaluator to check whether the notes-helper skill in /workspace/input is well-formed and give me its quality score. SkillEvaluator may not be installed on this machine yet.",
+      "expected_output": "Checks for the skillevaluator CLI (for example `skillevaluator --version`), installs it if missing with an isolated method such as `uv tool install \"skillevaluator[all]\"`, `pipx`, pip inside a virtual environment, or runs it through `uvx`, without sudo; then runs `skillevaluator quality-check` or `skillevaluator tier1 --no-llm` on the notes-helper skill and reports the score and exit code, or reports the exact install error if installation is impossible.",
+      "assertions": [
+        "Checks whether the skillevaluator CLI is available before relying on it",
+        "Installs it without sudo using uv tool, pipx, pip in a virtual environment, or uvx when it is missing",
+        "Runs a SkillEvaluator quality or Tier 1 check on the notes-helper skill",
+        "Reports the quality score and exit code from the run, or the exact install error, without inventing results"
+      ],
+      "files": [
+        "files/notes-helper"
+      ],
+      "expected_skill": "skillevaluator"
+    },
+    {
       "id": "skillevaluator-003-implicit-dataset",
       "prompt": "I need test cases so an agent benchmark can tell whether my 'csv-cleaner' agent skill gets used correctly. Write the evals/evals.json file for it with three cases: one that names the skill, one that only describes the task, and one prompt where the skill should NOT be used.",
       "expected_output": "A valid evals/evals.json with top-level skill_name 'csv-cleaner' and an evals array of three cases each having id, prompt, expected_output (optionally assertions), where the negative case sets expected_skill to null.",

@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
+  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -202,6 +211,9 @@ All notable changes to SkillEvaluator are documented in this file.
   screen's disclosure and filter state afterward. Downloads preserve the
   retained snapshot and existing safety bounds.
 
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
 - The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
   `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
   for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
@@ -281,6 +293,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
+
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
@@ -336,10 +361,59 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
+- Benchmark methodology describes the Overall row's shared comparison basis
+  rather than the headline with-skill score, in Tier 3 and publication cards.
+- The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
+  and 1 MiB per-manifest limit, including in description-only embedding mode.
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
+- `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
+  now say to install `skillevaluator[tier3]` instead of printing only
+  `Error: No module named 'harbor'`.
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.

@@ -358,6 +358,8 @@ All notable changes to SkillEvaluator are documented in this file.
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
+- New **Harness Check** docs page: what `skillevaluator harness-check` reports
+  and how to read its panel, with real output.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),

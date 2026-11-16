@@ -1,0 +1,77 @@
+---
+title: "Harness Check"
+description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
+---
+
+No LLM. No agent run. No API key. In about a second, the harness check tells you
+whether each agent harness **loads** your skill, **degrades** it, or **drops** it,
+and what to change.
+
+```bash
+skillevaluator harness-check ./my-skill
+```
+
+A skill can follow the [Agent Skills specification](https://agentskills.io/) and
+still never reach the model. Every harness has its own loader, with its own YAML
+parser, folders and size limits. The same `SKILL.md` can work in Claude Code and
+be dropped by Codex without an error. The harness check finds those differences
+before your users do.
+
+<CardGroup cols={3}>
+  <Card title="Static" icon="bolt">
+    It reads the files on disk. No model, no agent, no sandbox, no key.
+  </Card>
+  <Card title="Six harnesses" icon="layer-group">
+    Claude Code, Codex, Copilot CLI, Hermes, OpenClaw and OpenCode in one run.
+  </Card>
+  <Card title="Fixes included" icon="wrench">
+    Every finding names the rule, what the harness does, and the change that fixes it.
+  </Card>
+</CardGroup>
+
+## What you get
+
+This example skill has two small problems. The front matter has `license` twice,
+and the body uses `$ARGUMENTS`.
+
+```text title="skillevaluator harness-check ./my-skill"
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
+│                                                                                  │
+│  ✓ claude-code  loads                                                    1 note  │
+│  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
+│                 or duplicate keys).                                              │
+│  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
+│                 parsing is strict.                                               │
+│  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
+│                 model sees the literal text.                                     │
+│  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
+│                 duplicate keys).                                                 │
+│  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
+│                 keys.                                                            │
+│                                                                                  │
+│  Doesn't change pass/fail.  Details and fixes: -v                                │
+╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
+Tier 1 schema also fails for my-skill: [SCHEMA-HIGH] Duplicate frontmatter key 'license': YAML parsers disagree on it (Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value). Run `skillevaluator validate --tiers 1` for details.
+```
+
+Read it from the top:
+
+- **The first row** has one mark per harness, so you see the result at a glance.
+- **Each line below** is one harness: its verdict and its most serious finding.
+  `+1 more` means it has more findings. `1 note` counts notes that don't change the verdict.
+  A harness with nothing to report gets no line.
+- **The bottom corner** is the tally, here 4 of 6 not loaded.
+- **The line under the panel** appears when the same problem also fails a Tier 1
+  schema check, and points you to `validate --tiers 1`.
+
+Each harness gets one of three verdicts:
+
+| Mark | Verdict | What it means |
+| --- | --- | --- |
+| `✓` | `loads` | The harness finds the skill and the model gets it as written. |
+| `!` | `degraded` | The skill loads, but something is cut, hidden or ignored. |
+| `✗` | `not_loaded` | The harness drops the skill. The model never sees it. |
+
+The compact view labels a finding with its outcome when the rule names one, such
+as `not found`, `rejected`, `listing shortened` or `delivery truncated`.

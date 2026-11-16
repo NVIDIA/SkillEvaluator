@@ -1745,6 +1745,7 @@
                 <div class="hero-side">
                 {% if has_tier3 %}
                 {% set tier3_environment = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
+                {% set tier3_backend = (tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) | tier3_backend_label %}
                 {% if tier3_is_skipped %}
                     <span class="verdict-chip warn">Tier 3 quality: {{ verdict_words['skipped'] }}</span>
                     <div class="agent-hero-detail">
@@ -3910,6 +3911,8 @@
                     <span class="t3-ds-chip">{{ content_label }}: <b>{{ tier3.skill_name or 'unknown' }}</b></span>
                     {% if t3_best_name %}<span class="t3-ds-chip">Best Performing Agent: <b>{{ t3_best_name }}</b></span>{% endif %}
                     {% set t3_env = (tier3.summary.environment if tier3.summary is defined and tier3.summary else None) or tier3.environment %}
+                    {% set t3_backend = (tier3.summary.execution_backend if tier3.summary is defined and tier3.summary else None) | tier3_backend_label %}
+                    {% if t3_backend %}<span class="t3-ds-chip">Backend: <b>{{ t3_backend }}</b></span>{% endif %}
                     {% if t3_env %}<span class="t3-ds-chip">Environment: <b>{{ t3_env }}</b></span>{% endif %}
                     <span class="t3-ds-chip">Schema: <b>v{{ tier3.schema_version or '2.0' }}</b></span>
                 </div>
@@ -4726,6 +4729,7 @@
                 {% if has_tier3 %}<div><strong>Agent evaluation</strong>                        {% if completed_agent and completed_agent.recovered_attempts %}<div>{{ completed_agent.recovered_attempts }} timeout attempt(s) recovered; failed history retained.</div>{% endif %}
                         <div class="trial-coverage">{{ hero_trials }}</div>{% for detail in presentation.coverage.details %}<div>{{ detail }}</div>{% endfor %}
                         <div><strong>Metrics:</strong> {{ hero_metric_count }} evaluators</div>
+                        {% if tier3_backend %}<div><strong>Backend:</strong> {{ tier3_backend }}</div>{% endif %}
                         {% if tier3_environment %}<div><strong>Environment:</strong> <code>{{ tier3_environment }}</code></div>{% endif %}
                         {% if tier3.get('overall_lift') is not none %}<div><strong>Best-agent lift:</strong> {{ "%+.2f" | format(tier3.get('overall_lift')) }}</div>{% endif %}
 </div>{% endif %}

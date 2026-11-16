@@ -11,6 +11,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
   maps changed files to skill roots and runs each check without an API key,
   network, Docker, or scanner download.
+- The Tier 3 report data and JSON report record which execution backend ran the
+  evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
+  `environment`.
+- `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
+  sandbox environment, in the agent evaluation summary and the evaluation dataset header.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
@@ -365,6 +370,8 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+- The README badge row adds GitHub **Stars** and **Forks** badges that show the
+  live counts.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -416,6 +423,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
+  30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
+- On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be
+  confirmed` when `taskkill` needs more than 5 seconds. It now gets up to 30 seconds, so the tree is stopped
+  and the run's own timeout or output-limit error is reported. A second Ctrl+C still ends that wait early,
+  and the cleanup is then reported as unconfirmed.
 - Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
 - Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
 - Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.
@@ -437,9 +450,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
   as "not supported". As on Harbor, the parse error is logged and the run continues
   without MCP servers; a file that declares servers is still rejected.
-- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
-  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
-  yet, and OpenCode currently fails in Gym's agent setup.
+- The Tier 3 execution backends table and the NeMo Gym section below it state the live
+  status of `--backend nemo-gym`: Codex and Claude Code have completed live runs on the
+  pinned Gym, and OpenCode currently fails in Gym's agent setup. The section also
+  names the policy endpoint settings Claude Code reads.
 - `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
   and errors. Provider, model and base-URL names stay readable, as on Harbor.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a

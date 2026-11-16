@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import sys
 from pathlib import Path
 
 import click
@@ -718,6 +719,32 @@ def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> N
 
     assert result.exit_code == 1, result.output
     assert tiers == ["1", "2", "3"]
+
+
+@pytest.mark.parametrize("args", [["doctor"], ["doctor", "--tier", "3"], ["tier3", "doctor"]])
+def test_doctor_without_the_tier3_extra_names_the_missing_extra(monkeypatch, args) -> None:
+    monkeypatch.setitem(sys.modules, "skillevaluator.tier3.commands", None)
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, ImportError)
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_all_without_the_tier3_extra_still_checks_lower_tiers(monkeypatch, command) -> None:
+    import skillevaluator.doctor as readiness
+
+    tiers: list[str] = []
+    monkeypatch.setattr(readiness, "doctor", lambda **options: tiers.append(options["tier"]) or 0)
+    monkeypatch.setitem(sys.modules, "skillevaluator.tier3.commands", None)
+
+    result = CliRunner().invoke(cli, [command, "--tier", "all"])
+
+    assert result.exit_code == 1, result.output
+    assert tiers == ["1", "2"]
+    assert "Install skillevaluator[tier3]" in result.output
 
 
 @pytest.mark.parametrize(

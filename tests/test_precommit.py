@@ -160,6 +160,19 @@ def test_precommit_quality_exit_codes(tmp_path: Path) -> None:
     assert "(min 100)" in failed_lines[0]
 
 
+def test_precommit_quality_names_error_when_score_meets_minimum(tmp_path: Path) -> None:
+    body = _VALID_SKILL_MD.format(name="xml-skill", title="Xml Skill").replace(
+        "description: A xml-skill", "description: A <b>xml</b> skill"
+    )
+    skill = _write_skill(tmp_path, "xml-skill", body=body)
+
+    code, lines = run_precommit("quality", [str(skill / "SKILL.md")], min_score=0, cwd=tmp_path)
+    assert code == 1
+    assert lines[0].startswith("FAIL  xml-skill  quality  ")
+    assert "(min " not in lines[0]
+    assert lines[0].endswith("[QUALITY-HIGH] Description contains XML tags")
+
+
 def test_precommit_schema_exit_codes(tmp_path: Path) -> None:
     valid = _write_skill(tmp_path, "valid-skill")
     invalid = _write_skill(

@@ -146,8 +146,11 @@ def format_result_line(
         score = _quality_score(results)
         if score is not None:
             extra = f"  {score:.1f}/100"
-            if not passed:
+        if not passed:
+            if score is not None and score < min_score:
                 extra += f"  (min {min_score})"
+            elif detail := _first_error(results):
+                extra += f"  {detail}"
     elif check == CHECK_LINT_SCRIPTS:
         count = len(_lint_findings(results))
         extra = f"  {count} finding{'' if count == 1 else 's'}"

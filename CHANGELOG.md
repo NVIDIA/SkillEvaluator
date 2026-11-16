@@ -263,15 +263,6 @@ reviewed source revision.
   `environment`.
 - `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
   sandbox environment, in the agent evaluation summary and the evaluation dataset header.
-- Complete the public plugin workflow: supported-format detection, bounded component
-  checks and bundled-skill validation, advisory deduplication and compatible local
-  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
-  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
-  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
-  retry controls and published usage documentation. Skill and rule references that
-  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
-  the run incomplete, so a plugin with nothing else to load fails closed.
-
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
@@ -444,6 +435,15 @@ reviewed source revision.
   alone does not establish better Efficiency or quality, pairing does not certify
   equal concurrency/budget or judge-model agreement, and reused telemetry is
   historical. Scoring, raw deltas and reuse eligibility are unchanged.
+
+- Complete the public plugin workflow: supported-format detection, bounded component
+  checks and bundled-skill validation, advisory deduplication and compatible local
+  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
+  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
+  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
+  retry controls and published usage documentation. Skill and rule references that
+  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
+  the run incomplete, so a plugin with nothing else to load fails closed.
 
 ### Changed
 
@@ -760,26 +760,6 @@ reviewed source revision.
 - Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
 - Script lint now runs advisory AST checks on Python files with one leading UTF-8 BOM.
 - Task-list descriptions containing status words retain their text and pending status after reload.
-- Partial scanner results retain their actual diagnostics and recorded versions
-  instead of being described as missing installations; plugin projections
-  preserve incomplete-only status.
-- CI bootstrap rejects unsupported Tier 3 environment modes before importing
-  optional runtime dependencies, preserving the isolated consumer-path check
-  without paying for unnecessary Harbor initialization.
-- Local directory downloads disable macOS-generated AppleDouble tar entries
-  so extended attributes do not create nonexistent source-file errors. Real
-  user-authored `._` files and existing containment checks are preserved.
-- Optional plugin catalog comparisons are recorded as skipped when no catalog
-  is supplied, rather than as successful checks. Publication accepts those
-  skips only alongside trustworthy executed semantic analysis; requested
-  catalog failures, contradictory errors and required-tier skips still block.
-  Retained reports preserve the typed optional-skip flag.
-- Plugin context analysis reports work-budget and collection-limit stops as
-  incomplete, rather than advisory passes. Disabled or inapplicable analysis
-  records explicit skips; malformed dependency parsing remains non-green.
-  Aggregate limits are unchanged and reported with their observed counts.
-
-
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
@@ -1584,6 +1564,30 @@ reviewed source revision.
   command's password, and shell `apply_patch` evidence is masked before its
   400-character cut. The Tier 3 live evaluation guide lists the exact forms.
 
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations; plugin projections
+  preserve incomplete-only status.
+
+- CI bootstrap rejects unsupported Tier 3 environment modes before importing
+  optional runtime dependencies, preserving the isolated consumer-path check
+  without paying for unnecessary Harbor initialization.
+
+- Local directory downloads disable macOS-generated AppleDouble tar entries
+  so extended attributes do not create nonexistent source-file errors. Real
+  user-authored `._` files and existing containment checks are preserved.
+
+- Optional plugin catalog comparisons are recorded as skipped when no catalog
+  is supplied, rather than as successful checks. Publication accepts those
+  skips only alongside trustworthy executed semantic analysis; requested
+  catalog failures, contradictory errors and required-tier skips still block.
+  Retained reports preserve the typed optional-skip flag.
+
+- Plugin context analysis reports work-budget and collection-limit stops as
+  incomplete, rather than advisory passes. Disabled or inapplicable analysis
+  records explicit skips; malformed dependency parsing remains non-green.
+  Aggregate limits are unchanged and reported with their observed counts.
+
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed
@@ -2139,10 +2143,6 @@ reviewed source revision.
 
 ### Fixed
 
-- Plugin CLI preflight uses bounded, no-follow configuration loading for both
-  plugin directories and explicit manifests. Combined validation binds plugin
-  scores and runtime evidence to the returned run, retains partial scores when
-  latest changes, and never borrows another run's scores for missing artifacts.
 - Harbor local mode keeps exclusion and filtered download archives inside the
   allowed run directory, so pinned Harbor 0.25 transfers copy selected file
   contents without granting host `/tmp` access. Filters retain exact protected

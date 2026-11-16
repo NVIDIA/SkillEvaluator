@@ -220,7 +220,15 @@ def test_full_lane_keeps_the_existing_commands_and_runners() -> None:
     # The macOS Tier 2 tests share the Tier 3 macOS job and run even when its own tests fail.
     macos_test_steps = [step for step in jobs["tier3-macos"]["steps"] if "pytest" in step.get("run", "")]
     assert [step["name"] for step in macos_test_steps] == ["Run Tier 3 contract and progress tests", "Run Tier 2 tests"]
-    assert "tests/embedding" in macos_test_steps[1]["run"]
+    tier2_paths = {
+        "tests/embedding",
+        "tests/deduplication",
+        "tests/validators/test_similarity.py",
+        "tests/reporting",
+        "tests/test_cli.py",
+        "tests/test_oss_packaging.py",
+    }
+    assert tier2_paths <= set(shlex.split(macos_test_steps[1]["run"], comments=True))
     assert macos_test_steps[1]["if"] == RUN_UNLESS_CANCELLED_IF
     assert jobs["native-windows-local-mode"]["runs-on"] == "windows-latest"
     assert "tests/test_harbor_local_mode.py" in _runs(jobs["native-windows-local-mode"])

@@ -2993,7 +2993,20 @@ def _mask_judge_evidence_value_sites(text, sites):
     after = None
     for found in _JUDGE_EVIDENCE_SITE_END_RE.finditer(text):
         if after is not None:
-            spans.extend((after + start, after + end) for start, end in sites.get(text[after : found.start()], ()))
+            rest = text[after : found.start()]
+            values = sites.get(rest)
+            if values is None and not found.group(1) and rest.endswith(("=", ":")):
+                # Inside a quoted string the whole pass reads the unquoted value
+                # of a name to the closing quote or line end, so it can leave
+                # to the assignment rule a "_" flag value that the line, read
+                # on its own, masks whole with that name ("--access_token
+                # pass=..."). The rest then also matches without the word
+                # that ends at the marker.
+                cut = len(rest)
+                while cut and _JUDGE_EVIDENCE_VALUE_END_RE.match(rest, cut - 1) is None:
+                    cut -= 1
+                values = sites.get(rest[:cut])
+            spans.extend((after + start, after + end) for start, end in values or ())
         after = None if found.group(1) else found.end()
     if after is not None:
         spans.extend((after + start, after + end) for start, end in sites.get(text[after:], ()))

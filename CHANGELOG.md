@@ -1012,20 +1012,13 @@ All notable changes to SkillEvaluator are documented in this file.
   rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
-- Tier 3 security finding evidence and saved judge evidence now mask the
-  credential in five more forms that kept it: an `auth=` call value such as
-  `auth=HTTPBasicAuth("bob", "...")`, a credential name in a `sed`
-  substitution, a long flag with `_` between its words such as
-  `--db_password`, a quoted or `--` key of `npm config set`,
-  `yarn config set` or `git config`, and a credential name that starts the
-  line after a `\n` escape an unquoted value runs over, as in
-  `API_TOKEN=a\nauth=("bob", "...")`. A credential flag that takes no value,
-  such as `--use-token`, no longer hides the password of a command that
-  starts at the next word, such as `mysql -p...`. Shell `apply_patch`
-  finding evidence is now masked before its 400-character cut, so a cut inside
-  URL user info no longer keeps part of the password. Both the host checker
-  and the bundled Harbor verifier apply the fix, and the Tier 3 live
-  evaluation guide lists the exact forms.
+- Tier 3 security finding evidence and saved judge evidence mask the
+  credential in more command forms (`auth=` call values, `sed` replacements,
+  `_` long flags, quoted or `--` config keys, values in escaped single quotes
+  or quoted with the `'"'"'` idiom, a name after an escaped line break), also
+  in text escaped twice; a value-less credential flag no longer hides the next
+  command's password, and shell `apply_patch` evidence is masked before its
+  400-character cut. The Tier 3 live evaluation guide lists the exact forms.
 
 ## 0.9.0 - 2026-11-13
 

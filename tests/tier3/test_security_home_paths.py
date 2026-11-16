@@ -337,6 +337,12 @@ MAIN_WRITES = [
     pytest.param(_bash('cp /tmp/x "$ROOT/etc/sudoers" 2>&1'), id="quoted-variable-prefix-sudoers"),
     pytest.param(_bash("cp /tmp/x $1/etc/sudoers 2>&1"), id="positional-parameter-prefix-sudoers"),
     pytest.param(_bash("cp x.sh $DESTDIR$PREFIX/etc/profile.d/a.sh 2>&1"), id="two-variables-prefix-profile-d"),
+    # So may a variable right after a short option.
+    pytest.param(_bash("cp -t$ROOT/etc/sudoers.d /tmp/agent 2>&1"), id="attached-short-option-variable-prefix"),
+    pytest.param(_bash("tar -xzf t.tgz -C$DESTDIR/etc/profile.d 2>&1"), id="attached-short-option-destdir-prefix"),
+    pytest.param(
+        _bash("cp -t$DESTDIR$PREFIX/etc/sudoers.d /tmp/agent 2>&1"), id="attached-short-option-two-variables-prefix"
+    ),
     # A read the keyword rule still flags, as documented.
     pytest.param(_bash("cat ~/.bashrc 2>/dev/null"), id="keyword-rule-read"),
 ]
@@ -408,12 +414,20 @@ BENIGN_ACTIONS = [
         id="source-opt-conda-profile-d",
     ),
     pytest.param(_bash("grep -c conda ~/miniconda3/etc/profile.d/conda.sh 2>/dev/null"), id="read-miniconda-profile-d"),
-    # A hyphen inside a directory name is not a short option.
+    # A hyphen inside a directory name is not a short option, also before a variable.
     pytest.param(_bash("ls /opt/conda-envs/etc/profile.d 2>&1"), id="read-hyphenated-dir-profile-d"),
+    pytest.param(_bash("ls /opt/conda-py$V/etc/profile.d 2>&1"), id="read-hyphen-option-like-variable-dir-profile-d"),
     # A variable inside a longer path is not where the path starts.
     pytest.param(_bash("ls /opt/conda/etc/profile.d 2>&1"), id="read-opt-conda-profile-d"),
     pytest.param(_bash("ls /opt/$X/etc/profile.d 2>&1"), id="read-variable-dir-profile-d"),
     pytest.param(_bash("ls x$X/etc/sudoers.d 2>&1"), id="read-variable-suffix-dir-sudoers-d"),
+    pytest.param(_bash("ls /opt/conda-$V/etc/profile.d 2>&1"), id="read-hyphen-joined-variable-dir-profile-d"),
+    pytest.param(_bash("ls /opt/x.$V/etc/profile.d 2>&1"), id="read-dot-joined-variable-dir-profile-d"),
+    # The file a source command reads stays skipped when a variable starts it.
+    pytest.param(
+        _bash("source $CONDA_PREFIX/etc/profile.d/conda.sh && python train.py 2>&1"),
+        id="source-variable-prefix-profile-d",
+    ),
     # Reads of protected files: stderr or fd redirects and writes to other files are not writes.
     pytest.param(_bash("cat ~/.gitconfig 2>/dev/null"), id="read-gitconfig-stderr-devnull"),
     pytest.param(_bash("ls ~/.claude/settings.json 2>&1"), id="ls-claude-settings-fd-dup"),

@@ -3717,6 +3717,22 @@ _FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE = re.compile(
 _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(
     r"(?<!\\)((?:\\\\){0,3}" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
 )
+# Words that every match of some patterns the rules search whole texts for
+# holds, in groups: a match holds a word of each group. A text that lacks
+# all the words of a group is not searched (see _pattern_may_match), so a
+# long text pays only for the searches that can match in it.
+_FINDING_EVIDENCE_PATTERN_WORDS: dict[re.Pattern[str], tuple[tuple[str, ...], ...]] = {
+    _FINDING_EVIDENCE_LOGIN_PASSWORD_RE: (("login",), ("-p",)),
+    _FINDING_EVIDENCE_SSHPASS_RE: (("sshpass",),),
+    _FINDING_EVIDENCE_MYSQL_PASSWORD_RE: (("mysql", "mariadb"), ("-p",)),
+    _FINDING_EVIDENCE_NETRC_PASSWORD_RE: (("password",), ("machine", "login", "account")),
+    _FINDING_EVIDENCE_COOKIE_FLAG_RE: (("-b",),),
+    _FINDING_EVIDENCE_CONFIG_SET_RE: (("npm", "yarn", "git"), ("config", "set")),
+    _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE: (("npm", "yarn", "git", "<redacted>"), ("config", "set")),
+    _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS[0][0]: (("login",),),
+    _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS[1][0]: (("mysql", "mariadb"),),
+    _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE: (('"-p', "'-p"),),
+}
 # Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"
@@ -4211,7 +4227,8 @@ def _mask_finding_evidence_credentials_as_written(text: str, *, preserve_header_
     redacted = _mask_credential_flags(redacted)
     redacted = _mask_argv_credentials(redacted)
     for pattern in _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES:
-        redacted = pattern.sub(r"\1<redacted>", redacted)
+        if _pattern_may_match(pattern, redacted):
+            redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_config_set_values(redacted)
     redacted = _mask_credential_assignments(redacted, preserve_header_format=preserve_header_format)
     # Structured values are masked before known token substrings, so a token
@@ -4374,10 +4391,15 @@ def _hidden_credential_spans(
     if not value_spans:
         return []
     # Each rule's credentials, which do not overlap one another.
-    found = {pattern: list(pattern.finditer(text)) for pattern in _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES}
+    found = {
+        pattern: _pattern_matches(pattern, text)
+        for pattern in (*_FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES, _FINDING_EVIDENCE_CONFIG_SET_RE)
+    }
+    # A rule that finds nothing in the text matches at no start in it either.
+    rules = [pattern for pattern, matches in found.items() if matches]
     found[_FINDING_EVIDENCE_CONFIG_SET_RE] = [
         match
-        for match in _FINDING_EVIDENCE_CONFIG_SET_RE.finditer(text)
+        for match in found[_FINDING_EVIDENCE_CONFIG_SET_RE]
         if _mask_config_set_value(match, values) != match.group()
     ]
     # Each credential's command part and the password it hides.
@@ -4390,8 +4412,12 @@ def _hidden_credential_spans(
     # rule, read in the text with the values masked (see above).
     masked = _MaskedSpans(text, sorted(value_spans + masked_values) if masked_values else value_spans)
     command_words = [
-        _SpanIndex([(match.start(), match.end(), (rest, match.end())) for match in command.finditer(text)])
-        for command, rest in _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS
+        _SpanIndex(words)
+        for words in (
+            [(match.start(), match.end(), (rest, match.end())) for match in _pattern_matches(command, text)]
+            for command, rest in _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS
+        )
+        if words
     ]
     if inner_flags:
         command_parts.append(_SpanIndex(list(inner_flags)))
@@ -4438,7 +4464,7 @@ def _hidden_credential_spans(
         # aws_secret_access_key aws configure set aws_secret_access_key VALUE").
         if start not in starts_read:
             starts_read.add(start)
-            for pattern in found:
+            for pattern in rules:
                 match = pattern.match(text, start)
                 if match is not None and (
                     pattern is not _FINDING_EVIDENCE_CONFIG_SET_RE
@@ -4500,8 +4526,13 @@ class _SpanIndex:
 
     def take(self, start: int, end: int) -> list[Any]:
         """Take out and return, in order, the items not taken yet whose spans overlap *start*:*end*."""
+        index = bisect.bisect_right(self._ends, start)
+        # Starts run in order, so no entry from the first that ends past
+        # *start* on overlaps when that one starts at *end* or later.
+        if index == len(self._starts) or self._starts[index] >= end:
+            return []
         items = []
-        index = self._untaken(bisect.bisect_right(self._ends, start))
+        index = self._untaken(index)
         stop = bisect.bisect_left(self._starts, end)
         while index < stop:
             items.append(self._items[index])
@@ -4579,6 +4610,16 @@ class _MaskedSpans:
         return position + self._shifts[index]
 
 
+def _pattern_may_match(pattern: re.Pattern[str], text: str) -> bool:
+    """Return whether *text* holds a word of each group that _FINDING_EVIDENCE_PATTERN_WORDS lists for *pattern*."""
+    return all(any(word in text for word in words) for words in _FINDING_EVIDENCE_PATTERN_WORDS.get(pattern, ()))
+
+
+def _pattern_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Return the matches of *pattern* that finditer finds in *text*, searching only a text it can match."""
+    return list(pattern.finditer(text)) if _pattern_may_match(pattern, text) else []
+
+
 def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
     """Replace each span of *text* in *spans* with "<redacted>", and spans that overlap or touch with one."""
     parts: list[str] = []
@@ -4605,8 +4646,10 @@ def _is_credential_flag_name(name: str) -> bool:
 def _mask_argv_credentials(text: str) -> str:
     """Mask the list element after a quoted credential flag (["tool", "--password", "VALUE"])."""
     spans = _argv_credential_spans(text)
-    if spans:
-        text = _redact_spans(text, spans)
+    if not spans:
+        # The text is unchanged, and its attached "-pVALUE" elements were read with the list.
+        return text
+    text = _redact_spans(text, spans)
     # An attached "-pVALUE" element is read again once the list is masked,
     # which may bring a login or MySQL client element into reach.
     return _redact_spans(text, _attached_argv_password_spans(text))
@@ -4671,7 +4714,7 @@ def _attached_argv_password_spans(text: str) -> list[tuple[int, int]]:
     one that starts inside another (\\"login\\" at its backslash and at its
     quote) is found as a search of those 256 characters finds it.
     """
-    passwords = list(_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text))
+    passwords = _pattern_matches(_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE, text)
     if not passwords:
         return []
     elements = [(found.start(), found.end(1)) for found in _FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE.finditer(text)]
@@ -4698,6 +4741,8 @@ def _config_key_names_a_credential(key: str) -> bool:
 
 def _mask_config_set_values(text: str) -> str:
     """Mask the value of each config set command in *text* whose key names a credential."""
+    if not _pattern_may_match(_FINDING_EVIDENCE_CONFIG_SET_RE, text):
+        return text
     values = _AssignmentValues(text)
     return _FINDING_EVIDENCE_CONFIG_SET_RE.sub(lambda match: _mask_config_set_value(match, values), text)
 
@@ -4785,7 +4830,13 @@ class _AssignmentValues:
         for found in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, last_separator + 1):
             if found.start() > end:
                 break
-            name = _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start())
+            # A name's match can run past the last separator only by holding
+            # it, so one that ends before it is the name's whole match.
+            name = (
+                found
+                if found.end() <= last_separator
+                else _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start())
+            )
             if (
                 word
                 and name.end() < end
@@ -4913,7 +4964,7 @@ def _config_separator_name_ends(text: str) -> set[int]:
     """Return where each config set NAME in *text* ends that names a credential and is followed by a separator word."""
     return {
         name.end(4)
-        for name in _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE.finditer(text)
+        for name in _pattern_matches(_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE, text)
         if _config_key_names_a_credential(name.group(4))
     }
 
@@ -5157,21 +5208,29 @@ def _assignment_name_matches(text: str, config_name_ends: set[int]) -> list[tupl
     *config_name_ends* holds where each config set NAME that names a
     credential and is followed by a separator word ends.
     """
-    matches: dict[int, tuple[re.Match[str], int]] = {}
-    pos = 0
-    while (match := _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.search(text, pos)) is not None:
-        # A name right after "/" was read only as the start of a sed pattern.
-        sed_end = 0
-        if text[match.start() - 1 : match.start()] == "/":
-            sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, match.start() - 2).end()
-        matches[match.start()] = (match, sed_end)
-        # The config set rule masked the separator word after a config set
-        # NAME as its value before it left this form to the assignment rule,
-        # which then read names from the word after that separator. So an
-        # auth scheme word there still starts a name of its own ("npm config
-        # set _authToken = token = VALUE"), and names after it are read as
-        # they were then.
-        pos = match.end(3) if match.end(1) in config_name_ends else match.end()
+    names: list[tuple[re.Match[str], int]] = []
+    pos: int | None = 0
+    while pos is not None:
+        start, pos = pos, None
+        for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start):
+            # A name right after "/" was read only as the start of a sed pattern.
+            sed_end = 0
+            if text[match.start() - 1 : match.start()] == "/":
+                sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, match.start() - 2).end()
+            names.append((match, sed_end))
+            # The config set rule masked the separator word after a config set
+            # NAME as its value before it left this form to the assignment rule,
+            # which then read names from the word after that separator. So an
+            # auth scheme word there still starts a name of its own ("npm config
+            # set _authToken = token = VALUE"), and names after it are read as
+            # they were then.
+            if match.end(1) in config_name_ends:
+                pos = match.end(3)
+                break
+    if "s/" not in text:
+        # No sed expression holds a name.
+        return names
+    matches = {match.start(): (match, sed_end) for match, sed_end in names}
     for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
         sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, sed.start()).end()
         if sed.end() in matches:

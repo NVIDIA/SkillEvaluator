@@ -158,6 +158,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
 - The bundled `text-analyzer` example skill's description now says when to use it and
   lists sentence count and average word length, so Codex reads the skill before using it.
   The example's quality score is now 88.8/100 with 5 findings (was 86.2 with 6).
@@ -308,11 +311,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
   indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
   compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

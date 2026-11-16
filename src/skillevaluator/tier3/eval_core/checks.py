@@ -3761,6 +3761,9 @@ _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
 # The same value without its word reading (see _AssignmentValues.value_end).
 _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE_RE = re.compile(_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE)
 _FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
+# The start of a value that the assignment rule reads as a word: no quote,
+# backslash, parenthesis, marker or call (see _AssignmentValues.runs_past).
+_FINDING_EVIDENCE_WORD_VALUE_START_RE = re.compile(r"(?![A-Za-z_][\w.]{0,63}\()[^\s'\"`\\(<;|&]")
 # The same tuple and call values with each quoted argument read whole, a
 # JSON-escaped (\"...\"), double- or single-quoted string closed on its line,
 # so a parenthesis inside one is not read as the end of the value or the start
@@ -4325,12 +4328,8 @@ def _hidden_credential_spans(
             if not text.startswith(("'", '"', '\\"'), match.end(1))
         ]
     )
-    names = _SpanIndex(
-        [
-            (name.start(), name.end(), name)
-            for name, _ in _assignment_name_matches(text, _config_separator_name_ends(text))
-        ]
-    )
+    # The names the assignment rule reads, found once a hidden span needs them.
+    names: _SpanIndex | None = None
     hidden: list[tuple[int, int]] = []
     # The indexes in *hidden* of spans inside one before them (see below).
     inside: set[int] = set()
@@ -4384,6 +4383,13 @@ def _hidden_credential_spans(
             continue
         take_credentials(start, end)
         reach = end
+        if names is None:
+            names = _SpanIndex(
+                [
+                    (name.start(), name.end(), name)
+                    for name, _ in _assignment_name_matches(text, _config_separator_name_ends(text))
+                ]
+            )
         for name in names.take(start, end):
             value_end = values.value_end(name)
             if value_end is not None and value_end > end:
@@ -4646,7 +4652,11 @@ class _AssignmentValues:
 
     def __init__(self, text: str) -> None:
         self.text = text
-        self._quotes: tuple[list[int], list[int | None]] | None = None
+        # The quote characters read so far, each with the string open after
+        # it, and where and in which string the quote scan goes on.
+        self._quotes: tuple[list[int], list[int | None]] = ([], [])
+        self._scan_pos: int | None = 0
+        self._scan_opening: int | None = None
         self._config_name_ends: set[int] | None = None
         # For each pattern, the runs read so far: their starts, in order, and their ends.
         self._runs: dict[re.Pattern[str], tuple[list[int], list[int]]] = {}
@@ -4685,10 +4695,31 @@ class _AssignmentValues:
         text = self.text
         # A name that ends the value or follows it is read up to its separator.
         limit = _FINDING_EVIDENCE_NAME_TAIL_RE.match(text, end).end() + 2
-        for found in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, limit):
+        # A word value outside a quoted string stays outside one up to *end*,
+        # as a quote in it is escaped. A name inside it joined by "=" to a
+        # value that starts as a word and is no call reads that value as the
+        # rest of the same word, which ends at *end*, so such a name is not
+        # read, and a long word with many names in it is read in linear time.
+        word = (
+            not text.startswith(("'", '"', "\\", _FINDING_EVIDENCE_PRIVATE_KEY_MARKER), start)
+            and self._string_open(start) is None
+        )
+        # Every name ends with a separator that holds "=" or ":", so none is
+        # looked for past the last one.
+        last_separator = max(text.rfind("=", start, limit), text.rfind(":", start, limit))
+        for found in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, last_separator + 1):
             if found.start() > end:
                 break
             name = _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start())
+            if (
+                word
+                and name.end() < end
+                and name.group(3) == "="
+                and not name.group(2)
+                and text[name.start() - 1 : name.start()] not in ("'", '"')
+                and _FINDING_EVIDENCE_WORD_VALUE_START_RE.match(text, name.end()) is not None
+            ):
+                continue
             reading = self._value_reading(name)
             if reading is None:
                 continue
@@ -4763,18 +4794,21 @@ class _AssignmentValues:
         )
 
     def _string_open(self, position: int) -> int | None:
-        """Return where the quoted string open at *position* starts (None: none is), as the quote scan reads it."""
-        if self._quotes is None:
-            positions: list[int] = []
-            openings: list[int | None] = []
-            pos = 0
-            opening: int | None = None
-            while (match := _FINDING_EVIDENCE_QUOTE_CHAR_RE.search(self.text, pos)) is not None:
-                pos, opening = _scan_quotes(self.text, pos, match.start() + 1, opening)
-                positions.append(match.start())
-                openings.append(opening)
-            self._quotes = (positions, openings)
+        """Return where the quoted string open at *position* starts (None: none is), as the quote scan reads it.
+
+        The quotes are read forward once, only as far as a position asked for.
+        """
         positions, openings = self._quotes
+        while self._scan_pos is not None and (not positions or positions[-1] < position):
+            match = _FINDING_EVIDENCE_QUOTE_CHAR_RE.search(self.text, self._scan_pos)
+            if match is None:
+                self._scan_pos = None
+                break
+            self._scan_pos, self._scan_opening = _scan_quotes(
+                self.text, self._scan_pos, match.start() + 1, self._scan_opening
+            )
+            positions.append(match.start())
+            openings.append(self._scan_opening)
         index = bisect.bisect_left(positions, position)
         return openings[index - 1] if index else None
 

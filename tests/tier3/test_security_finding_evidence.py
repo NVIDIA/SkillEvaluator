@@ -2695,6 +2695,38 @@ def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> 
     assert time.perf_counter() - started < 2.0
 
 
+@pytest.mark.parametrize(
+    "make_text",
+    [
+        pytest.param(lambda n: "--db_password a" + "\\ -token=a" * n, id="names-in-the-word"),
+        pytest.param(lambda n: "--db_password a" + "\\ -token=a" * n + "\\ " + "A" * 50_000, id="names-then-a-long-word"),
+        pytest.param(lambda n: "npm config set -- _authToken a" + ",token=a" * n, id="names-in-a-config-value"),
+    ],
+)
+def test_a_long_underscored_flag_word_does_not_read_each_name_in_it(
+    make_text: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A "_" flag or config value is left to the assignment rule when a name in
+    # it has a value that runs past it. A name in an unquoted word joined by
+    # "=" to a value that starts as a word reads the rest of that same word,
+    # so it is not read, and masking a long word stays close to linear.
+    real = eval_core_checks._assignment_value_reading
+    counts = []
+    for repeats in (100, 1000):
+        calls = []
+
+        def counted(*args: Any, **kwargs: Any) -> Any:
+            calls.append(1)
+            return real(*args, **kwargs)
+
+        monkeypatch.setattr(eval_core_checks, "_assignment_value_reading", counted)
+        evidence = eval_core_checks._mask_finding_evidence_credentials(make_text(repeats))
+        assert "token=a" not in evidence
+        counts.append(len(calls))
+
+    assert counts[0] == counts[1]
+
+
 _HOOK_URL = "https://hooks.example.com/services/T0/B0/" + _API_TOKEN
 
 

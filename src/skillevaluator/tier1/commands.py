@@ -58,7 +58,6 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
-from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.quality_score import QualityScoreValidator
 from skillevaluator.validators.rubric_eval import RubricEvalValidator
@@ -280,18 +279,17 @@ def runs_security_scan(checks: str | None, skip: str | None) -> bool:
 def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | None):
     """Return the schema validator matching the (forced or detected) content type.
 
-    Rules, workflows, and plugins use their dedicated schema validators; skill
-    content, ``None`` and an ``unknown`` folder that holds an artifact
-    manifest entry fall back to the skill :class:`SchemaValidator` (the
-    historical default). ``run_validation`` records the schema check as not
-    applicable for any other ``unknown`` target instead of calling this.
+    Rules and workflows use their dedicated schema validators; skill content,
+    ``None`` and an ``unknown`` folder that holds an artifact manifest entry
+    fall back to the skill :class:`SchemaValidator` (the historical default).
+    ``run_validation`` records the schema check as not applicable for any
+    other ``unknown`` target instead of calling this, and hands a plugin to
+    the bounded plugin checks, which validate its manifest and components.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
-    if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator()
     return SchemaValidator(policy=policy)
 
 

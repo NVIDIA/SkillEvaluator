@@ -388,6 +388,21 @@ All notable changes to SkillEvaluator are documented in this file.
   "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
   request".
 
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results now covers a failed Tier 3 run whose budget left planned
+  attempts not run. Its JSON `tier3` object and full Tier 3 download record
+  `incomplete` and leave `summary.overall_lift` null, even when the best agent
+  has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
+  Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+  is advisory. The page said only that HTML displays a failed run as
+  **Changes required** and that both payloads keep the best agent's lift.
+
 ### Fixed
 
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.

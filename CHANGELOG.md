@@ -149,6 +149,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
+  for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
+  rubric and LLM security verification did not run. The same default applies to
+  SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
+  to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
+  the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
+  a scan on the native Anthropic API completed at full coverage.
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
   in the reusable workflow); `ci/README.md` notes the same.
@@ -219,6 +228,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
 - The GitHub Actions CI recipe in `ci-integration.mdx` verifies the downloaded
   Gitleaks archive against a pinned SHA-256 digest before extracting it.
 
@@ -227,6 +240,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
+- The `nv_build` documentation names `nvidia/nemotron-3.5-lightning-30b-a3b`
+  (Nemotron 3.5 Lightning) as the default model in the configuration guide,
+  environment variables reference, CLI reference, agents and sandboxes guide
+  and Tier 3 live evaluation guide, and the runnable `--agent-model` examples
+  use it. This entry covers the documentation only; the runtime default change
+  ships separately.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
@@ -271,10 +290,30 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.

@@ -410,6 +410,11 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     description = data.get("description")
     tools = data.get("allowed-tools")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
+    when_to_use = data.get("when_to_use")
+    # Claude Code lists "<description> - <when_to_use>" and cuts that whole text.
+    claude_listing = (description if isinstance(description, str) else "") + (
+        f" - {when_to_use}" if when_to_use is not None and str(when_to_use) else ""
+    )
     root, depth = _install_root(skill_path)
     target = "none"
     if skill_path.is_symlink():
@@ -449,6 +454,8 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "description_empty": isinstance(description, str) and not description.strip(),
         "description_type": type(description).__name__ if description is not None else "none",
         "description_codepoints": len(description) if isinstance(description, str) else 0,
+        "claude_listing_text": claude_listing,
+        "claude_listing_codepoints": len(claude_listing),
         "description_has_quote": isinstance(description, str) and '"' in description,
         "description_utf16_units": _utf16_units(description),
         "trigger_end": trigger.end() if trigger else None,
@@ -569,7 +576,7 @@ def _utf16_units(value: Any) -> int:
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
-    text = facts["description_text"]
+    text = facts[listing.get("text_fact", "description_text")]
     budget = listing.get("budget") or {}
     over_budget = facts["catalog_size"] and (
         facts["catalog_desc_chars"] > (facts.get("list_budget_chars") or budget.get("desc_chars", float("inf")))

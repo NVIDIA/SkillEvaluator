@@ -672,18 +672,18 @@ in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
 evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
 Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
 Explicit model overrides are preserved exactly. Without an override, all three
-agents default to Nemotron Super (`nvidia/nemotron-3-super-120b-a12b`); direct
-OpenCode renders it as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its
+agents default to Nemotron 3.5 Lightning (`nvidia/nemotron-3.5-lightning-30b-a3b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its
 adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
 when you want to compare harnesses or models:
 
 ```bash title="NVIDIA Build model overrides"
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
-  --agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b
+  --agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker \
-  --agent-model claude-code=nvidia/nemotron-3-super-120b-a12b
+  --agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b
 skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
   --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
 ```
@@ -724,11 +724,24 @@ Claude configuration directory. The baseline uses the same discovery settings
 without the target skill. Gym's required Anthropic credential field receives only
 a placeholder; policy credentials remain in the model-server environment.
 
+Install the pinned Gym in its own Python 3.13.14+ environment, separate from
+SkillEvaluator's, and check that its `gym eval run --help` lists `TARGET` and `--sandbox`:
+
+```bash
+uv venv --python ">=3.13.14,<3.14" "$HOME/nemo-gym/.venv"
+uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
+  "nemo-gym @ git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
+"$HOME/nemo-gym/.venv/bin/gym" eval run --help
+```
+
+Then point SkillEvaluator at it and run:
+
 ```bash
 # Requires a separately verified, pinned Gym task-folder implementation.
-export SKILL_EVAL_NEMO_GYM_BIN=/opt/nemo-gym/.venv/bin/gym
-export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://integrate.api.nvidia.com/v1
-export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$NVIDIA_API_KEY"
+export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
+# Codex needs an endpoint that serves the OpenAI Responses API; NVIDIA Build does not.
+export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://api.openai.com/v1
+export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$OPENAI_API_KEY"
 skillevaluator tier3 doctor --backend nemo-gym --agents codex
 skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
 ```
@@ -1023,6 +1036,17 @@ unit is denied, even when measured usage is below the cap. Its members retain
 also identifies estimate-based exhaustion. The budget summary shows measured
 usage and the estimated next unit, rather than implying usage reached the cap.
 Attempt-count limits and stopping on unknown bounded usage are unchanged.
+
+If every attempt for an agent arm is denied by the budget, no Harbor job is
+created for that arm. It is reported as skipped with `skip_reason:
+budget_exhausted`, zero expected and scored attempts, and no execution error.
+The run remains incomplete because the budget left planned attempts not run.
+An empty Harbor job that was expected to execute attempts still fails validation.
+This also applies with `--stop-on-pass`: every planned case and attempt must have
+an explicit budget denial before an arm is considered not run. A reused baseline
+remains baseline evidence when the with-skill arm is denied; it does not become
+the run's overall score. Records with an explicit non-budget reason do not reduce
+the required attempt coverage.
 
 Reservation reduces but does not eliminate in-flight overshoot. Estimates can
 grow, an attempt can exceed its estimate, and the calibration unit is

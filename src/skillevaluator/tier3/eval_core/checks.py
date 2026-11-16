@@ -6260,7 +6260,10 @@ def _classify_execution_failure(
     }
     declared_names = {normalized(str(name)) for name in dependencies}
     declared = normalized(missing) in declared_names or normalized(aliases.get(missing.lower(), "")) in declared_names
-    used = bool(re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", "")))
+    skill_name = normalized(str(context.get("skill_name") or ""))
+    used = skill_name != normalized(missing) and bool(
+        re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", ""))
+    )
     used = (
         used or missing in context.get("script_imports", []) or _command_executes_skill(command, expected_script, paths)
     )

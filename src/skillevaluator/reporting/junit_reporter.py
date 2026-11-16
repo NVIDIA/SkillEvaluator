@@ -236,13 +236,11 @@ def _cases_for_result(
             )
         ]
 
-    incomplete = bool(result.incomplete_scans)
     cases: list[_Case] = []
     for finding in result.findings:
         file_path = _junit_file_path(finding.file_path, workspace_root, scan_root)
         line = _positive_start_line(finding.line_number)
         failed = finding_blocks(result, finding)
-        skipped = incomplete and not failed
         name = _unique_name(_xml_text(finding.check_name) or "finding", used)
         detail = _failure_body(finding, file_path)
         cases.append(
@@ -250,33 +248,21 @@ def _cases_for_result(
                 name=name,
                 classname=classname,
                 failed=failed,
-                skipped=skipped,
                 message=_xml_text(finding.message),
-                body=detail if failed or skipped else "",
+                body=detail if failed else "",
                 file_path=file_path,
                 line=line,
-                system_out="" if failed or skipped else detail,
+                system_out="" if failed else detail,
             )
         )
     for success in result.success_details:
-        if incomplete:
-            cases.append(
-                _Case(
-                    name=_unique_name(_xml_text(success.check_name) or "check", used),
-                    classname=classname,
-                    skipped=True,
-                    message=_xml_text(success.message),
-                    body=_xml_text(success.message),
-                )
+        cases.append(
+            _Case(
+                name=_unique_name(_xml_text(success.check_name) or "check", used),
+                classname=classname,
+                system_out=_xml_text(success.message),
             )
-        else:
-            cases.append(
-                _Case(
-                    name=_unique_name(_xml_text(success.check_name) or "check", used),
-                    classname=classname,
-                    system_out=_xml_text(success.message),
-                )
-            )
+        )
     gate_failures = set(result.gate_failures)
     for error in result.independent_errors():
         base = "gate_failure" if error in gate_failures else "error"

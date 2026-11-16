@@ -137,8 +137,10 @@ def test_skipped_and_incomplete_are_not_all_passed() -> None:
     _assert_counts_match(root)
 
 
-def test_incomplete_warning_only_is_skipped_not_passed() -> None:
+def test_incomplete_scan_does_not_skip_other_cases() -> None:
     result = ValidationResult(validator_name="Security Scan", validator_description="Security")
+    for name in ("check_a", "check_b", "check_c"):
+        result.add_success(name, f"{name} passed")
     result.mark_scan_incomplete("skillspector")
     result.add_warning("skillspector timed out after 300 seconds")
     result.add_finding(
@@ -152,11 +154,13 @@ def test_incomplete_warning_only_is_skipped_not_passed() -> None:
     )
 
     root = ET.fromstring(JUnitReporter().render_all([result]))
-    cases = _cases(root)
-    assert cases
-    assert all(case.find("skipped") is not None for case in cases)
-    assert all(case.find("failure") is None for case in cases)
-    assert int(root.attrib["tests"]) == int(root.attrib["skipped"])
+    cases = {case.attrib["name"]: case for case in _cases(root)}
+    for name in ("check_a", "check_b", "check_c", "skillspector_timeout"):
+        assert cases[name].find("skipped") is None
+        assert cases[name].find("failure") is None
+    incomplete = cases["incomplete/skillspector"]
+    assert incomplete.find("skipped") is not None or incomplete.find("error") is not None
+    assert int(root.attrib["tests"]) == 5
     assert int(root.attrib["failures"]) == 0
     _assert_counts_match(root)
 

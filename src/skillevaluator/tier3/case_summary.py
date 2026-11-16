@@ -848,11 +848,14 @@ def render_case_summary(
             head = Text(f" {i}. ", style=f"bold {AMBER}")
             head.append(safe(fix["case"]), style="bold")
             n = fix["attempts_lost"]
-            lost = (
-                (f" · {n} attempt(s) missed the goal" if fix["kind"] == "goal not met" else f" · lost {n} attempt(s)")
-                if n
-                else ""
-            )
+            lost = ""
+            if n:
+                if fix["kind"] == "task outcome":
+                    lost = f" · {n} attempt(s) missed the case requirements"
+                elif fix["kind"] == "goal not met":
+                    lost = f" · {n} attempt(s) missed the goal"
+                else:
+                    lost = f" · lost {n} attempt(s)"
             head.append(f"  [{safe(fix['kind'])}] · {safe(fix['scope'])}{lost}", style="dim")
             console.print(head)
             console.print(Text(f"    what happened: {safe(fix['what'])}"))
@@ -1319,7 +1322,7 @@ def _dataset_entries(run_dir: Path) -> dict[str, Mapping[str, Any]]:
     return {str(e["id"]): e for e in entries or [] if isinstance(e, Mapping) and e.get("id") is not None}
 
 
-_MERGED_KINDS = ("run error", "skill not used", "eval case", "missing input", "goal not met")
+_MERGED_KINDS = ("run error", "skill not used", "eval case", "missing input", "goal not met", "task outcome")
 
 
 def _merge_across_cases(issues: list[dict[str, Any]], n_cases: int) -> list[dict[str, Any]]:
@@ -1455,6 +1458,11 @@ def _what_to_fix(
             ):
                 for issue in diagnosed:
                     if issue["kind"] in ("skill", "skill hurts", "goal not met"):
+                        if issue["kind"] == "skill hurts":
+                            issue["what"] = _short(
+                                "; ".join(issue["reasons"][:2]) or "the agent's answer missed the case requirements",
+                                320,
+                            )
                         issue["kind"] = "task outcome"
             for issue in diagnosed:
                 grouped.setdefault((case_id, issue["kind"], issue.get("cause")), []).append(issue)

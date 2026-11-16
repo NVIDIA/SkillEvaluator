@@ -1657,6 +1657,72 @@ def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path
     assert fix["attempts_lost"] == 2
 
 
+@pytest.mark.parametrize("passed", [False, True])
+def test_negative_task_outcome_copy_does_not_blame_skill_or_call_passed_attempts_lost(
+    tmp_path: Path, passed: bool
+) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    reward = _reward(False, "wrong total")
+    reward.update(
+        entry_id="negative",
+        goal_accuracy=0.0,
+        skill_execution=1.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
+    _trial(tmp_path, "a", "t0", reward)
+    result = {"agents": {"a": _agent({"negative": _case(passed)}, {"negative": _case(True)})}}
+
+    fixes = what_to_fix(result, run_dir=tmp_path, use_llm=False)
+    [fix] = [item for item in fixes if item["kind"] == "task outcome"]
+    assert "without the skill" not in fix["what"]
+    assert "wrong total" in fix["what"]
+    console = Console(record=True, width=180)
+    render_case_summary(result, console=console, fixes=[fix])
+    advice = console.export_text().split("How to improve", 1)[1]
+    assert "missed the case requirements" in advice
+    assert "lost " not in advice
+
+
+def test_negative_task_outcomes_merge_without_hiding_a_skill_fix(tmp_path: Path) -> None:
+    negative_ids = [f"negative-{index}" for index in range(3)]
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps(
+            {
+                "dataset": [
+                    *({"id": case, "expected_skill": None} for case in negative_ids),
+                    {"id": "positive", "should_trigger": True},
+                ]
+            }
+        )
+    )
+    cases = {}
+    for case_id in [*negative_ids, "positive"]:
+        negative = case_id in negative_ids
+        cases[case_id] = _case(*([False, False] if negative else [False]), prefix=case_id)
+        for index in range(2 if negative else 1):
+            reward = _reward(not negative, "wrong total" if negative else "missing required feature")
+            reward.update(
+                entry_id=case_id,
+                skill_execution=1.0,
+                skill_invoked=not negative,
+                invocation_evidence_source="trajectory",
+                invocation_evidence_scope="logical_trial",
+            )
+            _trial(tmp_path, "a", f"{case_id}{index}", reward)
+
+    fixes = what_to_fix({"agents": {"a": _agent(cases, {})}}, run_dir=tmp_path, use_llm=False)
+
+    assert len(fixes) == 2
+    [task_outcome] = [fix for fix in fixes if fix["kind"] == "task outcome"]
+    assert task_outcome["cases"] == negative_ids
+    assert task_outcome["attempts_lost"] == 6
+    assert any(fix["case"] == "positive" and fix["kind"] == "skill" for fix in fixes)
+
+
 @pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
 @pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
 def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(

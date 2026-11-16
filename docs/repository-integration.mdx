@@ -70,6 +70,75 @@ in the public repository. No demo-repository access is needed.
   workflow files. Additional evaluation stages require a separate opt-in.
 </Note>
 
+## Pre-commit hooks
+
+Run the deterministic, key-free Tier 1 checks on the skills a commit touches,
+without waiting for CI. The hooks install SkillEvaluator from this repository
+and call a hidden `skillevaluator precommit-run` entry that maps each changed
+file to its skill root (the nearest ancestor that contains `SKILL.md`),
+de-duplicates those roots, and runs one check per skill.
+
+Files that are not inside a skill are ignored. Deleted skills are skipped.
+Reports are not written into the repository.
+
+### Install
+
+Add a `.pre-commit-config.yaml` at the root of the skill repository and pin
+`rev` to a released tag that includes
+[`.pre-commit-hooks.yaml`](https://github.com/NVIDIA/SkillEvaluator/blob/main/.pre-commit-hooks.yaml).
+The example uses `v0.10.0` as the first release expected to ship the hooks;
+replace it with the tag you actually install.
+
+```yaml title=".pre-commit-config.yaml"
+repos:
+  - repo: https://github.com/NVIDIA/SkillEvaluator
+    rev: v0.10.0
+    hooks:
+      - id: skillevaluator-quality
+        args: ["--min-score", "70"]
+      - id: skillevaluator-schema
+      - id: skillevaluator-lint-scripts
+```
+
+Then `pre-commit install`. On each commit, pre-commit passes the changed skill
+files (`SKILL.md`, `scripts/`, `references/`, `evals/`) to the selected hooks.
+
+`--min-score` is forwarded to the quality check. Omit `args` to keep the
+default quality bar of 70.
+
+### What each hook checks
+
+| Hook id | Check | Needs |
+| --- | --- | --- |
+| `skillevaluator-quality` | Composite quality score (`quality-check`) | Nothing |
+| `skillevaluator-schema` | `SKILL.md` frontmatter and skill layout (`validate --tiers 1 --checks schema`) | Nothing |
+| `skillevaluator-lint-scripts` | Advisory Python script lint (`lint-scripts`) | Nothing |
+
+Each hook prints one compact line per skill (`PASS` or `FAIL`) and exits
+non-zero when any skill fails. Script lint findings are advisory, so that hook
+does not fail the commit on style warnings.
+
+### What the hooks do not run
+
+These hooks stay offline: no API key, no network, no Docker, and no scanner
+download.
+
+They do **not** run:
+
+- Security scans (`security-scan`, Gitleaks, SkillSpector, Semgrep). The first
+  full scan can download pinned scanner releases.
+- `doctor` / `health-check`, which probe those scanners.
+- Default `validate` (or `--tiers 1` without `--checks`). That lineup includes
+  security and code-integrity scans.
+- LLM-backed rubric scoring, Tier 2 deduplication, and Tier 3 live evaluation.
+
+Other keyless static checks (PII, license, Unicode, version, harness) are also
+omitted from the hook set. Run them with `validate --tiers 1` in CI once the
+scanners the remaining checks need are installed. Use the
+[GitHub](/skills/skillevaluator/github-actions) or
+[GitLab](/skills/skillevaluator/gitlab-ci) templates for scanner-backed CI, and
+[Gate Your CI](/skills/skillevaluator/ci-integration) for a copy-paste job.
+
 ## Other CI systems
 
 The container contains the same evaluator runtime, and the CLI can also run in

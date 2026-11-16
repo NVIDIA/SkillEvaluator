@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
+  exposes `skillevaluator-quality`, `skillevaluator-schema`, and
+  `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
+  maps changed files to skill roots and runs each check without an API key,
+  network, Docker, or scanner download.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level

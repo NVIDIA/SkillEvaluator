@@ -29,7 +29,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `github-actions.mdx` — skill check workflow setup and optional hosted PR feedback
 - `cli-onboarding.mdx` — released GitHub setup wizard
-- `repository-integration.mdx` — choose GitHub or GitLab for skill checks
+- `repository-integration.mdx` — choose GitHub or GitLab for skill checks; pre-commit hooks
 - `gitlab-ci.mdx` — reusable skill checks and downloadable GitLab reports
 - `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption

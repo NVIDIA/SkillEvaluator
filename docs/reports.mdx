@@ -349,8 +349,8 @@ merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
 | `testsuites` | One document per run |
 | `testsuite` | One check group (`ValidationResult`) |
 | `testcase` | One check, finding, gate failure, or incomplete scanner |
-| `failure` | A failing finding or an independent gate failure, with `file:line` when recorded |
-| `skipped` | A check that did not run, or a scanner that did not complete |
+| `failure` | A blocking finding, with `file:line` when recorded; every independent error on the group (schema errors, `No SKILL.md found`, scanner execution diagnostics) as a case named `error`; or a gate failure as a case named `gate_failure` |
+| `skipped` | A check group that did not run, as one case with its skip reason, or an `incomplete/<tool>` case for a scanner that did not complete. Other checks and findings in that group keep their real passed or failed status |
 | `system-out` | Score and threshold when recorded, and non-failing finding text |
 
 Counts on `testsuites` and each `testsuite` (`tests`, `failures`, `skipped`,

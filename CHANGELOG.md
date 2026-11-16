@@ -400,8 +400,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `incomplete` and leave `summary.overall_lift` null, even when the best agent
   has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
   Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
-  is advisory. The page said only that HTML displays a failed run as
-  **Changes required** and that both payloads keep the best agent's lift.
+  is advisory. The page said that HTML displays a failed run as
+  **Changes required**, or **Failed (advisory)** when Tier 3 is advisory, and
+  that both payloads keep the best agent's lift.
 
 ### Fixed
 

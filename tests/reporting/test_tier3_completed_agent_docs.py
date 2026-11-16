@@ -560,6 +560,13 @@ def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
         "best agent has a lift, so the Skill Lift card reads N/A and Run details & provenance has no Best-agent lift "
         "line."
     ) in _section()
+    # The general lift paragraph points back to this exception.
+    assert (
+        "The JSON report's `tier3` object and full Tier 3 download both keep this lift in `summary.overall_lift`. "
+        "The exception is a failed run whose budget left planned attempts not run, described above: there "
+        "`summary.overall_lift` is null, the Skill Lift card reads N/A and Run details & provenance has no "
+        "Best-agent lift line."
+    ) in _section()
 
 
 def test_changelog_documents_the_budget_stopped_failed_run(tmp_path: Path) -> None:

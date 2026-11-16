@@ -1677,7 +1677,10 @@ When the run has a best agent, the HTML report names it with the score,
 and its **Skill Lift** card and the **Best-agent lift** line under
 **Run details & provenance** show that agent's lift when it has one, even when
 its evidence is incomplete. The JSON report's `tier3` object and full Tier 3
-download both keep this lift in `summary.overall_lift`.
+download both keep this lift in `summary.overall_lift`. The exception is a
+failed run whose budget left planned attempts not run, described above: there
+`summary.overall_lift` is null, the **Skill Lift** card reads N/A and
+**Run details & provenance** has no **Best-agent lift** line.
 The lift is diagnostic evidence for one agent, not a whole-run lift.
 
 To get a whole-run result, fix the failed agent and rerun the evaluation with

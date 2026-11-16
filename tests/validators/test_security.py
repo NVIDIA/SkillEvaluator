@@ -10,6 +10,7 @@ import re
 import struct
 import subprocess
 import sys
+import time
 import zlib
 from concurrent.futures import Future
 from pathlib import Path
@@ -8575,6 +8576,8 @@ class TestSpdxAndIpFalsePositiveHardening:
             "releaseTag",
             "tagName",
             "tags",
+            "PackageVersion",
+            "dockerImageTag",
         ],
     )
     def test_explicit_version_label_variants_stay_non_pii(self, tmp_path: Path, field_name: str) -> None:
@@ -8585,6 +8588,27 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "prefix",
+        [
+            "a" * 79,
+            "toolshed.g2.bx.psu.edu/repos/devteam/picard/picard_RevertOriginalBaseQualitiesAndAddMateCigar/",
+        ],
+        ids=["lowercase-run", "galaxy-tool-id"],
+    )
+    def test_long_identifier_before_ip_shaped_value_scans_fast(self, tmp_path: Path, prefix: str) -> None:
+        # A run of letters with no Version/Tag after it must not backtrack exponentially
+        # in the version-label check that runs on every IPv4-shaped match.
+        skill_dir = tmp_path / "long-identifier-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f"{prefix}2.18.2.1\n", encoding="utf-8")
+
+        started = time.perf_counter()
+        SecurityValidator().validate_pii_only(skill_dir)
+        elapsed = time.perf_counter() - started
+
+        assert elapsed < 1.0, f"PII scan took {elapsed:.2f}s"
 
     def test_later_zero_component_ip_is_not_hidden_by_version_context(self, tmp_path: Path) -> None:
         skill_dir = tmp_path / "mixed-version-and-network-skill"

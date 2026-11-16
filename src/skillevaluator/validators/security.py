@@ -6110,10 +6110,19 @@ class SecurityValidator(ValidatorBase):
     )
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
+
+    # The camel-case regex used to let any letter start a word, (?:[A-Za-z][a-z0-9]*)*,
+    # so every lower-case letter was an optional word break: a run with L letters and W
+    # upper-case words had 2**(L - W) splits, and with no Version/Tag after it re-tried
+    # them all. For example, about 30 minutes for one line ending in
+    #   picard_RevertOriginalBaseQualitiesAndAddMateCigar/2.18.2.1
+    # (?:[A-Z][a-z0-9]*) ensures that only an upper-case letter starts a word after the first one,
+    # so the breaks are fixed and each run splits one way. This does not change the old behavior as the first
+    # word can still start with [A-Za-z], it only enforce the new words to start with a capital letter.
     _VERSION_LABEL_PATTERN = re.compile(
         r"(?:"
         r"(?i:(?<![a-z0-9])(?:[a-z0-9]+[_-])*(?:versions?|tags?)(?:[_-][a-z0-9]+)*(?![a-z0-9]))"
-        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*)*(?:Version|Versions|Tag|Tags)"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*(?:[A-Z][a-z0-9]*)*)?(?:Version|Versions|Tag|Tags)"
         r"(?:[A-Z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
         r"|(?<![A-Za-z0-9])(?:version|versions|tag|tags)"
         r"(?:[A-Z][A-Za-z0-9]*)+(?![A-Za-z0-9])"

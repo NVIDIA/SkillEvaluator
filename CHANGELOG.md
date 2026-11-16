@@ -411,6 +411,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The PII scan no longer hangs on a long identifier before an IPv4-shaped version, such as
+  `picard_RevertOriginalBaseQualitiesAndAddMateCigar/2.18.2.1`. The camel-case version-label
+  check backtracked exponentially in the identifier's length; it is now linear.
 - Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
 - Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
 - Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.

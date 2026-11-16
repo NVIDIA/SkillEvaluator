@@ -14,4 +14,6 @@ TIER3_EXTRA_MODULES = frozenset(
 
 def is_missing_tier3_extra(exc: ImportError) -> bool:
     """Return whether ``exc`` names a package that the ``tier3`` extra provides."""
-    return (exc.name or "").partition(".")[0] in TIER3_EXTRA_MODULES
+    # A missing symbol or submodule in an installed dependency means a broken or
+    # incompatible installation; preserve its real cause instead of claiming the extra is absent.
+    return isinstance(exc, ModuleNotFoundError) and exc.name in TIER3_EXTRA_MODULES

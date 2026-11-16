@@ -316,6 +316,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The Tier 1 validation guide now says that a PowerShell backtick before a
+  space does not count as a quoted or escaped space for the SkillSpector
+  missing-reference line check, so a labelled line such as
+  ``**Note:** run setup` h*.ps1`` passes when `setup helper.ps1` is left out.
 - The agent skill guide explicitly installs the CLI before the first check,
   so its setup flow also works with skill versions that do not bootstrap it.
 
@@ -354,7 +358,8 @@ All notable changes to SkillEvaluator are documented in this file.
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
   add checks to your repository with `skillevaluator ci init`, or install the
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
-  its guide on docs.nvidia.com.
+  its guide on docs.nvidia.com. The CI column starts by saying what the template
+  does: it checks every skill change, with no evaluation code to maintain.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -400,11 +405,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `incomplete` and leave `summary.overall_lift` null, even when the best agent
   has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
   Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
-  is advisory. The page said only that HTML displays a failed run as
-  **Changes required** and that both payloads keep the best agent's lift.
+  is advisory. The page said that HTML displays a failed run as
+  **Changes required**, or **Failed (advisory)** when Tier 3 is advisory, and
+  that both payloads keep the best agent's lift.
 
 ### Fixed
 
+- Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
+- Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
+- Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

@@ -3668,31 +3668,6 @@ def _normalize_trials(
     return out
 
 
-def _trusted_observed_activation(reward: dict[str, Any]) -> str:
-    """Project collector-issued invocation evidence; never inspect trajectory or scores as proof."""
-    from skillevaluator.tier3.harbor.metrics import (
-        DEFAULT_METRIC_SET,
-        LEGACY_METRIC_SET,
-        metric_is_not_applicable,
-        metric_set_for_reward,
-        metric_value,
-    )
-
-    standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
-    declared = reward.get("metric_set") or reward.get("metric_set_version")
-    metric_set, metrics = metric_set_for_reward(reward)
-    if (
-        (declared and str(declared) not in standard_sets)
-        or metric_set not in standard_sets
-        or "skill_execution" not in metrics
-        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
-        or reward.get("invocation_evidence_source") != "trajectory"
-    ):
-        return "unknown"
-    invoked = reward.get("skill_invoked")
-    return ("invoked" if invoked else "not_invoked") if type(invoked) is bool else "unknown"
-
-
 def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, Any]) -> dict[str, Any]:
     """Keep routing, task quality, workflow and resources at their observed scopes.
 
@@ -3700,9 +3675,11 @@ def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, A
     every retained row says non-use, omitted steps may have used the skill.
     Only a collector-produced single/merged root can certify logical non-use.
     """
+    from skillevaluator.tier3.harbor.metrics import trusted_observed_activation
+
     scopes: list[dict[str, Any]] = []
     for index, reward in enumerate(group[:_MAX_EVIDENCE_PER_CARD]):
-        scope: dict[str, Any] = {"reward_row": index, "observed_activation": _trusted_observed_activation(reward)}
+        scope: dict[str, Any] = {"reward_row": index, "observed_activation": trusted_observed_activation(reward)}
         artifacts = reward.get("_activation_artifacts")
         if isinstance(artifacts, dict):
             scope["artifacts"] = {
@@ -3730,7 +3707,7 @@ def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, A
     logical_scope = len(group) == 1 and group[0].get("invocation_evidence_scope") == "logical_trial"
     return {
         "expected_activation": None,
-        "observed_activation": _trusted_observed_activation(group[0]) if logical_scope else "unknown",
+        "observed_activation": trusted_observed_activation(group[0]) if logical_scope else "unknown",
         "expectation_status": "unknown",
         "observation_scope": "logical_trial" if logical_scope else "reward_rows_only",
         "evidence_scopes": scopes,

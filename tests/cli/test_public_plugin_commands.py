@@ -531,6 +531,30 @@ def test_run_directory_result_is_incomplete_when_the_package_is(tmp_path, comple
     assert result.passed is complete
 
 
+@pytest.mark.parametrize("engine_result", ["saved", "none"])
+@pytest.mark.parametrize("complete", [True, False], ids=["complete", "incomplete"])
+def test_rebuilt_run_directory_result_is_incomplete_when_the_saved_package_was(tmp_path, complete, engine_result):
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+
+    source = _live_report_source(tmp_path)
+    run_dir = _scored_run(tmp_path / "results", "20261110_010001", 0.5)
+    report = project_plugin_runtime(
+        {"run_dir": str(run_dir), "execution_status": "succeeded"},
+        provenance={**_provenance(complete), "runtime_evidence": {}},
+    )
+    save_plugin_runtime_report(report, run_dir)
+    # The saved result.json never holds the package provenance, so later
+    # reports (tier3 report, dashboard, feedback chat) rely on the snapshot.
+    saved = json.loads((run_dir / "result.json").read_text(encoding="utf-8")) if engine_result == "saved" else None
+
+    result = agent_eval_result_from_directory(source, run_dir, engine_result=saved, use_llm_judge=False)
+
+    assert result.metadata["agent_eval"]["overall_score"] == pytest.approx(0.5)
+    assert result.metadata["plugin_runtime_report"] == report.payload()
+    assert result.incomplete_scans == ([] if complete else ["plugin-components"])
+    assert result.passed is complete
+
+
 def test_reports_without_scores_are_incomplete_when_the_package_is(tmp_path):
     source = _live_report_source(tmp_path)
     engine_result = {

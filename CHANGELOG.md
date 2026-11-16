@@ -320,6 +320,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
   as "not supported". As on Harbor, the parse error is logged and the run continues
   without MCP servers; a file that declares servers is still rejected.
+- The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
+  Codex has completed live runs on the pinned Gym, Claude Code has not been run live
+  yet, and OpenCode currently fails in Gym's agent setup.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.

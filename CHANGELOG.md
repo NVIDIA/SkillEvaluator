@@ -411,6 +411,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
+  30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be
   confirmed` when `taskkill` needs more than 5 seconds. It now gets up to 30 seconds, so the tree is stopped
   and the run's own timeout or output-limit error is reported. A second Ctrl+C still ends that wait early,
@@ -853,10 +855,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `source ~/.bashrc; npm test 2>&1 | tail -20` and
   `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
   Security 0.0 and now score 1.0, in both the host checker and the bundled
-  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` still
-  scores 0.0. This amends the 0.9.0 note that every command that scored 0.0
-  in 0.8.0 still does; most other commands the 0.8.0 rule flags, such as
-  `cat ~/.bashrc 2>/dev/null`, still score 0.0.
+  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` and
+  `cp -t$ROOT/etc/sudoers.d /tmp/agent 2>&1` still score 0.0. This amends the
+  0.9.0 note that every command that scored 0.0 in 0.8.0 still does; most
+  other commands the 0.8.0 rule flags, such as `cat ~/.bashrc 2>/dev/null`,
+  still score 0.0.
 - The Tier 3 security scan no longer reads the license URL in a source file's
   copyright header as data exfiltration. A `http://` or `https://` URL on a
   comment line of a license or copyright notice is prose within recognized
@@ -1217,6 +1220,13 @@ All notable changes to SkillEvaluator are documented in this file.
   printed under each plan line that changed during the run, and the next plan
   line or table started on the same line as that copy's bottom border. Output
   to a terminal is unchanged.
+- Tier 3 security finding evidence and saved judge evidence mask the
+  credential in more command forms (`auth=` call values, `sed` replacements,
+  `_` long flags, quoted or `--` config keys, values in escaped single quotes
+  or quoted with the `'"'"'` idiom, a name after an escaped line break), also
+  in text escaped twice; a value-less credential flag no longer hides the next
+  command's password, and shell `apply_patch` evidence is masked before its
+  400-character cut. The Tier 3 live evaluation guide lists the exact forms.
 
 ## 0.9.0 - 2026-11-13
 

@@ -2049,11 +2049,60 @@ saved judge evidence use the same credential masker:
   the end of its word, so the rest of the command stays readable;
 - the values of long flags whose name holds a credential word, such as
   `--password`, `--token`, `--client-secret`, `--db-password`, or `--cookie`,
-  and a `curl -b name=value` cookie. A flag that takes a file or nothing, such
-  as `--password-stdin`, `--token-file`, or `--cookie-jar`, and token-count
-  flags `--max-tokens` and `--token-limit`, keep the word after them. A
-  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a flag
-  is no value (`gh auth login --with-token < token.txt`);
+  also with `_` between the words (`--db_password`, `--api_key`), and a
+  `curl -b name=value` cookie. A `_` flag joined to its value with `=`, or
+  followed by a separator (`--api_key = ...`), is read as an assignment, and
+  an unquoted value after a `_` flag and a space ends at `;`, `|`, or `&`.
+  A `_` flag value that holds a credential name whose value runs past it, as
+  in `--set_secret API_TOKEN="..."`, or is already masked
+  (`--set_secret API_TOKEN=<redacted>`) or in escaped single quotes
+  (`--api_key API_KEY=\'...\'` in a Python string), is read as an assignment
+  too, so masking such a value again keeps it as it is; any other `_` flag
+  value, as in `--set_secret SLACK_TOKEN_URL=...`, is masked whole. Inside a
+  single-quoted `sh -c` or `ssh` command string, a value quoted with the
+  `'"'"'` or `'\''` idiom runs to the next such idiom
+  (`ssh host './deploy --password '"'"'two words'"'"''`). A
+  flag that takes a file or nothing, such as `--password-stdin`,
+  `--token-file`, or `--cookie-jar`, and token-count flags `--max-tokens` and
+  `--token-limit` (or `--max_tokens`), keep the word after them. A
+  `-b cookies.txt` cookie jar keeps its path too. A shell operator after a
+  flag is no value (`gh auth login --with-token < token.txt`). A flag that
+  takes no value masks the next word as its value; when that word starts a
+  command whose password is masked below, as in
+  `--use-token mysql -u root -p...`, that password is masked too, and so is
+  an attached `-p...` element after a `mysql` or `login` element such a flag
+  takes in an argv list. So is a `docker login` or `mysql` password after a
+  credential flag value that holds a `-p` or `;`
+  (`--use-token docker login --token "x -p y" -p ...`), and the value after
+  a config set key and ` = `
+  (`--use-token npm config set _auth = token="..."`). A `docker login`,
+  `.netrc`, or `/usr/bin/mysql`
+  password after a `\n` inside a flag value or right after the value is
+  masked too, and so is a `docker login` password after a `\n` right after an
+  argv list whose last element is masked
+  (`["wrap", "--password", "..."]\ndocker login -p ...`); the plain `mysql`,
+  `sshpass`, and `aws configure set` rules below do not match after a `\n`
+  escape. The rest of a `.netrc` password that holds a flag
+  value is masked as well, and so is a quoted `-u` value whose only colon a
+  flag value inside it holds (`-u "bob --api_key \"x a:..."`). A name,
+  command, or `.netrc` phrase that such a password runs into is masked as
+  its own rule masks it (`--use-token mysql -u root -p...password: ...`). A
+  flag inside the quoted value of an earlier `_` flag is read too, and the
+  rest of its value past that quote is masked, as is a name or command that
+  rest runs into; a flag inside the value of a `-` flag is not read. The
+  argv rule below also reads list elements as they were before flag values
+  were masked, so a masked value that cuts an element
+  (`--set_secret "auth_type=x ["mysql", "-p..."]`) does not hide the
+  credential after it. When text an earlier rule masked, such as a flag value
+  that runs over the JSON-escaped line break or quote at which the value of
+  an earlier name ended, lies inside that value before a later credential
+  name, the rest of the later name's own value is masked too, as it is when
+  that name is read on its own
+  (`\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
+  arguments repeated as JSON, where that value runs to the end of the outer
+  string). A credential name at the start of a line after a JSON-escaped line
+  break that an unquoted assignment value ran over is read on its own too
+  (`API_TOKEN=a\nauth=("bob", "...")`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
@@ -2062,7 +2111,8 @@ saved judge evidence use the same credential masker:
   `date -u +%H:%M:%S` are left alone;
 - `-p` after a login subcommand (`docker login -u bot -p ...`, also attached as
   `-p...`) or `sshpass`, and attached to a MySQL client run by name or from a
-  `bin` directory (`mysql -p...`); `mkdir -p`, `ssh -p 2222`,
+  `bin` directory (`mysql -p...`, also quoted, as with the `'"'"'` idiom);
+  `mkdir -p`, `ssh -p 2222`,
   `git log --author=login -p`, and `find /var/lib/mysql -path ...` are left
   alone;
 - the same flags as elements of an argument list, as in
@@ -2074,14 +2124,30 @@ saved judge evidence use the same credential masker:
   on its own line;
 - credentials set with `aws configure set`, `npm config set` (or `npm set`),
   `pnpm config set`, `yarn config set`, or `git config`, also after options
-  such as `--location=global` (`_authToken`, `npmAuthToken`, `github.token`);
-  `git config --get` and `--unset` take no value. A `.netrc` `password` value
-  is masked too, also when the entry spans lines in a here-document or a
-  `printf` string;
+  such as `--location=global` or a `--` that ends them, and with a quoted key,
+  also when its quotes are JSON-escaped, as in saved tool-call arguments
+  (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
+  `--unset` take no value. An unquoted value after a quoted key or one after
+  `--` ends at `;`, `|`, or `&`, and such a key's value that holds a
+  credential name whose value runs past it or is already masked is read as
+  an assignment. The command may follow a `\n`, `\r`, or `\t` escape
+  (`db\nnpm config set ...`). Inside a quoted string, the value after a key
+  and a separator word (`npm config set _auth = ...`) runs to the closing
+  quote, a shell operator, or an escaped quote, so a command after it stays
+  readable. A `.netrc` `password` value is masked too, also when the
+  entry spans lines in a here-document or a `printf` string;
 - values assigned to a credential name, such as `_authToken=...`,
   `aws_secret_access_key = ...`, `"password": "..."`, `token := "..."`,
-  `os.environ["API_KEY"] = "..."`, `PASS=...`, `DB_PASS=...`, or
-  `MYSQLPWD=...`, also JSON-escaped inside a shell string. A bare `PASS` is
+  `os.environ["API_KEY"] = "..."`, `auth=HTTPBasicAuth("bob", "...")` (also
+  with its arguments on several lines, or with a `(` or `)` inside a quoted
+  argument, as also in `auth=("bob", "...")`), `PASS=...`, `DB_PASS=...`, or
+  `MYSQLPWD=...`, also JSON-escaped inside a shell string, in escaped single
+  quotes as in Python source (`'DB_PASSWORD=\'two words\''`), quoted with the
+  `'"'"'` or `'\''` idiom inside a single-quoted command string, and in a
+  `sed` replacement with `/` as its delimiter, such as
+  `sed -i 's/CHANGEME/password=.../'`, also inside a `sh -c` or `ssh` command
+  string. A word with parentheses in it, such as
+  `password: Pa(ss),word`, is masked whole. A bare `PASS` is
   left alone as test output or a counter, such as `PASS: 3`,
   `--- PASS: TestName`, `PASS=0`, or `"pass": true`, but OpenSSL's `pass:...`
   and a quoted `"pass"` key or value are masked. Inside a quoted string,
@@ -2107,19 +2173,36 @@ A credential in another form can still appear, such as free prose (`my password
 is ...` or `use token ...`), a `.pgpass` line, a standalone `pypi-` token, URL
 query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
 `unzip -P` password, a
-password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
-option with a separate value (`--location global`), or all but the first word
-of a value with spaces on an unquoted here-document line or inside a `sh -c`
-or `ssh` command string. Escaped text is read with at most two levels of
+password after an unknown flag or in a here-string (`--password-stdin <<<
+...`), a `pip config set` value, a `sed` replacement that names no
+credential (`s/PASSWORD/.../`) or uses another delimiter inside a `sh -c` or
+`ssh` command string (`s#token: .*#token: ...#`), a `mysql` password after a
+`;` inside a flag value that names no credential, an `auth=` call whose
+arguments are quoted with nested `'"'"'` idioms, a tuple or call value on the
+line after a `\n` escape that a flag or config value runs over
+(`--password K1\nauth=("bob", "...")`), an unquoted `PASS: value`, an
+`npm config set` option with a separate value (`--location global`), or all
+but the first word of a value with spaces on an unquoted here-document line
+or inside a `sh -c` or `ssh` command string. Escaped text is read with at most two levels of
 escapes removed, so a value can also appear in text escaped more than three
 times, in a single-quoted value whose quotes are escaped three times, in text
 that holds a NUL character (which is not read again), in JSON inside a Python
 `repr` (where `\\"` is an escaped quote), after an escaped quote inside a quoted
-Python argv value, and where text escaped once keeps part of a value
-(`"password: \"two words\""` at the start of a JSON string). Some ordinary
-words are masked, such as the path in `grep -r token: /etc`, the words after a
-`.netrc`-like `login NAME password` phrase in prose, or, after an unmatched
-quote, the rest of the line after a credential name. As escapes are also
+Python argv value, in the arguments of a call value whose single quotes are
+escaped inside a single-quoted Python string
+(`'auth=HTTPBasicAuth(\'bob\', \'...\')'`), and where text escaped once keeps
+part of a value (`"password: \"two words\""` at the start of a JSON string,
+or a call value split over lines in JSON text).
+Some ordinary words are masked, such as the path in `grep -r token: /etc`, the
+value of a flag that names a token other than `--max-tokens` and `--token-limit`
+(`--max-new-tokens 256` or `--tokenizer_name gpt2`), the words after a
+`.netrc`-like `login NAME password` phrase in prose, after an unmatched
+quote, the rest of the line after a credential name, and in a JSON string,
+the rest of the string after a credential name that starts a `sed`
+expression. Where the text that a reading with escapes removed keeps around
+its masked values fits that reading in more than one place, everything
+between those places is masked (the second `-p` in `--token "x -p y" -p ...`
+in a tool call escaped twice). As escapes are also
 decoded in text that was never escaped, an escape that leaves a quote
 unmatched there can mask the rest of its line after a later credential
 assignment such as `export GITHUB_TOKEN=$(...)`: a `\n`, `\r` or `\u000a`

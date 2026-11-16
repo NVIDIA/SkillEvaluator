@@ -142,7 +142,8 @@ Host MCP probes are off by default. `--probe-mcp` requests bounded, policy-check
 `initialize` and `tools/list` calls for supported URL servers. A declared header
 that references a host environment variable (`${NAME}` or `$NAME`) is sent only
 when a `--probe-mcp-env` grant covers every variable it references for that
-server; otherwise the header is left out and its variables are never read. Grants
+server; otherwise the header is left out and its variables are never read. A
+granted variable that is unset or empty also leaves its header out. Grants
 are repeatable, require `--probe-mcp`, and take three forms:
 
 | Grant | Sends `NAME` to |
@@ -154,8 +155,10 @@ are repeatable, require `--probe-mcp`, and take three forms:
 The plugin author chooses both the server URLs and the header templates, so a
 bare `NAME` sends the variable's value to every server whose headers ask for it,
 wherever that server is. Prefer `NAME=HOST` or `NAME@SERVER`. Each server's probe
-detail records which variables were sent to which host. Host reachability and
-agent-observed execution are separate evidence.
+detail names the variables granted for its host, and any granted variable left
+out because it is unset or empty, before any error text. A probe that fails may
+not have sent them. Host reachability and agent-observed execution are separate
+evidence.
 
 `--trial-retries N` accepts 0–5 setup-only retries, defaulting to zero. In-task
 failures are never retried. Retry reasons and counts remain in retained evidence.

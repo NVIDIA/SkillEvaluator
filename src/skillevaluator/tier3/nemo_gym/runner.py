@@ -1039,9 +1039,11 @@ def run_nemo_gym_eval(
         judge_verifier_env, judge_process_env = verifier_judge_env(skill_path, effective_grading, env_mode)
     except ValueError as exc:
         return _config_failure(str(exc))
-    reporter.set_secret_values(secret_values_from_environment(judge_process_env))
     # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
     runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
+    # As on Harbor: credentials plus every configured runtime_env value, which may be an allowlisted secret.
+    runtime_secret_values = {value for value in runtime_values.values() if value}
+    reporter.set_secret_values(secret_values_from_environment(judge_process_env) | runtime_secret_values)
     agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
 
     run_dir = _reserve_run_dir(output_dir, datetime.now(UTC).strftime("%Y%m%d_%H%M%S"))
@@ -1204,7 +1206,7 @@ def run_nemo_gym_eval(
                 if planned_agent != agent:
                     continue
                 arm_errors: list[str] = []
-                secrets = secret_values_from_environment(judge_process_env)
+                secrets = secret_values_from_environment(judge_process_env) | runtime_secret_values
                 rollouts_path = gym_root / f"{agent}-{arm}" / "rollouts.jsonl"
                 log_path = rollouts_path.with_name("gym.log")
                 if cleanup_error is not None:

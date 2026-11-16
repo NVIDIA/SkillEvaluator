@@ -8626,9 +8626,15 @@ def _build_comparison(agents_data: dict[str, Any]) -> dict[str, Any]:
         comparison["metrics"][metric] = {}
         for agent, data in agents_data.items():
             succeeded = data.get("execution_status") == "succeeded"
-            with_skill = data.get("with_skill", {}).get(metric) if succeeded else None
-            without_skill = data.get("without_skill", {}).get(metric) if succeeded else None
-            lift = data.get("lift", {}).get(metric, {}).get("delta") if succeeded else None
+            with_succeeded = (
+                succeeded and data.get("conditions", {}).get("with_skill", {}).get("execution_status") == "succeeded"
+            )
+            without_succeeded = (
+                succeeded and data.get("conditions", {}).get("without_skill", {}).get("execution_status") == "succeeded"
+            )
+            with_skill = data.get("with_skill", {}).get(metric) if with_succeeded else None
+            without_skill = data.get("without_skill", {}).get(metric) if without_succeeded else None
+            lift = data.get("lift", {}).get(metric, {}).get("delta") if with_succeeded and without_succeeded else None
             comparison["metrics"][metric][agent] = {
                 "with_skill": with_skill
                 if isinstance(with_skill, int | float) and not isinstance(with_skill, bool)

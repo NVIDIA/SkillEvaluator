@@ -207,8 +207,6 @@ class BenchmarkReporter(ReporterBase):
         assessment = _publication_assessment(results, ae, expected_skill_name=expected_skill_name)
         status = _assessment_status(assessment)
 
-        run_verdict = ae.get("verdict") if isinstance(ae, dict) else None
-        run_reason = ae.get("verdict_reason") if isinstance(ae, dict) else None
         budget = ae.get("budget") if isinstance(ae, dict) else None
         budget_reason = None
         if isinstance(budget, dict):
@@ -217,10 +215,6 @@ class BenchmarkReporter(ReporterBase):
             budget_reason = budget_incomplete_reason(budget)
         if budget_reason:
             tier3_callout = f"> **Tier 3: INCOMPLETE** — {budget_reason}"
-        elif self.report_scope == "tier3" and completed is None and isinstance(run_verdict, str):
-            tier3_callout = f"> **Tier 3 completed-agent result: {run_verdict.upper()}**" + (
-                f" — {_publication_safe_inline(run_reason, private_labels)}" if run_reason else ""
-            )
         else:
             tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"

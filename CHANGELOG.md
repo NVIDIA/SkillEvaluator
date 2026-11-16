@@ -288,6 +288,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Tier 3 benchmark headlines use the completed agent's quality verdict, matching
   the Tier 3 status row even when another agent fails execution.
 - Arms fully denied by a run budget are reported as not run instead of failed

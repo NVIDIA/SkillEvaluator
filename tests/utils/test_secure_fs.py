@@ -456,6 +456,7 @@ def test_directory_mutation_after_scandir_snapshot_fails_closed(
     root = tmp_path / "root"
     root.mkdir()
     (root / "safe.md").write_text("safe")
+    root_metadata = root.stat()
     real_scandir = os.scandir
     mutated = False
 
@@ -480,6 +481,7 @@ def test_directory_mutation_after_scandir_snapshot_fails_closed(
             except StopIteration:
                 if not mutated:
                     (root / "late.md").write_text("late")
+                    os.utime(root, ns=(root_metadata.st_atime_ns, root_metadata.st_mtime_ns + 2_000_000_000))
                     mutated = True
                 raise
 

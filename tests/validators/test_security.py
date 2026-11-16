@@ -8613,6 +8613,38 @@ class TestSpdxAndIpFalsePositiveHardening:
 
         assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
 
+    def test_long_identifiers_before_ip_values_do_not_stall_the_scan(self, tmp_path: Path) -> None:
+        """Regression (CWE-1333): the version-label pattern could split a run of letters in exponentially many
+        ways, so a 30-letter identifier before an IPv4-shaped value stalled the PII scan for about a minute and
+        every further letter doubled that. Runs in a subprocess so that a slow scan fails the timeout instead of
+        hanging the suite; the limit is generous because the scan takes about a second."""
+        skill_dir = tmp_path / "long-identifier-skill"
+        skill_dir.mkdir()
+        not_labels = ["a" * 76, "A" * 76, "aB" * 38, "a1" * 38]
+        labels = ["a" * 69 + "Version", "version" + "A" * 69, "Tag" + "Ab1" * 24, "a" * 60 + "_version"]
+        (skill_dir / "SKILL.md").write_text(
+            "".join(f'{name} = "8.8.0.{index}"\n' for index, name in enumerate(not_labels, 1))
+            + "".join(f'{name} = "4.4.0.{index}"\n' for index, name in enumerate(labels, 1)),
+            encoding="utf-8",
+        )
+        code = (
+            "import json, sys\n"
+            "from pathlib import Path\n"
+            "from skillevaluator.validators.security import SecurityValidator\n"
+            "result = SecurityValidator().validate_pii_only(Path(sys.argv[1]))\n"
+            "found = {f.metadata.get('matched_value') for f in result.findings if f.check_name == 'ip_addresses'}\n"
+            "print(json.dumps(sorted(found)))\n"
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(skill_dir)], capture_output=True, text=True, timeout=60
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        # The long plain identifiers are not version labels, so their values are still reported;
+        # the long labels still mark theirs as release versions.
+        assert json.loads(completed.stdout) == ["8.8.0.1", "8.8.0.2", "8.8.0.3", "8.8.0.4"]
+
     @pytest.mark.parametrize(
         "line",
         [

@@ -316,6 +316,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The Tier 1 validation guide now says that a PowerShell backtick before a
+  space does not count as a quoted or escaped space for the SkillSpector
+  missing-reference line check, so a labelled line such as
+  ``**Note:** run setup` h*.ps1`` passes when `setup helper.ps1` is left out.
 - The agent skill guide explicitly installs the CLI before the first check,
   so its setup flow also works with skill versions that do not bootstrap it.
 

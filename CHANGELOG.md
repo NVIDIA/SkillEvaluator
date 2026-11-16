@@ -1015,6 +1015,13 @@ All notable changes to SkillEvaluator are documented in this file.
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
 
+- With `--progress rich` when standard error is not a terminal, such as when
+  it is redirected to a file or piped to another program, the Tier 3 progress
+  table now ends its last line. Before, the next output, such as a log line,
+  the shell prompt, or the line saying that progress stopped after a drawing
+  error, was printed on the same line as the table's bottom border. Output to
+  a terminal is unchanged.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

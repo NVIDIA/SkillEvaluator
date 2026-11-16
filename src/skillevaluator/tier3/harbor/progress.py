@@ -503,7 +503,7 @@ class RichProgressReporter(PlainProgressReporter):
                                 # height, so it lists every stage in full.
                                 live.update(self._build_live_table(final=True), refresh=False)
                             finally:
-                                live.stop()
+                                self._stop_live(live)
                     elif (
                         after_failure
                         and self._live is None
@@ -539,6 +539,24 @@ class RichProgressReporter(PlainProgressReporter):
                         # notice, belongs to no later run on this reporter.
                         self._drop_refused_writes()
 
+    def _stop_live(self, live) -> None:
+        """Stop Live, leaving its last frame on lines of its own."""
+        if self._console.is_terminal or not getattr(live, "is_started", False):
+            # On a terminal Live ends the frame's last line itself when it
+            # stops. Live that never started, or already stopped, writes
+            # nothing here.
+            live.stop()
+            return
+        # Elsewhere, as with --progress rich on a pipe or a file, Live draws
+        # the frame as it stops and leaves the frame's last line open. The
+        # next output, such as a log line, the stop notice or the shell
+        # prompt, would then join the frame's bottom border. The line end
+        # goes out in the same write as the frame, so a stream that keeps a
+        # refused frame keeps its line end too.
+        with self._console:
+            live.stop()
+            self._console.line()
+
     def _stop_live_after_failure(self, live) -> None:
         """Stop the live view after a drawing failure and say that the run goes on.
 
@@ -559,7 +577,7 @@ class RichProgressReporter(PlainProgressReporter):
         notice_alone = live is None or bool(getattr(live, "is_started", False))
         if live is not None:
             try:
-                live.stop()
+                self._stop_live(live)
             except Exception:
                 # A terminal that refused the redraw can refuse Live's stop too,
                 # and with it the write that shows the cursor again.
@@ -630,7 +648,12 @@ class RichProgressReporter(PlainProgressReporter):
         try:
             if failed_stop.stop_refused:
                 # Live hides the cursor while it draws and shows it again when
-                # it stops, then ends the frame's last line.
+                # it stops, then ends the frame's last line. On a console that
+                # is not a terminal Live drew nothing before that stop, and the
+                # refused stop carried the frame's line end with it, so a
+                # stream that kept the whole stop, or none of it, leaves no
+                # line open. Only a stream buffer already nearly full would
+                # keep part of it.
                 line_ended = not self._console.is_terminal
                 self._console.show_cursor(True)
                 if self._console.is_terminal:

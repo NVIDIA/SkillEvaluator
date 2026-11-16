@@ -65,7 +65,9 @@ class EvaluationService:
             return str(raw_errors)
 
         status = result.get("execution_status")
-        if status != "succeeded":
+        from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+        if status != "succeeded" and not (status == "skipped" and budget_fully_denied(result.get("budget"))):
             label = str(status or "unknown")
             return f"Tier 3 evaluation execution status is {label}"
         return None

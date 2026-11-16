@@ -313,6 +313,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
 - Fully budget-denied runs exit successfully and finish progress without an
@@ -323,6 +324,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - The Tier 3 execution backends table states the live status of `--backend nemo-gym`:
   Codex has completed live runs on the pinned Gym, Claude Code has not been run live
   yet, and OpenCode currently fails in Gym's agent setup.
+- `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
+  and errors. Provider, model and base-URL names stay readable, as on Harbor.
 - `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
   native task's `task.toml` when its header has a trailing comment, extra spaces
   or no final newline. The duplicate table made the file fail to parse.
@@ -335,6 +338,8 @@ All notable changes to SkillEvaluator are documented in this file.
   model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
   run starts. It no longer sends the evaluator provider's default model name to
   that endpoint.
+- Make the MCP-staging restored-mtime race regression independent of filesystem
+  clock granularity by modeling an advanced ctime.
 - HTML reports preserve successful execution when Tier 3 quality fails, avoiding
   spurious notices that other execution failures need attention.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
@@ -351,6 +356,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Error: No module named 'harbor'`.
 - Tier 3 benchmark headlines use the completed agent's quality verdict, matching
   the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

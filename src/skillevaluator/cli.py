@@ -554,7 +554,9 @@ def _plugin_run_options(func):
             {
                 "multiple": True,
                 "callback": _check_probe_mcp_env,
-                "help": "Explicit environment grant for an MCP host probe (repeatable).",
+                "help": "Grant a host environment variable to MCP host probe headers (repeatable; requires "
+                "--probe-mcp). NAME=HOST limits it to URL servers at HOST and NAME@SERVER to the named "
+                "server; a bare NAME goes to every URL server whose headers reference ${NAME}.",
             },
         ),
         (

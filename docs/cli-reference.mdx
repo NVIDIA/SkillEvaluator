@@ -298,7 +298,7 @@ Plugin controls on `validate` and `tier3 evaluate-plugin`:
 | `--lift-mode effectiveness\|integration\|both\|ladder` | config, then `effectiveness` | Select comparison arms |
 | `--trial-retries 0..5` | config, then `0` | Retry setup failures before task execution |
 | `--probe-mcp` | off | Request bounded host MCP proof |
-| `--probe-mcp-env TEXT` | none | Explicit host environment grant; repeatable and requires probing |
+| `--probe-mcp-env TEXT` | none | Grant a host environment variable to MCP probe headers; repeatable (at most 64 grants of at most 512 characters each) and requires `--probe-mcp`. `NAME=HOST` limits it to URL servers at that host and `NAME@SERVER` to the server with that name; a bare `NAME` is sent to every URL server whose headers reference `${NAME}`. Prefer a scoped form |
 | `--repo-root PATH` | none | Repository context for dependency resolution |
 
 `validate` additionally accepts `--resolve-endpoints` and `--claude-validate` for

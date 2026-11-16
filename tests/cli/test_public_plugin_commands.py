@@ -24,6 +24,10 @@ def test_public_plugin_commands_expose_shared_runtime_options():
         assert result.exit_code == 0, result.output
         for flag in ("--plugin-load", "--lift-mode", "--probe-mcp", "--probe-mcp-env", "--trial-retries"):
             assert flag in result.output
+        # The help names the scoped grant forms and says where a bare grant goes.
+        text = " ".join(result.output.split())
+        assert "NAME=HOST limits it to URL servers at HOST and NAME@SERVER to the named server" in text
+        assert "a bare NAME goes to every URL server whose headers reference ${NAME}" in text
 
 
 def test_saved_run_replays_six_formats_without_the_source(tmp_path, monkeypatch):

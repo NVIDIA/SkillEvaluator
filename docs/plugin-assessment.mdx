@@ -129,9 +129,23 @@ are dataset-driven advisory signals. Missing expectations or traces remain
 unavailable or incomplete. A reference-dependent judge without a reference is N/A.
 
 Host MCP probes are off by default. `--probe-mcp` requests bounded, policy-checked
-`initialize` and `tools/list` calls for supported URL servers. Repeatable
-`--probe-mcp-env` grants permit named host environment variables only with this
-opt-in. Host reachability and agent-observed execution are separate evidence.
+`initialize` and `tools/list` calls for supported URL servers. A declared header
+that references a host environment variable (`${NAME}` or `$NAME`) is sent only
+when a `--probe-mcp-env` grant covers every variable it references for that
+server; otherwise the header is left out and its variables are never read. Grants
+are repeatable, require `--probe-mcp`, and take three forms:
+
+| Grant | Sends `NAME` to |
+| --- | --- |
+| `NAME=HOST` | URL servers whose host is `HOST`, compared without regard to case. Give a host name or IP address without a port or path; brackets around an IPv6 address are optional |
+| `NAME@SERVER` | The server whose name in the plugin's MCP configuration is exactly `SERVER` |
+| `NAME` | Every probed URL server whose declared headers reference `NAME` |
+
+The plugin author chooses both the server URLs and the header templates, so a
+bare `NAME` sends the variable's value to every server whose headers ask for it,
+wherever that server is. Prefer `NAME=HOST` or `NAME@SERVER`. Each server's probe
+detail records which variables were sent to which host. Host reachability and
+agent-observed execution are separate evidence.
 
 `--trial-retries N` accepts 0–5 setup-only retries, defaulting to zero. In-task
 failures are never retried. Retry reasons and counts remain in retained evidence.

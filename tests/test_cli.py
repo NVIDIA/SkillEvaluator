@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import json
 from pathlib import Path
@@ -718,6 +719,75 @@ def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> N
 
     assert result.exit_code == 1, result.output
     assert tiers == ["1", "2", "3"]
+
+
+def _fail_tier3_commands_import(monkeypatch, *, missing: str) -> None:
+    real_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise ModuleNotFoundError(f"No module named '{missing}'", name=missing)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+
+@pytest.mark.parametrize("args", [["doctor"], ["doctor", "--tier", "3"], ["tier3", "doctor"]])
+def test_doctor_without_the_tier3_extra_names_the_missing_extra(monkeypatch, args) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1
+    assert not isinstance(result.exception, ImportError)
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize("command", ["doctor", "health-check"])
+def test_doctor_all_without_the_tier3_extra_still_checks_lower_tiers(monkeypatch, command) -> None:
+    import skillevaluator.doctor as readiness
+
+    tiers: list[str] = []
+    monkeypatch.setattr(readiness, "doctor", lambda **options: tiers.append(options["tier"]) or 0)
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, [command, "--tier", "all"])
+
+    assert result.exit_code == 1, result.output
+    assert tiers == ["1", "2"]
+    assert "Install skillevaluator[tier3]" in result.output
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        ImportError("cannot import name 'GKEExecStreamClosedError'", name="harbor.environments.gke"),
+        ModuleNotFoundError("No module named 'harbor.missing'", name="harbor.missing"),
+    ],
+)
+def test_doctor_preserves_an_installed_dependency_import_failure(monkeypatch, error) -> None:
+    real_import = builtins.__import__
+
+    def broken_import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise error
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", broken_import)
+    result = CliRunner().invoke(cli, ["doctor"])
+
+    assert result.exception is error
+    assert "dependencies are not installed" not in result.output
+
+
+def test_doctor_keeps_an_unrelated_import_error(monkeypatch) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="skillevaluator.tier3.missing")
+
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "3"])
+
+    assert isinstance(result.exception, ModuleNotFoundError)
+    assert result.exception.name == "skillevaluator.tier3.missing"
+    assert "Install skillevaluator[tier3]" not in result.output
 
 
 @pytest.mark.parametrize(

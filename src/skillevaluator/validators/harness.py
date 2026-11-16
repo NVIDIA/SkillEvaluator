@@ -39,7 +39,7 @@ class HarnessValidator(ValidatorBase):
         skills = [skill_path] if self._is_skill_directory(skill_path) else self._find_all_skills(skill_path)
         result = ValidationResult(validator_name=self.name, validator_description=self.description)
         block: dict[str, list[dict]] = {}
-        for skill, facts in facts_for(skills).items():
+        for skill, facts in facts_for(skills, profiles).items():
             rows = [evaluate_profile(profile, facts, self.config) for profile in profiles]
             block[str(skill)] = [row.to_dict() for row in rows]
             for row in rows:

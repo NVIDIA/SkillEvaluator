@@ -81,7 +81,7 @@ def test_chat_default_models_are_the_single_source_of_truth() -> None:
     assert CHAT_DEFAULT_MODELS["openai"] == CHAT_DEFAULT_OPENAI == "gpt-6.1-sol"
     assert CHAT_DEFAULT_MODELS["anthropic"] == CHAT_DEFAULT_ANTHROPIC == "claude-opus-5-5"
     assert CHAT_DEFAULT_MODELS["bedrock"] == CHAT_DEFAULT_BEDROCK == "us.anthropic.claude-opus-5-5"
-    assert CHAT_DEFAULT_MODELS["nv_build"] == CHAT_DEFAULT_NVIDIA == "nvidia/nemotron-3-super-120b-a12b"
+    assert CHAT_DEFAULT_MODELS["nv_build"] == CHAT_DEFAULT_NVIDIA == "nvidia/nemotron-3.5-lightning-30b-a3b"
     assert CHAT_CHEAP_OPENAI == "gpt-5.4-mini"
     assert DIMENSION_JUDGE_MODEL == CHAT_DEFAULT_OPENAI
 
@@ -93,9 +93,9 @@ def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_mo
     # Literals, re-validated against the pinned SkillSpector release before they change.
     assert SKILLSPECTOR_DEFAULT_MODELS == {
         "openai": "gpt-6.1-sol",
-        "anthropic": "claude-opus-5",
-        "bedrock": "us.anthropic.claude-opus-5",
-        "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+        "anthropic": "claude-opus-5-5",
+        "bedrock": "us.anthropic.claude-opus-5-5",
+        "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
         "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
     }
 
@@ -109,7 +109,7 @@ def test_skillspector_defaults_cover_every_provider_and_keep_supported_claude_mo
         ("claude-opus-5-5", None),
         ("us.anthropic.claude-opus-5-5", None),
         ("aws/anthropic/bedrock-claude-opus-5-5", None),
-        ("nvidia/nemotron-3-super-120b-a12b", None),
+        ("nvidia/nemotron-3.5-lightning-30b-a3b", None),
     ],
 )
 def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, effort: str | None) -> None:
@@ -133,7 +133,7 @@ def test_skillspector_reasoning_effort_is_set_only_for_gpt_6_models(model: str, 
         ("aws/anthropic/bedrock-claude-opus-5", False, False, False),
         ("aws/anthropic/bedrock-claude-opus-5-5", False, True, False),
         ("claude-3-5-sonnet-20241022", False, False, True),
-        ("nvidia/nemotron-3-super-120b-a12b", False, False, True),
+        ("nvidia/nemotron-3.5-lightning-30b-a3b", False, False, True),
     ],
 )
 def test_model_capability_helpers(model: str, reasoning: bool, claude_5_5: bool, custom_temperature: bool) -> None:
@@ -155,7 +155,7 @@ def test_model_capability_helpers(model: str, reasoning: bool, claude_5_5: bool,
         ("anthropic", "claude-opus-5", None),
         ("bedrock", "us.anthropic.claude-opus-5-5", None),
         ("openai-compatible", "aws/anthropic/bedrock-claude-opus-5-5", None),
-        ("nv_build", "nvidia/nemotron-3-super-120b-a12b", None),
+        ("nv_build", "nvidia/nemotron-3.5-lightning-30b-a3b", None),
     ],
 )
 def test_reasoning_effort_is_sent_only_where_the_route_accepts_it(
@@ -325,7 +325,7 @@ def test_nvidia_build_uses_public_build_endpoint() -> None:
     assert config.base_url == "https://integrate.api.nvidia.com/v1"
     assert config.api_key == "test-nvidia-key"
     assert config.credential_env == "NVIDIA_API_KEY"
-    assert config.model == "nvidia/nemotron-3-super-120b-a12b"
+    assert config.model == "nvidia/nemotron-3.5-lightning-30b-a3b"
     assert config.child_environment() == {"NVIDIA_API_KEY": "test-nvidia-key"}
 
 

@@ -980,7 +980,7 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
     errors = runner._run_agent_pair(
         skill_name="demo",
         agent=agent,
-        model="nvidia/nemotron-3-super-120b-a12b",
+        model="nvidia/nemotron-3.5-lightning-30b-a3b",
         env_mode=env_mode,
         with_skill=tmp_path / "with",
         baseline=None,

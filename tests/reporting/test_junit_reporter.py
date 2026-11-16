@@ -277,6 +277,56 @@ def test_warning_findings_are_not_failures() -> None:
     _assert_counts_match(root)
 
 
+def test_medium_finding_recorded_as_blocking_is_a_failure() -> None:
+    result = ValidationResult(validator_name="Code Risk")
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.HIGH,
+            check_name="B602:subprocess_popen_with_shell_equals_true",
+            message="subprocess call with shell=True",
+            file_path="scripts/run.py",
+            line_number=3,
+        ),
+        is_error=True,
+    )
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.MEDIUM,
+            check_name="B301:blacklist",
+            message="Pickle can be unsafe when used to deserialize untrusted data",
+            file_path="scripts/load.py",
+            line_number=7,
+        ),
+        is_error=True,
+    )
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.MEDIUM,
+            check_name="B108:hardcoded_tmp_directory",
+            message="Probable insecure usage of temp file",
+            file_path="scripts/tmp.py",
+            line_number=2,
+        ),
+        is_error=False,
+    )
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    cases = {case.attrib["name"]: case for case in _cases(root)}
+    pickle_case = cases["B301:blacklist"]
+    failure = pickle_case.find("failure")
+    assert failure is not None
+    assert "scripts/load.py:7" in (failure.text or "")
+    assert pickle_case.attrib["file"] == "scripts/load.py"
+    assert pickle_case.attrib["line"] == "7"
+    assert cases["B108:hardcoded_tmp_directory"].find("failure") is None
+    assert "error" not in cases
+    assert int(root.attrib["failures"]) == 2
+    _assert_counts_match(root)
+
+
 def test_paths_are_relative_to_scanned_root(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     skill = repo / "skills" / "demo"

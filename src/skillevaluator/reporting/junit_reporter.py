@@ -27,8 +27,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from skillevaluator.models.result import Severity
 from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped
+from skillevaluator.reporting.run_status import finding_blocks
 from skillevaluator.reporting.sarif_reporter import (
     _positive_start_line,
     _quote_uri_path,
@@ -144,17 +144,6 @@ def _qualified(target: str, name: str) -> str:
     return f"{target}::{name}" if target else name
 
 
-def _finding_is_failure(finding: Finding) -> bool:
-    """Return whether *finding* is a failing check rather than a warning."""
-    severity = finding.severity
-    metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
-    fail_on_medium = metadata.get("fail_on_medium") is True
-    fail_on_low = metadata.get("fail_on_low") is True
-    if isinstance(severity, Severity):
-        return severity.is_error(fail_on_medium=fail_on_medium, fail_on_low=fail_on_low)
-    return False
-
-
 def _failure_body(finding: Finding, file_path: str) -> str:
     """Return failure text with file:line when the finding records a location."""
     line = _positive_start_line(finding.line_number)
@@ -252,7 +241,7 @@ def _cases_for_result(
     for finding in result.findings:
         file_path = _junit_file_path(finding.file_path, workspace_root, scan_root)
         line = _positive_start_line(finding.line_number)
-        failed = _finding_is_failure(finding)
+        failed = finding_blocks(result, finding)
         skipped = incomplete and not failed
         name = _unique_name(_xml_text(finding.check_name) or "finding", used)
         detail = _failure_body(finding, file_path)

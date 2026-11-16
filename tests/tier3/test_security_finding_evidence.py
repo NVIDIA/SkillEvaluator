@@ -3398,7 +3398,7 @@ def test_a_value_spliced_after_the_quote_of_a_long_sed_expression_stays_masked(c
         ),
         pytest.param(
             f'sed -i -e "s/__TOKEN__/token={_API_TOKEN}/g" .env',
-            'sed -i -e "s/__TOKEN__/token=<redacted>" .env',
+            'sed -i -e "s/__TOKEN__/token=<redacted>g" .env',
             id="sed-name-after-literal-pattern-double-quoted",
         ),
         pytest.param(
@@ -4044,6 +4044,28 @@ def test_an_underscored_flag_value_with_an_escaped_quote_assignment_is_masked_wh
     copy: str, text: str, expected: str
 ) -> None:
     assert _mask_as(copy, text) == expected
+
+
+# A credential name that starts a part of a sed expression inside a JSON
+# string reads its value as the rest of that string, past the shell quote that
+# closes the expression. The value ends with the expression, so the command
+# after it stays readable, also after a line continuation.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    "command",
+    [
+        pytest.param("sed -i 's/token_count: .*/token_count: 4096/' cfg.yml && rm -rf /srv/app", id="and"),
+        pytest.param(
+            "sed -i 's/token_count: .*/token_count: 4096/' cfg.yml \\\n&& rm -rf /srv/app", id="line-continuation"
+        ),
+        pytest.param(f"sed -i 's/token: .*/token: {_API_TOKEN}/' cfg.yml && rm -rf /srv/app", id="token"),
+    ],
+)
+def test_a_sed_value_in_a_json_string_ends_with_its_expression(copy: str, command: str) -> None:
+    evidence = _mask_as(copy, json.dumps({"command": command}))
+
+    assert _API_TOKEN not in evidence
+    assert evidence.endswith('&& rm -rf /srv/app"}')
 
 
 class _CountingPattern:

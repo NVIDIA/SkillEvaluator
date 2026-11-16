@@ -980,7 +980,7 @@ def build_agent_eval_payload(
         if isinstance(persisted_dataset_summary, dict)
         else _dataset_summary(
             public_dataset,
-            [trial for trial in canonical_trials if "diagnostic_rewards" not in agents.get(trial["agent"], {})],
+            [trial for trial in canonical_trials if not trial.get("diagnostic_only")],
         )
     )
     from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
@@ -2540,6 +2540,10 @@ def _build_agent(
         baseline_metrics,
         pass_threshold=pass_threshold,
     )
+    for key, rows in (("diagnostic_rewards", trials), ("diagnostic_rewards_baseline", baseline_trials)):
+        if key in info:
+            for trial in rows:
+                trial["diagnostic_only"] = True
     if not never_activated:
         _attach_baseline_pairs(trials, baseline_trials, with_metrics, comparable_overall=comparable_scores)
     from skillevaluator.tier3.harbor.resource_usage import resource_comparison

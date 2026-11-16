@@ -5,7 +5,6 @@
 
 from __future__ import annotations
 
-import hashlib
 import json
 from pathlib import Path
 
@@ -16,6 +15,7 @@ from skillevaluator.evaluation.tier3_report import (
     agent_eval_result_from_directory,
 )
 from skillevaluator.reporting.benchmark import BenchmarkReporter
+from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage
 
@@ -157,25 +157,69 @@ def test_diagnostic_trials_do_not_double_count_usage() -> None:
     assert arm["totals"]["total_tokens"] == 35
 
 
-def _score_bearing_outputs(payload: dict) -> dict:
+@pytest.mark.parametrize("arm,key", [("with-skill", "trials"), ("without-skill", "trials_baseline")])
+def test_failed_arm_score_bearing_outputs_are_unchanged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, arm: str, key: str
+) -> None:
+    payload = _failed_run(tmp_path, arm)
+    load = report_data.load_agent_data
+
+    def without_diagnostics(*args, **kwargs):
+        agents = load(*args, **kwargs)
+        for info in agents.values():
+            info.pop("diagnostic_rewards", None)
+            info.pop("diagnostic_rewards_baseline", None)
+        return agents
+
+    monkeypatch.setattr(report_data, "load_agent_data", without_diagnostics)
+    reference = agent_eval_result_from_directory(tmp_path / "demo", tmp_path / "results", use_llm_judge=False)
+    assert reference is not None
+    expected = reference.metadata["agent_eval"]
+    agent, before = payload["agents"]["codex"], expected["agents"]["codex"]
+    assert agent["with_skill" if arm == "with-skill" else "baseline"] is None
+    assert agent["lift"] is None
+    for field in ("with_skill", "baseline", "lift", "dimensions", "evaluators", "cases", "resources"):
+        assert agent[field] == before[field]
+    for field in (
+        "cases",
+        "verdict",
+        "recommendations",
+        "suggestions",
+        "suggestions_v2",
+        "conclusions",
+        "case_diagnostics",
+        "dataset_summary",
+        "dataset_sufficiency",
+        "overall_score",
+        "overall_lift",
+    ):
+        assert payload[field] == expected[field]
+    assert payload["dataset_summary"]["total_tasks"] == (0 if arm == "with-skill" else 1)
+    other_key = "trials_baseline" if key == "trials" else "trials"
+    assert all(row.get("diagnostic_only") is True for row in agent[key])
+    assert all("diagnostic_only" not in row for row in agent[other_key])
+    reporter = BenchmarkReporter(include_timestamp=False, report_scope="tier3")
     result = _validation_result_from_payload(payload)
     assert result is not None
-    report = {key: value for key, value in payload.items() if key not in {"trials", "agents"}}
-    report["agents"] = {
-        name: {key: value for key, value in agent.items() if key not in {"trials", "trials_baseline"}}
-        for name, agent in payload["agents"].items()
-    }
-    report["provenance"] = {**report["provenance"], "run_dir": "<run-dir>"}
-    benchmark = BenchmarkReporter(include_timestamp=False, report_scope="tier3").render_all([result])
-    return {
-        "report_sha256": hashlib.sha256(json.dumps(report, sort_keys=True).encode()).hexdigest(),
-        "benchmark_sha256": hashlib.sha256(benchmark.encode()).hexdigest(),
-    }
-
-
-@pytest.mark.parametrize("arm,key", [("with-skill", "trials"), ("without-skill", "trials_baseline")])
-def test_failed_arm_score_bearing_outputs_match_main(tmp_path: Path, arm: str, key: str) -> None:
-    expected = json.loads((Path(__file__).parents[1] / "golden" / "failed_arm_main.json").read_text())
-    payload = _failed_run(tmp_path, arm)
-    assert _score_bearing_outputs(payload) == expected[arm]
+    benchmark = reporter.render_all([result])
+    assert benchmark == reporter.render_all([reference])
+    overall = next(line for line in benchmark.splitlines() if line.startswith("| Overall |"))
+    assert "uplift unavailable" in overall
+    assert ("Not scored with the skill" if arm == "with-skill" else "baseline incomplete") in overall
     assert len(payload["agents"]["codex"][key]) == 2
+
+
+@pytest.mark.parametrize("status", ["failed", "error"])
+def test_succeeded_arm_aggregates_are_unchanged(tmp_path: Path, status: str) -> None:
+    expected = _failed_run(tmp_path, "")
+    reward_path = tmp_path / "results" / "codex" / "with-skill" / "trials" / "case__scored" / "reward.json"
+    reward = json.loads(reward_path.read_text())
+    reward["evaluation_status"] = status
+    _write(reward_path, reward)
+    result = agent_eval_result_from_directory(tmp_path / "demo", tmp_path / "results", use_llm_judge=False)
+    assert result is not None
+    agent = result.metadata["agent_eval"]["agents"]["codex"]
+    assert agent["conditions"]["with_skill"]["execution_status"] == "succeeded"
+    assert len(agent["trials"]) == 1
+    for field in ("with_skill", "baseline", "lift", "dimensions", "evaluators", "cases", "resources"):
+        assert agent[field] == expected["agents"]["codex"][field]

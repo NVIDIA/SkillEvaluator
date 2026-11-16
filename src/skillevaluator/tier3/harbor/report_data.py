@@ -1006,6 +1006,7 @@ def load_agent_data(
             )
 
         for variant_key, variant_dir_name in (("rewards", "with-skill"), ("rewards_baseline", "without-skill")):
+            condition = "with_skill" if variant_key == "rewards" else "without_skill"
             trial_list: list[dict[str, Any]] = []
             unscored_attempts: list[dict[str, Any]] = []
             count_key = "num_trials" if variant_key == "rewards" else "num_trials_baseline"
@@ -1049,10 +1050,10 @@ def load_agent_data(
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue
                     reward = _load_bounded_json(reward_file, agent_diagnostics, artifact="reward")
-                    if not isinstance(reward, dict) or str(reward.get("evaluation_status") or "").casefold() in {
-                        "error",
-                        "failed",
-                    }:
+                    if not isinstance(reward, dict) or (
+                        condition_execution.get(condition, {}).get("execution_status") != "succeeded"
+                        and str(reward.get("evaluation_status") or "").casefold() in {"error", "failed"}
+                    ):
                         rewards_complete = False
                         unscored_attempts.append(_unscored_attempt_usage(trial_dir))
                         continue

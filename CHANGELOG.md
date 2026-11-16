@@ -293,6 +293,8 @@ All notable changes to SkillEvaluator are documented in this file.
   error when all admitted attempts succeed, including stop-on-pass runs. Reused
   baselines are not promoted to overall scores when with-skill attempts are
   budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

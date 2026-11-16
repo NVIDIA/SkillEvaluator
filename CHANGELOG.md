@@ -228,6 +228,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
@@ -283,6 +286,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
 - Claude Code `harness` results count `when_to_use` toward the 1,536-character
   listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
   and cuts that whole text, so a long `when_to_use` loses its end.

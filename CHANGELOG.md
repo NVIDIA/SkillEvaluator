@@ -1157,6 +1157,21 @@ All notable changes to SkillEvaluator are documented in this file.
   received a `workflow-rules.mdc` file itself; it now receives the workflow
   folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
   when the file is a symlink to a file with another name.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. So do such a label and `$` on a line with a space or shell delimiter
+  between two of the same quote or after a backslash, as written or decoded,
+  such as `setup' 'helper.sh` or `setup\ h*.sh`, where a shell may join words
+  that the check reads apart. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
 
 - With `--progress rich` when standard error is not a terminal, such as when
   it is redirected to a file or piped to another program, the Tier 3 progress

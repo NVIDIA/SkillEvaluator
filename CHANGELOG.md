@@ -313,6 +313,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
   indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
   compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

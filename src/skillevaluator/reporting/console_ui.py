@@ -1266,12 +1266,29 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         rows.append(
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])
         )
-    items = [_tier1_fix(r) for r in broken]
+    items = [item for r in broken for item in _tier1_fixes(r)]
     if setup := [r for r in incomplete if not _only_llm_stages_missing(r)]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))
     return not failed, rows + fix_section_rows(items)
+
+
+def _tier1_fixes(result: ValidationResult) -> list[FixItem]:
+    """One item per distinct critical/high finding, so a check that failed on several shows each one."""
+    serious = [
+        f for f in result.findings if getattr(f.severity, "value", str(f.severity)).lower() in ("critical", "high")
+    ]
+    messages = list(dict.fromkeys(f.message for f in serious))
+    if result.gate_failures or len(messages) < 2:
+        return [_tier1_fix(result)]
+    where = _short_name(result.validator_name)
+    items, shown = [], set()
+    for message in messages:
+        action = next((f.suggestion for f in serious if f.message == message and f.suggestion), None)
+        items.append(FixItem(where, message, [action] if action and action not in shown else []))
+        shown.add(action)
+    return items
 
 
 def _tier1_fix(result: ValidationResult) -> FixItem:

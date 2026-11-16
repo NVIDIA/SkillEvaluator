@@ -3372,6 +3372,42 @@ def test_render_evaluation_result_invokes_findings_report(monkeypatch) -> None:
     assert str(results_dir) == "/tmp/run"
 
 
+def test_summarize_tier1_lists_each_serious_finding() -> None:
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    failing = ValidationResult(validator_name="Security Scan", passed=False)
+    for message, severity, suggestion in (
+        ("Tool Misuse: rm -rf ./build", Severity.HIGH, "Reject dangerous parameters."),
+        ("YARA Match: rm -rf ./; without asking", Severity.HIGH, "Reject dangerous parameters."),
+        ("Hook bypass: git commit --no-verify", Severity.CRITICAL, "Let the hooks run."),
+        ("Unpinned npx package", Severity.HIGH, "Pin the package version."),
+        ("Excessive Agency: without asking", Severity.MEDIUM, "Ask before acting."),
+    ):
+        failing.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=severity,
+                check_name="skillspector",
+                message=message,
+                file_path="SKILL.md",
+                suggestion=suggestion,
+            )
+        )
+
+    _ok, rows = summarize_tier1([failing])
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    numbered = [row for row in rows if row.glyph in {"1", "2", "3"}]
+    assert [row.segments[0][0] for row in numbered] == [
+        "Tool Misuse: rm -rf ./build",
+        "YARA Match: rm -rf ./; without asking",
+        "Hook bypass: git commit --no-verify",
+    ]
+    assert sum("Reject dangerous parameters." in line for line in rendered) == 1
+    assert any("+1 more in detailed reports" in line for line in rendered)
+    assert not any("Excessive Agency" in line for line in rendered)
+
+
 def test_summarize_tier2_lists_duplicate_details() -> None:
     # "duplicates found" alone is useless — the section must say WHAT
     # duplicated, up to three findings plus an overflow pointer.

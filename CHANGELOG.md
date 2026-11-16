@@ -305,6 +305,9 @@ All notable changes to SkillEvaluator are documented in this file.
   (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
   a `shell` other than bash or powershell, `background` without `context: fork`, and
   `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
 - Copilot CLI `harness` results flag an empty or whitespace-only `description`
   (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
   model sees only its name.

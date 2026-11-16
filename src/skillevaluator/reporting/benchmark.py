@@ -1022,7 +1022,11 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 (
                     "- Overall verdict: PASS only when every configured dimension passes for at least one "
-                    "supported agent. Lift is reported as diagnostic evidence and does not override this gate."
+                    "supported agent, with no with-skill case failing a required goal-accuracy or security check. "
+                    "A scored unmet goal or security issue in any attempt fails its case and that agent's quality "
+                    "verdict, even if all dimensions pass. "
+                    "Baseline-arm required-check failures do not change this quality verdict. "
+                    "Lift is reported as diagnostic evidence and does not override this gate."
                 ),
             ]
         )
@@ -1057,7 +1061,11 @@ class BenchmarkReporter(ReporterBase):
                     "- **Dimension score**: how well the agent did on one question above when it had the skill, "
                     "from 0% to 100%."
                 ),
-                "- **Overall** row: the equal-weight mean of the five dimension scores with the skill.",
+                (
+                    "- **Overall** row: when comparable baseline scores are available, the two scores used for "
+                    "published Skill Lift, on the metrics and cases both arms scored comparably. Otherwise, "
+                    "the available arm Overall score(s). These can differ from the headline with-skill score."
+                ),
                 (
                     "- **Uplift**: the displayed skill score minus the displayed no-skill baseline score. "
                     "Published Skill Lift compares Overall only on the metrics and cases both arms scored, "

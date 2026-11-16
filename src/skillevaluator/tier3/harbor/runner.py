@@ -5360,7 +5360,11 @@ class _RunProgressLifecycle:
         else:
             errors = [str(raw_errors)] if raw_errors else []
         warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
-        failed = bool(errors) or result.get("execution_status") not in {None, "succeeded"}
+        from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+        status = result.get("execution_status")
+        budget_denied = status == "skipped" and budget_fully_denied(result.get("budget"))
+        failed = bool(errors) or (status not in {None, "succeeded"} and not budget_denied)
         state = "failed" if failed else "degraded" if warnings else "complete"
         detail = errors[0] if errors else str(warnings[0]) if warnings else "Tier 3 evaluation finished"
         for stage in tuple(self._active_stages):

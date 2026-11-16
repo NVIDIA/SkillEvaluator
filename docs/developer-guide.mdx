@@ -76,6 +76,9 @@ mtime: two same-size writes can otherwise share a filesystem clock tick.
 | `integration` | End-to-end integration tests; may need fixtures or longer runtime | `pytest -m integration` |
 | `live` | Live tests against the in-process Harbor backend; requires the `tier3` extra and `NVIDIA_API_KEY` | `pytest -m live` |
 
+The MCP-staging restored-mtime regression models an advanced ctime explicitly,
+so its source-change assertion does not depend on the host clock ticking.
+
 The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 
 ```bash title="Run tests in parallel"

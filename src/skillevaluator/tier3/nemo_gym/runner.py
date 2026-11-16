@@ -306,7 +306,7 @@ def _task_case_ids(arm_dir: Path) -> dict[str, str]:
     return mapping
 
 
-def _model_endpoint(model: str | None) -> tuple[str, str, str]:
+def _model_endpoint(model: str | None, *, require_model: bool = True) -> tuple[str, str, str]:
     """Return ``(model, base_url, api_key)`` for Gym's OpenAI-compatible policy model server."""
     from skillevaluator.provider_config import resolve_llm_provider
 
@@ -315,6 +315,12 @@ def _model_endpoint(model: str | None) -> tuple[str, str, str]:
     if url and not key:
         # Never send the evaluator's provider key to a policy server it was not issued for.
         raise ValueError(f"{MODEL_URL_ENV} is set, so also set {MODEL_API_KEY_ENV} (use EMPTY for a keyless server)")
+    if url and not model and require_model:
+        # The provider's default model name is rarely served by a separate policy endpoint.
+        raise ValueError(
+            f"{MODEL_URL_ENV} is set, so also choose a model it serves "
+            "(--model, --agent-model, or harbor.agents.<agent>.model)"
+        )
     resolved_model = model
     if not url or not key or not resolved_model:
         provider = resolve_llm_provider()
@@ -1038,7 +1044,10 @@ def run_nemo_gym_eval(
     for agent in agents:
         cli_model = (agent_models or {}).get(agent) or model
         config_model = (config_agents.get(agent) or {}).get("model")
-        endpoints[agent] = _model_endpoint(cli_model or config_model)
+        try:
+            endpoints[agent] = _model_endpoint(cli_model or config_model)
+        except ValueError as exc:
+            return _config_failure(str(exc))
         source = "CLI" if cli_model else "evals/config.yml" if config_model else "public provider default"
         resolved_models[agent] = {"agent": agent, "model": endpoints[agent][0], "source": source}
         if url_error := model_url_credential_error(endpoints[agent][1]):
@@ -1051,9 +1060,12 @@ def run_nemo_gym_eval(
         judge_verifier_env, judge_process_env = verifier_judge_env(skill_path, effective_grading, env_mode)
     except ValueError as exc:
         return _config_failure(str(exc))
-    reporter.set_secret_values(set(judge_process_env.values()))
     # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
     runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
+    # As on Harbor: credentials plus every configured runtime_env value, which may be an allowlisted secret.
+    # Short values are flags such as "on"; redacting them would corrupt ordinary words in gym.log.
+    runtime_secret_values = {value for value in runtime_values.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
+    reporter.set_secret_values(secret_values_from_environment(judge_process_env) | runtime_secret_values)
     agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
 
     run_dir = _reserve_run_dir(output_dir, datetime.now(UTC).strftime("%Y%m%d_%H%M%S"))
@@ -1216,7 +1228,7 @@ def run_nemo_gym_eval(
                 if planned_agent != agent:
                     continue
                 arm_errors: list[str] = []
-                secrets = {value for value in judge_process_env.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
+                secrets = secret_values_from_environment(judge_process_env) | runtime_secret_values
                 rollouts_path = gym_root / f"{agent}-{arm}" / "rollouts.jsonl"
                 log_path = rollouts_path.with_name("gym.log")
                 if cleanup_error is not None:
@@ -1233,11 +1245,7 @@ def run_nemo_gym_eval(
                         arm_errors.append(f"Vertex AI ADC credentials could not be refreshed: {exc}")
                     else:
                         launch_env = gym_launch_environment(credentials)
-                        secrets |= {
-                            value
-                            for value in credentials.values()
-                            if len(value) >= MIN_EXACT_SECRET_CHARS and value != "EMPTY"
-                        }
+                        secrets |= secret_values_from_environment(credentials) - {"EMPTY"}
                         secrets |= secret_values_from_environment(launch_env)
                         reporter.set_secret_values(secrets)
                         command = gym_eval_command(

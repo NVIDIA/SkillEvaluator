@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg viewBox="0 0 800 636" width="800" height="636" xmlns="http://www.w3.org/2000/svg" role="img" aria-labelledby="ex-title ex-desc">
+<title id="ex-title">Example: asking an agent to evaluate a skill</title>
+<desc id="ex-desc">You ask whether your skill is any good. The agent uses the SkillEvaluator skill, runs skillevaluator tier1 ./my-skill --no-llm, which passes 11 of 11 checks with a quality score of 76.5 out of 100, and then lists three fixes.</desc>
+<defs>
+<linearGradient id="bg" x1="0" y1="0" x2="1" y2="1"><stop offset="0%" stop-color="#0d1117"/><stop offset="50%" stop-color="#101812"/><stop offset="100%" stop-color="#0d1117"/></linearGradient>
+<linearGradient id="card" x1="0" y1="0" x2="0" y2="1"><stop offset="0%" stop-color="#1a261c"/><stop offset="100%" stop-color="#121a14"/></linearGradient>
+</defs>
+<rect width="800" height="636" rx="22" fill="url(#bg)" stroke="#273129" stroke-width="1"/>
+<circle cx="32" cy="25" r="5.5" fill="#39523a"/><circle cx="52" cy="25" r="5.5" fill="#39523a"/><circle cx="72" cy="25" r="5.5" fill="#39523a"/>
+<text x="400.0" y="29.5" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="12.5" fill="#6f9264" text-anchor="middle">your agent</text>
+<line x1="0" y1="48" x2="800" y2="48" stroke="#273129" stroke-width="1"/>
+<text x="768" y="76" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" fill="#6f9264" font-weight="700" text-anchor="end" letter-spacing="1.6">YOU</text>
+<rect x="402" y="86" width="366" height="46" rx="16" fill="#22381a" stroke="#4a7a1c" stroke-width="1"/>
+<text x="424" y="115" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15.5" fill="#f3f7f0" font-weight="600">Is my skill any good? It’s in ./my-skill</text>
+<text x="32" y="150" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="10.5" fill="#6f9264" font-weight="700" letter-spacing="1.6">AGENT</text>
+<rect x="32" y="160" width="286" height="32" rx="16" fill="#152117" stroke="#304631" stroke-width="1"/>
+<path d="m51 167.5 1.9 5.1 5.1 1.9-5.1 1.9-1.9 5.1-1.9-5.1-5.1-1.9 5.1-1.9z" fill="#76b900"/>
+<text x="68" y="181" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#a9b9a2">Using the</text>
+<text x="133" y="181" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#9bdb34">skillevaluator</text>
+<text x="253" y="181" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#a9b9a2">skill</text>
+<rect x="32" y="206" width="736" height="196" rx="14" fill="#080c0a" stroke="#273129" stroke-width="1"/>
+<text x="52" y="238" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#76b900" font-weight="700">$</text>
+<text x="72" y="238" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="14" fill="#f3f7f0">skillevaluator tier1 ./my-skill --no-llm</text>
+<line x1="52" y1="256" x2="748" y2="256" stroke="#1c2a1f" stroke-width="1"/>
+<text x="52" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#6f9264">checks</text>
+<path d="M136 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="152" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">schema</text>
+<path d="M228 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="244" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">security</text>
+<path d="M336 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="352" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">pii</text>
+<path d="M402 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="418" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">license</text>
+<path d="M502 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="518" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">quality</text>
+<path d="M602 281 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="618" y="286" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">harness</text>
+<text x="52" y="312" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#6f9264">result</text>
+<text x="136" y="312" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">11 of 11 checks passed</text>
+<text x="52" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#6f9264">quality</text>
+<text x="136" y="338" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">C  76.5 / 100</text>
+<rect x="52" y="358" width="76" height="26" rx="6" fill="#76b900"/>
+<path d="M62 372 l3 3 l6 -7" fill="none" stroke="#0d1117" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="79" y="376" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#0d1117" font-weight="700">PASS</text>
+<text x="144" y="376" font-family="ui-monospace, SFMono-Regular, Menlo, monospace" font-size="13.5" fill="#dbe8d6">Passed required checks · exit 0</text>
+<rect x="32" y="418" width="736" height="148" rx="16" fill="url(#card)" stroke="#304631" stroke-width="1"/>
+<rect x="54" y="418" width="692" height="3" rx="1.5" fill="#76b900" fill-opacity="0.8"/>
+<text x="54" y="452" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="15" fill="#f3f7f0" font-weight="600">Yes, it passes. All 11 checks are green and the security scans are clean.</text>
+<text x="54" y="477" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#c9d6c3">Quality is 76.5 / 100 (C). Three fixes will raise it:</text>
+<circle cx="64" cy="499" r="9.5" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<text x="64" y="503.5" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#9bdb34" font-weight="700" text-anchor="middle">1</text>
+<text x="84" y="504" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#dbe8d6">Add an “Available Scripts” table to SKILL.md</text>
+<circle cx="64" cy="523" r="9.5" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<text x="64" y="527.5" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#9bdb34" font-weight="700" text-anchor="middle">2</text>
+<text x="84" y="528" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#dbe8d6">Add a version to the frontmatter</text>
+<circle cx="64" cy="547" r="9.5" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<text x="64" y="551.5" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="11.5" fill="#9bdb34" font-weight="700" text-anchor="middle">3</text>
+<text x="84" y="552" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="14" fill="#dbe8d6">Say when to use the skill at the start of its description</text>
+<rect x="32.0" y="582" width="236.0" height="38" rx="19" fill="#152117" stroke="#304631" stroke-width="1"/>
+<circle cx="53.0" cy="601" r="10" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<path d="M48.5 601.5 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="72.0" y="606" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#f3f7f0" font-weight="600">No API key</text>
+<rect x="282.0" y="582" width="236.0" height="38" rx="19" fill="#152117" stroke="#304631" stroke-width="1"/>
+<circle cx="303.0" cy="601" r="10" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<path d="M298.5 601.5 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="322.0" y="606" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#f3f7f0" font-weight="600">Runs on your machine</text>
+<rect x="532.0" y="582" width="236.0" height="38" rx="19" fill="#152117" stroke="#304631" stroke-width="1"/>
+<circle cx="553.0" cy="601" r="10" fill="#76b900" fill-opacity="0.16" stroke="#76b900" stroke-opacity="0.5"/>
+<path d="M548.5 601.5 l3 3 l6 -7" fill="none" stroke="#9bdb34" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/>
+<text x="572.0" y="606" font-family="Inter, ui-sans-serif, -apple-system, BlinkMacSystemFont, 'Segoe UI', Helvetica, Arial, sans-serif" font-size="13.5" fill="#f3f7f0" font-weight="600">Same scores as CI</text>
+</svg>

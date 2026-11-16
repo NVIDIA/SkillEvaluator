@@ -1279,6 +1279,43 @@ def test_timeout_multiplier_scales_staged_task_timeouts(tmp_path: Path) -> None:
     assert "timeout_sec = 1\n" in data["instruction"]
 
 
+@pytest.mark.parametrize(
+    "header",
+    ["[verifier.env] # judge\n", "  [verifier.env]\n", "[ verifier . env ]\n", "[verifier.env]"],
+)
+def test_staging_adds_judge_env_to_an_existing_verifier_env_table(tmp_path: Path, header: str) -> None:
+    import tomllib
+
+    from skillevaluator.tier3.nemo_gym.runner import stage_for_gym
+
+    task = tmp_path / "case-1"
+    task.mkdir()
+    body = 'FOO = "1"\n' if header.endswith("\n") else ""
+    (task / "task.toml").write_text(f"[environment]\n\n{header}{body}")
+    stage_for_gym(tmp_path, {"SKILL_EVAL_LLM_MODEL": "${SKILL_EVAL_LLM_MODEL}"}, agent="codex")
+    env = tomllib.loads((task / "task.toml").read_text())["verifier"]["env"]
+    assert env["SKILL_EVAL_LLM_MODEL"] == "${SKILL_EVAL_LLM_MODEL}"
+    assert env.get("FOO", "1") == "1"
+
+
+@pytest.mark.parametrize("real_table", [True, False])
+def test_staging_skips_a_verifier_env_header_inside_a_multiline_string(tmp_path: Path, real_table: bool) -> None:
+    import tomllib
+
+    from skillevaluator.tier3.nemo_gym.runner import stage_for_gym
+
+    task = tmp_path / "case-1"
+    task.mkdir()
+    instruction = 'instruction = """\nExample:\n[verifier.env] # example\n"""\n'
+    table = '\n[verifier.env]\nFOO = "1"\n' if real_table else ""
+    (task / "task.toml").write_text(f"{instruction}\n[environment]\n{table}")
+    stage_for_gym(tmp_path, {"SKILL_EVAL_LLM_MODEL": "${SKILL_EVAL_LLM_MODEL}"}, agent="codex")
+    data = tomllib.loads((task / "task.toml").read_text())
+    assert data["instruction"] == "Example:\n[verifier.env] # example\n"
+    assert data["verifier"]["env"]["SKILL_EVAL_LLM_MODEL"] == "${SKILL_EVAL_LLM_MODEL}"
+    assert data["verifier"]["env"].get("FOO") == ("1" if real_table else None)
+
+
 def test_timeout_multiplier_is_validated_and_recorded(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:
@@ -2181,6 +2218,30 @@ def test_adc_refresh_follows_the_policy_key_source(monkeypatch: pytest.MonkeyPat
     assert refreshed[MODEL_API_KEY_ENV] == "token-c" and refreshed["OPENAI_API_KEY"] == "token-c"
     refreshed, _timeout = gym_runner._refresh_adc_credentials(base, policy_uses_provider_key=False, timeout_s=60)
     assert refreshed[MODEL_API_KEY_ENV] == "token-a"
+
+
+def test_adc_refresh_renews_an_explicit_policy_key_that_is_the_provider_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import provider_config
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(provider_config, "refresh_host_vertex_adc_environment", lambda *_args, **_kwargs: "token-new")
+    shared = {"OPENAI_API_KEY": "token-old", MODEL_API_KEY_ENV: "token-old"}
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(shared, policy_uses_provider_key=False, timeout_s=60)
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new" and refreshed["OPENAI_API_KEY"] == "token-new"
+    assert shared[MODEL_API_KEY_ENV] == "token-old"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-old")
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "token-old"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new"
+
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "policy-own-key"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "policy-own-key"
 
 
 def test_second_interrupt_during_stop_still_kills_the_gym_group(tmp_path: Path) -> None:

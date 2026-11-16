@@ -162,7 +162,7 @@ automatically valid for every agent. Override the model per agent with
 
 ```bash title="Per-agent model override"
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
-  --agent-model codex=nvidia/nemotron-3-super-120b-a12b
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
 ```
 
 To make an override persistent, set it in `evals/config.yml` under
@@ -201,9 +201,9 @@ orchestration and server tools Build cannot execute — `WebFetch`,
 ### Models on the one-key path
 
 With `nv_build` and no explicit model override, every supported agent defaults
-to `nvidia/nemotron-3-super-120b-a12b`. The provider-native agent selection is
+to `nvidia/nemotron-3.5-lightning-30b-a3b`. The provider-native agent selection is
 OpenCode. Its model is automatically qualified with the `nvidia/` adapter
-namespace, so it renders as `nvidia/nvidia/nemotron-3-super-120b-a12b` in run
+namespace, so it renders as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` in run
 output — the doubled prefix is the adapter namespace plus the catalog publisher,
 not a bug.
 

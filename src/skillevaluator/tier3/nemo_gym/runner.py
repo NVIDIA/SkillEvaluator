@@ -35,7 +35,6 @@ from skillevaluator.tier3.harbor.progress import (
 )
 from skillevaluator.tier3.nemo_gym.backend import (
     DEFAULT_RUN_TIMEOUT_S,
-    MCP_SERVERS_ERROR,
     MODEL_API_KEY_ENV,
     MODEL_URL_ENV,
     NATIVE_MCP_SERVERS_ERROR,
@@ -43,7 +42,7 @@ from skillevaluator.tier3.nemo_gym.backend import (
     NEMO_GYM_BACKEND,
     NEMO_GYM_BIN_ENV,
     RUN_TIMEOUT_ENV,
-    mcp_servers_declared,
+    mcp_servers_error,
     model_url_credential_error,
     native_mcp_servers_declared,
     nemo_gym_bin,
@@ -108,9 +107,21 @@ def stage_for_gym(
             if name not in existing
         )
         if lines:
-            header = re.search(r"^\[verifier\.env\][ \t]*\n", staged, re.MULTILINE)
-            if header:
-                staged = staged[: header.end()] + lines + staged[header.end() :]
+            if not staged.endswith("\n"):
+                staged += "\n"
+            added = set(verifier_env or {}) - existing
+            for header in re.finditer(
+                r"^[ \t]*\[[ \t]*verifier[ \t]*\.[ \t]*env[ \t]*\][ \t]*(?:#[^\n]*)?\n", staged, re.MULTILINE
+            ):
+                # A header-like line can also sit inside a multiline string: keep the real table.
+                candidate = staged[: header.end()] + lines + staged[header.end() :]
+                try:
+                    candidate_env = (tomllib.loads(candidate).get("verifier") or {}).get("env") or {}
+                except tomllib.TOMLDecodeError:
+                    continue
+                if added <= set(candidate_env):
+                    staged = candidate
+                    break
             else:
                 staged = staged.rstrip("\n") + "\n\n[verifier.env]\n" + lines
         if timeout_multiplier != 1.0:
@@ -295,7 +306,7 @@ def _task_case_ids(arm_dir: Path) -> dict[str, str]:
     return mapping
 
 
-def _model_endpoint(model: str | None) -> tuple[str, str, str]:
+def _model_endpoint(model: str | None, *, require_model: bool = True) -> tuple[str, str, str]:
     """Return ``(model, base_url, api_key)`` for Gym's OpenAI-compatible policy model server."""
     from skillevaluator.provider_config import resolve_llm_provider
 
@@ -304,6 +315,12 @@ def _model_endpoint(model: str | None) -> tuple[str, str, str]:
     if url and not key:
         # Never send the evaluator's provider key to a policy server it was not issued for.
         raise ValueError(f"{MODEL_URL_ENV} is set, so also set {MODEL_API_KEY_ENV} (use EMPTY for a keyless server)")
+    if url and not model and require_model:
+        # The provider's default model name is rarely served by a separate policy endpoint.
+        raise ValueError(
+            f"{MODEL_URL_ENV} is set, so also choose a model it serves "
+            "(--model, --agent-model, or harbor.agents.<agent>.model)"
+        )
     resolved_model = model
     if not url or not key or not resolved_model:
         provider = resolve_llm_provider()
@@ -958,8 +975,8 @@ def run_nemo_gym_eval(
         errors.append("No native Harbor task source found at evals/harbor.")
     if task_source == "evals_json" and find_evals_file(skill_path) is None:
         errors.append(_MISSING_EVALS_DATASET_ERROR)
-    if mcp_servers_declared(skill_path):
-        errors.append(MCP_SERVERS_ERROR)
+    if mcp_error := mcp_servers_error(skill_path):
+        errors.append(mcp_error)
     if task_source == "native_harbor" and native_mcp_servers_declared(skill_path):
         errors.append(NATIVE_MCP_SERVERS_ERROR)
     pre_agent_setup = list(harbor_config.get("pre_agent_setup") or [])
@@ -1027,7 +1044,10 @@ def run_nemo_gym_eval(
     for agent in agents:
         cli_model = (agent_models or {}).get(agent) or model
         config_model = (config_agents.get(agent) or {}).get("model")
-        endpoints[agent] = _model_endpoint(cli_model or config_model)
+        try:
+            endpoints[agent] = _model_endpoint(cli_model or config_model)
+        except ValueError as exc:
+            return _config_failure(str(exc))
         source = "CLI" if cli_model else "evals/config.yml" if config_model else "public provider default"
         resolved_models[agent] = {"agent": agent, "model": endpoints[agent][0], "source": source}
         if url_error := model_url_credential_error(endpoints[agent][1]):

@@ -6,6 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and install it when missing (`uv tool install`, `pipx`, pip in a virtual
+  environment, or `uvx`), and adds a CLI-missing Tier 3 case.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and
@@ -149,6 +158,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
+- The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
+  for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
+  rubric and LLM security verification did not run. The same default applies to
+  SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
+  to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
+  the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
+  a scan on the native Anthropic API completed at full coverage.
 - The HTTP 404 message for an unavailable LLM model now says the provider's default
   may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
   in the reusable workflow); `ci/README.md` notes the same.
@@ -219,11 +240,30 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
+
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 
 - The README's Tier 1 row now covers harness compatibility and links to the
   `harness` check.
+- The `nv_build` documentation names `nvidia/nemotron-3.5-lightning-30b-a3b`
+  (Nemotron 3.5 Lightning) as the default model in the configuration guide,
+  environment variables reference, CLI reference, agents and sandboxes guide
+  and Tier 3 live evaluation guide, and the runnable `--agent-model` examples
+  use it. This entry covers the documentation only; the runtime default change
+  ships separately.
 - `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
@@ -268,10 +308,54 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
+- The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
+  and 1 MiB per-manifest limit, including in description-only embedding mode.
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
 - NeMo Gym detached cleanup defers termination signals until teardown finishes,
   preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
 - Native NeMo Gym project skill projections run after authored image instructions
   and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
 - Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
   so skill discovery works with Gym's isolated home and configuration directories.
   Baseline tasks use the same layout without the target skill.
@@ -454,6 +538,62 @@ All notable changes to SkillEvaluator are documented in this file.
   A RAGAS `replied` entry for a reply with no text and no tool call, such as a
   refusal or a content-filter stop, now saves the whole reply body instead of an
   empty reply.
+- Judge evidence (`judge_attempts.json`) and security finding evidence now mask
+  credentials whose quotes are escaped twice or three times, as when a RAGAS
+  request repeats a tool call's JSON arguments as JSON, and single-quoted values
+  whose quotes are escaped once or twice, as in Python source, JSON or not.
+  - Newly masked: an argv element after a credential flag, `-u`, `-b`, or a
+    `login` or `sshpass` `-p`
+    (`[\\\"tool\\\", \\\"--password\\\", \\\"...\\\"]`, or
+    `[\'tool\', \'--password\', \'...\']` in a quoted Python list), which was
+    saved in clear. An attached `-p...` after a `login` or MySQL client element,
+    which was saved in clear when escaped twice or in a JSON-escaped quoted
+    Python list (a quoted Python list that is not JSON-escaped already masked
+    it). A double- or single-quoted value after a credential flag, `-u`, `-p`,
+    `.netrc` `password`, `aws configure set`, `git config`, `npm config set` or
+    `curl -b` (`--password \\\"two words\\\"`, `--password \'two words\'`,
+    `curl -u \'user:...\'`) and a JSON member such as
+    `\\\"password\\\": \\\"...\\\"`, which were saved in clear or with only
+    their first word masked.
+  - How: the text is also read with one, then two levels of string escapes
+    removed (`\\`, `\"`, `\'`, `\/`, `\n`, `\r`, `\t`, `\uXXXX`, inside a quoted
+    string or not). What the same patterns mask in a reading is masked in the
+    saved text too, where the text kept around it places it for certain, so a
+    value escaped again is masked as it is when escaped once, also where the
+    patterns mask more than a credential (`"total_tokens": self.total_tokens,`
+    in a Write call a RAGAS request repeats). Markers are only added: the text
+    as written is masked exactly as before. A value in a reading ends at a quote
+    that ends a string of the text it was read from, and `\\"` ends a string, as
+    in JSON, so JSON inside a Python `repr`, where `\\"` is an escaped quote, is
+    masked as before.
+  - Still kept: values in text escaped more than three times; single-quoted
+    values whose quotes are escaped three times; values in text that holds a NUL
+    character, which is not read again (an escaped `\u0000` is read as written);
+    the part of a value that once-escaped text keeps, such as the words after
+    the first in `"password: \"two words\""` at the start of a JSON string; and
+    the words after an escaped quote in a quoted Python argv value
+    (`[\'--token\', \'a\\\'b two\']`).
+  - Known over-masks: `{"command": "mysql -u root -p", "timeout": 30}` is saved
+    as `-p<redacted>timeout": 30}`, as before, and now also when escaped twice
+    or three times. The judge's line pass can still mask the JSON after a value
+    on a piece that starts inside a string
+    (`{"command": "run(['C:\\\\tmp\\\\']); password: ...", "note": "keep me"}`
+    loses `"note"`). And as escapes are decoded outside strings too, in text
+    that was never escaped, an escape that leaves a quote unmatched in a reading
+    can mask the rest of its line after a later credential assignment
+    (`export GITHUB_TOKEN=$(...)`, `password: ...`): a `\n`, `\r` or `\u000a`
+    inside a quoted string (`printf '%s\n'`, `tr -d '\n'`, `echo "a\nb"`,
+    `cd "C:\repo\x"`), or an odd number of `\"` in a double-quoted string
+    (`echo "it\"s"`). Finding evidence can then lose the `curl` or `rm` the
+    finding is about. Judge evidence already lost the rest of
+    such a line after a `\n`, `\r` or `\t` escape, and now also loses it after
+    an odd `\"` or a `\u000a`.
+  - Cost: text with a backslash is masked up to three times, in time and memory
+    linear in its length. Judge evidence takes two to four times as long to mask
+    (about 0.2 s instead of 0.06 s for a 70 KB RAGAS prompt of Bash calls), and
+    up to about eight times as long on adversarial text. Peak memory can grow by
+    about 250 MB per MB of input for one long quoted value escaped twice, as the
+    patterns then read that value decoded.
 - Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
   interpolation variable ... requires protected execution state` because the
   shell exports a short flag with a sensitive-looking name. A host variable such

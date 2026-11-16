@@ -108,9 +108,21 @@ def stage_for_gym(
             if name not in existing
         )
         if lines:
-            header = re.search(r"^\[verifier\.env\][ \t]*\n", staged, re.MULTILINE)
-            if header:
-                staged = staged[: header.end()] + lines + staged[header.end() :]
+            if not staged.endswith("\n"):
+                staged += "\n"
+            added = set(verifier_env or {}) - existing
+            for header in re.finditer(
+                r"^[ \t]*\[[ \t]*verifier[ \t]*\.[ \t]*env[ \t]*\][ \t]*(?:#[^\n]*)?\n", staged, re.MULTILINE
+            ):
+                # A header-like line can also sit inside a multiline string: keep the real table.
+                candidate = staged[: header.end()] + lines + staged[header.end() :]
+                try:
+                    candidate_env = (tomllib.loads(candidate).get("verifier") or {}).get("env") or {}
+                except tomllib.TOMLDecodeError:
+                    continue
+                if added <= set(candidate_env):
+                    staged = candidate
+                    break
             else:
                 staged = staged.rstrip("\n") + "\n\n[verifier.env]\n" + lines
         if timeout_multiplier != 1.0:
@@ -767,8 +779,8 @@ def _refresh_adc_credentials(
     """Mint a fresh Vertex ADC token for one Gym launch and cap the launch to its lifetime.
 
     Mirrors the Harbor runner: the token is refreshed before every launch, reused as the
-    policy key when the policy has no key of its own, and the launch timeout is
-    capped by ``compute_adc_job_timeout``. Raises ``RuntimeError``/``ValueError`` on failure.
+    policy key when the policy has no key of its own or its key is the provider token being
+    replaced, and the launch timeout is capped by ``compute_adc_job_timeout``. Raises ``RuntimeError``/``ValueError`` on failure.
     """
     from skillevaluator.provider_config import (
         CREDENTIAL_EXPIRY_ENV,
@@ -784,12 +796,14 @@ def _refresh_adc_credentials(
     from skillevaluator.tier3.harbor.runner import VERTEX_ADC_JOB_TIMEOUT_ENV
 
     refreshed = dict(credentials)
+    previous_provider_key = (credentials.get("OPENAI_API_KEY") or os.environ.get("OPENAI_API_KEY") or "").strip()
     fresh = refresh_host_vertex_adc_environment(
         refreshed, fallback_env=os.environ, fail_on_expired=True, token_getter=_get_google_access_token
     )
     if fresh:
         refreshed["OPENAI_API_KEY"] = fresh
-        if policy_uses_provider_key:
+        policy_key = refreshed.get(MODEL_API_KEY_ENV, "").strip()
+        if policy_uses_provider_key or (previous_provider_key and policy_key == previous_provider_key):
             refreshed[MODEL_API_KEY_ENV] = fresh
     source = refreshed.get(CREDENTIAL_SOURCE_ENV) or os.environ.get(CREDENTIAL_SOURCE_ENV)
     base_url = refreshed.get("OPENAI_BASE_URL") or os.environ.get("OPENAI_BASE_URL")

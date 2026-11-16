@@ -8,7 +8,9 @@ import ast
 import json
 import os
 import re
+import unicodedata
 from dataclasses import dataclass, field
+from itertools import groupby
 from pathlib import Path
 from typing import Any
 
@@ -400,6 +402,30 @@ def _openclaw_gates(data: dict[str, Any]) -> str:
     return "; ".join(gates)
 
 
+_CLAUDE_EFFORTS = ("low", "medium", "high", "xhigh", "max")
+_CLAUDE_SHELLS = ("bash", "powershell")
+
+
+def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
+    """Claude Code skill fields whose value it ignores, each with what it accepts."""
+    ignored = []
+    effort = data.get("effort")
+    text = str(effort).strip().lower()
+    whole_number = isinstance(effort, int) and not isinstance(effort, bool)
+    whole_number = whole_number or (isinstance(effort, float) and effort.is_integer())
+    numeric = whole_number or text.isdigit()
+    if effort is not None and not numeric and text not in _CLAUDE_EFFORTS:
+        ignored.append(f"effort '{effort}' (use {', '.join(_CLAUDE_EFFORTS)} or a number)")
+    shell = data.get("shell")
+    if shell is not None and str(shell).strip().lower() not in ("", *_CLAUDE_SHELLS):
+        ignored.append(f"shell '{shell}' (use bash or powershell; Claude Code falls back to bash)")
+    if _is_true(data.get("background")) and data.get("context") != "fork":
+        ignored.append("background without context: fork")
+    if "maxTurns" in data:
+        ignored.append("maxTurns (an agent field, not a skill field)")
+    return ignored
+
+
 def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
@@ -410,6 +436,11 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     description = data.get("description")
     tools = data.get("allowed-tools")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
+    when_to_use = data.get("when_to_use")
+    # Claude Code lists "<description> - <when_to_use>" and cuts that whole text.
+    claude_listing = (description if isinstance(description, str) else "") + (
+        f" - {when_to_use}" if when_to_use is not None and str(when_to_use) else ""
+    )
     root, depth = _install_root(skill_path)
     target = "none"
     if skill_path.is_symlink():
@@ -428,10 +459,12 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
     platforms = data.get("platforms")
     name = _skill_name(skill_path, data)
     duplicates = catalog.duplicates(skill_path, name) if catalog else []
+    lookalikes = catalog.lookalikes(skill_path) if catalog else []
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
         "install_root": root,
+        "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
         "nested_skill_md": bool(nested),
@@ -449,6 +482,8 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "description_empty": isinstance(description, str) and not description.strip(),
         "description_type": type(description).__name__ if description is not None else "none",
         "description_codepoints": len(description) if isinstance(description, str) else 0,
+        "claude_listing_text": claude_listing,
+        "claude_listing_codepoints": len(claude_listing),
         "description_has_quote": isinstance(description, str) and '"' in description,
         "description_utf16_units": _utf16_units(description),
         "trigger_end": trigger.end() if trigger else None,
@@ -462,6 +497,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
+        "claude_ignored_values": "; ".join(_claude_ignored_values(data)),
         "custom_fields": ", ".join(map(str, custom)),
         "custom_field_chars": sum(len(v) if isinstance(v, str) else len(yaml.safe_dump(v)) for v in custom.values()),
         "platforms": ", ".join(map(str, platforms)) if isinstance(platforms, list) else str(platforms or ""),
@@ -484,7 +520,71 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
         "duplicate_name": bool(duplicates),
         "duplicate_paths": ", ".join(duplicates[:3]),
+        "lookalike_names": ", ".join(lookalikes[:3]),
     }
+
+
+_LOOKALIKE_OVERLAP = 0.95
+_LOOKALIKE_MIN_WORDS = 4
+_STOP_WORDS = frozenset(
+    [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "by",
+        "for",
+        "from",
+        "in",
+        "into",
+        "is",
+        "it",
+        "of",
+        "on",
+        "or",
+        "the",
+        "this",
+        "that",
+        "to",
+        "use",
+        "used",
+        "user",
+        "uses",
+        "when",
+        "with",
+        "you",
+        "your",
+    ]
+)
+
+
+# Scripts written without spaces between words (Han, kana, Thai, Lao): compared as character pairs.
+_UNSPACED_RUN = re.compile(r"([\u0e00-\u0eff\u3040-\u30ff\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]+)")
+
+
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or unicodedata.category(char).startswith("M")
+
+
+def _description_words(text: str) -> frozenset[str]:
+    """Letters and digits in any script, lowercased, split on everything else, minus common English words."""
+    words: set[str] = set()
+    for keep, chars in groupby(unicodedata.normalize("NFKC", text).casefold(), _is_word_char):
+        if not keep:
+            continue
+        for i, piece in enumerate(_UNSPACED_RUN.split("".join(chars))):
+            if i % 2:
+                words.update({piece[j : j + 2] for j in range(len(piece) - 1)} or {piece})
+            elif piece and piece not in _STOP_WORDS:
+                words.add(piece)
+    return frozenset(words)
+
+
+def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
+    return len(a & b) / len(a | b) if a and b else 0.0
 
 
 @dataclass
@@ -495,16 +595,33 @@ class Catalog:
     size: int
     desc_chars: int
     base: Path | None = None
+    descriptions: dict[Path, str] | None = None
 
     @classmethod
     def of(cls, skills: list[Path], base: Path | None = None) -> Catalog:
-        names, chars = {}, 0
+        names, descriptions, chars = {}, {}, 0
         for skill in skills:
             _, _, _, _, data = _read_manifest(skill)
             names[skill.resolve()] = _skill_name(skill, data)
             description = data.get("description")
             chars += len(description) if isinstance(description, str) else 0
-        return cls(names=names, size=len(skills), desc_chars=chars, base=base)
+            descriptions[skill.resolve()] = description if isinstance(description, str) else ""
+        return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
+
+    def lookalikes(self, skill: Path) -> list[str]:
+        """Other skills here whose description has nearly the same words as this one's."""
+        descriptions = self.descriptions or {}
+        own = skill.resolve()
+        words = _description_words(descriptions.get(own, ""))
+        if len(words) < _LOOKALIKE_MIN_WORDS:
+            return []
+        return [
+            self.names[other]
+            for other, text in descriptions.items()
+            if other != own
+            and self.names.get(other) != self.names.get(own)
+            and _jaccard(words, _description_words(text)) >= _LOOKALIKE_OVERLAP
+        ]
 
     def duplicates(self, skill: Path, name: str) -> list[str]:
         own = skill.resolve()
@@ -545,12 +662,15 @@ def _catalog_of(group: list[Path]) -> Catalog:
     return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
 
 
-def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
+def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
     A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
     measured against everything installed in that folder, and skills in different folders are separate
     installations. Skills outside any skills folder that are given together form their own catalog.
+
+    ``profiles`` are the harnesses being checked: only the user-level skills folders they read are searched for
+    same-named copies (every known folder when omitted).
     """
     groups: dict[Path | None, list[Path]] = {}
     for skill in skills:
@@ -559,7 +679,60 @@ def facts_for(skills: list[Path]) -> dict[Path, dict[str, Any]]:
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
         catalogs.update(dict.fromkeys(group, _catalog_of(group)))
-    return {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
+    user_skills: dict[Path, dict[Path, str]] = {}
+    facts = {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    for skill_facts_ in facts.values():
+        skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills, user_roots)
+    return facts
+
+
+def _project_root(facts: dict[str, Any]) -> str | None:
+    """The root a project skill is installed in: a harness root, or an OpenClaw workspace ``skills/`` folder."""
+    return "skills" if facts["workspace_skills"] else facts["install_root"]
+
+
+def _named_skills(folder: Path) -> dict[Path, str]:
+    """Skills under a folder and their names; one that cannot be read is left out."""
+    try:
+        found = _find_skills(folder) if folder.is_dir() else []
+    except OSError:
+        return {}
+    names = {}
+    for skill in found:
+        try:
+            names[skill] = _skill_name(skill, _read_manifest(skill)[4])
+        except OSError:
+            continue
+    return names
+
+
+def _user_copies(
+    facts: dict[str, Any], cache: dict[Path, dict[Path, str]], user_roots: set[str] | None = None
+) -> list[tuple[str, str, int]]:
+    """``(root, path, depth)`` of same-named skills in the user-level roots, for a skill installed in a project root.
+
+    ``depth`` counts the grouping folders between the root and the copy. ``user_roots`` limits which roots are searched.
+    """
+    project_root = _project_root(facts)
+    if project_root is None or project_root.startswith("~/"):
+        return []
+    try:
+        home = Path.home()
+    except (KeyError, RuntimeError):
+        return []
+    copies = []
+    for root in _KNOWN_ROOTS:
+        if user_roots is not None and f"~/{root}" not in user_roots:
+            continue
+        folder = home / root
+        if folder not in cache:
+            cache[folder] = _named_skills(folder)
+        for skill, name in cache[folder].items():
+            if name == facts["skill_name"]:
+                parts = skill.relative_to(folder).parts
+                copies.append((f"~/{root}", f"~/{root}/{'/'.join(parts)}", len(parts) - 1))
+    return copies
 
 
 def _utf16_units(value: Any) -> int:
@@ -569,7 +742,7 @@ def _utf16_units(value: Any) -> int:
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
-    text = facts["description_text"]
+    text = facts[listing.get("text_fact", "description_text")]
     budget = listing.get("budget") or {}
     over_budget = facts["catalog_size"] and (
         facts["catalog_desc_chars"] > (facts.get("list_budget_chars") or budget.get("desc_chars", float("inf")))
@@ -714,6 +887,41 @@ def version_finding(profile: dict[str, Any], declared: str) -> dict[str, str] | 
     }
 
 
+def _rule_names(profile: dict[str, Any], facts: dict[str, Any], setup: dict[str, Any]) -> dict[str, Any]:
+    """Everything a profile rule can name: skill facts, the model setup, ``always`` and ``roots`` (every root, with
+    ``roots.project`` and ``roots.user`` for the groups)."""
+    roots = profile.get("roots", {})
+    all_roots = [*roots.get("project", []), *roots.get("user", [])]
+    return {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
+
+
+def _rule_fires(rule: dict[str, Any], names: dict[str, Any]) -> bool:
+    expression = str(rule["when"])
+    if "install_root" in expression and (names["install_root"] is None or names["native_root"]):
+        return False
+    if "catalog_" in expression and not names["catalog_size"]:
+        return False
+    return expression == "always" or _Rule.evaluate(expression, names)
+
+
+def _finds_at_depth(profile: dict[str, Any], names: dict[str, Any], root: str, depth: int) -> bool:
+    """Whether the profile's grouping rules still let it find a skill ``depth`` folders below the user root ``root``.
+
+    The rules read the same names as in :func:`evaluate_profile`, with the install root and depth of that copy.
+    A rule that cannot be evaluated is ignored here so it cannot stop a user-copy lookup.
+    """
+    copy = {**names, "install_root": root, "workspace_skills": False, "grouping_depth": depth}
+    for rule in profile.get("rules", []):
+        if rule["effect"] != "not_loaded" or "grouping_depth" not in str(rule["when"]):
+            continue
+        try:
+            if _rule_fires(rule, copy):
+                return False
+        except (KeyError, SyntaxError, TypeError, ValueError):
+            continue
+    return True
+
+
 def evaluate_profile(
     profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
 ) -> HarnessResult:
@@ -724,19 +932,29 @@ def evaluate_profile(
     unknown context, a native provider, model-initiated activation and an interactive session.
     """
     roots = profile.get("roots", {})
-    all_roots = [*roots.get("project", []), *roots.get("user", [])]
     setup = model_config(profile, config)
-    facts = {**facts, "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"])}
-    names = {**facts, **setup, "always": True, "roots": _RootList(all_roots, roots)}
+    facts = {
+        **facts,
+        "list_budget_chars": listing_budget_chars(profile, setup["context_tokens"]),
+        "user_copy": False,
+        "user_copy_paths": "",
+    }
+    names = _rule_names(profile, facts, setup)
+    user_copies = (
+        [
+            path
+            for root, path, depth in facts.get("user_copies", [])
+            if root in roots.get("user", []) and _finds_at_depth(profile, names, root, depth)
+        ]
+        if _project_root(facts) in roots.get("project", [])
+        else []
+    )
+    facts = {**facts, "user_copy": bool(user_copies), "user_copy_paths": ", ".join(user_copies[:3])}
+    names = _rule_names(profile, facts, setup)
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in profile.get("rules", []):
-        expression = str(rule["when"])
-        if "install_root" in expression and (facts["install_root"] is None or names["native_root"]):
-            continue
-        if "catalog_" in expression and not facts["catalog_size"]:
-            continue
-        if expression != "always" and not _Rule.evaluate(expression, names):
+        if not _rule_fires(rule, names):
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "versions", "outcome", "confidence"):
@@ -790,5 +1008,6 @@ def evaluate_harnesses(
     config: dict[str, Any] | None = None,
 ) -> list[HarnessResult]:
     """Evaluate one skill (and the catalog it is installed in) against the selected profiles."""
-    facts = facts_for([skill_path])[skill_path]
-    return [evaluate_profile(profile, facts, config) for profile in load_profiles(harnesses, profiles_dir)]
+    profiles = load_profiles(harnesses, profiles_dir)
+    facts = facts_for([skill_path], profiles)[skill_path]
+    return [evaluate_profile(profile, facts, config) for profile in profiles]

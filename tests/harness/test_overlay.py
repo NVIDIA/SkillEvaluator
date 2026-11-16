@@ -840,6 +840,33 @@ def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
     assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
 
 
+def test_claude_ignored_field_values_are_noted(tmp_path: Path):
+    bad = _skill(tmp_path / "bad", extra="effort: extreme\nshell: zsh\nbackground: true\nmaxTurns: 5\n")
+    good = _skill(tmp_path / "good", extra="effort: XHigh\nshell: powershell\ncontext: fork\nbackground: true\n")
+    numeric = _skill(tmp_path / "numeric", extra="effort: 3\n")
+
+    finding = next(f for r in evaluate_harnesses(bad, "claude-code") for f in r.findings if f["id"] == "CC-FIELD-VALUE")
+    assert finding["effect"] == "advisory"
+    for part in ("effort 'extreme'", "shell 'zsh'", "background without context: fork", "maxTurns"):
+        assert part in finding["message"]
+    assert _status(bad)["claude-code"] == "loads"
+    assert "CC-FIELD-VALUE" not in _rule_ids(good, "claude-code")
+    assert "CC-FIELD-VALUE" not in _rule_ids(numeric, "claude-code")
+
+
+def test_claude_effort_accepts_whole_number_floats_only(tmp_path: Path):
+    whole = _skill(tmp_path / "whole", extra="effort: 3.0\n")
+    fraction = _skill(tmp_path / "fraction", extra="effort: 3.5\n")
+    flag = _skill(tmp_path / "flag", extra="effort: true\n")
+
+    assert "CC-FIELD-VALUE" not in _rule_ids(whole, "claude-code")
+    for skill, shown in ((fraction, "effort '3.5'"), (flag, "effort 'True'")):
+        finding = next(
+            f for r in evaluate_harnesses(skill, "claude-code") for f in r.findings if f["id"] == "CC-FIELD-VALUE"
+        )
+        assert shown in finding["message"]
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)

@@ -298,6 +298,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Claude Code `harness` results count `when_to_use` toward the 1,536-character
   listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
   and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
 - `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
   check, not only the first: a security scan with several SkillSpector findings
   shows them one per line, up to three, then "+N more in detailed reports".

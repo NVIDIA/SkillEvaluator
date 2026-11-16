@@ -313,6 +313,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - Fully budget-denied runs exit successfully and finish progress without an
   execution error, while retaining skipped arms and an incomplete quality verdict.
 - `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`

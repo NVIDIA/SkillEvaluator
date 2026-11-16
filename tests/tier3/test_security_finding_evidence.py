@@ -3762,6 +3762,52 @@ def test_a_scheme_name_after_a_config_separator_stays_masked_in_judge_evidence(c
     assert evidence.endswith(" <redacted> && rm -rf /srv/app")
 
 
+# A config set command that starts a line after a "\n" or "\t" escape, as in
+# judge evidence or a printf string, is read as one at a line start: the
+# escape's letter does not join its command word ("\nnpm" is no "nnpm").
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        pytest.param(
+            f'db\\nnpm config set _auth = token="{_API_TOKEN}" && ./deploy --password {_BASIC_PASSWORD}',
+            " && ./deploy --password <redacted>",
+            id="flag-after",
+        ),
+        pytest.param(
+            f'db\\nnpm config set _auth = token="{_API_TOKEN}" && login bob password {_BASIC_PASSWORD}',
+            " && login bob password <redacted>",
+            id="netrc-after",
+        ),
+        pytest.param(
+            f'db\\nnpm config set _auth = token="{_API_TOKEN}" && API_KEY={_BASIC_PASSWORD} ./x',
+            " && API_KEY=<redacted> ./x",
+            id="assignment-after",
+        ),
+        pytest.param(
+            f"echo done\\nnpm config set _auth = token=\"{_API_TOKEN}\""
+            f" && aws configure set aws_secret_access_key {_BASIC_PASSWORD}",
+            " && aws configure set aws_secret_access_key <redacted>",
+            id="aws-configure-after",
+        ),
+        pytest.param(f'db\\nnpm config set _auth = token="{_API_TOKEN}"', "db\\nnpm config set _auth", id="alone"),
+        pytest.param(
+            f'db\\tnpm set _auth = token="{_API_TOKEN}" login bob password {_BASIC_PASSWORD}',
+            " login bob password <redacted>",
+            id="tab-set-alias",
+        ),
+    ],
+)
+def test_a_config_set_command_after_an_escaped_line_break_keeps_its_value_masked(
+    copy: str, text: str, kept: str
+) -> None:
+    evidence = _mask_as(copy, text)
+
+    for secret in (_API_TOKEN, _BASIC_PASSWORD):
+        assert secret not in evidence
+    assert kept in evidence
+
+
 class _CountingPattern:
     """Count the searches of a compiled pattern."""
 

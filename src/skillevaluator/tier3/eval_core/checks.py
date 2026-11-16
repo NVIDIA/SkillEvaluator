@@ -3510,8 +3510,10 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # before this rule read those NAMEs, and the unquoted value of such a NAME
 # ends at ";", "|" or "&", as a "_" flag's does, so a "NAME=VALUE" right after
 # it is still masked ('npm config set -- password K1;TOKEN="..."').
+# The command may start a line after a "\n", "\r" or "\t" escape, whose letter
+# joins its first word for a word boundary ("db\nnpm config set ...").
 _FINDING_EVIDENCE_CONFIG_SET_COMMAND = (
-    r"\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
+    r"(?:\b|(?<=\\[nrt]))(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
 )
 _FINDING_EVIDENCE_CONFIG_SET_KEY = (
     r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"

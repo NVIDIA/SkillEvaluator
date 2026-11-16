@@ -339,8 +339,11 @@ def run_validation(
 
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
-    checks (``quality`` and ``lint`` are skipped for rules, workflows, and
-    plugins). For ``unknown`` (``--type auto`` found no supported artifact) the
+    checks (``quality`` and ``lint`` are skipped for rules and workflows). A
+    ``plugin`` target goes to the bounded plugin checks of
+    :func:`~skillevaluator.tier1.plugin_public.run_public_plugin_validation`,
+    which run ``quality`` and ``lint`` on each skill the plugin declares. For
+    ``unknown`` (``--type auto`` found no supported artifact) the
     manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
     applicable instead of run, and every result carries the
     ``tier1_applicability`` record, while the content scans still run. A target
@@ -446,7 +449,6 @@ def run_validation(
             use_llm=use_llm,
             verify_llm=llm_verify,
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
-            skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
             target_root=target_root,
         )

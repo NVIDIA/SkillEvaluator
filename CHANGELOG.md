@@ -228,6 +228,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
+
 - The starter walkthrough identifies the PASS message as the success summary;
   the runner's final line gives the report and editable-starter directory.
 

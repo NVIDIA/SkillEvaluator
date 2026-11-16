@@ -1041,6 +1041,17 @@ All notable changes to SkillEvaluator are documented in this file.
   rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
   4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
   the source line.
+- `validate path/to/SKILL.md` and `validate path/to/workflow-rules.mdc` now
+  validate the folder that holds the file, as passing the folder does, so a
+  file inside a symlinked folder is now refused unless `--no-dedup` is passed,
+  as that folder is. Before, Tier 1 and Tier 2 received the file itself:
+  `schema`, `version` and `quality` failed with `No skills found` for a skill,
+  and `schema` with `No workflow directories found` for a workflow; a run
+  narrowed with `--checks` could pass without scanning the skill's other files;
+  and a run from inside the skill wrote its reports into it. Tier 3 also
+  received a `workflow-rules.mdc` file itself; it now receives the workflow
+  folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
+  when the file is a symlink to a file with another name.
 
 ## 0.9.0 - 2026-11-13
 

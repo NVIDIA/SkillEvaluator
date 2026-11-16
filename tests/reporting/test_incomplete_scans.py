@@ -124,14 +124,17 @@ class TestIncompleteScanReporting:
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
 
-    def test_junit_marks_incomplete_as_skipped_not_passed(self):
+    def test_junit_marks_incomplete_as_error_not_passed(self):
         root = ET.fromstring(JUnitReporter().render_all([_incomplete_result()]))
         cases = list(root.iter("testcase"))
         assert cases
-        assert all(case.find("skipped") is not None for case in cases)
-        assert all(case.find("failure") is None for case in cases)
-        assert int(root.attrib["skipped"]) == int(root.attrib["tests"])
-        assert int(root.attrib["failures"]) == 0
+        assert all(case.find("skipped") is None for case in cases)
+        errors = [case.find("error") for case in cases if case.find("error") is not None]
+        assert len(errors) == 1
+        assert errors[0].attrib["type"] == "incomplete"
+        assert errors[0].attrib["message"] == "skillspector timed out after 300 seconds"
+        assert int(root.attrib["errors"]) == 1
+        assert int(root.attrib["skipped"]) == 0
 
 
 def test_status_handles_sanitized_finding_without_location():

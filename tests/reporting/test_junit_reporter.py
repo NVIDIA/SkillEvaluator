@@ -32,17 +32,18 @@ def _count_children(cases: list[ET.Element], tag: str) -> int:
 def _assert_counts_match(root: ET.Element) -> None:
     cases = _cases(root)
     failures = _count_children(cases, "failure")
+    errors = _count_children(cases, "error")
     skipped = _count_children(cases, "skipped")
     assert int(root.attrib["tests"]) == len(cases)
     assert int(root.attrib["failures"]) == failures
+    assert int(root.attrib["errors"]) == errors
     assert int(root.attrib["skipped"]) == skipped
-    assert int(root.attrib["errors"]) == 0
     for suite in root.findall("testsuite"):
         suite_cases = suite.findall("testcase")
         assert int(suite.attrib["tests"]) == len(suite_cases)
         assert int(suite.attrib["failures"]) == _count_children(suite_cases, "failure")
+        assert int(suite.attrib["errors"]) == _count_children(suite_cases, "error")
         assert int(suite.attrib["skipped"]) == _count_children(suite_cases, "skipped")
-        assert int(suite.attrib["errors"]) == 0
 
 
 def test_name_and_extension() -> None:
@@ -121,17 +122,19 @@ def test_skipped_and_incomplete_are_not_all_passed() -> None:
 
     incomplete_suite = suites["BANDIT"]
     incomplete_cases = incomplete_suite.findall("testcase")
-    assert any(case.find("skipped") is not None for case in incomplete_cases)
-    skipped_incomplete = next(case for case in incomplete_cases if case.find("skipped") is not None)
-    skipped_el = skipped_incomplete.find("skipped")
-    assert skipped_el is not None
-    assert "bandit scan did not complete" in (skipped_el.attrib.get("message") or "")
-    assert int(incomplete_suite.attrib["skipped"]) >= 1
-    assert int(root.attrib["skipped"]) >= 1
+    assert all(case.find("skipped") is None for case in incomplete_cases)
+    incomplete_case = next(case for case in incomplete_cases if case.attrib["name"] == "incomplete/bandit")
+    error_el = incomplete_case.find("error")
+    assert error_el is not None
+    assert error_el.attrib["type"] == "incomplete"
+    assert "scan did not complete" in (error_el.attrib.get("message") or "")
+    assert int(incomplete_suite.attrib["errors"]) == 1
+    assert int(root.attrib["errors"]) == 1
+    assert int(root.attrib["skipped"]) == 1
     passing = [
         case
         for case in _cases(root)
-        if case.find("failure") is None and case.find("skipped") is None
+        if case.find("failure") is None and case.find("error") is None and case.find("skipped") is None
     ]
     assert passing == []
     _assert_counts_match(root)
@@ -159,9 +162,56 @@ def test_incomplete_scan_does_not_skip_other_cases() -> None:
         assert cases[name].find("skipped") is None
         assert cases[name].find("failure") is None
     incomplete = cases["incomplete/skillspector"]
-    assert incomplete.find("skipped") is not None or incomplete.find("error") is not None
+    assert incomplete.find("skipped") is None
+    error = incomplete.find("error")
+    assert error is not None
+    assert error.attrib["type"] == "incomplete"
+    assert error.attrib["message"] == "skillspector timed out after 300 seconds"
     assert int(root.attrib["tests"]) == 5
     assert int(root.attrib["failures"]) == 0
+    assert int(root.attrib["errors"]) == 1
+    assert int(root.attrib["skipped"]) == 0
+    _assert_counts_match(root)
+
+
+def test_incomplete_scan_is_an_error_with_the_scanner_reason() -> None:
+    result = ValidationResult(validator_name="Security Scan", validator_description="Security")
+    result.mark_scan_incomplete("skillspector")
+    result.add_warning("skillspector not installed; install it to run the security scan")
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    (case,) = _cases(root)
+    assert case.attrib["name"] == "incomplete/skillspector"
+    assert case.find("skipped") is None
+    error = case.find("error")
+    assert error is not None
+    assert error.attrib["type"] == "incomplete"
+    assert error.attrib["message"] == "skillspector not installed; install it to run the security scan"
+    assert int(root.attrib["failures"]) + int(root.attrib["errors"]) >= 1
+    assert int(root.attrib["errors"]) == 1
+    assert int(root.attrib["skipped"]) == 0
+    _assert_counts_match(root)
+
+
+def test_incomplete_scan_without_reason_uses_generic_message() -> None:
+    result = ValidationResult(validator_name="Audit", validator_description="Dependency audit")
+    result.mark_scan_incomplete("pip-audit")
+    result.add_finding(
+        Finding(
+            category="DEPENDENCIES",
+            severity=Severity.INFO,
+            check_name="pip_audit",
+            message="Dependencies could not be audited",
+            file_path="requirements.txt",
+        )
+    )
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    error = next(case for case in _cases(root) if case.attrib["name"] == "incomplete/pip-audit").find("error")
+    assert error is not None
+    assert error.attrib["message"] == "pip-audit scan did not complete"
+    assert int(root.attrib["errors"]) == 1
+    assert int(root.attrib["skipped"]) == 0
     _assert_counts_match(root)
 
 

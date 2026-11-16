@@ -200,10 +200,10 @@ def _suite_system_out(result: ValidationResult) -> str:
     return _xml_text("\n".join(lines))
 
 
-def _set_counts(element: ET.Element, *, tests: int, failures: int, skipped: int) -> None:
+def _set_counts(element: ET.Element, *, tests: int, failures: int, errors: int, skipped: int) -> None:
     element.set("tests", str(tests))
     element.set("failures", str(failures))
-    element.set("errors", "0")
+    element.set("errors", str(errors))
     element.set("skipped", str(skipped))
     element.set("time", "0")
 
@@ -213,6 +213,7 @@ class _Case:
     name: str
     classname: str
     failed: bool = False
+    errored: bool = False
     skipped: bool = False
     message: str = ""
     body: str = ""
@@ -240,6 +241,15 @@ def _failure_reason(result: ValidationResult) -> str:
     if metadata.get("skip_reason") or result.warnings or (isinstance(provenance, dict) and provenance.get("message")):
         return _xml_text(get_skip_reason(result))
     return "failed"
+
+
+def _incomplete_reason(result: ValidationResult, tool: str) -> str:
+    """Return the first warning or error that names *tool*, else a generic incomplete-scan reason."""
+    needle = tool.casefold()
+    for text in (*result.warnings, *result.errors):
+        if isinstance(text, str) and needle in text.casefold():
+            return _xml_text(text)
+    return _xml_text(f"{tool} scan did not complete")
 
 
 def _cases_for_result(
@@ -302,36 +312,34 @@ def _cases_for_result(
             )
         )
     for tool in result.incomplete_scans:
-        reason = f"{tool} scan did not complete"
+        # An incomplete scan fails the run, so it is an <error>, never a <skipped> case.
+        reason = _incomplete_reason(result, tool)
         cases.append(
             _Case(
                 name=_unique_name(_xml_text(f"incomplete/{tool}"), used),
                 classname=classname,
-                skipped=True,
-                message=_xml_text(reason),
-                body=_xml_text(reason),
+                errored=True,
+                message=reason,
+                body=reason,
             )
         )
     gating = _gating(result)
     if gating is not None and not gating.get("blocking", True):
-        # An advisory result never fails the exit gate, so it fails no case here.
+        # An advisory result never fails the exit gate, so it fails or errors no case here.
         cases = [
             _Case(
                 name=case.name,
                 classname=case.classname,
-                skipped=case.skipped,
-                message=case.message if case.skipped else "",
-                body=case.body if case.skipped else "",
+                skipped=case.skipped or case.errored,
+                message=case.message if case.skipped or case.errored else "",
+                body=case.body if case.skipped or case.errored else "",
                 file_path=case.file_path,
                 line=case.line,
                 system_out=f"Advisory, does not gate: {case.body}" if case.failed else case.system_out,
             )
             for case in cases
         ]
-    if gating is not None:
-        needs_failure = not passes_required_gate(result) and not any(case.failed for case in cases)
-    else:
-        needs_failure = not passes_required_gate(result) and not any(case.failed or case.skipped for case in cases)
+    needs_failure = not passes_required_gate(result) and not any(case.failed or case.errored for case in cases)
     if needs_failure:
         message = _failure_reason(result)
         cases.append(
@@ -364,6 +372,13 @@ def _append_case(suite: ET.Element, case: _Case) -> None:
             skipped.set("message", case.message)
         if case.body:
             skipped.text = case.body
+    elif case.errored:
+        error = ET.SubElement(testcase, "error")
+        if case.message:
+            error.set("message", case.message)
+        error.set("type", "incomplete")
+        if case.body:
+            error.text = case.body
     elif case.failed:
         failure = ET.SubElement(testcase, "failure")
         if case.message:
@@ -406,14 +421,16 @@ class JUnitReporter(ReporterBase):
         testsuites.set("name", "SkillEvaluator")
         total_tests = 0
         total_failures = 0
+        total_errors = 0
         total_skipped = 0
         for result in results:
             cases = _cases_for_result(result, self.workspace_root, self.scan_root, self.target_identity)
             suite = ET.SubElement(testsuites, "testsuite")
             suite.set("name", _qualified(self.target_identity, _xml_text(result.validator_name) or "check"))
             failures = sum(1 for case in cases if case.failed)
+            errors = sum(1 for case in cases if case.errored)
             skipped = sum(1 for case in cases if case.skipped)
-            _set_counts(suite, tests=len(cases), failures=failures, skipped=skipped)
+            _set_counts(suite, tests=len(cases), failures=failures, errors=errors, skipped=skipped)
             for case in cases:
                 _append_case(suite, case)
             system_out_text = _suite_system_out(result)
@@ -422,8 +439,9 @@ class JUnitReporter(ReporterBase):
                 system_out.text = system_out_text
             total_tests += len(cases)
             total_failures += failures
+            total_errors += errors
             total_skipped += skipped
-        _set_counts(testsuites, tests=total_tests, failures=total_failures, skipped=total_skipped)
+        _set_counts(testsuites, tests=total_tests, failures=total_failures, errors=total_errors, skipped=total_skipped)
         ET.indent(testsuites, space="  ")
         body = ET.tostring(testsuites, encoding="unicode")
         if not body.endswith("\n"):

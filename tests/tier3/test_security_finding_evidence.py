@@ -2735,6 +2735,37 @@ def test_a_long_underscored_flag_word_does_not_read_each_name_in_it(
     assert counts[0] == counts[1]
 
 
+@pytest.mark.parametrize(
+    "make_text",
+    [
+        pytest.param(lambda n: "--db_password a" + "\\ -token=a" * n, id="flags-in-the-word"),
+        pytest.param(lambda n: "--api_key a" + "\\ --db-password=b" * n + " && ls", id="dashed-flags-in-the-word"),
+    ],
+)
+def test_a_flag_inside_a_long_underscored_flag_word_is_not_read(
+    make_text: Any, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A flag inside the unquoted word value of a "_" flag whose own value is
+    # the rest of that word ends where that value ends, so its value is not
+    # read, and a word with many flags in it stays close to linear.
+    real = eval_core_checks._AssignmentValues.flag_value_end
+    calls: list[int] = []
+
+    def counted(*args: Any, **kwargs: Any) -> Any:
+        calls.append(1)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(eval_core_checks._AssignmentValues, "flag_value_end", counted)
+    counts = []
+    for repeats in (100, 1000):
+        calls.clear()
+        evidence = eval_core_checks._mask_finding_evidence_credentials(make_text(repeats))
+        assert evidence.startswith(("--db_password <redacted>", "--api_key <redacted>"))
+        counts.append(len(calls))
+
+    assert counts[0] == counts[1]
+
+
 _HOOK_URL = "https://hooks.example.com/services/T0/B0/" + _API_TOKEN
 
 

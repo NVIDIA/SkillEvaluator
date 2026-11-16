@@ -4227,11 +4227,17 @@ def _mask_credential_flags(text: str) -> str:
     inner_flags: list[tuple[int, int, tuple[int, int]]] = []
     pos = 0
     underscored_value = False
+    # Whether the last masked value is a word that ends at whitespace, a
+    # quote, a backtick or the end of the text, not at ";", "|" or "&".
+    word_value = False
     for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
         inner = match.start() < pos
         if (
             # A flag inside the value of an earlier "-" flag is not read (see below).
             (inner and not underscored_value)
+            # Nor is one inside a "_" flag's word value whose own value is the
+            # rest of that word: it ends where that value does (see below).
+            or (inner and word_value and match.end() < pos and not text.startswith(("'", '"', "\\", "<"), match.end()))
             or not _is_credential_flag_name(match.group(1))
             # A name with "_" joined to its value by "=" ("--api_key=VALUE")
             # or followed by a separator ("--api_key = VALUE", "-access_token
@@ -4261,6 +4267,8 @@ def _mask_credential_flags(text: str) -> str:
         spans.append((start, end))
         pos = end
         underscored_value = underscored
+        quoted = _FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE.match(text, start) is not None
+        word_value = not quoted and text[end : end + 1] not in (";", "|", "&")
     if not spans:
         return text
     # A masked value may also cut an argv list element the argv rule reads

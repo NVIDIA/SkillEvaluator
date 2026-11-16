@@ -3504,7 +3504,12 @@
             <p style="color:var(--text-secondary);">No per-trial data available for this run.</p>
             {% endif %}
 
-            {% set t3_lift_trials = (tier3.trials or []) | selectattr('lift_scores', 'defined') | list %}
+            {% set t3_lift_trials = [] %}
+            {% for trial in tier3.trials or [] %}
+                {% if trial.lift_scores is defined and trial.get('diagnostic_only') is not sameas true and trial.get('scored') is not sameas false and (trial.agent or '(default)') not in tier3_diagnostic_comparison_agents %}
+                    {% set _ = t3_lift_trials.append(trial) %}
+                {% endif %}
+            {% endfor %}
             {% if t3_lift_trials %}
             <details class="t3-details" id="tier3-lift-per-case" open>
                 <summary>Lift per Eval Case</summary>

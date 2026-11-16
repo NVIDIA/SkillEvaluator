@@ -3580,6 +3580,23 @@ class HTMLReporter(ReporterBase):
                 "summary": {},
             }
         tier3_telemetry = build_telemetry_view(tier3_data)
+        # Failed-arm trials remain diagnostic evidence, including scored rewards.
+        # Determine comparison eligibility before preview bounds can omit those rows.
+        tier3_diagnostic_comparison_agents = {
+            trial.get("agent") or "(default)"
+            for trial in _dict_list((tier3_data or {}).get("trials"))
+            if trial.get("diagnostic_only") is True
+        }
+        tier3_diagnostic_comparison_agents.update(
+            name
+            for name, agent in ((tier3_data or {}).get("agents") or {}).items()
+            if isinstance(agent, dict)
+            if any(
+                trial.get("diagnostic_only") is True
+                for key in ("trials", "trials_baseline")
+                for trial in _dict_list(agent.get(key))
+            )
+        )
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
         tier3_metric_comparison = _tier3_metric_comparison_view(tier3_preview)
         insights_view = build_insights_view(tier3_preview or {})
@@ -3954,6 +3971,7 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_diagnostic_comparison_agents=tier3_diagnostic_comparison_agents,
             tier3_chart_data=_tier3_chart_projection(tier3_preview),
             insights_view=insights_view,
             dataset_diagnostics_view=build_dataset_diagnostics_view((tier3_preview or {}).get("case_diagnostics")),

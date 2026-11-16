@@ -268,6 +268,8 @@ All notable changes to SkillEvaluator are documented in this file.
   gives saved incomplete runs concise coverage and actions, with full errors
   in Diagnostics. Newly saved failed-run conclusions and recommendations
   keep their existing raw error text.
+  Agents with diagnostic-only trial evidence are excluded from lift panels;
+  their trial rows and canonical exports remain available.
   Overview links to complete Insights instead of repeating its cards; passive
   evidence and routine run provenance stay folded. Recorded native token and
   latency breakdowns are available under Trials without rerunning evaluations.

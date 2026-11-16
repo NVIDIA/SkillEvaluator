@@ -365,6 +365,8 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+- The README badge row adds GitHub **Stars** and **Forks** badges that show the
+  live counts.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

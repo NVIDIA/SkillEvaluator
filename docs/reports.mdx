@@ -1652,6 +1652,17 @@ HTML still displays the failed execution as a failure. Its stricter display
 does not rewrite the retained payload; completed-agent details describe that
 agent's evidence.
 
+A failed run whose budget left planned attempts not run is the exception: the
+JSON report's `tier3` object and **Download Full Tier 3 Payload** record
+`incomplete`. The **Tier 3 quality** status of every HTML report and the
+command status of the standalone Tier 3 `report.html` read **Incomplete**, as
+does the Overview's **Live quality** line when the Overview shows it. The Tier 3
+tile and the command status of a `validate` report read as for any other failed
+run: the tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+is advisory. Both payloads leave `summary.overall_lift` null even when the best
+agent has a lift, so the **Skill Lift** card reads N/A and **Run details &
+provenance** has no **Best-agent lift** line.
+
 The evidence is complete when the agent succeeded with no execution errors, has
 a with-skill score from 0 to 1, and scored every expected attempt of every case
 in each arm. `tier3-benchmark.md` shows lift only when the baseline arm also

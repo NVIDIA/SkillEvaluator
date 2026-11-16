@@ -323,6 +323,11 @@ All notable changes to SkillEvaluator are documented in this file.
   (it passed before) and checks every skill's report in a folder run.
 - The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
   repository's own workflows do.
+- The CI guide's troubleshooting note for an `incomplete` status no longer
+  says SkillEvaluator never installs the scanners. The first Tier 1 run
+  downloads pinned SkillSpector and Gitleaks releases when they are missing, so
+  the note now points to network access, and it says a missing Semgrep counts
+  only when `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
 
 - "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
   install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
@@ -382,6 +387,21 @@ All notable changes to SkillEvaluator are documented in this file.
   frontmatter fields" and "Reads `SKILL.md` files" keep their `SKILL.md`, and
   "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
   request".
+
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results now covers a failed Tier 3 run whose budget left planned
+  attempts not run. Its JSON `tier3` object and full Tier 3 download record
+  `incomplete` and leave `summary.overall_lift` null, even when the best agent
+  has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
+  Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+  is advisory. The page said only that HTML displays a failed run as
+  **Changes required** and that both payloads keep the best agent's lift.
 
 ### Fixed
 
@@ -924,10 +944,14 @@ All notable changes to SkillEvaluator are documented in this file.
   folder or plugin, still records the SkillSpector scan as incomplete
   (`incomplete_scans` in the JSON report, and publication eligibility
   `Incomplete`), with an error that names only that gap. The check itself is
-  reported as `FAIL`, not `INCOMPLETE`, because the Critical is a confirmed
-  failure. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
+  reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate
+  failure are a confirmed failure, also when a `--policy` override lowers the
+  Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
   a `static_parse_limit` row on the manifest, so that scan is recorded as
-  incomplete in the same way.
+  incomplete in the same way. In the terminal Tier 1 summary, "what to fix"
+  for a check that failed beside an incomplete scan also lists its other gate
+  failures, after its first one and any unresolved file reference, so it
+  shows the hook gate failure, not only the error for the gap.
 
 - `validate` no longer repeats its header box in short terminal windows or
   when a log warning prints mid-run. Only the tier that is still running is
@@ -1134,6 +1158,48 @@ All notable changes to SkillEvaluator are documented in this file.
   received a `workflow-rules.mdc` file itself; it now receives the workflow
   folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
   when the file is a symlink to a file with another name.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. So do such a label and `$` on a line with a space or shell delimiter
+  between two of the same quote or after a backslash, as written or decoded,
+  such as `setup' 'helper.sh` or `setup\ h*.sh`, where a shell may join words
+  that the check reads apart. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
+
+- With `--progress rich` when standard error is not a terminal, such as when
+  it is redirected to a file or piped to another program, the Tier 3 progress
+  table now ends its last line. Before, the next output, such as a log line,
+  the shell prompt, or the line saying that progress stopped after a drawing
+  error, was printed on the same line as the table's bottom border. Output to
+  a terminal is unchanged.
+
+- The Tier 3 "How to improve" list now finds the failed attempts of a case
+  whose trial directory names do not start with its case ID: a native or NeMo
+  Gym task whose `[metadata] entry_id` differs from its directory, or a case
+  ID longer than the 32 characters Harbor keeps in a trial name. Before, such a
+  case's run error said only "1 attempt(s) never produced a score", with no
+  cause and no evidence file, and a failed judge got the generic run error
+  advice instead of the judge remedy. Each attempt's case is now the
+  `entry_id` the collector recorded in its `failure.json` or `reward.json`,
+  as for token usage. The case rows rebuilt for a failed arm use the same
+  case instead of the task directory, and the live case grid during a run
+  counts a long-named case's attempts in its own row instead of a second row
+  with the cut name.
+
+- With `--progress rich` and `TTY_INTERACTIVE=1` when standard error is not a
+  terminal, the Tier 3 progress table is now drawn once, when the run ends, as
+  it is without `TTY_INTERACTIVE`. Before, a copy of the table was also
+  printed under each plan line that changed during the run, and the next plan
+  line or table started on the same line as that copy's bottom border. Output
+  to a terminal is unchanged.
 
 ## 0.9.0 - 2026-11-13
 

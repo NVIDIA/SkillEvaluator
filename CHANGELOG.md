@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- The Tier 3 report data and JSON report record which execution backend ran the
+  evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
+  `environment`.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level

@@ -30,6 +30,7 @@ from typing import Any
 
 from skillevaluator.tier3.attempt_verdict import attempt_verdict, scored_goal_accuracy
 from skillevaluator.tier3.baseline_store import BASELINE_ANNOTATION_KEYS, load_baseline_rows, measured_condition_usage
+from skillevaluator.tier3.declarative_coverage import agent_declarative_checks
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts, get_skill_tool_calls
 from skillevaluator.tier3.eval_core.checks import check_negative_case
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
@@ -6819,6 +6820,7 @@ def _condition_execution_summary(
     pass_threshold: float = 0.50,
     attempt_slots: dict[str, dict[str, Any]] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
+    expected_attempt_ordinals_by_case: Mapping[str, set[int]] | None = None,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
 
@@ -6957,8 +6959,14 @@ def _condition_execution_summary(
         if required > n_attempts:
             errors.append(f"Scored case {case_id!r} has an attempt ordinal above configured maximum {n_attempts}")
 
+        expected_ordinals = set(range(1, required + 1))
+        if expected_attempt_ordinals_by_case is not None and case_id in expected_attempt_ordinals_by_case:
+            expected_ordinals = set(expected_attempt_ordinals_by_case[case_id])
+            if stop_on_pass and first_pass is not None:
+                expected_ordinals = {ordinal for ordinal in expected_ordinals if ordinal <= required}
+            required = len(expected_ordinals)
+
         if all_explicit:
-            expected_ordinals = set(range(1, required + 1))
             actual_ordinals = set(explicit + recovered_ordinals)
             missing_ordinals = sorted(expected_ordinals - actual_ordinals)
             if attempt_slots is not None:
@@ -6969,12 +6977,13 @@ def _condition_execution_summary(
                 }
             return required, bool(missing_ordinals), bool(actual_ordinals - expected_ordinals)
         if attempt_slots is not None:
-            # Stop-on-pass runs each attempt as its own labelled job, so a case
-            # with nothing scored owes every ordinal through the maximum.
+            # Labelled jobs with nothing scored still owe every admitted ordinal.
             attempt_slots[case_id] = {
                 "required": required,
                 "missing": max(0, required - len(attempts)),
-                "missing_ordinals": list(range(1, required + 1)) if stop_on_pass and not attempts else None,
+                "missing_ordinals": sorted(expected_ordinals)
+                if not attempts and (stop_on_pass or (expected_attempt_ordinals_by_case or {}).get(case_id) is not None)
+                else None,
             }
         return required, len(attempts) < required, len(attempts) > required
 
@@ -7516,17 +7525,24 @@ def collect_harbor_results(
     def budget_expectations(
         agent: str,
         arm: str,
-    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None]:
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, dict[str, set[int]] | None, bool]:
         matching = [
-            item for item in budget_not_run if item.get("agent") == agent and item.get("arm") in {arm, f"{arm}_skill"}
+            item
+            for item in budget_not_run
+            if item.get("agent") == agent
+            and item.get("arm") in {arm, f"{arm}_skill"}
+            and item.get("reason") in {None, "budget_exhausted"}
         ]
         if not matching:
-            return expected_trials, expected_case_ids, expected_cases, None
+            return expected_trials, expected_case_ids, expected_cases, None, None, False
         attempts_by_case: dict[str, int] = {}
+        omitted_ordinals: dict[str, set[int]] = {}
         for item in matching:
             selector = str(item.get("case_id") or "")
             case_id = (case_id_by_task_selector or {}).get(selector, selector)
             attempts_by_case[case_id] = attempts_by_case.get(case_id, 0) + 1
+            if type(attempt := item.get("attempt")) is int and 1 <= attempt <= n_attempts:
+                omitted_ordinals.setdefault(case_id, set()).add(attempt)
         active_ids = [case_id for case_id in (expected_case_ids or []) if attempts_by_case.get(case_id, 0) < n_attempts]
         if expected_case_ids:
             active_case_ids: list[str] | None = active_ids
@@ -7539,8 +7555,34 @@ def collect_harbor_results(
             attempt_counts = {
                 case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
             }
+        attempt_ordinals = {
+            case_id: set(range(1, n_attempts + 1)) - omitted_ordinals[case_id]
+            for case_id, count in attempts_by_case.items()
+            if case_id in attempt_counts and len(omitted_ordinals.get(case_id, set())) == count
+        }
         actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
-        return actual_trials, active_case_ids, active_cases, attempt_counts
+        denied_slots = {
+            (
+                (case_id_by_task_selector or {}).get(str(item.get("case_id") or ""), str(item.get("case_id") or "")),
+                attempt,
+            )
+            for item in matching
+            if item.get("reason") == "budget_exhausted"
+            and type(attempt := item.get("attempt")) is int
+            and 1 <= attempt <= n_attempts
+        }
+        denied_cases = {
+            case_id
+            for case_id, _ in denied_slots
+            if case_id and all((case_id, attempt) in denied_slots for attempt in range(1, n_attempts + 1))
+        }
+        if expected_case_ids:
+            budget_denied = set(expected_case_ids) <= denied_cases
+        elif expected_cases is not None:
+            budget_denied = expected_cases > 0 and len(denied_cases) == expected_cases
+        else:
+            budget_denied = bool(expected_trials and len(denied_cases) * n_attempts == expected_trials)
+        return actual_trials, active_case_ids, active_cases, attempt_counts, attempt_ordinals, budget_denied
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -7576,12 +7618,22 @@ def collect_harbor_results(
     tolerance_rejected: dict[str, str] = {}
 
     for agent in agents:
-        with_expected_trials, with_expected_case_ids, with_expected_cases, with_expected_attempts = budget_expectations(
-            agent, "with"
-        )
-        without_expected_trials, without_expected_case_ids, without_expected_cases, without_expected_attempts = (
-            budget_expectations(agent, "without")
-        )
+        (
+            with_expected_trials,
+            with_expected_case_ids,
+            with_expected_cases,
+            with_expected_attempts,
+            with_expected_ordinals,
+            with_budget_denied,
+        ) = budget_expectations(agent, "with")
+        (
+            without_expected_trials,
+            without_expected_case_ids,
+            without_expected_cases,
+            without_expected_attempts,
+            without_expected_ordinals,
+            without_budget_denied,
+        ) = budget_expectations(agent, "without")
         if skip_baseline:
             agent_expected_case_ids = with_expected_case_ids
         elif with_expected_case_ids is not None and without_expected_case_ids is not None:
@@ -7597,7 +7649,7 @@ def collect_harbor_results(
 
         with_job_name = f"{skill_name}-{agent}-with"
         # A skipped arm never adopts a stale job left in a reused jobs directory.
-        with_job_dir = None if skip_with_skill else _find_job_dir(jobs_dir, with_job_name)
+        with_job_dir = None if skip_with_skill or with_budget_denied else _find_job_dir(jobs_dir, with_job_name)
 
         with_collected_rewards: list[dict[str, Any]] = []
         with_rewards: list[dict[str, Any]] = []
@@ -7690,6 +7742,7 @@ def collect_harbor_results(
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=with_expected_attempts,
+                expected_attempt_ordinals_by_case=with_expected_ordinals,
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
@@ -7761,7 +7814,7 @@ def collect_harbor_results(
                 len(with_logical_rewards),
                 with_scores,
             )
-        elif not skip_with_skill:
+        elif not skip_with_skill and not with_budget_denied:
             with_job_failure = f"No Harbor job found for {with_job_name}"
             logger.warning("No Harbor job found for %s (with-skill)", with_job_name)
             prefix = f"{agent} with-skill Harbor run failed: "
@@ -7779,10 +7832,12 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=with_job_failure,
                 runtime_failures=with_runtime_failures,
-                skipped=skip_with_skill,
+                skipped=skip_with_skill or with_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
             )
+        if with_budget_denied:
+            with_execution["skip_reason"] = "budget_exhausted"
         # A skipped with-skill arm still writes its summary: report loading keys
         # agent presence on it, and its "skipped" status marks a baseline-only run.
         # A with-skill job that never started records the requested grading
@@ -7840,7 +7895,7 @@ def collect_harbor_results(
         without_job_dir: Path | None = None
         without_slots: dict[str, dict[str, Any]] = {}
         without_identity: dict[str, Any] = {}
-        if not skip_baseline:
+        if not skip_baseline and not without_budget_denied:
             without_job_name = f"{skill_name}-{agent}-without"
             without_job_dir = (
                 reused_baseline_dir / agent / "without-skill"
@@ -7938,6 +7993,7 @@ def collect_harbor_results(
                     pass_threshold=pass_threshold,
                     attempt_slots=without_slots if tolerance_on else None,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                 )
                 if without_policy == "mixed-score-policies":
                     _fail_execution_with_error(
@@ -8041,11 +8097,14 @@ def collect_harbor_results(
                 n_attempts=n_attempts,
                 job_failure=without_job_failure,
                 runtime_failures=without_runtime_failures,
-                skipped=skip_baseline,
+                skipped=skip_baseline or without_budget_denied,
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=without_expected_attempts,
+                expected_attempt_ordinals_by_case=without_expected_ordinals,
             )
+        if without_budget_denied:
+            without_execution["skip_reason"] = "budget_exhausted"
         if not skip_baseline and without_job_dir is None:
             summary_dir = agent_dir / "without-skill"
             summary_dir.mkdir(parents=True, exist_ok=True)
@@ -8346,6 +8405,9 @@ def collect_harbor_results(
             },
             "output_dir": str(agent_dir.resolve()),
         }
+        coverage = agent_declarative_checks(with_collected_rewards, without_collected_rewards)
+        if coverage:
+            all_results["agents"][agent]["declarative_checks"] = coverage
         if (
             tolerance_on
             and without_job_dir is not None
@@ -8376,6 +8438,7 @@ def collect_harbor_results(
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                 )
                 tolerance_failures, tolerance_code = _baseline_timeout_failures(
                     job_dir=without_job_dir,

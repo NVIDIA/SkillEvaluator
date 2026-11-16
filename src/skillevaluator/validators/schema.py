@@ -772,11 +772,13 @@ class SchemaValidator(ValidatorBase):
                 break
 
         # Same folders the harness check skips: evals/ and versions/ are scanned like any other folder.
+        # Match listed names: on a case-insensitive filesystem a lookup by name answers for both
+        # spellings, which reported one nested manifest twice.
         nested = sorted(
             path
-            for name in SKILL_MANIFEST_VARIANTS
-            for path in skill_path.rglob(name)
-            if path.parent != skill_path
+            for path in skill_path.rglob("*")
+            if path.name in SKILL_MANIFEST_VARIANTS
+            and path.parent != skill_path
             and not any(part in SKILL_NOT_SHIPPED_DIRS for part in path.relative_to(skill_path).parts)
         )
         for path in nested:

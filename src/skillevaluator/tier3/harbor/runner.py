@@ -25,7 +25,7 @@ import threading
 import time
 import tomllib
 import unicodedata
-from collections.abc import Iterable, Iterator, Mapping, Sequence
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, as_completed, wait
 from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field, replace
@@ -76,6 +76,7 @@ from skillevaluator.tier3.baseline_store import (
     select_baseline,
 )
 from skillevaluator.tier3.case_ids import validate_case_ids
+from skillevaluator.tier3.declarative_coverage import compact_declarative_checks
 from skillevaluator.tier3.eval_core.llm_judge import JUDGE_REASONING_EFFORT
 from skillevaluator.tier3.evals_config import (
     _GKE_INFRASTRUCTURE_KWARGS,
@@ -586,6 +587,18 @@ def _compact_agent_result(
         compact["execution_error_details_truncated"] = len(compact["execution_errors"]) < exact_total
         omitted.append("execution_errors")
 
+    raw_coverage = compact.get("declarative_checks")
+    if isinstance(raw_coverage, dict):
+        # Cap the per-check rows; every count and per-reward denominator stays exact.
+        compact_coverage, dropped_checks = compact_declarative_checks(raw_coverage)
+        if dropped_checks:
+            compact["declarative_checks"] = compact_coverage
+            omitted.extend(
+                f"declarative_checks.{arm}.results"
+                for arm, data in compact_coverage.items()
+                if data is not raw_coverage[arm]
+            )
+
     if omitted:
         compact["detail_projection"] = {
             "artifacts": sorted(references),
@@ -878,6 +891,30 @@ class _HarborRunCancelledError(BaseException):
     """
 
 
+class _HarborCancellationEvent(threading.Event):
+    def __init__(self) -> None:
+        super().__init__()
+        self._callbacks: list[Callable[[], None]] = []
+        self._callback_lock = threading.Lock()
+
+    def add_callback(self, callback: Callable[[], None]) -> None:
+        with self._callback_lock:
+            self._callbacks.append(callback)
+        if self.is_set():
+            callback()
+
+    def remove_callback(self, callback: Callable[[], None]) -> None:
+        with self._callback_lock:
+            self._callbacks.remove(callback)
+
+    def set(self) -> None:
+        super().set()
+        with self._callback_lock:
+            callbacks = tuple(self._callbacks)
+        for callback in callbacks:
+            callback()
+
+
 @dataclass(frozen=True, eq=False)
 class _HarborRunCancellation:
     """Cross-thread stop request for the Harbor jobs of an interrupted run.
@@ -887,7 +924,7 @@ class _HarborRunCancellation:
     setting ``forced`` (a second Ctrl+C) ends that grace period early.
     """
 
-    requested: threading.Event = field(default_factory=threading.Event)
+    requested: _HarborCancellationEvent = field(default_factory=_HarborCancellationEvent)
     forced: threading.Event = field(default_factory=threading.Event)
 
     def raise_if_requested(self) -> None:
@@ -1421,9 +1458,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # wrappers check a minimum version for the selected model.
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
-# Harbor would otherwise install ``opencode-ai@latest``. CI's managed local
-# bootstrap installs this same release, so every CI mode shares one pin.
-OPENCODE_VERSION = "1.19.5"
+OPENCODE_VERSION = PINNED_RUNTIME_VERSIONS["opencode"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -4769,10 +4804,16 @@ def _run_budgeted_variants(
         admissions = [
             {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in jobs
         ]
-        if not budget.admit_many(admissions):
-            return False
+        with ExitStack() as reservations:
+            if not budget.admit_many(admissions):
+                return False
+            for admission in admissions:
+                reservations.callback(budget.release, admission)
+            return run_admitted(task_index, task_name, attempt, admissions)
+
+    def run_admitted(task_index: int, task_name: str, attempt: int, admissions: list[dict[str, Any]]) -> bool:
         passed = True
-        for variant, dataset, job_import_path in jobs:
+        for admission, (variant, dataset, job_import_path) in zip(admissions, jobs, strict=True):
             if cancellation is not None:
                 cancellation.raise_if_requested()
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
@@ -4798,7 +4839,7 @@ def _run_budgeted_variants(
                 cancellation=cancellation,
             )
             job_dir = jobs_dir / job_name
-            budget.record_usage(_budget_usage(job_dir), model=model)
+            budget.record_usage(_budget_usage(job_dir), model=model, attempt=admission)
             with result_lock:
                 attempt_job_dirs[variant][(task_index, attempt)] = job_dir
                 if ok:
@@ -4824,18 +4865,24 @@ def _run_budgeted_variants(
                 break
 
     worker_count = max(1, min(n_concurrent, len(task_names) or 1))
-    with ThreadPoolExecutor(max_workers=worker_count) as executor:
-        if stop_on_pass:
-            futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
-        else:
-            futures = [
-                executor.submit(run_unit, index, task_name, attempt)
-                for index, task_name in enumerate(task_names)
-                for attempt in range(1, n_attempts + 1)
-            ]
-        for future in as_completed(futures):
-            future.result()
+    with ExitStack() as callbacks:
+        if cancellation is not None:
+            cancellation.requested.add_callback(budget.cancel)
+            callbacks.callback(cancellation.requested.remove_callback, budget.cancel)
+        with ThreadPoolExecutor(max_workers=worker_count) as executor:
+            if stop_on_pass:
+                futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
+            else:
+                futures = [
+                    executor.submit(run_unit, index, task_name, attempt)
+                    for index, task_name in enumerate(task_names)
+                    for attempt in range(1, n_attempts + 1)
+                ]
+            for future in as_completed(futures):
+                future.result()
     for variant, _, _ in jobs:
+        if not attempt_job_dirs[variant]:
+            continue
         _merge_attempt_jobs(
             [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
             jobs_dir / f"{skill_name}-{agent}-{variant}",
@@ -5313,7 +5360,11 @@ class _RunProgressLifecycle:
         else:
             errors = [str(raw_errors)] if raw_errors else []
         warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
-        failed = bool(errors) or result.get("execution_status") not in {None, "succeeded"}
+        from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+        status = result.get("execution_status")
+        budget_denied = status == "skipped" and budget_fully_denied(result.get("budget"))
+        failed = bool(errors) or (status not in {None, "succeeded"} and not budget_denied)
         state = "failed" if failed else "degraded" if warnings else "complete"
         detail = errors[0] if errors else str(warnings[0]) if warnings else "Tier 3 evaluation finished"
         for stage in tuple(self._active_stages):
@@ -6709,6 +6760,7 @@ def _run_harbor_eval_impl(
         _emit_run_finished("failed", "result collection failed")
         raise
     reporter.emit(ProgressEvent(stage="collection", state="complete", detail="Harbor results collected"))
+    run_config["budget"] = budget.metadata()
     identity["score_policy"] = results.get("score_policy", identity["score_policy"])
     results.update(
         {
@@ -6731,7 +6783,7 @@ def _run_harbor_eval_impl(
             "dataset_digest_algorithm": dataset_truth["dataset_digest_algorithm"],
             "identity_dataset_digest": identity_digest,
             "baseline_task_tree_digest": task_tree_digest,
-            "budget": budget.metadata(),
+            "budget": run_config["budget"],
             "dataset_provenance": dataset_provenance,
             "run_config": run_config,
             "partial": bool(budget.not_run),
@@ -6740,6 +6792,7 @@ def _run_harbor_eval_impl(
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,
+        _evaluation_mode,
     )
     from skillevaluator.evaluation.tier3_report import (
         _pick_best_agent as _pick_canonical_best_agent,
@@ -6769,18 +6822,7 @@ def _run_harbor_eval_impl(
         if agent_results:
             best_agent = _pick_best_agent(agent_results)
             if best_agent not in agent_results:
-                conditions = [
-                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
-                    if isinstance(agent, dict)
-                    and isinstance(agent.get("conditions"), dict)
-                    and isinstance(agent["conditions"].get("with_skill"), dict)
-                    else None
-                    for agent in agent_results.values()
-                ]
-                baseline_only = bool(agent_results) and (
-                    skip_with_skill
-                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
-                )
+                baseline_only = _evaluation_mode(agent_results) == "baseline_only"
                 # Canonical agent payloads carry the baseline-only score as "baseline".
                 score_field = "baseline" if baseline_only else "with_skill"
                 canonical_agents = {
@@ -6802,6 +6844,11 @@ def _run_harbor_eval_impl(
             if best_agent in agent_results:
                 results["dataset_sufficiency"] = agent_results[best_agent]["dataset_sufficiency"]
     selected_metrics = tuple(results.get("metrics", DEFAULT_METRICS))
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    if reason := budget_incomplete_reason(results["budget"]):
+        results["verdict"] = "incomplete"
+        results["summary"] = {"verdict": "incomplete", "verdict_reason": reason}
     collected_attempt_policy = results.get("attempt_policy")
     attempt_policy = dict(collected_attempt_policy) if isinstance(collected_attempt_policy, dict) else {}
     selected_policy = results.get("score_policy") or attempt_policy.get("score_policy")

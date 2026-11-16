@@ -406,6 +406,22 @@ class TestQualityScoreValidator:
         result = QualityScoreValidator(min_score=0).validate(skill_dir)
 
         assert any("metadata.author" in finding.message for finding in result.findings)
+        assert all("version" not in finding.message.lower() for finding in result.findings)
+
+    @pytest.mark.parametrize(
+        "metadata",
+        ['{version: "1.0.0", author: Test User, tags: [testing]}', "{author: Test User, tags: [testing]}"],
+        ids=["metadata-version", "no-version"],
+    )
+    def test_optional_version_costs_no_correctness_points(self, tmp_path, metadata):
+        """A skill with an optional ``metadata.version``, or with none, is not told to add a root ``version``."""
+        skill_dir = _write_metadata_skill(tmp_path, metadata)
+
+        result = QualityScoreValidator(min_score=0).validate(skill_dir)
+
+        correctness = result.metadata["quality_scores"]["dimensions"]["correctness"]
+        assert all("version" not in issue["message"].lower() for issue in correctness["issues"])
+        assert all("version" not in finding.message.lower() for finding in result.findings)
 
     @pytest.mark.parametrize("metadata", ["[author, tags]", '"author: Test User"', "true", "1.5", "2026-01-01"])
     def test_non_mapping_metadata_counts_as_missing_fields(self, tmp_path, metadata):

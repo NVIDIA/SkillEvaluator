@@ -154,7 +154,7 @@ errors, such as an option the workflow does not accept, exit `2`.
 | `--quality-config PATH` | packaged `quality-default.yaml` | YAML file that adjusts the quality check's expected headings and error-handling rules; settings it omits keep their packaged values. See [Tier 1: Validation](/skills/skillevaluator/tier1-validation#the-checks). |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check. See [PII waivers](/skills/skillevaluator/tier1-validation#pii-waivers). |
 | `--profile TEXT` | `SKILLEVALUATOR_PROFILE`, then `default` | Validation policy: `default` or `registry`. `external` is a compatibility alias for `default`. |
-| `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](tier1-validation.mdx#validation-profiles-and-policies). |
+| `--policy FILE` | none | Explicit policy overlay, including reviewed ownership-contact severity. See [Tier 1 policies](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies). |
 | `--previous-version TEXT` | `SKILLEVALUATOR_PREVIOUS_VERSION`, else unset | Previous version for version checks |
 | `--skillspector-baseline FILE` | unset | Audited SkillSpector suppression baseline; never discovered from the skill. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines). |
 
@@ -341,8 +341,8 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
 | `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
-| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
-| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
+| `--max-cost-usd FLOAT` | unset | Agent inference accounting admission limit, not billed spend or a hard currency ceiling; requires a price book. Judge, setup, container, backend, and infrastructure charges are excluded. |
+| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
@@ -632,8 +632,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--max-agent-tokens INTEGER` | unset | Maximum measured agent-model tokens. |
 | `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
-| `--max-cost-usd FLOAT` | unset | Maximum agent model spend; requires a price book and excludes judge spend, setup, and container time. |
-| `--price-file FILE` | unset | JSON price book keyed by exact resolved model identifier; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
+| `--max-cost-usd FLOAT` | unset | Agent inference accounting admission limit, not billed spend or a hard currency ceiling; requires a price book. Judge, setup, container, backend, and infrastructure charges are excluded. |
+| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -663,8 +663,8 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 Without a `--model`/`--agent-model` override, agent execution uses
 `gpt-6.1-sol` for OpenAI (OpenCode: `openai/gpt-5.6-sol` unless
 `SKILL_EVAL_LLM_MODEL` is set), `claude-opus-5-5` for Anthropic, and
-`nvidia/nemotron-3-super-120b-a12b` for NVIDIA Build. OpenCode displays the
-last value as `nvidia/nvidia/nemotron-3-super-120b-a12b` because its adapter
+`nvidia/nemotron-3.5-lightning-30b-a3b` for NVIDIA Build. OpenCode displays the
+last value as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its adapter
 namespace precedes the NVIDIA catalog ID.
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults. The exception is `--results-dir`, which resolves independently of `evals/config.yml`.

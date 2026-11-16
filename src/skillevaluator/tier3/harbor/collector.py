@@ -4469,6 +4469,8 @@ def _mark_reward_collection_failure(reward: dict[str, Any], reason: str) -> None
 
 def _partition_scoreable_rewards(
     rewards: list[dict[str, Any]],
+    *,
+    integrity_errors: list[str] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, str]]]:
     """Separate complete finite rewards from diagnostic-only reward artifacts."""
     scoreable: list[dict[str, Any]] = []
@@ -4485,6 +4487,13 @@ def _partition_scoreable_rewards(
         if not evaluation_failed and overall_score(reward) is not None:
             scoreable.append(reward)
             continue
+        # Judge/service failures are missing evaluations, while collector-invalid
+        # identities, structures and numbers make the reward evidence untrustworthy.
+        evaluation_errors = reward.get("evaluation_errors")
+        if integrity_errors is not None and (
+            not evaluation_failed or (isinstance(evaluation_errors, dict) and "collector" in evaluation_errors)
+        ):
+            integrity_errors.append(_unscoreable_reward_reason(reward))
         raw_trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
         if raw_trial in failed_trials:
             continue
@@ -4499,6 +4508,8 @@ def _partition_scoreable_rewards(
 
     custom_names = {name for reward in scoreable for name in extract_custom_metrics(reward)}
     if len(custom_names) > MAX_CUSTOM_METRICS:
+        if integrity_errors is not None:
+            integrity_errors.append(UNSAFE_CUSTOM_METRIC_UNION_REASON)
         for reward in scoreable:
             _mark_reward_collection_failure(reward, UNSAFE_CUSTOM_METRIC_UNION_REASON)
             raw_trial = str(reward.get("_trial_name") or reward.get("_trial_root_name") or "unknown trial")
@@ -5084,6 +5095,34 @@ def _public_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if not key.startswith("_")}
 
 
+def _partial_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **summary,
+        "failed_cases": summary["_resolved_failed_cases"],
+        "unresolved_cases": summary["total_cases"] - summary["passed_cases"] - summary["_resolved_failed_cases"],
+        "rate": None,
+        "rate_interval": None,
+    }
+
+
+def _unscored_attempts_before_first_pass(
+    first_pass: int,
+    scored_ordinals: set[int],
+    recovered_ordinals: set[int],
+    admitted_ordinals: set[int] | None,
+) -> int:
+    """Count attempt slots up to the first pass that produced no scored result.
+
+    Stop-on-pass skips only the attempts after the first pass. A slot at or
+    before it ran (or was owed) and has no score, so it failed rather than
+    being skipped. Slots the budget never admitted are not owed.
+    """
+    covered = scored_ordinals | recovered_ordinals
+    if admitted_ordinals is not None:
+        return sum(1 for ordinal in admitted_ordinals if ordinal <= first_pass and ordinal not in covered)
+    return first_pass - sum(1 for ordinal in covered if 1 <= ordinal <= first_pass)
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -5093,6 +5132,7 @@ def _pass_summary(
     expected_cases: int | None,
     expected_case_ids: list[str] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
+    expected_attempt_ordinals_by_case: Mapping[str, set[int]] | None = None,
     recovered_attempts: list[dict[str, Any]] | None = None,
     scorer: Callable[[dict[str, Any]], float | None] | None = None,
     shared_metrics_by_case: Mapping[str, set[str]] | None = None,
@@ -5130,6 +5170,7 @@ def _pass_summary(
     pairing_cases: dict[str, dict[str, Any]] = {}
     passed_cases = 0
     scored_cases = 0
+    resolved_failed_cases = 0
     required_checks_passed = 0
     wrong_answer_cases = 0
     security_failed_cases = 0
@@ -5151,8 +5192,10 @@ def _pass_summary(
         attempt_verdicts = []
         best_score: float | None = None
         first_pass_attempt: int | None = None
+        scored_ordinals: set[int] = set()
         for idx, (reward, overall) in enumerate(sorted(attempts, key=lambda item: _attempt_sort_key(item[0])), start=1):
             idx = _attempt_ordinal(reward) or idx
+            scored_ordinals.add(idx)
             score = round(overall, 4)
             applicable_metrics = shared_metrics_by_case.get(entry_id) if shared_metrics_by_case is not None else None
             verdict = attempt_verdict(
@@ -5210,8 +5253,26 @@ def _pass_summary(
             expected_attempts_by_case.get(entry_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
         )
         unscored = max(0, expected_attempt_count - len(attempts) - recovered_count)
-        skipped = unscored if stop_on_pass and case_passed else 0
-        missing = 0 if skipped else unscored
+        missing = unscored
+        if stop_on_pass and first_pass_attempt is not None:
+            # Only attempts after the first pass were skipped on purpose. An unscored
+            # attempt before it failed, and must not be hidden behind the pass.
+            missing = min(
+                unscored,
+                _unscored_attempts_before_first_pass(
+                    first_pass_attempt,
+                    scored_ordinals,
+                    {
+                        item["attempt"]
+                        for item in recovered_attempts or []
+                        if item["case_id"] == entry_id and type(item["attempt"]) is int
+                    },
+                    (expected_attempt_ordinals_by_case or {}).get(entry_id),
+                ),
+            )
+        skipped = unscored - missing
+        if is_expected_case and attempts and not case_passed and missing == 0:
+            resolved_failed_cases += 1
 
         # Every attempt, also past the published caps: pass^k counts all k of them.
         pairing_cases[entry_id] = {
@@ -5282,6 +5343,7 @@ def _pass_summary(
         "case_details_limit": PUBLISHED_CASE_DETAILS_MAX,
         "cases": cases,
         "_pairing_cases": pairing_cases,
+        "_resolved_failed_cases": resolved_failed_cases,
     }
 
 
@@ -6856,6 +6918,7 @@ def _condition_execution_summary(
     stop_on_pass: bool = False,
     pass_threshold: float = 0.50,
     attempt_slots: dict[str, dict[str, Any]] | None = None,
+    integrity_errors: list[str] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
     expected_attempt_ordinals_by_case: Mapping[str, set[int]] | None = None,
 ) -> dict[str, Any]:
@@ -6868,7 +6931,8 @@ def _condition_execution_summary(
     When ``attempt_slots`` is a dict, it receives ``{"required", "missing",
     "missing_ordinals"}`` for each expected case; ``missing_ordinals`` lists
     the absent attempt ordinals when the case's attempts carry labels, and is
-    None when only a count is known.
+    None when only a count is known. ``integrity_errors`` receives structural
+    reward/identity errors separately from missing attempts and runtime failures.
     """
     expected_ids = _validated_expected_case_ids(expected_case_ids)
     expected_count = len(expected_ids) if expected_ids else int(expected_cases or 0)
@@ -6926,6 +6990,12 @@ def _condition_execution_summary(
             "Unscoreable reward details were truncated "
             f"(showing {len(public_reward_failures)} of {len(reward_failures or [])})"
         )
+
+    def integrity_error(message: str) -> None:
+        errors.append(message)
+        if integrity_errors is not None:
+            integrity_errors.append(message)
+
     expected_set = set(expected_ids)
     logical_passed: dict[str, bool] = {}
     for reward in _logical_attempt_rewards(rewards):
@@ -6941,14 +7011,14 @@ def _condition_execution_summary(
         case_id = _entry_id(reward, expected_set or None)
         step_name = str(reward.get("_step_name") or "").strip()
         if not root:
-            errors.append("A scored reward is missing its Harbor trial root name")
+            integrity_error("A scored reward is missing its Harbor trial root name")
             continue
         if not case_id or case_id == "unknown":
-            errors.append(f"Scored trial {published_root!r} has no case identifier")
+            integrity_error(f"Scored trial {published_root!r} has no case identifier")
             continue
         score = overall_score(reward)
         if score is None:
-            errors.append(f"Scored trial {published_root!r} has incomplete or non-finite reward metrics")
+            integrity_error(f"Scored trial {published_root!r} has incomplete or non-finite reward metrics")
             continue
         existing = roots.get(root)
         if existing is None:
@@ -6961,9 +7031,9 @@ def _condition_execution_summary(
             }
             continue
         if existing["case_id"] != case_id:
-            errors.append(f"Harbor trial {published_root!r} maps to multiple cases")
+            integrity_error(f"Harbor trial {published_root!r} maps to multiple cases")
         elif not step_name or step_name in existing["steps"]:
-            errors.append(f"Harbor trial {published_root!r} has duplicate reward rows")
+            integrity_error(f"Harbor trial {published_root!r} has duplicate reward rows")
         else:
             existing["steps"].add(step_name)
 
@@ -6978,9 +7048,9 @@ def _condition_execution_summary(
         explicit = [item["attempt_ordinal"] for item in attempts if item["attempt_ordinal"] is not None]
         all_explicit = len(explicit) == len(attempts) and bool(attempts)
         if explicit and len(explicit) != len(attempts):
-            errors.append(f"Scored case {case_id!r} mixes explicit and implicit attempt labels")
+            integrity_error(f"Scored case {case_id!r} mixes explicit and implicit attempt labels")
         if len(explicit + recovered_ordinals) != len(set(explicit + recovered_ordinals)):
-            errors.append(f"Scored case {case_id!r} has duplicate attempt ordinals")
+            integrity_error(f"Scored case {case_id!r} has duplicate attempt ordinals")
 
         required = (
             expected_attempts_by_case.get(case_id, n_attempts) if expected_attempts_by_case is not None else n_attempts
@@ -6994,7 +7064,7 @@ def _condition_execution_summary(
                 observed_index, passed_attempt = first_pass
                 required = int(passed_attempt["attempt_ordinal"] or observed_index)
         if required > n_attempts:
-            errors.append(f"Scored case {case_id!r} has an attempt ordinal above configured maximum {n_attempts}")
+            integrity_error(f"Scored case {case_id!r} has an attempt ordinal above configured maximum {n_attempts}")
 
         expected_ordinals = set(range(1, required + 1))
         if expected_attempt_ordinals_by_case is not None and case_id in expected_attempt_ordinals_by_case:
@@ -7048,17 +7118,18 @@ def _condition_execution_summary(
     if expected_ids:
         unexpected = sorted(case_id for case_id in by_case if case_id not in expected_set)
         if unexpected:
-            errors.append(_sampled_case_id_diagnostic("Unexpected scored cases", unexpected))
+            integrity_error(_sampled_case_id_diagnostic("Unexpected scored cases", unexpected))
     else:
         if expected_count and len(by_case) != expected_count:
-            errors.append(f"Scored case coverage is {len(by_case)}/{expected_count}")
+            report_case_coverage = integrity_error if len(by_case) > expected_count else errors.append
+            report_case_coverage(f"Scored case coverage is {len(by_case)}/{expected_count}")
         if stop_on_pass and expected_count > len(by_case):
             expected_attempts += (expected_count - len(by_case)) * n_attempts
 
     if missing:
         errors.append(_sampled_case_id_diagnostic("Missing scored attempts for cases", sorted(missing)))
     if excess:
-        errors.append(_sampled_case_id_diagnostic("Excess scored attempts for cases", sorted(excess)))
+        integrity_error(_sampled_case_id_diagnostic("Excess scored attempts for cases", sorted(excess)))
 
     scored_attempts = len(roots)
     physical_expected_attempts = expected_attempts
@@ -7701,6 +7772,7 @@ def collect_harbor_results(
         with_recovered: list[dict[str, Any]] = []
         with_job_recovered = False
         with_execution: dict[str, Any] = {}
+        with_integrity_errors: list[str] = []
         with_overall_score: float | None = None
         with_policy = fallback_policy
         with_policy_ambiguous = False
@@ -7735,7 +7807,9 @@ def collect_harbor_results(
                 if with_job_ok or preserve_partial
                 else []
             )
-            with_rewards, invalid_score_failures = _partition_scoreable_rewards(with_collected_rewards)
+            with_rewards, invalid_score_failures = _partition_scoreable_rewards(
+                with_collected_rewards, integrity_errors=with_integrity_errors
+            )
             _observe_private_trials(
                 agent, "with_skill", with_job_dir, with_collected_rewards, with_rewards, case_id_by_task_selector
             )
@@ -7765,10 +7839,12 @@ def collect_harbor_results(
                 expected_cases=with_expected_cases,
                 expected_case_ids=with_expected_case_ids,
                 expected_attempts_by_case=with_expected_attempts,
+                expected_attempt_ordinals_by_case=with_expected_ordinals,
                 recovered_attempts=with_recovered,
             )
             with_execution = _condition_execution_summary(
                 with_rewards,
+                integrity_errors=with_integrity_errors,
                 expected_case_ids=with_expected_case_ids,
                 expected_cases=with_expected_cases,
                 n_attempts=n_attempts,
@@ -7783,7 +7859,14 @@ def collect_harbor_results(
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
-            if with_execution["execution_status"] != "succeeded":
+            if (
+                with_execution["execution_status"] != "succeeded"
+                and 0 < with_execution["scored_attempts"] < with_execution["expected_attempts"]
+                and with_policy != "mixed-score-policies"
+                and not with_integrity_errors
+            ):
+                with_pass = _partial_pass_summary(with_pass)
+            elif with_execution["execution_status"] != "succeeded":
                 with_scores = {}
                 with_custom_scores = {}
                 with_pass = {}
@@ -7923,6 +8006,7 @@ def collect_harbor_results(
         without_recovered: list[dict[str, Any]] = []
         without_job_recovered = False
         without_execution: dict[str, Any] = {}
+        without_integrity_errors: list[str] = []
         without_overall_score: float | None = None
         without_policy = fallback_policy
         without_policy_ambiguous = False
@@ -7944,7 +8028,9 @@ def collect_harbor_results(
                 if reused_baseline_dir is not None:
                     without_job_ok, without_job_failure = True, ""
                     without_collected_rewards = load_baseline_rows(reused_baseline_dir, agent)
-                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(
+                        without_collected_rewards, integrity_errors=without_integrity_errors
+                    )
                 else:
                     without_job_ok, without_job_failure = validate_harbor_job_result(
                         without_job_dir / "result.json",
@@ -7972,7 +8058,9 @@ def collect_harbor_results(
                         if without_job_ok or preserve_partial
                         else []
                     )
-                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(without_collected_rewards)
+                    without_rewards, invalid_score_failures = _partition_scoreable_rewards(
+                        without_collected_rewards, integrity_errors=without_integrity_errors
+                    )
                     _observe_private_trials(
                         agent,
                         "without_skill",
@@ -8015,10 +8103,12 @@ def collect_harbor_results(
                     expected_cases=without_expected_cases,
                     expected_case_ids=without_expected_case_ids,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                     recovered_attempts=without_recovered,
                 )
                 without_execution = _condition_execution_summary(
                     without_rewards,
+                    integrity_errors=without_integrity_errors,
                     expected_case_ids=without_expected_case_ids,
                     expected_cases=without_expected_cases,
                     n_attempts=n_attempts,
@@ -8037,7 +8127,14 @@ def collect_harbor_results(
                         without_execution,
                         "Conflicting score policies within the without-skill condition",
                     )
-                if without_execution["execution_status"] != "succeeded":
+                if (
+                    without_execution["execution_status"] != "succeeded"
+                    and 0 < without_execution["scored_attempts"] < without_execution["expected_attempts"]
+                    and without_policy != "mixed-score-policies"
+                    and not without_integrity_errors
+                ):
+                    without_pass = _partial_pass_summary(without_pass)
+                elif without_execution["execution_status"] != "succeeded":
                     without_scores = {}
                     without_custom_scores = {}
                     without_pass = {}
@@ -8605,9 +8702,15 @@ def _build_comparison(agents_data: dict[str, Any]) -> dict[str, Any]:
         comparison["metrics"][metric] = {}
         for agent, data in agents_data.items():
             succeeded = data.get("execution_status") == "succeeded"
-            with_skill = data.get("with_skill", {}).get(metric) if succeeded else None
-            without_skill = data.get("without_skill", {}).get(metric) if succeeded else None
-            lift = data.get("lift", {}).get(metric, {}).get("delta") if succeeded else None
+            with_succeeded = (
+                succeeded and data.get("conditions", {}).get("with_skill", {}).get("execution_status") == "succeeded"
+            )
+            without_succeeded = (
+                succeeded and data.get("conditions", {}).get("without_skill", {}).get("execution_status") == "succeeded"
+            )
+            with_skill = data.get("with_skill", {}).get(metric) if with_succeeded else None
+            without_skill = data.get("without_skill", {}).get(metric) if without_succeeded else None
+            lift = data.get("lift", {}).get(metric, {}).get("delta") if with_succeeded and without_succeeded else None
             comparison["metrics"][metric][agent] = {
                 "with_skill": with_skill
                 if isinstance(with_skill, int | float) and not isinstance(with_skill, bool)

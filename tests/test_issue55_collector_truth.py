@@ -2664,10 +2664,14 @@ def test_mixed_failed_condition_suppresses_published_quality_and_paired_artifact
     assert agent["conditions"]["with_skill"]["execution_status"] == "failed"
     assert agent["conditions"]["with_skill"]["scored_attempts"] == 1
     assert agent["conditions"]["without_skill"]["execution_status"] == "succeeded"
-    assert agent["with_skill"] == {}
+    assert agent["with_skill"] == dict.fromkeys(DEFAULT_METRICS, 0.9)
     assert agent["custom_with_skill"] == {}
-    assert agent["dimensions_with_skill"] == {}
-    assert agent["pass_at_k"]["with_skill"] == {}
+    assert agent["dimensions_with_skill"]
+    assert agent["overall_with_skill"] is None
+    partial = agent["pass_at_k"]["with_skill"]
+    assert partial["attempts_used"] == 1 and partial["rate"] is None
+    assert partial["cases"]["case-001"]["attempts"][0]["score"] == 0.9
+    assert partial["cases"]["case-002"]["attempts"] == []
     assert agent["without_skill"] == dict.fromkeys(DEFAULT_METRICS, 0.2)
     assert agent["dimensions_without_skill"]
     assert agent["pass_at_k"]["without_skill"]["rate"] == 0.0
@@ -2678,10 +2682,10 @@ def test_mixed_failed_condition_suppresses_published_quality_and_paired_artifact
 
     results_dir = tmp_path / "results" / "opencode"
     persisted = json.loads((results_dir / "with-skill" / "summary.json").read_text(encoding="utf-8"))
-    assert persisted["scores"] == {}
+    assert persisted["scores"] == agent["with_skill"]
     assert persisted["custom_scores"] == {}
-    assert persisted["dimensions"] == {}
-    assert persisted["pass_at_k"] == {}
+    assert persisted["dimensions"] == agent["dimensions_with_skill"]
+    assert persisted["pass_at_k"] == partial
     assert not (results_dir / "lift.json").exists()
     assert not (results_dir / "custom_lift.json").exists()
     assert not (results_dir / "pass_at_k_lift.json").exists()

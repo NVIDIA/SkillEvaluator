@@ -953,6 +953,9 @@ def load_agent_data(
                     )
                     condition_execution[key] = {
                         "execution_status": status,
+                        **(
+                            {"skip_reason": "budget_exhausted"} if data.get("skip_reason") == "budget_exhausted" else {}
+                        ),
                         "execution_errors": condition_errors,
                         **_execution_error_details(data, len(condition_errors)),
                         "expected_cases": _nonnegative_counter(data.get("expected_cases")),

@@ -4881,6 +4881,8 @@ def _run_budgeted_variants(
             for future in as_completed(futures):
                 future.result()
     for variant, _, _ in jobs:
+        if not attempt_job_dirs[variant]:
+            continue
         _merge_attempt_jobs(
             [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
             jobs_dir / f"{skill_name}-{agent}-{variant}",
@@ -6786,6 +6788,7 @@ def _run_harbor_eval_impl(
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,
+        _evaluation_mode,
     )
     from skillevaluator.evaluation.tier3_report import (
         _pick_best_agent as _pick_canonical_best_agent,
@@ -6815,18 +6818,7 @@ def _run_harbor_eval_impl(
         if agent_results:
             best_agent = _pick_best_agent(agent_results)
             if best_agent not in agent_results:
-                conditions = [
-                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
-                    if isinstance(agent, dict)
-                    and isinstance(agent.get("conditions"), dict)
-                    and isinstance(agent["conditions"].get("with_skill"), dict)
-                    else None
-                    for agent in agent_results.values()
-                ]
-                baseline_only = bool(agent_results) and (
-                    skip_with_skill
-                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
-                )
+                baseline_only = _evaluation_mode(agent_results) == "baseline_only"
                 # Canonical agent payloads carry the baseline-only score as "baseline".
                 score_field = "baseline" if baseline_only else "with_skill"
                 canonical_agents = {

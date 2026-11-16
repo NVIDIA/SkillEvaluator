@@ -101,6 +101,13 @@ def test_copilot_shows_body_for_missing_description_but_drops_non_string(tmp_pat
     assert "CP-STRICT-YAML" in _ids(_rows(listed), "copilot-cli")
 
 
+def test_copilot_lists_empty_description_by_name_only(tmp_path: Path):
+    for n, desc in enumerate(['""', '"   "']):
+        rows = _rows(_skill(tmp_path / str(n), desc=desc))
+        assert rows["copilot-cli"]["status"] == "degraded"
+        assert "CP-DESC-EMPTY" in _ids(rows, "copilot-cli") and "CP-DESC-MISSING" not in _ids(rows, "copilot-cli")
+
+
 def test_symlinked_manifest(tmp_path: Path):
     skill = _skill(tmp_path)
     target = tmp_path / "real.md"
@@ -386,6 +393,7 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
         f["id"] for r in rows.values() for f in r["findings"]
     }
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
+    assert "lists both" in next(f["message"] for f in rows["hermes"]["findings"] if f["id"] == "HM-DUP-NAME")
 
 
 def _install(folder: Path, dirname: str, name: str | None = None) -> Path:

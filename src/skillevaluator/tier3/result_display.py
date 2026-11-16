@@ -1113,7 +1113,7 @@ def render_evaluation_result(
     ):
         from skillevaluator.tier3.harbor.run_budget import budget_line
 
-        console.print(budget_line(dict(budget)))
+        console.print(budget_line(dict(budget), agents=result.get("agents")))
     from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
 
     budget_reason = budget_incomplete_reason(dict(budget)) if isinstance(budget, Mapping) else None

@@ -1691,16 +1691,22 @@ def test_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> N
     assert large < 16 * small + 0.05
 
 
-def _masking_seconds(mask: Callable[[str], object], unit: str, small: int, large: int) -> tuple[float, float]:
+def _masking_seconds(
+    mask: Callable[[str], object], unit: str | Callable[[int], str], small: int, large: int
+) -> tuple[float, float]:
     """Return the CPU seconds *mask* takes on *unit* repeated to *small* and to *large* characters.
 
-    The two texts are masked in turn, three times each, and the fastest time
-    of each counts, so a burst of load on a busy CI runner slows both rather
+    *unit* may also be a function that returns the text for a length. The
+    two texts are masked in turn, three times each, and the fastest time of
+    each counts, so a burst of load on a busy CI runner slows both rather
     than only the large one. The time is this thread's CPU time with garbage
     collection paused: neither another process or thread holding the CPU nor
     a collection of the test worker's whole heap is counted.
     """
-    texts = (unit * (small // len(unit)), unit * (large // len(unit)))
+    if callable(unit):
+        texts = (unit(small), unit(large))
+    else:
+        texts = (unit * (small // len(unit)), unit * (large // len(unit)))
     fastest = [math.inf, math.inf]
     collecting = gc.isenabled()
     gc.disable()
@@ -2639,83 +2645,120 @@ def test_masking_a_command_password_after_a_flag_keeps_the_text_around_it(flag: 
     assert kept.replace("FLAG", flag) in evidence
 
 
+def _repeated(head: str, unit: str, tail: str = "") -> Callable[[int], str]:
+    """Return a function that writes *head*, *unit* repeated and *tail* in about the length it is given."""
+    return lambda size: head + unit * max(1, (size - len(head) - len(tail)) // len(unit)) + tail
+
+
+def _argv_flags_as_json(count: int, data: str | None = None) -> str:
+    """Return an argv list of *count* "--db-password=VALUE" flags and *data* in JSON, repeated as JSON."""
+    arguments: dict[str, Any] = {"argv": [f"--db-password=v{index}" for index in range(count)]}
+    if data is not None:
+        arguments["data"] = data
+    return json.dumps({"arguments": json.dumps(arguments, separators=(",", ":"))})
+
+
+_VALUE_LESS_FLAGS_IN_A_QUOTED_STRING = _repeated(
+    '{"cmd": "PASSWORD: x ', "--use_token mysql -u root -pX token=y ", '"}'
+)
+
+
+# Texts the flag rule and the readings it starts read, each written in a
+# given length, so its units grow in number with the text.
 @pytest.mark.parametrize(
-    "text",
+    "make_text",
     [
+        pytest.param(_VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, id="value-less-flags-in-a-quoted-string"),
+        pytest.param(_repeated("--use_token login bob password X ", "token=y a "), id="names-in-a-long-netrc-password"),
         pytest.param(
-            '{"cmd": "PASSWORD: x ' + "--use_token mysql -u root -pX token=y " * 1000 + '"}',
-            id="value-less-flags-in-a-quoted-string",
-        ),
-        pytest.param("--use_token login bob password X " + "token=y a " * 4000, id="names-in-a-long-netrc-password"),
-        pytest.param(
-            '{"cmd": "' + "--api_key 'TOKEN='v --set_secret auth=f('a', 'b') " * 800 + '"}',
+            _repeated('{"cmd": "', "--api_key 'TOKEN='v --set_secret auth=f('a', 'b') ", '"}'),
             id="names-in-flag-values-in-a-quoted-string",
         ),
-        pytest.param("--api_key " + "token=x," * 5000, id="names-in-one-long-flag-value"),
-        pytest.param('["w", "--use_token", "mysql", "-pX", ' * 1000 + "]", id="value-less-flags-in-an-argv-list"),
+        pytest.param(_repeated("--api_key ", "token=x,"), id="names-in-one-long-flag-value"),
         pytest.param(
-            '["w", "--use_token", "mysql", ' + '"-pX", ' * 6000 + "]", id="attached-passwords-after-a-command"
+            _repeated("", '["w", "--use_token", "mysql", "-pX", ', "]"), id="value-less-flags-in-an-argv-list"
         ),
         pytest.param(
-            "--use_token login bob password " + "token=" * 6000 + "\\nX" + "\\\\" * 6000 + " ",
+            _repeated('["w", "--use_token", "mysql", ', '"-pX", ', "]"), id="attached-passwords-after-a-command"
+        ),
+        pytest.param(
+            lambda size: (
+                "--use_token login bob password " + "token=" * (size // 8) + "\\nX" + "\\\\" * (size // 8) + " "
+            ),
             id="names-in-a-hidden-password",
         ),
-        pytest.param('--api_key "a --db_password "x ' * 1300, id="flags-inside-flag-values"),
+        pytest.param(_repeated("", '--api_key "a --db_password "x '), id="flags-inside-flag-values"),
         pytest.param(
-            '{"c": "' + "./wrap --api_key K1\\\\nlogin bob password Z " * 1000 + '"}',
+            _repeated('{"c": "', "./wrap --api_key K1\\\\nlogin bob password Z ", '"}'),
             id="escaped-backslashes-before-line-breaks",
         ),
-        pytest.param('curl -u "bob --api_key \\"x a:b" https://h ' * 1000, id="flag-values-in-user-values"),
+        pytest.param(_repeated("", 'curl -u "bob --api_key \\"x a:b" https://h '), id="flag-values-in-user-values"),
         pytest.param(
-            "./wrap --use_token " + "aws configure set aws_secret_access_key " * 1000 + "x",
+            _repeated("./wrap --use_token ", "aws configure set aws_secret_access_key ", "x"),
             id="commands-in-hidden-passwords",
         ),
-        pytest.param("--use_token mysql -u root -pXpassword: Y " * 1000, id="names-cut-by-hidden-passwords"),
+        pytest.param(_repeated("", "--use_token mysql -u root -pXpassword: Y "), id="names-cut-by-hidden-passwords"),
         pytest.param(
-            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=x " * 3500})}),
+            lambda size: json.dumps(
+                {"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=x " * (size // 10)})}
+            ),
             id="names-past-a-masked-flag-value",
         ),
         pytest.param(
-            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\nb token=x " * 1200})}),
+            lambda size: json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\nb token=x " * (size // 40)})}),
             id="lines-past-masked-flag-values",
         ),
         pytest.param(
-            json.dumps({"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=f(" * 3500})}),
+            lambda size: json.dumps(
+                {"a": json.dumps({"cmd": "password: a --api_key K1\n" + "b token=f(" * (size // 10)})}
+            ),
             id="calls-past-a-masked-flag-value",
         ),
-        pytest.param("--password a" + "\\ --db-password=a" * 6000, id="flags-inside-a-long-flag-word"),
-        pytest.param("--db_password a" + "\\ -token=a" * 8000, id="flags-inside-a-long-underscored-flag-word"),
-        pytest.param(
-            json.dumps(
-                {"arguments": json.dumps({"argv": [f"--db-password=v{i}" for i in range(4000)]}, separators=(",", ":"))}
-            ),
-            id="flags-in-an-argv-list-repeated-as-json",
-        ),
-        pytest.param(
-            json.dumps(
-                {
-                    "arguments": json.dumps(
-                        {"argv": [f"--db-password=v{i}" for i in range(200)], "data": "A" * 500_000},
-                        separators=(",", ":"),
-                    )
-                }
-            ),
-            id="flags-before-a-long-word",
-        ),
+        pytest.param(_repeated("--password a", "\\ --db-password=a"), id="flags-inside-a-long-flag-word"),
+        pytest.param(_repeated("--db_password a", "\\ -token=a"), id="flags-inside-a-long-underscored-flag-word"),
+        pytest.param(lambda size: _argv_flags_as_json(size // 24), id="flags-in-an-argv-list-repeated-as-json"),
+        pytest.param(lambda size: _argv_flags_as_json(max(1, size // 2500), "A" * size), id="flags-before-a-long-word"),
     ],
 )
-def test_masking_credentials_behind_flags_stays_fast_on_long_text(text: str) -> None:
+def test_masking_credentials_behind_flags_grows_linearly_with_the_text(make_text: Callable[[int], str]) -> None:
     # Judge evidence is masked whole, with no 2,000-character scan window, so
-    # the flag rule must stay close to linear: each of these texts of 40,000
-    # to 500,000 characters takes tens to hundreds of milliseconds, where a
-    # walk that grows with the square or cube of the text would take seconds
-    # to minutes. A flag inside the word value of an earlier flag ("--password
-    # a\ --db-password=a", or an argv list in JSON repeated as JSON, where
-    # every quote is escaped) must not read the rest of that word again. The
-    # bound is generous for a slow CI runner.
-    started = time.perf_counter()
-    eval_core_checks._mask_finding_evidence_credentials(text)
-    assert time.perf_counter() - started < 2.0
+    # the flag rule and the readings it starts must stay close to linear: ten
+    # times the text takes about ten times as long. A flag inside the word
+    # value of an earlier flag ("--password a\ --db-password=a", or an argv
+    # list in JSON repeated as JSON, where every quote is escaped) must not
+    # read the rest of that word again, nor may a flag before a long word, nor
+    # each name that a masked value hides (see the next test).
+    small, large = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, make_text, 10_000, 100_000)
+    assert _grows_linearly(small, large), (small, large)
+
+
+def _grows_linearly(small: float, large: float) -> bool:
+    """Whether masking a text ten times as long took *large* CPU seconds against *small*: about ten times as long.
+
+    The margin allows for a slow CI runner. A reading that grows with the
+    square of the text takes tens of times as long.
+    """
+    return large < 16 * small + 0.05
+
+
+def test_the_linear_growth_bound_rejects_reading_each_run_again(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The same measurement and bound fail for a reading that reads a word or
+    # the rest of a quoted string again from each name in it, as the
+    # assignment rule's reading of each name on its own would without keeping
+    # the runs it has read: then masking 30,000 characters of value-less
+    # flags in a quoted string takes about 50 to 70 times as long as masking
+    # 3,000, and the gap grows with the text.
+    mask = eval_core_checks._mask_finding_evidence_credentials
+    small, large = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
+    assert _grows_linearly(small, large), (small, large)
+
+    def read_again(self: Any, pattern: re.Pattern[str], start: int) -> int | None:
+        match = pattern.match(self.text, start)
+        return None if match is None else match.end()
+
+    monkeypatch.setattr(eval_core_checks._AssignmentValues, "_run_end", read_again)
+    small, large = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
+    assert not _grows_linearly(small, large), (small, large)
 
 
 @pytest.mark.parametrize(

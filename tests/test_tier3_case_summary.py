@@ -1174,6 +1174,41 @@ def test_failed_condition_rebuilds_native_task_rows_under_the_case_the_collector
     ]
 
 
+def test_failed_condition_rows_are_rebuilt_once_per_what_to_fix_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import case_summary
+
+    # A failed condition with several cases, each with one scored attempt and one that timed out.
+    trials = tmp_path / "a" / "with-skill" / "trials"
+    failed = []
+    for index in range(4):
+        case_id = f"case-{index}"
+        _trial_records(trials, f"native-{index}__pass", {"reward.json": {"overall": 0.9, "entry_id": case_id}})
+        _trial_records(trials, f"native-{index}__timeout", {"failure.json": {**_TIMEOUT, "entry_id": case_id}})
+        failed.append({"trial": f"native-{index}__timeout", "reason": "Agent timed out"})
+    agent = _agent({}, {})
+    agent.update(output_dir=str(tmp_path / "a"), trial_failures={"with_skill": failed})
+    rebuilds: list[str] = []
+    rebuild = case_summary._rebuilt_cases
+
+    def counted(agent: object, key: str) -> object:
+        rebuilds.append(key)
+        return rebuild(agent, key)
+
+    monkeypatch.setattr(case_summary, "_rebuilt_cases", counted)
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    # Rebuilding reads every trial's files, so each failed condition is rebuilt once for the whole
+    # call rather than again for each of its cases.
+    assert [fix["case"] for fix in fixes] == ["all 4 cases"]
+    assert sorted(rebuilds) == ["with_skill", "without_skill"]
+    # The next call reads the trials again: they can change between calls.
+    what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert sorted(rebuilds) == ["with_skill", "with_skill", "without_skill", "without_skill"]
+
+
 @pytest.mark.parametrize(
     "records",
     [{}, {"config.json": {"task": {"path": "/run/_harbor-tasks/a/with/plain-case"}}}],

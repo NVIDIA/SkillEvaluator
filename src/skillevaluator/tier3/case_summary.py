@@ -12,6 +12,7 @@ import re
 import tempfile
 from collections import Counter
 from collections.abc import Callable, Mapping
+from contextvars import ContextVar
 from difflib import SequenceMatcher
 from itertools import islice
 from pathlib import Path
@@ -168,12 +169,32 @@ def _case_comparable(agent: Mapping[str, Any], with_case: Any, without_case: Any
 # ---------------------------------------------------------------- per-case data
 
 
+# The rows rebuilt for a failed condition while what_to_fix runs, by agent and condition. Rebuilding
+# reads every trial's files, and what_to_fix asks for an agent's rows several times for each case.
+_REBUILT_CASES: ContextVar[dict[tuple[int, str], tuple[Mapping[str, Any], Mapping[str, Any]]] | None] = ContextVar(
+    "_REBUILT_CASES", default=None
+)
+
+
 def _cases(agent: Mapping[str, Any], key: str) -> Mapping[str, Any]:
     pass_at_k = agent.get("pass_at_k")
     variant = pass_at_k.get(key) if isinstance(pass_at_k, Mapping) else None
     cases = variant.get("cases") if isinstance(variant, Mapping) else None
     if isinstance(cases, Mapping) and cases:
         return cases
+    rebuilt_cases = _REBUILT_CASES.get()
+    if rebuilt_cases is not None:
+        # The agent itself is kept with its rows, so a later agent that reuses its id gets no stale rows.
+        cached = rebuilt_cases.get((id(agent), key))
+        if cached is not None and cached[0] is agent:
+            return cached[1]
+    rebuilt = _rebuilt_cases(agent, key)
+    if rebuilt_cases is not None:
+        rebuilt_cases[(id(agent), key)] = (agent, rebuilt)
+    return rebuilt
+
+
+def _rebuilt_cases(agent: Mapping[str, Any], key: str) -> dict[str, dict[str, Any]]:
     # A failed condition persists no pass@k cases; rebuild them from its trial rewards and errors.
     failures = agent.get("trial_failures")
     failed = failures.get(key) if isinstance(failures, Mapping) else None
@@ -1347,6 +1368,17 @@ def what_to_fix(
     result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None = None, use_llm: bool = True
 ) -> list[dict[str, Any]]:
     """Rank failed test cases across agents by attempts lost and attach one fix each."""
+    # A failed condition's rows are rebuilt from its trials once for this call, not for every case.
+    rebuilt_cases = _REBUILT_CASES.set({})
+    try:
+        return _what_to_fix(result, run_dir=run_dir, skill_path=skill_path, use_llm=use_llm)
+    finally:
+        _REBUILT_CASES.reset(rebuilt_cases)
+
+
+def _what_to_fix(
+    result: Mapping[str, Any], *, run_dir: Path, skill_path: Path | None, use_llm: bool
+) -> list[dict[str, Any]]:
     agents = {
         str(k): dict(v, attempt_policy=result.get("attempt_policy") or v.get("attempt_policy"))
         for k, v in (result.get("agents") or {}).items()

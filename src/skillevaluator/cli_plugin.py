@@ -114,9 +114,11 @@ def build_plugin_commands(evaluate, *, run_options, report_options, console):
     @click.pass_context
     def evaluate_plugin(ctx, report_formats, output_dir, **kwargs):
         """Run supported agents against a plugin and retain explicit loading and behavior evidence."""
+        from skillevaluator.cli import _require_probe_mcp_for_grants
         from skillevaluator.evaluation.options import PluginOptions
         from skillevaluator.validators.policy import resolve_policy
 
+        _require_probe_mcp_for_grants(kwargs["probe_mcp"], kwargs["probe_mcp_env"])
         output_dir = _report_output_location(kwargs["skill_path"], output_dir, report_formats)
         controls = {
             name: kwargs.pop(name)

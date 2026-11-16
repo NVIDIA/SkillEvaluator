@@ -85,3 +85,48 @@ def test_probe_grants_accept_supported_scopes_and_bounds(tmp_path, monkeypatch, 
 
     assert result.exit_code == 0, (result.output, result.exception)
     assert seen == [grants]
+
+
+def _passing_plugin(tmp_path):
+    source = tmp_path / "demo"
+    manifest = source / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name": "demo"}', encoding="utf-8")
+    return source
+
+
+@pytest.mark.parametrize("probe", [(), ("--no-probe-mcp",)], ids=["absent", "disabled"])
+def test_validate_refuses_grants_without_probes_before_any_tier(tmp_path, probe):
+    source = _passing_plugin(tmp_path)
+    args = ["validate", str(source), "--tiers", "1", "--skip", "security", "-r", "json"]
+    # The plugin passes Tier 1, so only the grant decides the exit code.
+    passing = CliRunner().invoke(cli, [*args, "-o", str(tmp_path / "passing")])
+    assert passing.exit_code == 0, (passing.output, passing.exception)
+
+    result = CliRunner().invoke(cli, [*args, *probe, "--probe-mcp-env", "TOKEN", "-o", str(tmp_path / "refused")])
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "--probe-mcp-env requires --probe-mcp" in result.output
+    assert not (tmp_path / "refused").exists()
+
+
+@pytest.mark.parametrize("probe", [(), ("--no-probe-mcp",)], ids=["absent", "disabled"])
+def test_evaluate_plugin_refuses_grants_without_probes_before_running(tmp_path, monkeypatch, probe):
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _passing_plugin(tmp_path)
+    runs = []
+
+    def execute(self, options, *, plugin_options=None, progress_reporter=None):
+        runs.append(plugin_options)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate_plugin", execute)
+    args = ["tier3", "evaluate-plugin", str(source), "--agents", "opencode", "--progress", "off", "-r", "json"]
+
+    result = CliRunner().invoke(cli, [*args, *probe, "--probe-mcp-env", "TOKEN", "-o", str(tmp_path / "refused")])
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "--probe-mcp-env requires --probe-mcp" in result.output
+    assert runs == []
+    assert not (tmp_path / "refused").exists()

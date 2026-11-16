@@ -573,6 +573,16 @@ def _check_probe_mcp_env(ctx: click.Context, param: click.Parameter, values: tup
     return values
 
 
+def _require_probe_mcp_for_grants(probe_mcp: bool | None, probe_mcp_env: tuple[str, ...]) -> None:
+    """Refuse MCP environment grants without ``--probe-mcp`` before any tier runs.
+
+    Only the flag turns host probes on; an evals config cannot, so a grant
+    without it would never be used.
+    """
+    if probe_mcp_env and probe_mcp is not True:
+        raise click.UsageError("--probe-mcp-env requires --probe-mcp")
+
+
 def _plugin_run_options(func):
     """Reuse the same plugin controls for combined and standalone runs."""
     options = (
@@ -2782,6 +2792,7 @@ def validate(
     checks and applicable bundled-skill quality/lint/version checks are included.
     """
     _record_validate_json_report(None)
+    _require_probe_mcp_for_grants(probe_mcp, probe_mcp_env)
     requested_path = target_path
     if harness:
         from skillevaluator.harness import load_profiles

@@ -41,7 +41,16 @@ def run_public_plugin_validation(
     repo_root=None,
     resolve_endpoints=False,
     claude_validate=False,
+    target_root=None,
 ) -> list[ValidationResult]:
+    """Run the bounded plugin checks with the options of a Tier 1 skill run.
+
+    *target_root* is the folder that the plugin belongs to when a caller
+    validates that folder one skill at a time, as ``validate`` does for a
+    folder of skills. The ``security`` check then accepts no SkillSpector
+    missing reference, because the plugin's instructions may name a file
+    elsewhere in the folder.
+    """
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.constants import PLUGIN_CONTAINED_MODE, PLUGIN_MANIFEST_TYPE, PLUGIN_MODE
     from skillevaluator.tier1 import commands as public
@@ -69,6 +78,9 @@ def run_public_plugin_validation(
         from skillevaluator.validators.security import _rewrite_path_prefix
 
         snapshot_by_view = {view.resolve(): (snapshot / unit).resolve() for unit, view in views.items()}
+        # With no skill below the root, the root scan unit is the whole plugin.
+        whole_plugin_view = views["."].resolve() if len(views) == 1 else None
+        plugin_root = Path(source_root).resolve()
 
         class SnapshotSecurityValidator(public.SecurityValidator):
             def _skillspector_issue_scopes(self, issues, components, *, source_root, report_truncated):
@@ -80,6 +92,18 @@ def run_public_plugin_validation(
                     source_root = scope_root
                 return super()._skillspector_issue_scopes(
                     issues, components, source_root=source_root, report_truncated=report_truncated
+                )
+
+            def _validate_skillspector_report(self, *args, scanned_root=None, reference_root=None, **kwargs):
+                # A scan of the whole plugin accepts missing references as a skill
+                # scan does. Like the artifact-free copy of a skill scan, it is
+                # judged against the source tree, whose listing also names what
+                # the staged copy left out. A part of a plugin, or a plugin in a
+                # folder validated part by part (target_root), still accepts none.
+                if whole_plugin_view is not None and scanned_root == whole_plugin_view:
+                    scanned_root, reference_root = plugin_root, self.target_root or plugin_root
+                return super()._validate_skillspector_report(
+                    *args, scanned_root=scanned_root, reference_root=reference_root, **kwargs
                 )
 
         def mapped_option(path):
@@ -98,6 +122,7 @@ def run_public_plugin_validation(
             content_type="plugin",
             skillspector_reference_root=snapshot,
             skillspector_baseline=mapped_option(skillspector_baseline),
+            target_root=target_root,
         )
         pii = public.SecurityValidator(use_llm=False, verify_llm=llm_verify)
         if pii_waivers is not None and "pii" in selected:

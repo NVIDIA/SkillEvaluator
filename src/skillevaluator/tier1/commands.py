@@ -389,6 +389,7 @@ def run_validation(
             repo_root=repo_root,
             resolve_endpoints=resolve_endpoints,
             claude_validate=claude_validate,
+            target_root=target_root,
         )
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)

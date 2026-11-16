@@ -10564,6 +10564,56 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
+    @pytest.mark.parametrize("case", ["missing", "left-out", "in-folder"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
+        self, mock_tools, tmp_path: Path, case: str
+    ) -> None:
+        """The plugin checks scan a staged copy; a plugin that is one scan unit is its own reference root.
+
+        The listing of the plugin also names what the staged copy left out, so a
+        line that names a file there stays incomplete, and so does the plugin
+        when it is one part of a folder that is validated part by part.
+        """
+        from skillevaluator.tier1 import commands as tier1_commands
+
+        files = {"SKILL.md": _SETUP_HELPER_SKILL, ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'}
+        if case == "left-out":
+            # Left out of the staged copy, and named on line 8.
+            files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        plugin = _write_skill(tmp_path / "setup-helper", files)
+        report = json.dumps(_reference_report("2.13.3", "staged-script"))
+        mock_tools.skillspector.is_available = True
+        scanned = []
+
+        def record_scan(argv, **_kwargs):
+            scanned.append(argv[1])
+            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
+
+        mock_tools.skillspector.run.side_effect = record_scan
+
+        results = tier1_commands.run_validation(
+            plugin,
+            checks="security",
+            content_type="plugin",
+            target_root=tmp_path if case == "in-folder" else None,
+        )
+
+        (security,) = [result for result in results if result.validator_name == "Security Scan"]
+        (scan_root,) = scanned
+        assert Path(scan_root) != plugin.resolve()
+        if case == "missing":
+            assert security.incomplete_scans == []
+            assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+        else:
+            assert security.incomplete_scans == ["skillspector"]
+            assert security.errors == [
+                "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+                "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+                + _REFERENCE_REJECTION_HELP
+            ]
+            assert not security.warnings
+
     @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
@@ -10588,10 +10638,10 @@ class TestSkillspectorMissingReferences:
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
-        scanned_skill_bytes = []
+        scans = []
 
         def record_scan(argv, **_kwargs):
-            scanned_skill_bytes.append((Path(argv[1]) / "SKILL.md").read_bytes())
+            scans.append((argv[1], (Path(argv[1]) / "SKILL.md").read_bytes()))
             return ToolResult(
                 success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
             )
@@ -10599,34 +10649,27 @@ class TestSkillspectorMissingReferences:
         mock_tools.skillspector.run.side_effect = record_scan
         options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
 
-        def validate(target: Path, reports: Path, *, content_type: str = "auto") -> object:
+        def validate(target: Path, reports: Path) -> object:
             return CliRunner().invoke(
                 cli_module.cli,
-                [
-                    "validate",
-                    str(target),
-                    *options,
-                    "--type",
-                    content_type,
-                    "--workers",
-                    str(workers),
-                    "-o",
-                    str(reports),
-                ],
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
             )
 
         result = validate(catalog, tmp_path / "reports")
 
-        # Auto-detected plugins use bounded copies; verify the scanned instructions themselves.
-        assert scanned_skill_bytes == [(skill / "SKILL.md").read_bytes()]
+        ((scanned_root, scanned_skill),) = scans
+        assert scanned_skill == (skill / "SKILL.md").read_bytes()
+        # A skill is scanned where it is; the checks of a plugin scan a staged copy of its tree.
+        assert (scanned_root == str(skill.resolve())) is not (manifest and workers > 1)
         assert result.exit_code != 0, result.output
         summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
         (entry,) = summary["skills"]
         assert entry["name"] == "skills/setup-helper"
         assert entry["passed"] is False
         assert entry["incomplete_scans"]
-        # The explicit skill control scans the whole skill, rather than a native-plugin partition.
-        alone = validate(skill, tmp_path / "alone", content_type="skill")
+        # The same skill validated on its own is its own target, and passes with the warning, also
+        # as a plugin: its staged copy is a single scan unit, which is judged against the plugin.
+        alone = validate(skill, tmp_path / "alone")
         assert alone.exit_code == 0, alone.output
         alone_report = json.loads(next((tmp_path / "alone").glob("*.json")).read_text(encoding="utf-8"))
         assert _reference_caveat_warning("SKILL.md:8", files=1) in [
@@ -11368,10 +11411,10 @@ class TestSkillspectorCompleteWithCaveats:
             _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.4", "staged-script"))
         mock_tools.skillspector.is_available = True
-        scanned_skill_bytes = []
+        scans = []
 
         def record_scan(argv, **_kwargs):
-            scanned_skill_bytes.append((Path(argv[1]) / "SKILL.md").read_bytes())
+            scans.append((argv[1], (Path(argv[1]) / "SKILL.md").read_bytes()))
             return ToolResult(
                 success=True, stdout=report.replace("versions/install.sh", "scripts/install.sh"), stderr="", exit_code=0
             )
@@ -11379,26 +11422,18 @@ class TestSkillspectorCompleteWithCaveats:
         mock_tools.skillspector.run.side_effect = record_scan
         options = ["--tiers", "1", "--checks", "security", "--no-llm", "-r", "json"]
 
-        def validate(target: Path, reports: Path, *, content_type: str = "auto") -> object:
+        def validate(target: Path, reports: Path) -> object:
             return CliRunner().invoke(
                 cli_module.cli,
-                [
-                    "validate",
-                    str(target),
-                    *options,
-                    "--type",
-                    content_type,
-                    "--workers",
-                    str(workers),
-                    "-o",
-                    str(reports),
-                ],
+                ["validate", str(target), *options, "--workers", str(workers), "-o", str(reports)],
             )
 
         result = validate(catalog, tmp_path / "reports")
 
-        # Auto-detected plugins use bounded copies; verify the scanned instructions themselves.
-        assert scanned_skill_bytes == [(skill / "SKILL.md").read_bytes()]
+        ((scanned_root, scanned_skill),) = scans
+        assert scanned_skill == (skill / "SKILL.md").read_bytes()
+        # A skill is scanned where it is; the checks of a plugin scan a staged copy of its tree.
+        assert (scanned_root == str(skill.resolve())) is not (manifest and workers > 1)
         assert result.exit_code != 0, result.output
         summary = json.loads((tmp_path / "reports" / "catalog-summary.json").read_text(encoding="utf-8"))
         (entry,) = summary["skills"]
@@ -11408,8 +11443,9 @@ class TestSkillspectorCompleteWithCaveats:
         reports = "\n".join(path.read_text(encoding="utf-8") for path in sorted((tmp_path / "reports").rglob("*.json")))
         assert _caveat_error("SKILL.md:8 [reference_resolution; reference_missing]") in reports
         assert "does not bundle" not in reports
-        # The explicit skill control scans the whole skill, rather than a native-plugin partition.
-        alone = validate(skill, tmp_path / "alone", content_type="skill")
+        # The same skill validated on its own is its own target, and passes with the warning, also
+        # as a plugin: its staged copy is a single scan unit, which is judged against the plugin.
+        alone = validate(skill, tmp_path / "alone")
         assert alone.exit_code == 0, alone.output
         alone_report = json.loads(next((tmp_path / "alone").glob("*.json")).read_text(encoding="utf-8"))
         assert _missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]") in [

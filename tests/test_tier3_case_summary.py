@@ -1074,6 +1074,209 @@ def test_failed_condition_rebuilds_case_rows_from_trial_rewards(tmp_path: Path) 
     assert "1/1 ✓ (0.90)" in output and "0/1 ✗ (0.30)" in output and "⊘" in output
 
 
+# Harbor names a trial after the first 32 characters of its task directory, so a trial's name need not
+# start with its case: a native task keeps its own directory name, and a longer case ID is cut.
+_LONG_CASE = "convert-quarterly-report-to-markdown-table"
+_TIMEOUT = {"error": {"type": "AgentTimeoutError", "message": "900s"}}
+_JUDGE_FAILED = {
+    "overall": 0.0,
+    "evaluation_status": "failed",
+    "evaluation_errors": {"accuracy": "Judge reply was empty"},
+}
+
+
+def _trial_records(trials: Path, name: str, records: dict[str, dict]) -> Path:
+    trial = trials / name
+    trial.mkdir(parents=True)
+    for file_name, payload in records.items():
+        (trial / file_name).write_text(json.dumps(payload))
+    return trial
+
+
+@pytest.mark.parametrize(
+    ("case_id", "trial_name", "records"),
+    [
+        ("case-alpha", "native-task-a__AbC1234", {"failure.json": {**_TIMEOUT, "entry_id": "case-alpha"}}),
+        (_LONG_CASE, f"{_LONG_CASE[:32]}__AbC1234", {"failure.json": {**_TIMEOUT, "entry_id": _LONG_CASE}}),
+        # A run from before failure.json named the case: the trial's config names the whole task directory.
+        (
+            _LONG_CASE,
+            f"{_LONG_CASE[:32]}__AbC1234",
+            {"failure.json": _TIMEOUT, "config.json": {"task": {"path": f"/run/_harbor-tasks/a/with/{_LONG_CASE}"}}},
+        ),
+    ],
+    ids=["native-task", "long-case-id", "long-case-id-without-recorded-case"],
+)
+def test_run_error_is_found_for_a_trial_whose_name_does_not_start_with_its_case(
+    tmp_path: Path, case_id: str, trial_name: str, records: dict
+) -> None:
+    _trial_records(tmp_path / "a" / "with-skill" / "trials", trial_name, records)
+
+    [fix] = what_to_fix({"agents": {"a": _agent({case_id: _case(missing=1)}, {})}}, run_dir=tmp_path, use_llm=False)
+
+    assert (fix["case"], fix["kind"]) == (case_id, "run error")
+    assert fix["what"] == "1 attempt(s) never produced a score: AgentTimeoutError: 900s"
+    assert fix["evidence"] == f"a/with-skill/trials/{trial_name}/failure.json"
+
+
+def test_judge_failure_of_a_native_task_gets_judge_advice_under_the_case_the_collector_recorded(
+    tmp_path: Path,
+) -> None:
+    # The judge's own entry_id is not authoritative; the collector's record in failure.json is.
+    _trial_records(
+        tmp_path / "a" / "with-skill" / "trials",
+        "native-task-a__AbC1234",
+        {
+            "reward.json": {**_JUDGE_FAILED, "entry_id": "native-task-a"},
+            "failure.json": {"status": "unscored", "evaluation_status": "failed", "entry_id": "case-alpha"},
+        },
+    )
+
+    [fix] = what_to_fix(
+        {"agents": {"a": _agent({"case-alpha": _case(missing=1)}, {})}}, run_dir=tmp_path, use_llm=False
+    )
+
+    assert (fix["case"], fix["kind"], fix.get("cause")) == ("case-alpha", "run error", "judge")
+    assert "Judge reply was empty" in fix["what"]
+    assert "judge model configuration" in fix["action"]
+    assert fix["evidence"] == "a/with-skill/trials/native-task-a__AbC1234/reward.json"
+
+
+def test_failed_condition_rebuilds_native_task_rows_under_the_case_the_collector_recorded(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import ERROR, PASS, _cases, _marks
+
+    trials = tmp_path / "a" / "with-skill" / "trials"
+    _trial_records(trials, "native-task-a__pass", {"reward.json": {"overall": 0.9, "entry_id": "case-alpha"}})
+    _trial_records(
+        trials,
+        "native-task-a__judge",
+        {"reward.json": _JUDGE_FAILED, "failure.json": {"evaluation_status": "failed", "entry_id": "case-alpha"}},
+    )
+    _trial_records(trials, "native-task-a__timeout", {"failure.json": {**_TIMEOUT, "entry_id": "case-alpha"}})
+    agent = _agent({}, {})
+    agent.update(
+        output_dir=str(tmp_path / "a"),
+        trial_failures={
+            "with_skill": [
+                {"trial": "native-task-a__judge", "reason": "Required judge evaluation failed"},
+                {"trial": "native-task-a__timeout", "reason": "Agent timed out"},
+            ]
+        },
+    )
+
+    assert {case: _marks(row) for case, row in _cases(agent, "with_skill").items()} == {
+        "case-alpha": [PASS, ERROR, ERROR]
+    }
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert sorted((f["case"], f["kind"], f.get("cause") or "") for f in fixes) == [
+        ("case-alpha", "run error", ""),
+        ("case-alpha", "run error", "judge"),
+    ]
+
+
+def test_failed_condition_rows_are_rebuilt_once_per_what_to_fix_call(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import case_summary
+
+    # A failed condition with several cases, each with one scored attempt and one that timed out.
+    trials = tmp_path / "a" / "with-skill" / "trials"
+    failed = []
+    for index in range(4):
+        case_id = f"case-{index}"
+        _trial_records(trials, f"native-{index}__pass", {"reward.json": {"overall": 0.9, "entry_id": case_id}})
+        _trial_records(trials, f"native-{index}__timeout", {"failure.json": {**_TIMEOUT, "entry_id": case_id}})
+        failed.append({"trial": f"native-{index}__timeout", "reason": "Agent timed out"})
+    agent = _agent({}, {})
+    agent.update(output_dir=str(tmp_path / "a"), trial_failures={"with_skill": failed})
+    rebuilds: list[str] = []
+    rebuild = case_summary._rebuilt_cases
+
+    def counted(agent: object, key: str) -> object:
+        rebuilds.append(key)
+        return rebuild(agent, key)
+
+    monkeypatch.setattr(case_summary, "_rebuilt_cases", counted)
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    # Rebuilding reads every trial's files, so each failed condition is rebuilt once for the whole
+    # call rather than again for each of its cases.
+    assert [fix["case"] for fix in fixes] == ["all 4 cases"]
+    assert sorted(rebuilds) == ["with_skill", "without_skill"]
+    # The next call reads the trials again: they can change between calls.
+    what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+    assert sorted(rebuilds) == ["with_skill", "with_skill", "without_skill", "without_skill"]
+
+
+@pytest.mark.parametrize(
+    "records",
+    [{}, {"config.json": {"task": {"path": "/run/_harbor-tasks/a/with/plain-case"}}}],
+    ids=["no-harbor-files", "config-written-at-trial-start"],
+)
+def test_trial_whose_reward_identity_the_collector_rejected_keeps_its_own_case(tmp_path: Path, records: dict) -> None:
+    from skillevaluator.tier3.case_summary import _cases
+    from skillevaluator.tier3.harbor.collector import UNSAFE_REWARD_IDENTITY_REASON
+
+    # A trial stopped before Harbor wrote result.json names no task the collector can map to a case, so
+    # the collector rejects its reward and records the placeholder entry_id "unknown", which is no case.
+    rejected = {
+        "overall": 0.9,
+        "evaluation_status": "failed",
+        "evaluation_errors": {"collector": UNSAFE_REWARD_IDENTITY_REASON},
+        "entry_id": "unknown",
+    }
+    trial = "plain-case__Zx81kQa"
+    _trial_records(tmp_path / "a" / "with-skill" / "trials", trial, {"reward.json": rejected, **records})
+    failed_arm = _agent({}, {})
+    failed_arm.update(
+        output_dir=str(tmp_path / "a"),
+        trial_failures={"with_skill": [{"trial": trial, "reason": "Required judge evaluation failed"}]},
+    )
+    scored_arm = _agent({"plain-case": _case(missing=1)}, {})
+
+    assert set(_cases(failed_arm, "with_skill")) == {"plain-case"}
+    for agent in (failed_arm, scored_arm):
+        [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+        assert (fix["case"], fix["kind"], fix.get("cause")) == ("plain-case", "run error", "collector")
+        assert fix["evidence"] == f"a/with-skill/trials/{trial}/reward.json"
+
+
+def test_recorded_case_is_not_read_through_a_link(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import _cases
+
+    # A link to a trial directory, or to its failure.json, must not move the trial to another case.
+    outside = tmp_path / "outside"
+    _trial_records(outside, "dir", {"failure.json": {**_TIMEOUT, "entry_id": "outside-case"}})
+    (outside / "failure.json").write_text(json.dumps({"entry_id": "outside-case"}))
+    trials = tmp_path / "run" / "a" / "with-skill" / "trials"
+    judged = _trial_records(trials, "t__judge", {"reward.json": _JUDGE_FAILED})
+    (judged / "failure.json").symlink_to(outside / "failure.json")
+    (trials / "t__link").symlink_to(outside / "dir", target_is_directory=True)
+    agent = _agent({}, {})
+    agent.update(output_dir=str(tmp_path / "run" / "a"), trial_failures={"with_skill": [{"trial": "t__link"}]})
+
+    assert set(_cases(agent, "with_skill")) == {"t"}
+
+
+def test_live_marks_key_a_trial_by_its_whole_task_directory(tmp_path: Path) -> None:
+    from skillevaluator.tier3.case_summary import PASS, live_case_marks
+
+    staged = tmp_path / "_harbor-tasks" / "a" / "with" / _LONG_CASE
+    staged.mkdir(parents=True)
+    jobs = tmp_path / "_harbor-jobs" / "job-a-with"
+    done = {"finished_at": "t", "verifier_result": {"rewards": {"overall": 0.9}}}
+    config = {"task": {"path": str(staged)}}
+    _trial_records(jobs, f"{_LONG_CASE[:32]}__AbC1234", {"config.json": config, "result.json": done})
+    # Harbor writes config.json as the trial starts, before any result.
+    _trial_records(jobs, f"{_LONG_CASE[:32]}__DeF5678", {"config.json": config})
+
+    marks, running = live_case_marks(tmp_path, ["a"])
+
+    assert marks == {"a": {"with_skill": {_LONG_CASE: [PASS]}}}
+    assert running == {("a", "with_skill", _LONG_CASE)}
+
+
 def test_agent_asking_for_files_the_case_lacks_is_flagged_as_missing_input(tmp_path: Path) -> None:
     agents = {"claude-code": _agent({"app": _case(False, False, prefix="m")}, {})}
     for name in ("m0", "m1"):
@@ -1309,6 +1512,7 @@ def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", **routing}]}))
     reward = _reward(False, "the answer omitted the requested total")
     reward.update(
+        entry_id="negative",
         skill_execution=1.0,
         goal_accuracy=0.0,
         skill_invoked=False,
@@ -1334,6 +1538,7 @@ def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Pa
     if evidence != "missing":
         reward = _reward(False, "wrong total")
         reward.update(
+            entry_id="negative",
             skill_execution=1.0,
             skill_invoked=evidence == "invoked",
             invocation_evidence_source="trajectory",
@@ -1372,6 +1577,7 @@ def test_negative_non_use_requires_complete_attempt_details(tmp_path: Path, meta
 
     reward = _reward(False, "wrong total")
     reward.update(
+        entry_id="negative",
         skill_execution=1.0,
         skill_invoked=False,
         invocation_evidence_source="trajectory",
@@ -1430,6 +1636,7 @@ def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path
         for i in range(attempts):
             reward = _reward(False, "wrong total" if name == "A" else "correct total")
             reward.update(
+                entry_id="negative",
                 skill_execution=1.0,
                 goal_accuracy=0.0 if name == "A" else 1.0,
                 skill_invoked=False,

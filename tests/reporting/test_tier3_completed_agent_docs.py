@@ -4,18 +4,24 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import re
 from html import unescape
 from pathlib import Path
 
 import pytest
+from tests.reporting.test_report_redesign import _tier_card_verdicts
 from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
+from tests.reporting.test_unified_tier3_report import _write_summary
 
-from skillevaluator.evaluation.tier3_report import build_agent_eval_payload
+from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory, build_agent_eval_payload
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
+from skillevaluator.reporting.html import ADVISORY_FAIL_WORD, VERDICT_WORDS
+from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.run_budget import BudgetController
 
 REPO = Path(__file__).resolve().parents[2]
 HEADING = "### Completed agents in an incomplete run"
@@ -42,6 +48,16 @@ def _run_details(raw_html: str) -> str:
     """Return the text of the collapsed Run details & provenance panel."""
     start = raw_html.index('<details class="run-metadata"')
     return _plain(raw_html[start : raw_html.index("</details>", start)])
+
+
+def _embedded_tier3(raw_html: str) -> dict:
+    """Return the full Tier 3 payload the HTML report embeds for download."""
+    match = re.search(
+        r'<script type="application/json" id="tier3-full"( data-encoding="base64")?>(.*?)</script>', raw_html, re.DOTALL
+    )
+    assert match is not None
+    body = match.group(2)
+    return json.loads(base64.b64decode(body).decode("utf-8") if match.group(1) else body)
 
 
 def _hero_command_status(raw_html: str) -> str:
@@ -395,3 +411,209 @@ def test_changelog_entry_matches_the_docs() -> None:
     assert len(entries) == 1
     assert "show the best agent's score when that agent's evidence is complete" in entries[0]
     assert "every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3" in entries[0]
+
+
+def _changelog_entry(lead: str) -> tuple[str, str, str]:
+    """Return the release heading, subsection heading and plain text of the one entry starting with ``lead``."""
+    release = subsection = ""
+    found: list[tuple[str, str, str]] = []
+    for block in (REPO / "CHANGELOG.md").read_text(encoding="utf-8").split("\n\n"):
+        first = block.strip().splitlines()[0] if block.strip() else ""
+        if first.startswith("## "):
+            release, subsection = first, ""
+        elif first.startswith("### "):
+            subsection = first
+        elif _plain(block).startswith(lead):
+            found.append((release, subsection, _plain(block)))
+    assert len(found) == 1
+    return found[0]
+
+
+def _newer_than_0_9_0(release: str) -> bool:
+    """Whether ``release`` is ``## Unreleased`` or the heading of a release after 0.9.0."""
+    if release == "## Unreleased":
+        return True
+    match = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
+    return match is not None and tuple(int(part) for part in match.groups()) > (0, 9, 0)
+
+
+def _validate_tier3_reports(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, blocking: bool, tier3: ValidationResult
+) -> tuple[int, dict, str]:
+    """Run ``validate --tier3`` after a passing Tier 1; return its exit code, JSON ``tier3`` object and HTML report.
+
+    ``tier3`` stands in for the live run, so no agent runs.
+    """
+    from click.testing import CliRunner
+
+    from skillevaluator import cli as cli_module
+    from skillevaluator.cli import cli
+    from skillevaluator.evaluation import EvaluationService
+
+    for name in ("FORCE_COLOR", "TTY_COMPATIBLE"):
+        monkeypatch.delenv(name, raising=False)
+    skill = tmp_path / "demo"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: demo\ndescription: test\n---\n", encoding="utf-8")
+    dataset = {"skill_name": "demo", "evals": [{"id": "case-a", "prompt": "Q", "expected_output": "A"}]}
+    (skill / "evals" / "evals.json").write_text(json.dumps(dataset), encoding="utf-8")
+    tier1 = ValidationResult(validator_name="SCHEMA")
+    tier1.add_success("schema", "ok")
+    monkeypatch.setattr(cli_module, "run_validation", lambda *_args, **_kwargs: [tier1])
+    monkeypatch.setattr(cli_module, "_run_agent_eval_or_skip", lambda *_args, **_kwargs: tier3)
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_args, **_kwargs: pytest.fail("no agent may run"))
+    output = tmp_path / "reports"
+    args = ["validate", "--no-autopilot", str(skill), "--no-tier2", "--tier3", "-r", "json,html", "-o", str(output)]
+
+    command = CliRunner().invoke(cli, [*args, "--block-on-agent-eval"] if blocking else args)
+
+    [report_json] = output.glob("*.json")
+    [report_html] = output.glob("*.html")
+    report_tier3 = json.loads(report_json.read_text(encoding="utf-8"))["tier3"]
+    return command.exit_code, report_tier3, report_html.read_text(encoding="utf-8")
+
+
+def _budget_left_attempts_not_run() -> dict:
+    """Return budget metadata whose token cap stopped the run after its first attempt."""
+    budget = BudgetController(max_agent_tokens=10, planned=4)
+    budget.admit(agent="opencode", arm="with", case_id="case-a", attempt=1)
+    budget.record_usage({"total_tokens": 20, "judge_calls": 1})
+    budget.admit(agent="opencode", arm="with", case_id="case-a", attempt=2)
+    metadata = budget.metadata()
+    assert metadata["not_run"]
+    return metadata
+
+
+def _failed_run(tmp_path: Path, failure: str, *, budget: dict | None) -> ValidationResult:
+    """Return a run that failed through a failed peer or a backend error after scoring.
+
+    With ``budget``, the run's budget also left planned attempts not run.
+    """
+    if failure == "failed peer":
+        failed_peer = {"execution_status": "failed", "execution_errors": ["Agent setup failed"]}
+        payload = build_agent_eval_payload(
+            "demo",
+            {"opencode": _agent(0.8), "codex": {**failed_peer, "with_skill": {}, "without_skill": {}}},
+            dataset=[{"id": "case-a"}],
+            attempt_policy={"max_attempts": 1, "stop_on_pass": False, "pass_threshold": 0.5},
+            run_config={"budget": budget} if budget else None,
+            use_llm_judge=False,
+        )
+        result = ValidationResult(validator_name="AGENT_EVAL")
+        result.metadata["agent_eval"] = payload
+        result.add_error("Agent setup failed")
+        return result
+    run_dir = tmp_path / "results" / "20260709_120005"
+    _write_summary(run_dir, score=1.0)
+    (tmp_path / "engine" / "demo").mkdir(parents=True)
+    engine: dict = {"execution_status": "failed", "execution_errors": ["Harbor job exited 1"]}
+    if budget:
+        engine["budget"] = budget
+    loaded = agent_eval_result_from_directory(
+        tmp_path / "engine" / "demo", run_dir, engine_result=engine, use_llm_judge=False
+    )
+    assert loaded is not None
+    return loaded
+
+
+SKILL_LIFT_CARD = r'<h3 class="dashboard-card-title">Skill Lift</h3>\s*<p class="dashboard-card-value">([^<]*)<'
+
+
+@pytest.mark.parametrize("blocking", [False, True])
+@pytest.mark.parametrize("failure", ["failed peer", "backend error"])
+def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, failure: str
+) -> None:
+    # A failed run whose budget also left planned attempts not run records
+    # incomplete, and the labels that follow the run's verdict read Incomplete.
+    result = _failed_run(tmp_path / "budget", failure, budget=_budget_left_attempts_not_run())
+    payload = result.metadata["agent_eval"]
+    assert (payload["execution_status"], payload["verdict"]) == ("failed", "incomplete")
+    if failure == "failed peer":
+        # The best agent has a lift, but the run's summary does not keep it.
+        assert payload["best_agent"] == "opencode"
+        assert payload["agents"]["opencode"]["lift"] == pytest.approx(0.4)
+    other = _failed_run(tmp_path / "other", failure, budget=None)
+    assert (other.metadata["agent_eval"]["execution_status"], other.metadata["agent_eval"]["verdict"]) != (
+        "failed",
+        "incomplete",
+    )
+    # Render the standalone reports first: validate records its gate on the result.
+    standalone = HTMLReporter(report_scope="tier3").render(result)
+    other_standalone = HTMLReporter(report_scope="tier3").render(other)
+
+    exit_code, report_tier3, raw = _validate_tier3_reports(
+        monkeypatch, tmp_path / "validate", blocking=blocking, tier3=result
+    )
+    _, _, other_raw = _validate_tier3_reports(monkeypatch, tmp_path / "validate-other", blocking=blocking, tier3=other)
+
+    assert exit_code == (1 if blocking else 0)
+    assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", "incomplete")
+    assert report_tier3["summary"]["overall_lift"] is None
+    for html in (standalone, raw):
+        text = _plain(html)
+        assert f"Tier 3 quality: {VERDICT_WORDS['incomplete']}" in text
+        assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" not in text
+        assert f"Tier 3 quality: {ADVISORY_FAIL_WORD}" not in text
+        if failure == "failed peer":
+            # The Overview leads with the completed agent's result instead.
+            assert "Live quality:" not in text
+            assert "Completed-agent result:" in text
+        else:
+            assert f"Live quality: {VERDICT_WORDS['incomplete']}." in text
+        embedded = _embedded_tier3(html)
+        assert (embedded["verdict"], embedded["summary"]["overall_lift"]) == ("incomplete", None)
+        assert re.findall(SKILL_LIFT_CARD, html) == ["N/A"]
+        assert "Best-agent lift" not in _run_details(html)
+    assert _hero_command_status(standalone) == VERDICT_WORDS["incomplete"]
+    # The Tier 3 tile and validate's command status read as for the same failed run without the budget stop.
+    assert dict(_tier_card_verdicts(standalone))["Tier 3"] == dict(_tier_card_verdicts(other_standalone))["Tier 3"]
+    assert dict(_tier_card_verdicts(standalone))["Tier 3"] == VERDICT_WORDS["fail"]
+    tile = VERDICT_WORDS["fail"] if blocking else ADVISORY_FAIL_WORD
+    assert dict(_tier_card_verdicts(raw))["Tier 3"] == dict(_tier_card_verdicts(other_raw))["Tier 3"] == tile
+    command_status = VERDICT_WORDS["fail"] if blocking else "Passed required checks"
+    assert _hero_command_status(raw) == _hero_command_status(other_raw) == command_status
+    assert (
+        "A failed run whose budget left planned attempts not run is the exception: the JSON report's `tier3` object "
+        "and Download Full Tier 3 Payload record `incomplete`. The Tier 3 quality status of every HTML report and the "
+        f"command status of the standalone Tier 3 `report.html` read {VERDICT_WORDS['incomplete']}, as does the "
+        "Overview's Live quality line when the Overview shows it. The Tier 3 tile and the command status of a "
+        f"`validate` report read as for any other failed run: the tile reads {VERDICT_WORDS['fail']}, or "
+        f"{ADVISORY_FAIL_WORD} when Tier 3 is advisory. Both payloads leave `summary.overall_lift` null even when the "
+        "best agent has a lift, so the Skill Lift card reads N/A and Run details & provenance has no Best-agent lift "
+        "line."
+    ) in _section()
+
+
+def test_changelog_documents_the_budget_stopped_failed_run(tmp_path: Path) -> None:
+    # The entry is found by its opening words in any section, so a release that
+    # moves Unreleased into a dated section keeps it valid. It must stay out of
+    # 0.9.0 and older released sections.
+    release, subsection, entry = _changelog_entry(
+        "- Reports & Results now covers a failed Tier 3 run whose budget left planned attempts not run."
+    )
+    assert subsection == "### Documentation"
+    assert _newer_than_0_9_0(release), release
+    assert (
+        "Its JSON `tier3` object and full Tier 3 download record `incomplete` and leave `summary.overall_lift` null, "
+        "even when the best agent has a lift."
+    ) in entry
+    assert (
+        f"Its Tier 3 quality status reads {VERDICT_WORDS['incomplete']}, while its Tier 3 tile reads "
+        f"{VERDICT_WORDS['fail']}, or {ADVISORY_FAIL_WORD} when Tier 3 is advisory."
+    ) in entry
+    result = _failed_run(tmp_path, "failed peer", budget=_budget_left_attempts_not_run())
+    raw = HTMLReporter(report_scope="tier3").render(result)
+    report_tier3 = json.loads(JSONReporter().render_all([result]))["tier3"]
+    embedded = _embedded_tier3(raw)
+    assert (report_tier3["verdict"], report_tier3["summary"]["overall_lift"]) == ("incomplete", None)
+    assert (embedded["verdict"], embedded["summary"]["overall_lift"]) == ("incomplete", None)
+    assert result.metadata["agent_eval"]["agents"]["opencode"]["lift"] == pytest.approx(0.4)
+    assert f"Tier 3 quality: {VERDICT_WORDS['incomplete']}" in _plain(raw)
+    assert dict(_tier_card_verdicts(raw))["Tier 3"] == VERDICT_WORDS["fail"]
+    # The general rule the page gave, which a budget-stopped run does not follow.
+    for said in (
+        f"HTML displays a failed run as {VERDICT_WORDS['fail']}",
+        "The JSON report's `tier3` object and full Tier 3 download both keep this lift in `summary.overall_lift`.",
+    ):
+        assert said in _section()

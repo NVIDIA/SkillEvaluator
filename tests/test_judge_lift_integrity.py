@@ -10,6 +10,7 @@ import re
 from pathlib import Path
 
 import pytest
+from tests.reporting.test_tier3_incomplete_arms import _doc_block
 
 from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_report import (
@@ -726,13 +727,6 @@ def test_attempt_counts_stay_null_unless_the_load_identifies_every_left_out_case
         f"the arm scores include {'it' if excluded_cases == 1 else 'them'}."
     ) in card_html
     assert "no comparable result remains" not in card_html
-
-
-def _doc_block(name: str, lead: str) -> str:
-    """Return the one blank-line separated block of ``name`` that starts with ``lead``, whitespace-normalized."""
-    text = (Path(__file__).resolve().parents[1] / name).read_text(encoding="utf-8")
-    [block] = [" ".join(part.split()) for part in re.split(r"\n\s*\n", text) if " ".join(part.split()).startswith(lead)]
-    return block
 
 
 def test_docs_and_changelog_say_when_each_no_lift_note_applies() -> None:

@@ -338,10 +338,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Reports & Results said that the HTML report labels a failed Tier 3 run's
   `neutral` verdict **Changes required**. The HTML reports show a failed run's
   verdict as `fail`, labelled **Changes required**, or **Failed (advisory)**
-  when Tier 3 is advisory. A failed run whose budget left planned attempts not
-  run reads **Incomplete** instead. The `tier3` object of a `validate --tier3`
-  JSON report can differ: it can still carry `neutral` or the verdict the
-  scores give. Reports & Results has the details.
+  when Tier 3 is advisory. The `tier3` object of a `validate --tier3` JSON
+  report can differ: it can still carry `neutral` or the verdict the scores
+  give. Reports & Results has the details.
 
 ### Fixed
 

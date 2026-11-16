@@ -4,13 +4,13 @@
 from __future__ import annotations
 
 import json
-import re
 import tomllib
 from pathlib import Path
 
 import pytest
 import yaml
 from click.testing import CliRunner
+from tests.reporting.test_tier3_completed_agent_docs import _changelog_entry, _newer_than_0_9_0
 
 from skillevaluator.cli import cli
 from skillevaluator.tier3 import commands, workflow
@@ -236,25 +236,11 @@ def test_changelog_limits_the_empty_expected_output_rejection_to_the_object_shap
     # The entry is found by its opening words in any section, so a release that
     # moves Unreleased into a dated section keeps it valid. It must stay out of
     # 0.9.0 and older released sections.
-    lead = "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
-    release = subsection = ""
-    found: list[tuple[str, str, str]] = []
-    changelog = (Path(__file__).resolve().parents[1] / "CHANGELOG.md").read_text(encoding="utf-8")
-    for block in changelog.split("\n\n"):
-        normalized = " ".join(block.split())
-        if normalized.startswith("## "):
-            release, subsection = normalized, ""
-        elif normalized.startswith("### "):
-            subsection = normalized
-        elif normalized.startswith(lead):
-            found.append((release, subsection, normalized))
-    assert len(found) == 1
-    release, subsection, entry = found[0]
+    release, subsection, entry = _changelog_entry(
+        "- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`"
+    )
     assert subsection == "### Documentation"
-    version = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
-    assert release == "## Unreleased" or (
-        version is not None and tuple(int(part) for part in version.groups()) > (0, 9, 0)
-    ), release
+    assert _newer_than_0_9_0(release), release
     assert 'They reject it only in a `{"skill_name", "evals"}` dataset.' in entry
     assert (
         'A flat dataset (a JSON or YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an empty '

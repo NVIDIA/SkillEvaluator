@@ -11,6 +11,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
+from tests.reporting.test_report_redesign import _tier_card_verdicts
 from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
 from tests.reporting.test_unified_tier3_report import _write_summary
 
@@ -647,8 +648,8 @@ def _budget_left_attempts_not_run() -> dict:
 def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, blocking: bool, failure: str
 ) -> None:
-    # A failed run whose budget also left planned attempts not run is incomplete,
-    # not fail, in the JSON report and in the HTML labels.
+    # A failed run whose budget also left planned attempts not run is incomplete in
+    # the JSON report and in the HTML labels that follow the run's verdict.
     budget = _budget_left_attempts_not_run()
     if failure == "failed peer":
         failed_peer = {"execution_status": "failed", "execution_errors": ["Agent setup failed"]}
@@ -680,19 +681,30 @@ def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
 
     assert exit_code == (1 if blocking else 0)
     assert (report_tier3["execution_status"], report_tier3["verdict"]) == ("failed", "incomplete")
+    assert report_tier3["summary"]["overall_lift"] is None
+    verdict_card = (
+        r'<h3 class="dashboard-card-title">(?:Quality )?Verdict</h3>\s*<p class="dashboard-card-value">([^<]*)<'
+    )
+    lift_card = r'<h3 class="dashboard-card-title">Skill Lift</h3>\s*<p class="dashboard-card-value">([^<]*)<'
     for html in (standalone, raw):
         text = _plain(html)
         assert f"Tier 3 quality: {VERDICT_WORDS['incomplete']}" in text
         assert f"Tier 3 quality: {VERDICT_WORDS['fail']}" not in text
         assert f"Tier 3 quality: {ADVISORY_FAIL_WORD}" not in text
-    # Only the standalone report's command status follows the verdict.
+        assert re.findall(verdict_card, html) == [VERDICT_WORDS["incomplete"]]
+        assert (_embedded_tier3(html)["verdict"], _embedded_tier3(html)["summary"]["overall_lift"]) == ("fail", None)
+        assert re.findall(lift_card, html) == ["N/A"]
+        assert "Best-agent lift" not in _run_details(html)
+    # The command status and the Tier 3 tile do not follow the incomplete verdict.
     assert _hero_command_status(standalone) == VERDICT_WORDS["incomplete"]
     assert _hero_command_status(raw) == (VERDICT_WORDS["fail"] if blocking else "Passed required checks")
+    assert dict(_tier_card_verdicts(standalone))["Tier 3"] == VERDICT_WORDS["fail"]
+    assert dict(_tier_card_verdicts(raw))["Tier 3"] == (VERDICT_WORDS["fail"] if blocking else ADVISORY_FAIL_WORD)
     assert (
         "A failed run whose budget left planned attempts not run is the exception: its `tier3` object records "
-        f"`incomplete`, and the HTML reports label its verdict {VERDICT_WORDS['incomplete']}, as does the command "
-        "status of the standalone Tier 3 `report.html`."
+        "`incomplete`, and the Tier 3 quality chip, the overview's verdict card and the command status of the "
+        f"standalone Tier 3 `report.html` read {VERDICT_WORDS['incomplete']}. The Tier 3 tile still reads "
+        f"{VERDICT_WORDS['fail']}, or {ADVISORY_FAIL_WORD} when Tier 3 is advisory, and the payload embedded in the "
+        "HTML report records `fail`. Both payloads leave its `summary.overall_lift` null, so the Skill Lift card "
+        "reads N/A and Run details & provenance has no Best-agent lift line."
     ) in _section()
-    assert (
-        f"A failed run whose budget left planned attempts not run reads {VERDICT_WORDS['incomplete']} instead."
-    ) in _changelog_entry(FAILED_RUN_ENTRY)[2]

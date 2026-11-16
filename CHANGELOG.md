@@ -1213,6 +1213,13 @@ All notable changes to SkillEvaluator are documented in this file.
   printed under each plan line that changed during the run, and the next plan
   line or table started on the same line as that copy's bottom border. Output
   to a terminal is unchanged.
+- Tier 3 security finding evidence and saved judge evidence mask the
+  credential in more command forms (`auth=` call values, `sed` replacements,
+  `_` long flags, quoted or `--` config keys, values in escaped single quotes
+  or quoted with the `'"'"'` idiom, a name after an escaped line break), also
+  in text escaped twice; a value-less credential flag no longer hides the next
+  command's password, and shell `apply_patch` evidence is masked before its
+  400-character cut. The Tier 3 live evaluation guide lists the exact forms.
 
 ## 0.9.0 - 2026-11-13
 

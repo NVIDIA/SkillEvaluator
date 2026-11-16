@@ -3,6 +3,7 @@
 
 # Offline Tier 1 hooks for skill repositories. Each hook maps the files
 # pre-commit passes to skill roots and runs one key-free check per skill.
+# The files pattern covers every skill directory the schema check allows.
 # See docs/repository-integration.mdx.
 
 - id: skillevaluator-quality
@@ -10,14 +11,14 @@
   description: Score each touched skill against the quality bar. Offline; no API key, network, Docker, or scanner download.
   entry: skillevaluator precommit-run quality
   language: python
-  files: '(^|/)(SKILL\.md$|(scripts|references|evals)/)'
+  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
 
 - id: skillevaluator-schema
   name: SkillEvaluator schema
   description: Validate SKILL.md frontmatter and skill layout. Offline; no API key, network, Docker, or scanner download.
   entry: skillevaluator precommit-run schema
   language: python
-  files: '(^|/)(SKILL\.md$|(scripts|references|evals)/)'
+  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
 
 - id: skillevaluator-lint-scripts
   name: SkillEvaluator script lint
@@ -26,4 +27,4 @@
   language: python
   # Findings are advisory and never fail the commit; verbose shows them anyway.
   verbose: true
-  files: '(^|/)(SKILL\.md$|(scripts|references|evals)/)'
+  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'

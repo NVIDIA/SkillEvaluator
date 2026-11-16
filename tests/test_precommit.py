@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import re
 import shlex
 import sys
 from pathlib import Path
@@ -12,6 +13,7 @@ import yaml
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
+from skillevaluator.constants import DEFAULT_ALLOWED_SKILL_DIRS
 from skillevaluator.precommit import (
     CHECKS,
     collect_skill_roots,
@@ -294,3 +296,12 @@ def test_precommit_hooks_yaml_entries_resolve_to_commands() -> None:
         "skillevaluator-schema",
         "skillevaluator-lint-scripts",
     ]
+
+
+def test_precommit_hooks_yaml_files_cover_every_allowed_skill_dir() -> None:
+    hooks = yaml.safe_load((REPO / ".pre-commit-hooks.yaml").read_text(encoding="utf-8"))
+    for hook in hooks:
+        pattern = re.compile(hook["files"])
+        assert pattern.search("skills/x/SKILL.md"), hook["id"]
+        for directory in sorted(DEFAULT_ALLOWED_SKILL_DIRS):
+            assert pattern.search(f"skills/x/{directory}/file.py"), f"{hook['id']}: {directory}/"

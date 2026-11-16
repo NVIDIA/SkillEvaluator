@@ -101,7 +101,9 @@ repos:
 ```
 
 Then `pre-commit install`. On each commit, pre-commit passes the changed skill
-files (`SKILL.md`, `scripts/`, `references/`, `evals/`) to the selected hooks.
+files (`SKILL.md` and anything under the skill directories the schema check
+allows: `agents/`, `assets/`, `config/`, `evals/`, `references/`, `scripts/`,
+`tests/`, `tools/`) to the selected hooks.
 
 `--min-score` is forwarded to the quality check. Omit `args` to keep the
 default quality bar of 70.

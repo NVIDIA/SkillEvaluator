@@ -2122,6 +2122,14 @@ def _stderr_shaped(raw: io.RawIOBase) -> io.TextIOWrapper:
     )
 
 
+def _bottom_right_corner(console: Any) -> str:
+    # The progress table's box is ROUNDED, but Rich draws it SQUARE on a
+    # legacy Windows console, so its last line ends with "┘" there.
+    from rich import box
+
+    return box.ROUNDED.substitute(console.options).bottom_right
+
+
 @pytest.mark.parametrize(
     "stream_kind",
     ["text-stream", "stderr-shaped-pipe", "pipe-full-at-close"],
@@ -2158,8 +2166,9 @@ def test_forced_rich_progress_on_a_stream_that_is_not_a_terminal_ends_the_final_
     # Off a terminal, Live draws the frame once, as it stops. Its last line
     # ends there, once, so the next line is neither joined to the frame's
     # bottom border nor left after a blank line.
-    assert output.count("╯") == 1
-    assert output.endswith("╯\nResult: pass\n")
+    corner = _bottom_right_corner(rich_reporter._console)
+    assert output.count(corner) == 1
+    assert output.endswith(f"{corner}\nResult: pass\n")
 
 
 @pytest.mark.parametrize(
@@ -2289,13 +2298,14 @@ def test_forced_rich_progress_on_an_interactive_pipe_draws_only_the_final_frame(
     # so none is drawn: Live draws its frame once, as it stops. The changed
     # plan line is a line of its own above it, and the frame's last line ends
     # once before the next output.
-    assert output.count("╯") == 1
+    corner = _bottom_right_corner(rich_reporter._console)
+    assert output.count(corner) == 1
     assert "\nRun plan: Tasks 3 · " in output
     if stream_kind == "plan-line-refused":
         assert output.count("Tier 3 progress display stopped after a drawing error") == 1
-        assert output.endswith(f"╯\n{_STOP_NOTICE}\nResult: pass\n")
+        assert output.endswith(f"{corner}\n{_STOP_NOTICE}\nResult: pass\n")
     else:
-        assert output.endswith("╯\nResult: pass\n")
+        assert output.endswith(f"{corner}\nResult: pass\n")
 
 
 @pytest.mark.parametrize(

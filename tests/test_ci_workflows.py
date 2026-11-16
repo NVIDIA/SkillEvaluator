@@ -406,6 +406,68 @@ def test_every_workflow_pins_every_action_to_a_commit() -> None:
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), f"{workflow_name}: {uses}"
 
 
+def _uv_pins() -> list[tuple[str, str | None]]:
+    """Every place CI chooses a uv version, as ``(where, version)``.
+
+    ``version`` is ``None`` for a ``setup-uv`` step that names none, because that
+    step installs whatever uv is newest on the day it runs.
+    """
+    pins: list[tuple[str, str | None]] = []
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            if _action_repository(step.get("uses", "")) == "astral-sh/setup-uv":
+                pins.append((f"{workflow_name}: setup-uv", step.get("with", {}).get("version")))
+    for path in [*sorted(WORKFLOWS.iterdir()), *sorted((ROOT / "ci" / "gitlab").glob("*.yml"))]:
+        if path.suffix not in {".yml", ".yaml"}:
+            continue
+        for found in re.findall(r"\buv==([^\s'\"\\]+)", path.read_text(encoding="utf-8")):
+            pins.append((f"{path.relative_to(ROOT)}: pip install", found))
+    # The hash-locked bootstrap behind the Tier 1 image and the privileged publisher.
+    requirements = ROOT / "ci" / "requirements"
+    for name in ("uv.in", "uv.txt"):
+        first = (requirements / name).read_text(encoding="utf-8").split(maxsplit=1)[0]
+        pinned = re.fullmatch(r"uv==(\S+)", first)
+        assert pinned, f"ci/requirements/{name} must start with an exact uv pin, not {first!r}"
+        pins.append((f"ci/requirements/{name}", pinned.group(1)))
+    return pins
+
+
+def _assert_one_uv_version(pins: Sequence[tuple[str, str | None]]) -> None:
+    assert pins, "no uv pins found"
+    unpinned = [where for where, version in pins if version is None]
+    assert not unpinned, f"pin uv with version:, not the latest release: {unpinned}"
+    where_by_version: dict[str | None, set[str]] = {}
+    for where, version in pins:
+        where_by_version.setdefault(version, set()).add(where)
+    assert len(where_by_version) == 1, "CI runs more than one uv version: " + "; ".join(
+        f"{version} in {sorted(places)}" for version, places in sorted(where_by_version.items())
+    )
+
+
+def test_every_ci_uv_install_uses_the_one_reviewed_version() -> None:
+    """GitHub jobs, GitLab jobs, the Tier 1 image and the publisher all run one uv.
+
+    Covers ``setup-uv`` steps (including an older action pin with no ``version:``),
+    ``pip install uv==...`` lines, and the hash-locked ``ci/requirements/uv.*``.
+    """
+    pins = _uv_pins()
+    _assert_one_uv_version(pins)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", str(pins[0][1])), f"pin an exact version, not {pins[0][1]!r}"
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        pytest.param([("ci.yml: setup-uv", "0.13.8"), ("ci.yml: setup-uv", None)], id="unpinned-setup-uv"),
+        pytest.param([("ci.yml: setup-uv", "0.13.8"), ("ci/requirements/uv.in", "0.13.4")], id="mixed-versions"),
+        pytest.param([], id="no-pins"),
+    ],
+)
+def test_uv_version_guard_rejects_drift(pins: list[tuple[str, str | None]]) -> None:
+    with pytest.raises(AssertionError):
+        _assert_one_uv_version(pins)
+
+
 def test_every_workflow_does_not_persist_checkout_credentials() -> None:
     checkout_steps = [
         (workflow_name, step)

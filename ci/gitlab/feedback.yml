@@ -52,7 +52,7 @@ skill-evaluation-feedback:
       env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" remote add origin "https://github.com/$tools_repository.git"
       env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" fetch -q --depth 1 origin "$tools_ref"
       env -i PATH="$PATH" GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_SYSTEM=/dev/null git -C "$tools_dir" checkout -q --detach FETCH_HEAD
-      env -i PATH="$PATH" python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      env -i PATH="$PATH" python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
       env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$tools_dir/.uv-cache" sync --locked --no-dev --extra publisher --project "$tools_dir" --python 3.12 --default-index https://pypi.org/simple
       "$tools_dir/.venv/bin/python" -I - "$tools_dir/ci/feedback.py" --platform gitlab --api-url '$[[ inputs.api-url ]]' --project-id '$[[ inputs.project-id ]]' --pipeline-id "$SKILL_EVAL_SOURCE_PIPELINE_ID" <<'PYTHON'
       import os, runpy, sys

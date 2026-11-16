@@ -292,7 +292,7 @@ jobs:
         env:
           TIER: ${{ matrix.tier }}
         run: |
-          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --extra "tier${TIER}" --project "$GITHUB_WORKSPACE/evaluator" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/evaluator/.venv/bin" >> "$GITHUB_PATH"
       - &current-head-check
@@ -408,7 +408,7 @@ jobs:
           python-version: '3.12'
       - name: Install the locked credential-free Tier 1 launcher
         run: |
-          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --project "$GITHUB_WORKSPACE/evaluator" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/evaluator/.venv/bin" >> "$GITHUB_PATH"
       - *current-head-check
@@ -502,7 +502,7 @@ jobs:
           python-version: '3.12'
       - name: Install the locked aggregate runtime
         run: |
-          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --project "$GITHUB_WORKSPACE" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       # "Re-run failed jobs" keeps earlier-attempt artifacts from tier jobs that were not rerun.

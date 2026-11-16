@@ -288,6 +288,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
 - Arms fully denied by a run budget are reported as not run instead of failed
   empty Harbor jobs. Budget-partial runs remain incomplete without an execution
   error when all admitted attempts succeed, including stop-on-pass runs. Reused

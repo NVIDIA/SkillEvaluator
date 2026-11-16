@@ -369,6 +369,8 @@ All notable changes to SkillEvaluator are documented in this file.
   depending on filesystem clock granularity.
 - Make the onboarding URL-rewrite test use its temporary global Git config even
   when the caller sets `GIT_CONFIG_GLOBAL`.
+- Model a changed ctime explicitly in the restored-mtime summary regression so
+  it does not depend on two writes crossing a filesystem clock tick.
 - Terminal quality headlines and check-count comparisons exclude execution-failed arms.
   Multi-agent summaries also withhold a failed agent's quality headline, and the
   `RUN QUALITY VERDICT` line no longer reads that agent: an agent that failed

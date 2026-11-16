@@ -51,6 +51,9 @@ existing benchmark into a custom grader, read
   `lint-scripts`, `tier1 PATH --no-llm`, `validate PATH --tiers 1`).
 - A provider for LLM stages, Tier 2 and Tier 3. Simplest:
   `export SKILL_EVAL_LLM_PROVIDER=nv_build` and `export NVIDIA_API_KEY=...`.
+  A key for a company or self-hosted gateway works too, so the user does not
+  need a new one: `SKILL_EVAL_LLM_PROVIDER=openai-compatible` with
+  `SKILL_EVAL_LLM_BASE_URL` and `SKILL_EVAL_LLM_API_KEY`.
   Other providers: [references/providers.md](references/providers.md).
 - For Tier 3: an agent (`opencode`, `codex`, or `claude-code`) and a sandbox.
   Harbor is installed with the `tier3` extra; you do not run it yourself.
@@ -141,6 +144,9 @@ command, not the skill).
 - **Quality** (0-100): Correctness 35%, Discoverability 25%, Reliability 25%,
   Efficiency 15%. Grades A>=90, B>=80, C>=70. Passing needs `--min-score`
   (default 70) and no HIGH/CRITICAL quality finding.
+- **The gate and the score are separate results.** `tier1` exits `1` when any
+  check fails, for example a HIGH security finding, even if the quality grade
+  is A or B. Report both, and never call a skill passing from its grade alone.
 - **Rubric** (0-100): nine criteria scored 0-10; passing needs the weighted
   score >= `--min-score` and every criterion >= 7.
 - **Tier 2**: HIGH or CRITICAL duplicate findings exit `1` in `tier2 PATH`.
@@ -153,7 +159,9 @@ command, not the skill).
   verdict; only an incomplete run exits `1`.
 - **Missing scores are `NO SCORE` or `None`, never 0.** Do not average them in.
 - **Publication**: require `publication_status == "pass"` in the JSON report,
-  not just `overall_passed`.
+  not just `overall_passed`. A keyless Tier 1 run that passes still ends with
+  `Publication eligibility: Incomplete`, because Tier 2 and Tier 3 did not run.
+  Tell the user this is expected and is not a failure.
 
 Report anatomy and JSON fields: [references/reports-and-ci.md](references/reports-and-ci.md).
 

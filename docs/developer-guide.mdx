@@ -70,6 +70,9 @@ it must exercise ctime detection even when the host clock has not ticked.
 evaluation framework used by Tier 3; the `live` marker exercises its in-process
 backend.
 
+The POSIX same-inode read-race test explicitly advances the modified file's
+mtime: two same-size writes can otherwise share a filesystem clock tick.
+
 | Marker | What it covers | Run it with |
 | --- | --- | --- |
 | *(none)* | Fast unit tests — the default selection | `pytest` |
@@ -84,6 +87,9 @@ The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 ```bash title="Run tests in parallel"
 pytest -n auto
 ```
+
+The directory-snapshot race regression explicitly advances directory mtime when
+inserting its late entry, rather than assuming creation crosses a clock tick.
 
 ### Check the HTML report in a browser
 

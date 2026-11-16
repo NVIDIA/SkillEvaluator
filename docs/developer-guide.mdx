@@ -80,6 +80,9 @@ The MCP-staging and legacy-summary restored-mtime regressions model an advanced
 ctime explicitly, so their source-change assertions do not depend on the host
 clock ticking.
 
+The directory-snapshot race regression explicitly advances directory mtime when
+inserting its late entry, rather than assuming creation crosses a clock tick.
+
 Git URL-rewrite tests point `GIT_CONFIG_GLOBAL` at their temporary configuration,
 so caller-level Git isolation does not suppress the rewrite being tested.
 
@@ -88,9 +91,6 @@ The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 ```bash title="Run tests in parallel"
 pytest -n auto
 ```
-
-The directory-snapshot race regression explicitly advances directory mtime when
-inserting its late entry, rather than assuming creation crosses a clock tick.
 
 ### Check the HTML report in a browser
 

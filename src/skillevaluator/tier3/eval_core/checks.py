@@ -3470,7 +3470,8 @@ _FINDING_EVIDENCE_LOGIN_PASSWORD_RE = re.compile(
 _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDING_EVIDENCE_FLAG_VALUE)
 # The MySQL client is a command word, run by name or from a bin directory
 # ("/usr/bin/mysql"), not a path component ("find /var/lib/mysql -path ...").
-# find's -path, -perm, -print and -prune are not attached passwords.
+# find's -path, -perm, -print and -prune are not attached passwords. The
+# password may be quoted as a flag value is, also with the '"'"' idiom.
 _FINDING_EVIDENCE_MYSQL_COMMAND = (
     r"(?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
     r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)(?=[ \t])"
@@ -3478,7 +3479,11 @@ _FINDING_EVIDENCE_MYSQL_COMMAND = (
 _FINDING_EVIDENCE_MYSQL_PASSWORD_REST = (
     r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:"
     + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
-    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
 )
 _FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
     "(" + _FINDING_EVIDENCE_MYSQL_COMMAND + _FINDING_EVIDENCE_MYSQL_PASSWORD_REST

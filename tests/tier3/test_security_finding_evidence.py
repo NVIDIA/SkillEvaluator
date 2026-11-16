@@ -4014,6 +4014,11 @@ def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
             "ssh host 'export API_TOKEN=<redacted> && rm -rf /srv/app'",
             id="assignment-backslash-idiom",
         ),
+        pytest.param(
+            f"bash -c 'mysql -h db -u root -p'\"'\"'{_API_TOKEN}'\"'\"' mydb | tee out.log'",
+            "bash -c 'mysql -h db -u root -p<redacted> mydb | tee out.log'",
+            id="mysql-password",
+        ),
     ],
 )
 def test_a_value_quoted_with_a_quote_idiom_is_masked_whole(copy: str, text: str, expected: str) -> None:

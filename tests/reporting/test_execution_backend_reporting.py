@@ -10,6 +10,7 @@ import json
 import pytest
 
 from skillevaluator.evaluation import tier3_report
+from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
@@ -148,14 +149,38 @@ def test_html_report_omits_a_backend_that_is_not_a_known_name(backend):
     assert '<span class="t3-ds-chip">Environment: <b>docker</b></span>' in html
 
 
+def _untrusted_result(backend):
+    # A success claim with no agent evidence must be rebuilt as incomplete.
+    return ValidationResult(
+        validator_name="AGENT_EVAL",
+        metadata={
+            "agent_eval": {
+                "skill_name": "demo",
+                "execution_status": "succeeded",
+                "verdict": "pass",
+                "summary": {"environment": "docker", "execution_backend": backend},
+                "agents": {},
+            }
+        },
+    )
+
+
+@pytest.mark.parametrize(("backend", "label"), [("harbor", "Harbor"), ("nemo-gym", "NeMo Gym")])
+def test_html_report_keeps_a_recorded_backend_when_rebuilding_untrusted_evidence(backend, label):
+    html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([_untrusted_result(backend)])
+
+    assert "Tier 3 quality: Incomplete" in html
+    assert f"<div><strong>Backend:</strong> {label}</div>" in html
+    assert "<div><strong>Environment:</strong> <code>docker</code></div>" in html
+
+
 @pytest.mark.parametrize("backend", _NOT_A_BACKEND_NAME)
 def test_html_report_omits_a_malformed_backend_on_an_untrusted_payload(backend):
-    # A failed result with no execution evidence takes the display path that rebuilds the payload.
-    result = _dataset_result(backend)
-    result.add_error("Tier 3 evaluation failed")
+    result = _untrusted_result(backend)
 
     html = HTMLReporter(report_scope="tier3", include_timestamp=False).render_all([result])
 
+    assert "Tier 3 quality: Incomplete" in html
     assert "Backend:" not in html
 
 

@@ -4164,6 +4164,93 @@ def write_reward_outputs(result, overall):
     REWARD_TXT.write_text(str(sanitized_overall))
 
 
+_YAML_FRONTMATTER = re.compile(r"\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
+_YAML_TOP_LEVEL_KEY = re.compile(
+    r"""^(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\n]|'')*)'|([^\s#'"\-?:\[\]{}|>&*!%@`,][^:\n]*?))[ \t]*:(?=[ \t\r\n]|\Z)""",
+    re.MULTILINE,
+)
+_YAML_QUOTED_BODY = {'"': re.compile(r"(?:[^\"\\]|\\.)*", re.DOTALL), "'": re.compile(r"(?:[^']|'')*")}
+_YAML_BLOCK_SCALAR = re.compile(r"([|>])[+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
+_YAML_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)", re.DOTALL)
+_YAML_SIMPLE_ESCAPES = {"0": "\0", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _yaml_unescape(match: re.Match[str]) -> str:
+    code = match.group(1)
+    if len(code) > 1:
+        try:
+            return chr(int(code[1:], 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+    return _YAML_SIMPLE_ESCAPES.get(code, code)
+
+
+def _yaml_scalar(text: str, start: int) -> tuple[str, int]:
+    """Read the YAML scalar whose value begins at ``text[start]``.
+
+    Returns the value and the index just past it. Covers the spellings a skill
+    name takes: plain (with a trailing comment), single- or double-quoted
+    (possibly folded over several lines), a ``|``/``>`` block scalar, and a
+    value on the line after the key.
+    """
+    while text[start : start + 1] in {" ", "\t"}:
+        start += 1
+    if text[start : start + 1] in {'"', "'"}:
+        quote = text[start]
+        body = _YAML_QUOTED_BODY[quote].match(text, start + 1)
+        end = body.end()
+        if text[end : end + 1] != quote:
+            return "", len(text)  # unterminated: not valid YAML
+        value = re.sub(r"[ \t]*\r?\n[ \t]*", " ", body.group())
+        value = _YAML_ESCAPE.sub(_yaml_unescape, value) if quote == '"' else value.replace("''", "'")
+        return value, end + 1
+    line_end = text.find("\n", start)
+    line_end = len(text) if line_end < 0 else line_end
+    block = _YAML_BLOCK_SCALAR.match(text, start)
+    if block:
+        position, lines = block.end(), []
+        while position < len(text):
+            end = text.find("\n", position)
+            end = len(text) if end < 0 else end
+            line = text[position:end]
+            if line.strip() and line[0] not in {" ", "\t"}:
+                break  # the block ends at the next unindented line
+            if line.strip():
+                lines.append(line.strip())
+            position = end + 1
+        return (" " if block.group(1) == ">" else "\n").join(lines), min(position, len(text))
+    value = re.split(r"(?:^|[ \t])#", text[start:line_end], maxsplit=1)[0].strip()
+    if value:
+        return value, line_end
+    position = line_end + 1
+    while position < len(text):  # no value on this line: it may continue, indented, below
+        end = text.find("\n", position)
+        end = len(text) if end < 0 else end
+        line = text[position:end]
+        if line.strip() and not line.lstrip().startswith("#"):
+            return _yaml_scalar(text, position) if line[0] in {" ", "\t"} else ("", line_end)
+        position = end + 1
+    return "", line_end
+
+
+def _frontmatter_skill_name(content: str) -> str:
+    """Read the top-level ``name`` of a SKILL.md the way ``yaml.safe_load`` does.
+
+    The verifier image does not guarantee PyYAML, and loading skill-authored
+    YAML there would also expand its aliases, so this reads only the scalar
+    spellings above. Like ``yaml.safe_load``, a later ``name`` key wins.
+    """
+    frontmatter = _YAML_FRONTMATTER.match(content)
+    if not frontmatter:
+        return ""
+    text, name, position = frontmatter.group(1), "", 0
+    while key := _YAML_TOP_LEVEL_KEY.search(text, position):
+        value, position = _yaml_scalar(text, key.end())
+        if (key.group(1) or key.group(2) or key.group(3)) == "name":
+            name = value.strip()
+    return name
+
+
 def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
     """Read bounded dependency evidence from the evaluator-staged skill."""
     context: dict[str, Any] = {
@@ -4218,10 +4305,8 @@ def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skil
             )
         else:
             context["skill_text"] += "\n" + content
-            frontmatter = re.match(r"---[ \t]*\r?\n(.*?)^---", content, re.MULTILINE | re.DOTALL)
-            name = frontmatter and re.search(r"^name:[ \t]*['\"]?([^'\"\s#]+)", frontmatter.group(1), re.MULTILINE)
-            if relative.as_posix().lower() == "skill.md" and name:
-                context["skill_name"] = name.group(1)
+            if relative.as_posix().lower() == "skill.md":
+                context["skill_name"] = _frontmatter_skill_name(content) or context["skill_name"]
             if "scripts" in relative.parts and path.suffix == ".py":
                 imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
                 context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)

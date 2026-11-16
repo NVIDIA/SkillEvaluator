@@ -190,12 +190,13 @@ def test_dependency_context_records_modules_provided_by_skill(tmp_path):
     assert "rasterio" in context["script_imports"]
 
 
-def _skill_named_text_analyzer(tmp_path, apt: str | None = None) -> dict:
+def _skill_named_text_analyzer(tmp_path, apt: str | None = None, frontmatter: str | None = None) -> dict:
     skill = tmp_path / "text-analyzer"
     (skill / "scripts").mkdir(parents=True)
-    (skill / "SKILL.md").write_text(
-        "---\nname: text-analyzer\ndescription: Count words. Use when a request names text-analyzer.\n---\n"
-        "Run scripts/analyze_text.py; pipe the result to jq if needed.\n"
+    if frontmatter is None:
+        frontmatter = "name: text-analyzer\ndescription: Count words. Use when a request names text-analyzer.\n"
+    (skill / "SKILL.md").write_bytes(
+        f"---\n{frontmatter}---\nRun scripts/analyze_text.py; pipe the result to jq if needed.\n".encode()
     )
     if apt is not None:
         (skill / "scripts" / "apt-packages.txt").write_text(apt)
@@ -212,6 +213,61 @@ def test_missing_command_named_after_the_skill_is_agent_tool_choice(checker, tmp
     assert result["failures"][0]["fault"] == "agent"
     assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
     assert result["environment_faults"] == 0
+
+
+# Every spelling below is the same skill name to yaml.safe_load, which the schema validator uses.
+_DESCRIPTION = "description: Count words. Use when a request names text-analyzer.\n"
+_TEXT_ANALYZER_FRONTMATTERS = {
+    "double-quoted-value": f'name: "text-analyzer"\n{_DESCRIPTION}',
+    "single-quoted-value": f"name: 'text-analyzer'\n{_DESCRIPTION}",
+    "double-quoted-key": f'"name": text-analyzer\n{_DESCRIPTION}',
+    "single-quoted-key-and-value": f"'name': 'text-analyzer'\n{_DESCRIPTION}",
+    "space-before-colon": f"name : text-analyzer\n{_DESCRIPTION}",
+    "folded-block-scalar": f"name: >-\n  text-analyzer\n{_DESCRIPTION}",
+    "literal-block-scalar": f"name: |\n  text-analyzer\n{_DESCRIPTION}",
+    "value-on-next-line": f"name:\n  text-analyzer\n{_DESCRIPTION}",
+    "plain-trailing-comment": f"name: text-analyzer # shown in listings\n{_DESCRIPTION}",
+    "quoted-trailing-comment": f'name: "text-analyzer" # shown in listings\n{_DESCRIPTION}',
+    "name-after-block-description": "description: |\n  Count words.\n  name: not-this-one\nname: text-analyzer\n",
+    "nested-name-is-ignored": f"metadata:\n  name: not-this-one\nname: text-analyzer\n{_DESCRIPTION}",
+    "name-inside-multiline-quoted-text": 'description: "Count words.\nname: not-this-one"\nname: text-analyzer\n',
+}
+
+
+@pytest.mark.parametrize("frontmatter", _TEXT_ANALYZER_FRONTMATTERS.values(), ids=_TEXT_ANALYZER_FRONTMATTERS.keys())
+def test_skill_name_is_read_from_any_yaml_spelling_of_the_name(checker, tmp_path, frontmatter):
+    """A missing command named after the skill is the agent's choice however the manifest spells the name."""
+    context = _skill_named_text_analyzer(tmp_path, frontmatter=frontmatter)
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=context,
+    )
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+    assert result["environment_faults"] == 0
+    other = checker([_call("jq . out.json", "bash: line 1: jq: command not found")], dependency_context=context)
+    assert other["failures"][0]["fault_kind"] == "undeclared_dependency"
+
+
+def test_crlf_frontmatter_name_is_read(tmp_path):
+    skill = tmp_path / "text-analyzer"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(
+        b"---\r\nname: 'text-analyzer'\r\ndescription: Count words.\r\n---\r\nRun scripts/run.py\r\n"
+    )
+    context = eval_template._dependency_context("text-analyzer", skills_root=tmp_path)
+    assert context["skill_name"] == "text-analyzer"
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["description: Count words.\n", "name:\ndescription: x\n", "name: ''\n"],
+    ids=["missing", "empty-value", "empty-string"],
+)
+def test_skill_without_a_readable_name_records_no_name(tmp_path, frontmatter):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\n{frontmatter}---\nBody\n")
+    assert eval_template._dependency_context("demo", skills_root=tmp_path)["skill_name"] == ""
 
 
 def test_declared_tool_named_after_the_skill_stays_environment_fault(checker, tmp_path):

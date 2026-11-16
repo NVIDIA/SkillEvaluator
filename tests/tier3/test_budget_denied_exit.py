@@ -8,6 +8,8 @@ from click.testing import CliRunner
 
 from skillevaluator.cli import cli
 from skillevaluator.evaluation import EvaluationService
+from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
+from skillevaluator.reporting import HTMLReporter
 from skillevaluator.tier3.harbor import runner
 from skillevaluator.tier3.harbor.progress import NullProgressReporter
 from skillevaluator.tier3.harbor.run_budget import BudgetController
@@ -45,6 +47,27 @@ def test_budget_denied_cli_exits_successfully(monkeypatch, denied_result):
     assert result.exit_code == 0, result.output
     assert "RUN QUALITY VERDICT: INCOMPLETE" in result.output
     assert "execution status is skipped" not in result.output
+
+
+def test_budget_denied_html_is_incomplete_and_retains_budget(denied_result):
+    condition = {
+        "execution_status": "skipped",
+        "skip_reason": "budget_exhausted",
+        "expected_attempts": 0,
+        "scored_attempts": 0,
+    }
+    payload = build_agent_eval_payload(
+        "skill",
+        {"opencode": {**denied_result, "conditions": {"with_skill": condition, "without_skill": condition}}},
+        run_config={"budget": denied_result["budget"]},
+        use_llm_judge=False,
+    )
+    validation = _validation_result_from_payload(payload)
+    assert not validation.errors
+    rendered = HTMLReporter(report_scope="tier3").render_all([validation])
+    assert 'data-verdict="incomplete"' in rendered
+    assert "Budget exhausted (attempts 0 of 0)" in rendered
+    assert "with-skill not run due to budget" in rendered
 
 
 @pytest.mark.parametrize("change", ["error", "failed", "started", "reason", "partial", "empty", "missing"])

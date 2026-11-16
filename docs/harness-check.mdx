@@ -190,7 +190,8 @@ These are the findings you are most likely to meet:
 <Tabs>
   <Tab title="On its own">
     Use `harness-check` when this is the only answer you want. It takes a skill
-    folder, a folder of skills, or a plugin folder, and it always exits `0`.
+    folder, a folder of skills, or a plugin folder. Its findings never change the
+    exit code.
 
     ```bash
     skillevaluator harness-check ./my-skill
@@ -265,8 +266,8 @@ These are the findings you are most likely to meet:
 
 | | `harness-check` | `validate` |
 | --- | --- | --- |
-| Runs | Only the harness check | Every Tier 1 check, and other tiers if you ask |
-| Exit code | Always `0` | Set by the other checks. The harness check does not change it |
+| Runs | Only the harness check | Every Tier 1 check, and Tier 2 and Tier 3 too unless you pass `--tiers 1` |
+| Exit code | `0` whatever it finds. A usage error or a folder with no skills is nonzero | Set by the other checks. The harness check does not change it |
 | Files | `--json FILE` | HTML, JSON and SARIF reports, each with the harness findings |
 | Model setup flags | Yes, see [Match your setup](#match-your-setup) | No |
 

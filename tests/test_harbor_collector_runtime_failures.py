@@ -13,7 +13,12 @@ from uuid import UUID
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload, render_agent_eval_html_report
+from skillevaluator.models import ValidationResult
+from skillevaluator.reporting.base import assess_publication
+from skillevaluator.reporting.summary_copy import pass_at_k_summary
+from skillevaluator.reporting.tier3_scope import completed_agent_result
+from skillevaluator.tier3.case_summary import verdict
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.collector import (
@@ -22,6 +27,7 @@ from skillevaluator.tier3.harbor.collector import (
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.result_display import render_result
+from skillevaluator.tier3.results_location import _legacy_pass_at_k_is_complete
 
 _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES = (
     "AgentAuthenticationError",
@@ -872,6 +878,117 @@ def test_partially_errored_job_preserves_only_completed_trial_coverage(tmp_path:
         }
     ]
     assert any("Scored attempt coverage is 3/4" in error for error in results["execution_errors"])
+
+
+@pytest.mark.parametrize("partial_variant", ["with", "without"])
+@pytest.mark.parametrize("score", [0.0, 1.0])
+def test_partial_arm_retains_scored_evidence_without_enabling_quality(
+    tmp_path: Path, partial_variant: str, score: float
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        for case_id in CASES:
+            value = score if variant == partial_variant and case_id == "case-a" else 1.0
+            _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=1, score=value)
+            trial = jobs_dir / f"demo-opencode-{variant}" / f"{case_id}_attempt001"
+            path = trial / "verifier/reward.json"
+            reward = json.loads(path.read_text(encoding="utf-8"))
+            reward["custom_metrics"] = {"native_quality": {"score": value}}
+            path.write_text(json.dumps(reward), encoding="utf-8")
+            (trial / "agent").mkdir()
+            prompt, completion = (20, 3) if variant == partial_variant and case_id == "case-b" else (10, 2)
+            (trial / "agent/trajectory.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ATIF-v1.7",
+                        "agent": {"name": "opencode", "version": "test"},
+                        "steps": [{"step_id": 1, "source": "agent", "message": "Done"}],
+                        "final_metrics": {"total_prompt_tokens": prompt, "total_completion_tokens": completion},
+                    }
+                ),
+                encoding="utf-8",
+            )
+    _write_variant_job_results(jobs_dir)
+    partial_job = jobs_dir / f"demo-opencode-{partial_variant}"
+    failure = {"exception_info": {"exception_type": "AgentTimeoutError", "exception_message": "Agent timed out"}}
+    (partial_job / "case-b_attempt001/result.json").write_text(json.dumps(failure), encoding="utf-8")
+    job_result = json.loads((partial_job / "result.json").read_text(encoding="utf-8"))
+    job_result["stats"]["n_errors"] = 1
+    (partial_job / "result.json").write_text(json.dumps(job_result), encoding="utf-8")
+
+    result = _collect(tmp_path, n_attempts=1, stop_on_pass=False)
+
+    agent = result["agents"]["opencode"]
+    arm = f"{partial_variant}_skill"
+    complete_arm = "without_skill" if partial_variant == "with" else "with_skill"
+    assert result["execution_status"] == agent["execution_status"] == "failed"
+    assert (result["scored_attempts"], result["expected_attempts"]) == (3, 4)
+    condition = agent["conditions"][arm]
+    assert condition["execution_status"] == "failed"
+    assert (condition["scored_attempts"], condition["expected_attempts"]) == (1, 2)
+    assert agent[arm] and set(agent[arm].values()) == {score}
+    assert agent[f"custom_{arm}"] == {"native_quality": score}
+    assert agent[f"overall_{arm}"] is None
+    assert agent["lift"] == agent["custom_lift"] == agent["pass_at_k"]["lift"] == {}
+    partial = agent["pass_at_k"][arm]
+    assert partial["rate"] is None and partial["rate_interval"] is None
+    assert partial["passed_cases"] == int(score == 1.0)
+    assert partial["failed_cases"] == int(score == 0.0)
+    assert partial["attempts_used"] == 1 and partial["max_attempts_possible"] == 2
+    [attempt] = partial["cases"]["case-a"]["attempts"]
+    assert attempt["score"] == score and attempt["passed"] is (score == 1.0)
+    missing = partial["cases"]["case-b"]
+    assert missing["attempts"] == [] and missing["best_score"] is None
+    assert missing["attempts_missing"] == 1 and missing["attempts_used"] == 0
+    summary = json.loads(
+        (tmp_path / "results/opencode" / f"{partial_variant}-skill/summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["pass_at_k"] == partial
+    assert summary["scores"] == agent[arm] and summary["custom_scores"] == agent[f"custom_{arm}"]
+    assert not _legacy_pass_at_k_is_complete(partial, num_trials=1, require_scored_attempt=True)
+    assert "N/A" in pass_at_k_summary(agent["pass_at_k"])
+    assert verdict(result["agents"])[0] == "inconclusive"
+    terminal = render_result(result)
+    check_line = next(line for line in terminal.splitlines() if "REQUIRED CHECKS PASSED" in line)
+    assert check_line.strip(" │").endswith("N/A")
+    if partial_variant == "with":
+        assert "QUALITY VERDICT: FAIL" not in terminal
+
+    complete = agent["pass_at_k"][complete_arm]
+    assert complete["passed_cases"] == complete["attempts_used"] == 2
+    assert complete["failed_cases"] == 0 and complete["rate"] == 1.0
+    assert complete["rate_interval"]["confidence_level"] == 0.95
+    assert agent["conditions"][complete_arm]["execution_status"] == "succeeded"
+    assert set(agent[complete_arm].values()) == {1.0}
+    assert agent[f"custom_{complete_arm}"] == {"native_quality": 1.0}
+
+    loaded = report_data.load_agent_data(tmp_path / "results")
+    assert loaded["opencode"][arm] == loaded["opencode"][f"custom_{arm}"] == {}
+    assert loaded["opencode"][f"pass_{arm}"] == {"attempts_used": 1, "max_attempts_possible": 2}
+    payload = build_agent_eval_payload("demo", loaded, use_llm_judge=False)
+    assert payload["execution_status"] == "failed" and payload["overall_score"] is None
+    assert completed_agent_result(payload) is None
+    assert payload["agents"]["opencode"]["lift"] is None
+    trial_key = "trials" if partial_variant == "with" else "trials_baseline"
+    trials = payload["agents"]["opencode"][trial_key]
+    assert len(trials) == 2 and all(row["diagnostic_only"] for row in trials)
+    assert sum(row.get("scored") is False for row in trials) == 1
+    usage = payload["token_usage"]["agents"]["opencode"]["with_skill" if partial_variant == "with" else "baseline"]
+    assert usage["coverage"]["observed_attempts"] == usage["coverage"]["measured_attempts"] == 2
+    assert usage["coverage"]["unscored_attempts"] == 1
+    assert (
+        usage["totals"]["prompt_tokens"],
+        usage["totals"]["completion_tokens"],
+        usage["totals"]["total_tokens"],
+    ) == (
+        30,
+        5,
+        35,
+    )
+    validation = ValidationResult(validator_name="AGENT_EVAL")
+    validation.metadata["agent_eval"] = payload
+    assessment = assess_publication([validation])
+    assert assessment.status != "pass" and not assessment.tier3.evidence_complete
 
 
 def test_partial_rewards_stay_suppressed_when_not_every_job_error_maps_to_a_trial(tmp_path: Path) -> None:
@@ -2254,7 +2371,10 @@ def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -
     assert result["execution_status"] == "failed"
     assert result["expected_attempts"] == 2
     assert result["scored_attempts"] == 1
-    assert agent["pass_at_k"]["with_skill"] == {}
+    partial = agent["pass_at_k"]["with_skill"]
+    assert partial["rate"] is None
+    assert partial["attempts_used"] == 1
+    assert partial["cases"]["case-a"]["attempts_missing"] == 1
 
 
 def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:

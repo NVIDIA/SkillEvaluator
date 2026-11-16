@@ -5084,6 +5084,15 @@ def _public_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in summary.items() if not key.startswith("_")}
 
 
+def _partial_pass_summary(summary: dict[str, Any]) -> dict[str, Any]:
+    return {
+        **summary,
+        "failed_cases": summary["required_checks"]["scored"] - summary["passed_cases"],
+        "rate": None,
+        "rate_interval": None,
+    }
+
+
 def _pass_summary(
     rewards: list[dict[str, Any]],
     *,
@@ -7783,7 +7792,13 @@ def collect_harbor_results(
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
-            if with_execution["execution_status"] != "succeeded":
+            if (
+                with_execution["execution_status"] != "succeeded"
+                and 0 < with_execution["scored_attempts"] < with_execution["expected_attempts"]
+                and with_policy != "mixed-score-policies"
+            ):
+                with_pass = _partial_pass_summary(with_pass)
+            elif with_execution["execution_status"] != "succeeded":
                 with_scores = {}
                 with_custom_scores = {}
                 with_pass = {}
@@ -8037,7 +8052,13 @@ def collect_harbor_results(
                         without_execution,
                         "Conflicting score policies within the without-skill condition",
                     )
-                if without_execution["execution_status"] != "succeeded":
+                if (
+                    without_execution["execution_status"] != "succeeded"
+                    and 0 < without_execution["scored_attempts"] < without_execution["expected_attempts"]
+                    and without_policy != "mixed-score-policies"
+                ):
+                    without_pass = _partial_pass_summary(without_pass)
+                elif without_execution["execution_status"] != "succeeded":
                     without_scores = {}
                     without_custom_scores = {}
                     without_pass = {}

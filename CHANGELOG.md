@@ -6,6 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
 - Canonical `comment-skill-checks.yml` reusable workflow and source template for
   the standard scored Tier 1 PR comment without hosted reports. It verifies the
   existing signed receipts and native evidence, reuses the shared report and

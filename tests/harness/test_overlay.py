@@ -826,6 +826,29 @@ def test_claude_allowed_tools_blocks_headless_load(tmp_path: Path):
     assert "CC-ALLOWED-TOOLS-HEADLESS" in _rule_ids(skill, "claude-code", {"headless": True})
 
 
+def test_lookalike_descriptions_are_flagged(tmp_path: Path):
+    def write(name: str, description: str) -> Path:
+        skill = tmp_path / ".agents" / "skills" / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: {description}\n---\n# {name}\n")
+        return skill
+
+    same = (
+        "Generate PDF reports from spreadsheet data. Use when the user asks for a report, summary PDF, or chart export."
+    )
+    builder = write("report-builder", same)
+    write("report-generator", same.lower().replace(", or", " or"))
+    hr = write("hr-headcount", "Count employees per department from the HR roster. Use for headcount questions.")
+    write("sales-pipeline", "Summarize open deals by stage from the CRM export. Use for sales pipeline questions.")
+
+    facts = facts_for([builder, hr])
+    assert facts[builder]["lookalike_names"] == "report-generator"
+    assert facts[hr]["lookalike_names"] == ""
+    finding = next(f for r in evaluate_harnesses(builder, "codex") for f in r.findings if f["id"] == "CX-LOOKALIKE")
+    assert finding["effect"] == "advisory"
+    assert "report-generator" in finding["message"]
+
+
 def test_native_root_skips_root_rules(tmp_path):
     skill = tmp_path / ".claude" / "skills" / "demo"
     skill.mkdir(parents=True)

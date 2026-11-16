@@ -9,7 +9,7 @@ from collections.abc import Iterable, Sequence
 from pathlib import Path
 from typing import TYPE_CHECKING
 
-from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SKILL_MANIFEST_FILE
+from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SKILL_MANIFEST_VARIANTS
 from skillevaluator.tier1.commands import run_lint_scripts, run_quality_check
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -33,8 +33,20 @@ def parse_hook_path(value: str | Path) -> Path:
     return Path(value)
 
 
+def _has_skill_manifest(directory: Path) -> bool:
+    """Return True when *directory* holds a manifest named exactly as in ``SKILL_MANIFEST_VARIANTS``.
+
+    Names are compared as stored on disk, so the result is the same on
+    case-insensitive (macOS, Windows) and case-sensitive (Linux) filesystems.
+    """
+    try:
+        return any(child.name in SKILL_MANIFEST_VARIANTS and child.is_file() for child in directory.iterdir())
+    except OSError:
+        return False
+
+
 def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:
-    """Return the nearest ancestor of *path* that contains ``SKILL.md``.
+    """Return the nearest ancestor of *path* that contains ``SKILL.md`` or ``skill.md``.
 
     Deleted skills and paths that never sit under a skill are ignored. Search
     stops at *cwd* (the repository root pre-commit runs from) so a stray
@@ -44,7 +56,7 @@ def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:
     candidate = parse_hook_path(path)
     if not candidate.is_absolute():
         candidate = cwd / candidate
-    if candidate.name == SKILL_MANIFEST_FILE:
+    if candidate.name in SKILL_MANIFEST_VARIANTS:
         start = candidate.parent
     elif candidate.exists() and candidate.is_dir():
         start = candidate
@@ -57,12 +69,11 @@ def skill_root_for(path: str | Path, *, cwd: Path | None = None) -> Path | None:
         limit = cwd
 
     for ancestor in [start, *start.parents]:
-        manifest = ancestor / SKILL_MANIFEST_FILE
-        try:
-            if manifest.is_file():
+        if _has_skill_manifest(ancestor):
+            try:
                 return ancestor.resolve()
-        except OSError:
-            pass
+            except OSError:
+                return ancestor
         try:
             if ancestor.resolve() == limit:
                 break

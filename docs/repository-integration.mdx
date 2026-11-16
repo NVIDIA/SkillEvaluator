@@ -75,7 +75,9 @@ in the public repository. No demo-repository access is needed.
 Run the deterministic, key-free Tier 1 checks on the skills a commit touches,
 without waiting for CI. The hooks install SkillEvaluator from this repository
 and call a hidden `skillevaluator precommit-run` entry that maps each changed
-file to its skill root (the nearest ancestor that contains `SKILL.md`),
+file to its skill root (the nearest ancestor that contains `SKILL.md`, or a
+lowercase `skill.md` that the schema check then flags; names match exactly on
+every OS),
 de-duplicates those roots, and runs one check per skill.
 
 Files that are not inside a skill are ignored. Deleted skills are skipped.
@@ -101,7 +103,7 @@ repos:
 ```
 
 Then `pre-commit install`. On each commit, pre-commit passes the changed skill
-files (`SKILL.md` and anything under the skill directories the schema check
+files (`SKILL.md`, `skill.md`, and anything under the skill directories the schema check
 allows: `agents/`, `assets/`, `config/`, `evals/`, `references/`, `scripts/`,
 `tests/`, `tools/`) to the selected hooks.
 

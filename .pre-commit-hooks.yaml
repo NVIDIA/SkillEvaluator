@@ -11,14 +11,14 @@
   description: Score each touched skill against the quality bar. Offline; no API key, network, Docker, or scanner download.
   entry: skillevaluator precommit-run quality
   language: python
-  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
 
 - id: skillevaluator-schema
   name: SkillEvaluator schema
   description: Validate SKILL.md frontmatter and skill layout. Offline; no API key, network, Docker, or scanner download.
   entry: skillevaluator precommit-run schema
   language: python
-  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
 
 - id: skillevaluator-lint-scripts
   name: SkillEvaluator script lint
@@ -27,4 +27,4 @@
   language: python
   # Findings are advisory and never fail the commit; verbose shows them anyway.
   verbose: true
-  files: '(^|/)(SKILL\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'

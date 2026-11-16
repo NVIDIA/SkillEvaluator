@@ -362,5 +362,44 @@ def test_precommit_hooks_yaml_files_cover_every_allowed_skill_dir() -> None:
     for hook in hooks:
         pattern = re.compile(hook["files"])
         assert pattern.search("skills/x/SKILL.md"), hook["id"]
+        assert pattern.search("skills/x/skill.md"), hook["id"]
         for directory in sorted(DEFAULT_ALLOWED_SKILL_DIRS):
             assert pattern.search(f"skills/x/{directory}/file.py"), f"{hook['id']}: {directory}/"
+
+
+def _write_lowercase_manifest_skill(parent: Path, name: str) -> Path:
+    skill = parent / name
+    skill.mkdir(parents=True)
+    text = _VALID_SKILL_MD.format(name=name, title=name.replace("-", " ").title())
+    (skill / "skill.md").write_text(text, encoding="utf-8")
+    return skill
+
+
+def test_skill_root_finds_lowercase_manifest(tmp_path: Path) -> None:
+    skill = _write_lowercase_manifest_skill(tmp_path / "skills", "lower-skill")
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "a.py").write_text("print(1)\n", encoding="utf-8")
+
+    assert skill_root_for(skill / "skill.md", cwd=tmp_path) == skill.resolve()
+    assert skill_root_for("skills/lower-skill/scripts/a.py", cwd=tmp_path) == skill.resolve()
+
+
+def test_skill_root_matches_manifest_names_exactly(tmp_path: Path) -> None:
+    # A differently cased name such as Skill.md is not a manifest on any OS,
+    # so a case-insensitive filesystem must not map it to a skill either.
+    skill = tmp_path / "skills" / "odd-case"
+    skill.mkdir(parents=True)
+    (skill / "Skill.md").write_text("# Odd\n", encoding="utf-8")
+
+    assert skill_root_for(skill / "Skill.md", cwd=tmp_path) is None
+
+
+def test_precommit_schema_reports_lowercase_manifest(tmp_path: Path) -> None:
+    skill = _write_lowercase_manifest_skill(tmp_path / "skills", "lower-skill")
+
+    code, lines = run_precommit("schema", [str(skill / "skill.md")], cwd=tmp_path)
+
+    assert code == 1
+    assert len(lines) == 1
+    assert lines[0].startswith("FAIL  lower-skill  schema")
+    assert "non-canonical name 'skill.md'" in lines[0]

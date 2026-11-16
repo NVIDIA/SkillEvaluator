@@ -2000,13 +2000,17 @@ def test_gym_redacts_only_credentials_not_provider_or_model_names(
         def set_secret_values(self, values) -> None:
             self.secrets |= set(values)
 
-    config = "schema_version: 1\nharbor:\n  runtime_env:\n    SERVICE_SETTING: ${SERVICE_SETTING}\n"
+    config = (
+        "schema_version: 1\nharbor:\n  runtime_env:\n"
+        "    SERVICE_SETTING: ${SERVICE_SETTING}\n    SERVICE_FLAG: ${SERVICE_FLAG}\n"
+    )
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
     monkeypatch.setenv("SERVICE_SETTING", "runtime-value-123")
+    monkeypatch.setenv("SERVICE_FLAG", "on")
     reporter = _Recorder()
     _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1, progress_reporter=reporter)
     assert {"judge-key", "policy-key", "runtime-value-123"} <= reporter.secrets
-    assert not {"openai", "gpt-4.1-mini", "policy-model"} & reporter.secrets
+    assert not {"openai", "gpt-4.1-mini", "policy-model", "on"} & reporter.secrets
 
 
 def test_cli_checks_gym_settings_before_autopilot_writes_a_dataset(

@@ -26,6 +26,7 @@ from typing import Any
 
 from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.progress import (
+    MIN_EXACT_SECRET_CHARS,
     NullProgressReporter,
     ProgressEvent,
     ProgressReporter,
@@ -1042,7 +1043,8 @@ def run_nemo_gym_eval(
     # harbor.runtime_env reaches the agent as ${NAME} templates, resolved from Gym's environment.
     runtime_values, _runtime_errors = _resolve_runtime_env(harbor_config.get("runtime_env"), env_mode=env_mode)
     # As on Harbor: credentials plus every configured runtime_env value, which may be an allowlisted secret.
-    runtime_secret_values = {value for value in runtime_values.values() if value}
+    # Short values are flags such as "on"; redacting them would corrupt ordinary words in gym.log.
+    runtime_secret_values = {value for value in runtime_values.values() if len(value) >= MIN_EXACT_SECRET_CHARS}
     reporter.set_secret_values(secret_values_from_environment(judge_process_env) | runtime_secret_values)
     agent_runtime_env = {name: f"${{{name}}}" for name in runtime_values}
 

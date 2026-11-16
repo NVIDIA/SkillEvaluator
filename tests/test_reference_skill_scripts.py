@@ -75,6 +75,28 @@ def test_task_content_containing_error_label_remains_successful(tmp_path: Path) 
     assert result.stderr == ""
 
 
+@pytest.mark.parametrize("status_word", ["pending", "in_progress", "completed", "cancelled"])
+def test_task_status_words_survive_persistence(status_word: str, tmp_path: Path) -> None:
+    content = f"Investigate ({status_word}) labels after merge"
+    state_path = tmp_path / "todo.md"
+    env = {"TASK_LIST_STATE_PATH": str(state_path)}
+
+    added = _run_script("tasks", "add", "--content", content, env=env)
+    listed = _run_script("tasks", "list", env=env)
+    state, error = _load_script("tasks")._load_state(state_path)
+
+    assert added.returncode == listed.returncode == 0
+    assert added.stderr == listed.stderr == ""
+    assert error is None
+    assert state["tasks"]["task_1"] == {
+        "id": "task_1",
+        "content": content,
+        "status": "pending",
+    }
+    assert content in listed.stdout
+    assert f"- [ ] task_1: {content} (pending)" in state_path.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize(
     ("name", "args", "expected_error"),
     [

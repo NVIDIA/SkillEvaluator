@@ -2766,21 +2766,9 @@
             {% if tier3_display_dimensions or t3_na_dimensions or t3_peer_only_dimensions %}
             {% set t3_baseline_only = tier3.get('mode') == 'baseline_only' %}
             {% set t3_signal_evidence = tier3.signal_evidence or {} %}
-            {% set t3_definition_ids = [] %}
-            {% for dimension_id in t3_present_dimension_ids %}{% if t3_dim_hints.get(dimension_id) %}{% set _ = t3_definition_ids.append(dimension_id) %}{% endif %}{% endfor %}
             <details class="t3-details" id="tier3-dimension-lift" open>
                 <summary>Dimension Scores and Skill Lift{% if t3_best_name %} (Best Performing Agent: {{ t3_best_name }}){% endif %}</summary>
                 <div class="t3-details-body">
-                {% if t3_definition_ids %}
-                <details class="t3-method" id="tier3-dimension-definitions">
-                    <summary>Dimension definitions</summary>
-                    <ul class="t3-reasoning-list">
-                        {% for dimension_id in t3_definition_ids %}
-                        <li><strong>{{ "Skill Efficiency" if dimension_id == "efficiency" else (dimension_id | title) }}</strong>: {{ t3_dim_hints.get(dimension_id) }}</li>
-                        {% endfor %}
-                    </ul>
-                </details>
-                {% endif %}
                 <div class="table-scroll" id="tier3-multi-agent-dimension-table">
                 <table class="summary-table" id="tier3-dimension-table">
                     <caption class="t3-comparison-caption">N/A means unavailable. Expand Details for the recorded scope and evidence.</caption>
@@ -2806,6 +2794,12 @@
                         <td>
                             <strong>{{ "Skill Efficiency" if dim.id == "efficiency" else (dim.id | title) }}</strong>
                             {% if dim.partial %}<span class="t3-pill warning" title="A subset of the configured signals was recorded.">partial</span>{% endif %}
+                            {% if t3_dim_hints.get(dim.id) %}
+                            <details class="t3-table-detail t3-dimension-definition">
+                                <summary aria-label="Definition of {{ 'Skill Efficiency' if dim.id == 'efficiency' else (dim.id | title) }}">Definition</summary>
+                                <p>{{ t3_dim_hints.get(dim.id) }}</p>
+                            </details>
+                            {% endif %}
                         </td>
                         <td>
                             {% if dim_score is not none %}
@@ -2838,7 +2832,6 @@
                         <td class="t3-reasoning">
                             {% if dim.comparison and dim.comparison.status != 'comparable' %}<p class="t3-dim-hint">{% if dim.comparison.label %}<strong>{{ dim.comparison.label }}</strong>{% endif %}{% if dim.comparison.with_skill is number and dim.comparison.baseline is number and dim.comparison.lift is number %}: {{ "%.2f" | format(dim.comparison.baseline) }} → {{ "%.2f" | format(dim.comparison.with_skill) }} ({{ "%+.2f" | format(dim.comparison.lift) }} lift).{% endif %}</p>{% endif %}
                             <details class="t3-table-detail"><summary>Details</summary>
-                            {% if t3_dim_hints.get(dim.id) %}<p>{{ t3_dim_hints.get(dim.id) }}</p>{% endif %}
                             {% if dim_evidence %}<p>Evidence: {{ dim_evidence | join('; ') }}.</p>{% endif %}
                             {% if dim_score is none %}<p>{{ "with-skill arm not run" if t3_baseline_only else "not scored with the skill" }}</p>{% endif %}
                             {% if dim.baseline is none %}<p>{{ "baseline not run" if t3_baseline_coverage and t3_baseline_coverage.status == 'skipped' and t3_recorded_baseline is mapping and t3_recorded_baseline.get('execution_status') == 'skipped' else "baseline quality unavailable" }}</p>{% endif %}
@@ -2859,7 +2852,12 @@
                     <tr>
                         <td>
                             <strong>{{ "Skill Efficiency" if dim.id == "efficiency" else (dim.id | title) }}</strong>
-                            {% if t3_dim_hints.get(dim.id) %}<div class="t3-dim-hint">{{ t3_dim_hints.get(dim.id) }}</div>{% endif %}
+                            {% if t3_dim_hints.get(dim.id) %}
+                            <details class="t3-table-detail t3-dimension-definition">
+                                <summary aria-label="Definition of {{ 'Skill Efficiency' if dim.id == 'efficiency' else (dim.id | title) }}">Definition</summary>
+                                <p>{{ t3_dim_hints.get(dim.id) }}</p>
+                            </details>
+                            {% endif %}
                         </td>
                         <td>N/A</td><td>N/A</td><td>N/A</td>
                         <td><span class="t3-pill warning">{{ 'Not measured' if dim.peer_only else 'Not applicable' }}</span></td>

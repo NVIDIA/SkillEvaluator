@@ -84,9 +84,14 @@ def _dimension_row(html: str, label: str) -> str:
     )
 
 
-def _dimension_definitions(html: str) -> str:
-    match = re.search(r'<details[^>]*id="tier3-dimension-definitions"[^>]*>.*?</details>', html, re.DOTALL)
-    assert match is not None, "The comparison needs a named dimension-definitions disclosure"
+def _dimension_definition(html: str, label: str) -> str:
+    row = _dimension_row(html, label)
+    name_cell = re.search(r"<td>(.*?)</td>", row, re.DOTALL)[1]
+    match = re.search(
+        r'<details[^>]*class="[^"]*t3-dimension-definition[^"]*"[^>]*>.*?</details>', name_cell, re.DOTALL
+    )
+    assert match is not None, f"{label} needs a definition beneath its name"
+    assert name_cell.index(f"<strong>{label}</strong>") < match.start()
     return match[0]
 
 
@@ -208,43 +213,51 @@ def test_html_dimension_table_names_evidence_and_baseline_status() -> None:
     assert "N/A means no measurement, never a score of zero; the note under it says why." in html
 
 
-def test_html_dimension_definitions_are_discoverable_beside_the_comparison() -> None:
+def test_html_dimension_definitions_are_discoverable_beneath_each_dimension_name() -> None:
     payload = _payload({"agent": _agent()})
     # Older retained reports do not always record the hint mapping.
     payload.pop("dimension_hints")
     _markdown, html = _render(payload)
 
-    definitions = _dimension_definitions(html)
-    assert "<summary>Dimension definitions</summary>" in definitions
-    assert "open" not in definitions.split(">", 1)[0]
-    assert html.index('id="tier3-dimension-lift"') < html.index('id="tier3-dimension-definitions"')
-    assert html.index('id="tier3-dimension-definitions"') < html.index('id="tier3-dimension-table"')
-    text = " ".join(text_content(definitions).split())
-    for meaning in (
-        "Security: Avoids unsafe operations, secret leakage, and unauthorized access.",
-        "Correctness: Produces factually accurate output.",
-        "Discoverability: Activates the right skill when relevant; ignores unrelated skills.",
-        "Effectiveness: Reaches the user's goal and follows the expected behavior.",
-        "Skill Efficiency: Uses the skill and tools productively without wasted work.",
+    assert 'id="tier3-dimension-definitions"' not in html
+    for label, meaning in (
+        ("Security", "Avoids unsafe operations, secret leakage, and unauthorized access."),
+        ("Correctness", "Produces factually accurate output."),
+        ("Discoverability", "Activates the right skill when relevant; ignores unrelated skills."),
+        ("Effectiveness", "Reaches the user's goal and follows the expected behavior."),
+        ("Skill Efficiency", "Uses the skill and tools productively without wasted work."),
     ):
-        assert meaning in text
+        definition = _dimension_definition(html, label)
+        assert f'<summary aria-label="Definition of {label}">Definition</summary>' in definition
+        assert "open" not in definition.split(">", 1)[0]
+        assert meaning in text_content(definition)
+        # Reasoning retains scope and evidence without a duplicate definition.
+        assert text_content(_dimension_row(html, label)).count(meaning) == 1
 
 
-def test_html_dimension_definitions_remain_available_for_unscored_and_inapplicable_rows() -> None:
+def test_html_dimension_definitions_remain_available_for_unscored_inapplicable_and_peer_only_rows() -> None:
     payload = _payload({"agent": _agent(baseline=False, with_scores={"accuracy": None})})
     agent = payload["agents"]["agent"]
-    agent["dimensions"] = [d for d in agent["dimensions"] if d["id"] != "discoverability"]
+    payload["agents"]["peer"] = deepcopy(agent)
+    agent["dimensions"] = [d for d in agent["dimensions"] if d["id"] not in {"discoverability", "efficiency"}]
+    agent["metrics_with_skill"] = [m for m in agent["metrics_with_skill"] if m != "skill_efficiency"]
     agent["not_applicable_dimensions"] = [{"id": "discoverability", "reason": "No relevant skill case"}]
     payload["dimensions"] = deepcopy(agent["dimensions"])
     payload["not_applicable_dimensions"] = deepcopy(agent["not_applicable_dimensions"])
 
     _markdown, html = _render(payload)
 
-    definitions = _dimension_definitions(html)
-    assert "Correctness</strong>: Produces factually accurate output." in definitions
-    assert "Discoverability</strong>: Activates the right skill when relevant; ignores unrelated skills." in definitions
+    assert "Produces factually accurate output." in text_content(_dimension_definition(html, "Correctness"))
+    assert "Activates the right skill when relevant; ignores unrelated skills." in text_content(
+        _dimension_definition(html, "Discoverability")
+    )
+    assert "Uses the skill and tools productively without wasted work." in text_content(
+        _dimension_definition(html, "Skill Efficiency")
+    )
     assert 'title="not scored with the skill"' in _dimension_row(html, "Correctness")
     assert "Not applicable" in _dimension_row(html, "Discoverability")
+    assert "Not measured" in _dimension_row(html, "Skill Efficiency")
+    assert "No measurement was recorded for the primary agent" in _dimension_row(html, "Skill Efficiency")
 
 
 def test_html_dimension_definitions_escape_recorded_text_and_skip_missing_hints() -> None:
@@ -254,12 +267,14 @@ def test_html_dimension_definitions_escape_recorded_text_and_skip_missing_hints(
 
     _markdown, html = _render(payload)
 
-    definitions = _dimension_definitions(html)
-    assert recorded_hint in text_content(definitions)
-    assert "<img" not in definitions
-    assert "&lt;img" in definitions and "&amp;" in definitions
-    assert definitions.count("<li>") == 1
-    assert "None" not in definitions
+    definition = _dimension_definition(html, "Security")
+    assert recorded_hint in text_content(definition)
+    assert "<img" not in definition
+    assert "&lt;img" in definition and "&amp;" in definition
+    table = re.search(r'<table[^>]*id="tier3-dimension-table".*?</table>', html, re.DOTALL)[0]
+    assert table.count('class="t3-table-detail t3-dimension-definition"') == 1
+    assert recorded_hint not in text_content(_dimension_row(html, "Security").split("</td>", 1)[1])
+    assert "None" not in definition
 
 
 def test_html_number_key_separates_verdict_scores_lift_and_quality() -> None:
@@ -305,7 +320,7 @@ def test_html_does_not_add_unscored_rows_for_custom_only_metrics() -> None:
     _markdown, html = _render(payload)
 
     assert 'id="tier3-dimension-table"' not in html
-    assert 'id="tier3-dimension-definitions"' not in html
+    assert "t3-dimension-definition" not in html
 
 
 def test_benchmark_missing_dimension_requires_a_successful_active_signal() -> None:

@@ -822,7 +822,7 @@ def test_no_javascript_keeps_all_recorded_evidence_readable(browser, reports):
 
 
 @pytest.mark.parametrize("javascript", [True, False])
-def test_dimension_definitions_open_natively_beside_comparison(browser, reports, javascript):
+def test_dimension_definitions_open_natively_beneath_each_dimension(browser, reports, javascript):
     directory, _, _ = reports
     context = browser.new_context(java_script_enabled=javascript, viewport={"width": 390, "height": 1000})
     context.route("https://**/*", lambda route: route.abort())
@@ -834,17 +834,25 @@ def test_dimension_definitions_open_natively_beside_comparison(browser, reports,
             _tier(tab, "tier3")
         comparison = tab.locator("#tier3-dimension-lift")
         assert comparison.get_attribute("open") is not None
-        definitions = comparison.locator("#tier3-dimension-definitions")
-        assert definitions.get_attribute("open") is None
-        assert definitions.locator("li").count() == 5
-        assert not definitions.locator("li").first.is_visible()
+        definitions = comparison.locator("#tier3-dimension-table td:first-child > .t3-dimension-definition")
+        assert definitions.count() == 5
+        for definition in definitions.all():
+            name = definition.locator("..").locator("strong").inner_text()
+            assert definition.locator("summary").get_attribute("aria-label") == f"Definition of {name}"
+            assert definition.get_attribute("open") is None
+            assert not definition.locator("p").is_visible()
 
-        definitions.get_by_text("Dimension definitions", exact=True).click()
+        security = definitions.filter(has=tab.get_by_label("Definition of Security", exact=True))
+        security.locator("summary").click()
+        assert security.get_attribute("open") is not None
+        assert security.locator("p").is_visible()
 
-        assert definitions.get_attribute("open") is not None
-        assert all(item.is_visible() for item in definitions.locator("li").all())
-        assert "Produces factually accurate output." in definitions.inner_text()
-        assert "Skill Efficiency" in definitions.inner_text()
+        correctness = definitions.filter(has=tab.get_by_label("Definition of Correctness", exact=True))
+        correctness.locator("summary").focus()
+        tab.keyboard.press("Enter")
+        assert correctness.get_attribute("open") is not None
+        assert correctness.locator("p").is_visible()
+        assert "Produces factually accurate output." in correctness.inner_text()
         assert tab.evaluate("document.documentElement.scrollWidth <= innerWidth + 1")
     finally:
         context.close()

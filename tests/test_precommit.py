@@ -3,8 +3,11 @@
 
 from __future__ import annotations
 
+import os
 import re
 import shlex
+import socket
+import subprocess
 import sys
 from pathlib import Path
 
@@ -382,6 +385,53 @@ def test_precommit_hooks_yaml_files_cover_every_allowed_skill_dir() -> None:
         assert pattern.search("skills/x/skill.md"), hook["id"]
         for directory in sorted(DEFAULT_ALLOWED_SKILL_DIRS):
             assert pattern.search(f"skills/x/{directory}/file.py"), f"{hook['id']}: {directory}/"
+        assert pattern.search("SKILL.md"), hook["id"]
+        assert pattern.search("scripts/run.py"), hook["id"]
+        for path in (
+            "README.md",
+            "docs/guide.md",
+            "src/skillevaluator/cli.py",
+            "skills/x/notes.md",
+            "skills/x/SKILL.md.bak",
+            "skills/x/Skill.md",
+            "skills/x/myscripts/run.py",
+            "skills/x/scripts.py",
+        ):
+            assert not pattern.search(path), f"{hook['id']}: {path}"
+
+
+@pytest.mark.parametrize("check", CHECKS)
+def test_precommit_checks_open_no_sockets_or_subprocesses(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, check: str
+) -> None:
+    attempts: list[str] = []
+
+    def _blocked(name: str):
+        def _raise(*args, **kwargs):
+            attempts.append(name)
+            raise AssertionError(f"pre-commit check attempted {name}")
+
+        return _raise
+
+    monkeypatch.setattr(socket.socket, "connect", _blocked("socket.connect"))
+    monkeypatch.setattr(socket.socket, "connect_ex", _blocked("socket.connect_ex"))
+    monkeypatch.setattr(socket, "create_connection", _blocked("socket.create_connection"))
+    monkeypatch.setattr(socket, "getaddrinfo", _blocked("socket.getaddrinfo"))
+    monkeypatch.setattr(subprocess.Popen, "__init__", _blocked("subprocess.Popen"))
+    monkeypatch.setattr(os, "system", _blocked("os.system"))
+    if hasattr(os, "posix_spawn"):
+        monkeypatch.setattr(os, "posix_spawn", _blocked("os.posix_spawn"))
+
+    skill = _write_skill(tmp_path, "offline-skill")
+    script = skill / "scripts" / "run.py"
+    script.parent.mkdir()
+    script.write_text("import os\nprint(os.getcwd())\n", encoding="utf-8")
+
+    code, lines = run_precommit(check, [str(skill / "SKILL.md"), str(script)], min_score=0, cwd=tmp_path)
+
+    assert attempts == []
+    assert code == 0, lines
+    assert lines[0].startswith(f"PASS  offline-skill  {check}")
 
 
 def _write_lowercase_manifest_skill(parent: Path, name: str) -> Path:

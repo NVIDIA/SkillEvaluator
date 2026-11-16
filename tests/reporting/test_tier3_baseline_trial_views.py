@@ -207,6 +207,22 @@ def test_trial_charts_include_agent_condition_series() -> None:
     }
 
 
+@pytest.mark.parametrize("case_ids", [[], ["short-case"], ["same-prefix-" + "a" * 84, "same-prefix-" + "b" * 84]])
+def test_steps_chart_bounds_ticks_without_changing_case_ids(case_ids: list[str]) -> None:
+    payload = _payload(include_baseline=False)
+    payload["trials"] = [{"agent": "codex", "entry_id": case_id, "steps": 7} for case_id in case_ids]
+    html = _render(payload)
+
+    assert _steps_chart(html)["labels"] == case_ids
+    config = html.split('var stepsChart = document.getElementById("tier3-steps-chart");', 1)[1].split(
+        "window.rebuildTier3Charts();", 1
+    )[0]
+    assert "maxRotation: 0" in config
+    assert "var label = this.getLabelForValue(value);" in config
+    assert 'label.length > 24 ? (Number(value) + 1) + " · " + label.slice(0, 20) + "…" : label' in config
+    assert 'return items.length ? items[0].label : "";' in config
+
+
 def test_drilldown_renders_with_skill_and_baseline_rows() -> None:
     html = _render(_payload())
     table = _drilldown_table(html)

@@ -228,6 +228,124 @@ def test_failed_agent_has_no_quality_headline_in_multi_agent_summary(failed_agen
     assert result == original
 
 
+def _checks(passed: int) -> dict:
+    return {
+        "with_skill": {
+            "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+        },
+    }
+
+
+def _failed_with_skill_agent(shape: str) -> dict:
+    """An agent whose with-skill arm failed to run, so none of its checks were scored."""
+    agent: dict = {
+        "execution_status": "failed",
+        "conditions": {
+            "with_skill": {"execution_status": "failed"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+    }
+    if shape == "empty_pass_at_k":
+        agent["pass_at_k"] = {}
+    elif shape == "passing_checks":
+        agent["pass_at_k"] = _checks(1)
+    elif shape == "explicit_pass":
+        agent["verdict"] = "pass"
+    return agent
+
+
+def _succeeded_agent(*, passed: int) -> dict:
+    return {
+        "execution_status": "succeeded",
+        "conditions": {
+            "with_skill": {"execution_status": "succeeded"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+        "pass_at_k": _checks(passed),
+    }
+
+
+def _run_verdict_lines(result: dict) -> list[str]:
+    original = deepcopy(result)
+    lines = [line for line in render_result(result).splitlines() if line.startswith("RUN QUALITY VERDICT:")]
+    assert result == original
+    return lines
+
+
+FAILED_ARM_SHAPES = ["missing_pass_at_k", "empty_pass_at_k", "passing_checks", "explicit_pass"]
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_ignores_an_agent_whose_with_skill_arm_failed(shape: str) -> None:
+    # The per-agent headline of the failed agent is withheld, so the run verdict
+    # must not read it either: only the agent that ran decides, and it fails.
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "opencode": _succeeded_agent(passed=0)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: FAIL"]
+    assert "QUALITY VERDICT (codex):" not in render_result(result)
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_is_pass_when_the_agent_that_ran_passes(shape: str) -> None:
+    # Mixed run: the canonical report (`_overall_verdict_from_agents`) sets
+    # execution-failed agents aside and passes when any remaining agent passes.
+    # The terminal line follows it, as it does when one agent fails its checks
+    # and another passes.
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "opencode": _succeeded_agent(passed=1)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: PASS"]
+    assert "QUALITY VERDICT (codex):" not in render_result(result)
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_is_incomplete_when_no_agent_ran_its_with_skill_arm(shape: str) -> None:
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "claude": _failed_with_skill_agent(shape)}}
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert "QUALITY VERDICT (" not in output
+
+
+def test_run_verdict_ignores_an_agent_that_failed_only_its_baseline() -> None:
+    # Without --tolerate-baseline-timeouts a failed baseline fails the agent, although its
+    # with-skill arm ran. The canonical report sets that agent aside, so it cannot set the
+    # run PASS beside an agent that fails; its own per-agent headline still shows.
+    baseline_failed = {
+        **_succeeded_agent(passed=1),
+        "execution_status": "failed",
+        "conditions": {
+            "with_skill": {"execution_status": "succeeded"},
+            "without_skill": {"execution_status": "failed"},
+        },
+    }
+    result = {"agents": {"opencode": baseline_failed, "codex": _succeeded_agent(passed=0)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: FAIL"]
+    assert "QUALITY VERDICT (opencode): PASS" in render_result(result)
+
+
+def test_baseline_only_multi_agent_run_gives_no_skill_verdict() -> None:
+    skipped = {
+        "execution_status": "succeeded",
+        "conditions": {
+            "with_skill": {"execution_status": "skipped"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+    }
+    result = {"agents": {"codex": skipped, "opencode": deepcopy(skipped)}}
+
+    assert _run_verdict_lines(result) == []
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_single_failed_agent_never_reads_as_a_passing_run(shape: str) -> None:
+    result = {"agents": {"codex": _failed_with_skill_agent(shape)}}
+
+    assert _run_verdict_lines(result) == []
+    assert "QUALITY VERDICT" not in render_result(result)
+
+
 def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
     def agent(passed: int, *, case_id: str) -> dict:
         return {

@@ -189,12 +189,20 @@ def test_html_parser_patch_boundary_coverage_uses_available_runner_artifacts() -
     # Floating the OS can make these historical patch interpreters unavailable,
     # preventing the compatibility regression tests from running at all.
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    versions = ["3.12.11", "3.13.5"]
     setup_python = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-python@"))
-    assert setup_python["with"]["python-version"] == "${{ matrix.python-version }}"
-    commands = _runs(job)
-    assert "tests/validators/test_markdown.py" in commands
-    assert "tests/test_cli_html_parser_compat.py" in commands
+    assert setup_python["with"]["python-version"].split() == versions
+    # One job runs both patch releases, each against the same two test files.
+    test_steps = [step for step in job["steps"] if "pytest" in step.get("run", "")]
+    assert len(test_steps) == len(versions)
+    for version, step in zip(versions, test_steps, strict=True):
+        assert f"uv sync --extra dev --locked --python {version}\n" in step["run"]
+        assert f"uv run --python {version} pytest -q " in step["run"]
+        assert "tests/validators/test_markdown.py" in step["run"]
+        assert "tests/test_cli_html_parser_compat.py" in step["run"]
+    # A failure on the first interpreter must not hide the result for the second.
+    assert "if" not in test_steps[0]
+    assert test_steps[1]["if"] == RUN_UNLESS_CANCELLED_IF
 
 
 def test_ci_skips_every_other_required_job_only_after_classification() -> None:
@@ -232,9 +240,8 @@ def test_html_parser_compatibility_keeps_old_python_versions_on_a_supported_runn
 
     # setup-python publishes these older patch builds for Ubuntu 24.04, not 26.04.
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
     python_step = next(step for step in job["steps"] if _action_repository(step.get("uses", "")) == "actions/setup-python")
-    assert python_step["with"]["python-version"] == "${{ matrix.python-version }}"
+    assert python_step["with"]["python-version"].split() == ["3.12.11", "3.13.5"]
 
 
 def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() -> None:

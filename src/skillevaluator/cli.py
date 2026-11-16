@@ -2002,7 +2002,8 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        state = "didn't run" if only.is_incomplete else "failed"
+        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
+        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )

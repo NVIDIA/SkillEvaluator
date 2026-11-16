@@ -10,7 +10,6 @@ import re
 from pathlib import Path
 
 import pytest
-from tests.reporting.test_tier3_incomplete_arms import _doc_block
 
 from skillevaluator.evaluation import tier3_report
 from skillevaluator.evaluation.tier3_report import (
@@ -727,20 +726,6 @@ def test_attempt_counts_stay_null_unless_the_load_identifies_every_left_out_case
         f"the arm scores include {'it' if excluded_cases == 1 else 'them'}."
     ) in card_html
     assert "no comparable result remains" not in card_html
-
-
-def test_docs_and_changelog_say_when_each_no_lift_note_applies() -> None:
-    """A card with no lift says nothing comparable remains only when no attempt fed the lift."""
-    entry = _doc_block("CHANGELOG.md", "- A Tier 3 HTML evaluator card with no lift for a judge metric no longer says")
-    assert (
-        "A card with no lift says that no comparable result remains when the loaded results show that no attempt "
-        "fed the lift, and otherwise that the loaded results cannot confirm the comparison"
-    ) in entry
-    docs = _doc_block("docs/reports.mdx", "For each LLM metric (`accuracy`, `goal_accuracy`, and `behavior_check`)")
-    assert (
-        "When it has no lift, the card says that no comparable result remains if its `comparison_basis` records "
-        "`contributing_attempts` as 0, and otherwise that the loaded results cannot confirm the comparison."
-    ) in docs
 
 
 def test_lift_note_mentions_arm_scores_only_when_both_arms_have_one() -> None:

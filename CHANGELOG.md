@@ -259,6 +259,61 @@ All notable changes to SkillEvaluator are documented in this file.
   the half blocks of the two-row one, so they get the plain title at 60-75
   columns.
 
+- Standalone HTML reports use one NVIDIA presentation across all three tiers,
+  with consistent typography, a green header, numbered Insights cards, and
+  plugin evidence inside the relevant tier. Clickable tier cards replace the
+  left sidebar and sticky mobile tier bar. Reports containing Tier 3 default
+  to dark and other reports to light, instead of following the device theme;
+  saved Light, Dark and System choices still take precedence. The renderer
+  gives saved incomplete runs concise coverage and actions, with full errors
+  in Diagnostics. Newly saved failed-run conclusions and recommendations
+  keep their existing raw error text.
+  Agents with diagnostic-only trial evidence are excluded from lift panels;
+  their trial rows and canonical exports remain available.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
+  The native header scale and visible tool versions, consolidated baseline
+  comparison with Overall and partial-comparison details, clickable agent
+  scorecards, and Harbor results/analysis actions are retained. Empty primary
+  viewer metadata no longer hides usable recorded summary links.
+  Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
+  snapshots add supplied plugin evidence. CLI JSON validator rows now include
+  a recorded boolean `optional_skip`, which the retained JSON reader
+  round-trips without changing gate policy. Shared plugin composition supplies
+  static and retained runtime evidence before the HTML template renders.
+  Recorded Harbor upload links survive saved-run regeneration. The renderer
+  version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
+  the aligned desktop report is slightly wider. Long scanner versions wrap
+  within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
+  text contrast in the light and dark themes.
+- HTML Overview combines execution status, scored/unscored coverage and the
+  recorded next action. The baseline comparison stays open with its scores,
+  lift and Overall visible; signals and reasoning use adjacent disclosures.
+  Compact Definition disclosures beneath each dimension name explain the metric,
+  including unavailable scores and no-JavaScript viewing, without repeating its
+  definition in a separate guide or the Reasoning column.
+  Native agent cards, versions and typography remain. Dataset diagnostics
+  share exact structured explanations within an attempt and status while
+  retaining every assertion, requirement and evidence association. Missing
+  pass@k case outcomes show N/A alongside retained attempt counts; measured
+  zero success remains 0%. Harbor actions use concise recorded labels and
+  retain exact job identities in Diagnostics.
+- HTML can display optional retained native dependency completeness,
+  composition/ablation, Harbor delivery status, provider refusal/mixed-model
+  comparison basis, and recovery notes. Active warnings stay visible; routine
+  evidence is folded in the relevant view with local omission and shortening
+  notices. These are passive display fields, not new backend coverage;
+  hook/canary runtime summaries still need separate producer integration.
+  Public recovery, MCP and comparison projections remain. No scoring, gate,
+  CLI, canonical payload or newly produced insight behavior changes.
+- Embedded HTML JSON uses compact whitespace and charts receive only their
+  consumed data. Charts initialize for visible views after applying the theme,
+  reuse instances, and prepare closed views synchronously for print. Print
+  includes retained Dataset cases hidden by screen filters and restores the
+  screen's disclosure and filter state afterward. Downloads preserve the
+  retained snapshot and existing safety bounds.
+
 ### Documentation
 
 - The agent skill guide explicitly installs the CLI before the first check,
@@ -335,15 +390,17 @@ All notable changes to SkillEvaluator are documented in this file.
   empty or whitespace-only `expected_output` or `ground_truth` is accepted and
   makes `accuracy` and `goal_accuracy` N/A.
 
-- Reports & Results said that the HTML report labels a failed Tier 3 run's
-  `neutral` verdict **Changes required**. The HTML reports show a failed run's
-  verdict as `fail`, labelled **Changes required**, or **Failed (advisory)**
-  when Tier 3 is advisory. The `tier3` object of a `validate --tier3` JSON
-  report can differ: it can still carry `neutral` or the verdict the scores
-  give. Reports & Results has the details.
+- Reports & Results now covers a failed Tier 3 run whose budget left planned
+  attempts not run. Its JSON `tier3` object and full Tier 3 download record
+  `incomplete` and leave `summary.overall_lift` null, even when the best agent
+  has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
+  Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+  is advisory. The page said only that HTML displays a failed run as
+  **Changes required** and that both payloads keep the best agent's lift.
 
 ### Fixed
 
+- Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without
   restoring untrusted score evidence.
@@ -385,6 +442,13 @@ All notable changes to SkillEvaluator are documented in this file.
   when the caller sets `GIT_CONFIG_GLOBAL`.
 - Model a changed ctime explicitly in the restored-mtime summary regression so
   it does not depend on two writes crossing a filesystem clock tick.
+- Terminal quality headlines and check-count comparisons exclude execution-failed arms.
+  Multi-agent summaries also withhold a failed agent's quality headline, and the
+  `RUN QUALITY VERDICT` line no longer reads that agent: an agent that failed
+  cannot make the run PASS, and a run where no agent can be read reads
+  INCOMPLETE with a reason that names the arm that failed (with-skill, baseline
+  or both). A baseline-only multi-agent run (`--skip-with-skill`) prints no run
+  verdict instead of PASS.
 - The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
   and 1 MiB per-manifest limit, including in description-only embedding mode.
 - Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
@@ -1084,26 +1148,6 @@ All notable changes to SkillEvaluator are documented in this file.
   received a `workflow-rules.mdc` file itself; it now receives the workflow
   folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
   when the file is a symlink to a file with another name.
-
-- Tier 3 coverage notices now name the exception type Harbor recorded under a
-  job whose statistics miss a trial. The collector's job failure then ends with
-  `trial <label> recorded VerifierOutputParseError: <message>`, and the notice's
-  `failure` now reads `verifier output parse error`, live and from a saved run,
-  instead of `null` or the type of a later error.
-
-- The HTML Tier 3 dimension table no longer says that a Not applicable
-  dimension keeps the verdict NEUTRAL, which was wrong when another dimension
-  is below 0.40 and the agent is FAIL. The row now reads `It has no score, so
-  the agent cannot PASS.`, and its reason ends with a period.
-
-- A Tier 3 HTML evaluator card with no lift for a judge metric no longer says
-  that no comparable result remains when its lift basis still records a case
-  scored by matching judge models. A card with no lift says that no
-  comparable result remains when the loaded results show that no attempt fed
-  the lift, and otherwise that the loaded results cannot confirm the
-  comparison, as in `No lift: 1 case was scored by different judge models and
-  the loaded results cannot confirm the comparison; the arm scores include
-  it.`
 
 ## 0.9.0 - 2026-11-13
 

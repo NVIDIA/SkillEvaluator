@@ -65,7 +65,7 @@ def _overall_kpi_values(output: str) -> list[str]:
 
 
 def _overall_matrix_html(output: str) -> str:
-    match = re.search(r"<td><strong>Overall</strong></td>(.*?)</tr>", output, re.DOTALL)
+    match = re.search(r"<td><strong>Overall</strong>.*?</td>(.*?)</tr>", output, re.DOTALL)
     assert match is not None
     return match.group(1)
 
@@ -224,9 +224,13 @@ def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Pat
     assert all(dimension["score"] is None and dimension["baseline"] == 0.4 for dimension in failed_dimensions)
 
     overall_matrix = _overall_matrix_html(output)
-    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["N/A", "0.80"]
+    # The native table puts the best agent in Score/Baseline/Lift, followed
+    # by the other agents. The failed peer keeps its own unavailable cell.
+    assert 'class="metric-value"' in overall_matrix and ">0.80</span>" in overall_matrix
+    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["N/A"]
     assert '<span class="t3-mad-score" style="color:var(--text-secondary);">N/A</span>' in overall_matrix
-    assert overall_matrix.count('class="t3-mad-bar"') == 1
+    assert overall_matrix.count('class="mini-bar"') == 1
+    assert overall_matrix.count('class="t3-mad-bar"') == 0
     assert _visible_text_by_class(output, "t3-agent-score") == ["N/A", "0.80"]
     assert _visible_text_by_class(output, "t3-tab-score") == ["N/A", "0.80 (+0.30)"]
     assert _overall_kpi_values(output) == ["N/A", "0.80"]
@@ -234,7 +238,8 @@ def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Pat
     assert output.count('<span class="t3-mad-score" style="color:var(--text-secondary);">N/A</span>') >= 6
     # Five dimension cells plus overall matrix, scorecard, and lift KPI must
     # distinguish an unavailable with-skill score from a missing baseline.
-    assert output.count("with-skill unavailable") == 8
+    assert "with-skill unavailable" in overall_matrix
+    assert "with-skill unavailable" in output.split('id="tier3-agent-scorecards"', 1)[1].split("</details>", 1)[0]
     assert "no baseline" not in output
 
 
@@ -576,8 +581,10 @@ def test_successful_agent_with_legitimate_zero_score_renders_numeric_zero(tmp_pa
 
     assert payload["agents"]["zero"]["with_skill"] == 0.0
     overall_matrix = _overall_matrix_html(output)
-    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["0.80", "0.00"]
-    assert overall_matrix.count('class="t3-mad-bar"') == 2
+    assert 'class="metric-value"' in overall_matrix and ">0.80</span>" in overall_matrix
+    assert _visible_text_by_class(overall_matrix, "t3-mad-score") == ["0.00"]
+    assert overall_matrix.count('class="mini-bar"') == 1
+    assert overall_matrix.count('class="t3-mad-bar"') == 1
     assert _visible_text_by_class(output, "t3-agent-score") == ["0.80", "0.00"]
     assert _visible_text_by_class(output, "t3-tab-score") == ["0.80", "0.00"]
     assert _overall_kpi_values(output) == ["0.80", "0.00"]

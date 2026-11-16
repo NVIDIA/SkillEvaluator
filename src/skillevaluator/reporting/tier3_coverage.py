@@ -26,9 +26,8 @@ _NOT_REPORTED = {
 # many of its attempts scored.
 _NOTICE_CODES = {"with_skill": "with_skill_failed", "without_skill": "baseline_failed"}
 # Harbor records a failed trial as ``ExceptionType: message`` after the trial
-# label. A job whose statistics miss a trial names the trial or step exception
-# Harbor recorded as ``trial <label> recorded ExceptionType: message``. Only the
-# type name is kept, as plain words, so it is safe to publish.
+# label, or as ``trial <label> recorded ExceptionType: message`` in a failed
+# job's statistics. Only the type name is kept, as plain words, so it is safe to publish.
 _EXCEPTION_TYPE = re.compile(
     r"(?:^|: | recorded )(?:[A-Za-z_]\w{0,63}\.){0,8}([A-Z][A-Za-z0-9]{0,63}(?:Error|Exception))(?=:|$)"
 )

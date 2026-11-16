@@ -1,0 +1,125 @@
+{
+  "plugin_provenance": {
+    "partial": true,
+    "evaluated_member_skills": [
+      "resolved-skill"
+    ],
+    "staged_rules": [
+      "resolved-rule"
+    ],
+    "unresolved_skill_refs": [
+      "unresolved-skill"
+    ],
+    "unresolved_rule_refs": [
+      "unresolved-rule"
+    ],
+    "mcp_resolutions": [
+      {
+        "name": "synthetic-mcp",
+        "status": "reachable-in-agent",
+        "tool_count": 1,
+        "tool_usage": {
+          "calls": 0,
+          "failed": 0,
+          "tools": [
+            "synthetic-tool"
+          ]
+        },
+        "reason": "Synthetic connection evidence"
+      }
+    ]
+  },
+  "integration": {
+    "with_plugin": 0.71,
+    "sum_of_parts": 0.54,
+    "integration_lift": 0.17,
+    "verdict": "real_integration",
+    "point_verdict": "real_integration",
+    "interpretation": "Synthetic recorded interpretation",
+    "components": [
+      "component-alpha",
+      "component-beta"
+    ],
+    "lift_uncertainty": {
+      "ci_low": 0.04,
+      "ci_high": 0.3,
+      "n_cases": 8,
+      "precision": "adequate"
+    },
+    "complete": false,
+    "completeness": {
+      "missing_sum_of_parts": [
+        "missing-part-case"
+      ],
+      "missing_with_plugin": []
+    },
+    "component_signals": {
+      "multi_component_rate": 0.5,
+      "unused_declared": {
+        "rules": [
+          "unused-rule"
+        ]
+      },
+      "runtime_unavailable": [
+        {
+          "name": "unavailable-component",
+          "type": "rule"
+        }
+      ],
+      "convention_note": "Synthetic activation convention"
+    },
+    "mcp": {
+      "declared": 1,
+      "connected_in_agent": 1,
+      "used": 0,
+      "failed_calls": 0,
+      "exercised": false,
+      "servers": [
+        {
+          "name": "synthetic-mcp",
+          "status": "reachable-in-agent",
+          "calls": 0,
+          "failed": 0,
+          "tools": []
+        }
+      ]
+    }
+  },
+  "harbor_viewer_delivery": {
+    "viewer_status": "failed",
+    "uploads": [
+      {
+        "job_name": "demo-job",
+        "status": "failed",
+        "error": "synthetic upload timeout",
+        "diagnostic_archive": "uploads/demo.tar.gz"
+      }
+    ]
+  },
+  "agents": {
+    "demo-agent": {
+      "safety_refusals": {
+        "attempts": 2,
+        "model_mixed_attempts": 1,
+        "categories": [
+          "synthetic-category"
+        ],
+        "cases": [
+          "refused-case"
+        ]
+      },
+      "recovery_notes": [
+        "Synthetic recovery note"
+      ],
+      "pass_at_k": {
+        "lift": {
+          "safety_refusal_cases": [
+            "refused-case"
+          ],
+          "with_skill": 0.8,
+          "without_skill": 0.6
+        }
+      }
+    }
+  }
+}

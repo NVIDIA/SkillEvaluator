@@ -239,7 +239,7 @@ def test_catalog_kpi_marks_non_catalog_scopes_not_applicable():
     result.add_success("index_built", "Indexed", entry_count=3, content_type="skill")
     output = HTMLReporter(include_timestamp=False).render_all([result])
     across = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
-    catalog_card = across.split("Catalog entries compared</h3>", 1)[1].split("</div>", 1)[0]
+    catalog_card = across.split("Catalog entries compared</dt>", 1)[1].split("</div>", 1)[0]
     assert "Not applicable" in catalog_card
     # similarity-check never runs the within-skill scope: say so, without Unavailable KPIs.
     within = output.split('id="tier2-within"', 1)[1].split("</section>", 1)[0]
@@ -291,7 +291,7 @@ def test_across_scope_counts_similarity_matches_not_duplicates():
     result.add_success("catalog_compared", "Compared", catalog_entry_count=5, self_matches_excluded=1)
     output = HTMLReporter(include_timestamp=False).render_all([result])
     across = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
-    assert "Similarity matches</h3>" in across and "Duplicate findings" not in across
+    assert "Similarity matches</dt>" in across and "Duplicate findings" not in across
 
 
 def test_harbor_legacy_pair_stays_one_job_and_bad_shapes_do_not_crash():

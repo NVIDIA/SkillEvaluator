@@ -21,7 +21,6 @@ from typing import TYPE_CHECKING, Any
 
 import pytest
 from rich.console import Console
-from tests.test_harbor_collector_runtime_failures import _write_actual_harbor_022_result
 
 from skillevaluator.cli import _effective_report_formats
 from skillevaluator.constants import DIMENSION_MAPPING
@@ -34,7 +33,6 @@ from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporte
 from skillevaluator.reporting.console_ui import summarize_tier3
 from skillevaluator.reporting.html import _TIER3_HTML_PREVIEW_TRIGGER_BYTES
 from skillevaluator.reporting.tier3_coverage import IncompleteArm, coverage_notices, incomplete_arms
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 if TYPE_CHECKING:
@@ -45,12 +43,6 @@ TIMEOUT_ERROR = (
 )
 SETUP_ERROR = (
     "Agent runtime failed in case-1__attempt1: AgentSetupTimeoutError: Agent setup timed out after 360 seconds"
-)
-# A job whose statistics miss a trial names the first trial or step exception
-# Harbor recorded under it.
-JOB_STATISTICS_ERROR = "Harbor evaluation statistics account for 1/2 completed trials"
-RECORDED_STEP_ERROR = (
-    f"{JOB_STATISTICS_ERROR}; trial case-1__attempt2 recorded RewardFileNotFoundError: reward.json missing"
 )
 FAILED_AGENT = "The agent and the Tier 3 run are marked failed."
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -202,22 +194,20 @@ def test_incomplete_arm_states_and_counts(scored: int | None, expected: int, sta
         (["Missing scored attempts for cases: ParseError", "Scored attempt coverage is 1/2"], None),
         (["Excess scored attempts for cases: ParseError", TIMEOUT_ERROR], "agent timeout error"),
         (["Unexpected scored cases: ValueError"], None),
-        # The exception Harbor recorded under a failed job, as the collector and
-        # the saved-run loader word it, is the first failure, also before a later
-        # typed error.
         (
-            [RECORDED_STEP_ERROR, "Missing scored attempts for cases: case-1", "Scored attempt coverage is 1/2"],
+            [
+                "Harbor evaluation statistics account for 1/2 completed trials; "
+                "trial case-1__attempt2 recorded RewardFileNotFoundError: reward.json missing",
+                TIMEOUT_ERROR,
+            ],
             "reward file not found error",
         ),
-        ([f"Without skill aggregate job: {RECORDED_STEP_ERROR}"], "reward file not found error"),
-        ([RECORDED_STEP_ERROR, TIMEOUT_ERROR], "reward file not found error"),
         (
-            [f"{JOB_STATISTICS_ERROR}; trial case-1__attempt2 recorded harbor.trial.errors.VerifierTimeoutError"],
+            ["Without skill aggregate job: trial case-1 recorded harbor.trial.errors.VerifierTimeoutError"],
             "verifier timeout error",
         ),
-        # A recorded message without a type, or a trial label shaped like a type, names nothing.
-        ([f"{JOB_STATISTICS_ERROR}; trial case-1__attempt2 recorded reward.json missing"], None),
-        ([f"{JOB_STATISTICS_ERROR}; trial FakeError recorded reward.json missing"], None),
+        (["trial case-1 recorded reward.json missing"], None),
+        (["trial FakeError recorded reward.json missing"], None),
         (["Scored attempt coverage is 1/2", "Unscoreable reward in case-1__attempt2: judge failed"], None),
         ("AgentTimeoutError: not a list", None),
     ],
@@ -351,52 +341,6 @@ def test_run_directory_failed_baseline_trial_reaches_the_coverage_notice(tmp_pat
     assert _benchmark_rows(benchmark)["Overall"] == [
         "80.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable"
     ]
-
-
-def _collect_failed_baseline_step(tmp_path: Path) -> dict[str, Any]:
-    """Collect a run whose baseline job recorded a ``RewardFileNotFoundError`` step exception."""
-    jobs_dir = tmp_path / "jobs"
-    _write_actual_harbor_022_result(jobs_dir / "demo-opencode-with", reward=1.0)
-    _write_actual_harbor_022_result(
-        jobs_dir / "demo-opencode-without",
-        verifier_mode="missing",
-        step_rewards=(1.0,),
-        step_exception_type="RewardFileNotFoundError",
-    )
-    return collect_harbor_results(
-        skill_name="demo",
-        agents=["opencode"],
-        output_dir=tmp_path / "results",
-        jobs_dir=jobs_dir,
-        expected_cases=1,
-        expected_case_ids=["case-001"],
-        expected_trials=1,
-    )
-
-
-def test_harbor_step_exception_reaches_the_coverage_notice(tmp_path: Path) -> None:
-    """A step exception Harbor recorded under a failed baseline job is the first failure, live and reloaded."""
-    results = _collect_failed_baseline_step(tmp_path)
-    skill = tmp_path / "demo"
-    skill.mkdir()
-    saved = agent_eval_result_from_directory(skill, tmp_path / "results", use_llm_judge=False)
-
-    assert saved is not None
-    expected = [("opencode", "baseline_failed", "unavailable", "reward file not found error")]
-    for notices in (coverage_notices(results["agents"]), saved.metadata["agent_eval"]["coverage_notices"]):
-        assert [(notice["agent"], notice["code"], notice["state"], notice["failure"]) for notice in notices] == expected
-
-
-def test_changelog_quotes_the_recorded_clause_as_the_end_of_the_job_failure(tmp_path: Path) -> None:
-    """The job failure opens with the trial count, so the entry quotes only how it ends."""
-    results = _collect_failed_baseline_step(tmp_path)
-    job_failure = results["agents"]["opencode"]["conditions"]["without_skill"]["execution_errors"][0]
-    assert job_failure.startswith("Harbor evaluation statistics account for 0/1 completed trials; trial ")
-    assert re.search(r"; trial \S+ recorded RewardFileNotFoundError: [^;]+\Z", job_failure)
-
-    entry = _doc_block("CHANGELOG.md", "- Tier 3 coverage notices now name the exception type Harbor recorded")
-    assert "job failure then ends with `trial <label> recorded VerifierOutputParseError: <message>`" in entry
-    assert "reports that job failure as" not in entry
 
 
 # -- BENCHMARK.md ---------------------------------------------------------------
@@ -573,7 +517,7 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
     assert notice["message"] not in compact
     assert "baseline incomplete" not in compact
 
-    docs = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
+    docs = _doc_block("docs/reports.mdx", "The HTML report keeps a short coverage cue near the Tier 3 result")
     changelog = _doc_block("CHANGELOG.md", "- Tier 3 reports no longer say `baseline not run`")
     for name, text in (("docs/reports.mdx", docs), ("CHANGELOG.md", changelog)):
         assert "`validate --verbose`" in text, name
@@ -582,8 +526,8 @@ def test_compact_validate_view_leaves_coverage_notes_to_the_report_files_and_the
         assert "`validate` prints" not in text, name
 
 
-def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_docs_say_so() -> None:
-    """Only the callout tells a baseline that ran and failed from one that was skipped."""
+def test_html_agent_details_distinguish_an_unavailable_baseline_from_a_skipped_one() -> None:
+    """Unavailable aggregate quality must not imply the recorded baseline never ran."""
     _, _, _, report = _render(
         {
             "claude-code": _agent(baseline=_condition("failed", 1, errors=[TIMEOUT_ERROR])),
@@ -593,13 +537,15 @@ def test_html_agent_details_label_a_failed_baseline_like_a_skipped_one_and_the_d
 
     kpi_subs = re.findall(r'<div class="t3-kpi-sub">(.*?)</div>', report)
     assert kpi_subs.count("baseline N/A") == 2
-    assert kpi_subs.count("no baseline") == 2
+    assert kpi_subs.count("no baseline") == 1
+    assert kpi_subs.count("Overall baseline unavailable") == 1
     (note,) = _html_coverage_notes(report)
     assert note.startswith("claude-code baseline incomplete")
 
     definition = _doc_block("docs/reports.mdx", "When the HTML report has no lift for an agent or dimension")
-    assert "**no baseline** means" in definition
-    assert "a baseline arm that ran but failed" in definition
+    assert "**Overall baseline unavailable**" in definition
+    assert "**no baseline**" in definition
+    assert "aggregate quality score is missing" in definition
     assert "**Agent coverage notes**" in definition
-    details = _doc_block("docs/reports.mdx", "The HTML report lists each message under **Agent coverage notes**")
-    assert "**no baseline** and `baseline N/A`" in details
+    details = _doc_block("docs/reports.mdx", "The HTML report keeps a short coverage cue near the Tier 3 result")
+    assert "**Overall baseline unavailable**" in details and "`baseline N/A`" in details

@@ -224,6 +224,68 @@ def test_unsafe_mcp_refused_before_engine_call(tmp_path, monkeypatch):
         EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
 
 
+def _mcp_plugin(root, package):
+    root = _plugin(root)
+    manifest = {"name": "demo", "mcpServers": {"server": {"command": "npx", "args": [package]}}}
+    (root / ".claude-plugin/plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    return root
+
+
+def _policy(tmp_path, overrides):
+    import yaml
+
+    from skillevaluator.validators.policy import resolve_policy
+
+    path = tmp_path / "policy.yaml"
+    path.write_text(yaml.safe_dump({"severity_overrides": overrides}), encoding="utf-8")
+    return resolve_policy(policy_path=path)
+
+
+def test_policy_that_raises_a_finding_to_blocking_stops_the_run_before_the_engine(tmp_path, monkeypatch):
+    from skillevaluator.tier3.plugin_prepare import PreparationError
+
+    # An unpinned package is a MEDIUM finding by default, so only the override makes it blocking.
+    root = _mcp_plugin(tmp_path / "plugin", "some-package")
+    policy = _policy(tmp_path, {"MCP_DECLARATION.mcp_unpinned_package": "critical"})
+    calls = []
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_a, **_kw: calls.append(1) or {"execution_status": "x"})
+
+    EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    assert calls == [1]
+    with pytest.raises(PreparationError, match="policy blocks runtime evaluation: mcp_unpinned_package"):
+        EvaluationService().evaluate_plugin(
+            EvaluationOptions(root, agents="claude-code"), plugin_options=PluginOptions(policy=policy)
+        )
+    assert calls == [1]
+
+
+def test_policy_that_lowers_a_blocking_finding_lets_the_run_start(tmp_path, monkeypatch):
+    from skillevaluator.tier3.plugin_prepare import PreparationError
+
+    # A floating package version is a HIGH finding by default.
+    root = _mcp_plugin(tmp_path / "plugin", "some-package@latest")
+    policy = _policy(tmp_path, {"MCP_DECLARATION.*": "medium"})
+    calls = []
+    monkeypatch.setattr(
+        EvaluationService, "evaluate", lambda *_a, **_kw: calls.append(1) or {"execution_status": "succeeded"}
+    )
+
+    with pytest.raises(PreparationError, match="mcp_command_floating_version"):
+        EvaluationService().evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    assert calls == []
+    result = EvaluationService().evaluate_plugin(
+        EvaluationOptions(root, agents="claude-code"), plugin_options=PluginOptions(policy=policy)
+    )
+    assert calls == [1]
+    assert result["plugin_runtime_report"]["execution_status"] == "succeeded"
+
+
+@pytest.mark.parametrize("value", ["strict", {"MCP_DECLARATION.*": "critical"}])
+def test_plugin_policy_must_be_a_validation_policy(value):
+    with pytest.raises(ValueError, match="policy"):
+        PluginOptions(policy=value)
+
+
 def _scored_run(run_dir):
     from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 

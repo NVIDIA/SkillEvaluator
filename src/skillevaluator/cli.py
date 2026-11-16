@@ -2795,6 +2795,7 @@ def validate(
             repo_root=repo_root,
             allowed_private_hosts=policy.mcp_allowed_private_hosts,
             hook_allowed_urls=policy.hook_allowed_urls,
+            policy=policy,
         )
     elif (
         any(value is not None for value in (plugin_load, lift_mode, probe_mcp, trial_retries, repo_root))

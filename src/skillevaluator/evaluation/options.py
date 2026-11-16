@@ -12,7 +12,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field, fields
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from skillevaluator.validators.policy import ValidationPolicy
 
 
 @dataclass
@@ -97,7 +100,13 @@ class DatasetOptions:
 
 @dataclass(frozen=True)
 class PluginOptions:
-    """Plugin runtime controls; unset values defer to authored configuration."""
+    """Plugin runtime controls; unset values defer to authored configuration.
+
+    ``policy`` is the operator's validation policy. Its severity overrides
+    decide which manifest and component findings refuse the run before any
+    agent starts, as they decide Tier 1 blocking. ``None`` keeps each check's
+    default severity.
+    """
 
     plugin_load: str | None = None
     lift_mode: str | None = None
@@ -107,9 +116,14 @@ class PluginOptions:
     repo_root: Path | None = None
     allowed_private_hosts: tuple[str, ...] = ()
     hook_allowed_urls: tuple[str, ...] = ()
+    policy: ValidationPolicy | None = None
 
     def __post_init__(self) -> None:
         from skillevaluator.validators.plugin_policy import normalize_plugin_allowlist
+        from skillevaluator.validators.policy import ValidationPolicy
+
+        if self.policy is not None and not isinstance(self.policy, ValidationPolicy):
+            raise ValueError("policy must be a ValidationPolicy")
 
         object.__setattr__(
             self,

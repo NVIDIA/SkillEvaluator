@@ -90,6 +90,11 @@ inside the plugin root; skill and rule references it does not stage (same-reposi
 external, unresolved, or not bundled) stay listed as not staged and make the run
 incomplete.
 
+Before any agent starts, a HIGH or CRITICAL manifest or component finding refuses
+the run. Severity overrides from `--policy` or `--profile` apply first, as they do
+for static checks, so a policy can make a finding block the run or lower it so the
+run proceeds.
+
 ```bash
 skillevaluator tier3 evaluate-plugin ./my-plugin \
   --agents claude-code --plugin-load wrapper -r json,html

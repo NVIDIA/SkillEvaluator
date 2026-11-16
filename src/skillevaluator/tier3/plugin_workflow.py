@@ -91,7 +91,14 @@ def evaluate_plugin(
     if plugin_options.probe_mcp_env and not plugin_options.probe_mcp:
         raise ValueError("--probe-mcp-env requires --probe-mcp")
     validation = validate_inventory_schema(inventory, repo_root=plugin_options.repo_root)
-    blocking = [finding for finding in validation.findings if finding.severity in {Severity.CRITICAL, Severity.HIGH}]
+    policy = plugin_options.policy
+    # Block on the severities Tier 1 reports: the operator's policy overrides each check's default.
+    blocking = [
+        finding
+        for finding in validation.findings
+        if (policy.severity_for(finding.category, finding.check_name, finding.severity) if policy else finding.severity)
+        in {Severity.CRITICAL, Severity.HIGH}
+    ]
     package = prepare_runtime_package(inventory, expected=expected, blocking_findings=blocking)
     agents = parse_agents(options.agents)
     if options.agents is None:

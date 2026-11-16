@@ -230,6 +230,74 @@ def test_plugin_cli_preflight_enforces_authored_cost_requirement(tmp_path, monke
     assert "max_cost_usd requires harbor.price_file" in result.output
 
 
+def _policy_plugin(tmp_path, monkeypatch, package, override):
+    """A plugin with one npx MCP server, a policy file, and an engine that records each call."""
+    from skillevaluator.evaluation.service import EvaluationService
+
+    source = _live_report_source(tmp_path)
+    manifest = {"name": "demo", "mcpServers": {"server": {"command": "npx", "args": [package]}}}
+    (source / ".claude-plugin/plugin.json").write_text(json.dumps(manifest), encoding="utf-8")
+    skill = source / "skills/a"
+    (skill / "evals").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: a\ndescription: Fixture member.\n---\nBody.\n", encoding="utf-8")
+    (skill / "evals/evals.json").write_text('[{"id": "one", "prompt": "Use a."}]', encoding="utf-8")
+    policy = tmp_path / "policy.yaml"
+    policy.write_text(f"severity_overrides:\n  {override}\n", encoding="utf-8")
+    calls = []
+
+    def engine(self, options, *, progress_reporter=None):
+        calls.append(options.skill_path)
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    return source, policy, calls
+
+
+def test_evaluate_plugin_policy_override_makes_a_finding_block_the_run(tmp_path, monkeypatch):
+    # An unpinned package is MEDIUM by default; the operator's policy makes it blocking.
+    source, policy, calls = _policy_plugin(
+        tmp_path, monkeypatch, "some-package", "MCP_DECLARATION.mcp_unpinned_package: critical"
+    )
+    result = CliRunner().invoke(
+        cli,
+        ["tier3", "evaluate-plugin", str(source), "--agents", "opencode", "--progress", "off", "--policy", str(policy)],
+    )
+
+    assert result.exit_code == 1, (result.output, result.exception)
+    assert "policy blocks runtime evaluation: mcp_unpinned_package" in result.output
+    assert calls == []
+
+
+def test_validate_plugin_policy_override_lets_a_lowered_finding_run(tmp_path, monkeypatch):
+    # A floating package version is HIGH by default; the operator's policy lowers it below blocking.
+    source, policy, calls = _policy_plugin(
+        tmp_path, monkeypatch, "some-package@latest", "MCP_DECLARATION.mcp_command_floating_version: medium"
+    )
+    output = tmp_path / "reports"
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(source),
+            "--tiers",
+            "1,3",
+            "--agents",
+            "opencode",
+            "--policy",
+            str(policy),
+            "-r",
+            "json",
+            "-o",
+            str(output),
+        ],
+    )
+
+    assert "policy blocks" not in result.output
+    assert len(calls) == 1, (result.output, result.exception)
+    [report] = output.glob("*.json")
+    assert "policy blocks" not in report.read_text(encoding="utf-8")
+
+
 def _live_json_report(source, engine_result, results, output):
     report = project_plugin_runtime(engine_result, provenance={"plugin": "demo", "runtime_evidence": {}})
     assert report is not None

@@ -127,7 +127,9 @@ def build_plugin_commands(evaluate, *, run_options, report_options, console):
         except (OSError, ValueError) as exc:
             raise click.ClickException(str(exc)) from exc
         controls.update(
-            allowed_private_hosts=policy.mcp_allowed_private_hosts, hook_allowed_urls=policy.hook_allowed_urls
+            allowed_private_hosts=policy.mcp_allowed_private_hosts,
+            hook_allowed_urls=policy.hook_allowed_urls,
+            policy=policy,
         )
         ctx.invoke(
             evaluate,

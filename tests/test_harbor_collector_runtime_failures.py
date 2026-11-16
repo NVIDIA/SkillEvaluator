@@ -2937,3 +2937,83 @@ def test_trial_failure_names_docker_address_pool_exhaustion(tmp_path: Path) -> N
     [failure] = results["agents"]["opencode"]["trial_failures"]["with_skill"]
     assert failure["trial"] == "case-001__attempt"
     assert failure["reason"].startswith(f"RuntimeError: {_ADDRESS_POOL_NOTE_START} ")
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+@pytest.mark.parametrize(
+    "corruption", ["duplicate-ordinal", "excess-ordinal", "unexpected-case", "nonfinite", "unsafe-identity"]
+)
+def test_partial_integrity_failure_clears_scores(tmp_path: Path, variant: str, corruption: str) -> None:
+    jobs = tmp_path / "jobs"
+    _write_reward(jobs, variant=variant, case_id="case-a", attempt=1, score=1.0)
+    if corruption == "duplicate-ordinal":
+        _write_reward(
+            jobs, variant=variant, case_id="case-a", attempt=1, score=0.0, trial_name="duplicate-case-a_attempt001"
+        )
+    elif corruption == "excess-ordinal":
+        _write_reward(jobs, variant=variant, case_id="case-a", attempt=3, score=0.0)
+    elif corruption == "unexpected-case":
+        _write_reward(jobs, variant=variant, case_id="case-extra", attempt=1, score=0.0)
+    else:
+        _write_reward(jobs, variant=variant, case_id="case-b", attempt=1, score=0.0)
+        path = jobs / f"demo-opencode-{variant}/case-b_attempt001/verifier/reward.json"
+        reward = json.loads(path.read_text())
+        if corruption == "nonfinite":
+            reward["accuracy"] = float("nan")
+            reward["overall"] = float("nan")
+        else:
+            reward["entry_id"] = "bad\nidentity"
+        path.write_text(json.dumps(reward))
+    _write_variant_job_results(jobs, variants=(variant,))
+    result = _collect(tmp_path, skip_baseline=variant == "with", skip_with_skill=variant == "without")
+    agent = result["agents"]["opencode"]
+    arm = f"{variant}_skill"
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert agent[arm] == {}
+    assert agent["pass_at_k"][arm] == {}
+    saved = json.loads((tmp_path / "results/opencode" / f"{variant}-skill/summary.json").read_text())
+    assert saved["scores"] == {} and saved["pass_at_k"] == {}
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+@pytest.mark.parametrize("case_detail_cap", [1, 400])
+def test_partial_failed_case_requires_all_attempts(
+    tmp_path: Path, variant: str, case_detail_cap: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(collector_module, "PUBLISHED_CASE_DETAILS_MAX", case_detail_cap)
+    jobs = tmp_path / "jobs"
+    for case_id, scores in {"case-a": [0.0], "case-b": [0.0, 0.0], "case-c": [1.0]}.items():
+        for attempt, score in enumerate(scores, start=1):
+            _write_reward(jobs, variant=variant, case_id=case_id, attempt=attempt, score=score)
+    _write_variant_job_results(jobs, variants=(variant,))
+    result = _collect(
+        tmp_path,
+        skip_baseline=variant == "with",
+        skip_with_skill=variant == "without",
+        expected_cases=4,
+        expected_case_ids=["case-a", "case-b", "case-c", "case-d"],
+    )
+    partial = result["agents"]["opencode"]["pass_at_k"][f"{variant}_skill"]
+    assert partial["passed_cases"] == 1
+    assert partial["failed_cases"] == 1
+    assert partial["unresolved_cases"] == 2
+    assert sum(partial[key] for key in ("passed_cases", "failed_cases", "unresolved_cases")) == partial["total_cases"]
+    saved = json.loads((tmp_path / "results/opencode" / f"{variant}-skill/summary.json").read_text())
+    assert saved["pass_at_k"] == partial
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+def test_partial_extra_case_count_without_expected_ids_clears_scores(tmp_path: Path, variant: str) -> None:
+    for case_id in ["case-a", "case-b", "case-extra"]:
+        _write_reward(tmp_path / "jobs", variant=variant, case_id=case_id, attempt=1, score=1.0)
+    _write_variant_job_results(tmp_path / "jobs", variants=(variant,))
+    result = _collect(
+        tmp_path,
+        skip_baseline=variant == "with",
+        skip_with_skill=variant == "without",
+        expected_cases=2,
+        expected_case_ids=None,
+    )
+    agent = result["agents"]["opencode"]
+    assert agent[f"{variant}_skill"] == {}
+    assert agent["pass_at_k"][f"{variant}_skill"] == {}

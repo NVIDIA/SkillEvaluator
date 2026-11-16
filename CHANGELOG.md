@@ -405,6 +405,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Partial Tier 3 evidence is retained only for valid reward identities and attempt
+  coverage. Corrupt rewards or duplicate attempts still suppress arm scores;
+  incomplete cases are reported as unresolved instead of failed.
+
 - Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.

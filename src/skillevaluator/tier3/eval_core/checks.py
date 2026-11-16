@@ -3720,8 +3720,10 @@ _FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
 _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
     r"[0-9]{1,12}(?![\w.-])|\$\(\(|(?:true|false|null|none)(?![\w.-])", re.IGNORECASE
 )
-# A value: a masked private key, a JSON-escaped or quoted string, a
-# parenthesized tuple (auth=("bob", "...")), a call
+# A value: a masked private key, a JSON-escaped or quoted string, a string
+# in escaped single quotes as in Python source ('DB_PASSWORD=\'two words\''),
+# which, as a JSON-escaped one, ends at its escaped closing quote or the end
+# of the line, a parenthesized tuple (auth=("bob", "...")), a call
 # (auth=HTTPBasicAuth("bob", "..."), auth=requests.auth.HTTPDigestAuth(...)),
 # or one word, which may hold escaped spaces ("correct\ horse"). The arguments
 # of a tuple or call may hold one level of calls
@@ -3735,7 +3737,8 @@ _FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()]|\([^()]{0,64}\)){0,256}"
 _FINDING_EVIDENCE_WORD_VALUE = r"(?:\\.|[^\s'\"`;|&\\])+"
 _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\\'(?:[^'\\\r\n]|\\(?!'))*(?:\\')?"
+    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
     + r"|\("
     + _FINDING_EVIDENCE_TUPLE_ARGUMENTS
     + r"\)?|(?P<call>[A-Za-z_][\w.]{0,63}\("
@@ -4660,10 +4663,14 @@ class _AssignmentValues:
         "TOKEN=<redacted>,x"), so masking masked text again keeps the text
         before that marker. Text masked whole and then again line by line
         keeps such a value as the whole pass left it, so the rest of a line
-        after an earlier marker still reads as it did. A flag or header name
-        does not count: a rule before this one masks its value
-        ("K1,--token=<redacted>", "K1,api-key=<redacted>"), and the value it
-        is in is masked whole, as it was when that value was read.
+        after an earlier marker still reads as it did. So does a name whose
+        value starts with an escaped single quote, as in a Python string
+        ("API_KEY=\\'two words\\'", "K1,TOKEN=\\'...\\'"): the word reads on
+        over that quote, but the text read with its escapes removed holds
+        the quoted value whole. A flag or header name does not count: a rule
+        before this one masks its value ("K1,--token=<redacted>",
+        "K1,api-key=<redacted>"), and the value it is in is masked whole, as
+        it was when that value was read.
         """
         text = self.text
         # A name that ends the value or follows it is read up to its separator.
@@ -4676,7 +4683,7 @@ class _AssignmentValues:
             if reading is None:
                 continue
             if (
-                text.startswith("<redacted>", reading[1])
+                text.startswith(("<redacted>", "\\'"), reading[1])
                 and _FINDING_EVIDENCE_FLAG_OR_HEADER_NAME_RE.search(name.group(1)) is None
             ):
                 return True

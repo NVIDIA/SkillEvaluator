@@ -3930,6 +3930,42 @@ def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
     assert _mask_as(copy, text) == expected
 
 
+# A "_" flag value that holds a credential name whose value starts with an
+# escaped single quote, as in a Python string, is left to the assignment rule,
+# which reads that value to the escaped closing quote, as it reads a value in
+# JSON-escaped double quotes.
+@pytest.mark.parametrize("copy", ["template", "eval_core"])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        pytest.param(
+            f"'./app --auth_token API_KEY=\\'{_API_TOKEN} {_BASIC_PASSWORD}\\'\\ngit status'",
+            "'./app --auth_token API_KEY=<redacted>\\ngit status'",
+            id="starts-the-value",
+        ),
+        pytest.param(
+            f"'./app --api_key K1,TOKEN=\\'{_API_TOKEN} {_BASIC_PASSWORD}\\'\\ngit status'",
+            "'./app --api_key K1,TOKEN=<redacted>\\ngit status'",
+            id="inside-the-value",
+        ),
+        pytest.param(
+            f"./app --db_password API_KEY=\\'{_API_TOKEN} {_BASIC_PASSWORD}\\' && rm -rf /srv/app",
+            "./app --db_password API_KEY=<redacted> && rm -rf /srv/app",
+            id="outside-a-string",
+        ),
+        pytest.param(
+            f"os.system('export DB_PASSWORD=\\'{_API_TOKEN} {_BASIC_PASSWORD}\\' && ./deploy')",
+            "os.system('export DB_PASSWORD=<redacted> && ./deploy')",
+            id="assignment-with-no-flag",
+        ),
+    ],
+)
+def test_an_underscored_flag_value_with_an_escaped_quote_assignment_is_masked_whole(
+    copy: str, text: str, expected: str
+) -> None:
+    assert _mask_as(copy, text) == expected
+
+
 class _CountingPattern:
     """Count the searches of a compiled pattern."""
 
@@ -4077,29 +4113,83 @@ def _parametrized_strings(value: Any) -> list[str]:
     return []
 
 
-# A marker that masking leaves is read again as the start of an unquoted
-# value by the assignment rule, which takes the closing brackets, commas and
-# backslashes right after it ('{"api_key": <redacted>}' loses its "}"), and
-# by the MySQL client rule, which takes backslashes. A .netrc password that
-# starts with a marker is read again on over ";" to the next marker
-# ("password <redacted>; auth=<redacted>,"). None of these shows more of a
-# credential, so those characters are left out of the comparison and such
-# text is skipped.
-_MARKER_TAIL_RE = re.compile(r"(?<=<redacted>)[)\]},\\]+")
-_MARKED_NETRC_PASSWORD_RE = re.compile(r"\bpassword[ \t]+<redacted>[ \t]*[;|&<>]")
+def _masks_only_after_markers(once: str, twice: str) -> bool:
+    """Whether *twice* is *once* with, at most, the text right after some of its markers masked into them.
+
+    The text before the first marker is the same, and each piece of text
+    that *twice* keeps between markers ends a piece that *once* keeps, in
+    order. A piece that *once* keeps and *twice* drops was masked whole
+    between two markers.
+    """
+    kept_once = _MARKERS.split(once)
+    kept_twice = _MARKERS.split(twice)
+    if kept_once[0] != kept_twice[0] or not kept_once[-1].endswith(kept_twice[-1]):
+        return False
+    index = 1
+    for piece in kept_twice[1:]:
+        while index < len(kept_once) and not kept_once[index].endswith(piece):
+            index += 1
+        if index == len(kept_once):
+            return False
+        index += 1
+    return True
 
 
-def test_masking_masked_text_again_changes_nothing() -> None:
+def test_masks_only_after_markers_rejects_text_shown_or_masked_away_from_a_marker() -> None:
+    assert _masks_only_after_markers("a <redacted> b c", "a <redacted> c")
+    assert _masks_only_after_markers("a <redacted>; b=<redacted>, c", "a <redacted>, c")
+    assert _masks_only_after_markers('{"k": <redacted>}', '{"k": <redacted>')
+    assert not _masks_only_after_markers("a <redacted> b", "a VALUE b")
+    assert not _masks_only_after_markers("a b <redacted> c", "a <redacted> c")
+    assert not _masks_only_after_markers("a <redacted> b c d", "a <redacted> b <redacted> d")
+    assert not _masks_only_after_markers("a <redacted> b", "a <redacted> b c")
+
+
+def _param_strings(test: Any, argname: str) -> list[str]:
+    """Return the strings that *test* is parametrized with for *argname*."""
+    for mark in test.pytestmark:
+        if mark.name == "parametrize" and mark.args[0] == argname:
+            return [text for value in mark.args[1] for text in _parametrized_strings(value)]
+    return []
+
+
+def _built_texts() -> list[str]:
+    """Return texts that tests build from their parameters, as the masker reads them."""
+    texts = []
+    next_lines = _param_strings(test_a_credential_on_the_line_after_an_unquoted_value_is_masked, "next_line")
+    next_lines += _param_strings(test_the_lines_after_an_unquoted_value_keep_no_credential, "next_line")
+    for next_line in next_lines:
+        command = f"API_TOKEN=abc\n{next_line}\nrm -rf /srv/app"
+        texts += [command.replace("\n", "\\n"), _as_json_text(command, 1), _as_json_text(command, 2)]
+    for command in _param_strings(test_a_spaced_call_value_escaped_twice_keeps_its_arguments_masked, "command"):
+        texts.append(_as_json_text(command, 2))
+    for flag in ("--use_token", "--no_token", "--with_password"):
+        command = f'./ci {flag} docker login -u bot --token "x -p y" -p {_API_TOKEN} registry.example.com\nls'
+        texts += [_as_json_text(command, 2), _ragas_prompt(command)]
+    return texts
+
+
+def test_masking_masked_text_again_masks_only_after_a_marker() -> None:
     # Judge evidence is masked whole and then line by line, so masking the
-    # text the masker returns must give the same text. Every string the
-    # parametrized tests in this module pass is masked twice, except the long
-    # texts of the flag timing test, which repeat shorter forms.
+    # text the masker returns must keep it. Every string the parametrized
+    # tests in this module pass is masked twice, except the long texts of the
+    # flag timing test, which repeat shorter forms, and so are texts that
+    # tests build from them. A second pass shows nothing more and masks
+    # nothing away from a marker, but it may read a marker as the start of a
+    # value and mask the text right after it: the closing brackets, commas
+    # and backslashes after an unquoted value ('{"api_key": <redacted>}'
+    # loses its "}"), the rest of a quoted string ("'export
+    # DB_PASSWORD=<redacted> && ./deploy'" loses " && ./deploy"), a .netrc
+    # password read on over ";" to the next marker ("password <redacted>;
+    # auth=<redacted>"), the word after a "\n" escape ("API_TOKEN=<redacted>
+    # \nrm -rf" loses "\nrm"), or quote characters after a value.
     strings: dict[str, None] = {}
     for name, test in list(globals().items()):
         for mark in getattr(test, "pytestmark", []) if name.startswith("test_") else []:
             if mark.name == "parametrize":
                 for value in mark.args[1]:
                     strings.update(dict.fromkeys(_parametrized_strings(value)))
+    strings.update(dict.fromkeys(_built_texts()))
     texts = [text for text in strings if len(text) <= 10_000]
     changed = []
     for text in texts:
@@ -4107,12 +4197,10 @@ def test_masking_masked_text_again_changes_nothing() -> None:
             once = eval_core_checks._mask_finding_evidence_credentials(
                 text, preserve_header_format=preserve_header_format
             )
-            if _MARKED_NETRC_PASSWORD_RE.search(once):
-                continue
             twice = eval_core_checks._mask_finding_evidence_credentials(
                 once, preserve_header_format=preserve_header_format
             )
-            if _MARKER_TAIL_RE.sub("", twice) != _MARKER_TAIL_RE.sub("", once):
+            if not _masks_only_after_markers(once, twice):
                 changed.append((once[:300], twice[:300]))
 
     assert len(texts) > 500

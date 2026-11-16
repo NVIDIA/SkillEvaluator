@@ -411,6 +411,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
+  30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
 - Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
 - Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.

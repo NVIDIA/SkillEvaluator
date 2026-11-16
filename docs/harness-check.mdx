@@ -173,11 +173,11 @@ These are the findings you are most likely to meet:
 | No usable description | Codex, OpenClaw and OpenCode drop a skill without one. The others list it badly. | Add a non-empty `description` as plain text. |
 | Non-canonical name | `skill.md` or `Skill.md` is not `SKILL.md`. Codex and Hermes never load it. | Rename the file to `SKILL.md`, with that exact casing. |
 | Not found | The skill sits in a folder this harness does not read. | Install it in the folder the finding names, such as `.claude/skills` for Claude Code or `.agents/skills` for Codex. |
-| Symlinked `SKILL.md` skipped | Codex, Hermes and OpenClaw skip a symlinked manifest. | Copy `SKILL.md` into the folder. A symlinked folder works. |
+| Symlinked `SKILL.md` skipped | Codex, Hermes and OpenClaw skip a symlinked manifest. | Copy `SKILL.md` into the folder. If you symlink a folder, OpenClaw requires its target to stay within the skills root. |
 | Description cut in the skill list | Codex cuts at 1,024 characters, Claude Code at 1,536, and Copilot CLI drops the skill past 1,024 UTF-16 units. | Put the trigger first and keep the description under 1,024 characters. |
 | Skill list over budget | The skills in this folder have more description text than the harness lists. | Shorten descriptions, or install fewer skills in that folder. |
 | Delivery truncated | `SKILL.md` is larger than the harness reads in one go. | Move detail into `references/` files. The tightest limit is OpenClaw, at about 15,000 characters. |
-| `$ARGUMENTS` is not substituted | Only Claude Code fills in `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`. | Describe the expected input in words, and use paths relative to `SKILL.md`. |
+| `$ARGUMENTS` is not substituted | Claude Code substitutes `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`. OpenCode also substitutes `$ARGUMENTS` through `/command`; its skill tool leaves it literal. | Describe the expected input in words, and use paths relative to `SKILL.md`. |
 | `disable-model-invocation` is ignored | Codex, Hermes and OpenCode don't honour it. | For Codex, add `agents/openai.yaml` with `policy: {allow_implicit_invocation: false}`. |
 
 <Tip>
@@ -266,9 +266,9 @@ These are the findings you are most likely to meet:
 
 | | `harness-check` | `validate` |
 | --- | --- | --- |
-| Runs | Only the harness check | Every Tier 1 check, and Tier 2 and Tier 3 too unless you pass `--tiers 1` |
-| Exit code | `0` whatever it finds. A usage error or a folder with no skills is nonzero | Set by the other checks. The harness check does not change it |
-| Files | `--json FILE` | HTML, JSON and SARIF reports, each with the harness findings |
+| Runs | Only the harness check | Selected checks in the requested tiers (default: 1, 2, 3). Dependency auditing is opt-in; use `--tiers 1` to limit the tiers |
+| Exit code | `0` whatever it finds. A usage error or a folder with no skills is nonzero | Set by the selected checks and active policy. Harness findings are advisory by default; a policy override can make them blocking |
+| Files | `--json FILE` | HTML and JSON reports by default. Choose formats with `-r`, for example `-r json,html,sarif` to include SARIF |
 | Model setup flags | Yes, see [Match your setup](#match-your-setup) | No |
 
 ## What it checks
@@ -278,11 +278,11 @@ The rules cover everything between your folder and the model's context.
 | Area | What it looks for |
 | --- | --- |
 | Front matter | Duplicate keys, tab indentation, a UTF-8 BOM, a missing front matter block, and long custom fields that never reach the model. |
-| Description | Missing or empty descriptions, and descriptions a harness cuts in its skill list, such as Hermes at 60 characters or Copilot CLI at 1,024 UTF-16 units. |
+| Description | Missing or empty descriptions and harness limits: Hermes shortens its skill-list description to 60 characters; Copilot CLI rejects descriptions over 1,024 UTF-16 units. |
 | Location | `SKILL.md` casing, nested or symlinked manifests, how deep a harness scans, and whether the skill sits in a folder the harness reads. |
 | Catalog | Your skill counted with the skills installed next to it: skill-list budgets, duplicate names, and near-identical descriptions. |
 | Delivery | Size limits when the model opens the skill, such as OpenCode's 51,200 bytes or 2,000 lines and Hermes's 100,000 characters. |
-| Placeholders | `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes. |
+| Placeholders | Whether `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` reach the model literally; substitution depends on the harness and invocation path. |
 | Invocation | `disable-model-invocation`, `allowed-tools` and Claude Code-only fields that other harnesses ignore. |
 | Gates | Hermes `platforms` and OpenClaw `metadata.openclaw.requires`, which hide the skill on hosts that don't match. |
 | Plugins | Which plugin formats each harness accepts, how plugin skills are named, and components a harness registers but doesn't deliver. |

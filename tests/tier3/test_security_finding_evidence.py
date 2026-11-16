@@ -4185,21 +4185,27 @@ def test_a_line_start_credential_in_json_stays_masked_before_a_flag_value_left_t
         pytest.param(f"-api_key x=1,token=f({_AWS_KEY_BODY}) echo", id="flag-value-holds-a-call"),
     ],
 )
+@pytest.mark.parametrize("nul", [False, True])
 def test_a_line_start_credential_stays_masked_before_a_flag_value_read_to_the_end_of_a_quoted_line(
-    head: str, tail: str
+    head: str, tail: str, nul: bool
 ) -> None:
     # Inside the quoted command, the whole pass reads the unquoted value of
     # the name in the "_" flag value on to the line end and leaves that flag
     # value to the assignment rule, while the line, read on its own, is masked
     # whole with the name. The rest of the line after the earlier marker is
-    # still found without that name.
+    # still found without that name. Text that holds a NUL character is not
+    # read again with its escapes removed, so there only the line pass finds
+    # that rest.
     command = f"./deploy --password {_BASIC_PASSWORD}\n{head} {tail}\nls"
+    text = json.dumps({"cmd": command})
+    if nul:
+        text = text[:-2] + "\x00" + text[-2:]
 
-    evidence = eval_template._redact_judge_evidence(json.dumps({"cmd": command}))
+    evidence = eval_template._redact_judge_evidence(text)
 
     for secret in (_BASIC_PASSWORD, _API_TOKEN, _AWS_KEY_BODY):
         assert secret not in evidence
-    assert evidence.endswith('\\nls"}')
+    assert evidence.replace("\x00", "").endswith('\\nls"}')
 
 
 def _parametrized_strings(value: Any) -> list[str]:

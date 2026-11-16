@@ -202,6 +202,67 @@ class TestRecalculateFromFindings:
             assert before[key] == after[key]
 
 
+class TestRecalculateKeepingIndependent:
+    """The rebuild that a severity change needs, with the lines no finding repeats put back."""
+
+    @staticmethod
+    def _result(*, incomplete: bool) -> ValidationResult:
+        result = ValidationResult()
+        result.add_finding(_finding(Severity.HIGH))
+        result.add_error("scanner report was cut short")
+        result.fail_gate("scanner status is unknown")
+        result.add_warning("scanner skipped one file")
+        result.add_warning("scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("scanner")
+        return result
+
+    @staticmethod
+    def _lower(result: ValidationResult, **options: bool) -> tuple[list[str], list[str]]:
+        errors, warnings = result.independent_errors(), result.independent_warnings()
+        result.findings[0].severity = Severity.INFO
+        result.recalculate_keeping_independent(errors, warnings, **options)
+        return errors, warnings
+
+    @pytest.mark.parametrize("incomplete", [True, False])
+    def test_errors_stay_only_for_an_incomplete_scan_and_a_gate_failure_stays_once(self, incomplete: bool):
+        result = self._result(incomplete=incomplete)
+
+        self._lower(result)
+
+        expected = ["scanner status is unknown"]
+        if incomplete:
+            expected.append("scanner report was cut short")
+        assert result.errors == expected
+        assert result.summary.errors == len(expected)
+        assert result.passed is False
+
+    def test_every_error_stays_when_asked(self):
+        result = self._result(incomplete=False)
+
+        self._lower(result, keep_all_errors=True)
+
+        assert result.errors == ["scanner status is unknown", "scanner report was cut short"]
+        assert result.summary.errors == 2
+
+    @pytest.mark.parametrize(("repeated", "copies"), [(False, 1), (True, 2)])
+    def test_a_repeated_warning_goes_back_once_unless_asked(self, repeated: bool, copies: int):
+        result = self._result(incomplete=False)
+
+        self._lower(result, keep_repeated_warnings=repeated)
+
+        assert result.warnings == [result.findings[0].to_legacy_string(), *["scanner skipped one file"] * copies]
+        assert result.summary.warnings == 1 + copies
+
+    def test_a_lowered_finding_is_counted_by_its_new_severity(self):
+        result = self._result(incomplete=False)
+
+        self._lower(result)
+
+        assert (result.summary.high_count, result.summary.warnings) == (0, 2)
+        assert result.findings[0].to_legacy_string() in result.warnings
+
+
 class TestMerge:
     """Tests for merge and merge_with_prefix aggregation."""
 

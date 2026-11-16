@@ -33,7 +33,7 @@ from skillevaluator.tier3.harbor.baseline_timeouts import (
     settle,
     unexplained_launch_errors,
 )
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.collector import _build_comparison, collect_harbor_results
 
 SKILL = "demo"
 CASES = ["case-001", "case-002"]
@@ -249,12 +249,12 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     assert opencode["execution_status"] == "succeeded"
     assert opencode["execution_errors"] == []
     assert opencode["overall_with_skill"] is not None
-    # The baseline stays honest: failed, with its errors, and never scored or compared.
+    # The baseline stays failed, with its errors and no aggregate or comparison.
     baseline = opencode["conditions"]["without_skill"]
     assert baseline["execution_status"] == "failed"
     assert (baseline["scored_attempts"], baseline["expected_attempts"]) == (1, 2)
     assert "Scored attempt coverage is 1/2" in baseline["execution_errors"]
-    assert opencode["without_skill"] == {}
+    assert opencode["without_skill"] == SCORES
     assert opencode["overall_without_skill"] is None
     assert opencode["lift"] == {}
     assert opencode["pass_at_k"]["lift"] == {}
@@ -262,6 +262,12 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     assert (opencode["expected_attempts"], opencode["scored_attempts"]) == (4, 3)
     assert results["comparison"]["metrics"]["accuracy"]["opencode"]["without_skill"] is None
     assert results["comparison"]["metrics"]["accuracy"]["opencode"]["lift"] is None
+    comparison = json.loads((tmp_path / "results" / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["metrics"]["accuracy"]["opencode"] == {
+        "with_skill": SCORES["accuracy"],
+        "without_skill": None,
+        "lift": None,
+    }
     assert opencode[RECORD_KEY] == {
         "status": "partial",
         "reason": "agent_execution_timeout",
@@ -286,6 +292,28 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     ]
     assert results["agents"]["codex"]["execution_status"] == "succeeded"
     assert results["agents"]["codex"]["lift"]
+
+
+@pytest.mark.parametrize("failed_arm", ["with_skill", "without_skill"])
+def test_succeeded_agent_comparison_withholds_failed_arm(failed_arm: str) -> None:
+    agent = {
+        "execution_status": "succeeded",
+        "conditions": {
+            arm: {"execution_status": "failed" if arm == failed_arm else "succeeded"}
+            for arm in ("with_skill", "without_skill")
+        },
+        "with_skill": {"accuracy": 0.9},
+        "without_skill": {"accuracy": 0.8},
+        "lift": {"accuracy": {"delta": 0.1}},
+    }
+
+    comparison = _build_comparison({"opencode": agent})["metrics"]["accuracy"]["opencode"]
+
+    assert comparison == {
+        "with_skill": None if failed_arm == "with_skill" else 0.9,
+        "without_skill": None if failed_arm == "without_skill" else 0.8,
+        "lift": None,
+    }
 
 
 def test_reports_reload_the_tolerated_agent_from_disk(tmp_path: Path) -> None:

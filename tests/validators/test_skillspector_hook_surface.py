@@ -49,6 +49,8 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.reporting.console_ui import summarize_tier1
+from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.run_status import Status, resolve_run_status
 from skillevaluator.utils.tool_runner import ToolResult
 from skillevaluator.validators.base import Severity, ValidationResult
@@ -370,6 +372,50 @@ def _assert_failed_with_incomplete_scan(result: ValidationResult, stage: str = "
     assert run.headline == Status.FAILED
     assert run.missing == (stage,)
     assert run.publication == Status.INCOMPLETE
+    _assert_what_to_fix_lists_the_hook_gate(result)
+
+
+def _assert_what_to_fix_lists_the_hook_gate(result: ValidationResult) -> None:
+    """The "what to fix" items of the Tier 1 terminal summary show the hook gate failure.
+
+    The check's own item names its first gate failure, which beside a gap that
+    records the scan as incomplete is often the error for the gap. An
+    unresolved reference keeps its item next, and each later gate failure
+    follows, so the hook gate failure is not hidden behind the gap.
+    """
+    _passed, rows = summarize_tier1([result], lineup=["security"])
+    fixes = ["".join(text for text, _style in row.segments) for row in rows if row.glyph.isdigit()]
+    gates = list(dict.fromkeys(result.gate_failures))
+    references = [fix for fix in fixes if fix.startswith("SkillSpector ran, but couldn't resolve the file reference")]
+    assert bool(references) == any("[reference_resolution; reference_missing]" in gate for gate in gates)
+    assert fixes == [gates[0], *references, *gates[1:]][: len(fixes)]
+    assert [fix for fix in fixes if "could not model these hooks" in fix]
+
+
+def _assert_terminal_summary_lists_a_failure(result: ValidationResult) -> None:
+    """The Tier 1 terminal summary counts the check as failed and points at a gate failure.
+
+    A check that is not counted as a confirmed failure is listed as one that
+    "didn't run", with advice to install the scanner or skip the check. The
+    scanners row and the first "what to fix" item follow the rules for any
+    incomplete scan, so this does not pin the scanners row, or which of
+    several gate failures comes first.
+    """
+    result.validator_name = "Security Scan"  # run_validation names the result this way
+    passed, rows = summarize_tier1([result], lineup=["security"])
+    shown = {row.label: "".join(text for text, _style in row.segments) for row in rows}
+    everything = "\n".join(shown.values())
+
+    assert not passed
+    assert shown["checks"] == "✗ security"
+    assert shown["summary"].startswith("0/1 checks passed")
+    assert "  ·  1 failed" in shown["summary"]
+    assert "didn't run" not in shown["summary"]
+    [fix] = [row for row in rows if row.glyph == "1"]
+    assert fix.label == "security"
+    assert "".join(text for text, _style in fix.segments) in result.gate_failures
+    assert "--skip" not in everything
+    assert "not installed" not in everything
 
 
 class TestCapturedReports:
@@ -456,20 +502,42 @@ class TestUnmodeledHooks:
             pytest.param({"SECURITY.*": Severity.LOW}, id="security-low"),
         ],
     )
+    @pytest.mark.parametrize(
+        ("name", "build"),
+        [
+            pytest.param(_PLUGIN_REPORT, _plugin, id="complete"),
+            # The v2.13.4 parse-limit row records the scan as incomplete.
+            pytest.param(_TIMEOUT_REPORT, _timeout_plugin, id="timeout-parse-limit"),
+        ],
+    )
     @patch("skillevaluator.validators.security.Tools")
     def test_policy_overrides_cannot_pass_the_hooks(
-        self, mock_tools, tmp_path: Path, overrides: dict[str, Severity]
+        self,
+        mock_tools,
+        tmp_path: Path,
+        overrides: dict[str, Severity],
+        name: str,
+        build: Callable[[Path], Path],
     ) -> None:
-        root = _plugin(tmp_path)
-        result = _validate(mock_tools, root, _report(_PLUGIN_REPORT))
+        """The gate failure keeps the check failed, also when another gap records the scan as incomplete."""
+        root = build(tmp_path)
+        result = _validate(mock_tools, root, _report(name))
 
         apply_policy([result], ValidationPolicy(severity_overrides=overrides))
 
         [finding] = _unverified(result)
         assert finding.severity in {Severity.INFO, Severity.LOW}
         assert not result.passed
-        assert result.status == "failed"
-        assert result.errors == [_gate("hooks/hooks.json")]
+        assert result.errors.count(_gate("hooks/hooks.json")) == 1
+        if name == _TIMEOUT_REPORT:
+            _assert_failed_with_incomplete_scan(result)
+        else:
+            assert result.status == "failed"
+            assert result.errors == [_gate("hooks/hooks.json")]
+            assert resolve_run_status([result]).of(result) == Status.FAILED
+        exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
+        _assert_terminal_summary_lists_a_failure(result)
 
     @patch("skillevaluator.validators.security.Tools")
     def test_llm_verification_cannot_downgrade_the_hook_critical(self, mock_tools, tmp_path: Path) -> None:
@@ -735,6 +803,39 @@ class TestFolderScans:
             f"[{name}] .claude/settings.json" for name in ("a", "b")
         ]
 
+    @pytest.mark.parametrize("method", ["validate_security_only", "validate"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_a_policy_override_keeps_a_folder_scan_failed_beside_a_missing_reference(
+        self, mock_tools, tmp_path: Path, method: str
+    ) -> None:
+        """Each skill's gate failure is a confirmed failure that the folder result keeps.
+
+        A ``--policy`` override lowers each Critical, and each skill's
+        reference row records the scan as incomplete, but the check is still
+        reported as failed, not as a scan that did not run.
+        """
+        folder = tmp_path / "folder"
+        for name in ("a", "b"):
+            _write(folder / name, {**_SETTINGS_SKILL, "SKILL.md": _SETTINGS_MISSING_REFERENCE_SKILL_MD})
+        report = _report(_settings_missing_reference_report("2.13.4"))
+        mock_tools.skillspector.is_available = True
+        mock_tools.skillspector.run.return_value = ToolResult(
+            success=True, stdout=json.dumps(report), stderr="", exit_code=0
+        )
+        result = getattr(SecurityValidator(use_llm=False), method)(folder)
+
+        overrides = {"SECURITY.skillspector_hook_payload_unverified": Severity.INFO}
+        apply_policy([result], ValidationPolicy(severity_overrides=overrides))
+
+        assert {finding.severity for finding in _unverified(result)} == {Severity.INFO}
+        assert [gate for gate in result.gate_failures if "could not model" in gate] == [
+            f"[{name}] {_gate('.claude/settings.json')}" for name in ("a", "b")
+        ]
+        _assert_failed_with_incomplete_scan(result)
+        exported = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+        assert (exported["overall_status"], exported["results"][0]["status"]) == ("failed", "failed")
+        _assert_terminal_summary_lists_a_failure(result)
+
 
 class TestPartlyReadManifests:
     @pytest.mark.parametrize(
@@ -890,6 +991,8 @@ class TestOtherGapsStayIncomplete:
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             f"{label}; security scan did not complete"
         )
+        # The incomplete-analysis gate alone is missing evidence, not a confirmed failure.
+        assert resolve_run_status([result]).of(result) == Status.INCOMPLETE
 
     def test_fatal_row_is_not_trusted(self) -> None:
         report = _report(_PLUGIN_REPORT)

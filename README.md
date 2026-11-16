@@ -56,6 +56,8 @@ Other tiers: [installation guide](https://docs.nvidia.com/skills/skillevaluator/
 </td>
 <td>
 
+Our CI template checks every skill change. No evaluation code to maintain.
+
 Run this in your GitHub repository. It opens a setup PR:
 
 ```bash
@@ -74,7 +76,7 @@ npx skills add \
   NVIDIA/SkillEvaluator
 ```
 
-Then ask: *"Is my skill any good?"* It runs the CLI from step 1.
+Then ask: *"Is my skill any good?"*
 See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill).
 
 </td>

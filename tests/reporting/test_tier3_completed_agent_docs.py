@@ -11,6 +11,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
+from tests.changelog_entries import changelog_entry, newer_than_0_9_0
 from tests.reporting.test_report_redesign import _tier_card_verdicts
 from tests.reporting.test_tier3_scoped_reports import result_with_completed_peer
 from tests.reporting.test_unified_tier3_report import _write_summary
@@ -413,30 +414,6 @@ def test_changelog_entry_matches_the_docs() -> None:
     assert "every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3" in entries[0]
 
 
-def _changelog_entry(lead: str) -> tuple[str, str, str]:
-    """Return the release heading, subsection heading and plain text of the one entry starting with ``lead``."""
-    release = subsection = ""
-    found: list[tuple[str, str, str]] = []
-    for block in (REPO / "CHANGELOG.md").read_text(encoding="utf-8").split("\n\n"):
-        first = block.strip().splitlines()[0] if block.strip() else ""
-        if first.startswith("## "):
-            release, subsection = first, ""
-        elif first.startswith("### "):
-            subsection = first
-        elif _plain(block).startswith(lead):
-            found.append((release, subsection, _plain(block)))
-    assert len(found) == 1
-    return found[0]
-
-
-def _newer_than_0_9_0(release: str) -> bool:
-    """Whether ``release`` is ``## Unreleased`` or the heading of a release after 0.9.0."""
-    if release == "## Unreleased":
-        return True
-    match = re.match(r"## (\d+)\.(\d+)\.(\d+)\b", release)
-    return match is not None and tuple(int(part) for part in match.groups()) > (0, 9, 0)
-
-
 def _validate_tier3_reports(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, blocking: bool, tier3: ValidationResult
 ) -> tuple[int, dict, str]:
@@ -583,17 +560,24 @@ def test_failed_run_whose_budget_left_attempts_not_run_reads_incomplete(
         "best agent has a lift, so the Skill Lift card reads N/A and Run details & provenance has no Best-agent lift "
         "line."
     ) in _section()
+    # The general lift paragraph points back to this exception.
+    assert (
+        "The JSON report's `tier3` object and full Tier 3 download both keep this lift in `summary.overall_lift`. "
+        "The exception is a failed run whose budget left planned attempts not run, described above: there "
+        "`summary.overall_lift` is null, the Skill Lift card reads N/A and Run details & provenance has no "
+        "Best-agent lift line."
+    ) in _section()
 
 
 def test_changelog_documents_the_budget_stopped_failed_run(tmp_path: Path) -> None:
     # The entry is found by its opening words in any section, so a release that
     # moves Unreleased into a dated section keeps it valid. It must stay out of
     # 0.9.0 and older released sections.
-    release, subsection, entry = _changelog_entry(
+    release, subsection, entry = changelog_entry(
         "- Reports & Results now covers a failed Tier 3 run whose budget left planned attempts not run."
     )
     assert subsection == "### Documentation"
-    assert _newer_than_0_9_0(release), release
+    assert newer_than_0_9_0(release), release
     assert (
         "Its JSON `tier3` object and full Tier 3 download record `incomplete` and leave `summary.overall_lift` null, "
         "even when the best agent has a lift."

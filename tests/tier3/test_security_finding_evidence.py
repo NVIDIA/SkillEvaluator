@@ -3971,9 +3971,9 @@ def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
     assert _mask_as(copy, text) == expected
 
 
-# Inside a single-quoted command string a flag value quoted with the '"'"' or
-# '\'' idiom runs to the next such idiom, so the words after its first one
-# are masked, and the text after it is read in the string it is in.
+# Inside a single-quoted command string a flag or assignment value quoted with
+# the '"'"' or '\'' idiom runs to the next such idiom, so the words after its
+# first one are masked, and the text after it is read in the string it is in.
 @pytest.mark.parametrize("copy", ["template", "eval_core"])
 @pytest.mark.parametrize(
     ("text", "expected"),
@@ -4004,9 +4004,19 @@ def test_a_quoted_config_value_after_a_separator_keeps_the_command_after_it(
             "ssh host './deploy --access_token <redacted> client.auth=<redacted>'",
             id="call-after-the-value",
         ),
+        pytest.param(
+            f"bash -c 'export DB_PASSWORD='\"'\"'{_API_TOKEN} {_BASIC_PASSWORD}'\"'\"' && rm -rf /srv/app'",
+            "bash -c 'export DB_PASSWORD=<redacted> && rm -rf /srv/app'",
+            id="assignment",
+        ),
+        pytest.param(
+            f"ssh host 'export API_TOKEN='\\''{_API_TOKEN} {_BASIC_PASSWORD}'\\'' && rm -rf /srv/app'",
+            "ssh host 'export API_TOKEN=<redacted> && rm -rf /srv/app'",
+            id="assignment-backslash-idiom",
+        ),
     ],
 )
-def test_a_flag_value_quoted_with_a_quote_idiom_is_masked_whole(copy: str, text: str, expected: str) -> None:
+def test_a_value_quoted_with_a_quote_idiom_is_masked_whole(copy: str, text: str, expected: str) -> None:
     assert _mask_as(copy, text) == expected
 
 

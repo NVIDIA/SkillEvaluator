@@ -3371,6 +3371,7 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # ("ssh host './deploy --password '"'"'two words'"'"' && ...'").
 _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?"
 _FINDING_EVIDENCE_QUOTE_IDIOM = r"'(?:\"'\"|\\')'"
+_FINDING_EVIDENCE_QUOTE_IDIOM_RE = re.compile(_FINDING_EVIDENCE_QUOTE_IDIOM)
 _FINDING_EVIDENCE_QUOTED_FLAG_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + "|"
@@ -3733,7 +3734,10 @@ _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
 # A value: a masked private key, a JSON-escaped or quoted string, a string
 # in escaped single quotes as in Python source ('DB_PASSWORD=\'two words\''),
 # which, as a JSON-escaped one, ends at its escaped closing quote or the end
-# of the line, a parenthesized tuple (auth=("bob", "...")), a call
+# of the line, a string quoted with the '"'"' or '\'' idiom inside a
+# single-quoted command string, as a flag value is (see
+# _FINDING_EVIDENCE_QUOTED_FLAG_VALUE), a parenthesized tuple
+# (auth=("bob", "...")), a call
 # (auth=HTTPBasicAuth("bob", "..."), auth=requests.auth.HTTPDigestAuth(...)),
 # or one word, which may hold escaped spaces ("correct\ horse"). The arguments
 # of a tuple or call may hold one level of calls
@@ -3748,7 +3752,11 @@ _FINDING_EVIDENCE_WORD_VALUE = r"(?:\\.|[^\s'\"`;|&\\])+"
 _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\\'(?:[^'\\\r\n]|\\(?!'))*(?:\\')?"
-    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
     + r"|\("
     + _FINDING_EVIDENCE_TUPLE_ARGUMENTS
     + r"\)?|(?P<call>[A-Za-z_][\w.]{0,63}\("
@@ -5051,10 +5059,15 @@ def _assignment_value_reading(
     )
     if header_prefix is not None:
         return None, header_prefix.start(1), header_prefix
-    if in_quotes and text.startswith(closers, start):
+    if (
+        in_quotes
+        and text.startswith(closers, start)
+        and _FINDING_EVIDENCE_QUOTE_IDIOM_RE.match(text, start) is None
+    ):
         # The value is empty and the quote after it closes the string that
         # opened before the name ('grep "token=" ...', "printf 'password: '"),
-        # so it is not the opening quote of a value.
+        # so it is not the opening quote of a value, unless that quote starts
+        # a '"'"' or '\'' idiom, which quotes the value.
         return _FINDING_EVIDENCE_STUCK_VALUE_RE, text.index(opening, start) + 1, None
     if (
         separator == ":"

@@ -6820,6 +6820,7 @@ def _condition_execution_summary(
     pass_threshold: float = 0.50,
     attempt_slots: dict[str, dict[str, Any]] | None = None,
     expected_attempts_by_case: Mapping[str, int] | None = None,
+    expected_attempt_ordinals_by_case: Mapping[str, set[int]] | None = None,
 ) -> dict[str, Any]:
     """Describe whether a Harbor condition produced complete logical attempts.
 
@@ -6958,8 +6959,14 @@ def _condition_execution_summary(
         if required > n_attempts:
             errors.append(f"Scored case {case_id!r} has an attempt ordinal above configured maximum {n_attempts}")
 
+        expected_ordinals = set(range(1, required + 1))
+        if expected_attempt_ordinals_by_case is not None and case_id in expected_attempt_ordinals_by_case:
+            expected_ordinals = set(expected_attempt_ordinals_by_case[case_id])
+            if stop_on_pass and first_pass is not None:
+                expected_ordinals = {ordinal for ordinal in expected_ordinals if ordinal <= required}
+            required = len(expected_ordinals)
+
         if all_explicit:
-            expected_ordinals = set(range(1, required + 1))
             actual_ordinals = set(explicit + recovered_ordinals)
             missing_ordinals = sorted(expected_ordinals - actual_ordinals)
             if attempt_slots is not None:
@@ -6970,12 +6977,13 @@ def _condition_execution_summary(
                 }
             return required, bool(missing_ordinals), bool(actual_ordinals - expected_ordinals)
         if attempt_slots is not None:
-            # Stop-on-pass runs each attempt as its own labelled job, so a case
-            # with nothing scored owes every ordinal through the maximum.
+            # Labelled jobs with nothing scored still owe every admitted ordinal.
             attempt_slots[case_id] = {
                 "required": required,
                 "missing": max(0, required - len(attempts)),
-                "missing_ordinals": list(range(1, required + 1)) if stop_on_pass and not attempts else None,
+                "missing_ordinals": sorted(expected_ordinals)
+                if not attempts and (stop_on_pass or (expected_attempt_ordinals_by_case or {}).get(case_id) is not None)
+                else None,
             }
         return required, len(attempts) < required, len(attempts) > required
 
@@ -7517,7 +7525,7 @@ def collect_harbor_results(
     def budget_expectations(
         agent: str,
         arm: str,
-    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, bool]:
+    ) -> tuple[int | None, list[str] | None, int | None, dict[str, int] | None, dict[str, set[int]] | None, bool]:
         matching = [
             item
             for item in budget_not_run
@@ -7526,12 +7534,15 @@ def collect_harbor_results(
             and item.get("reason") in {None, "budget_exhausted"}
         ]
         if not matching:
-            return expected_trials, expected_case_ids, expected_cases, None, False
+            return expected_trials, expected_case_ids, expected_cases, None, None, False
         attempts_by_case: dict[str, int] = {}
+        omitted_ordinals: dict[str, set[int]] = {}
         for item in matching:
             selector = str(item.get("case_id") or "")
             case_id = (case_id_by_task_selector or {}).get(selector, selector)
             attempts_by_case[case_id] = attempts_by_case.get(case_id, 0) + 1
+            if type(attempt := item.get("attempt")) is int and 1 <= attempt <= n_attempts:
+                omitted_ordinals.setdefault(case_id, set()).add(attempt)
         active_ids = [case_id for case_id in (expected_case_ids or []) if attempts_by_case.get(case_id, 0) < n_attempts]
         if expected_case_ids:
             active_case_ids: list[str] | None = active_ids
@@ -7544,6 +7555,11 @@ def collect_harbor_results(
             attempt_counts = {
                 case_id: max(0, n_attempts - count) for case_id, count in attempts_by_case.items() if count < n_attempts
             }
+        attempt_ordinals = {
+            case_id: set(range(1, n_attempts + 1)) - omitted_ordinals[case_id]
+            for case_id, count in attempts_by_case.items()
+            if case_id in attempt_counts and len(omitted_ordinals.get(case_id, set())) == count
+        }
         actual_trials = None if expected_trials is None else max(0, expected_trials - len(matching))
         denied_slots = {
             (
@@ -7566,7 +7582,7 @@ def collect_harbor_results(
             budget_denied = expected_cases > 0 and len(denied_cases) == expected_cases
         else:
             budget_denied = bool(expected_trials and len(denied_cases) * n_attempts == expected_trials)
-        return actual_trials, active_case_ids, active_cases, attempt_counts, budget_denied
+        return actual_trials, active_case_ids, active_cases, attempt_counts, attempt_ordinals, budget_denied
 
     # Unscored conditions keep the requested grading policy instead of
     # falling back to the default metric set, which custom_only never grades.
@@ -7607,6 +7623,7 @@ def collect_harbor_results(
             with_expected_case_ids,
             with_expected_cases,
             with_expected_attempts,
+            with_expected_ordinals,
             with_budget_denied,
         ) = budget_expectations(agent, "with")
         (
@@ -7614,6 +7631,7 @@ def collect_harbor_results(
             without_expected_case_ids,
             without_expected_cases,
             without_expected_attempts,
+            without_expected_ordinals,
             without_budget_denied,
         ) = budget_expectations(agent, "without")
         if skip_baseline:
@@ -7724,6 +7742,7 @@ def collect_harbor_results(
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=with_expected_attempts,
+                expected_attempt_ordinals_by_case=with_expected_ordinals,
             )
             if with_policy == "mixed-score-policies":
                 _fail_execution_with_error(with_execution, "Conflicting score policies within the with-skill condition")
@@ -7974,6 +7993,7 @@ def collect_harbor_results(
                     pass_threshold=pass_threshold,
                     attempt_slots=without_slots if tolerance_on else None,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                 )
                 if without_policy == "mixed-score-policies":
                     _fail_execution_with_error(
@@ -8081,6 +8101,7 @@ def collect_harbor_results(
                 stop_on_pass=stop_on_pass,
                 pass_threshold=pass_threshold,
                 expected_attempts_by_case=without_expected_attempts,
+                expected_attempt_ordinals_by_case=without_expected_ordinals,
             )
         if without_budget_denied:
             without_execution["skip_reason"] = "budget_exhausted"
@@ -8417,6 +8438,7 @@ def collect_harbor_results(
                     stop_on_pass=stop_on_pass,
                     pass_threshold=pass_threshold,
                     expected_attempts_by_case=without_expected_attempts,
+                    expected_attempt_ordinals_by_case=without_expected_ordinals,
                 )
                 tolerance_failures, tolerance_code = _baseline_timeout_failures(
                     job_dir=without_job_dir,

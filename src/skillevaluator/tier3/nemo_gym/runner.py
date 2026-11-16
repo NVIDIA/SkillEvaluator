@@ -35,7 +35,6 @@ from skillevaluator.tier3.harbor.progress import (
 )
 from skillevaluator.tier3.nemo_gym.backend import (
     DEFAULT_RUN_TIMEOUT_S,
-    MCP_SERVERS_ERROR,
     MODEL_API_KEY_ENV,
     MODEL_URL_ENV,
     NATIVE_MCP_SERVERS_ERROR,
@@ -43,7 +42,7 @@ from skillevaluator.tier3.nemo_gym.backend import (
     NEMO_GYM_BACKEND,
     NEMO_GYM_BIN_ENV,
     RUN_TIMEOUT_ENV,
-    mcp_servers_declared,
+    mcp_servers_error,
     model_url_credential_error,
     native_mcp_servers_declared,
     nemo_gym_bin,
@@ -958,8 +957,8 @@ def run_nemo_gym_eval(
         errors.append("No native Harbor task source found at evals/harbor.")
     if task_source == "evals_json" and find_evals_file(skill_path) is None:
         errors.append(_MISSING_EVALS_DATASET_ERROR)
-    if mcp_servers_declared(skill_path):
-        errors.append(MCP_SERVERS_ERROR)
+    if mcp_error := mcp_servers_error(skill_path):
+        errors.append(mcp_error)
     if task_source == "native_harbor" and native_mcp_servers_declared(skill_path):
         errors.append(NATIVE_MCP_SERVERS_ERROR)
     pre_agent_setup = list(harbor_config.get("pre_agent_setup") or [])

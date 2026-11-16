@@ -266,10 +266,11 @@ All notable changes to SkillEvaluator are documented in this file.
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
 - The README opens with a three-column **Get started** section: run the CLI
-  directly (`pip install skillevaluator`, then
-  `skillevaluator validate ./my-skill --tiers 1`), add checks to your repository
-  with `skillevaluator ci init` or a CI template, or install the agent skill with
-  `npx skills add NVIDIA/SkillEvaluator`.
+  directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
+  in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
+  add checks to your repository with `skillevaluator ci init`, or install the
+  agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
+  its guide on docs.nvidia.com.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

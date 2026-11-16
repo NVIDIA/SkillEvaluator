@@ -869,6 +869,11 @@ _HARBOR_RUN_STOPPING_DETAIL = (
     f"2nd Ctrl+C skips wait; stopping Harbor jobs, up to {_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
 )
 _HARBOR_RUN_REAP_SECONDS = 5.0
+# ``taskkill /T /F`` has to look the task tree up before it kills anything, and
+# that lookup can take longer than reaping a process that was already signalled.
+# Cutting it short leaves the tree running and replaces the run's own error with
+# a cleanup error, so the tree kill gets its own, longer bound.
+_HARBOR_WINDOWS_TREE_KILL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -3838,7 +3843,7 @@ def _terminate_harbor_process_tree(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+        taskkill.wait(timeout=_HARBOR_WINDOWS_TREE_KILL_SECONDS)
         if taskkill.returncode != 0:
             taskkill_error = RuntimeError("Windows Harbor process-tree cleanup failed")
     except subprocess.TimeoutExpired as exc:

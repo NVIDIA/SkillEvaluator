@@ -10,6 +10,7 @@ import importlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -802,6 +803,63 @@ def test_windows_tree_cleanup_fails_closed_when_taskkill_misses_an_exited_root(
         runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
 
     assert root_process.killed is False
+
+
+@pytest.mark.parametrize("taskkill_finishes", [True, False])
+def test_windows_tree_cleanup_gives_taskkill_longer_than_a_plain_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    taskkill_finishes: bool,
+) -> None:
+    """taskkill looks the task tree up before it kills it, which can outlast the budget for reaping an
+    already-signalled process. Cut short, it leaves the tree running and hides the run's own error."""
+
+    class WindowsOs:
+        name = "nt"
+
+    class FakeProcess:
+        def __init__(self, *, pid: int, exits_after: float) -> None:
+            self.pid = pid
+            self.returncode: int | None = None
+            self.exits_after = exits_after
+            self.killed = False
+            self.wait_timeouts: list[float | None] = []
+
+        def poll(self) -> int | None:
+            return self.returncode
+
+        def kill(self) -> None:
+            self.killed = True
+            self.exits_after = 0.0
+
+        def wait(self, timeout: float | None = None) -> int:
+            self.wait_timeouts.append(timeout)
+            if timeout is not None and timeout < self.exits_after:
+                raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+            if self.returncode is None:
+                self.returncode = -9 if self.killed else 0
+            return self.returncode
+
+    reap_seconds = runner._HARBOR_RUN_REAP_SECONDS
+    taskkill_process = FakeProcess(pid=99, exits_after=2 * reap_seconds if taskkill_finishes else float("inf"))
+    root_process = FakeProcess(pid=4242, exits_after=0.0)
+    monkeypatch.setattr(runner, "os", WindowsOs())
+    monkeypatch.setattr(runner, "_verified_windows_taskkill_path", lambda: Path("/trusted/taskkill.exe"))
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: taskkill_process)
+
+    if taskkill_finishes:
+        runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
+
+        assert taskkill_process.killed is False
+        assert taskkill_process.wait_timeouts == [runner._HARBOR_WINDOWS_TREE_KILL_SECONDS]
+    else:
+        # A taskkill that never returns is still stopped, and cleanup still fails closed.
+        with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed"):
+            runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
+
+        assert taskkill_process.killed is True
+        assert taskkill_process.wait_timeouts == [runner._HARBOR_WINDOWS_TREE_KILL_SECONDS, reap_seconds]
+    # The root is reaped either way, on the short budget.
+    assert root_process.wait_timeouts == [reap_seconds]
 
 
 @pytest.mark.parametrize("candidate_kind", ["missing", "directory"])

@@ -74,13 +74,20 @@ jobs:
       - name: Install external Python scanners
         run: |
           uv tool install semgrep
-          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
+          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@54824463814a0be01360792523ec7245a69190fc # v2.13.4
 
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=8.30.0
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          # SHA-256 of the linux_x64 archive, from the release's checksums.txt.
+          # Update it together with GITLEAKS_VERSION.
+          GITLEAKS_SHA256=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 "${base}/${archive}" -o "${archive}"
+          printf '%s  %s\n' "${GITLEAKS_SHA256}" "${archive}" | sha256sum -c -
+          tar -xzf "${archive}" gitleaks
           sudo mv gitleaks /usr/local/bin/
 
       - name: Validate skills
@@ -155,6 +162,10 @@ jobs:
 Each action is pinned to a commit SHA, with its release in a comment, as in this
 repository's own workflows, so a moved tag cannot change what the job runs.
 To update an action, replace the SHA with the commit of the newer release.
+The same holds for the scanners: SkillSpector installs from the commit behind
+its release tag, and the Gitleaks archive is checked against the SHA-256 from
+the release's `gitleaks_<version>_checksums.txt` before it is unpacked. To
+update either, take the new commit or checksum from the release page.
 
 SkillEvaluator installs Bandit, and the `security` extra adds pip-audit. Semgrep and SkillSpector
 stay in separate uv tool environments, while Gitleaks is installed from its

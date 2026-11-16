@@ -55,7 +55,7 @@ def test_saved_run_replays_six_formats_without_the_source(tmp_path, monkeypatch)
         "plugin-report.sarif.json",
         "BENCHMARK.md",
     }
-    payload = json.loads((output / "plugin-report.json").read_text())
+    payload = json.loads((output / "plugin-report.json").read_text(encoding="utf-8"))
     assert payload["plugin_runtime"] == report.payload()
     card = (output / "BENCHMARK.md").read_text(encoding="utf-8")
     assert card.startswith("# Plugin Benchmark: replayed-public\n")
@@ -83,7 +83,7 @@ def test_replay_missing_or_invalid_snapshot_fails_before_writing(tmp_path):
     output = tmp_path / "reports"
     for payload in (None, '{"schema_version": 100}'):
         if payload is not None:
-            (tmp_path / "plugin_runtime_report.json").write_text(payload)
+            (tmp_path / "plugin_runtime_report.json").write_text(payload, encoding="utf-8")
         result = CliRunner().invoke(cli, ["tier3", "report-plugin", str(tmp_path), "-r", "json", "-o", str(output)])
         assert result.exit_code != 0
         assert "unavailable" in result.output.lower()
@@ -96,7 +96,7 @@ def test_live_report_destination_is_rejected_before_execution(tmp_path, monkeypa
 
     manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"public-demo"}')
+    manifest.write_text('{"name":"public-demo"}', encoding="utf-8")
     seen = []
 
     def engine(*args, **kwargs):

@@ -22,6 +22,10 @@ from skillevaluator.validators.security import SecurityValidator
         (".codex-plugin/plugin.json", '{"name":"demo","version":"1.0.0","description":"Demo"}'),
         (".cursor-plugin/plugin.json", '{"name":"demo","version":"1.0.0","description":"Demo"}'),
         (
+            "openclaw.plugin.json",
+            '{"id":"demo","name":"Demo","version":"1.0.0","description":"Demo","configSchema":{"type":"object"}}',
+        ),
+        (
             "plugin.json",
             '{"$schema":"https://agent-plugins.org/schemas/1.0.0/plugin.schema.json","name":"demo","version":"1.0.0","description":"Demo"}',
         ),
@@ -30,7 +34,7 @@ from skillevaluator.validators.security import SecurityValidator
 def test_all_profiles_detect_from_directory_or_manifest(tmp_path, manifest, payload):
     path = tmp_path / manifest
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(payload)
+    path.write_text(payload, encoding="utf-8")
     assert detect_content_type(tmp_path) == "plugin"
     assert detect_content_type(path) == "plugin"
     assert resolve_plugin_path(path) == tmp_path
@@ -38,8 +42,10 @@ def test_all_profiles_detect_from_directory_or_manifest(tmp_path, manifest, payl
 
 
 def test_unrelated_plugin_json_does_not_change_skill_detection(tmp_path):
-    (tmp_path / "plugin.json").write_text('{"name":"unrelated"}')
-    (tmp_path / "SKILL.md").write_text("---\nname: ordinary\ndescription: Ordinary skill.\n---\nBody.")
+    (tmp_path / "plugin.json").write_text('{"name":"unrelated"}', encoding="utf-8")
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: ordinary\ndescription: Ordinary skill.\n---\nBody.", encoding="utf-8"
+    )
     assert detect_content_type(tmp_path) == "skill"
 
 
@@ -48,10 +54,10 @@ def test_bundled_quality_receives_public_options_once(tmp_path, monkeypatch):
 
     manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text(json.dumps({"name": "demo"}))
+    manifest.write_text(json.dumps({"name": "demo"}), encoding="utf-8")
     member = tmp_path / "skills/a/SKILL.md"
     member.parent.mkdir(parents=True)
-    member.write_text("---\nname: a\ndescription: A skill.\n---\nBody.")
+    member.write_text("---\nname: a\ndescription: A skill.\n---\nBody.", encoding="utf-8")
     seen = []
 
     class Quality:
@@ -77,7 +83,7 @@ def test_schema_failure_stops_before_scanner_construction_when_fail_fast(tmp_pat
 
     manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text("{broken")
+    manifest.write_text("{broken", encoding="utf-8")
 
     def forbidden(*args, **kwargs):
         pytest.fail("A scanner was constructed after a schema failure")
@@ -183,7 +189,7 @@ def test_default_skill_keeps_the_actual_harness_check(plugin_with_local_scanners
 def test_selected_skipped_checks_stay_explicit(tmp_path):
     manifest = tmp_path / ".claude-plugin/plugin.json"
     manifest.parent.mkdir()
-    manifest.write_text('{"name":"demo"}')
+    manifest.write_text('{"name":"demo"}', encoding="utf-8")
     results = run_validation(tmp_path, content_type="plugin", checks="schema,quality", skip="quality")
     skipped = [result for result in results if result.metadata.get("skipped_by_user")]
     assert len(skipped) == 1

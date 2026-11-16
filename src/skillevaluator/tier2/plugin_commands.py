@@ -16,7 +16,7 @@ def plugin_target(path: Path, content_type: str = "auto") -> Path | None:
     if content_type == CONTENT_TYPE_PLUGIN or (
         content_type == "auto" and detect_content_type(path) == CONTENT_TYPE_PLUGIN
     ):
-        return resolve_plugin_path(path).absolute()
+        return path.absolute()
     return None
 
 
@@ -29,7 +29,7 @@ def plugin_dedup_results(path: Path, **options) -> list[ValidationResult]:
 def run_public_plugin_dedup(path: Path, **options) -> list[ValidationResult]:
     root = resolve_plugin_path(path)
     return guarded_results(
-        "Plugin Deduplication", root, lambda: plugin_dedup_results(root, **options), check_id="context-optimization"
+        "Plugin Deduplication", root, lambda: plugin_dedup_results(path, **options), check_id="context-optimization"
     )
 
 
@@ -76,6 +76,7 @@ def plugin_similarity_results(
 
     summary = ValidationResult(validator_name="Plugin Catalog", metadata={"advisory_tier2": True})
     results = [summary]
+    root = resolve_plugin_path(path)
     try:
         _validate_threshold(threshold)
         if full_body:
@@ -97,7 +98,7 @@ def plugin_similarity_results(
             profiles = []
             for prefix in prefixes:
                 try:
-                    profiles.append(load_plugin_profile(path / prefix))
+                    profiles.append(load_plugin_profile(path if prefix == "." else root / prefix))
                 except SecurePathError:
                     raise
                 except ValueError:
@@ -123,7 +124,7 @@ def plugin_similarity_results(
                     profile, local, threshold=threshold, llm_verdict=llm_verdict, llm_model=llm_model
                 ),
             ]
-            prefix = profile.root.relative_to(path)
+            prefix = profile.root.relative_to(root)
             for result in compared:
                 result.metadata["plugin_catalog_target"] = {"name": profile.name, "path": prefix.as_posix()}
                 if prefix != Path():

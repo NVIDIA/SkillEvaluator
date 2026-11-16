@@ -7,6 +7,7 @@ from types import SimpleNamespace
 import pytest
 
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.publication_identity import publication_target_from_path
 from skillevaluator.tier2 import commands
 
 
@@ -34,10 +35,12 @@ def embedding(monkeypatch):
 def make_plugin(root, name="demo"):
     manifest = root / ".claude-plugin/plugin.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"name": name, "description": "Reusable project workflow"}))
+    manifest.write_text(json.dumps({"name": name, "description": "Reusable project workflow"}), encoding="utf-8")
     member = root / "skills" / f"{name}-member" / "SKILL.md"
     member.parent.mkdir(parents=True)
-    member.write_text(f"---\nname: {name}-member\ndescription: Complete the project task\n---\nExecute the task.\n")
+    member.write_text(
+        f"---\nname: {name}-member\ndescription: Complete the project task\n---\nExecute the task.\n", encoding="utf-8"
+    )
     return root
 
 
@@ -55,7 +58,7 @@ def test_plugin_dispatch_preserves_every_result(tmp_path, monkeypatch):
         root / ".claude-plugin/plugin.json", threshold=0.7, model="embed", llm_model="judge"
     )
     assert result == expected
-    assert seen[0][0] == root
+    assert seen[0][0] == root / ".claude-plugin/plugin.json"
     assert seen[0][1]["threshold"] == 0.7
     assert all(r.metadata["publication_evidence"]["check_id"] == "context-optimization" for r in result)
 
@@ -63,7 +66,7 @@ def test_plugin_dispatch_preserves_every_result(tmp_path, monkeypatch):
 def test_ordinary_skills_keep_the_existing_validator(tmp_path, monkeypatch):
     root = tmp_path / "skill"
     root.mkdir()
-    (root / "SKILL.md").write_text("---\nname: skill\ndescription: Test skill\n---\nRun the task.\n")
+    (root / "SKILL.md").write_text("---\nname: skill\ndescription: Test skill\n---\nRun the task.\n", encoding="utf-8")
     expected = ValidationResult(validator_name="Context Deduplication")
     seen = []
 
@@ -87,7 +90,7 @@ def test_collection_v2_catalog_reuses_fresh_vectors(tmp_path, embedding):
     output = tmp_path / "catalog.json"
     result = commands.run_similarity_check(root, content_type="plugin", save_catalog=output)
     assert all(r.passed for r in result), [r.errors for r in result]
-    payload = json.loads(output.read_text())
+    payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["schema_version"] == 2 and len(payload["plugins"]) == 2
     assert len(embedding.requests) == 1
     assert sum(r.validator_name == "Inter-Plugin Deduplication" for r in result) == 2
@@ -101,13 +104,13 @@ def test_existing_v1_skill_catalog_can_be_used_for_a_plugin(tmp_path, embedding)
     skill = collection / "external"
     skill.mkdir(parents=True)
     (skill / "SKILL.md").write_text(
-        "---\nname: external\ndescription: Existing reusable task\n---\nExecute the task.\n"
+        "---\nname: external\ndescription: Existing reusable task\n---\nExecute the task.\n", encoding="utf-8"
     )
     registry = EmbeddingRegistry(embedding)
     assert registry.build_from_directory(collection, "skill", minimum_entries=1, for_pairwise_scan=True) == 1
     catalog = tmp_path / "v1.json"
     registry.save_catalog(catalog)
-    assert json.loads(catalog.read_text())["schema_version"] == 1
+    assert json.loads(catalog.read_text(encoding="utf-8"))["schema_version"] == 1
     result = commands.run_similarity_check(make_plugin(tmp_path / "plugin"), catalog=catalog)
     assert all(r.passed for r in result), [r.errors for r in result]
     assert any(f.category == "INTER_SKILL" for r in result for f in r.findings)
@@ -119,11 +122,12 @@ def test_full_body_is_refused_without_embedding(tmp_path, embedding):
     assert embedding.requests == []
 
 
-def test_source_swapped_during_embedding_is_blocking_and_cannot_save_catalog(tmp_path, embedding):
+@pytest.mark.parametrize("explicit_manifest", [False, True])
+def test_source_swapped_during_embedding_is_blocking_and_cannot_save_catalog(tmp_path, embedding, explicit_manifest):
     root = make_plugin(tmp_path / "plugin")
     member = root / "skills/demo-member/SKILL.md"
     outside = tmp_path / "outside.md"
-    outside.write_text(member.read_text())
+    outside.write_text(member.read_text(encoding="utf-8"), encoding="utf-8")
     output = tmp_path / "catalog.json"
     original = embedding.embed
 
@@ -137,22 +141,25 @@ def test_source_swapped_during_embedding_is_blocking_and_cannot_save_catalog(tmp
         return vectors
 
     embedding.embed = replace_source
-    results = commands.run_similarity_check(root, save_catalog=output)
+    target = root / ".claude-plugin/plugin.json" if explicit_manifest else root
+    results = commands.run_similarity_check(target, save_catalog=output)
     assert any(
         result.metadata.get("security_failure") and not result.metadata.get("advisory_tier2") for result in results
     )
     assert not output.exists()
 
 
-def test_unsafe_source_blocks_before_embedding(tmp_path, embedding):
+@pytest.mark.parametrize("explicit_manifest", [False, True])
+def test_unsafe_source_blocks_before_embedding(tmp_path, embedding, explicit_manifest):
     root = make_plugin(tmp_path / "plugin")
     outside = tmp_path / "outside.md"
-    outside.write_text("Outside source")
+    outside.write_text("Outside source", encoding="utf-8")
     try:
         (root / "unsafe.md").symlink_to(outside)
     except (OSError, NotImplementedError):
         pytest.skip("Symbolic links unavailable")
-    result = commands.run_similarity_check(root)
+    target = root / ".claude-plugin/plugin.json" if explicit_manifest else root
+    result = commands.run_similarity_check(target)
     assert any(r.metadata.get("security_failure") and not r.metadata.get("advisory_tier2") for r in result)
     assert embedding.requests == []
 

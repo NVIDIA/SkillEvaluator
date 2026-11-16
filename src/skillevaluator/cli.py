@@ -886,7 +886,8 @@ def _partial_agent_eval_result(
         errors = [errors]
     error_messages = [str(error) for error in errors if str(error).strip()] if isinstance(errors, list) else []
     for message in dict.fromkeys(error_messages or [failure]):
-        result.add_error(message)
+        if message not in result.errors:
+            result.add_error(message)
     return result
 
 
@@ -2126,8 +2127,11 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
-        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
+        from skillevaluator.reporting.console_ui import _scanner_setup_issue
+
+        state = "failed"
+        if context.result_statuses[id(only)] == "incomplete":
+            state = "didn't run" if _scanner_setup_issue(only) else "was incomplete"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -2997,7 +3001,7 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = _run_dedup_or_skip(plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path)
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:

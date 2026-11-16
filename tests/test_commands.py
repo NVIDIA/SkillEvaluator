@@ -1972,6 +1972,14 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
         "output_dir": "each child is given its own per-skill output directory",
+        "repo_root": "plugin-only repository context does not apply to skill catalog children",
+        "resolve_endpoints": "plugin-only endpoint auditing does not apply to skill catalog children",
+        "claude_validate": "plugin-only native validation does not apply to skill catalog children",
+        "plugin_load": "plugin-only loading does not apply to skill catalog children",
+        "lift_mode": "plugin-only comparison arms do not apply to skill catalog children",
+        "probe_mcp": "plugin-only MCP probes do not apply to skill catalog children",
+        "probe_mcp_env": "plugin-only MCP grants do not apply to skill catalog children",
+        "trial_retries": "plugin-only setup retries do not apply to skill catalog children",
     }
     source = inspect.getsource(_catalog_child_argv_from_ctx)
 

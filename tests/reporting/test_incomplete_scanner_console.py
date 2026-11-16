@@ -47,7 +47,7 @@ def test_partial_analysis_keeps_its_diagnostic_and_version(diagnostic, gate, run
 
     assert not passed
     assert diagnostic in text
-    assert "SkillSpector 2.11.2, incomplete" in text
+    assert "SkillSpector 2.11.2, scan incomplete" in text
     assert "0/1 checks passed  ·  1 incomplete" in text
     assert "security incomplete:" in text
     assert "rerun" in text
@@ -120,7 +120,7 @@ def test_completed_member_cannot_hide_an_incomplete_scanner_run(reverse):
     _passed, rows = summarize_tier1(results[::-1] if reverse else results)
     scanner = next(row for row in rows if row.label == "scanners")
 
-    assert _text([scanner]) == "SkillSpector 2.11.2, incomplete"
+    assert _text([scanner]) == "SkillSpector 2.11.2, scan incomplete"
 
 
 @pytest.mark.parametrize("count", [1, 2])
@@ -159,7 +159,7 @@ def test_final_verdict_distinguishes_incomplete_scans_from_known_failures(tmp_pa
     text = stream.getvalue()
 
     if count == 1:
-        assert f"Security Scan {'failed' if blocking else 'incomplete'} in Tier 1" in text
+        assert f"Security Scan {'failed' if blocking else 'was incomplete'} in Tier 1" in text
     else:
         assert ("Tier 1: 1 failed, 1 incomplete" if blocking else "Tier 1: 2 incomplete") in text
     assert "didn't run" not in text

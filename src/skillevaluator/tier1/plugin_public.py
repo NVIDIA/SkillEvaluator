@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 from skillevaluator.models.result import ValidationResult
@@ -65,6 +66,21 @@ def run_public_plugin_validation(
 
     def tree_factory(source_root, snapshot, views):
         nonlocal loaded_waivers
+        from skillevaluator.validators.security import _rewrite_path_prefix
+
+        snapshot_by_view = {view.resolve(): (snapshot / unit).resolve() for unit, view in views.items()}
+
+        class SnapshotSecurityValidator(public.SecurityValidator):
+            def _skillspector_issue_scopes(self, issues, components, *, source_root, report_truncated):
+                # Scanner inputs are partitioned, but reachability must include
+                # references from every component in the immutable full tree.
+                if source_root is not None and (scope_root := snapshot_by_view.get(source_root.resolve())) is not None:
+                    issues = _rewrite_path_prefix(issues, str(source_root), str(scope_root))
+                    components = _rewrite_path_prefix(components, str(source_root), str(scope_root))
+                    source_root = scope_root
+                return super()._skillspector_issue_scopes(
+                    issues, components, source_root=source_root, report_truncated=report_truncated
+                )
 
         def mapped_option(path):
             if path is None:
@@ -76,7 +92,7 @@ def run_public_plugin_validation(
                     return views[unit] / absolute.relative_to(source)
             return path
 
-        security = public.SecurityValidator(
+        security = SnapshotSecurityValidator(
             use_llm=use_llm,
             verify_llm=llm_verify,
             content_type="plugin",
@@ -129,13 +145,44 @@ def run_public_plugin_validation(
         }
 
     notified = set()
+    progress_total, progress_step, progress_started = 0, 0, 0.0
+
+    def plan_progress(total):
+        nonlocal progress_total
+        progress_total = total
 
     def notify(check):
+        nonlocal progress_step, progress_started
         canonical = "code-integrity" if check in {"hygiene", "secrets"} else check
+        if on_check is None:
+            progress_step += 1
+            progress_started = time.monotonic()
+            public.progress_console.print(
+                f"[{progress_step}/{progress_total}] {canonical} ...", markup=False, highlight=False
+            )
+            return
         if canonical in active and canonical not in notified:
             notified.add(canonical)
-            if on_check is not None:
-                on_check(canonical)
+            on_check(canonical)
+
+    def complete_progress(check, result):
+        if on_check is not None:
+            return
+        canonical = "code-integrity" if check in {"hygiene", "secrets"} else check
+        outcome = (
+            f"incomplete: {', '.join(result.incomplete_scans)}"
+            if result.is_incomplete
+            else "ok"
+            if result.passed
+            else f"{result.summary.errors} error(s)"
+        )
+        if result.summary.warnings:
+            outcome += f", {result.summary.warnings} warning(s)"
+        public.progress_console.print(
+            f"[{progress_step}/{progress_total}] {canonical} done in {time.monotonic() - progress_started:.1f}s ({outcome})",
+            markup=False,
+            highlight=False,
+        )
 
     with continue_on_failure_scope(continue_on_failure):
         results = run_plugin_validation(
@@ -153,6 +200,8 @@ def run_public_plugin_validation(
             skill_checks_factory=skill_factory,
             fail_fast=fail_fast and not continue_on_failure,
             on_check=notify,
+            on_check_plan=plan_progress,
+            on_check_complete=complete_progress,
         )
     if loaded_waivers is not None:
         waiver_result = ValidationResult(validator_name="PII Waiver Review", metadata={"plugin_check": "pii"})

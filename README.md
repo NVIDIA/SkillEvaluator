@@ -327,12 +327,7 @@ See [CHANGELOG.md](CHANGELOG.md) and
 
 ## Assess plugins
 
-Use `skillevaluator validate ./my-plugin --tiers 1` for static checks and
-`skillevaluator tier3 evaluate-plugin ./my-plugin --agents claude-code` for
-runtime comparisons. `tier3 report-plugin RUN_DIR` replays retained evidence
-without the original source or runtime dependencies.
-See the [plugin assessment guide](docs/plugin-assessment.mdx) for supported
-formats, loading modes, comparison arms, and evidence limits.
+[Plugin guide](docs/plugin-assessment.mdx).
 
 ## License
 

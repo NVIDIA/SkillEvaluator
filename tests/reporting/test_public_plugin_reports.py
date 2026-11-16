@@ -45,7 +45,7 @@ def test_public_report_hook_and_saved_files_include_static_evidence(tmp_path, pl
         assert "Plugin static evidence" in output
     target = tmp_path / ("report" + reporter.get_file_extension())
     reporter.save([plugin_result], target)
-    assert "public-demo" in target.read_text()
+    assert "public-demo" in target.read_text(encoding="utf-8")
 
 
 def test_runtime_snapshot_is_validated_without_mutating_metadata(plugin_result):

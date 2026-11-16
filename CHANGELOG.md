@@ -263,12 +263,14 @@ reviewed source revision.
   `environment`.
 - `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
   sandbox environment, in the agent evaluation summary and the evaluation dataset header.
-- Complete the public plugin workflow: five-format detection, bounded component
+- Complete the public plugin workflow: supported-format detection, bounded component
   checks and bundled-skill validation, advisory deduplication and compatible local
   catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
   multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
   and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
-  retry controls and published usage documentation.
+  retry controls and published usage documentation. Skill and rule references that
+  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
+  the run incomplete, so a plugin with nothing else to load fails closed.
 
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
@@ -352,15 +354,6 @@ reviewed source revision.
   codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
   profiles from a directory. The first rules flag a skill installed outside the
   folders a harness scans.
-- Complete the public plugin workflow: supported-format detection, bounded component
-  checks and bundled-skill validation, advisory deduplication and compatible local
-  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
-  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
-  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
-  retry controls and published usage documentation. Skill and rule references that
-  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
-  the run incomplete, so a plugin with nothing else to load fails closed.
-
 - A separate four-case synthetic grader pilot adds forbidden-startup-write and
   root-search challenges with quoted/read-only and scoped controls, an independent
   label worksheet, content/source manifest and explicit security/Efficiency

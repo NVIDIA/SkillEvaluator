@@ -267,6 +267,8 @@ def run_plugin_validation(
     skill_checks_factory: Callable | None = None,
     fail_fast: bool = False,
     on_check: Callable[[str], None] | None = None,
+    on_check_plan: Callable[[int], None] | None = None,
+    on_check_complete: Callable[[str, ValidationResult], None] | None = None,
 ) -> list[ValidationResult]:
     """Assemble a private run; network collectors require independent explicit options."""
     options = options or PrivatePluginChecks()
@@ -277,6 +279,10 @@ def run_plugin_validation(
         path, allowed_private_hosts=options.allowed_private_hosts, hook_allowed_urls=options.hook_allowed_urls
     )
     if inventory is None:
+        if on_check_plan is not None:
+            on_check_plan(1)
+        if on_check is not None:
+            on_check("schema")
         result = ValidationResult(validator_name=VALIDATOR_NAME)
         result.add_finding(
             Finding(
@@ -288,14 +294,28 @@ def run_plugin_validation(
             )
         )
         result.mark_scan_incomplete("plugin-inventory")
+        if on_check_complete is not None:
+            on_check_complete("schema", result)
         return [result]
     root = inventory.root
+    scan_checks = options.checks & TREE_CHECKS
+    skill_checks = options.checks & SKILL_CHECKS
+    skills = sorted({m.path for m in inventory.components if m.type == "skill" and m.path and not m.problem})
+    if on_check_plan is not None:
+        scan_count = 0
+        if inventory.tree_complete:
+            unit_count = 1 + len(set(skills) - {"."})
+            scan_count = len(scan_checks - {"hygiene"}) * unit_count + int("hygiene" in scan_checks)
+            scan_count += len(skill_checks) * len(skills)
+        on_check_plan(1 + scan_count + options.audit_dependencies + options.resolve_endpoints + options.claude_validate)
     # Composition is mandatory even for a narrowed scanner selection: a declared
     # but unreadable tree cannot claim complete coverage.
     if on_check is not None:
         on_check("schema")
     schema = validate_inventory_schema(inventory, repo_root=options.repo_root)
     results = [schema]
+    if on_check_complete is not None:
+        on_check_complete("schema", schema)
 
     def finish() -> list[ValidationResult]:
         inventory.attribute_findings(f for result in results[1:] for f in result.findings)
@@ -304,11 +324,8 @@ def run_plugin_validation(
 
     if fail_fast and not schema.passed:
         return finish()
-    scan_checks = options.checks & TREE_CHECKS
-    skill_checks = options.checks & SKILL_CHECKS
     source_files = inventory.source_files
     source_complete = inventory.tree_complete
-    skills = sorted({m.path for m in inventory.components if m.type == "skill" and m.path and not m.problem})
     if scan_checks or skill_checks:
         snapshot_result = ValidationResult(validator_name="Private Tree Coverage")
         if not inventory.tree_complete:
@@ -328,14 +345,16 @@ def run_plugin_validation(
                     for key, (validator, runner) in tree_validators.items():
                         if key not in scan_checks:
                             continue
-                        if on_check is not None:
-                            on_check(key)
                         if key == "hygiene":
+                            if on_check is not None:
+                                on_check(key)
                             result = _run_hygiene(validator, view, views, skills, root)
                             result.validator_name = validator.name
                             result.validator_description = validator.description
                             result.metadata.update(plugin_check="hygiene", plugin_scan_scope="whole_tree")
                             results.append(result)
+                            if on_check_complete is not None:
+                                on_check_complete(key, result)
                             if fail_fast and not result.passed:
                                 return finish()
                             continue
@@ -346,6 +365,8 @@ def run_plugin_validation(
                                 or validator._validate_single_asset
                             )
                         for unit, scan_view in views.items():
+                            if on_check is not None:
+                                on_check(key)
                             result = _invoke_scan(runner, scan_view, key)
                             result.validator_name = validator.name
                             result.validator_description = validator.description
@@ -353,6 +374,8 @@ def run_plugin_validation(
                             result.metadata["plugin_scan_scope"] = "root_owned" if unit == "." else "declared_skill"
                             _attribute_scan_result(result, unit, scan_view, root)
                             results.append(result)
+                            if on_check_complete is not None:
+                                on_check_complete(key, result)
                             if fail_fast and not result.passed:
                                 return finish()
                     # Every audited client skill receives its own quality/lint/
@@ -383,6 +406,8 @@ def run_plugin_validation(
                             result.metadata.update(plugin_check=key, plugin_member=relative)
                             _rebase(result, view, root)
                             results.append(result)
+                            if on_check_complete is not None:
+                                on_check_complete(key, result)
                             if fail_fast and not result.passed:
                                 return finish()
                     snapshot_result.metadata.update(
@@ -390,6 +415,13 @@ def run_plugin_validation(
                         scan_units=list(views),
                         complete=not snapshot_result.is_incomplete,
                     )
+                    if not snapshot_result.is_incomplete:
+                        snapshot_result.add_success(
+                            "plugin_tree_snapshot",
+                            "Staged the complete plugin source tree into immutable scan units",
+                            source_files=len(source_files),
+                            scan_units=len(views),
+                        )
                     results.append(snapshot_result)
             except (SecurePathError, OSError):
                 source_complete = False
@@ -425,6 +457,8 @@ def run_plugin_validation(
         if not source_complete:
             audit.mark_scan_incomplete("dependency-source-discovery")
         results.append(audit)
+        if on_check_complete is not None:
+            on_check_complete("dependency", audit)
         if fail_fast and not audit.passed:
             return finish()
     if options.resolve_endpoints:
@@ -444,6 +478,8 @@ def run_plugin_validation(
         if summary.get("incomplete") or not inventory.complete:
             result.mark_scan_incomplete("endpoint-resolution")
         results.append(result)
+        if on_check_complete is not None:
+            on_check_complete("endpoint-resolution", result)
     if options.claude_validate:
         if on_check is not None:
             on_check("claude-validate")
@@ -454,4 +490,6 @@ def run_plugin_validation(
                 skillevaluator_fields=skillevaluator_manifest_fields([schema], VALIDATOR_NAME),
             )
         )
+        if on_check_complete is not None:
+            on_check_complete("claude-validate", results[-1])
     return finish()

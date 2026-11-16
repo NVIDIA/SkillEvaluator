@@ -42,6 +42,7 @@ def run_similarity_check(
     # Caller option errors have safe diagnostics and should not become provider failures.
     validate_max_entries(max_entries)
     validate_max_scalar_comparisons(max_scalar_comparisons)
+    from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.tier2.plugin_commands import plugin_similarity_results, plugin_target
 
     if (target := plugin_target(content_path, content_type)) is not None:
@@ -64,7 +65,9 @@ def run_similarity_check(
                 llm_model=llm_model,
             )
 
-        return guarded_results("Plugin Similarity Check", target, compare_plugins, check_id="similarity")
+        return guarded_results(
+            "Plugin Similarity Check", resolve_plugin_path(target), compare_plugins, check_id="similarity"
+        )
 
     def _run() -> ValidationResult:
         validator = SimilarityValidator(

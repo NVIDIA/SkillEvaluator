@@ -547,6 +547,10 @@ def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
     assert not _only_llm_stages_missing(security)
     assert "SkillSpector 2.13.3, scan incomplete" in _text(_scanners_row([security]))
     security.metadata["scanners"] = {}
+    text = _text(_scanners_row([security]))
+    assert "SkillSpector incomplete" in text
+    assert "didn't run" not in text
+    security.add_error("SkillSpector not installed")
     assert "SkillSpector didn't run" in _text(_scanners_row([security]))
 
 

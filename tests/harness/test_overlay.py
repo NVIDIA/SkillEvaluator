@@ -11,7 +11,7 @@ import pytest
 from click.testing import CliRunner
 
 from skillevaluator.cli import cli
-from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, skill_facts
+from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
 from skillevaluator.harness.overlay import PROFILES_DIR
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
@@ -457,6 +457,158 @@ def test_reload_guidance_reaches_findings(tmp_path: Path):
     assert set(reload) == {"CP-RELOAD", "OC-RELOAD"}
     assert {f["effect"] for f in reload.values()} == {"advisory"}
     assert {r["status"] for r in rows.values()} == {"loads"}
+
+
+def test_user_level_copy_of_a_project_skill_is_flagged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for folder in (project / ".claude/skills", home / ".claude/skills", home / ".agents/skills"):
+        (folder / "report").mkdir(parents=True)
+        (folder / "report" / "SKILL.md").write_text(
+            f"---\nname: report\ndescription: Use when testing copies.\n---\n{BODY}"
+        )
+    rows = _rows(project / ".claude/skills/report")
+
+    copies = {
+        h: next((f["message"] for f in r["findings"] if f["id"].endswith("-USER-COPY")), "") for h, r in rows.items()
+    }
+    assert "~/.claude/skills/report; Claude Code uses that user-level copy" in copies["claude-code"]
+    assert "~/.agents/skills/report; Copilot CLI uses this project copy" in copies["copilot-cli"]
+    assert "~/.agents/skills/report, ~/.claude/skills/report" in copies["opencode"]
+    assert copies["codex"] == copies["hermes"] == copies["openclaw"] == ""
+    assert not _rows(home / ".claude/skills/report")["claude-code"]["findings"]
+
+
+def test_only_the_user_roots_a_harness_reads_are_searched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    searched = []
+    find_skills = overlay._find_skills
+    monkeypatch.setattr(overlay, "_find_skills", lambda folder: searched.append(folder) or find_skills(folder))
+    for folder in (home / ".claude" / "skills", home / ".codex" / "skills", home / ".agents" / "skills"):
+        _install(folder, "report")
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+
+    evaluate_harnesses(skill, "claude-code")
+
+    assert [f for f in searched if home in f.parents] == [home / ".claude" / "skills"]
+
+
+def test_unreadable_user_skill_does_not_abort_the_check(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills", "broken")
+    _install(home / ".claude" / "skills", "report")
+    read_manifest = overlay._read_manifest
+
+    def read(path: Path):
+        if path.name == "broken":
+            raise PermissionError(13, "Permission denied")
+        return read_manifest(path)
+
+    monkeypatch.setattr(overlay, "_read_manifest", read)
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+
+    rows = _rows(skill)
+
+    assert "CC-USER-COPY" in _ids(rows, "claude-code")
+
+
+def test_user_copy_in_a_folder_the_harness_does_not_scan_is_not_flagged(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills" / "group", "report")
+    _install(home / ".codex" / "skills" / "a" / "b" / "c" / "d" / "e" / "f", "report")  # six folders down: past Codex
+    claude = _install(project / ".claude" / "skills", "report")
+    codex = _install(project / ".codex" / "skills", "report")
+
+    claude_rows, codex_rows = _rows(claude), _rows(codex)
+
+    assert "CC-USER-COPY" not in _ids(claude_rows, "claude-code")
+    opencode = next(f["message"] for f in claude_rows["opencode"]["findings"] if f["id"] == "OC-USER-COPY")
+    assert "~/.claude/skills/group/report" in opencode
+    assert "CX-USER-COPY" not in _ids(codex_rows, "codex")
+
+
+def _custom_grouping_profile(tmp_path: Path, grouping: str) -> Path:
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    (profiles / "acme.yaml").write_text(
+        "harness: acme\n"
+        "roots: {project: [.claude/skills], user: [~/.claude/skills]}\n"
+        "rules:\n"
+        f'  - {{id: AC-GROUPING, when: "{grouping}", effect: not_loaded, message: "Grouping is not searched."}}\n'
+        '  - {id: AC-USER-COPY, when: "user_copy", effect: advisory, message: "Also at {user_copy_paths}."}\n',
+        encoding="utf-8",
+    )
+    return profiles
+
+
+def _custom_user_copies(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, grouping: str, config: dict | None = None
+) -> set[str]:
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    _install(home / ".claude" / "skills", "report")
+    _install(home / ".claude" / "skills" / "group", "report")
+    skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
+    profiles = _custom_grouping_profile(tmp_path, grouping)
+
+    (result,) = evaluate_harnesses(skill, "acme", profiles, config)
+
+    message = next((f["message"] for f in result.findings if f["id"] == "AC-USER-COPY"), "")
+    return set(message.removeprefix("Also at ").removesuffix(".").split(", ")) - {""}
+
+
+def test_custom_grouping_rule_can_name_roots_when_looking_for_a_user_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    both = {"~/.claude/skills/report", "~/.claude/skills/group/report"}
+
+    # The rule is read for the user copy's root: it hides the grouped copy and keeps the direct one.
+    user_rule = "install_root in roots.user and grouping_depth > 0"
+    assert _custom_user_copies(tmp_path / "user", monkeypatch, user_rule) == {"~/.claude/skills/report"}
+    # A project-only rule says nothing about a copy in a user root, even though the project skill sits in a project root.
+    project_rule = "install_root in roots.project and grouping_depth > 0"
+    assert _custom_user_copies(tmp_path / "project", monkeypatch, project_rule) == both
+
+
+def test_custom_grouping_rule_can_name_the_configuration_when_looking_for_a_user_copy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+):
+    rule = "custom_provider and grouping_depth > 0"
+
+    hidden = _custom_user_copies(tmp_path / "hidden", monkeypatch, rule, {"custom_provider": True})
+    shown = _custom_user_copies(tmp_path / "shown", monkeypatch, rule)
+
+    assert hidden == {"~/.claude/skills/report"}
+    assert shown == {"~/.claude/skills/report", "~/.claude/skills/group/report"}
+
+
+def test_unevaluable_grouping_rule_does_not_stop_the_user_copy_lookup():
+    rule = {"id": "X", "when": "grouping_depth > 0 and nope", "effect": "not_loaded"}
+    profile = {"harness": "acme", "roots": {}, "rules": [rule]}
+    names = overlay._rule_names(profile, {"install_root": None, "catalog_size": 0}, {"native_root": False})
+
+    assert overlay._finds_at_depth(profile, names, "~/.claude/skills", 1)
+
+
+def test_openclaw_workspace_skill_is_checked_against_both_user_roots(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    home, project = tmp_path / "home", tmp_path / "project"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    for folder in (home / ".agents" / "skills", home / ".openclaw" / "skills", home / ".claude" / "skills"):
+        _install(folder, "report")
+    workspace = _install(project / "skills", "report")
+    loose = _install(project / "loose", "report")
+
+    rows = _rows(workspace)
+
+    message = next(f["message"] for f in rows["openclaw"]["findings"] if f["id"] == "OW-USER-COPY")
+    assert "~/.agents/skills/report, ~/.openclaw/skills/report;" in message
+    assert not any(f["id"].endswith("-USER-COPY") for h, r in rows.items() if h != "openclaw" for f in r["findings"])
+    assert facts_for([loose])[loose]["user_copies"] == []
 
 
 def test_claude_listing_cut_counts_when_to_use(tmp_path: Path):

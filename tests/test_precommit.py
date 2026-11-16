@@ -433,6 +433,7 @@ def test_precommit_hooks_yaml_entries_resolve_to_commands() -> None:
     for hook in hooks:
         assert hook["language"] == "python"
         assert hook.get("files")
+        assert hook.get("require_serial") is True, hook["id"]
         ids.append(hook["id"])
         parts = shlex.split(hook["entry"])
         assert parts[0] == "skillevaluator"

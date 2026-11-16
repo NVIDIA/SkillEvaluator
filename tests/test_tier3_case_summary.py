@@ -1499,6 +1499,283 @@ def test_failed_negative_keeps_task_diagnostics(tmp_path: Path, activation_statu
         assert "omitted the requested total" in fix["what"]
 
 
+@pytest.mark.parametrize("routing", [{"expected_skill": None}, {"should_trigger": False}])
+@pytest.mark.parametrize("passed", [False, True])
+@pytest.mark.parametrize("use_llm", [False, True])
+def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
+    tmp_path: Path, monkeypatch, routing: dict, passed: bool, use_llm: bool
+) -> None:
+    monkeypatch.setattr(
+        "skillevaluator.tier3.case_summary._llm_actions",
+        lambda *_args: pytest.fail("Correct non-use must not request a skill-edit action"),
+    )
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", **routing}]}))
+    reward = _reward(False, "the answer omitted the requested total")
+    reward.update(
+        entry_id="negative",
+        skill_execution=1.0,
+        goal_accuracy=0.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
+    _trial(tmp_path, "a", "t0", reward)
+    agent = _agent({"negative": _case(passed)}, {})
+
+    [fix] = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=use_llm)
+
+    assert fix["kind"] == "task outcome"
+    assert fix["source"] == "deterministic"
+    assert "correctly unused" in fix["action"]
+    assert "SKILL.md" not in fix["action"]
+    assert "requested total" in fix["what"] or "requested total" in " ".join(fix["reasons"])
+    assert fix["attempts_lost"] == 1
+
+
+@pytest.mark.parametrize("evidence", ["invoked", "unknown", "missing", "error", "custom", "step", "missing scope"])
+def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Path, evidence: str) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    if evidence != "missing":
+        reward = _reward(False, "wrong total")
+        reward.update(
+            entry_id="negative",
+            skill_execution=1.0,
+            skill_invoked=evidence == "invoked",
+            invocation_evidence_source="trajectory",
+            invocation_evidence_scope="logical_trial",
+        )
+        if evidence == "unknown":
+            reward.pop("invocation_evidence_source")
+        elif evidence == "error":
+            reward["evaluation_status"] = "error"
+        elif evidence == "custom":
+            reward["metric_set"] = "custom-metrics"
+        elif evidence == "step":
+            reward["invocation_evidence_scope"] = "step"
+        elif evidence == "missing scope":
+            reward.pop("invocation_evidence_scope")
+        _trial(tmp_path, "a", "t0", reward)
+    agent = _agent({"negative": _case(False)}, {})
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert all(fix["kind"] != "task outcome" for fix in fixes)
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"attempt_details_truncated": True},
+        {"attempts_recovered": 1},
+        {"attempts_missing": 1},
+        *(
+            {key: value}
+            for key in ("attempts_used", "attempt_details_total", "attempt_details_shown")
+            for value in (2, -1, True, 1.0, "1", None)
+        ),
+    ],
+)
+def test_negative_non_use_requires_complete_attempt_details(tmp_path: Path, metadata: dict) -> None:
+    from skillevaluator.tier3.case_summary import _correctly_unused_negative
+
+    reward = _reward(False, "wrong total")
+    reward.update(
+        entry_id="negative",
+        skill_execution=1.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
+    _trial(tmp_path, "a", "t0", reward)
+    case = {**_case(False), **metadata}
+    agent = _agent({"negative": case}, {})
+
+    assert not _correctly_unused_negative(tmp_path, "a", agent, "negative", {"expected_skill": None})
+
+
+def test_collector_capped_attempts_do_not_claim_complete_negative_non_use(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.collector import PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX, _pass_summary
+
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    rewards = []
+    for index in range(PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX + 1):
+        reward = _reward(False, "wrong total")
+        reward.update(
+            entry_id="negative",
+            _trial_name=f"t{index}",
+            skill_execution=1.0,
+            skill_invoked=index == PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX,
+            invocation_evidence_source="trajectory",
+            invocation_evidence_scope="logical_trial",
+        )
+        rewards.append(reward)
+        _trial(tmp_path, "a", f"t{index}", reward)
+    summary = _pass_summary(
+        rewards,
+        n_attempts=len(rewards),
+        pass_threshold=0.5,
+        expected_cases=1,
+        expected_case_ids=["negative"],
+        scorer=lambda _reward: 0.2,
+    )
+    case = summary["cases"]["negative"]
+    assert case["attempt_details_truncated"]
+    assert len(case["attempts"]) == PUBLISHED_ATTEMPT_DETAILS_PER_CASE_MAX
+    assert case["attempts_used"] == len(rewards)
+    agent = _agent({}, {})
+    agent["pass_at_k"]["with_skill"] = summary
+
+    fixes = what_to_fix({"agents": {"a": agent}}, run_dir=tmp_path, use_llm=False)
+
+    assert fixes
+    assert all(fix["kind"] != "task outcome" and "correctly unused" not in fix["action"] for fix in fixes)
+
+
+def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path: Path) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    for name, attempts in (("A", 2), ("B", 1)):
+        for i in range(attempts):
+            reward = _reward(False, "wrong total" if name == "A" else "correct total")
+            reward.update(
+                entry_id="negative",
+                skill_execution=1.0,
+                goal_accuracy=0.0 if name == "A" else 1.0,
+                skill_invoked=False,
+                invocation_evidence_source="trajectory",
+                invocation_evidence_scope="logical_trial",
+            )
+            _trial(tmp_path, name, f"t{i}", reward)
+    agents = {
+        "A": _agent({"negative": _case(False, True)}, {}),
+        "B": _agent({"negative": _case(True)}, {}),
+    }
+
+    [fix] = what_to_fix({"agents": agents}, run_dir=tmp_path, use_llm=False)
+
+    assert fix["kind"] == "task outcome"
+    assert fix["scope"] == "A only"
+    assert fix["scope"].count("A") == 1
+    assert fix["attempts_lost"] == 2
+
+
+@pytest.mark.parametrize("passed", [False, True])
+def test_negative_task_outcome_copy_does_not_blame_skill_or_call_passed_attempts_lost(
+    tmp_path: Path, passed: bool
+) -> None:
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
+    reward = _reward(False, "wrong total")
+    reward.update(
+        entry_id="negative",
+        goal_accuracy=0.0,
+        skill_execution=1.0,
+        skill_invoked=False,
+        invocation_evidence_source="trajectory",
+        invocation_evidence_scope="logical_trial",
+    )
+    _trial(tmp_path, "a", "t0", reward)
+    result = {"agents": {"a": _agent({"negative": _case(passed)}, {"negative": _case(True)})}}
+
+    fixes = what_to_fix(result, run_dir=tmp_path, use_llm=False)
+    [fix] = [item for item in fixes if item["kind"] == "task outcome"]
+    assert "without the skill" not in fix["what"]
+    assert "wrong total" in fix["what"]
+    console = Console(record=True, width=180)
+    render_case_summary(result, console=console, fixes=[fix])
+    advice = console.export_text().split("How to improve", 1)[1]
+    assert "missed the case requirements" in advice
+    assert "lost " not in advice
+
+
+def test_negative_task_outcomes_merge_without_hiding_a_skill_fix(tmp_path: Path) -> None:
+    negative_ids = [f"negative-{index}" for index in range(3)]
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps(
+            {
+                "dataset": [
+                    *({"id": case, "expected_skill": None} for case in negative_ids),
+                    {"id": "positive", "should_trigger": True},
+                ]
+            }
+        )
+    )
+    cases = {}
+    for case_id in [*negative_ids, "positive"]:
+        negative = case_id in negative_ids
+        cases[case_id] = _case(*([False, False] if negative else [False]), prefix=case_id)
+        for index in range(2 if negative else 1):
+            reward = _reward(not negative, "wrong total" if negative else "missing required feature")
+            reward.update(
+                entry_id=case_id,
+                skill_execution=1.0,
+                skill_invoked=not negative,
+                invocation_evidence_source="trajectory",
+                invocation_evidence_scope="logical_trial",
+            )
+            _trial(tmp_path, "a", f"{case_id}{index}", reward)
+
+    fixes = what_to_fix({"agents": {"a": _agent(cases, {})}}, run_dir=tmp_path, use_llm=False)
+
+    assert len(fixes) == 2
+    [task_outcome] = [fix for fix in fixes if fix["kind"] == "task outcome"]
+    assert task_outcome["cases"] == negative_ids
+    assert task_outcome["attempts_lost"] == 6
+    assert any(fix["case"] == "positive" and fix["kind"] == "skill" for fix in fixes)
+
+
+def test_trusted_observed_activation_is_a_public_metrics_helper() -> None:
+    from skillevaluator.tier3 import case_summary
+    from skillevaluator.tier3.harbor import metrics
+
+    helper = metrics.trusted_observed_activation
+    trusted = {"skill_execution": 1.0, "invocation_evidence_source": "trajectory"}
+    assert helper({**trusted, "skill_invoked": True}) == "invoked"
+    assert helper({**trusted, "skill_invoked": False}) == "not_invoked"
+    assert helper({**trusted, "skill_invoked": "no"}) == "unknown"
+    assert helper({"skill_execution": 1.0, "skill_invoked": False}) == "unknown"
+    assert helper({**trusted, "skill_invoked": False, "metric_set": "custom-metrics"}) == "unknown"
+    assert helper({"invocation_evidence_source": "trajectory", "skill_invoked": False}) == "unknown"
+    assert case_summary.trusted_observed_activation is helper
+
+
+def test_report_activation_validation_uses_the_shared_trusted_helper(monkeypatch) -> None:
+    from skillevaluator.evaluation.tier3_report import _trial_activation_validation
+    from skillevaluator.tier3.harbor import metrics
+
+    monkeypatch.setattr(metrics, "trusted_observed_activation", lambda _reward: "shared-helper")
+    reward = {"invocation_evidence_scope": "logical_trial"}
+    trial = {"scores": {}}
+
+    validation = _trial_activation_validation([reward], trial)
+
+    assert validation["observed_activation"] == "shared-helper"
+    assert validation["evidence_scopes"][0]["observed_activation"] == "shared-helper"
+
+
+def test_case_summary_import_does_not_load_the_report_module() -> None:
+    import subprocess
+    import sys
+
+    source = Path(__file__).resolve().parents[1] / "src"
+    code = (
+        "import sys; "
+        f"sys.path.insert(0, {str(source)!r}); "
+        "import skillevaluator.tier3.case_summary; "
+        f"assert skillevaluator.tier3.case_summary.__file__ == {str(source / 'skillevaluator/tier3/case_summary.py')!r}; "
+        "sys.exit(1 if 'skillevaluator.evaluation.tier3_report' in sys.modules else 0)"
+    )
+    completed = subprocess.run([sys.executable, "-I", "-c", code], capture_output=True, text=True, timeout=60)
+
+    assert completed.returncode == 0, completed.stderr
+
+
 @pytest.mark.parametrize("snapshot", [None, "{broken", '{"dataset": [{"id": "c"}]}'])
 @pytest.mark.parametrize("activation_status", ["never_activated", "unknown"])
 def test_unlabeled_snapshot_preserves_legacy_activation_diagnosis(

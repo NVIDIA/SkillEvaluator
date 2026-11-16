@@ -718,12 +718,14 @@ def test_attempt_counts_stay_null_unless_the_load_identifies_every_left_out_case
     assert basis["excluded_cases"] == excluded_cases
     assert basis["case_ids"] == ["case-1" if excluded_cases == 2 else "mixed"]
     assert (basis["excluded_attempts"], basis["contributing_attempts"]) == (None, None)
-    card_html = _card_html(_render(payload), "Accuracy")
+    card_html = _text(_card_html(_render(payload), "Accuracy"))
     noun = "1 case was" if excluded_cases == 1 else "2 cases were"
+    # A matching-judge case can still exist, so the note does not say none remains.
     assert (
-        f"No lift: {noun} scored by different judge models and no comparable result remains; "
+        f"No lift: {noun} scored by different judge models and the loaded results cannot confirm the comparison; "
         f"the arm scores include {'it' if excluded_cases == 1 else 'them'}."
-    ) in _text(card_html)
+    ) in card_html
+    assert "no comparable result remains" not in card_html
 
 
 def test_lift_note_mentions_arm_scores_only_when_both_arms_have_one() -> None:

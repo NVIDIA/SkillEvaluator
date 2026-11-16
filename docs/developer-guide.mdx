@@ -67,14 +67,24 @@ The Makefile wraps the standard tools, so you can run the underlying commands di
 evaluation framework used by Tier 3; the `live` marker exercises its in-process
 backend.
 
+The POSIX same-inode read-race test explicitly advances the modified file's
+mtime: two same-size writes can otherwise share a filesystem clock tick.
+
 | Marker | What it covers | Run it with |
 | --- | --- | --- |
 | *(none)* | Fast unit tests — the default selection | `pytest` |
 | `integration` | End-to-end integration tests; may need fixtures or longer runtime | `pytest -m integration` |
 | `live` | Live tests against the in-process Harbor backend; requires the `tier3` extra and `NVIDIA_API_KEY` | `pytest -m live` |
 
-The MCP-staging restored-mtime regression models an advanced ctime explicitly,
-so its source-change assertion does not depend on the host clock ticking.
+The MCP-staging and legacy-summary restored-mtime regressions model an advanced
+ctime explicitly, so their source-change assertions do not depend on the host
+clock ticking.
+
+The directory-snapshot race regression explicitly advances directory mtime when
+inserting its late entry, rather than assuming creation crosses a clock tick.
+
+Git URL-rewrite tests point `GIT_CONFIG_GLOBAL` at their temporary configuration,
+so caller-level Git isolation does not suppress the rewrite being tested.
 
 The `dev` extra includes pytest-xdist, so you can parallelize any of these runs:
 
@@ -84,15 +94,24 @@ pytest -n auto
 
 ### Check the HTML report in a browser
 
-`tests/reporting/browser_navigation_checks.py` opens the HTML report in a headless browser and checks navigation, focus, themes, print view and layout at three screen widths. pytest doesn't collect it, and it needs Playwright:
+The development extra includes Playwright. The dedicated browser suite checks
+all three tiers, Tier 3 subtabs, keyboard navigation, themes, JSON downloads,
+offline charts, print, and narrow layouts using synthetic reports. Regular
+pytest runs skip browser checks unless explicitly enabled:
 
 ```bash title="Run the HTML report browser checks"
-pip install playwright
 python -m playwright install chromium
-python tests/reporting/browser_navigation_checks.py browser-checks
+SKILLEVALUATOR_BROWSER_TESTS=1 pytest tests/reporting/test_report_browser.py -q
 ```
 
-The script renders its own fixture reports, then writes screenshots and `navigation-results.json` to `browser-checks/`. To use an installed Chrome instead of Playwright's Chromium, set `SKILLEVALUATOR_TEST_BROWSER` to the browser's executable or pass `--browser`.
+Set `SKILLEVALUATOR_BROWSER_SCREENSHOTS` to a directory to retain screenshots.
+To use an installed Chrome instead of Playwright's Chromium, set
+`SKILLEVALUATOR_TEST_BROWSER` to its executable. The convenience command
+`python tests/reporting/browser_navigation_checks.py browser-checks` runs the
+same suite and retains screenshots plus a test-result XML file. The dedicated
+HTML browser CI job builds a wheel and runs the suite outside the checkout
+against that installed wheel, so missing packaged templates and chart assets
+fail the same checks.
 
 ## Documentation and starter changes
 

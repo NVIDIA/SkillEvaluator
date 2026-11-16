@@ -1,0 +1,75 @@
+name: HTML report browser checks
+
+on:
+  pull_request:
+    paths:
+      - "src/skillevaluator/reporting/**"
+      - "src/skillevaluator/evaluation/tier3_report.py"
+      - "tests/reporting/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/report-browser.yml"
+  push:
+    branches: [main]
+    paths:
+      - "src/skillevaluator/reporting/**"
+      - "src/skillevaluator/evaluation/tier3_report.py"
+      - "tests/reporting/**"
+      - "pyproject.toml"
+      - "uv.lock"
+      - ".github/workflows/report-browser.yml"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: report-browser-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: true
+
+jobs:
+  chromium:
+    name: Offline report behavior from installed wheel
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: "3.12"
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.11.27"
+      - name: Build and install the public wheel
+        shell: bash
+        run: |
+          set -euo pipefail
+          uv sync --extra dev --locked --python 3.12
+          uv build --wheel --python 3.12 --no-sources
+          uv venv "$RUNNER_TEMP/report-wheel" --python 3.12
+          uv pip install --python "$RUNNER_TEMP/report-wheel/bin/python" \
+            dist/skillevaluator-*.whl pytest playwright==1.65.2
+      - name: Install Chromium
+        run: |
+          "$RUNNER_TEMP/report-wheel/bin/python" -m playwright install --with-deps chromium
+      - name: Exercise installed reports without network
+        shell: bash
+        env:
+          SKILLEVALUATOR_BROWSER_TESTS: "1"
+          SKILLEVALUATOR_REQUIRE_INSTALLED_REPORT: "1"
+          SKILLEVALUATOR_BROWSER_SCREENSHOTS: ${{ runner.temp }}/report-browser-screenshots
+        run: |
+          set -euo pipefail
+          unset PYTHONPATH
+          cd "$RUNNER_TEMP"
+          "$RUNNER_TEMP/report-wheel/bin/python" -m pytest \
+            "$GITHUB_WORKSPACE/tests/reporting/test_report_browser.py" \
+            --basetemp="$RUNNER_TEMP/report-browser-pytest" -q
+      - name: Retain synthetic browser screenshots
+        if: ${{ always() }}
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: report-browser-screenshots
+          path: ${{ runner.temp }}/report-browser-screenshots
+          if-no-files-found: ignore

@@ -2252,6 +2252,77 @@ def test_rich_progress_on_a_terminal_still_ends_the_final_frame_line_once(
     assert stream.getvalue().endswith(f"╯\n{show_cursor}Result: pass\n")
 
 
+@pytest.mark.parametrize(
+    "stream_kind",
+    ["text-stream", "stderr-shaped-pipe", "plan-line-refused"],
+    ids=["text-stream", "stderr-shaped-pipe", "pipe-refuses-the-changed-plan-line"],
+)
+def test_forced_rich_progress_on_an_interactive_pipe_draws_only_the_final_frame(
+    monkeypatch: pytest.MonkeyPatch,
+    stream_kind: str,
+) -> None:
+    progress = _progress_module()
+    # --progress rich with standard error piped, and TTY_INTERACTIVE=1, which
+    # asks Rich for live updates although the stream is not a terminal.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
+    monkeypatch.setenv("TTY_INTERACTIVE", "1")
+    pipe = _WouldBlockPipe()
+    stream = io.StringIO() if stream_kind == "text-stream" else _stderr_shaped(pipe)
+    rich_reporter = progress.create_progress_reporter("rich", stream=stream, refresh_interval=60)
+    assert isinstance(rich_reporter, progress.RichProgressReporter)
+    assert rich_reporter._console.is_terminal is False
+    reporter = progress.safe_progress_reporter(rich_reporter)
+    reporter.start(_plan(progress))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="running", detail="evaluating"))
+    if stream_kind == "plan-line-refused":
+        pipe.refuse_once = [b"Run plan: Tasks 3"]
+    # A plan line that changes during the run is printed while Live runs.
+    reporter.start(dataclasses.replace(_plan(progress), task_count=3))
+    reporter.emit(progress.ProgressEvent(stage="agent:codex", state="complete", detail="agent finished"))
+    reporter.close()
+    stream.write("Result: pass\n")
+    stream.flush()
+    output = stream.getvalue() if isinstance(stream, io.StringIO) else pipe.received.decode("utf-8")
+
+    # Off a terminal the frames drawn under printed lines could not be erased,
+    # so none is drawn: Live draws its frame once, as it stops. The changed
+    # plan line is a line of its own above it, and the frame's last line ends
+    # once before the next output.
+    assert output.count("╯") == 1
+    assert "\nRun plan: Tasks 3 · " in output
+    if stream_kind == "plan-line-refused":
+        assert output.count("Tier 3 progress display stopped after a drawing error") == 1
+        assert output.endswith(f"╯\n{_STOP_NOTICE}\nResult: pass\n")
+    else:
+        assert output.endswith("╯\nResult: pass\n")
+
+
+@pytest.mark.parametrize(
+    ("tty_interactive", "interactive"),
+    [(None, True), ("1", True), ("0", False)],
+    ids=["default", "tty-interactive-1", "tty-interactive-0"],
+)
+def test_rich_progress_on_a_terminal_keeps_rich_interactive_setting(
+    monkeypatch: pytest.MonkeyPatch,
+    tty_interactive: str | None,
+    interactive: bool,
+) -> None:
+    progress = _progress_module()
+    monkeypatch.setenv("TERM", "xterm-256color")
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    monkeypatch.delenv("TTY_COMPATIBLE", raising=False)
+    if tty_interactive is not None:
+        monkeypatch.setenv("TTY_INTERACTIVE", tty_interactive)
+    rich_reporter = progress.create_progress_reporter("rich", stream=_TTYBuffer(), refresh_interval=60)
+
+    # Only a stream that is not a terminal is kept from redrawing in place. On
+    # a terminal Live still redraws the frame unless TTY_INTERACTIVE=0 says not
+    # to.
+    assert rich_reporter._console.is_terminal is True
+    assert rich_reporter._console.is_interactive is interactive
+
+
 def test_changelog_says_a_stream_can_still_send_refused_output_later() -> None:
     # close() drops only the view's own copy of what the terminal refused. A
     # stream shaped like standard error keeps its copy and sends it with its

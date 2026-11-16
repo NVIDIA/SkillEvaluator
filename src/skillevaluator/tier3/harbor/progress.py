@@ -438,6 +438,15 @@ class RichProgressReporter(PlainProgressReporter):
         from rich.live import Live
 
         self._console = Console(file=self._stream)
+        if not self._console.is_terminal:
+            # TTY_INTERACTIVE=1 makes Rich treat a pipe or a file as
+            # interactive, and Live then draws a whole frame under every line
+            # printed while it runs. Off a terminal Rich drops the cursor moves
+            # that would erase those frames, so they all stay, each with its
+            # last line open, and the next plan line or frame joins its bottom
+            # border. Live then draws only its last frame, as it stops, the same
+            # as on any other stream that is not a terminal.
+            self._console.is_interactive = False
         self._live_factory = Live
         self._live = None
         self._live_plan: Tier3RunPlan | None = None

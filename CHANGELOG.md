@@ -1035,6 +1035,13 @@ All notable changes to SkillEvaluator are documented in this file.
   counts a long-named case's attempts in its own row instead of a second row
   with the cut name.
 
+- With `--progress rich` and `TTY_INTERACTIVE=1` when standard error is not a
+  terminal, the Tier 3 progress table is now drawn once, when the run ends, as
+  it is without `TTY_INTERACTIVE`. Before, a copy of the table was also
+  printed under each plan line that changed during the run, and the next plan
+  line or table started on the same line as that copy's bottom border. Output
+  to a terminal is unchanged.
+
 ## 0.9.0 - 2026-11-13
 
 ### Fixed

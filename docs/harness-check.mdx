@@ -79,3 +79,108 @@ Each harness gets one of three verdicts:
 
 The compact view labels a finding with its outcome when the rule names one, such
 as `not found`, `rejected`, `listing shortened` or `delivery truncated`.
+
+## See every finding and its fix
+
+Add `-v` for the detailed view. `--harness` narrows it to the harnesses you care about.
+
+```bash
+skillevaluator harness-check ./my-skill --harness codex,hermes -v
+```
+
+```text
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✗ codex   ! hermes                                                              │
+│                                                                                  │
+│  ✗ codex   NOT LOADED    verified 0.166.0, 2026-11-01                            │
+│            ✗ NOT LOADED  Skill dropped: invalid YAML (tabs or duplicate keys).   │
+│                          [CX-STRICT-YAML]                                        │
+│                          → Use spaces, not tabs, and remove duplicate keys.      │
+│                            confidence: high                                      │
+│            ! degraded    $ARGUMENTS is not substituted: the model sees the       │
+│                          literal text.  [CX-ARGUMENTS]                           │
+│                          → Describe the expected input in words instead of       │
+│                          $ARGUMENTS.                                             │
+│                            confidence: medium                                    │
+│  ! hermes  degraded      verified main @ c419cf7c864a (binary reports            │
+│                          2026.9.24), 2026-11-01                                  │
+│            · note        Duplicate keys: last value wins.  [HM-DUP-KEY]          │
+│                          → Remove the duplicate frontmatter key.                 │
+│                            confidence: high                                      │
+│            ! degraded    $ARGUMENTS is not substituted: the model sees the       │
+│                          literal text.  [HM-ARGUMENTS]                           │
+│                          → Describe the expected input in words instead of       │
+│                          $ARGUMENTS.                                             │
+│                            confidence: high                                      │
+│                                                                                  │
+│  Description in the model's skill list (from the profile):                       │
+│  hermes  cut to 60 chars  “Write release notes from merged pull requests. Use    │
+│                           when t…”                                               │
+│                                                                                  │
+│  Doesn't change pass/fail.                                                       │
+╰──────────────────────────────────────────────────────────── ✗ 1 of 2 not loaded ─╯
+```
+
+The detailed view adds:
+
+- **The rule ID** in brackets, such as `CX-STRICT-YAML`, so you can search for it or refer to it.
+- **The fix** after the arrow.
+- **A confidence level** for each rule.
+- **The harness release and date** each profile was verified against.
+- **Your description as the model sees it**, for each harness that shortens it in its skill list.
+
+Remove the duplicate key, replace `$ARGUMENTS` with words, and run it again:
+
+```text title="skillevaluator harness-check ./my-skill"
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✓ claude-code   ✓ codex   ✓ copilot-cli   ✓ hermes   ✓ openclaw   ✓ opencode    │
+│                                                                                  │
+│  ✓ copilot-cli  loads                                                    1 note  │
+│  ✓ opencode     loads                                                    1 note  │
+│                                                                                  │
+│  Doesn't change pass/fail.  Details and fixes: -v                                │
+╰────────────────────────────────────────────────────────────────── ✓ 6 of 6 load ─╯
+```
+
+## Fix what it finds
+
+Every finding comes with its own fix, so recovering is a short loop.
+
+<Steps>
+
+### Run it with `-v`
+
+The detailed view prints the fix for each finding after the arrow. The JSON
+output has the same text in the `fix` field.
+
+### Fix `✗ not loaded` first
+
+Those harnesses never show your skill to the model, so nothing else matters
+until they are fixed. Then work through `! degraded`. Notes are optional.
+
+### Run it again
+
+Repeat until the tally reads `6 of 6 load`. One change often clears several
+harnesses at once, because the same problem trips more than one loader.
+
+</Steps>
+
+These are the findings you are most likely to meet:
+
+| You see | Why | Fix |
+| --- | --- | --- |
+| Skill dropped: invalid YAML | Codex, Copilot CLI, OpenClaw and OpenCode parse front matter strictly. | Indent with spaces, not tabs, and use each front matter key once. |
+| No usable description | Codex, OpenClaw and OpenCode drop a skill without one. The others list it badly. | Add a non-empty `description` as plain text. |
+| Non-canonical name | `skill.md` or `Skill.md` is not `SKILL.md`. Codex and Hermes never load it. | Rename the file to `SKILL.md`, with that exact casing. |
+| Not found | The skill sits in a folder this harness does not read. | Install it in the folder the finding names, such as `.claude/skills` for Claude Code or `.agents/skills` for Codex. |
+| Symlinked `SKILL.md` skipped | Codex, Hermes and OpenClaw skip a symlinked manifest. | Copy `SKILL.md` into the folder. A symlinked folder works. |
+| Description cut in the skill list | Codex cuts at 1,024 characters, Claude Code at 1,536, and Copilot CLI drops the skill past 1,024 UTF-16 units. | Put the trigger first and keep the description under 1,024 characters. |
+| Skill list over budget | The skills in this folder have more description text than the harness lists. | Shorten descriptions, or install fewer skills in that folder. |
+| Delivery truncated | `SKILL.md` is larger than the harness reads in one go. | Move detail into `references/` files. The tightest limit is OpenClaw, at about 15,000 characters. |
+| `$ARGUMENTS` is not substituted | Only Claude Code fills in `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`. | Describe the expected input in words, and use paths relative to `SKILL.md`. |
+| `disable-model-invocation` is ignored | Codex, Hermes and OpenCode don't honour it. | For Codex, add `agents/openai.yaml` with `policy: {allow_implicit_invocation: false}`. |
+
+<Tip>
+  Only ship to some harnesses? Narrow the check with `--harness codex,claude-code`,
+  so findings for the others stay out of your way.
+</Tip>

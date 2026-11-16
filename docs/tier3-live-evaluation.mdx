@@ -2150,19 +2150,19 @@ is ...` or `use token ...`), a `.pgpass` line, a standalone `pypi-` token, URL
 query parameters named only `key`, `sig`, or `signature`, a `redis-cli -a` or
 `unzip -P` password, a
 password after an unknown flag, an unquoted `PASS: value`, an `npm config set`
-option with a separate value (`--location global`), all but the first word
+option with a separate value (`--location global`), or all but the first word
 of a value with spaces on an unquoted here-document line or inside a `sh -c`
-or `ssh` command string, or text after a flag value inside the quoted value
-of an earlier `_` flag when the two values use different quotes, such as
-`\"` and `\\\"`. Escaped text is read with at most two levels of
+or `ssh` command string. Escaped text is read with at most two levels of
 escapes removed, so a value can also appear in text escaped more than three
 times, in a single-quoted value whose quotes are escaped three times, in text
 that holds a NUL character (which is not read again), in JSON inside a Python
 `repr` (where `\\"` is an escaped quote), after an escaped quote inside a quoted
-Python argv value, and where text escaped once keeps part of a value
-(`"password: \"two words\""` at the start of a JSON string). Some ordinary
-words are masked, such as the path in `grep -r token: /etc`, the value of a
-flag that names a token other than `--max-tokens` and `--token-limit`
+Python argv value, in the arguments of a call value whose single quotes are
+escaped inside a single-quoted Python string
+(`'auth=HTTPBasicAuth(\'bob\', \'...\')'`), and where text escaped once keeps
+part of a value (`"password: \"two words\""` at the start of a JSON string).
+Some ordinary words are masked, such as the path in `grep -r token: /etc`, the
+value of a flag that names a token other than `--max-tokens` and `--token-limit`
 (`--max-new-tokens 256` or `--tokenizer_name gpt2`), the words after a
 `.netrc`-like `login NAME password` phrase in prose, or, after an unmatched
 quote, the rest of the line after a credential name. As escapes are also

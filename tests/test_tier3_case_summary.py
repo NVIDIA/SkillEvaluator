@@ -1534,7 +1534,9 @@ def test_correctly_unused_negative_answer_does_not_advise_skill_edits(
 
 @pytest.mark.parametrize("evidence", ["invoked", "unknown", "missing", "error", "custom", "step", "missing scope"])
 def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Path, evidence: str) -> None:
-    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
     if evidence != "missing":
         reward = _reward(False, "wrong total")
         reward.update(
@@ -1568,8 +1570,11 @@ def test_negative_answer_requires_complete_trusted_non_use_evidence(tmp_path: Pa
         {"attempt_details_truncated": True},
         {"attempts_recovered": 1},
         {"attempts_missing": 1},
-        *({key: value} for key in ("attempts_used", "attempt_details_total", "attempt_details_shown")
-          for value in (2, -1, True, 1.0, "1", None)),
+        *(
+            {key: value}
+            for key in ("attempts_used", "attempt_details_total", "attempt_details_shown")
+            for value in (2, -1, True, 1.0, "1", None)
+        ),
     ],
 )
 def test_negative_non_use_requires_complete_attempt_details(tmp_path: Path, metadata: dict) -> None:
@@ -1631,7 +1636,9 @@ def test_collector_capped_attempts_do_not_claim_complete_negative_non_use(tmp_pa
 
 
 def test_negative_task_outcome_scope_deduplicates_agent_and_sums_losses(tmp_path: Path) -> None:
-    (tmp_path / "dataset_snapshot.json").write_text(json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]}))
+    (tmp_path / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "negative", "expected_skill": None}]})
+    )
     for name, attempts in (("A", 2), ("B", 1)):
         for i in range(attempts):
             reward = _reward(False, "wrong total" if name == "A" else "correct total")

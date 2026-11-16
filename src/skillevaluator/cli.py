@@ -4305,7 +4305,11 @@ def _run_doctor(
         if selected == "3":
             try:
                 from skillevaluator.tier3.commands import doctor as tier3_doctor
-            except ImportError:
+            except ImportError as exc:
+                from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+                if not is_missing_tier3_extra(exc):
+                    raise
                 click.echo(
                     "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
                 )

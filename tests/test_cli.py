@@ -3,9 +3,9 @@
 
 from __future__ import annotations
 
+import builtins
 import contextlib
 import json
-import sys
 from pathlib import Path
 
 import click
@@ -721,9 +721,20 @@ def test_doctor_all_checks_every_tier_after_a_failure(monkeypatch, command) -> N
     assert tiers == ["1", "2", "3"]
 
 
+def _fail_tier3_commands_import(monkeypatch, *, missing: str) -> None:
+    real_import = builtins.__import__
+
+    def _import(name, *args, **kwargs):
+        if name == "skillevaluator.tier3.commands":
+            raise ModuleNotFoundError(f"No module named '{missing}'", name=missing)
+        return real_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", _import)
+
+
 @pytest.mark.parametrize("args", [["doctor"], ["doctor", "--tier", "3"], ["tier3", "doctor"]])
 def test_doctor_without_the_tier3_extra_names_the_missing_extra(monkeypatch, args) -> None:
-    monkeypatch.setitem(sys.modules, "skillevaluator.tier3.commands", None)
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
 
     result = CliRunner().invoke(cli, args)
 
@@ -738,13 +749,23 @@ def test_doctor_all_without_the_tier3_extra_still_checks_lower_tiers(monkeypatch
 
     tiers: list[str] = []
     monkeypatch.setattr(readiness, "doctor", lambda **options: tiers.append(options["tier"]) or 0)
-    monkeypatch.setitem(sys.modules, "skillevaluator.tier3.commands", None)
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
 
     result = CliRunner().invoke(cli, [command, "--tier", "all"])
 
     assert result.exit_code == 1, result.output
     assert tiers == ["1", "2"]
     assert "Install skillevaluator[tier3]" in result.output
+
+
+def test_doctor_keeps_an_unrelated_import_error(monkeypatch) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="skillevaluator.tier3.missing")
+
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "3"])
+
+    assert isinstance(result.exception, ModuleNotFoundError)
+    assert result.exception.name == "skillevaluator.tier3.missing"
+    assert "Install skillevaluator[tier3]" not in result.output
 
 
 @pytest.mark.parametrize(

@@ -43,10 +43,10 @@ existing benchmark into a custom grader, read
 
 - A target directory containing `SKILL.md` (or a folder of skills, `.mdc`
   rules, or a plugin manifest).
-- The CLI: `pip install --upgrade "skillevaluator[all]"`, or from a checkout
-  `uv run --python 3.13 --extra all skillevaluator ...`. Check with
-  `skillevaluator --version`. Extras: `llm` (rubric), `security` (scanners),
-  `tier2`, `tier3`, `all`, `dashboard`.
+- The CLI on Python 3.12-3.14. If it is missing, install it yourself (Workflow
+  step 1). Extras: `llm` (rubric), `security` (scanners), `tier2`, `tier3`,
+  `all`, `dashboard`. From a source checkout use
+  `uv run --python 3.13 --extra all skillevaluator ...`.
 - No key for keyless commands (`quality-check`, `security-scan`, `pii-scan`,
   `lint-scripts`, `tier1 PATH --no-llm`, `validate PATH --tiers 1`).
 - A provider for LLM stages, Tier 2 and Tier 3. Simplest:
@@ -88,10 +88,13 @@ Full flag tables: [Tier 1](references/commands-tier1.md),
 
 ## Ask The User First
 
-Run keyless, read-only commands without asking. Stop and ask one short question
-before any of these:
+Run keyless, read-only commands without asking only when their tools are already
+available. Keyless scans can auto-install missing scanners, so get permission
+before launching a command that would provision them. Reuse the user's explicit
+authorization for the same installation rather than asking again. Otherwise,
+stop and ask one short question before any of these:
 
-- **Installing.** A missing extra (`tier2`, `tier3`) or scanner changes the
+- **Installing.** A missing CLI, extra (`tier2`, `tier3`) or scanner changes the
   user's environment. Name what is missing and the install command, then ask.
 - **Credentials.** Check by name whether a provider variable is exported. If
   none is, list the options (`NVIDIA_API_KEY` from https://build.nvidia.com,
@@ -108,18 +111,37 @@ do. Report no score, lift or verdict for that tier.
 
 ## Workflow
 
-1. **Locate the target.** Confirm the path has `SKILL.md` and that its
+1. **Get the CLI.** Run `skillevaluator --version`. If the command is not
+   found, name the installation option and get permission as above. Once
+   authorized, install it in the first way that works, then run the version
+   check again:
+   - `uv tool install --python 3.13 "skillevaluator[all]"` (isolated, preferred)
+   - `pipx install "skillevaluator[all]"`
+   - `python3 -m pip install --upgrade "skillevaluator[all]"` inside an active
+     virtual environment
+   - with no install, prefix each command with `uvx --python 3.13 --from "skillevaluator[all]"`
+
+   The same permission rule covers isolated installs, `uvx` provisioning and
+   upgrades as well as system or shared Python. Never use `sudo pip`. If the
+   binary is installed but not on `PATH`, run
+   `uv tool update-shell` or add `~/.local/bin` to `PATH`. If a documented
+   command or flag is unknown, upgrade: `uv tool upgrade skillevaluator`. If
+   installation fails (no network, no Python 3.12+), stop and report the
+   exact error and the install command instead of guessing results.
+2. **Locate the target.** Confirm the path has `SKILL.md` and that its
    frontmatter `name` matches the directory name. For a folder of skills, the
    commands evaluate each skill inside it.
-2. **Check readiness before paid runs.** Run `skillevaluator health-check --tier 1`
+3. **Check readiness.** Run `skillevaluator health-check --tier 1`
    for scanners, `skillevaluator doctor --tier 2` for providers, and
    `skillevaluator doctor --env-mode docker` (add `--verify-models`) for Tier 3.
+   Scanner readiness probes can provision a managed scanner runtime. Get
+   installation permission before probing or scanning when its tools are missing.
    Fix every failing row first.
-3. **Start keyless.** Run `skillevaluator tier1 <skill-dir> --no-llm`. Fix
+4. **Start keyless.** Run `skillevaluator tier1 <skill-dir> --no-llm`. Fix
    CRITICAL and HIGH findings before anything else; `lint` findings are advisory.
-4. **Add LLM checks** when a provider is set: `skillevaluator tier1 <skill-dir>`
+5. **Add LLM checks** when a provider is set: `skillevaluator tier1 <skill-dir>`
    (rubric, LLM security, verification) and `skillevaluator tier2 <skill-dir>`.
-5. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, ask
+6. **Prepare Tier 3 cases.** If `<skill-dir>/evals/evals.json` is missing, ask
    the user for three to five real requests the skill should handle, what a
    good result looks like for each, and one request that should not trigger it.
    Write those into `<skill-dir>/evals/EVAL.md`; headings alone do not qualify.
@@ -139,13 +161,13 @@ do. Report no score, lift or verdict for that tier.
    `skillevaluator tier3 validate <skill-dir> --strict`. Format:
    [references/tier3-datasets.md](references/tier3-datasets.md); run policy and
    scoring: [references/tier3-running.md](references/tier3-running.md).
-6. **Run live evaluation.** `skillevaluator tier3 <skill-dir>` (or
+7. **Run live evaluation.** `skillevaluator tier3 <skill-dir>` (or
    `skillevaluator tier3 evaluate <skill-dir> -a opencode --env-mode docker --n-attempts 3`).
    Use `--max-cases 1` for a cheap smoke run first; such runs are never
    publication evidence.
-7. **Read the results** (see below), open `skillevaluator view <skill-dir>`, and
+8. **Read the results** (see below), open `skillevaluator view <skill-dir>`, and
    for follow-up questions run `skillevaluator tier3 feedback <run-dir>`.
-8. **Iterate.** Change the skill, rerun the same command with the same cases,
+9. **Iterate.** Change the skill, rerun the same command with the same cases,
    agent and model, and compare. Treat a single run's lift as directional.
 
 ## Read The Results
@@ -209,6 +231,7 @@ skillevaluator tier3 evaluate <skill-dir> --skip-with-skill
 
 | Symptom | Cause | Fix |
 | --- | --- | --- |
+| `skillevaluator: command not found` | CLI not installed or not on `PATH` | Workflow step 1: install with `uv tool install`, `pipx`, or `pip` in a virtual environment, or use `uvx` |
 | Exit `2` | Unknown flag, bad value, or missing path | Check `skillevaluator <command> --help`; prefix paths named like commands with `./` |
 | Check shows `INCOMPLETE` | A scanner is missing or failed | Run `skillevaluator health-check --tier 1`; install the `security` extra or the missing scanner |
 | "provider is required" / exit `1` before reports | No `SKILL_EVAL_LLM_PROVIDER` or key, or several keys exported | Set exactly one provider and its key; see providers reference |

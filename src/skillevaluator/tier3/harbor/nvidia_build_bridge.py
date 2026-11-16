@@ -221,7 +221,10 @@ class NvidiaBuildBridgeHandler(BaseHTTPRequestHandler):
             self._log(error.status_code, route, error.category)
             return
 
-        self._send_sse(events)
+        if payload.get("stream") is False and route == MESSAGES_PATH:
+            self._send_json(200, _anthropic_message_from_events(events))
+        else:
+            self._send_sse(events)
         self._log(200, route, "none")
 
     def _client_is_authorized(self) -> bool:
@@ -1303,7 +1306,13 @@ def chat_completion_to_responses_events(
         )
 
     events.append(
-        {"type": "response.completed", "response": _responses_response(response_id, model, "completed", output)}
+        {
+            "type": "response.completed",
+            "response": {
+                **_responses_response(response_id, model, "completed", output),
+                "usage": _chat_usage(payload, anthropic=False),
+            },
+        }
     )
     for sequence_number, event in enumerate(events, start=1):
         yield {**event, "sequence_number": sequence_number}
@@ -1324,7 +1333,7 @@ def chat_completion_to_anthropic_events(
             "model": model,
             "content": [],
             "stop_reason": None,
-            "usage": {"input_tokens": 0, "output_tokens": 0},
+            "usage": _chat_usage(payload, anthropic=True),
         },
     }
 
@@ -1354,9 +1363,69 @@ def chat_completion_to_anthropic_events(
     yield {
         "type": "message_delta",
         "delta": {"stop_reason": "tool_use" if normalized_tool_calls else "end_turn", "stop_sequence": None},
-        "usage": {"input_tokens": 0, "output_tokens": 0},
+        "usage": _chat_usage(payload, anthropic=True),
     }
     yield {"type": "message_stop"}
+
+
+def _chat_usage(payload: dict[str, Any], *, anthropic: bool) -> dict[str, Any] | None:
+    usage = payload.get("usage")
+    if not isinstance(usage, dict):
+        if not anthropic:
+            return None
+        usage = {}
+    result: dict[str, Any] = {"input_tokens": 0, "output_tokens": 0} if anthropic else {}
+    for source, target in (("prompt_tokens", "input_tokens"), ("completion_tokens", "output_tokens")):
+        value = usage.get(source)
+        if isinstance(value, int) and not isinstance(value, bool) and value >= 0:
+            result[target] = value
+    details = usage.get("prompt_tokens_details")
+    cached = details.get("cached_tokens") if isinstance(details, dict) else None
+    if isinstance(cached, int) and not isinstance(cached, bool) and cached >= 0:
+        if anthropic:
+            result["cache_read_input_tokens"] = cached
+            if "input_tokens" in result:
+                result["input_tokens"] = max(0, result["input_tokens"] - cached)
+        else:
+            result["input_tokens_details"] = {"cached_tokens": cached}
+    if anthropic:
+        return result
+    completion_details = usage.get("completion_tokens_details")
+    reasoning = completion_details.get("reasoning_tokens") if isinstance(completion_details, dict) else None
+    if isinstance(reasoning, int) and not isinstance(reasoning, bool) and reasoning >= 0:
+        result["output_tokens_details"] = {"reasoning_tokens": reasoning}
+    total = usage.get("total_tokens")
+    if isinstance(total, int) and not isinstance(total, bool) and total >= 0:
+        result["total_tokens"] = total
+    if not result:
+        return None
+    # Responses usage has no optional fields once present, so fill what Build did not report.
+    result.setdefault("input_tokens", 0)
+    result.setdefault("output_tokens", 0)
+    result.setdefault("input_tokens_details", {"cached_tokens": 0})
+    result.setdefault("output_tokens_details", {"reasoning_tokens": 0})
+    result.setdefault("total_tokens", result["input_tokens"] + result["output_tokens"])
+    return result
+
+
+def _anthropic_message_from_events(events: list[dict[str, Any]]) -> dict[str, Any]:
+    message = dict(events[0]["message"])
+    content: list[dict[str, Any]] = []
+    for event in events:
+        if event["type"] == "content_block_start":
+            content.append(dict(event["content_block"]))
+        elif event["type"] == "content_block_delta":
+            block = content[event["index"]]
+            delta = event["delta"]
+            if delta["type"] == "text_delta":
+                block["text"] += delta["text"]
+            else:
+                block["input"] = json.loads(delta["partial_json"])
+        elif event["type"] == "message_delta":
+            message.update(event["delta"])
+            message["usage"] = event["usage"]
+    message["content"] = content
+    return message
 
 
 def redact_bridge_text(value: Any) -> str:

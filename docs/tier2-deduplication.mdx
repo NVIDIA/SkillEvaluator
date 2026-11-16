@@ -8,8 +8,8 @@ Tier 2 finds redundant content — inside a single skill and across a skill
 collection — using embedding similarity, with chat-LLM verification for
 intra-skill candidates. It needs a configured embeddings provider; intra-skill
 analysis also needs a chat LLM. See
-[Providers & Credentials](configuration.mdx) to set both up, including the
-[fully local recipe](configuration.mdx#fully-local-setup) when skill content
+[Providers & Credentials](/skills/skillevaluator/configuration) to set both up, including the
+[fully local recipe](/skills/skillevaluator/configuration#fully-local-setup) when skill content
 must not leave your machine.
 
 Both checks read local files only.
@@ -21,8 +21,25 @@ The [all-tier onboarding path](/skills/skillevaluator/advanced-ci)
 runs Tier 2 as an advisory check, independently from the Tier 1 image and paired
 Tier 3 evaluation. Configure chat and embedding provider credentials as CI
 secrets. Tier 2 does not read `evals/`; committed native datasets are needed
-only for [Tier 3](tier3-live-evaluation.mdx). Missing credentials or a central
+only for [Tier 3](/skills/skillevaluator/tier3-live-evaluation). Missing credentials or a central
 dataset mapping produce an actionable incomplete result before paid work.
+
+When the configured skill roots hold more than one skill, CI compares the
+selected skills with a catalog built from all of them, including skills that
+did not change. One `SKILL.md` among them whose frontmatter is not a valid YAML
+mapping with a non-empty string `name` and `description`, such as `name: 2048`,
+`name: yes`, or `description: [Draft]`, stops that catalog before any embedding
+request. Tier 2 then checks no skill and is incomplete. Its reason says that a
+skill's frontmatter is the cause, and the retained catalog diagnostics name
+every such skill by its path in the repository. Quote such a value, as in
+`name: "2048"`. A `SKILL.md` that is not valid UTF-8, such as one saved as
+UTF-16 or as Windows-1252 with an accented letter, stops the catalog with the
+same reason and is named the same way; save it as UTF-8.
+Frontmatter over a [structure or length limit](#defaults-and-safety-limits)
+also stops the catalog, but with the reason that points at provider and
+embedding configuration, and the diagnostics then name no skill, not even one
+whose frontmatter is invalid as described above. Run `similarity-check` on the
+skill root to find the manifest over the limit.
 
 The aggregate artifact preserves native Tier 2 JSON and HTML, including
 deduplication and catalog-similarity findings. Failed, missing or incomplete
@@ -55,7 +72,7 @@ Direct Tier 2 prints the terminal report and writes JSON and HTML reports to
 
 For NVIDIA Build or OpenAI, the same provider and key configure both chat and
 embeddings; no separate embedding variables are needed. See
-[Providers & Credentials](configuration.mdx) for other providers.
+[Providers & Credentials](/skills/skillevaluator/configuration) for other providers.
 
 ## Which check do you need
 
@@ -242,7 +259,7 @@ again on a rerun, so Tier 2 records a MEDIUM `llm_refused` finding that names
 the overlapping sections and does not block. Review that overlap by hand, or
 rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
 a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
-[policy overlay](tier1-validation.mdx#validation-profiles-and-policies).
+[policy overlay](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies).
 
 The JSON report's `llm_analysis` names the configured `provider` and `model`.
 A server-side fallback model can answer a cluster in the configured model's
@@ -360,6 +377,15 @@ entries when each skill has a directory and `SKILL.md`. Collections with more
 supporting files or deeper layouts may reach the path ceiling before the
 selected-entry budget.
 
+Selected manifests also share a fixed 8 MiB input-byte budget, with a 1 MiB
+per-manifest limit. Both apply to the complete manifest bytes even in the
+default description-only embedding mode; supporting files count toward
+discovered paths, but not these selected-manifest byte totals. For example,
+2,500 manifests averaging 4 KiB exceed the collection byte budget even though
+the entry count fits. Discovery stops with an explicit error before embedding;
+`--max-entries` and `--max-scalar-comparisons` do not raise either byte limit.
+Check total manifest sizes as well as path counts before planning a scale run.
+
 For a saved catalog query, `--max-entries` does not reduce the catalog's existing
 5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
 bounded by `--max-scalar-comparisons`.
@@ -409,7 +435,8 @@ existing set — save the collection once and query candidates against it.
     ```
 
     `--save-catalog` builds a versioned JSON catalog from the supplied
-    collection.
+    collection. Catalogs use compact JSON so formatting whitespace does not
+    consume the 32 MiB file budget; vector values and the schema are unchanged.
   </Step>
   <Step title="Screen a candidate">
     ```bash title="Compare one candidate against the catalog"
@@ -482,7 +509,7 @@ All Tier 2 commands accept the standard report options (`-r cli,json,html,markdo
 and `-o`). HIGH and CRITICAL findings, along with blocking analysis errors,
 produce a non-zero exit code; MEDIUM and LOW findings are advisory. Exit
 behavior is identical in every output mode, so these commands work as CI gates
-— see [Gate Your CI](ci-integration.mdx).
+— see [Gate Your CI](/skills/skillevaluator/ci-integration).
 
 Inside the combined `validate` pipeline, Tier 2 also gates by default. Pass
 `--no-block-on-dedup` to keep the scan and its findings in every report without
@@ -559,7 +586,7 @@ scan.
 - Catalog files are read and written locally; SkillEvaluator does not upload
   them to a catalog service.
 
-Use the [fully local provider recipe](configuration.mdx#fully-local-setup) when
+Use the [fully local provider recipe](/skills/skillevaluator/configuration#fully-local-setup) when
 skill content must not leave the machine, and review your provider's data
 handling terms before sending confidential skill content to a hosted endpoint.
 
@@ -592,7 +619,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
     | Catalog path is missing | Returns an error and does not rebuild it silently |
     | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
     | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
-    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete |
+    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete. In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog and names the skill |
     | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
     | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
     | Candidate matches multiple catalog entries | Reports matches in descending similarity order |
@@ -604,13 +631,13 @@ handling terms before sending confidential skill content to a hosted endpoint.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="tier3-live-evaluation.mdx">
+  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Prove the skill changes agent behavior with a live A/B evaluation.
   </Card>
-  <Card title="Providers & Credentials" icon="book" href="configuration.mdx">
+  <Card title="Providers & Credentials" icon="book" href="/skills/skillevaluator/configuration">
     Configure an embeddings provider — including a fully local setup.
   </Card>
-  <Card title="CLI Reference" icon="terminal" href="cli-reference.mdx">
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
     Every Tier 2 flag, default, and report option.
   </Card>
 </CardGroup>

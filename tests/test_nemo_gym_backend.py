@@ -95,6 +95,41 @@ def test_gym_command_keeps_api_key_out_of_argv(tmp_path: Path, monkeypatch: pyte
     assert "+default_host=172.17.0.1" in command
 
 
+@pytest.mark.parametrize("agent", ["claude-code", "codex", "opencode"])
+def test_gym_claude_command_configures_model_server_runtime(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, agent: str
+) -> None:
+    from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
+
+    monkeypatch.setenv(MODEL_API_KEY_ENV, "policy-secret-value")
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "unrelated-anthropic-secret")
+    command = gym_eval_command(
+        "gym",
+        tmp_path,
+        agent=agent,
+        model="policy-model",
+        model_url="https://example.com/v1",
+        rollouts_path=tmp_path / "rollouts.jsonl",
+        n_attempts=1,
+        n_concurrent=None,
+        sandbox="docker",
+    )
+    assert "policy-secret-value" not in " ".join(command)
+    assert "unrelated-anthropic-secret" not in " ".join(command)
+    assert f"+policy_api_key=${{oc.env:{MODEL_API_KEY_ENV}}}" in command
+    overrides = [
+        "++anthropic_api_key=EMPTY",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model_server="
+        "{type:responses_api_models,name:policy_model}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.model=${policy_model_name}",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.bare=false",
+        "++claude_code_agent.responses_api_agents.claude_code_agent.claude_code_version="
+        + PINNED_RUNTIME_VERSIONS["claude-code"],
+    ]
+    for override in overrides:
+        assert (override in command) == (agent == "claude-code")
+
+
 def _rollout(tmp_path: Path, task: str, attempt: int, overall: float | None) -> dict:
     logs = tmp_path / "gym-logs" / f"{task}-{attempt}"
     logs.mkdir(parents=True)
@@ -157,6 +192,143 @@ def test_normalized_gym_jobs_are_read_by_shared_collector(tmp_path: Path) -> Non
     assert agent["overall_with_skill"] == pytest.approx(0.9)
     assert agent["overall_without_skill"] == pytest.approx(0.4)
     assert agent["scored_attempts"]
+
+
+def test_verifier_case_id_mismatches_are_unscored_by_shared_collector(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    task_case_ids = {"case-1": "case-1", "case-2": "case-2"}
+    rows = []
+    for task, reported_id, score in (("case-1", "case-2", 1.0), ("case-2", "case-1", 0.0)):
+        row = _rollout(tmp_path, task, 1, score)
+        Path(row["verifier_logs_dir"], "reward.json").write_text(
+            json.dumps({"entry_id": reported_id, "overall": score}),
+            encoding="utf-8",
+        )
+        rows.append(row)
+
+    errors = write_job_from_rollouts(
+        rows,
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids=task_case_ids,
+        n_attempts=1,
+    )
+
+    assert errors == [
+        "case case-1 attempt 1: the task verifier reported case 'case-2' for staged case 'case-1'",
+        "case case-2 attempt 1: the task verifier reported case 'case-1' for staged case 'case-2'",
+    ]
+    job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
+    assert job_result["stats"]["n_errors"] == 2
+    assert job_result["stats"]["evals"]["codex__m"]["n_trials"] == 0
+    assert job_result["stats"]["evals"]["codex__m"]["reward_stats"]["reward"] == {}
+    for task in task_case_ids:
+        trial_result = json.loads((job_dir / f"{task}__gym001" / "result.json").read_text(encoding="utf-8"))
+        assert trial_result["verifier_result"] is None
+        assert trial_result["exception_info"]["exception_type"] == "NeMoGymEpisodeFailure"
+
+    output_dir = tmp_path / "out"
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        output_dir,
+        jobs,
+        skip_baseline=True,
+        expected_cases=2,
+        expected_case_ids=list(task_case_ids.values()),
+        expected_trials=2,
+    )
+    agent = results["agents"]["codex"]
+    assert results["execution_status"] == "failed"
+    assert agent["num_trials_with"] == 0
+    assert agent["scored_attempts"] == 0
+    assert agent["overall_with_skill"] is None
+    assert not list((output_dir / "codex" / "with-skill" / "trials").glob("*/reward.json"))
+
+
+def test_matching_verifier_case_id_still_scores_through_shared_collector(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    row = _rollout(tmp_path, "case-1", 1, 0.75)
+    Path(row["verifier_logs_dir"], "reward.json").write_text(
+        json.dumps({"entry_id": "case-1", "overall": 0.75}),
+        encoding="utf-8",
+    )
+
+    errors = write_job_from_rollouts(
+        [row],
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids={"case-1": "case-1"},
+        n_attempts=1,
+    )
+    assert errors == []
+    normalized_reward = json.loads(
+        (job_dir / "case-1__gym001" / "verifier" / "reward.json").read_text(encoding="utf-8")
+    )
+    assert normalized_reward == {"entry_id": "case-1", "overall": 0.75}
+
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        tmp_path / "out",
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+        expected_trials=1,
+    )
+    agent = results["agents"]["codex"]
+    assert agent["overall_with_skill"] == pytest.approx(0.75)
+    assert agent["scored_attempts"] == 1
+
+
+def test_custom_reward_sidecar_survives_normalization_and_collection(tmp_path: Path) -> None:
+    jobs = tmp_path / "jobs"
+    job_dir = jobs / "calc-codex-with"
+    row = _rollout(tmp_path, "case-1", 1, 0.75)
+    logs_dir = Path(row["verifier_logs_dir"])
+    (logs_dir / "reward.json").write_text(json.dumps({"overall": 0.75}), encoding="utf-8")
+    custom_reward = {
+        "overall": 0.75,
+        "custom_metrics": {"quality": 0.8},
+        "details": {"quality": {"reason": "The answer follows the requested format."}},
+    }
+    (logs_dir / "custom_reward.json").write_text(json.dumps(custom_reward), encoding="utf-8")
+
+    errors = write_job_from_rollouts(
+        [row],
+        job_dir,
+        eval_name="codex__m",
+        task_case_ids={"case-1": "case-1"},
+        n_attempts=1,
+    )
+    assert errors == []
+    normalized_sidecar = job_dir / "case-1__gym001" / "verifier" / "custom_reward.json"
+    assert json.loads(normalized_sidecar.read_text(encoding="utf-8")) == custom_reward
+
+    output_dir = tmp_path / "out"
+    results = collect_harbor_results(
+        "calc",
+        ["codex"],
+        output_dir,
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-1"],
+        expected_trials=1,
+        grading_mode="custom_only",
+    )
+    agent = results["agents"]["codex"]
+    assert agent["scored_attempts"] == 1
+    collected_reward = json.loads(
+        (output_dir / "codex" / "with-skill" / "trials" / "case-1__gym001" / "reward.json").read_text(encoding="utf-8")
+    )
+    detail = {"reason": "The answer follows the requested format."}
+    assert collected_reward["custom_metrics"]["quality"] == pytest.approx(0.8)
+    assert collected_reward["details"]["quality"] == detail
+    assert collected_reward["custom_details"]["quality"] == detail
 
 
 def test_an_unscored_gym_attempt_of_a_native_task_counts_its_tokens_in_its_case(tmp_path: Path) -> None:
@@ -288,6 +460,107 @@ def test_stage_for_gym_drops_only_the_skills_dir_hook(tmp_path: Path) -> None:
     text = (task / "task.toml").read_text()
     assert "skills_dir" not in text
     assert "cpus = 2" in text and 'A = "1"' in text
+
+
+@pytest.mark.parametrize("workdir", [None, "/work/custom/", "/work with spaces"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_opencode_project_skills_are_staged_in_both_arms(tmp_path: Path, workdir, with_skill: bool) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("---\nname: calculator\n---\n")
+    (task / "task.toml").write_text("[environment]\n" + (f"workdir = {json.dumps(workdir)}\n" if workdir else ""))
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent="opencode")
+    staged = dockerfile.read_text()
+    target = (workdir or "/workspace").rstrip("/") + "/.agents/skills/"
+    assert "COPY " + json.dumps(["skills/", target]) in staged.splitlines()
+    stage_for_gym(tmp_path, agent="opencode")
+    assert dockerfile.read_text() == staged
+    assert (skills / "calculator" / "SKILL.md").is_file() is with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "claude-code", "opencode"])
+def test_project_skill_projection_leaves_tasks_without_skills_unchanged(tmp_path: Path, agent) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    environment.mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.13-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == "FROM python:3.13-slim\n"
+
+
+@pytest.mark.parametrize("agent, directory", [("opencode", ".agents"), ("claude-code", ".claude")])
+def test_project_skill_projection_follows_final_authored_reset(tmp_path: Path, agent, directory) -> None:
+    from skillevaluator.tier3.harbor.adapter import _append_task_input_projection
+
+    task = tmp_path / "case"
+    environment = task / "environment"
+    (environment / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    projection = "COPY " + json.dumps(["skills/", f"/workspace/{directory}/skills/"])
+    authored = f"FROM python:3.13-slim\n{projection}\nRUN rm -rf /workspace/{directory}\n"
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text(_append_task_input_projection(authored, include_input=False, agent_config_lines=[]))
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text().splitlines()[-1] == projection
+    staged = dockerfile.read_text()
+    stage_for_gym(tmp_path, agent=agent)
+    assert dockerfile.read_text() == staged
+
+
+@pytest.mark.parametrize("workdir", [None, "/work", "/"])
+@pytest.mark.parametrize("with_skill", [True, False])
+def test_stage_for_gym_projects_claude_skills_into_task_workdir(
+    tmp_path: Path, workdir: str | None, with_skill: bool
+) -> None:
+    task = tmp_path / "case"
+    environment = task / "environment"
+    skills = environment / "skills"
+    skills.mkdir(parents=True)
+    if with_skill:
+        (skills / "calculator").mkdir()
+        (skills / "calculator" / "SKILL.md").write_text("Use the calculator.\n")
+    (task / "task.toml").write_text(
+        '[environment]\nskills_dir = "/workspace/skills"\n' + (f"workdir = {json.dumps(workdir)}\n" if workdir else "")
+    )
+    dockerfile = environment / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    stage_for_gym(tmp_path, agent="claude-code")
+    destination = (workdir or "/workspace").rstrip("/") + "/.claude/skills/"
+    assert dockerfile.read_text().splitlines().count("COPY " + json.dumps(["skills/", destination])) == 1
+    assert "skills_dir" not in (task / "task.toml").read_text()
+    assert bool(list(skills.rglob("SKILL.md"))) == with_skill
+
+
+@pytest.mark.parametrize("agent", [None, "codex", "opencode"])
+def test_stage_for_gym_projects_only_supported_agent_images(tmp_path: Path, agent: str | None) -> None:
+    task = tmp_path / "case"
+    (task / "environment" / "skills").mkdir(parents=True)
+    (task / "task.toml").write_text("[environment]\n")
+    dockerfile = task / "environment" / "Dockerfile"
+    dockerfile.write_text("FROM python:3.12-slim\n")
+    stage_for_gym(tmp_path, agent=agent)
+    if agent == "opencode":
+        projection = "COPY " + json.dumps(["skills/", "/workspace/.agents/skills/"])
+        assert dockerfile.read_text().splitlines()[-1] == projection
+    else:
+        assert dockerfile.read_text() == "FROM python:3.12-slim\n"
+
+
+def test_stage_for_gym_claude_without_docker_skills(tmp_path: Path) -> None:
+    task = tmp_path / "case"
+    task.mkdir()
+    (task / "task.toml").write_text("[environment]\n")
+    stage_for_gym(tmp_path, agent="claude-code")
+    assert not (task / "environment").exists()
 
 
 def test_verifier_judge_env_stages_templates_not_values(tmp_path: Path, monkeypatch) -> None:
@@ -430,6 +703,33 @@ def _run_fake_gym(skill: Path, tmp_path: Path, **overrides) -> dict:
     }
     kwargs.update(overrides)
     return run_nemo_gym_eval(**kwargs)
+
+
+def test_fake_gym_claude_stages_project_skills_in_both_arms(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
+    original_stage = gym_runner.stage_for_gym
+    staged = {}
+
+    def recording_stage(arm_dir: Path, *args, **kwargs) -> None:
+        original_stage(arm_dir, *args, **kwargs)
+        staged[arm_dir.name] = [
+            (
+                path.read_text(),
+                bool(list((path.parent / "skills").rglob("SKILL.md"))),
+            )
+            for path in arm_dir.glob("*/environment/Dockerfile")
+        ]
+
+    monkeypatch.setattr(gym_runner, "stage_for_gym", recording_stage)
+    _run_fake_gym(skill, tmp_path, agents=["claude-code"])
+    assert set(staged) == {"with", "without"}
+    for arm, tasks in staged.items():
+        assert tasks
+        for dockerfile, has_skill in tasks:
+            assert 'COPY ["skills/", "/workspace/.claude/skills/"]' in dockerfile
+            assert has_skill == (arm == "with")
 
 
 @pytest.fixture
@@ -1205,6 +1505,107 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
         pytest.fail("child of the Gym leader survived")
 
 
+@pytest.mark.parametrize("interrupt", [False, True])
+def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, interrupt: bool) -> None:
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    script = "import os, signal, time; time.sleep(0.5); "
+    if interrupt:
+        script += "os.kill(os.getppid(), signal.SIGINT); "
+    script += "time.sleep(60)"
+    reporter = _RecordingReporter()
+    with (tmp_path / "gym.log").open("w") as log:
+
+        def run():
+            return _run_gym(
+                [sys.executable, "-c", script],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=1,
+                reporter=reporter,
+            )
+
+        if interrupt:
+            with pytest.raises(KeyboardInterrupt):
+                run()
+        else:
+            assert run() is None
+    cleanup = [event for event in reporter.events if event.stage == "cleanup"]
+    assert [event.state for event in cleanup] == ["running", "complete"]
+    assert cleanup[-1].detail == "NeMo Gym stopped"
+
+
+@pytest.mark.parametrize("exit_early", [False, True])
+def test_gym_cleanup_stops_detached_servers_but_not_other_runs(tmp_path: Path, exit_early: bool) -> None:
+    import socket
+    import subprocess
+    import sys
+
+    from skillevaluator.tier3.nemo_gym.runner import _run_gym
+
+    unrelated = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"], start_new_session=True)
+    ready = tmp_path / "server.json"
+    child = (
+        "import json, os, signal, socket, time\n"
+        "signal.signal(signal.SIGTERM, lambda *_: exit(0))\n"
+        "s = socket.socket(); s.bind(('127.0.0.1', 0)); s.listen()\n"
+        f"open({str(ready)!r}, 'w').write(json.dumps([os.getpid(), s.getsockname()[1]]))\n"
+        "time.sleep(60)\n"
+    )
+    leader = (
+        "import subprocess, sys, time\n"
+        f"subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        "time.sleep(0.5)\n" + ("sys.exit(1)\n" if exit_early else "time.sleep(60)\n")
+    )
+    try:
+        with (tmp_path / "gym.log").open("w") as log:
+            result = _run_gym([sys.executable, "-c", leader], cwd=tmp_path, env=dict(os.environ), log=log, timeout_s=2)
+        assert result == (1 if exit_early else None)
+        _pid, port = json.loads(ready.read_text())
+        with socket.socket() as connection:
+            assert connection.connect_ex(("127.0.0.1", port)) != 0
+        assert unrelated.poll() is None
+    finally:
+        unrelated.terminate()
+        unrelated.wait(timeout=5)
+
+
+def test_detached_process_discovery_requires_this_runs_exact_marker(monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(
+        gym_runner.subprocess,
+        "run",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="11 11 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "12 12 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run-other\n"
+            "13 13 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=another-run\n"
+            "14 10 S python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+            "15 15 Z python SKILL_EVAL_NEMO_GYM_RUN_TOKEN=this-run\n"
+        ),
+    )
+    assert gym_runner._gym_run_processes("this-run", 10) == [11]
+
+
+def test_detached_process_discovery_error_is_actionable_and_does_not_echo_environment(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    def unavailable(*args, **kwargs):
+        raise subprocess.CalledProcessError(1, ["ps"], output="credential-value")
+
+    monkeypatch.setattr(gym_runner.subprocess, "run", unavailable)
+    with pytest.raises(gym_runner.GymCleanupError, match="check host process access") as error:
+        gym_runner._gym_run_processes("this-run", 10)
+    assert "credential-value" not in str(error.value)
+
+
 def test_gym_judge_override_reaches_the_staged_verifier(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, keep_staged_tasks: None
 ) -> None:
@@ -1229,7 +1630,8 @@ def test_gym_run_removes_staged_tasks_and_jobs(tmp_path: Path, monkeypatch: pyte
     assert json.loads((run_dir / "run_config.json").read_text())["harbor"]["jobs_retained"] is False
 
 
-def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+@pytest.mark.parametrize("reachable", [True, False])
+def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, reachable: bool) -> None:
     from skillevaluator.tier3 import commands
     from skillevaluator.tier3.nemo_gym import backend
     from skillevaluator.tier3.nemo_gym import runner as gym_runner
@@ -1244,17 +1646,185 @@ def test_doctor_reports_nemo_gym_readiness(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setattr("shutil.which", lambda name: f"/usr/bin/{name}")
     monkeypatch.setattr(commands, "_docker_daemon_error", lambda _env: None)
     monkeypatch.setattr(gym_runner, "_model_endpoint", lambda model: (model or "m", "http://127.0.0.1:9/v1", "k"))
-    rows = commands._nemo_gym_doctor_rows(["codex"], "docker", {})
+    probes = []
+
+    def endpoint_probe(url):
+        probes.append(url)
+        return None if reachable else "check SKILL_EVAL_NEMO_GYM_MODEL_URL"
+
+    monkeypatch.setattr(commands, "_nemo_gym_policy_endpoint_error", endpoint_probe)
+    rows = commands._nemo_gym_doctor_rows(["codex", "opencode"], "docker", {})
     assert rows == [
         ("NeMo Gym CLI", "pass", f"{gym} (nemo-gym 0.7.0)"),
-        ("NeMo Gym backend", "pass", "docker sandbox ready"),
+        ("NeMo Gym backend", "pass", "docker sandbox ready")
+        if reachable
+        else ("NeMo Gym backend", "fail", "codex: check SKILL_EVAL_NEMO_GYM_MODEL_URL"),
     ]
+    assert probes == ["http://127.0.0.1:9/v1"]
 
     monkeypatch.setenv("SKILL_EVAL_NEMO_GYM_BIN", str(tmp_path / "missing"))
     rows = commands._nemo_gym_doctor_rows(["codex", "goose"], "local", {})
     assert rows[0][:2] == ("NeMo Gym CLI", "fail")
     details = " ".join(detail for _name, status, detail in rows[1:] if status == "fail")
     assert "goose" in details and "docker only" in details
+
+
+@pytest.mark.parametrize("status", [200, 307, 401, 403, 404, 405])
+def test_policy_endpoint_probe_accepts_any_http_response_without_credentials(status: int) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    headers = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            headers.append(dict(self.headers))
+            self.send_response(status)
+            self.send_header("Location", "http://127.0.0.1:9/unreachable")
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    try:
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(headers) == 1
+        assert not any(name.lower() in {"authorization", "x-api-key"} for name in headers[0])
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("url", ["", "not-a-url", "http://127.0.0.1:9/v1", "http://user:credential@127.0.0.1:9/v1"])
+def test_policy_endpoint_probe_failure_is_actionable_and_redacted(url: str) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    error = _nemo_gym_policy_endpoint_error(url)
+    assert error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error and "network access" in error
+    assert "credential@" not in error
+
+
+def test_policy_endpoint_probe_has_a_hard_deadline_even_for_stalled_dns(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    def stalled_probe(args, **kwargs):
+        assert kwargs["timeout"] == 3
+        assert kwargs["input"] == "https://example.invalid/v1"
+        assert "https://example.invalid/v1" not in args
+        assert kwargs["stderr"] == subprocess.DEVNULL
+        raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+
+    monkeypatch.setattr(commands.subprocess, "run", stalled_probe)
+    error = commands._nemo_gym_policy_endpoint_error("https://example.invalid/v1")
+    assert "timed out after 3s" in error and "SKILL_EVAL_NEMO_GYM_MODEL_URL" in error
+
+
+def test_policy_endpoint_probe_does_not_import_from_checkout(tmp_path: Path, monkeypatch) -> None:
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    marker = tmp_path / "imported"
+    (tmp_path / "http.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    monkeypatch.chdir(tmp_path)
+    _nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1")
+    assert not marker.exists()
+
+
+def test_policy_endpoint_probe_environment_excludes_credentials(monkeypatch) -> None:
+    import subprocess
+
+    from skillevaluator.tier3 import commands
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-probe-credential")
+
+    def probe(_args, **kwargs):
+        assert "OPENAI_API_KEY" not in tuple(kwargs.get("env", os.environ))
+        return subprocess.CompletedProcess(_args, 0)
+
+    monkeypatch.setattr(commands.subprocess, "run", probe)
+    assert commands._nemo_gym_policy_endpoint_error("http://127.0.0.1:9/v1") is None
+
+
+@pytest.mark.parametrize("proxy_name", ["http_proxy", "HTTP_PROXY"])
+@pytest.mark.parametrize("scheme", ["http://", ""])
+@pytest.mark.parametrize(
+    "endpoint_scheme, status",
+    [("http", 405), ("http", 407), ("http", 502), ("http", 504), ("https", 407), ("https", 502), ("https", 504)],
+)
+def test_policy_endpoint_probe_honors_anonymous_http_proxy(
+    monkeypatch, proxy_name, scheme, endpoint_scheme, status
+) -> None:
+    import http.server
+    import threading
+
+    from skillevaluator.tier3.commands import _nemo_gym_policy_endpoint_error
+
+    requests = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            requests.append((self.path, tuple(self.headers)))
+            self.send_response(status)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+        def do_CONNECT(self):
+            self.do_HEAD()
+
+    for name in ("http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        monkeypatch.delenv(name, raising=False)
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
+    proxy_name = proxy_name.replace("http", endpoint_scheme).replace("HTTP", endpoint_scheme.upper())
+    monkeypatch.setenv(proxy_name, f"{scheme}user:password@127.0.0.1:{server.server_port}")
+    try:
+        error = _nemo_gym_policy_endpoint_error(f"{endpoint_scheme}://policy.invalid/v1")
+        expected_path = "http://policy.invalid/v1" if endpoint_scheme == "http" else "policy.invalid:443"
+        assert len(requests) == 1 and requests[0][0] == expected_path
+        assert not {name.lower() for name in requests[0][1]} & {"authorization", "proxy-authorization", "x-api-key"}
+        if status != 405:
+            assert error and "proxy" in error
+            if status == 407:
+                assert "authentication" in error
+            return
+        assert error is None
+        monkeypatch.setenv(proxy_name, "http://127.0.0.1:9")
+        monkeypatch.setenv("NO_PROXY", "127.0.0.1")
+        assert _nemo_gym_policy_endpoint_error(f"http://127.0.0.1:{server.server_port}/v1") is None
+        assert len(requests) == 2 and requests[1][0] == "/v1"
+    finally:
+        server.shutdown()
+        thread.join()
+        server.server_close()
+
+
+@pytest.mark.parametrize("status", [502, 504])
+def test_https_policy_endpoint_origin_error_after_proxy_tunnel_is_reachable(monkeypatch, status) -> None:
+    import io
+    import urllib.error
+    import urllib.request
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3 import commands
+
+    def origin_response(request, **_kwargs):
+        raise urllib.error.HTTPError(request.full_url, status, "origin gateway error", {}, None)
+
+    monkeypatch.setattr(sys, "stdin", io.StringIO("https://policy.invalid/v1"))
+    monkeypatch.setattr(urllib.request, "getproxies_environment", lambda: {"https": "http://proxy.invalid"})
+    monkeypatch.setattr(urllib.request, "proxy_bypass", lambda _host: False)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *_handlers: SimpleNamespace(open=origin_response))
+    exec(commands._POLICY_ENDPOINT_PROBE, {})
 
 
 def test_tier3_doctor_accepts_backend_option() -> None:
@@ -1611,6 +2181,30 @@ def test_adc_refresh_follows_the_policy_key_source(monkeypatch: pytest.MonkeyPat
     assert refreshed[MODEL_API_KEY_ENV] == "token-c" and refreshed["OPENAI_API_KEY"] == "token-c"
     refreshed, _timeout = gym_runner._refresh_adc_credentials(base, policy_uses_provider_key=False, timeout_s=60)
     assert refreshed[MODEL_API_KEY_ENV] == "token-a"
+
+
+def test_adc_refresh_renews_an_explicit_policy_key_that_is_the_provider_token(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from skillevaluator import provider_config
+    from skillevaluator.tier3.nemo_gym import runner as gym_runner
+
+    monkeypatch.setattr(provider_config, "refresh_host_vertex_adc_environment", lambda *_args, **_kwargs: "token-new")
+    shared = {"OPENAI_API_KEY": "token-old", MODEL_API_KEY_ENV: "token-old"}
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(shared, policy_uses_provider_key=False, timeout_s=60)
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new" and refreshed["OPENAI_API_KEY"] == "token-new"
+    assert shared[MODEL_API_KEY_ENV] == "token-old"
+
+    monkeypatch.setenv("OPENAI_API_KEY", "token-old")
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "token-old"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "token-new"
+
+    refreshed, _timeout = gym_runner._refresh_adc_credentials(
+        {MODEL_API_KEY_ENV: "policy-own-key"}, policy_uses_provider_key=False, timeout_s=60
+    )
+    assert refreshed[MODEL_API_KEY_ENV] == "policy-own-key"
 
 
 def test_second_interrupt_during_stop_still_kills_the_gym_group(tmp_path: Path) -> None:
@@ -2169,6 +2763,113 @@ def test_nemo_gym_rejects_unsupported_run_options(
         _evaluate(monkeypatch, tmp_path, backend="nemo-gym", **{option: value})
     errors = nemo_gym_preflight_errors(tmp_path, {"agents": "codex", "env_mode": "docker", option: value})
     assert f"{flag} is not supported with --backend nemo-gym yet" in errors
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP"])
+def test_detached_cleanup_defers_termination_until_finished(tmp_path: Path, signal_name) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    marker = tmp_path / "finished"
+    script = (
+        "import os, signal, sys\n"
+        "from pathlib import Path\n"
+        "from skillevaluator.tier3.nemo_gym import runner\n"
+        "def cleanup(*args, **kwargs):\n"
+        f"    os.kill(os.getpid(), signal.{signal_name})\n"
+        f"    Path({str(marker)!r}).touch()\n"
+        "runner._stop_detached_gym_processes = cleanup\n"
+        f"with open({str(tmp_path / 'gym.log')!r}, 'w') as log:\n"
+        f"    runner._run_gym([sys.executable, '-c', 'pass'], cwd=Path({str(tmp_path)!r}), "
+        "env=dict(os.environ), log=log, timeout_s=5)\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(Path(runner.__file__).parents[3])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert marker.exists(), f"cleanup interrupted: returncode={result.returncode}"
+    assert "KeyboardInterrupt" in result.stderr
+
+
+@pytest.mark.skipif(os.name != "posix", reason="requires POSIX signals")
+@pytest.mark.parametrize("interrupted", [True, False])
+def test_detached_inspection_failure_preserves_cancellation(tmp_path: Path, monkeypatch, interrupted) -> None:
+    import signal
+    import threading
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    def fail_cleanup(*_args, **_kwargs):
+        raise runner.GymCleanupError("Cannot inspect detached processes")
+
+    monkeypatch.setattr(runner, "_stop_detached_gym_processes", fail_cleanup)
+    reporter = _RecordingReporter()
+    timer = threading.Timer(0.5, lambda: os.kill(os.getpid(), signal.SIGINT)) if interrupted else None
+    if timer:
+        timer.start()
+    try:
+        with (
+            (tmp_path / "gym.log").open("w") as log,
+            pytest.raises(KeyboardInterrupt if interrupted else runner.GymCleanupError) as error,
+        ):
+            runner._run_gym(
+                [sys.executable, "-c", "import time; time.sleep(60)" if interrupted else "pass"],
+                cwd=tmp_path,
+                env=dict(os.environ),
+                log=log,
+                timeout_s=5,
+                reporter=reporter,
+            )
+    finally:
+        if timer:
+            timer.cancel()
+            timer.join()
+    if interrupted:
+        assert isinstance(error.value.__cause__, runner.GymCleanupError)
+        assert any(event.stage == "cleanup" and event.state == "failed" for event in reporter.events)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="needs Linux PR_SET_CHILD_SUBREAPER")
+def test_detached_cleanup_reaps_adopted_servers(tmp_path: Path) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    child = "import time; time.sleep(60)"
+    leader = (
+        "import os, subprocess, sys\n"
+        f"server = subprocess.Popen([sys.executable, '-c', {child!r}], start_new_session=True)\n"
+        "print(server.pid, flush=True)\n"
+    )
+    script = (
+        "import ctypes, os, subprocess, sys\n"
+        "from skillevaluator.tier3.nemo_gym.runner import _stop_detached_gym_processes\n"
+        "assert ctypes.CDLL(None).prctl(36, 1, 0, 0, 0) == 0\n"
+        f"leader = subprocess.Popen([sys.executable, '-c', {leader!r}], stdout=subprocess.PIPE, text=True,\n"
+        "    env={**os.environ, 'SKILL_EVAL_NEMO_GYM_RUN_TOKEN': 'reap-test-token'})\n"
+        "pid = int(leader.stdout.readline())\n"
+        "leader.wait(timeout=5)\n"
+        "_stop_detached_gym_processes('reap-test-token', leader.pid, force=True)\n"
+        "try:\n"
+        "    reaped, _ = os.waitpid(pid, os.WNOHANG)\n"
+        "except ChildProcessError:\n"
+        "    pass\n"
+        "else:\n"
+        "    assert False, f'adopted server was not reaped: {reaped}'\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        env={**os.environ, "PYTHONPATH": str(Path(runner.__file__).parents[3])},
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_nemo_gym_rejects_budget_config(tmp_path: Path) -> None:

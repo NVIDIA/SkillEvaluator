@@ -283,7 +283,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `sed -i 's/password=.*/password=.../'`, also inside an `ssh`, `sh -c`, or
   `eval` command string; a long flag with `_` between its words, such as
   `--db_password` or `--api_key`; an `npm config set`, `yarn config set`, or
-  `git config` key that is quoted or follows `--`, or whose value follows
+  `git config` key that is quoted (also with its quotes JSON-escaped, as in
+  saved tool-call arguments) or follows `--`, or whose value follows
   ` = `; and a shell `apply_patch` command whose 400-character cut split URL
   user info before it was masked.
   The `apply_patch` text is now masked before it is cut. A word with
@@ -334,8 +335,11 @@ All notable changes to SkillEvaluator are documented in this file.
   later credential name, the rest of the later name's own value is masked
   too, as it is when that name is read on its own, as in
   `\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
-  arguments repeated as JSON. Both the host checker and the bundled Harbor
-  verifier apply the fix.
+  arguments repeated as JSON. So is a credential name at the start of a line
+  after a JSON-escaped line break that an unquoted value ran over, as in
+  `API_TOKEN=a\nauth=("bob", "...")`, where the next line's tuple, call, or
+  quoted value with spaces was left unmasked. Both the host checker and the
+  bundled Harbor verifier apply the fix.
 - The behavior evidence gate no longer keeps a score for an expectation that
   names an observed artifact but also asks for something only the final answer
   could show. "Writes `report.py` and explains why each column was dropped" was

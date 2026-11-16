@@ -1966,7 +1966,9 @@ saved judge evidence use the same credential masker:
   that name is read on its own
   (`\"password: ... --api_key ...\\nb passwd = ...` in a tool call's JSON
   arguments repeated as JSON, where that value runs to the end of the outer
-  string);
+  string). A credential name at the start of a line after a JSON-escaped line
+  break that an unquoted value ran over is read on its own too
+  (`API_TOKEN=a\nauth=("bob", "...")`);
 - a `-u`, `-U`, `--user`, or `--proxy-user` value that holds a colon, such as
   `user:password` or an API key with an empty password (`KEY:`), also attached
   (`-uuser:password`) or at the end of a flag group (`curl -su user:password`);
@@ -1987,7 +1989,8 @@ saved judge evidence use the same credential masker:
   on its own line;
 - credentials set with `aws configure set`, `npm config set` (or `npm set`),
   `pnpm config set`, `yarn config set`, or `git config`, also after options
-  such as `--location=global` or a `--` that ends them, and with a quoted key
+  such as `--location=global` or a `--` that ends them, and with a quoted key,
+  also when its quotes are JSON-escaped, as in saved tool-call arguments
   (`_authToken`, `npmAuthToken`, `"github.token"`); `git config --get` and
   `--unset` take no value. An unquoted value after a quoted key or one after
   `--` ends at `;`, `|`, or `&`, and such a key's value that holds a

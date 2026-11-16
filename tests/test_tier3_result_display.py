@@ -304,7 +304,93 @@ def test_run_verdict_is_incomplete_when_no_agent_ran_its_with_skill_arm(shape: s
     output = render_result(result)
 
     assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == WITH_SKILL_FAILED_REASON
     assert "QUALITY VERDICT (" not in output
+
+
+def _arm_failures(*, with_skill: bool, baseline: bool) -> dict:
+    """An agent that failed the named arms; a failed baseline alone leaves the with-skill arm scored."""
+    agent = _succeeded_agent(passed=1)
+    agent["conditions"] = {
+        "with_skill": {"execution_status": "failed" if with_skill else "succeeded"},
+        "without_skill": {"execution_status": "failed" if baseline else "succeeded"},
+    }
+    if with_skill or baseline:
+        agent["execution_status"] = "failed"
+    if with_skill:
+        agent["pass_at_k"] = {}
+    return agent
+
+
+def _incomplete_reason(output: str) -> str:
+    """Return the line that explains an INCOMPLETE run verdict."""
+    lines = output.splitlines()
+    return lines[lines.index("RUN QUALITY VERDICT: INCOMPLETE") + 1]
+
+
+NEITHER_ARM_REASON = "no agent completed either arm; there is no quality verdict to report"
+WITH_SKILL_FAILED_REASON = "no agent completed its with-skill arm; there is no quality verdict to report"
+BASELINE_FAILED_REASON = (
+    "no agent completed its baseline arm, so the run has no complete agent result; "
+    "per-agent verdicts cover the with-skill arm only"
+)
+MIXED_REASON = (
+    "no agent completed both arms (with-skill arm failed for some, baseline arm for the rest); "
+    "there is no quality verdict to report"
+)
+
+
+@pytest.mark.parametrize(
+    ("codex", "opencode", "reason"),
+    [
+        ((True, True), (True, True), NEITHER_ARM_REASON),
+        ((True, False), (True, False), WITH_SKILL_FAILED_REASON),
+        ((True, True), (True, False), WITH_SKILL_FAILED_REASON),
+        ((False, True), (False, True), BASELINE_FAILED_REASON),
+        ((True, False), (False, True), MIXED_REASON),
+        ((True, True), (False, True), MIXED_REASON),
+    ],
+    ids=["neither-arm", "with-skill-arms", "neither-and-with-skill", "baseline-only", "mixed", "neither-and-baseline"],
+)
+def test_incomplete_run_verdict_names_the_arm_that_failed(codex, opencode, reason) -> None:
+    result = {
+        "agents": {
+            "codex": _arm_failures(with_skill=codex[0], baseline=codex[1]),
+            "opencode": _arm_failures(with_skill=opencode[0], baseline=opencode[1]),
+        }
+    }
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == reason
+
+
+def test_baseline_only_failures_keep_the_with_skill_headlines() -> None:
+    # The with-skill arms ran, so each agent's own headline reads them; only the
+    # run verdict is withheld, and its reason says the baseline arm is what failed.
+    result = {
+        "agents": {
+            name: {
+                **_arm_failures(with_skill=False, baseline=True),
+                "pass_at_k": {
+                    "with_skill": {
+                        **_checks(1)["with_skill"],
+                        "cases": {"case": {"passed": True, "attempts_used": 1, "best_score": 1.0, "attempts": []}},
+                    }
+                },
+            }
+            for name in ("codex", "opencode")
+        }
+    }
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == BASELINE_FAILED_REASON
+    assert "its with-skill arm" not in _incomplete_reason(output)
+    assert "QUALITY VERDICT (codex): PASS" in output
+    assert "QUALITY VERDICT (opencode): PASS" in output
 
 
 def test_run_verdict_ignores_an_agent_that_failed_only_its_baseline() -> None:

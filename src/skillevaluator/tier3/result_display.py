@@ -149,19 +149,19 @@ def _counts_toward_run_verdict(raw: Mapping[str, Any]) -> bool:
     return raw.get("execution_status") == "succeeded" and _condition_usable(raw, "with_skill")
 
 
-def _run_verdict_from_agents(agents: Mapping[str, Any]) -> str:
-    """Return the multi-agent run verdict read from the agents that ran their with-skill arm.
+def _run_verdict_from_agents(agents: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the multi-agent run verdict and, when it is incomplete, why.
 
-    The result is ``pass``, ``fail`` or ``inconclusive`` as in the canonical
-    report. It is ``incomplete`` when no agent ran its with-skill arm, and empty
-    for a baseline-only run (``--skip-with-skill``), which gives no skill verdict.
+    The verdict is read from the agents that ran their with-skill arm and is
+    ``pass``, ``fail`` or ``inconclusive`` as in the canonical report. It is
+    ``incomplete`` when no agent can be read, with a reason naming the arm that
+    failed, and empty for a baseline-only run (``--skip-with-skill``), which
+    gives no skill verdict.
     """
     verdict_agents = _run_verdict_agents(agents)
     if not verdict_agents:
-        baseline_only = all(
-            _condition_status(raw, "with_skill") == "skipped" for raw in agents.values() if isinstance(raw, Mapping)
-        )
-        return "" if baseline_only else "incomplete"
+        arm_failures = _arm_failures(agents)
+        return ("", "") if arm_failures is None else ("incomplete", _incomplete_run_reason(arm_failures))
     agent_verdicts = []
     for raw in verdict_agents:
         explicit = str(raw.get("verdict") or "").casefold()
@@ -175,10 +175,49 @@ def _run_verdict_from_agents(agents: Mapping[str, Any]) -> str:
             "inconclusive" if _never_activated(raw) else "fail" if required_check_failure_reason(raw_checks) else "pass"
         )
     if "pass" in agent_verdicts:
-        return "pass"
+        return "pass", ""
     if all(item == "inconclusive" for item in agent_verdicts):
-        return "inconclusive"
-    return "fail"
+        return "inconclusive", ""
+    return "fail", ""
+
+
+def _arm_failures(agents: Mapping[str, Any]) -> set[str] | None:
+    """Name how each agent missed the run verdict, or None for a baseline-only run.
+
+    ``both`` is an agent that completed neither arm, ``with_skill`` one whose
+    with-skill arm did not complete, and ``baseline`` one whose with-skill arm
+    completed but whose baseline did not (and was not tolerated), so the agent
+    still failed.
+    """
+    raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
+    if all(_condition_status(raw, "with_skill") == "skipped" for raw in raw_agents):
+        return None
+    failures = set()
+    for raw in raw_agents:
+        if _condition_usable(raw, "with_skill"):
+            failures.add("baseline")
+        elif _condition_usable(raw, "without_skill") or _condition_status(raw, "without_skill") == "skipped":
+            failures.add("with_skill")
+        else:
+            failures.add("both")
+    return failures
+
+
+def _incomplete_run_reason(arm_failures: set[str]) -> str:
+    """Say which arm kept every agent out of the run verdict, in the budget reason's plain style."""
+    if arm_failures == {"both"}:
+        return "no agent completed either arm; there is no quality verdict to report"
+    if arm_failures <= {"both", "with_skill"}:
+        return "no agent completed its with-skill arm; there is no quality verdict to report"
+    if arm_failures == {"baseline"}:
+        return (
+            "no agent completed its baseline arm, so the run has no complete agent result; "
+            "per-agent verdicts cover the with-skill arm only"
+        )
+    return (
+        "no agent completed both arms (with-skill arm failed for some, baseline arm for the rest); "
+        "there is no quality verdict to report"
+    )
 
 
 def _ranks_like_the_canonical_report(raw: Mapping[str, Any]) -> bool:
@@ -1179,15 +1218,14 @@ def render_evaluation_result(
     if isinstance(agents, Mapping) and agents and not incomplete:
         if len(agents) > 1 and not budget_reason:
             run_verdict = str(result.get("verdict") or "").casefold()
+            run_verdict_reason = ""
             if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
-                run_verdict = _run_verdict_from_agents(agents)
+                run_verdict, run_verdict_reason = _run_verdict_from_agents(agents)
             if run_verdict:
                 style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
                 console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
-                if run_verdict == "incomplete":
-                    console.print(
-                        Text("No agent completed its with-skill arm, so no quality verdict is given.", style="yellow")
-                    )
+                if run_verdict_reason:
+                    console.print(Text(run_verdict_reason, style="yellow"))
         if not verbose:
             for agent, raw in agents.items():
                 if not isinstance(raw, Mapping):

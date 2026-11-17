@@ -362,6 +362,12 @@ All notable changes to SkillEvaluator are documented in this file.
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
+- New **Harness Check** docs page: what `skillevaluator harness-check` reports
+  and how to read its panel, with real output, the detailed view and how to fix
+  findings, what the rules check, the harnesses it covers, and how to run it on
+  its own or inside `validate`. The Tier 1 guide and the CLI reference link to it.
+  Clarify description rejection versus truncation, invocation-specific argument
+  substitution, folder-symlink target limits, and validation report/gate defaults.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
@@ -369,6 +375,8 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+- The README badge row adds GitHub **Stars** and **Forks** badges that show the
+  live counts.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

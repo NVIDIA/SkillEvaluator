@@ -50,6 +50,9 @@ navigation:
       - page: "Tier 1: Validation"
         path: ../docs/tier1-validation.mdx
         slug: tier1-validation
+      - page: Harness Check
+        path: ../docs/harness-check.mdx
+        slug: harness-check
       - page: "Tier 2: Deduplication"
         path: ../docs/tier2-deduplication.mdx
         slug: tier2-deduplication

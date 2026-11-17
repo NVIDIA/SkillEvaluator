@@ -481,9 +481,10 @@ calls read are Python's `subprocess.run`, `call`, `check_call`, `check_output`
 and `Popen` (the vector as the first argument or `args=`, with an
 `executable=` other than `None` naming the program), `os.exec*`, `os.spawn*`,
 `os.posix_spawn`, `os.posix_spawnp` and `asyncio.create_subprocess_exec`
-(whose `executable=` names the program in the same way), named by module (which an earlier notebook cell may have imported) or through
-the code's imports, as in `import subprocess as sp` or
-`from subprocess import run`, and Node's `spawn`, `spawnSync`, `execFile` and
+(whose `executable=` names the program in the same way), named by module
+(which an earlier notebook cell may have imported) or through the code's
+imports, as in `import subprocess as sp` or `from subprocess import run`,
+and Node's `spawn`, `spawnSync`, `execFile` and
 `execFileSync`, matched by name. The code is a `python -c`, `node -e`,
 `node -p`, `bun -e` or `deno eval` payload (Node and Bun options written as
 one word before the code, such as `--input-type=module`, a `-pe` cluster, and
@@ -684,9 +685,9 @@ forms are not read as argument vectors and keep the result they had before:
   words and `-c`; shell text whose commands that may run a vector hold over
   4096 shell words, take over 32 KiB outside here-document bodies, as a
   payload padded with a 33,000-character comment does, take more than the
-  split has left in the trace, or hold over
-  16 substitutions (`$( )`, backticks or `$'...'`) and more than one for each
-  40 of their characters, as `python3 -c "..." $(:)$(:)...` does
+  split has left in the trace, or hold over 16 substitutions (`$( )`,
+  backticks or `$'...'`) and more than one for each 40 of their characters,
+  as `python3 -c "..." $(:)$(:)...` does
   (those commands are the ones that name `cd`, `pushd` or `popd` as a word,
   those that name an interpreter or a shell, a word ending in `sh` included,
   and a quoted `rm`, and those that start a here-document on the line of such

@@ -4,6 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+
 ## 1.0.0 - 2026-11-17
 
 ### Added

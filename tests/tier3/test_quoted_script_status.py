@@ -4,6 +4,7 @@
 """A quoted script path must retain its recorded command exit status."""
 
 import shlex
+import shutil
 import subprocess
 import sys
 
@@ -53,15 +54,27 @@ def test_quoted_script_still_does_not_claim_a_shell_tail_status(tail: str) -> No
     assert result["passed"] is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32" or shutil.which("bash") is None,
+    reason="Requires POSIX bash to record actual negated shell statuses",
+)
 @pytest.mark.parametrize(
-    "script_operand",
-    ["'scripts/my task.py'", '"scripts/my task.py"', r"scripts/my\ task.py"],
+    ("script_operand", "relative_script"),
+    [
+        ("'scripts/my task.py'", "scripts/my task.py"),
+        ('"scripts/my task.py"', "scripts/my task.py"),
+        (r"scripts/my\ folder/task.py", "scripts/my folder/task.py"),
+    ],
 )
 @pytest.mark.parametrize("script_status", [0, 2])
-def test_negated_quoted_script_does_not_claim_the_shell_status(tmp_path, script_operand, script_status):
-    script = tmp_path / "scripts" / "my task.py"
-    script.parent.mkdir()
-    script.write_text("import sys\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8")
+def test_negated_quoted_script_does_not_claim_the_shell_status(
+    tmp_path, script_operand, relative_script, script_status
+):
+    script = tmp_path / relative_script
+    script.parent.mkdir(parents=True)
+    script.write_text(
+        "import sys\nprint('script-ran')\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8"
+    )
     command = f"! {shlex.quote(sys.executable)} {script_operand} {script_status}"
     completed = subprocess.run(
         ["bash", "-c", command],
@@ -72,11 +85,13 @@ def test_negated_quoted_script_does_not_claim_the_shell_status(tmp_path, script_
         timeout=10,
     )
     assert completed.returncode == int(script_status == 0), completed.stderr
+    assert completed.stdout == "script-ran\n"
+    assert completed.stderr == ""
 
     invoked, succeeded = evaluate_declarative_checks(
         [
-            {"type": "script_invoked", "script": "scripts/my task.py"},
-            {"type": "command_succeeded", "script": "scripts/my task.py"},
+            {"type": "script_invoked", "script": relative_script},
+            {"type": "command_succeeded", "script": relative_script},
         ],
         tool_calls=[
             {

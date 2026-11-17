@@ -373,6 +373,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+  Under the table, a harness check highlight gives the
+  `skillevaluator harness-check ./my-skill` command, an example result with one
+  line per harness, and links to the Harness Check page and to live evaluation.
+  The intro now mentions plugins. The README word limit in the packaging test
+  goes from 1,100 to 1,200 to fit the example.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
 

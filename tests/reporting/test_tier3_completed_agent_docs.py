@@ -391,7 +391,7 @@ def test_tier3_benchmark_gives_its_own_reason_for_not_assessed() -> None:
 
 def test_results_tree_and_tier3_guide_point_to_the_section() -> None:
     page = _reports_page()
-    guide = (REPO / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    guide = (REPO / "docs" / "tier3-results.mdx").read_text(encoding="utf-8")
 
     assert "      - tier3-benchmark.md\n" in page
     every_run = "At the end of every Tier 3 run, from `tier3 evaluate` or a `validate` run that includes Tier 3"

@@ -11,6 +11,7 @@ from typing import Any
 
 from skillevaluator.tier3.dataset_utils import find_eval_file, load_dataset_entries
 from skillevaluator.tier3.eval_core.checks import resolve_should_trigger
+from skillevaluator.tier3.eval_core.declarative_checks import validate_declarative_checks
 from skillevaluator.tier3.eval_core.llm_judge import _has_judge_reference
 from skillevaluator.tier3.evals_config import load_evals_config
 
@@ -21,7 +22,15 @@ def summarize_dataset(entries: list[dict[str, Any]]) -> dict[str, Any]:
     positive = sum(resolve_should_trigger(entry) is True for entry in entries)
     negative = sum(resolve_should_trigger(entry) is False for entry in entries)
     outcomes = sum(_has_judge_reference(entry.get("ground_truth")) for entry in entries)
-    behaviors = sum(_has_judge_reference(entry.get("expected_behavior")) for entry in entries)
+    behaviors = sum(
+        _has_judge_reference(entry.get("expected_behavior"))
+        or (
+            isinstance(checks := entry.get("checks"), list)
+            and bool(checks)
+            and not validate_declarative_checks(checks)
+        )
+        for entry in entries
+    )
     gaps = []
     if not count:
         gaps.append("no evaluation cases")
@@ -37,7 +46,8 @@ def summarize_dataset(entries: list[dict[str, Any]]) -> dict[str, Any]:
     if count - behaviors:
         prefix = "no assertions; " if not behaviors else ""
         gaps.append(
-            f"{prefix}{count - behaviors} cases have no assertions or expected behaviors, so behavior_check is N/A for them"
+            f"{prefix}{count - behaviors} cases have no assertions, expected behaviors or declarative checks, "
+            "so behavior_check is N/A for them"
         )
     return {
         "case_count": count,
@@ -58,7 +68,7 @@ def coverage_text(coverage: dict[str, Any]) -> str:
         f"{coverage['negative_cases']} negative/non-trigger, "
         f"{coverage['unlabeled_trigger_cases']} unlabeled trigger.",
         f"Expected outcome: {coverage['cases_with_expected_outcome']}/{count}; "
-        f"assertions/expected behaviors: {coverage['cases_with_expected_behaviors']}/{count}.",
+        f"assertions/expected behaviors/declarative checks: {coverage['cases_with_expected_behaviors']}/{count}.",
     ]
     if coverage["starter"]:
         lines.append("One-case starter: a starting point, not a representative evaluation.")

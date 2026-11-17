@@ -438,6 +438,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Dataset coverage includes cases with valid declarative checks in behavior coverage,
+  so checks-only cases no longer incorrectly claim that `behavior_check` is unavailable.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

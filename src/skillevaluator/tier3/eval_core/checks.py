@@ -5503,7 +5503,7 @@ _RM_MAX_FALLBACK_FRAGMENTS = 65_536
 # more for each word, shell operator and substitution, which cost the lexer and
 # the walk more than a character does. So does each here-document body the
 # lexer checks for them beyond main's "rm -", and, at any length, each call,
-# word and substitution the eval gate checks, unless the gate opens a strict
+# word and substitution the eval gate reads, unless the gate opens a strict
 # reading of it, which counts it instead (see _rm_gated). A longer text that is
 # read is read in one pass, where each command and body it holds counts before
 # its check. This bounds their work to about a second.
@@ -5692,6 +5692,23 @@ def _rm_may_build_rm(text: str, _depth: int = 0) -> bool:
     return answer
 
 
+def _rm_gate_reads(text: str) -> bool:
+    """True when the eval gate (see _rm_reads_again_as_commands) reads *text*, which it turns away otherwise.
+
+    The gate reads text that, in a form without quotes or backslashes (see
+    _rm_unquoted_forms), holds eval, env beside an S or --s, or grep beside
+    an O or --op; it answers False for other text without reading it.
+    """
+    # Without a quote or backslash, every form is the text itself.
+    forms = _rm_unquoted_forms(text) if any(char in text for char in "\\'\"") else (text,)
+    return any(
+        "eval" in form
+        or ("env" in form and ("S" in form or "--s" in form))
+        or ("grep" in form and ("O" in form or "--op" in form))
+        for form in forms
+    )
+
+
 def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     """True for eval, env -S or git grep -O text, also when quotes or backslashes split the name.
 
@@ -5706,14 +5723,7 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     Where a quote does not close, the text is also read with its quotes and
     backslashes dropped, as the one-pass reading reads it.
     """
-    # Without a quote or backslash, every form is the text itself.
-    forms = _rm_unquoted_forms(text) if any(char in text for char in "\\'\"") else (text,)
-    if not any(
-        "eval" in form
-        or ("env" in form and ("S" in form or "--s" in form))
-        or ("grep" in form and ("O" in form or "--op" in form))
-        for form in forms
-    ):
+    if not _rm_gate_reads(text):
         return False
     if _depth >= _RM_MAX_GATE_DEPTH:
         return True
@@ -5845,33 +5855,38 @@ def _rm_candidate(text: str, extra_chars: list[int] | None = None) -> bool:
     """True for text the rm check reads: an rm with an option, or eval or env -S text.
 
     Where the strict readings count the texts they check in *extra_chars*,
-    the eval gate's check of *text* counts there first (see _rm_gated).
+    *text* counts there first where the eval gate reads it (see _rm_gated).
     """
     if not _rm_may_name(text, ("rm", "eval", "env", "grep")):
         return False  # No form of the text names any of these.
     if re.search(r"\brm\s+-", text) is not None:
         return True
-    return _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(text, _rm_may_build_rm, extra_chars)
+    return _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(text, extra_chars)
 
 
-def _rm_gated(text: str, gate: Callable[[str], bool], extra_chars: list[int] | None) -> bool:
-    """Answer the eval *gate* for *text*, which counts toward *extra_chars* first (see _rm_read_cost), at any length.
+def _rm_gated(text: str, extra_chars: list[int] | None) -> bool:
+    """Answer the eval gate (see _rm_may_build_rm) for *text*, which counts toward *extra_chars* where the gate reads it.
 
-    The gate is the strict readings' work, so it stops with them: where the
-    count is spent, or *text* would take it past ``_RM_MAX_EXTRA_CHARS``,
-    the gate does not run, *text* spends the count, and the answer is
-    False. Where the gate opens a strict reading of *text* (True), that
-    reading counts what it checks of *text* before each check (see
-    _rm_targets_outside_tmp), so *text* is not counted here as well;
-    otherwise it counts here. Without *extra_chars*, the gate runs.
+    Text the gate turns away without reading it (see _rm_gate_reads) counts
+    nothing, and the answer is False. Reading other text is the strict
+    readings' work, so it counts first (see _rm_read_cost), at any length,
+    and stops with them: where the count is spent, or *text* would take it
+    past ``_RM_MAX_EXTRA_CHARS``, the gate does not read it, *text* spends
+    the count, and the answer is False. Where the gate opens a strict
+    reading of *text* (True), that reading counts what it checks of *text*
+    before each check (see _rm_targets_outside_tmp), so *text* is not
+    counted here as well; otherwise it counts here. Without *extra_chars*,
+    the gate runs.
     """
     if extra_chars is None:
-        return gate(text)
+        return _rm_may_build_rm(text)
+    if not _rm_gate_reads(text):
+        return False
     cost = _rm_read_cost(text)
     if extra_chars[0] + cost > _RM_MAX_EXTRA_CHARS:
         extra_chars[0] += cost
         return False
-    if gate(text):
+    if _rm_may_build_rm(text):
         return True
     extra_chars[0] += cost
     return False
@@ -7868,7 +7883,7 @@ def _rm_targets_outside_tmp(
     (see _rm_read_cost); so does a here-document body or substitution,
     which only these readings check beyond main's "rm -", before the checks
     that keep it from them (see _rm_shell_words), and a word or substitution
-    the eval gate checks (see _rm_gated). Past
+    the eval gate reads (see _rm_gated). Past
     ``_RM_MAX_EXTRA_CHARS`` characters there, strict readings stop and find
     nothing, so a text that would take the count past them is not read, and
     the bodies left are read as main reads them.
@@ -8067,7 +8082,8 @@ def _rm_targets_outside_tmp(
     # same text read again from the command line that eval or env -S reads would give the same answer.
     decoded_read: dict[str, bool] = {}
     # The answer for each word and substitution of this text checked below for an rm or eval text (see
-    # _rm_candidate), whose check counts toward the strict readings' limit, so a repeat is not counted again.
+    # _rm_candidate), whose check counts toward the strict readings' limit where the eval gate reads it, so a
+    # repeat is not counted again.
     # Here-document bodies were counted when the lexer checked them, and unescaped text counts on its own below.
     candidates: dict[str, bool] = {}
 
@@ -8312,17 +8328,22 @@ def _rm_reading(
     lowercased, as in ``$'\\U00000072m'``, or that holds xargs and rm, as in
     ``xargs $'rm' -rf``), opens a strict walk, where only that text and an rm
     that runs as a command can give the finding: in ``grep 'rm' -rn .`` rm
-    is grep's argument. The check for that text is the strict readings'
-    work, so the action's text counts toward the trace's *extra_chars*
-    first (see _rm_gated); once that count is spent, nothing else opens a
-    walk.
+    is grep's argument. The eval gate's reading of that text is the strict
+    readings' work, so where the gate reads the action's text, it counts
+    toward the trace's *extra_chars* first (see _rm_gated); text that may
+    not count an rm is not read. Once that count is spent, nothing else
+    opens a walk.
     """
     if matched or _rm_targets_outside_tmp(text, _xargs_only=True, _symlink_seen=symlink_seen):
         return False
     if main_only:
         return None
-    if _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(
-        text, lambda gated: _rm_may_count_as_rm(gated) and _rm_may_build_rm(gated), extra_chars
+    # The gate's own first test, then the rm test, only scan the text without lexing it, so they count nothing.
+    if (
+        _rm_may_name(text, _RM_GATE_NAMES)
+        and _rm_gate_reads(text)
+        and _rm_may_count_as_rm(text)
+        and _rm_gated(text, extra_chars)
     ):
         return True
     if _rm_extra_spent(extra_chars):

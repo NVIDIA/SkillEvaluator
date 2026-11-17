@@ -406,15 +406,20 @@ even when it only cleans `/tmp` or prints; such text over 64 KiB does too.
 
 These readings stop once the texts they check count 256 KiB of a trace.
 Each text of up to 64 KiB counts before each check of it, also one they
-then do not read, such as a here-document body, substitution or word that
-runs no `rm`: its length, 64 characters more, and 10 more for each word,
+then do not read, such as a here-document body or substitution that runs
+no `rm`: its length, 64 characters more, and 10 more for each word,
 newline, shell operator character (`;`, `&`, `|`, `(`, `)`, `<` or `>`),
 backtick, `$(` and `$'...'` word in it, which cost the lexer and the walk
-more than a character does. The check of a call, word or substitution that
-names `eval`, `env` or `grep` for `eval`, `env -S` or pager text counts
-its text the same way at any length, unless the check finds such text,
-whose reading then counts it. A longer text that is read does not count
-as a whole: it is
+more than a character does. The check of a call, word or substitution for
+`eval`, `env -S` or pager text counts its text the same way at any length
+where it reads that text, unless it finds such text, whose reading then
+counts it. It reads only text that, with quotes and backslashes dropped,
+holds `eval`, `env` beside an `S` or `--s`, or `grep` beside an `O` or
+`--op`, and a call only where it also names `rm` beside an `r` or `f`
+option or holds an expansion beside a recursive option. So
+`source .venv/bin/activate && python -m pytest -q` and
+`grep -rn 'def main' src/` count nothing. A longer text that is read does
+not count as a whole: it is
 read in one pass, where each command and here-document body that reading
 checks counts the same way before its check, at any length. So four calls
 of `rm -rf /tmp/x; echo` and 70,000 more characters spend the limit, while

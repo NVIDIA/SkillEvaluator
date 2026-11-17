@@ -3,6 +3,7 @@
 
 """Tests for skillevaluator.utils module."""
 
+import errno
 import os
 import subprocess
 import sys
@@ -295,7 +296,12 @@ class TestResolveGitRemoteUrl:
         repo_root = tmp_path / "repo"
         _init_git_repo(repo_root, "https://github.com/example/project.git")
         sub_dir = repo_root / os.fsdecode(b"skill-\xff")
-        sub_dir.mkdir()
+        try:
+            sub_dir.mkdir()
+        except OSError as exc:
+            if exc.errno == errno.EILSEQ:
+                pytest.skip("filesystem rejects non-UTF-8 filename bytes")
+            raise
 
         with patch.dict("os.environ", _clean_ci_env(GITHUB_REF_NAME="main"), clear=True):
             url = resolve_git_remote_url(sub_dir)

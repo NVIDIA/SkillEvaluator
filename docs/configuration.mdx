@@ -28,9 +28,11 @@ not automatically selected as the latest available model. Set
 `SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
 standard judge inherits it unless a judge override is set. Embeddings use their
 own model, and Tier 3 agent selection is separate. With NVIDIA Build, all three
-agents default to Nemotron 3.5 Lightning. OpenCode follows
+agents in current GitHub source default to Nemotron 3.5 Lightning. OpenCode follows
 `SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Lightning default
 unless you override their models.
+PyPI 0.9.0 uses earlier defaults; see
+[release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
 
 Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.
@@ -268,7 +270,7 @@ harbor:
       model: gpt-6.1-sol
 ```
 
-You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) for the full run workflow.
+You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) for the full run workflow.
 
 In Docker mode, credential values are never rendered on the `docker compose exec` command line — the bridge receives them through a mode-0600 file inside the container that is consumed and removed before the agent starts.
 
@@ -349,7 +351,7 @@ Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name 
   <Card title="Tier 2: Deduplication" icon="copy" href="/skills/skillevaluator/tier2-deduplication">
     Put your embedding provider to work — find overlap within and across skills.
   </Card>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Run a live agent evaluation with the two-credential setup above.
   </Card>
 </CardGroup>

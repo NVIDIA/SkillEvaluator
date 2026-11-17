@@ -3,6 +3,9 @@ title: "Eval Datasets"
 description: "Author the evals/ directory that powers Tier 3 — the dataset format, generation with create-eval-dataset, the config.yml run policy, fixtures, and custom container environments."
 ---
 
+New to datasets? Follow [Prepare a Tier 3 Dataset](/skills/skillevaluator/prepare-dataset)
+for the short creation and review workflow. This page is the detailed format reference.
+
 Everything a live evaluation runs on lives in one directory: `evals/` inside
 your skill. This page is the contract for that directory — what goes in it,
 the dataset format `tier3 evaluate` reads, and how to generate and refine
@@ -100,7 +103,7 @@ them about the task outcome. A prompt that points at the skill's files, or an
 expected output or assertion that the agent read `SKILL.md`, ran the skill's
 script, or used the skill, cannot be met by the baseline and inflates lift.
 `skill_execution` scores skill use separately (see
-[How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
+[How standard grading judges a trial](/skills/skillevaluator/tier3-grading#how-standard-grading-judges-a-trial)).
 Template cases from `create-eval-dataset` are outcome-only. When the skill's
 description reads, opens, loads, consults or follows `SKILL.md` with no path
 before it, or otherwise points at the skill's own `SKILL.md` as a prompt
@@ -250,7 +253,7 @@ including sample sizes and the lack of independent human labels.
     to discover or measure, so its Discoverability and Efficiency are N/A. If
     no entry is a positive case that names an `expected_skill`, the agent
     cannot PASS. See
-    [Reading results](/skills/skillevaluator/tier3-live-evaluation#reading-results).
+    [Reading results](/skills/skillevaluator/tier3-results#reading-results).
   </Accordion>
 </AccordionGroup>
 
@@ -565,10 +568,10 @@ grading:
 | `harbor.max_judge_calls` | integer ≥ 0 | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `harbor.max_attempts_total` | integer ≥ 0 | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
 | `harbor.max_cost_usd` | finite number ≥ 0 | Agent inference accounting admission limit, not a hard currency ceiling or billed spend; requires `harbor.price_file`. Judge, setup, container, backend, and infrastructure charges are excluded. |
-| `harbor.price_file` | path | User-supplied JSON rates per million tokens, keyed by exact resolved model identifier, not verified billing prices. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. File name/hash and actually applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
+| `harbor.price_file` | path | User-supplied JSON rates per million tokens, keyed by exact resolved model identifier, not verified billing prices. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. File name/hash and actually applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-run-reference#cost-limits). |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
-| `harbor.tolerate_baseline_timeouts` | boolean | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)). Default: `false`; the CLI flag overrides this value. |
+| `harbor.tolerate_baseline_timeouts` | boolean | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported (see [Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts)). Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |

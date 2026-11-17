@@ -143,3 +143,38 @@ def test_invalid_or_mismatched_mcp_metadata_preserves_legacy_name_policy(extra):
     call = {"action": "mcp__filesystem__inspect", "action_input": {"path": "/"}, "extra": extra}
 
     assert check_tool_efficiency([call])["score"] == 0.0
+
+
+@pytest.mark.parametrize("label_length", [256, 257])
+def test_native_mcp_report_validates_identity_before_truncating_labels(tmp_path, label_length):
+    prefix = "project__filesystem"
+    server = prefix + "x" * (label_length - len(f"mcp__{prefix}__inspect"))
+    trajectory = _load_native_mcp_log(tmp_path, server, "inspect", "/")
+    calls = extract_tool_calls_as_dicts(trajectory)
+    assert len(calls[0]["action"]) == label_length
+    assert check_tool_efficiency(calls)["score"] == 0.0
+
+    signals = compute_plugin_signals(trajectory, {}, declared={"mcp": ["project", server]})
+
+    assert signals["evidence_complete"] is True
+    assert signals["activations"][0]["server"] == server
+    assert signals["activations"][0]["name"] == server
+    assert len(signals["activations"][0]["tool"]) <= 256
+    assert list(signals["mcp_calls"]["by_server"]) == [server]
+    assert signals["mcp_calls"]["by_server"][server]["succeeded"] == 1
+    assert signals["activation_coverage"]["exercised"] == [f"mcp:{server}"]
+    assert signals["activation_coverage"]["unverified"] == ["mcp:project"]
+
+
+def test_long_mcp_label_does_not_trust_metadata_matching_only_its_prefix(tmp_path):
+    server = "project__filesystem" + "x" * 250
+    trajectory = _load_native_mcp_log(tmp_path, server, "inspect", "/")
+    tool_call = trajectory["steps"][0]["tool_calls"][0]
+    tool_call["extra"] = {"mcp_server": server + "other", "mcp_tool": "inspect"}
+
+    signals = compute_plugin_signals(
+        trajectory, {}, declared={"mcp": ["project", server, server + "other"]}
+    )
+
+    assert signals["activations"][0]["server"] == "project"
+    assert list(signals["mcp_calls"]["by_server"]) == ["project"]

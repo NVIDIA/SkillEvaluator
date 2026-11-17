@@ -1742,7 +1742,7 @@ def _tool_name(tool_call: Mapping[str, Any]) -> str:
     for key in ("function_name", "name", "tool_name"):
         value = tool_call.get(key)
         if isinstance(value, str) and value.strip():
-            return value.strip()[:_MAX_LABEL_CHARS]
+            return value.strip()
     return ""
 
 
@@ -2937,7 +2937,7 @@ def _expanded_tool_calls(raw: Mapping[str, Any], outer_id: str, mcp_call_servers
     server = mcp_call_servers.get(outer_id) if outer_id else None
     if server and name and not name.casefold().startswith(_MCP_PREFIX):
         # The harness log names the server this bare MCP tool name came from (Codex).
-        name = f"mcp__{server}__{name}"[:_MAX_LABEL_CHARS]
+        name = f"mcp__{server}__{name}"
     prepared = {**raw, "function_name": name, "arguments": _arguments(raw)}
     try:
         return normalize_tool_call(prepared)
@@ -2971,10 +2971,13 @@ def _identify_call(
     lsp_extensions: Mapping[str, str] | None = None,
 ) -> _Call:
     """A normalized tool call with its identities and outcome (its subagent fields are filled in later)."""
-    fn = str(tool_call.get("function_name") or "")[:_MAX_LABEL_CHARS]
+    full_name = str(tool_call.get("function_name") or "")
+    # Validate the complete identity before limiting display labels.
+    recorded = recorded_mcp_identity(full_name, tool_call.get("extra"))
+    fn = full_name[:_MAX_LABEL_CHARS]
     args = tool_call.get("arguments")
     args = args if isinstance(args, dict) else {}
-    mcp = _mcp_ident(fn, mcp_names, agent=agent, recorded=recorded_mcp_identity(fn, tool_call.get("extra")))
+    mcp = _mcp_ident(fn, mcp_names, agent=agent, recorded=recorded)
     fn_base = _base_tool_name(mcp.tool if mcp is not None and mcp.tool else fn)
     manifest = _manifest_reads(fn_base, args, declared.get(COMPONENT_SKILL) or (), is_mcp=mcp is not None)
     named = {

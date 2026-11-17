@@ -4,6 +4,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Codex JSONL reconstruction preserves recorded MCP server and tool names as
+  `mcp__server__tool`, allowing tool efficiency to recognize MCP work and apply
+  the existing filesystem-root search policy. Their separately recorded identity
+  also keeps server names containing `__` intact for scoring and plugin reports.
+  Full identities are checked before display-label truncation.
+
+## 1.0.0 - 2026-11-17
+
 ### Added
 
 - Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit
@@ -471,10 +481,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Codex JSONL reconstruction preserves recorded MCP server and tool names as
-  `mcp__server__tool`, allowing tool efficiency to recognize MCP work and apply
-  the existing filesystem-root search policy. Their separately recorded identity
-  also keeps server names containing `__` intact for scoring and plugin reports.
+- Script lint measures control-flow nesting without recursively walking expression
+  nodes, so valid long operator or attribute chains no longer abort advisory
+  checks for that script and subsequent files.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.

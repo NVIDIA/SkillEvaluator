@@ -6604,7 +6604,9 @@ def _rm_argv_commands_that_matter(
     limit = spans[-1][0] if unterminated and spans else len(text)
     spans = spans[:-1] if unterminated else spans
     commands = [text[start:end] for start, end in spans]
-    otherwise: list[bool] = []
+    # Whether each command matters for a reason other than starting a here-document: it changes
+    # directory, names an interpreter or a shell and a quoted rm, or is part of a quoted substitution.
+    matters_besides_heredoc: list[bool] = []
     directories: list[bool] = []
     split_forms: list[str] = []
     programs = 0
@@ -6617,7 +6619,7 @@ def _rm_argv_commands_that_matter(
             and _rm_argv_names_rm(command)
         )
         programs += program and not directory
-        otherwise.append(directory or program)
+        matters_besides_heredoc.append(directory or program)
         directories.append(directory)
         split_forms.append(forms[1])
     # The commands of a "$( )" substitution inside double quotes, as in
@@ -6631,7 +6633,7 @@ def _rm_argv_commands_that_matter(
             programs += 1
             grouped.update(range(first, last + 1))
     for index in grouped:
-        otherwise[index] = True
+        matters_besides_heredoc[index] = True
         split_forms[index] = "$"
     # The commands left out with the bodies of their line, and where each such line's bodies end.
     left_out: set[int] = set()
@@ -6646,7 +6648,7 @@ def _rm_argv_commands_that_matter(
         while index >= 0 and spans[index][0] >= line_start:
             line.append(index)
             index -= 1
-        if (index >= 0 and spans[index][1] > line_start) or any(otherwise[other] for other in line):
+        if (index >= 0 and spans[index][1] > line_start) or any(matters_besides_heredoc[other] for other in line):
             continue
         left_out.update(line)
         bodies_end[body_start] = body_end
@@ -6671,7 +6673,8 @@ def _rm_argv_commands_that_matter(
         if blank and end not in bodies_end:
             continue
         if blank or not (
-            otherwise[index] or (index not in left_out and _RM_ARGV_HEREDOC_RE.search(command) is not None)
+            matters_besides_heredoc[index]
+            or (index not in left_out and _RM_ARGV_HEREDOC_RE.search(command) is not None)
         ):
             if run and _RM_ARGV_SEPARATORS_RE.fullmatch(text, run[1], start):
                 run[1] = end

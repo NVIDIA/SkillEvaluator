@@ -14,7 +14,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Awaitable, Callable
 from time import monotonic
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 from harbor.agents.installed.base import NonZeroAgentExitCodeError
 from harbor.agents.installed.claude_code import ClaudeCode
@@ -178,6 +178,10 @@ class SkillEvaluatorClaudeCode(ClaudeCode):
 
 class SkillEvaluatorOpenCode(OpenCode):
     """Avoid a redundant distribution Node/npm install before Harbor's NVM."""
+
+    # Headless trials never use OpenCode's undo, and its snapshot can EPIPE on a
+    # workspace without .git (#757). opencode_config can turn it back on.
+    _DEFAULT_CONFIG: ClassVar[dict[str, Any]] = {"snapshot": False}
 
     def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:
         normalized = []

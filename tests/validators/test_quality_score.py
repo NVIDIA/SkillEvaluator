@@ -1821,6 +1821,25 @@ class TestDiscoverabilityDescriptionTooShortConfig:
         assert issue["message"].endswith(": 32 chars, minimum 40")
         assert _short_description_issues(default) == []
 
+    @pytest.mark.parametrize("points", [0, 20])
+    def test_minimum_above_200_keeps_the_long_description_rule(self, tmp_path: Path, points: int):
+        skill_dir = _write_described_skill(tmp_path, "Use for parsing logs. " + "x" * 230)
+        config = f"discoverability:\n  description_too_short:\n    min_chars: 300\n    points: {points}\n"
+
+        default = _validate_with(skill_dir, tmp_path)
+        raised = _validate_with(skill_dir, tmp_path, config)
+
+        def long_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if issue["message"].startswith("Description very long")]
+
+        assert long_issues(default) == long_issues(raised) == ["Description very long (252 chars, recommend 50-150)"]
+        if points:
+            (issue,) = _short_description_issues(raised)
+            assert issue["message"].endswith(": 252 chars, minimum 300")
+        else:
+            assert _short_description_issues(raised) == []
+
     def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
         config = (
             "discoverability:\n  description_too_short:\n    points: 7\n"

@@ -724,15 +724,15 @@ class QualityScoreValidator(ValidatorBase):
 
         if desc:
             too_short = self.quality_config["discoverability"]["description_too_short"]
-            if len(desc) < too_short["min_chars"]:
-                if too_short["points"]:
-                    dim.deduct(
-                        too_short["points"],
-                        "warning",
-                        f"{too_short['message']}: {len(desc)} chars, minimum {too_short['min_chars']}",
-                        too_short["suggestion"],
-                    )
-            elif len(desc) > 200:
+            if too_short["points"] and len(desc) < too_short["min_chars"]:
+                dim.deduct(
+                    too_short["points"],
+                    "warning",
+                    f"{too_short['message']}: {len(desc)} chars, minimum {too_short['min_chars']}",
+                    too_short["suggestion"],
+                )
+            # Independent of the configurable minimum: a min_chars above 200 must not hide this rule.
+            if len(desc) > 200:
                 dim.deduct(
                     5,
                     "info",

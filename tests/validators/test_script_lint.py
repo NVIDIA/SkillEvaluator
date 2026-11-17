@@ -23,6 +23,34 @@ def skill_with_scripts(tmp_path: Path) -> Path:
 
 
 class TestScriptLintValidator:
+    @pytest.mark.parametrize("prefix", [b"", b"\xef\xbb\xbf"], ids=["plain", "utf8-bom"])
+    def test_utf8_bom_scripts_receive_ast_lint_findings(self, skill_with_scripts, prefix):
+        script = skill_with_scripts / "scripts" / "example.py"
+        script.write_bytes(prefix + b"import sys\nprint(sys.argv)\n")
+
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        assert {finding.check_name for finding in result.findings} == {
+            "flat_script",
+            "missing_shebang",
+            "no_input_validation",
+        }
+        assert result.passed
+        assert not any("passed lint checks" in detail.message for detail in result.success_details)
+
+    def test_utf8_bom_keeps_raw_shebang_check(self, skill_with_scripts):
+        script = skill_with_scripts / "scripts" / "example.py"
+        script.write_bytes(b"\xef\xbb\xbf#!/usr/bin/env python3\nprint('hello')\n")
+
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        checks = {finding.check_name for finding in result.findings}
+        assert "flat_script" in checks
+        assert "missing_shebang" in checks
+        shebang_finding = next(finding for finding in result.findings if finding.check_name == "missing_shebang")
+        assert shebang_finding.message == "example.py shebang is preceded by a UTF-8 BOM and will be ignored"
+        assert shebang_finding.suggestion == "Save the file as UTF-8 without a BOM"
+
     def test_no_scripts_dir(self, tmp_path):
         skill_dir = tmp_path / "no-scripts"
         skill_dir.mkdir()
@@ -181,13 +209,22 @@ class TestScriptLintValidator:
         result = v.validate(skill_with_scripts)
         assert not result.findings
 
-    def test_syntax_error_skipped(self, skill_with_scripts):
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "def broken(:\n    pass\n",
+            "\ufeff\ufeffprint(1)\n",
+            "\n\ufeffprint(1)\n",
+        ],
+        ids=["syntax-error", "double-leading-bom", "non-leading-bom"],
+    )
+    def test_syntax_error_skipped(self, skill_with_scripts, source):
         scripts = skill_with_scripts / "scripts"
-        (scripts / "broken.py").write_text("def broken(:\n    pass\n")
-        v = ScriptLintValidator()
-        result = v.validate(skill_with_scripts)
-        # Syntax errors should be silently skipped
-        assert "read_error" not in [f.check_name for f in result.findings]
+        (scripts / "broken.py").write_text(source, encoding="utf-8")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        assert result.findings == []
+        assert result.passed
 
     def test_validator_name(self):
         v = ScriptLintValidator()

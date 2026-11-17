@@ -597,7 +597,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | `flat_script` | MEDIUM | No function definitions |
     | `deep_nesting` | MEDIUM | Control-flow nesting deeper than 6 |
     | `magic_numbers` | LOW | Raw numeric constants outside the safe constant set |
-    | `missing_shebang` | LOW | No leading shebang (`#!`) |
+    | `missing_shebang` | LOW | No leading shebang (`#!`), or a shebang preceded by a UTF-8 BOM |
     | `no_input_validation` | LOW | No `argparse`, `click`, `typer`, or explicit raise pattern |
   </Accordion>
 

@@ -566,10 +566,10 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     | --- | --- | --- |
     | `max_tokens` | `5000` | A positive whole number. The rule deducts when the estimated size of `SKILL.md` is above it; a file estimated at exactly `max_tokens` passes |
     | `points` | `15` | Non-negative number deducted from Efficiency. `0` turns the rule off |
-    | `message` | See `quality-default.yaml` | Start of the finding message |
-    | `suggestion` | See `quality-default.yaml` | Fix suggestion attached to the finding |
+    | `message` | `Large skill` | Start of the finding message |
+    | `suggestion` | See `quality-default.yaml` | Fix suggestion attached to the finding, including the agentskills.io guidance on size |
 
-    The size is an estimate, not a tokenizer count: the number of characters in `SKILL.md`, frontmatter included, divided by 4 and rounded down. Files in `references/` and `scripts/` are not counted. The finding appends the estimate and the limit to `message`, as in `Large skill. ...: ~6200 estimated tokens at 4 characters per token, recommended max <5000; a real tokenizer may count more`. Reports show the limit in force as `recommended_max_tokens` in the quality metrics, whether or not the rule is turned off.
+    The size is an estimate, not a tokenizer count: the number of characters in `SKILL.md`, frontmatter included, divided by 4 and rounded down. Files in `references/` and `scripts/` are not counted. The finding appends the estimate and the limit to `message`, as in `Large skill: ~6200 estimated tokens at 4 characters per token, recommended max <5000; a real tokenizer may count more`. Keep a custom `message` short: report summaries show only the first 160 characters of a finding message, so a long one pushes the estimate and the limit out of view. Reports show the limit in force as `recommended_max_tokens` in the quality metrics, whether or not the rule is turned off.
 
     **Description length.** Discoverability deducts points when the frontmatter `description` is too short or too long, set in the `discoverability` section under `description_too_short` and `description_too_long`. An omitted key keeps its packaged value and `points: 0` turns a rule off, so it adds no finding. This file raises the minimum and the maximum and changes nothing else:
 

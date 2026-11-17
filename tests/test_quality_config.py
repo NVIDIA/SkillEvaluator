@@ -480,11 +480,10 @@ def test_integer_settings_accept_the_largest_allowed_value(tmp_path: Path) -> No
 
 PACKAGED_TOKEN_BUDGET = {
     "points": 15,
-    "message": (
-        "Large skill. Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase "
-        "token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy"
-    ),
+    "message": "Large skill",
     "suggestion": (
+        "Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase "
+        "token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy. "
         "Keep required sections concise; move detailed examples, reference material, "
         "and supporting docs to the references/ directory"
     ),

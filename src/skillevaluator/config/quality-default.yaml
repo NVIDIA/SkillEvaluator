@@ -48,11 +48,12 @@ error_handling:
 # subset, omitted keys keep the values below, and points: 0 turns a rule off.
 efficiency:
   # SKILL.md is estimated at more than max_tokens tokens (characters divided by 4, frontmatter
-  # included). The finding appends the estimate and the limit to the message.
+  # included). The finding appends the estimate and the limit to the message. Keep the message
+  # short: report summaries cut a finding message at 160 characters.
   token_budget:
     points: 15
-    message: "Large skill. Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy"
-    suggestion: "Keep required sections concise; move detailed examples, reference material, and supporting docs to the references/ directory"
+    message: "Large skill"
+    suggestion: "Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy. Keep required sections concise; move detailed examples, reference material, and supporting docs to the references/ directory"
     max_tokens: 5000
 
 # Discoverability rules. They overlay the same way as error_handling and efficiency.

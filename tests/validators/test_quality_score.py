@@ -620,7 +620,7 @@ class TestQualityScoreValidator:
         assert large_findings[0].severity == Severity.MEDIUM
         assert "recommended max <5000" in large_findings[0].message
         assert "estimated tokens" in large_findings[0].message
-        assert "long or unfocused top-level descriptions" in large_findings[0].message
+        assert "long or unfocused top-level descriptions" in large_findings[0].suggestion
         assert "Keep required sections concise" in large_findings[0].suggestion
         assert "references/" in large_findings[0].suggestion
         assert result.passed, result.errors
@@ -1723,8 +1723,13 @@ class TestEfficiencyTokenBudgetConfig:
         (issue,) = _token_budget_issues(over_limit)
         assert issue["deduction"] == 15
         assert issue["severity"] == "warning"
-        assert issue["message"].startswith("Large skill. Per agentskills.io")
-        assert issue["message"].endswith(": ~5001 estimated tokens at 4 characters per token, recommended max <5000; a real tokenizer may count more")
+        assert issue["message"] == (
+            "Large skill: ~5001 estimated tokens at 4 characters per token, "
+            "recommended max <5000; a real tokenizer may count more"
+        )
+        # Report summaries cut a finding message at 160 characters; the estimate and limit must survive.
+        assert len(issue["message"]) <= 160
+        assert issue["suggestion"].startswith("Per agentskills.io, SKILL.md should be concise")
 
     def test_custom_limit_moves_the_threshold_and_the_reported_limit(self, tmp_path: Path):
         skill_dir = _write_sized_skill(tmp_path, 24000)

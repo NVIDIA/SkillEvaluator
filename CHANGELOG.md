@@ -141,9 +141,10 @@ All notable changes to SkillEvaluator are documented in this file.
   the sections.
 
   The four finding messages are reworded: the measured values follow the
-  configured message, as in `Large skill. ...: ~6200 estimated tokens at 4
+  configured message, as in `Large skill: ~6200 estimated tokens at 4
   characters per token, recommended max <5000; a real tokenizer may count
-  more`, `Description too short (recommend 50-150 chars): 12 chars, minimum
+  more` (the agentskills.io guidance moves from this message to its
+  suggestion), `Description too short (recommend 50-150 chars): 12 chars, minimum
   20`, `Description very long (recommend 50-150 chars): 251 chars, maximum
   200`, and `Name contains reserved word: claude`, which names only the words
   that matched. Because the message is part of the ID, these findings'

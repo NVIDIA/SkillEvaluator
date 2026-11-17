@@ -7,7 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.harness.overlay import _tab_indent_breaks_yaml
+from skillevaluator.tier1.commands import run_validation
 from skillevaluator.validators.frontmatter_parser import parse_frontmatter
+from skillevaluator.validators.harness import HARNESS_METADATA_KEY
 from skillevaluator.validators.markdown import markdown_link_targets
 from skillevaluator.validators.quality_score import QualityScoreValidator
 from skillevaluator.validators.schema import SchemaValidator
@@ -60,3 +63,19 @@ def test_markdown_analysis_keeps_body_links(malformed_skill: Path) -> None:
     content = (malformed_skill / "SKILL.md").read_text(encoding="utf-8")
 
     assert "guide.md" in markdown_link_targets(content)
+
+
+def test_schema_and_harness_finish_with_a_yaml_finding(malformed_skill: Path) -> None:
+    results = run_validation(malformed_skill, checks="schema,harness")
+
+    assert any(finding.check_name == "yaml_syntax" for result in results for finding in result.findings)
+    harness = next(result for result in results if HARNESS_METADATA_KEY in result.metadata)
+    assert len(harness.metadata[HARNESS_METADATA_KEY][str(malformed_skill)]) == 6
+
+
+def test_harness_tab_check_handles_scalar_errors(malformed_skill: Path) -> None:
+    content = (malformed_skill / "SKILL.md").read_text(encoding="utf-8")
+    raw_yaml = content.split("---", 2)[1]
+    # A tab inside a block scalar is valid YAML, so construction reaches the
+    # invalid explicitly tagged value rather than failing during scanning.
+    assert _tab_indent_breaks_yaml("note: |\n  \ttext\n" + raw_yaml)

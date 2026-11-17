@@ -22,7 +22,7 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
     SKILL_NOT_SHIPPED_DIRS,
 )
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, load_frontmatter_yaml
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
@@ -234,7 +234,7 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     match = FRONTMATTER_PATTERN.match(text)
     fm_yaml = match.group(1) if match else ""
     try:
-        data = yaml.safe_load(fm_yaml) if match else None
+        data = load_frontmatter_yaml(fm_yaml) if match else None
     except yaml.YAMLError:
         data = None
     return manifest, raw, text, fm_yaml, data if isinstance(data, dict) else {}
@@ -250,7 +250,7 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     if not any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()):
         return False
     try:
-        yaml.safe_load(fm_yaml)
+        load_frontmatter_yaml(fm_yaml)
     except yaml.YAMLError:
         return True
     return False

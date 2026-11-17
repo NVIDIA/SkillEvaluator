@@ -720,6 +720,43 @@ def test_two_dataset_ids_with_the_same_cut_name_are_never_guessed() -> None:
     assert usage["case_id_validation"]["unmatched_case_ids"] == [_CUT_CASE]
 
 
+@pytest.mark.parametrize("attempt_suffix", ["-attempt001__trial", "-attempt0__trial", "-attempt1__"])
+def test_stop_on_pass_evidence_keeps_priority_over_a_unique_cut_label(attempt_suffix: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    trial = _trial(first[:32], 100, 20)
+    trial["trial_id"] = f"demo-codex-with-{second}{attempt_suffix}"
+
+    usage = build_token_usage({"codex": _agent([trial], [])}, dataset_case_ids=[first, second])
+
+    assert usage is not None
+    rows = usage["agents"]["codex"]["cases"]
+    expected = second if attempt_suffix == "-attempt001__trial" else first
+    assert [row["entry_id"] for row in rows] == [expected]
+    assert rows[0]["with_skill"]["totals"]["total_tokens"] == 120
+
+
+def test_cut_name_resolution_is_local_to_each_agents_known_cases() -> None:
+    first = "same-long-description-prefix-for-first-case"
+    second = "same-long-description-prefix-for-second-case"
+    assert first[:32] == second[:32]
+    agents = {
+        name: _agent([_trial(case, 100, 20)], [], unscored=[_trial(case[:32], 40, 4)])
+        for name, case in (("first", first), ("second", second))
+    }
+    original = copy.deepcopy(agents)
+
+    usage = build_token_usage(agents)
+
+    assert usage is not None
+    for name, case in (("first", first), ("second", second)):
+        rows = usage["agents"][name]["cases"]
+        assert [row["entry_id"] for row in rows] == [case]
+        assert rows[0]["with_skill"]["totals"]["total_tokens"] == 164
+        assert rows[0]["with_skill"]["coverage"]["unscored_attempts"] == 1
+    assert agents == original
+
+
 def test_an_agent_without_scores_still_gets_canonical_case_rows() -> None:
     # An optional agent the deadline killed: no scored attempt, usage only.
     killed = {"entry_id": _CUT_CASE, "trial_id": f"{_CUT_CASE}__a", "tokens": {"prompt": 40, "completion": 4}}

@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- LLM finding verification requires non-negative JSON integer identities and
+  withholds repeated identities or objects with duplicate members, preventing
+  ambiguous replies from selecting a finding or replacing its verdict.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

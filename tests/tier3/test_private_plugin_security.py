@@ -433,6 +433,46 @@ def test_rm_check_counts_each_word_it_checks_for_eval_text_toward_the_trace_limi
     assert 0 < sum(checks._rm_read_cost(word) for word in checked) <= checks._RM_MAX_EXTRA_CHARS
 
 
+@pytest.mark.parametrize("scanner", ["plugin", "host"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param("grep -rn 'def handler_{k}' src/ | head -20", id="grep"),
+        pytest.param(
+            "cd /workspace/repo && source .venv/bin/activate && python -m pytest tests/test_{k}.py -q 2>&1 | tail -20",
+            id="venv",
+        ),
+        pytest.param("python3 -c 'import os; print(os.environ.get(\"HOME\"), {k})'", id="environ"),
+    ],
+)
+def test_rm_check_counts_no_word_the_eval_gate_does_not_read(security, monkeypatch, scanner, template):
+    """A call or word the eval gate turns away without reading it counts nothing toward the trace limit.
+
+    ``grep`` without -O, ``.venv/bin/activate`` and ``os.environ`` hold no
+    eval, no env beside an S and no grep beside an O, so the gate answers
+    no without reading them. Counted, a few thousand such calls would spend
+    the limit, and a later call's eval text would keep main's result.
+    """
+    from skillevaluator.tier3.eval_core import checks
+
+    counted: list[str] = []
+    cost = checks._rm_read_cost
+
+    def recorded(text):
+        counted.append(text)
+        return cost(text)
+
+    monkeypatch.setattr(checks, "_rm_read_cost", recorded)
+    last = "eval '$CMD -rf /workspace'"
+    calls = [call(template.format(k=k)) for k in range(40)] + [call(last)]
+    result = security.scan_plugin_security(calls) if scanner == "plugin" else checks.check_security(calls)
+
+    assert "destructive_command" in kinds(result)
+    # Only the last call's readings count: its text and the eval text in it.
+    assert counted
+    assert all(text in last for text in counted)
+
+
 @pytest.mark.parametrize("scanner", ["plugin", "host", "workdirs", "links"])
 def test_rm_check_reads_here_documents_only_as_main_does_where_it_reads_as_main(security, monkeypatch, scanner):
     """A reading as main reads keeps a here-document body only for its "rm -", as main does.

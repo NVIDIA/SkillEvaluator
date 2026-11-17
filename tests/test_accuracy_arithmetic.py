@@ -51,7 +51,7 @@ def test_accuracy_criteria_grade_the_outcome_not_skill_use(accuracy_judge):
 
 
 def test_tier3_docs_describe_criterion_derived_accuracy():
-    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-grading.mdx").read_text(encoding="utf-8")
     normalized = " ".join(docs.split())
 
     assert "passing criteria divided by five" in normalized

@@ -103,7 +103,19 @@ def skill_root_for(
         limit = cwd.resolve()
         resolved_start = start.resolve()
         if not resolved_start.is_relative_to(limit):
-            return None
+            # macOS may preserve a case-only spelling even after resolve().
+            # Re-anchor only after filesystem identity proves containment, so
+            # exclusions and the ancestor stop use the repository's spelling.
+            for ancestor in (resolved_start, *resolved_start.parents):
+                try:
+                    same_root = ancestor.samefile(limit)
+                except FileNotFoundError:
+                    continue  # deleted descendants can still belong to a skill
+                if same_root:
+                    resolved_start = limit / resolved_start.relative_to(ancestor)
+                    break
+            else:
+                return None
     except (OSError, RuntimeError):
         return None
 

@@ -372,6 +372,56 @@ def test_skill_root_does_not_map_a_skill_outside_cwd(tmp_path: Path, relative: b
     assert run_precommit("schema", [path], cwd=repo) == (0, [])
 
 
+@pytest.mark.parametrize("relative", ["skills/demo/SKILL.md", "skills/demo", "skills/demo/deleted/sub/file.py", "."])
+def test_case_only_checkout_alias_keeps_schema_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    alias = repo.with_name("caseprobe")
+    if not alias.exists() or not alias.samefile(repo):
+        pytest.skip("filesystem does not support case-only directory aliases")
+
+    broken = "---\nname: demo\n---\n\n# Missing description\n"
+    (repo / "SKILL.md").write_text(broken, encoding="utf-8")
+    skill = _write_skill(repo / "skills", "demo", body=broken)
+    expected = repo.resolve() if relative == "." else skill.resolve()
+    path = alias / relative
+    monkeypatch.chdir(repo)
+
+    assert skill_root_for(path, cwd=repo) == expected
+    assert collect_skill_roots([path, expected / "SKILL.md"], cwd=repo) == [expected]
+    result = CliRunner().invoke(cli, ["precommit-run", "schema", str(path)])
+    assert result.exit_code == 1, result.output
+    assert "FAIL" in result.output
+    assert "description" in result.output
+
+
+def test_case_only_checkout_alias_keeps_exclusions_and_root_boundary(tmp_path: Path) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    alias = repo.with_name("caseprobe")
+    if not alias.exists() or not alias.samefile(repo):
+        pytest.skip("filesystem does not support case-only directory aliases")
+
+    (tmp_path / "SKILL.md").write_text(_VALID_SKILL_MD.format(name="outside", title="Outside"), encoding="utf-8")
+    fixture = _write_skill(repo / "evals", "fixture")
+    assert skill_root_for(alias / fixture.relative_to(repo) / "SKILL.md", cwd=repo) is None
+    assert skill_root_for(alias / "deleted.py", cwd=repo) is None
+
+
+def test_differently_cased_checkout_is_not_an_alias_on_case_sensitive_filesystems(tmp_path: Path) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    sibling = repo.with_name("caseprobe")
+    if sibling.exists():
+        pytest.skip("filesystem treats the two directory spellings as aliases")
+    outside = _write_skill(sibling, "outside")
+
+    assert skill_root_for(outside / "SKILL.md", cwd=repo) is None
+    assert run_precommit("schema", [outside / "SKILL.md"], cwd=repo) == (0, [])
+
+
 def test_changed_directory_link_maps_to_its_own_skill(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     inside = _write_skill(repo, "inside")

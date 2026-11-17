@@ -36,18 +36,18 @@ skill folder. Model calls can incur charges.
 
 ### Install the pinned Gym
 
-Keep Gym in its own Python **3.13** environment, version **3.13.14 or later**. Use this tested source pin;
-the public `nemo-gym==0.7.0` package has an incompatible CLI.
+SkillEvaluator finds Gym on `PATH` and checks its compatibility. It does not
+install Gym automatically. If you already have this compatible build on `PATH`,
+skip this step.
 
-```bash title="Install Gym separately from SkillEvaluator"
-uv venv --python ">=3.13.14,<3.14" "$HOME/nemo-gym/.venv"
-uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
+```bash title="Install Gym once; uv manages its Python environment"
+uv tool install --python ">=3.13.14,<3.14" --reinstall \
   "nemo-gym @ git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
-export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
-"$SKILL_EVAL_NEMO_GYM_BIN" eval run --help
 ```
 
-The help must include the positional `TARGET` argument and `--sandbox`.
+uv creates the isolated environment and exposes the `gym` command. Use this
+source pin: public `nemo-gym==0.7.0` has an incompatible CLI. The readiness
+check below verifies the required interface automatically.
 
 ### Connect your model
 
@@ -132,9 +132,11 @@ for other environments or unsupported run options.
 
 <AccordionGroup>
   <Accordion title="Gym is missing or its CLI is incompatible">
-    Reinstall the source pin above and export `SKILL_EVAL_NEMO_GYM_BIN` in the
-    evaluation terminal. Check that its `eval run --help` shows `TARGET` and
-    `--sandbox`. Installing public Gym 0.7.0 does not supply this interface.
+    Reinstall the source pin above. If uv's tool directory is not on `PATH`,
+    run `uv tool update-shell` and open a new terminal. A previously set
+    `SKILL_EVAL_NEMO_GYM_BIN` takes precedence over `PATH`; unset it to use the
+    detected tool, or point it at a compatible custom installation.
+    Installing public Gym 0.7.0 does not supply the required interface.
   </Accordion>
   <Accordion title="Doctor passes, but the model call fails">
     Check the policy URL, API key, and explicit `--agent-model` selection.

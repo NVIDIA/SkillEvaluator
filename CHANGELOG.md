@@ -11,6 +11,10 @@ All notable changes to SkillEvaluator are documented in this file.
   no longer loses every live skill, while nested evaluation snapshots remain excluded.
 
 - Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+- The bundled `create-custom-grader` example now ships the benchmark folder and
+  existing skill its first two cases ask the agent to convert, under
+  `evals/files/`, and each case declares `files` so only its own fixture is
+  staged. Previously those cases had no workspace input to work from.
 
 ## 1.0.0 - 2026-11-17
 

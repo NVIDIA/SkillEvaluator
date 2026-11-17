@@ -181,6 +181,7 @@ class SkillEvaluatorOpenCode(OpenCode):
 
     # Headless trials never use OpenCode's undo, and its snapshot can EPIPE on a
     # workspace without .git (#757). opencode_config can turn it back on.
+    # Newer OpenCode renames this key to "snapshots"; update it when bumping OPENCODE_VERSION.
     _DEFAULT_CONFIG: ClassVar[dict[str, Any]] = {"snapshot": False}
 
     def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:

@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import json
 import re
+import subprocess
+import sys
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 if __package__:
@@ -29,6 +33,54 @@ SUPPORTED_CHECK_TYPES = (
     "output_matches",
     "output_contains",
 )
+
+_PATTERN_TIMEOUT_SECONDS = 1.0
+_PATTERN_BUDGET_SECONDS = 5.0
+_PATTERN_WORKER = """
+import json
+import re
+import sys
+
+pattern, text = json.load(sys.stdin)
+try:
+    matched = re.search(pattern, text) is not None
+except (re.error, RecursionError, OverflowError) as exc:
+    print("error:" + str(exc))
+else:
+    print("match" if matched else "no_match")
+"""
+
+
+def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tuple[bool | None, str | None]:
+    """Keep Python re semantics while bounding a pattern's compilation and matching."""
+    timeout = min(_PATTERN_TIMEOUT_SECONDS, budget[0])
+    if timeout <= 0:
+        return None, "the regular expression time budget was exhausted"
+    started = monotonic()
+    try:
+        result = subprocess.run(
+            [sys.executable, "-I", "-c", _PATTERN_WORKER],
+            input=json.dumps([pattern, text]),
+            capture_output=True,
+            encoding="utf-8",
+            timeout=timeout,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return None, "the regular expression timed out"
+    except OSError:
+        return None, "the regular expression worker could not be started"
+    finally:
+        budget[0] -= max(0.0, monotonic() - started)
+    if result.returncode != 0:
+        return None, "the regular expression worker failed"
+    if result.stdout == "match\n":
+        return True, None
+    if result.stdout == "no_match\n":
+        return False, None
+    if result.stdout.startswith("error:"):
+        return None, "it is not a valid regular expression: " + result.stdout.removeprefix("error:").strip()
+    return None, "the regular expression worker returned an invalid result"
 
 
 def validate_declarative_checks(value: object) -> list[str]:
@@ -181,6 +233,7 @@ def evaluate_declarative_checks(
     results = []
     if not isinstance(checks, list):
         return results
+    pattern_budget = [_PATTERN_BUDGET_SECONDS]
     for check in checks:
         if not isinstance(check, dict):
             results.append({"type": None, "passed": None, "reason": "Declarative check must be an object"})
@@ -245,11 +298,9 @@ def evaluate_declarative_checks(
             )
         elif check_type == "output_matches":
             expected = check.get("pattern", "")
-            try:
-                passed = re.search(str(expected), final_response) is not None
-            except re.error as exc:
-                passed = None
-                reason = f"Could not check output pattern because it is not a valid regular expression: {exc}"
+            passed, problem = _output_pattern_matches(str(expected), final_response, pattern_budget)
+            if problem is not None:
+                reason = f"Could not check output pattern because {problem}"
             else:
                 reason = (
                     f"Final response matches /{expected}/"

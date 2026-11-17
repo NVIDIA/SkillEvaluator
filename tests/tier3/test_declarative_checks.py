@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import importlib.util
+import json
+import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -126,6 +129,68 @@ def test_final_response_checks_match_contains_and_regex():
     assert _evaluate({"type": "output_contains", "text": "Report ready"}, response="Still working")["passed"] is False
     assert _evaluate({"type": "output_matches", "pattern": r"Report \d+"}, response="Report 17")["passed"] is True
     assert _evaluate({"type": "output_matches", "pattern": r"Report \d+"}, response="No report")["passed"] is False
+
+
+@pytest.mark.parametrize(
+    ("pattern", "response", "expected"),
+    [
+        (r"^\w+$", "e\u0301", False),
+        (r"^\w+$", "a\u200d", False),
+        (r"^\s$", "\x1c", True),
+        (r"^(a)\1$", "aa", True),
+        (r"^(a)\1$", "ab", False),
+        (r"(?<=a)b", "ab", True),
+        (r"(?i:ready)", "READY", True),
+        (r"^ready$", "ready\n", True),
+    ],
+)
+def test_output_patterns_keep_python_regex_semantics(pattern, response, expected):
+    result = _evaluate({"type": "output_matches", "pattern": pattern}, response=response)
+    assert result["passed"] is expected
+
+
+def test_backtracking_pattern_has_a_shared_deadline_and_other_checks_continue():
+    script = """
+import json
+from skillevaluator.tier3.eval_core import declarative_checks as checks
+checks._PATTERN_TIMEOUT_SECONDS = 0.05
+checks._PATTERN_BUDGET_SECONDS = 0.05
+results = checks.evaluate_declarative_checks(
+    [
+        {"type": "output_matches", "pattern": "^(a|aa)+$"},
+        {"type": "output_matches", "pattern": "a"},
+        {"type": "output_contains", "text": "!"},
+    ],
+    tool_calls=[], final_response="a" * 100 + "!", workspace_roots=[],
+)
+print(json.dumps(results))
+"""
+    # The outer bound also prevents an unfixed implementation from hanging the suite.
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=5)
+    timed_out, exhausted, literal = json.loads(completed.stdout)
+    assert timed_out["passed"] is None
+    assert "timed out" in timed_out["reason"]
+    assert exhausted["passed"] is None
+    assert "budget was exhausted" in exhausted["reason"]
+    assert literal["passed"] is True
+
+
+def test_deep_pattern_compilation_is_not_checked_instead_of_aborting_evaluation():
+    result = _evaluate({"type": "output_matches", "pattern": "(" * 2000}, response="ready")
+    assert result["passed"] is None
+    assert "not a valid regular expression" in result["reason"]
+
+
+def test_pattern_worker_failure_cannot_become_a_match(monkeypatch):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    def unavailable_worker(*args, **kwargs):
+        raise OSError("worker unavailable")
+
+    monkeypatch.setattr(declarative_checks.subprocess, "run", unavailable_worker)
+    result = _evaluate({"type": "output_matches", "pattern": "ready"}, response="ready")
+    assert result["passed"] is None
+    assert "worker could not be started" in result["reason"]
 
 
 def test_runtime_invalid_regex_and_unknown_check_are_not_checked():
@@ -313,11 +378,12 @@ def test_standalone_bundle_stages_and_imports_the_shared_helper(tmp_path: Path, 
     spec.loader.exec_module(staged)
 
     result = staged.evaluate_declarative_checks(
-        [{"type": "output_contains", "text": "ready"}],
+        [{"type": "output_contains", "text": "ready"}, {"type": "output_matches", "pattern": r"ready\s$"}],
         tool_calls=[],
-        final_response="ready",
+        final_response="ready\x1c",
         workspace_roots=[],
     )
 
     assert helper_path.is_file()
     assert result[0]["passed"] is True
+    assert result[1]["passed"] is True

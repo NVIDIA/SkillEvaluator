@@ -95,7 +95,7 @@ skill-junit:
 
 `skillevaluator validate` on a folder of skills writes one file per skill
 instead, as `reports/<skill>/skillevaluator-output-<timestamp>.junit.xml`;
-point `junit:` at `reports/*/*.junit.xml` for that layout.
+point `junit:` at `reports/**/*.junit.xml` to include nested skill folders.
 
 The [public examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
 include this report preview and a log excerpt without requiring access to a

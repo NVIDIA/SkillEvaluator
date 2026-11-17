@@ -256,9 +256,6 @@ def _python_signature(
     """Read the complete header, stopping before the first body statement."""
     first = node.body[0]
     body_line, body_column = first.lineno, first.col_offset
-    decorators = getattr(first, "decorator_list", [])
-    if decorators:
-        body_line, body_column = decorators[0].lineno, 0
 
     header_lines = source_lines[node.lineno - 1 : body_line]
     # AST columns count UTF-8 bytes, unlike string slicing and tokenizer columns.
@@ -266,6 +263,10 @@ def _python_signature(
     header = "\n".join(header_lines)
     end_line, end_column = 1, len(header_lines[0])
     for token in tokenize.generate_tokens(io.StringIO(header).readline):
+        if token.type == tokenize.NEWLINE:
+            # The header is one logical line. Do not read body decorators:
+            # their AST expression may start after a parenthesized @ line.
+            break
         if token.type == tokenize.OP and token.string == ":":
             # Earlier colons can belong to annotations, defaults, or lambdas.
             # Comments between the header and body are not signature tokens.

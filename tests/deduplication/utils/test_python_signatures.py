@@ -101,3 +101,44 @@ def test_physical_source_lines_follow_python_ast_coordinates(newline):
         "def second(\n    value: int,\n) -> int:",
     ]
     assert [(chunk.start_line, chunk.end_line) for chunk in chunks] == [(1, 2), (3, 6)]
+
+
+@pytest.mark.parametrize("signature", ["class Example:", "def outer():"])
+@pytest.mark.parametrize(
+    "decorator",
+    [
+        "    @(\n        staticmethod\n    )\n",
+        "    @(\n        lambda value: value\n    )\n",
+        "    @((\n        staticmethod\n    ))\n    @another\n",
+        "    @decorate(\n        lambda value: value\n    )\n",
+    ],
+    ids=["parenthesized", "lambda", "stacked", "call-control"],
+)
+def test_first_members_multiline_decorator_is_not_part_of_the_enclosing_signature(signature, decorator):
+    content = signature + "\n" + decorator + "    def method():\n        pass\n"
+
+    chunks = chunk_python(_collected(content), min_chars=1)
+
+    assert [chunk.text for chunk in chunks] == [signature, "    def method():"]
+    assert chunks[0].start_line == 1
+    assert chunks[0].end_line == len(content.splitlines())
+    # Even short definitions must be safe: extraction precedes the length filter.
+    assert chunk_file(_collected(content)) == []
+
+
+@pytest.mark.parametrize("signature", ["class Example:", "def outer():"])
+def test_collected_parenthesized_decorator_does_not_abort_intra_skill_validation(tmp_path, signature):
+    from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+
+    (tmp_path / "SKILL.md").write_text("# Example\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "example.py").write_text(
+        signature + "\n    @(\n        staticmethod\n    )\n    def method():\n        pass\n",
+        encoding="utf-8",
+    )
+
+    result = IntraSkillValidator().validate(tmp_path)
+
+    assert result.incomplete_scans == []
+    assert result.findings == []

@@ -11,6 +11,8 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator._ci_onboarding_git import repository_root
+from skillevaluator.tier3.grader_validation import _verifier_git_provenance
 from skillevaluator.tier3.results_location import git_root_for
 from skillevaluator.utils import find_skills_in_directory, get_skill_name_from_path
 from skillevaluator.utils.helpers import (
@@ -279,6 +281,21 @@ def test_every_git_root_lookup_preserves_trailing_whitespace(tmp_path: Path, fol
     skill_dir.mkdir()
 
     assert lookup(skill_dir) == repo_root.resolve()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows strips trailing whitespace in directory names")
+@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n"])
+@pytest.mark.parametrize("consumer", ["ci-onboarding", "verifier-provenance"])
+def test_additional_git_root_consumers_preserve_trailing_whitespace(tmp_path: Path, folder: str, consumer) -> None:
+    repo_root = tmp_path / folder
+    commit = _init_git_repo(repo_root, "git@github.com:example/project.git")
+    if consumer == "ci-onboarding":
+        assert repository_root(repo_root) == repo_root.resolve()
+    else:
+        tracked = repo_root / "README.md"
+        assert _verifier_git_provenance([tracked]) == {"verifier_git_commit": commit, "verifier_git_dirty": False}
+        tracked.write_text("changed content\n")
+        assert _verifier_git_provenance([tracked]) == {"verifier_git_commit": commit, "verifier_git_dirty": True}
 
 
 class TestResolveGitRemoteUrl:

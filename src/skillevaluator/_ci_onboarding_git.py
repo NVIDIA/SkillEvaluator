@@ -75,7 +75,7 @@ def git(repo: Path, *args: str, optional: bool = False, network: bool = False) -
 
 def repository_root(path: Path) -> Path:
     repo = path.resolve(strict=True)
-    top = Path(git(repo, "rev-parse", "--show-toplevel").strip()).resolve(strict=True)
+    top = Path(git(repo, "rev-parse", "--show-toplevel").removesuffix("\n")).resolve(strict=True)
     if top != repo:
         raise SetupError("Run from the Git repository root, or pass that root using --repo.")
     return repo

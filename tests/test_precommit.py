@@ -385,6 +385,22 @@ def test_changed_directory_link_maps_to_its_own_skill(tmp_path: Path) -> None:
     assert collect_skill_roots([link], cwd=repo) == [inside.resolve()]
 
 
+@pytest.mark.parametrize("indirect", [False, True], ids=["self-loop", "two-link-loop"])
+def test_paths_below_symlink_loops_do_not_abort_collection(tmp_path: Path, indirect: bool) -> None:
+    repo = tmp_path / "repo"
+    kept = _write_skill(repo, "kept")
+    loop = repo / "loop"
+    try:
+        loop.symlink_to("other" if indirect else "loop", target_is_directory=True)
+        if indirect:
+            (repo / "other").symlink_to("loop", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    assert skill_root_for(loop / "changed.py", cwd=repo) is None
+    assert collect_skill_roots([loop / "changed.py", kept / "SKILL.md"], cwd=repo) == [kept.resolve()]
+
+
 @pytest.mark.parametrize("root_manifest", [False, True])
 def test_external_alias_cannot_select_its_lexical_ancestor(tmp_path: Path, root_manifest: bool) -> None:
     repo = _write_skill(tmp_path, "repo") if root_manifest else tmp_path / "repo"

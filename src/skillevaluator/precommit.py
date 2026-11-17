@@ -101,30 +101,19 @@ def skill_root_for(
 
     try:
         limit = cwd.resolve()
-    except OSError:
-        limit = cwd
-
-    try:
         resolved_start = start.resolve()
         if not resolved_start.is_relative_to(limit):
             return None
-    except OSError:
+    except (OSError, RuntimeError):
         return None
 
     root: Path | None = None
     for ancestor in [resolved_start, *resolved_start.parents]:
         if not _in_excluded_dir(ancestor, limit) and _has_skill_manifest(ancestor, _manifest_cache):
-            try:
-                root = ancestor.resolve()
-            except OSError:
-                root = ancestor
+            root = ancestor
             break
-        try:
-            if ancestor.resolve() == limit:
-                break
-        except OSError:
-            if ancestor == cwd:
-                break
+        if ancestor == limit:
+            break
     if _cache is not None:
         _cache[start] = root
     return root

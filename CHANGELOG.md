@@ -11,6 +11,7 @@ All notable changes to SkillEvaluator are documented in this file.
   interpretation. Detailed Tier 3 run options, runtime behavior, grading,
   results, and experiments now have separate reference pages; existing topic
   bookmarks link to their new locations.
+  The README harness panel is labelled as an illustrative profile summary.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.

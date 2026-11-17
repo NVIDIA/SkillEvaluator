@@ -17,8 +17,7 @@
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
-on task results: start with quality checks, then compare runs with and without a skill.
+Check skill and plugin quality, then compare task results with and without a skill.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -95,6 +94,8 @@ No LLM inference · No model key · No agent run
 ```bash
 skillevaluator harness-check ./my-skill
 ```
+
+Illustrative summary of versioned profiles. Full output can include notes and schema diagnostics.
 
 ```text
 ╭─ Harness compatibility · my-skill ──────────────────────────────────────────────────────╮

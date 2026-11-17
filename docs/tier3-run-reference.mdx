@@ -48,7 +48,7 @@ skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 
 `--full` with an LLM provider generates all four buckets (explicit, implicit,
 contextual, and negative). With `--no-llm`, template mode emits the three
-positive buckets and adds a negative case only when `evals/EVAL.md` supplies an
+positive buckets and adds a negative case only when the author guidance supplies an
 off-skill prompt under a supported negative heading. Generation uses your
 configured evaluator provider by default; `--no-llm` falls back to keyless local
 templates. The dataset format, `EVAL.md` guidance, and refinement options live

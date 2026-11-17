@@ -127,7 +127,7 @@ For an editable checkout and contributor tools, use the
   | Base (no extra) | Quality and structural checks; no model clients |
   | `[llm]` | Model clients for rubric reviews and other LLM-backed checks |
   | `[tier2]` | Deduplication and similarity checks; includes `llm` |
-  | `[tier3]` | Live agent evaluation; includes `llm` and `harbor==0.25.0` |
+  | `[tier3]` | Live agent evaluation; includes `llm` and `harbor[gke]==0.25.0` |
   | `[security]` | Bandit and pip-audit on PyPI 0.9.0; current source includes Bandit in the base package |
   | `[all]` | `tier2`, `tier3`, and `security` |
   | `[all,dashboard]` | All evaluation extras plus the local Streamlit dashboard |
@@ -135,8 +135,9 @@ For an editable checkout and contributor tools, use the
 
   [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
   evaluation framework installed by `tier3`; that extra also requires
-  `python-dotenv>=1.2.0`. Optional dependencies for managed sandbox backends
-  stay separate; see [backend setup](/skills/skillevaluator/agents-and-sandboxes#where-trials-run).
+  `python-dotenv>=1.2.0`. GKE/ACK dependencies are included; other managed
+  backends may need additional dependencies. See
+  [backend setup](/skills/skillevaluator/agents-and-sandboxes#where-trials-run).
 </Accordion>
 
 ## System tools
@@ -147,17 +148,32 @@ Current source also needs this extra for pip-audit when running Python
 dependency audits:
 
 <Tabs>
-  <Tab title="pip">
+  <Tab title="pip (PyPI)">
 
 ```bash title="Add security dependencies in your activated environment"
 python -m pip install --upgrade "skillevaluator[security]"
 ```
 
   </Tab>
-  <Tab title="uv tool">
+  <Tab title="uv tool (PyPI)">
 
 ```bash title="Add security dependencies to the uv tool"
 uv tool install --python 3.13 --reinstall "skillevaluator[security]"
+```
+
+  </Tab>
+  <Tab title="GitHub source">
+
+Keep the GitHub source when adding scanner dependencies:
+
+```bash title="Add security dependencies to a source-installed uv tool"
+uv tool install --python 3.13 --reinstall "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+Or in the activated environment for your pip source installation:
+
+```bash title="Add security dependencies to a pip source installation"
+python -m pip install --upgrade --force-reinstall "skillevaluator[security] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
   </Tab>

@@ -32,21 +32,16 @@ Install the CLI in a Python 3.12–3.14 environment:
 pip install skillevaluator
 ```
 
-<details><summary>Or use uv, or run from a clone</summary>
+<details><summary>Or use uv</summary>
 
 ```bash
 uv tool install --python 3.13 skillevaluator
 ```
 
-From a clone, with [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
-cd SkillEvaluator
-uv run --python 3.13 skillevaluator --help
-```
-
 </details>
+
+For uv setup or direct GitHub source installation, see
+[Installation](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 Then check skills from your terminal, CI, or agent:
 
@@ -61,7 +56,7 @@ Quickly check your skill without an LLM key:
 skillevaluator quality-check ./my-skill
 ```
 
-Run all tiers with a [free build.nvidia.com key](#run-all-three-tiers-with-a-free-nvidia-build-key). Same command, no tiers flag:
+After [all-tier setup with NVIDIA Build](#run-all-three-tiers-with-a-free-nvidia-build-key), run the combined pipeline:
 
 ```bash
 skillevaluator validate \

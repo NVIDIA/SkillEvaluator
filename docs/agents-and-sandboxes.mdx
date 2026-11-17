@@ -253,8 +253,9 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
-Docker is the default. The `tier3` extra installs base `harbor==0.25.0`; install
-the environment extra shown below when a managed backend needs one.
+Docker is the default. The `tier3` extra installs `harbor[gke]==0.25.0`, including
+GKE/ACK dependencies. Install the environment extra shown below when another
+managed backend needs one.
 
 | Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |

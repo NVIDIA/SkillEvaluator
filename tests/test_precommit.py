@@ -385,6 +385,39 @@ def test_changed_directory_link_maps_to_its_own_skill(tmp_path: Path) -> None:
     assert collect_skill_roots([link], cwd=repo) == [inside.resolve()]
 
 
+@pytest.mark.parametrize("root_manifest", [False, True])
+def test_external_alias_cannot_select_its_lexical_ancestor(tmp_path: Path, root_manifest: bool) -> None:
+    repo = _write_skill(tmp_path, "repo") if root_manifest else tmp_path / "repo"
+    target = repo / "docs"
+    target.mkdir(parents=True)
+    (target / "changed.py").write_text("print(0)\n", encoding="utf-8")
+    outside = _write_skill(tmp_path, "outside")
+    alias = outside / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    expected = repo.resolve() if root_manifest else None
+    assert skill_root_for(alias / "changed.py", cwd=repo) == expected
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_internal_alias_keeps_target_exclusion_rules(tmp_path: Path, excluded: bool) -> None:
+    repo = tmp_path / "repo"
+    target_parent = repo / "evals" if excluded else repo
+    target = _write_skill(target_parent, "target")
+    (target / "changed.py").write_text("print(0)\n", encoding="utf-8")
+    alias = repo / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    expected = [] if excluded else [target.resolve()]
+    assert collect_skill_roots([alias / "changed.py", target / "changed.py"], cwd=repo) == expected
+
+
 def test_precommit_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.chdir(tmp_path)
     skill = _write_skill(tmp_path, "cli-skill")

@@ -401,10 +401,15 @@ even when it only cleans `/tmp` or prints; such text over 64 KiB does too.
 These readings stop once the texts they check count 256 KiB of a trace.
 Each text of up to 64 KiB counts before each check of it, also one they
 then do not read, such as a here-document body or substitution that runs
-no `rm`, or a command of text read in one pass: its length, 64 characters
-more, and 10 more for each word, newline, shell operator character (`;`,
-`&`, `|`, `(`, `)`, `<` or `>`), backtick, `$(` and `$'...'` word in it,
-which cost the lexer and the walk more than a character does. Text read
+no `rm`: its length, 64 characters more, and 10 more for each word,
+newline, shell operator character (`;`, `&`, `|`, `(`, `)`, `<` or `>`),
+backtick, `$(` and `$'...'` word in it, which cost the lexer and the walk
+more than a character does. A longer text does not count as a whole: it is
+read in one pass, where each command and here-document body that reading
+checks counts the same way before its check, at any length. So four calls
+of `rm -rf /tmp/x; echo` and 70,000 more characters spend the limit, while
+five such calls with 60,000 characters, which the check splits into words
+and in which no reading checks a text, count nothing. Text read
 again, such as `eval` text or a
 command read in pieces, counts again at each level it is read. A text that
 would take the count past 256 KiB is not read: it, the rest of its call and

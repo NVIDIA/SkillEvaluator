@@ -8,7 +8,7 @@ run: which agents attempt the tasks (`--agents`) and where the trials execute
 (`--env-mode`). This page is the complete matrix for both, plus the resource,
 safety, and workspace controls around them and the readiness checks that tell
 you a run will work before you spend compute. The run workflow itself is
-[Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+[Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework that executes each Tier 3 trial and provides its Docker,
@@ -253,8 +253,9 @@ Anthropic evaluator with `opencode` also does not support local mode.
 
 SkillEvaluator exposes 27 environment modes: 26 Harbor-native backends,
 including Docker, plus SkillEvaluator's own `local` host-execution mode.
-Docker is the default. The `tier3` extra installs base `harbor==0.25.0`; install
-the environment extra shown below when a managed backend needs one.
+Docker is the default. The `tier3` extra installs `harbor[gke]==0.25.0`, including
+GKE/ACK dependencies. Install the environment extra shown below when another
+managed backend needs one.
 
 | Mode | Type | Harbor extra or system prerequisite |
 | --- | --- | --- |
@@ -813,7 +814,7 @@ error.
 
 Selection and group-mode evaluation read the `name` and `description` of the
 target and of each selected skill as `similarity-check` does, within the same
-[frontmatter structure limits](/skills/skillevaluator/tier2-deduplication#defaults-and-safety-limits).
+[frontmatter structure limits](/skills/skillevaluator/tier2-reference#defaults-and-safety-limits).
 The command fails, and says the skill needs a root `SKILL.md` whose frontmatter
 is a valid YAML mapping with a non-empty string name and description, when that
 file or its frontmatter is missing, the frontmatter is invalid YAML or not a
@@ -933,7 +934,7 @@ covered in [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     The end-to-end run workflow — readiness, dataset, evaluation, and results.
   </Card>
   <Card title="Custom Graders & Tasks" icon="terminal" href="/skills/skillevaluator/custom-graders">

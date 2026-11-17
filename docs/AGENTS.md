@@ -17,10 +17,14 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `installation-options.mdx` — upgrades, Docker, release differences, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
-- `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
-- `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
+- `tier1-validation.mdx` — first static run, report, and next steps
+- `tier1-reference.mdx` — detailed checks, policies, scanners, and exit semantics
+- `tier2-deduplication.mdx` — choose a scope, run deduplication, and read findings
+- `tier2-reference.mdx` — chunking, catalogs, thresholds, algorithms, and limits
 - `tier3-live-evaluation.mdx` — first Tier 3 comparison; keep this task-focused
-- `tier3-run-options.mdx` — dataset review, cost, tuning, and repeat comparisons
+- `prepare-dataset.mdx` — author, generate, review, and validate cases before trials
+- `tier3-run-options.mdx` — choose an agent and attempt count for reviewed cases
+- `tier3-run-reference.mdx` — staging contracts, run settings, budgets, and repeat comparisons
 - `tier3-runtime.mdx` — backend compatibility, runtime contracts, and troubleshooting
 - `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback policies
 - `tier3-results.mdx` — scores, applicability, verdicts, and incomplete evidence

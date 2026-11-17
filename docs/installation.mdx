@@ -125,6 +125,22 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 </div>
 
+<Accordion title="What if I install without [all]?">
+  `pip install skillevaluator` or `uv tool install skillevaluator` installs
+  the lightweight CLI for quality scoring and basic static checks.
+
+  On PyPI 0.9.0, the base install does not include model clients for rubric
+  reviews or Tier 2, the Tier 3 agent runtime, Bandit, or pip-audit. Full static
+  validation can report **INCOMPLETE** until scanner requirements are met.
+  `[all]` includes the `tier2`, `tier3`, and `security` extras; provider keys,
+  Docker, and the optional dashboard still have separate setup.
+
+  Add all evaluation dependencies later using the
+  [upgrade commands](/skills/skillevaluator/installation-options#upgrade), or
+  choose [individual extras](/skills/skillevaluator/installation-options#choosing-extras).
+  Harness Check still requires the GitHub source installation.
+</Accordion>
+
 ## Verify your install
 
 ```bash title="Check the CLI"
@@ -144,7 +160,7 @@ command is not found.
 | [Tier 1: Validation](/skills/skillevaluator/tier1-validation) | A skill folder. Static checks need no API key. |
 | [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | GitHub source installation and a skill folder. No API key or agent run. |
 | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) | A provider for embeddings and model analysis. |
-| [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | A model API key and Docker. |
+| [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | A [reviewed dataset](/skills/skillevaluator/prepare-dataset), a model API key, and Docker. |
 
 Need an example skill? Start with the [quickstart](/skills/skillevaluator/quickstart).
 

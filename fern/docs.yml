@@ -65,12 +65,15 @@ navigation:
       - page: "Tier 3: Live Agent Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Prepare a Dataset
+        path: ../docs/prepare-dataset.mdx
+        slug: prepare-dataset
+      - page: Configure a Tier 3 Run
+        path: ../docs/tier3-run-options.mdx
+        slug: tier3-run-options
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation
-      - page: Eval Datasets
-        path: ../docs/eval-datasets.mdx
-        slug: eval-datasets
       - page: Trace Datasets
         path: ../docs/trace-datasets.mdx
         slug: trace-datasets
@@ -113,12 +116,21 @@ navigation:
       - page: Installation Options
         path: ../docs/installation-options.mdx
         slug: installation-options
+      - page: Tier 1 Checks and Policies
+        path: ../docs/tier1-reference.mdx
+        slug: tier1-reference
+      - page: Tier 2 Checks and Limits
+        path: ../docs/tier2-reference.mdx
+        slug: tier2-reference
       - section: Live Evaluation
         skip-slug: true
         contents:
-          - page: Prepare and Tune a Run
-            path: ../docs/tier3-run-options.mdx
-            slug: tier3-run-options
+          - page: Run Options and Cost
+            path: ../docs/tier3-run-reference.mdx
+            slug: tier3-run-reference
+          - page: Dataset Format and Policy
+            path: ../docs/eval-datasets.mdx
+            slug: eval-datasets
           - page: Interpret Results
             path: ../docs/tier3-results.mdx
             slug: tier3-results

@@ -804,6 +804,7 @@ def test_public_cli_exposes_both_tier_two_workflows_without_a_service() -> None:
 def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     guide = (REPO_ROOT / "docs" / "tier2-deduplication.mdx").read_text(encoding="utf-8")
+    guide += "\n" + (REPO_ROOT / "docs" / "tier2-reference.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{guide}"
 
     assert "similarity-check ./skills" in public_docs
@@ -844,7 +845,7 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
 def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
-    tier3 = (REPO_ROOT / "docs" / "tier3-run-options.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-run-reference.mdx").read_text(encoding="utf-8")
     runtime = (REPO_ROOT / "docs" / "tier3-runtime.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{configuration}\n{tier3}\n{runtime}"
 
@@ -900,7 +901,7 @@ def test_fern_docs_use_the_verified_skills_basepath_and_launch_positioning() -> 
 
 
 def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
-    tier3 = (REPO_ROOT / "docs" / "tier3-run-options.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-run-reference.mdx").read_text(encoding="utf-8")
     normalized = " ".join(tier3.split())
 
     assert "eval cases \u00d7 agents \u00d7 attempts \u00d7 arms" in normalized

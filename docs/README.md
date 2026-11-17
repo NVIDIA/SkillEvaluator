@@ -16,10 +16,14 @@ contributors making non-trivial edits.
 - `installation.mdx` — shared pip, uv, and GitHub installation paths and verification
 - `installation-options.mdx` — upgrades, Docker, release differences, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
-- `tier1-validation.mdx` — checks, profiles, scanner setup, exit codes
-- `tier2-deduplication.mdx` — dedup commands, catalogs, thresholds, limits
+- `tier1-validation.mdx` — first static run, report, and next steps
+- `tier1-reference.mdx` — detailed checks, policies, scanners, and exit semantics
+- `tier2-deduplication.mdx` — choose a scope, run deduplication, and read findings
+- `tier2-reference.mdx` — chunking, catalogs, thresholds, algorithms, and limits
 - `tier3-live-evaluation.mdx` — first live comparison, from model setup to report
-- `tier3-run-options.mdx` — reviewed datasets, run size, cost, and repeat comparisons
+- `prepare-dataset.mdx` — author, generate, review, and validate cases before trials
+- `tier3-run-options.mdx` — choose an agent and attempt count for reviewed cases
+- `tier3-run-reference.mdx` — staging contracts, run settings, budgets, and repeat comparisons
 - `tier3-runtime.mdx` — runtime contracts, backend compatibility, and troubleshooting
 - `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback models
 - `tier3-results.mdx` — scores, applicability, verdicts, and incomplete results

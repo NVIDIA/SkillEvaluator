@@ -1,7 +1,7 @@
 ---
 title: "Tier 3: Live Agent Evaluation"
 sidebar-title: "Tier 3: Live Agent Evaluation"
-description: "Connect a model, run an agent with and without your skill, and open the comparison report."
+description: "Prepare reviewed cases, run an agent with and without your skill, and open the comparison report."
 ---
 
 Does your skill help an agent complete a task? Run the same tasks **with and
@@ -10,16 +10,16 @@ without your skill**, then open a report showing the difference: **Skill Lift**.
 <div id="install-live-evaluation-support">
 
 First, [install SkillEvaluator](/skills/skillevaluator/installation#install) with the all-tier option,
-then return here to connect your model and run the comparison.
+then connect a model, prepare your dataset, and run the comparison.
 
 </div>
 
 <CardGroup cols={3}>
-  <Card title="1. Set up" icon="key" href="#before-you-start">
-    Connect one model provider and check readiness.
+  <Card title="1. Prepare" icon="list-check" href="#prepare-your-dataset">
+    Create and review the tasks the agent will run.
   </Card>
-  <Card title="2. Run" icon="play" href="#start-with-one-command">
-    Start a comparison in Docker.
+  <Card title="2. Run" icon="play" href="#run-your-reviewed-dataset">
+    Evaluate the reviewed cases in Docker.
   </Card>
   <Card title="3. See the result" icon="chart-simple" href="#read-the-report">
     Open the report and inspect the paired outcomes.
@@ -28,8 +28,14 @@ then return here to connect your model and run the comparison.
 
 ## Before you start
 
-Have Docker running, a model API key, and a skill folder containing `SKILL.md`.
-Replace `./my-skill` below with that folder. New to skills? Try the
+Have these ready before starting the agent run:
+
+- A skill folder containing `SKILL.md`; replace `./my-skill` with that folder.
+- A model API key and Docker running.
+- A **reviewed dataset** at `./my-skill/evals/evals.json`. [Create one](/skills/skillevaluator/prepare-dataset) or review your existing cases using the step below.
+
+Native task bundles use the [custom task workflow](/skills/skillevaluator/custom-graders)
+instead of `evals.json`. New to skills? Try the
 [bundled keyless example](/skills/skillevaluator/quickstart) first.
 
 <Steps toc={true}>
@@ -67,6 +73,29 @@ export OPENAI_API_KEY='sk-...'
 For Anthropic, a different model, or an existing provider setup, use
 [Providers & Credentials](/skills/skillevaluator/configuration).
 
+### Prepare your dataset
+
+**Do this before running the comparison.** The dataset defines the requests
+both agents receive and the outcomes they are graded against.
+
+<Card title="Create or bring your evaluation dataset" icon="list-check" href="/skills/skillevaluator/prepare-dataset">
+  Write task guidance → generate cases → review and validate them.
+  If you already have cases, start at the review step.
+</Card>
+
+Open `./my-skill/evals/evals.json` and check the prompts, expected outcomes,
+and any input files. Then validate:
+
+```bash title="Validate the reviewed dataset"
+skillevaluator tier3 validate ./my-skill --strict
+```
+
+Confirm the file exists first: an absent `evals/` directory can be reported as
+missing without a failing exit code. Resolve errors and warnings before
+continuing. Passing validation checks the
+dataset's structure and flagged wording; you still need to review whether its
+tasks represent how people will use the skill.
+
 ### Check readiness
 
 ```bash title="Check your provider and Docker setup"
@@ -78,25 +107,31 @@ inside their containers. [Runtime setup and troubleshooting](/skills/skillevalua
 
 </Steps>
 
-## Start with one command
+<div id="start-with-one-command">
 
-```bash title="Run a paired comparison"
+## Run your reviewed dataset
+
+```bash title="Run the reviewed cases with and without the skill"
+skillevaluator tier3 evaluate ./my-skill --env-mode docker --n-attempts 1
+```
+
+This explicit command uses the existing evaluation source. It does not create
+a missing dataset unless you opt into `--autopilot`. **Model calls can incur
+charges.** One attempt means one try per selected case in each arm. Saved run
+settings can limit coverage or affect attempts. [Choose run settings](/skills/skillevaluator/tier3-run-options).
+
+</div>
+
+<Accordion title="Optional: try automatic setup for a workflow check">
+
+```bash title="Generate a starter only when no evaluation source exists"
 skillevaluator tier3 ./my-skill --env-mode docker --n-attempts 1
 ```
 
-The command selects the agent for your provider, prepares the tasks, runs both
-arms, and saves the report. **Model calls can incur charges.** One attempt
-means one try per case in each arm; existing datasets run all their cases.
-[Control the run size and cost](/skills/skillevaluator/tier3-run-options#plan-for-cost).
-
-<Accordion title="Which tasks will it run?">
-  If your skill has no evaluation dataset, the command generates one starter
-  case. If a valid dataset or native task source already exists, it reuses it
-  unchanged. Invalid sources stop the run instead of being replaced.
-
-  A one-case starter checks the workflow; it cannot establish how well the
-  skill performs across its intended tasks. To review cases before any live
-  trials, follow [Prepare a fuller evaluation](/skills/skillevaluator/tier3-run-options#prepare-and-review-a-fuller-evaluation).
+  This shorter workflow creates one starter case when no source exists, or
+  reuses existing cases. Invalid sources stop the run. A one-case starter
+  checks the workflow; it does not establish performance across intended tasks.
+  Use the reviewed-dataset workflow above for a planned evaluation.
 </Accordion>
 
 ## Read the report
@@ -120,8 +155,8 @@ The run prints its output directory. By default, reports are saved under
 ## Build on your first run
 
 <CardGroup cols={2}>
-  <Card title="Evaluate representative tasks" icon="list-check" href="/skills/skillevaluator/tier3-run-options#prepare-and-review-a-fuller-evaluation">
-    Review a fuller dataset, repeat attempts, and compare skill versions.
+  <Card title="Configure your next run" icon="sliders" href="/skills/skillevaluator/tier3-run-options">
+    Choose an agent, repeat attempts, or open advanced run controls.
   </Card>
   <Card title="Run in CI" icon="code-branch" href="/skills/skillevaluator/advanced-ci">
     Use committed evaluation cases in the automatic CI workflow.
@@ -172,20 +207,20 @@ The run prints its output directory. By default, reports are saved under
 <div id="cost-limits">
 
 <Accordion title="Datasets, run options, and cost">
-  - [Prepare and review a fuller evaluation](/skills/skillevaluator/tier3-run-options#prepare-and-review-a-fuller-evaluation)
-  - [Check readiness](/skills/skillevaluator/tier3-run-options#check-readiness)
-  - [Generate an eval dataset](/skills/skillevaluator/tier3-run-options#generate-an-eval-dataset)
-  - [Review the cases](/skills/skillevaluator/tier3-run-options#review-the-cases)
-  - [Run the comparison](/skills/skillevaluator/tier3-run-options#run-the-comparison)
-  - [Read the report](/skills/skillevaluator/tier3-run-options#read-the-report)
-  - [Plan for cost](/skills/skillevaluator/tier3-run-options#plan-for-cost)
-  - [Cost and local mode](/skills/skillevaluator/tier3-run-options#cost-and-local-mode)
-  - [Tune the run](/skills/skillevaluator/tier3-run-options#tune-the-run)
-  - [Reuse a baseline](/skills/skillevaluator/tier3-run-options#reuse-a-baseline)
-  - [Compare skill versions](/skills/skillevaluator/tier3-run-options#compare-skill-versions)
-  - [Baseline only runs](/skills/skillevaluator/tier3-run-options#baseline-only-runs)
-  - [Baseline timeouts](/skills/skillevaluator/tier3-run-options#baseline-timeouts)
-  - [Cost limits](/skills/skillevaluator/tier3-run-options#cost-limits)
+  - [Prepare and review a fuller evaluation](/skills/skillevaluator/tier3-run-reference#prepare-and-review-a-fuller-evaluation)
+  - [Check readiness](/skills/skillevaluator/tier3-run-reference#check-readiness)
+  - [Generate an eval dataset](/skills/skillevaluator/tier3-run-reference#generate-an-eval-dataset)
+  - [Review the cases](/skills/skillevaluator/tier3-run-reference#review-the-cases)
+  - [Run the comparison](/skills/skillevaluator/tier3-run-reference#run-the-comparison)
+  - [Read the report](/skills/skillevaluator/tier3-run-reference#read-the-report)
+  - [Plan for cost](/skills/skillevaluator/tier3-run-reference#plan-for-cost)
+  - [Cost and local mode](/skills/skillevaluator/tier3-run-reference#cost-and-local-mode)
+  - [Tune the run](/skills/skillevaluator/tier3-run-reference#tune-the-run)
+  - [Reuse a baseline](/skills/skillevaluator/tier3-run-reference#reuse-a-baseline)
+  - [Compare skill versions](/skills/skillevaluator/tier3-run-reference#compare-skill-versions)
+  - [Baseline only runs](/skills/skillevaluator/tier3-run-reference#baseline-only-runs)
+  - [Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts)
+  - [Cost limits](/skills/skillevaluator/tier3-run-reference#cost-limits)
 </Accordion>
 
 </div>

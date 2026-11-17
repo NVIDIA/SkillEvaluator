@@ -175,7 +175,7 @@ Each tier is independent. Use the [all-tier installation](https://docs.nvidia.co
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
-| Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-validation.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
+| Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-reference.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
 | Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | GitHub source; no API key or agent run |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
@@ -207,7 +207,7 @@ retain their applicable stages.
 
 Tier 1 gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
-can incur charges; see [runtime and cost](docs/tier3-run-options.mdx#plan-for-cost).
+can incur charges; see [runtime and cost](docs/tier3-run-reference.mdx#plan-for-cost).
 
 Standalone generation needs substantive `evals/EVAL.md` guidance, a `--prompt`
 file with task requests and outcomes, or matching retained traces. `--force`

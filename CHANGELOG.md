@@ -6,6 +6,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit
+  live evaluation, with a short dataset guide and concise run-settings page.
+  Tier 1 and Tier 2 now have short first-run paths; detailed checks, policies,
+  algorithms, and run contracts move to linked references with legacy anchors
+  preserved. Installation explains the base package versus `[all]`.
+
 - Central installation guide with pip and uv PyPI installs, uv bootstrap, and
   direct GitHub source options for all three tiers. Release differences, scanner
   setup, and smaller installs are documented on a linked options page. Tier guides and the quickstart use the installed CLI. Navigation

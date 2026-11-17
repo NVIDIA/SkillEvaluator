@@ -15,9 +15,7 @@ from skillevaluator.validators.workflows_schema import WorkflowsSchemaValidator
 
 @pytest.mark.parametrize("use_errors", [True, False])
 def test_trailing_newline_is_not_a_valid_kebab_case_name(use_errors):
-    result = validate_kebab_case_name(
-        "my-skill\n", NamingValidationConfig(name_type="Name", use_errors=use_errors)
-    )
+    result = validate_kebab_case_name("my-skill\n", NamingValidationConfig(name_type="Name", use_errors=use_errors))
 
     assert result.errors if use_errors else result.warnings
     assert not any("follows naming convention" in message for message in result.messages)

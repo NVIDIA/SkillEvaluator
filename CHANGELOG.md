@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Reuse occurrence indexes while merging collection finding summaries, avoiding
+  repeated scans of every previously collected location when many skills share
+  a finding. Finding identities, severity, ordering, and counts are preserved.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

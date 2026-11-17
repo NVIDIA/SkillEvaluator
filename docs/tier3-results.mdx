@@ -367,7 +367,14 @@ chain longer than 300 characters, or a name bound by a loop; a client
 as in `lib.axios.post(...)` after `const lib = require("./lib")`; a config
 read through process substitution; a `perl` or `ruby` option with a value
 attached before the code, as in `perl -0777 -ne CODE` or `perl -F, -ane CODE`;
-a script or config that an earlier call wrote; and code over 64 KiB.
+a script or config that an earlier call wrote; and code over 64 KiB. The
+shell commands of Python code that does not parse, its argument vectors and
+shell strings, are not read either; its client calls still are. Python code
+is parsed by the Python that runs the grader, so the host checker and the
+Harbor verifier can differ: code that needs a newer Python than the task
+image has, such as a `match` statement on a Python 3.9 image, and code nested
+deeper than one Python's parser accepts, is read for shell commands by one and
+not by the other.
 
 Each tool call the reader reads has one work budget, shared by every program,
 shell text, and config the call runs: 32 units per character of the call's

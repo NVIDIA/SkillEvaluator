@@ -169,7 +169,7 @@ self-checks are not a substitute for feedback from a first-time human user.
 | Output directory already exists | Keep it as evidence; use a new `--output` path. Nothing is overwritten. |
 | A checked score or report field differs | Read the retained JSON/text, confirm `receipt.json` if present and the installed version; do not blindly update expectations. A failed demo does not write a success receipt. |
 | Analysis count differs | Check file contents, encoding and newlines; the input is UTF-8 plain text with a final newline. |
-| Scanner or sandbox is missing | The keyless demo does not need either. Follow [scanner setup](/skills/skillevaluator/installation#system-tools) or [agent setup](/skills/skillevaluator/agents-and-sandboxes) before adding those stages. |
+| Scanner or sandbox is missing | The keyless demo does not need either. Follow [scanner setup](/skills/skillevaluator/installation-options#system-tools) or [agent setup](/skills/skillevaluator/agents-and-sandboxes) before adding those stages. |
 | Template reference asks you to sign in | Use the [public template reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md) and [versioned bundles](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0), not a private mirror. Check bundle files against `SHA256SUMS.txt`. |
 
 The public template reference and versioned downloadable bundles were consolidated

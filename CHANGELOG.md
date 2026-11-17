@@ -6,6 +6,24 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit
+  live evaluation, with a short dataset guide and concise run-settings page.
+  Tier 1 and Tier 2 now have short first-run paths; detailed checks, policies,
+  algorithms, and run contracts move to linked references with legacy anchors
+  preserved. Installation defaults to the lightweight base package and offers
+  `[all]` explicitly for all three tiers.
+
+- Central installation guide with pip and uv PyPI installs, uv bootstrap, and
+  direct GitHub source options for all three tiers. Release differences, scanner
+  setup, and smaller installs are documented on a linked options page. Tier guides and the quickstart use the installed CLI. Navigation
+  groups Tier 1 Validation, Tier 1 Harness Check, Tier 2 Deduplication, and
+  Tier 3 Live Agent Evaluation in that order.
+- Task-first documentation entry pages: a three-step keyless quickstart and a
+  live-evaluation walkthrough with provider tabs, readiness checks, and report
+  interpretation. Detailed Tier 3 run options, runtime behavior, grading,
+  results, and experiments now have separate reference pages; existing topic
+  bookmarks link to their new locations.
+  The README harness panel is labelled as an illustrative profile summary.
 - Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
   exposes `skillevaluator-quality`, `skillevaluator-schema`, and
   `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
@@ -457,6 +475,7 @@ All notable changes to SkillEvaluator are documented in this file.
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
   no longer loses every live skill, while nested evaluation snapshots remain excluded.
 
+- GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.

@@ -1536,8 +1536,31 @@ def _hostile(call: str | dict[str, Any], units_per_char: int = 8) -> tuple[str |
 
 
 # Client names that code may bind to something else, as in requests = 0;
-# HTTPie's and curl's names would also be read as shell words.
-_BOUND_CLIENT_NAMES = sorted(checks._CODE_CLIENT_NAMES - {"HTTP", "http", "https", "pycurl"})
+# HTTPie's and curl's names, which would also be read as shell words, are left out.
+_BOUND_CLIENT_NAMES = [
+    "Faraday",
+    "Furl",
+    "GuzzleHttp",
+    "HTTParty",
+    "LWP",
+    "Mojo",
+    "Net",
+    "RestClient",
+    "UserAgent",
+    "XMLHttpRequest",
+    "aiohttp",
+    "axios",
+    "got",
+    "httplib2",
+    "httpx",
+    "needle",
+    "request",
+    "requests",
+    "reqwest",
+    "superagent",
+    "undici",
+    "urllib3",
+]
 
 
 # Hostile code the reader reads in full: each of these once made it read the

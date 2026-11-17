@@ -1,0 +1,12 @@
+id: csv-dedupe-bench
+description: Remove duplicate customer rows from a CSV export without losing data.
+coverage:
+  target_skill: csv-cleaner
+  non_trigger_skills:
+    - text-analyzer
+    - calculator
+prompts:
+  - prompts/default.md
+  - prompts/terse.md
+fixtures: code/
+rubric: rubric.md

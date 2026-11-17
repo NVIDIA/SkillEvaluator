@@ -54,6 +54,8 @@ def _run_script(name: str, *args: str, env: dict[str, str] | None = None) -> sub
 
 
 def _load_script(name: str) -> ModuleType:
+    if str(SCRIPTS[name].parent) not in sys.path:
+        sys.path.insert(0, str(SCRIPTS[name].parent))
     spec = importlib.util.spec_from_file_location(f"reference_script_{name}", SCRIPTS[name])
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)

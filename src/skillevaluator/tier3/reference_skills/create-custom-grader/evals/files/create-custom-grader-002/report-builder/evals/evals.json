@@ -1,0 +1,25 @@
+{
+  "skill_name": "report-builder",
+  "evals": [
+    {
+      "id": "report-builder-001",
+      "expected_skill": "report-builder",
+      "prompt": "Build report.md from sales.csv.",
+      "expected_output": "report.md has a Weekly sales heading, a table of regions sorted by total units, and a Total units line.",
+      "assertions": [
+        "The agent writes report.md.",
+        "The region totals and the overall total are correct."
+      ]
+    },
+    {
+      "id": "report-builder-002-negative",
+      "expected_skill": null,
+      "should_trigger": false,
+      "prompt": "What is the capital of France?",
+      "expected_output": "The agent answers Paris without using report-builder.",
+      "assertions": [
+        "The agent does not activate report-builder."
+      ]
+    }
+  ]
+}

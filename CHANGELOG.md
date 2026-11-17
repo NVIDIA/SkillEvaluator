@@ -583,7 +583,11 @@ reviewed source revision.
 - Script lint measures control-flow nesting without recursively walking expression
   nodes, so valid long operator or attribute chains no longer abort advisory
   checks for that script and subsequent files.
-
+- The bundled `api-caller` reference skill passes Tier 2: its two scripts share one URL check in
+  `scripts/url_validation.py` instead of each carrying a copy.
+- The bundled `create-custom-grader` reference skill's Tier 3 cases now stage the benchmark folder and
+  existing skill their prompts describe under `evals/files/`, so agents no longer stop to ask for missing input.
+  The skill's `evals/config.yml` doubles the agent time limit, because those cases take the agent 4 to 5 minutes.
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
   finished answer (#757). OpenCode's snapshot passed the workspace file list to

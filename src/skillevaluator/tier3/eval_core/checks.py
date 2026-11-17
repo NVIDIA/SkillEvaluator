@@ -3117,7 +3117,8 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         # of the same arguments, so it is skipped once an earlier word's check
         # covered it; an HTTPie or xh word whose arguments turn off standard
         # input (--ignore-stdin, or xh's -I) covers only a later one that
-        # still sees that flag, so each client is read at most twice. Piped or
+        # still sees that flag, so each client, and HTTPie's capitalized
+        # spelling (see below), is read at most twice. Piped or
         # redirected stdin stays with a text consumer such as grep, so it is
         # not the client's request body; any other command may pass it on. A
         # command runner, or one named after a pass-through wrapper such as

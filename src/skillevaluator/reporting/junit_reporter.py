@@ -181,14 +181,15 @@ def _finding_case_name(check_name: str, file_path: str, line: int | None) -> str
     return f"{stem} ({location})"
 
 
-def _unique_name(base: str, used: set[str]) -> str:
+def _unique_name(base: str, used: dict[str, int]) -> str:
     stem = base or "check"
     name = stem
-    index = 2
+    index = used.get(stem, 2)
     while name in used:
         name = f"{stem}-{index}"
         index += 1
-    used.add(name)
+    used[stem] = index
+    used[name] = 2
     return name
 
 
@@ -276,7 +277,7 @@ def _cases_for_result(
 ) -> list[_Case]:
     validator = _xml_text(result.validator_name) or "check"
     classname = _qualified(target, validator)
-    used: set[str] = set()
+    used: dict[str, int] = {}
     # A skip that run status reports as failed (a blocking gate that did not run)
     # falls through to the gate_failure case below rather than a <skipped> case.
     if is_cleanly_skipped(result) and result_status(result) == Status.SKIPPED:

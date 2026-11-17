@@ -10,6 +10,7 @@ validators without structured findings are omitted.
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -91,12 +92,18 @@ def _positive_start_line(line_number: Any) -> int | None:
 
 
 def _resolve_for_reporting(path: Path) -> Path:
-    """Resolve accessible path components without failing on a cyclic link.
+    """Resolve accessible paths while retaining the name of a cyclic artifact.
 
     Python 3.12's non-strict ``Path.resolve()`` still raises for link loops.
-    A report must be able to identify those links as the finding's artifact.
+    Non-strict ``realpath`` can instead expand their suffix on each call, so
+    detect loops strictly before falling back for missing path components.
     """
-    return Path(os.path.realpath(path))
+    try:
+        return Path(os.path.realpath(path, strict=True))
+    except OSError as exc:
+        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921:
+            return path.absolute()
+        return Path(os.path.realpath(path))
 
 
 def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:

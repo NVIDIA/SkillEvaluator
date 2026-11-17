@@ -23,6 +23,8 @@ All notable changes to SkillEvaluator are documented in this file.
   as `url_safety.py`, as a case's `expected_script` when the skill has a script
   that does something when run. A skill with one script, or only helpers, keeps
   its previous choice.
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
 
 ## 1.0.0 - 2026-11-17
 
@@ -611,8 +613,6 @@ reviewed source revision.
   percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.
   Such input, and a malformed number like `1.2.3 km to miles`, now gets the usual `Error:` line instead
   of a wrong result or a traceback.
-- Native platform CI stays enabled for package-code changes, including catalog
-  I/O and rubric validators with macOS-specific filesystem behavior.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

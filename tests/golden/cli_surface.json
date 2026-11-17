@@ -1726,6 +1726,14 @@
           "type": "integer"
         },
         {
+          "name": "quality_config",
+          "opts": [
+            "--quality-config"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "quality",
             "schema",

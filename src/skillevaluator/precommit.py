@@ -200,10 +200,16 @@ def format_result_line(
     return f"{status}  {skill_name}  {check}{extra}"
 
 
-def run_check(check: str, skill_root: Path, *, min_score: int) -> list[ValidationResult]:
-    """Run one offline check against a single skill directory. Never writes reports."""
+def run_check(
+    check: str, skill_root: Path, *, min_score: int, quality_config: Path | None = None
+) -> list[ValidationResult]:
+    """Run one offline check against a single skill directory. Never writes reports.
+
+    *quality_config* replaces the packaged quality-default.yaml for the quality
+    check, the same way ``quality-check --quality-config`` does.
+    """
     if check == CHECK_QUALITY:
-        return run_quality_check(skill_root, min_score=min_score)
+        return run_quality_check(skill_root, min_score=min_score, quality_config=quality_config)
     if check == CHECK_SCHEMA:
         return [SchemaValidator().validate(skill_root)]
     if check == CHECK_LINT_SCRIPTS:
@@ -216,6 +222,7 @@ def run_precommit(
     paths: Sequence[str | Path],
     *,
     min_score: int = QUALITY_DEFAULT_MIN_SCORE,
+    quality_config: Path | None = None,
     cwd: Path | None = None,
 ) -> tuple[int, list[str]]:
     """Run *check* once per skill touched by *paths*.
@@ -231,7 +238,7 @@ def run_precommit(
     failed = False
     for root in collect_skill_roots(paths, cwd=cwd):
         try:
-            results = run_check(check, root, min_score=min_score)
+            results = run_check(check, root, min_score=min_score, quality_config=quality_config)
         except Exception as exc:  # one broken skill must not hide the others
             lines.append(f"FAIL  {root.name}  {check}  error: {type(exc).__name__}: {exc}")
             failed = True

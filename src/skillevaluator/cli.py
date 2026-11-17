@@ -3351,13 +3351,19 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
     show_default=True,
     help="Minimum quality score (0-100) when the quality check runs.",
 )
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml when the quality check runs.",
+)
 @click.argument("check", type=click.Choice(list(CHECKS)))
 @click.argument("paths", nargs=-1, type=str)
-def precommit_run(min_score: int, check: str, paths: tuple[str, ...]) -> None:
+def precommit_run(min_score: int, quality_config: Path | None, check: str, paths: tuple[str, ...]) -> None:
     """Map changed files to skill roots and run one offline Tier 1 check per skill."""
     from skillevaluator.precommit import run_precommit
 
-    code, lines = run_precommit(check, paths, min_score=min_score)
+    code, lines = run_precommit(check, paths, min_score=min_score, quality_config=quality_config)
     for line in lines:
         click.echo(line)
     raise SystemExit(code)

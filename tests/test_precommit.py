@@ -23,6 +23,7 @@ from skillevaluator.precommit import (
     run_precommit,
     skill_root_for,
 )
+from skillevaluator.tier1.commands import run_quality_check
 
 REPO = Path(__file__).resolve().parents[1]
 
@@ -546,3 +547,53 @@ def test_precommit_schema_reports_lowercase_manifest(tmp_path: Path) -> None:
     assert len(lines) == 1
     assert lines[0].startswith("FAIL  lower-skill  schema")
     assert "non-canonical name 'skill.md'" in lines[0]
+
+
+def _score_from_line(line: str) -> float:
+    match = re.search(r"  (\d+\.\d)/100", line)
+    assert match, line
+    return float(match.group(1))
+
+
+def test_precommit_quality_uses_quality_config(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path, "config-skill")
+    config = tmp_path / "quality.yaml"
+    config.write_text("expected_headers: []\n", encoding="utf-8")
+    paths = [str(skill / "SKILL.md")]
+
+    _code, default_lines = run_precommit("quality", paths, min_score=0, cwd=tmp_path)
+    _code, config_lines = run_precommit("quality", paths, min_score=0, quality_config=config, cwd=tmp_path)
+
+    (expected,) = run_quality_check(skill, min_score=0, quality_config=config)
+    expected_score = float(expected.metadata["quality_scores"]["overall_score"])
+    assert _score_from_line(config_lines[0]) == pytest.approx(round(expected_score, 1))
+    assert _score_from_line(config_lines[0]) > _score_from_line(default_lines[0])
+
+
+def test_precommit_cli_forwards_quality_config(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    _write_skill(tmp_path / "skills", "config-skill")
+    (tmp_path / "quality.yaml").write_text("expected_headers: []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    runner = CliRunner()
+    path = "skills/config-skill/SKILL.md"
+
+    default = runner.invoke(cli, ["precommit-run", "quality", "--min-score", "0", path])
+    # pre-commit appends hook args after the entry, then filenames.
+    configured = runner.invoke(
+        cli, ["precommit-run", "quality", "--min-score", "0", "--quality-config", "quality.yaml", path]
+    )
+
+    assert default.exit_code == 0, default.output
+    assert configured.exit_code == 0, configured.output
+    assert _score_from_line(configured.output) > _score_from_line(default.output)
+
+
+def test_precommit_cli_rejects_invalid_quality_config(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path, "config-skill")
+    runner = CliRunner()
+
+    missing = runner.invoke(
+        cli, ["precommit-run", "quality", "--quality-config", str(tmp_path / "missing.yaml"), str(skill / "SKILL.md")]
+    )
+    assert missing.exit_code == 2
+    assert "does not exist" in missing.output

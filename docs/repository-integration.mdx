@@ -109,8 +109,15 @@ files (`SKILL.md`, `skill.md`, and anything under the skill directories the sche
 allows: `agents/`, `assets/`, `config/`, `evals/`, `references/`, `scripts/`,
 `tests/`, `tools/`) to the selected hooks.
 
-`--min-score` is forwarded to the quality check. Omit `args` to keep the
-default quality bar of 70.
+`--min-score` and `--quality-config` are forwarded to the quality check, the
+same options `quality-check` takes. Omit `args` to keep the default quality bar
+of 70 and the packaged `quality-default.yaml`. To score commits the same way CI
+does, pass the same config file, with a path relative to the repository root:
+
+```yaml
+      - id: skillevaluator-quality
+        args: ["--min-score", "80", "--quality-config", "quality.yaml"]
+```
 
 ### What each hook checks
 

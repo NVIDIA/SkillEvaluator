@@ -438,6 +438,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Agent JSONL log reconstruction preserves Unicode line separators inside command,
+  observation and response strings instead of treating them as record boundaries.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

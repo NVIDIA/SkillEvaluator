@@ -75,7 +75,8 @@ def _attach_tool_result(
 def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] | None:
     """Parse Claude Code ``--output-format stream-json`` lines (tee'd to claude-code.txt)."""
     steps: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
+    # JSONL records end at LF; Unicode line separators can appear inside JSON strings.
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -281,7 +282,7 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
     steps: list[dict[str, Any]] = []
     n = 0
 
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -498,7 +499,7 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
     steps: list[dict[str, Any]] = []
     saw_content = False
 
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -585,7 +586,7 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
 def _iter_jsonl_dicts(text: str) -> list[dict[str, Any]]:
     """Parse JSONL lines, skipping non-JSON noise (e.g. stderr mixed into tee logs)."""
     events: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line.startswith("{") or not line.endswith("}"):
             continue
@@ -991,7 +992,7 @@ def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
     if synth and synth.get("steps"):
         return synth
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
     if not lines:
         return None
     if all(line.startswith("{") and line.endswith("}") for line in lines):

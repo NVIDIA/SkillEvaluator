@@ -8048,11 +8048,14 @@ _CODE_NAMED_CALLS = _CODE_REQUEST_CALLS | {"fetch", "Request", "getattr", "open"
 # modules, as in requests.Request or httpx.Request, and urllib's, as in
 # urllib.request.Request (Python 2's urllib2.Request).
 _CODE_REQUEST_MODULES = _CODE_CLIENT_NAMES | {"urllib", "urllib2"}
-# Calls that send a request object built with such a Request (see
-# _code_request_sends): send, as in Session().send(prepared) or
-# httpx.Client().send(request), urlopen, open on a receiver, as in
-# opener.open(req), and fetch.
-_CODE_REQUEST_SEND_CALLS = frozenset({"fetch", "open", "send", "urlopen"})
+# Go's calls that build a request for a client's Do to send.
+_CODE_GO_REQUEST_CALLS = frozenset({"NewRequest", "NewRequestWithContext"})
+# Calls that send a request object built with such a Request or Go's
+# NewRequest (see _code_request_sends): send, as in Session().send(prepared)
+# or httpx.Client().send(request), urlopen, fetch, and these on a receiver:
+# open, as in opener.open(req), and Go's Do, as in client.Do(req).
+_CODE_REQUEST_SEND_CALLS = frozenset({"fetch", "open", "send", "urlopen", "Do"})
+_CODE_RECEIVER_SEND_CALLS = frozenset({"open", "Do"})
 # Words after a Ruby method name that do not start its arguments.
 _RUBY_KEYWORDS = frozenset({"and", "do", "end", "if", "in", "not", "or", "rescue", "then", "unless", "until", "while"})
 # Code without one of these spells no upload method or data in a call.
@@ -9349,7 +9352,9 @@ def _code_client_call_uploads(reader: _CodeReader) -> bool:
       _code_client_chain), or called bare when the name is a client, as
       request is after "from requests import request": such a key, or an
       upload method as an argument, quoted, in a variable or as Go's
-      http.MethodPost;
+      http.MethodPost; Go's NewRequest and NewRequestWithContext count only
+      when the code sends the request they build (see _code_request_sent),
+      as client.Do(req) does;
     - urlopen on any receiver: data, by keyword or as its second argument
       unless the first is an HTTP method, as urllib3's urlopen("GET", url)
       has;
@@ -9424,6 +9429,17 @@ def _code_client_call_uploads(reader: _CodeReader) -> bool:
         elif name in _CODE_REQUEST_CALLS:
             if not (receiver_is_client or bare_client):
                 continue
+            if name in _CODE_GO_REQUEST_CALLS:
+                # Go's NewRequest only builds a request; a client's Do sends it.
+                if sends is None:
+                    sends = _code_request_sends(reader)
+                    if sends is None:
+                        return False
+                sent = _code_request_sent(reader, sends, match.start())
+                if sent is None:
+                    return False
+                if not sent:
+                    continue
             kinds = {"options", "method"}
         elif name == "getattr" and not dotted:
             kinds = {"getattr"}
@@ -9621,8 +9637,8 @@ class _CodeSends(NamedTuple):
 def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     """Read once where code sends a request object; None when over budget.
 
-    A sending call is one of _CODE_REQUEST_SEND_CALLS (open only on a
-    receiver, as builtin open reads a file). The names its arguments hold,
+    A sending call is one of _CODE_REQUEST_SEND_CALLS (open and Do only on
+    a receiver, as builtin open reads a file). The names its arguments hold,
     read up to _CODE_ARGUMENT_CHARS characters, are sent, and so are the
     names in the value bound to a sent name, followed for up to
     _CODE_BINDING_PASSES rounds, as req is in prepared = req.prepare() or
@@ -9639,7 +9655,7 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     for match in _CODE_CALL_RE.finditer(masked):
         if match[1] not in _CODE_REQUEST_SEND_CALLS:
             continue
-        if match[1] == "open":
+        if match[1] in _CODE_RECEIVER_SEND_CALLS:
             before = match.start()
             while before > 0 and masked[before - 1] in " \t\r\n":
                 before -= 1
@@ -9682,7 +9698,9 @@ def _code_request_sent(reader: _CodeReader, sends: _CodeSends, start: int) -> bo
     urlopen(Request(url, data=d)) or s.send(Request(...).prepare()), or
     when it is in the value bound to a name that is sent (see
     _code_request_sends), as in req = requests.Request("POST", url, json=d)
-    and then Session().send(req.prepare()). A Request that code only
+    and then Session().send(req.prepare()), or Go's
+    req, err := http.NewRequest("POST", url, body) and then
+    client.Do(req) (see _code_unpacked_names). A Request that code only
     builds, prepares or prints, or returns from a function, is not sent.
     The bindings whose values may hold the call, which start at most
     _CODE_RECEIVER_CHARS characters before it, are charged to the
@@ -9694,13 +9712,62 @@ def _code_request_sent(reader: _CodeReader, sends: _CodeSends, start: int) -> bo
     position = bisect.bisect_right(sends.value_starts, start) - 1
     limit = start - _CODE_RECEIVER_CHARS
     while position >= 0 and sends.values[position][0] >= limit:
-        _value_start, value_end, name = sends.values[position]
+        value_start, value_end, name = sends.values[position]
         if not reader.spend(1):
             return None
-        if start < value_end and name in sends.names:
-            return True
+        if start < value_end:
+            if name in sends.names:
+                return True
+            unpacked = _code_unpacked_names(reader, value_start)
+            if unpacked is None:
+                return None
+            if not sends.names.isdisjoint(unpacked):
+                return True
         position -= 1
     return False
+
+
+def _code_unpacked_names(reader: _CodeReader, value_start: int) -> list[str] | None:
+    """Return the names a statement binds together from the value at value_start; None when over budget.
+
+    Python's and Ruby's req, err = value and Go's req, err := value bind
+    each name from the value, while the binding the reader keeps (see
+    _code_bindings) names only the last. The names are read back from the
+    = within _CODE_RECEIVER_CHARS characters, and count only when two or
+    more stand at the start of a statement: at the start of the code or
+    after a newline, ;, { or }. A keyword argument, as in f(a, b=value),
+    binds none. JavaScript's let a, b = value binds only b, so code read
+    as JavaScript, Perl or PHP has none. The text read is charged to the
+    reader's work.
+    """
+    if reader.family not in {"python", "ruby", "go", ""}:
+        return []
+    masked = reader.masked
+    limit = max(0, value_start - _CODE_RECEIVER_CHARS)
+    idx = value_start - 2
+    if idx >= limit and masked[idx] == ":":
+        idx -= 1
+    names: list[str] = []
+    while True:
+        while idx >= limit and masked[idx] in " \t":
+            idx -= 1
+        end = idx + 1
+        while idx >= limit and (masked[idx].isalnum() or masked[idx] in "_$"):
+            idx -= 1
+        if idx + 1 == end:
+            names = []
+            break
+        names.append(masked[idx + 1 : end])
+        while idx >= limit and masked[idx] in " \t":
+            idx -= 1
+        if idx < limit or masked[idx] != ",":
+            break
+        idx -= 1
+    if not reader.spend(value_start - idx):
+        return None
+    if len(names) < 2 or (idx >= 0 and (idx < limit or masked[idx] not in "\n;{}")):
+        return []
+    return names
 
 
 def _code_call_sends(

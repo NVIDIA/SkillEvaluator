@@ -275,7 +275,10 @@ In interpreter code, these warn:
   and then `Session().send(req.prepare())`; JavaScript's own `Request` when
   `fetch` sends it, as in `fetch(new Request(URL, options))` or
   `const req = new Request(URL, options)` and then `fetch(req)`, with an
-  upload method in its options, also through an options variable;
+  upload method in its options, also through an options variable; Go's
+  `http.NewRequest` or `NewRequestWithContext` with an upload method when a
+  client's `Do` sends it, as in `req, _ := http.NewRequest("POST", URL, body)`
+  and then `client.Do(req)`;
   `getattr(requests, "post")` called, bound, or passed on; and
   `xhr.open("POST", ...)`;
 - pycurl and PHP curl upload options, unless an on/off option such as
@@ -308,7 +311,8 @@ These do not warn:
   `httpx.Request(method="POST", url=URL)` passed to an error; JavaScript's
   own `Request` that `fetch` does not send, as in a route handler test that
   passes `new Request(URL, { method: "POST", body })` to the handler's
-  `POST(req)`;
+  `POST(req)`; Go's `http.NewRequest` that no client's `Do` sends, as in a
+  handler test that passes it to `handler.ServeHTTP(rec, req)`;
   and another module's `Request`, such as oauthlib's or `falcon.Request`;
 - MSW request handlers such as `http.post(URL, resolver)` after
   `import { http } from "msw"`, `import { http as h } from "msw"` (as

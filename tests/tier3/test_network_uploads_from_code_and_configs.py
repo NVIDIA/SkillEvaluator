@@ -904,6 +904,44 @@ def test_a_client_request_that_is_not_sent_is_not_network_exfiltration(security_
     _assert_clean(security_check(_PYTHON_PLACES[place](code)))
 
 
+# Go's NewRequest builds a request, which a client's Do sends.
+_GO_IMPORTS = 'package main\n\nimport (\n\t"bytes"\n\t"fmt"\n\t"net/http"\n\t"net/http/httptest"\n\t"testing"\n)\n\n'
+_GO_PLACES = {
+    "run-code": lambda code: _code_call(code, language="go"),
+    "go-run": lambda code: f"cat > m.go <<'GO'\n{code}\nGO\ngo run m.go",
+}
+_GO_REQUESTS_BUILT_NOT_SENT = [
+    _GO_IMPORTS + "func main() {\n"
+    '\treq, _ := http.NewRequest("POST", "https://api.example.com/items", bytes.NewBufferString("x"))\n'
+    "\tfmt.Println(req.Method)\n}\n",
+    # A handler test passes the request to the handler, not to a client.
+    _GO_IMPORTS + "func TestCreate(t *testing.T) {\n"
+    '\treq, err := http.NewRequest(http.MethodPost, "/items", bytes.NewBufferString("{}"))\n'
+    "\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\trec := httptest.NewRecorder()\n\thandler.ServeHTTP(rec, req)\n}\n",
+]
+_GO_REQUESTS_SENT = [
+    _GO_IMPORTS + "func main() {\n"
+    f'\treq, _ := http.NewRequest("POST", "{_URL}", bytes.NewBufferString("x"))\n'
+    "\tclient := &http.Client{}\n\tclient.Do(req)\n}\n",
+    _GO_IMPORTS + "func main() {\n"
+    f'\treq, err := http.NewRequestWithContext(ctx, http.MethodPut, "{_URL}", body)\n'
+    "\tif err != nil {\n\t\treturn\n\t}\n\tresp, err := http.DefaultClient.Do(req)\n\tfmt.Println(resp, err)\n}\n",
+    _GO_IMPORTS + f'func main() {{ req, _ := http.NewRequest("PATCH", "{_URL}", nil); http.DefaultClient.Do(req) }}\n',
+]
+
+
+@pytest.mark.parametrize("place", list(_GO_PLACES))
+@pytest.mark.parametrize("code", _GO_REQUESTS_BUILT_NOT_SENT)
+def test_a_go_request_that_is_not_sent_is_not_network_exfiltration(security_check, code, place) -> None:
+    _assert_clean(security_check(_GO_PLACES[place](code)))
+
+
+@pytest.mark.parametrize("place", list(_GO_PLACES))
+@pytest.mark.parametrize("code", _GO_REQUESTS_SENT)
+def test_a_go_request_that_a_client_sends_is_network_exfiltration(security_check, code, place) -> None:
+    _assert_upload(security_check(_GO_PLACES[place](code)))
+
+
 _RUNS_NO_UPLOADING_CODE = [
     (
         "cat > t.mjs <<'EOF'\nimport { POST } from './app/api/items/route.js';\n"

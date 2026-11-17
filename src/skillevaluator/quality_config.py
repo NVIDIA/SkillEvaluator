@@ -182,9 +182,14 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
+# Upper bound for integer settings. YAML builds hex, octal and binary integers of any size, and
+# one past Python's int-to-str digit limit would crash the digest instead of failing as a usage error.
+_MAX_INT_SETTING = 10**9
+
+
 def _validate_positive_int(value: object, source: str, location: str) -> int:
-    if isinstance(value, bool) or not isinstance(value, int) or value < 1:
-        raise QualityConfigError(f"{source}: {location} must be a positive integer")
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_INT_SETTING:
+        raise QualityConfigError(f"{source}: {location} must be a positive integer no greater than {_MAX_INT_SETTING}")
     return value
 
 

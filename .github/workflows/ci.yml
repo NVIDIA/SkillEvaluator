@@ -20,6 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.changes.outputs.docs_only }}
+      tier3_platform: ${{ steps.changes.outputs.tier3_platform }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -37,6 +38,7 @@ jobs:
           if ! git show "$BASE_SHA:scripts/classify_ci_changes.py" > "$classifier"; then
             echo "::notice::Trusted classifier is not present on the base branch; running full CI."
             echo "docs_only=false" >> "$GITHUB_OUTPUT"
+            echo "tier3_platform=true" >> "$GITHUB_OUTPUT"
             exit 0
           fi
           python3 "$classifier" --base "$BASE_SHA" --head "$HEAD_SHA"
@@ -50,21 +52,20 @@ jobs:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
           persist-credentials: false
+      # The setup steps and the boundary scan run in both lanes. The docs lane
+      # needs the project installed for the documentation tests, and the scan
+      # reads the documentation a docs-only pull request changes.
       - name: Set up Python
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
         with:
           python-version: "3.12"
       - name: Set up uv
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
           version: "0.13.8"
       - name: Install dependencies
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: uv sync --all-extras --locked --python 3.12
       - name: Scan OSS source boundary
-        if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
         run: python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
       - name: Lint committed BENCHMARK.md fixtures for leak patterns
         if: ${{ needs.classify-changes.outputs.docs_only != 'true' }}
@@ -92,6 +93,18 @@ jobs:
             echo
             echo "Validated docs and Fern configuration with Fern CLI $FERN_VERSION."
           } >> "$GITHUB_STEP_SUMMARY"
+      # A docs-only pull request skips every other job, so this is where its
+      # documentation tests run: every test file that reads a documentation file.
+      # The selection is a plain assignment so that a failing selector stops the
+      # step; pytest with no paths would run the whole suite.
+      - name: Run documentation tests
+        if: ${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only == 'true' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          docs_tests="$(python -m scripts.select_docs_tests)"
+          mapfile -t docs_test_files <<< "$docs_tests"
+          uv run pytest -q -n auto "${docs_test_files[@]}"
       # Pull requests run the suite in parallel without coverage, like the 3.13
       # and 3.14 jobs. No pull-request check reads the coverage report, and
       # tracing it on one core made this the slowest required job by far.
@@ -348,10 +361,13 @@ jobs:
           "$RUNNER_TEMP/skillevaluator-wheel-3.12/bin/python" \
             "$GITHUB_WORKSPACE/scripts/ci/smoke_harbor_verifier.py" --python "$task_python"
 
+  # This job tests operating-system behaviour of Tier 3, so on a pull request it
+  # runs only when the classifier says the change can affect it. It is skipped
+  # only on an explicit "false": a push to main leaves the output empty and runs it.
   tier3-macos:
     name: Tier 3 macOS contract and progress
     needs: classify-changes
-    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' && needs.classify-changes.outputs.tier3_platform != 'false' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -373,11 +389,17 @@ jobs:
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
+          tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias
 
+  # Tier 2 is platform-independent Python, and Linux and Windows run the same
+  # tests on every pull request. This job never failed for a macOS-specific
+  # reason, so it runs after merge only. Its one macOS-only test, the /tmp
+  # alias test, runs in the Tier 3 macOS job above on every pull request. The
+  # job stays defined, and is skipped on pull requests, so the required check
+  # of the same name still reports.
   tier2-macos:
     name: Tier 2 (macos-latest)
-    needs: classify-changes
-    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -542,10 +564,13 @@ jobs:
           '@ | & $basePython -
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
+  # This job tests operating-system behaviour of Tier 3, so on a pull request it
+  # runs only when the classifier says the change can affect it. It is skipped
+  # only on an explicit "false": a push to main leaves the output empty and runs it.
   native-windows-local-mode:
     name: Native Windows local mode fails closed
     needs: classify-changes
-    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' && needs.classify-changes.outputs.tier3_platform != 'false' }}
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

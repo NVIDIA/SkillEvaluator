@@ -31,14 +31,27 @@ REQUIRED_CI_JOBS = {
     "tier3-macos": "Tier 3 macOS contract and progress",
     "native-windows-local-mode": "Native Windows local mode fails closed",
 }
-HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"}
+# Required jobs that are skipped on every pull request and run after merge.
+AFTER_MERGE_ONLY_CI_JOBS = {"tier2-macos"}
+# Required jobs that test operating-system behaviour of Tier 3. On a pull request
+# they run only when the change classifier says the change can affect them.
+TIER3_PLATFORM_CI_JOBS = {"tier3-macos", "native-windows-local-mode"}
+HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"} - AFTER_MERGE_ONLY_CI_JOBS - TIER3_PLATFORM_CI_JOBS
 RUN_UNLESS_CANCELLED_IF = "${{ !cancelled() }}"
 FULL_LANE_IF = "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}"
+TIER3_PLATFORM_IF = (
+    "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true'"
+    " && needs.classify-changes.outputs.tier3_platform != 'false' }}"
+)
 NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
 PULL_REQUEST_TESTS_IF = (
     "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}"
 )
+DOCS_ONLY_TESTS_IF = (
+    "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only == 'true' }}"
+)
 MAIN_COVERAGE_IF = "${{ github.event_name != 'pull_request' }}"
+AFTER_MERGE_ONLY_IF = "${{ github.event_name != 'pull_request' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     "cancel-in-progress": "true",
@@ -114,7 +127,10 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     assert ci["concurrency"] == PR_CONCURRENCY
     assert classifier["name"] == "Classify changes"
     assert classifier["if"] == "${{ github.event_name == 'pull_request' }}"
-    assert classifier["outputs"]["docs_only"] == "${{ steps.changes.outputs.docs_only }}"
+    assert classifier["outputs"] == {
+        "docs_only": "${{ steps.changes.outputs.docs_only }}",
+        "tier3_platform": "${{ steps.changes.outputs.tier3_platform }}",
+    }
     assert classifier["steps"][0]["with"]["fetch-depth"] == "0"
     assert classifier["steps"][0]["with"]["persist-credentials"] == "false"
     assert classifier["steps"][1]["id"] == "changes"
@@ -122,6 +138,7 @@ def test_ci_classifier_is_pull_request_only_and_exports_docs_only() -> None:
     assert 'git show "$BASE_SHA:scripts/classify_ci_changes.py"' in classifier_run
     assert 'python3 "$classifier"' in classifier_run
     assert 'echo "docs_only=false" >> "$GITHUB_OUTPUT"' in classifier_run
+    assert 'echo "tier3_platform=true" >> "$GITHUB_OUTPUT"' in classifier_run
     assert "python3 scripts/classify_ci_changes.py" not in classifier_run
     assert classifier["steps"][1]["env"] == {
         "BASE_SHA": "${{ github.event.pull_request.base.sha }}",
@@ -137,11 +154,21 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert job["runs-on"] == "ubuntu-latest"
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
 
-    full_lane_step_names = {
+    # The docs lane runs the documentation tests, so it needs the project
+    # installed. It also scans for private integration names, because the scan
+    # reads the documentation a docs-only pull request changes.
+    both_lane_step_names = {
         "Set up Python",
         "Set up uv",
         "Install dependencies",
         "Scan OSS source boundary",
+    }
+    both_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in both_lane_step_names}
+    assert set(both_lane_steps) == both_lane_step_names
+    assert all("if" not in step for step in both_lane_steps.values())
+
+    full_lane_step_names = {
+        "Lint committed BENCHMARK.md fixtures for leak patterns",
         "Lint",
     }
     full_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in full_lane_step_names}
@@ -149,6 +176,19 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert all(step["if"] == NOT_DOCS_ONLY_IF for step in full_lane_steps.values())
 
     step_names = [step.get("name") for step in job["steps"]]
+    # A docs-only pull request skips every other job, so this step is the only
+    # place its documentation tests run.
+    docs_tests = job["steps"][step_names.index("Run documentation tests")]
+    assert docs_tests["if"] == DOCS_ONLY_TESTS_IF
+    assert docs_tests["shell"] == "bash"
+    docs_tests_run = docs_tests["run"].splitlines()
+    assert docs_tests_run[0] == "set -euo pipefail"
+    # The selection is captured with a plain assignment so that a failing
+    # selector stops the step. pytest with no paths would run the whole suite.
+    assert 'docs_tests="$(python -m scripts.select_docs_tests)"' in docs_tests_run
+    assert 'mapfile -t docs_test_files <<< "$docs_tests"' in docs_tests_run
+    assert 'uv run pytest -q -n auto "${docs_test_files[@]}"' in docs_tests_run
+    assert "<(" not in docs_tests["run"], "a process substitution would hide a failing selector"
     pull_request_tests = job["steps"][step_names.index("Run tests")]
     main_tests = job["steps"][step_names.index("Run tests with coverage")]
     # Pull requests wait on this required job, so they run it like the 3.13 and
@@ -168,12 +208,17 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
         "--cov-report=xml:coverage.xml",
     ]
     pytest_steps = [step.get("name") for step in job["steps"] if "pytest" in step.get("run", "")]
-    assert pytest_steps == ["Run tests", "Run tests with coverage"], "exactly one pytest step runs per event"
+    assert pytest_steps == [
+        "Run documentation tests",
+        "Run tests",
+        "Run tests with coverage",
+    ], "exactly one pytest step runs per event"
 
     node_step = next(step for step in job["steps"] if step.get("name") == "Set up Node.js for docs")
     docs_step = next(step for step in job["steps"] if step.get("name") == "Validate Fern documentation")
     # A failing suite must not hide a docs break, and the docs verdict should
     # not wait for the suite.
+    assert step_names.index("Validate Fern documentation") < step_names.index("Run documentation tests")
     assert step_names.index("Validate Fern documentation") < step_names.index("Run tests")
     assert "if" not in node_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert len(node_step["uses"].split("@", 1)[1]) == 40
@@ -211,6 +256,55 @@ def test_ci_skips_every_other_required_job_only_after_classification() -> None:
     for job_id in HEAVY_CI_JOBS:
         assert jobs[job_id]["needs"] == "classify-changes"
         assert jobs[job_id]["if"] == FULL_LANE_IF
+
+
+def test_tier3_platform_jobs_run_only_for_changes_that_can_affect_them() -> None:
+    jobs = _load("ci.yml")["jobs"]
+
+    for job_id in TIER3_PLATFORM_CI_JOBS:
+        assert jobs[job_id]["name"] == REQUIRED_CI_JOBS[job_id]
+        assert jobs[job_id]["needs"] == "classify-changes"
+        # The jobs are skipped only on an explicit ``false``. A push to main,
+        # a classifier that failed, and a base branch whose classifier does not
+        # report this output all leave it empty, and the jobs run.
+        assert jobs[job_id]["if"] == TIER3_PLATFORM_IF
+
+
+def test_the_classifier_knows_every_test_file_the_tier3_platform_jobs_run() -> None:
+    """A test file added to one of the jobs must also make the job run when it changes."""
+    from scripts.classify_ci_changes import TIER3_PLATFORM_TESTS, is_tier3_platform_related
+
+    jobs = _load("ci.yml")["jobs"]
+    run_by_the_jobs = {
+        token.split("::", 1)[0]
+        for job_id in TIER3_PLATFORM_CI_JOBS
+        for token in _runs(jobs[job_id]).split()
+        if token.startswith("tests/")
+    }
+
+    assert run_by_the_jobs, "no test paths found in the Tier 3 platform jobs"
+    assert {path.decode() for path in TIER3_PLATFORM_TESTS} == run_by_the_jobs
+    assert all(is_tier3_platform_related([path.encode()]) for path in run_by_the_jobs)
+
+
+def test_tier2_runs_on_macos_after_merge_only_and_keeps_its_required_name() -> None:
+    jobs = _load("ci.yml")["jobs"]
+
+    for job_id in AFTER_MERGE_ONLY_CI_JOBS:
+        job = jobs[job_id]
+        # The job is skipped on pull requests, not removed: a skipped job still
+        # reports, so the required check of the same name does not block a merge.
+        assert job["name"] == REQUIRED_CI_JOBS[job_id]
+        assert job["if"] == AFTER_MERGE_ONLY_IF
+        # The classifier only runs on pull requests, where this job never runs.
+        assert "needs" not in job
+
+    # The one Tier 2 test that only runs on macOS keeps running on pull requests.
+    assert (
+        "tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias"
+        in _runs(jobs["tier3-macos"])
+    )
+    assert jobs["tier3-macos"]["if"] == TIER3_PLATFORM_IF
 
 
 def test_full_lane_keeps_the_existing_commands_and_runners() -> None:

@@ -31,6 +31,7 @@ from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_S
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.precommit import CHECKS
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
     TierRow,
@@ -3359,6 +3360,32 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
         raise click.ClickException("script lint failed")
 
 
+@cli.command("precommit-run", hidden=True)
+@click.option(
+    "--min-score",
+    type=int,
+    default=QUALITY_DEFAULT_MIN_SCORE,
+    show_default=True,
+    help="Minimum quality score (0-100) when the quality check runs.",
+)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml when the quality check runs.",
+)
+@click.argument("check", type=click.Choice(list(CHECKS)))
+@click.argument("paths", nargs=-1, type=str)
+def precommit_run(min_score: int, quality_config: Path | None, check: str, paths: tuple[str, ...]) -> None:
+    """Map changed files to skill roots and run one offline Tier 1 check per skill."""
+    from skillevaluator.precommit import run_precommit
+
+    code, lines = run_precommit(check, paths, min_score=min_score, quality_config=quality_config)
+    for line in lines:
+        click.echo(line)
+    raise SystemExit(code)
+
+
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
 @click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
@@ -3611,7 +3638,6 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    _offer_scanner_install(checks, skip)
     # Validators build finding paths from this root, so it is made absolute, as
     # validate does: a relative root leaves finding paths relative to the working
     # directory, and the report roots would then prefix the skill folder twice.
@@ -3628,6 +3654,7 @@ def _tier1_workflow(
         profile=policy,
         previous_version=previous_version,
         skillspector_baseline=skillspector_baseline,
+        prepare_scanners=lambda: _offer_scanner_install(checks, skip),
     )
     # Resolved after the run so configuration errors still leave no output.
     output_dir = _resolve_file_report_output_location(skill_path, output_dir, report_formats)

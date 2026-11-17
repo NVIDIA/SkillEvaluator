@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
+  exposes `skillevaluator-quality`, `skillevaluator-schema`, and
+  `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
+  maps changed files to skill roots and runs each check without an API key,
+  network, Docker, or scanner download.
 - JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
   artifacts. One testsuite is emitted per check group, failures include
   file:line when recorded and follow the same gate as the exit code, incomplete
@@ -366,9 +371,11 @@ All notable changes to SkillEvaluator are documented in this file.
 - New **Harness Check** docs page: what `skillevaluator harness-check` reports
   and how to read its panel, with real output, the detailed view and how to fix
   findings, what the rules check, the harnesses it covers, and how to run it on
-  its own or inside `validate`. The Tier 1 guide and the CLI reference link to it.
+  its own or inside `validate`, the JSON block, and when the check helps. The
+  Tier 1 guide and the CLI reference link to it.
   Clarify description rejection versus truncation, invocation-specific argument
   substitution, folder-symlink target limits, and validation report/gate defaults.
+  Qualify the CI policy behavior and static loader predictions in the new FAQ.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
@@ -376,6 +383,13 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+  Under the table, a harness check highlight gives the
+  `skillevaluator harness-check ./my-skill` command, an example result with one
+  line per harness, and links to the Harness Check page and to live evaluation.
+  The intro now mentions plugins. The README word limit in the packaging test
+  goes from 1,100 to 1,200 to fit the example.
+- The README header is centred: the wordmark is the page title, followed by a
+  one-line tagline and the badge row. The separate text title is gone.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
 
@@ -429,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Direct Tier 1 validates the target, selected checks and LLM configuration before
+  preparing scanners, so configuration errors do not trigger downloads or stdout noise.
+- Documentation-only CI follows imports through collected test modules and
+  package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
   30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be

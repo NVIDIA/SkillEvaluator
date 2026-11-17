@@ -398,6 +398,11 @@ def test_token_estimate_divisor_matches_constants() -> None:
     assert budget == load_quality_config()["efficiency"]["token_budget"]["max_tokens"]
 
 
+def test_description_minimum_matches_the_packaged_quality_config() -> None:
+    minimum = int(_one(r"Description under (\d+) characters").group(1))
+    assert minimum == load_quality_config()["discoverability"]["description_too_short"]["min_chars"]
+
+
 def _quality_score_functions() -> dict[str, ast.FunctionDef]:
     tree = ast.parse(QUALITY_SCORE_PATH.read_text(encoding="utf-8"))
     return {node.name: node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef)}

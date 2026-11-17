@@ -47,16 +47,14 @@ _NESTING_NODES = (
 def _calculate_nesting_depth(tree: ast.AST) -> int:
     """Calculate maximum nesting depth of control flow statements."""
     max_depth = 0
-
-    def _walk(node: ast.AST, depth: int) -> None:
-        nonlocal max_depth
+    pending = [(tree, 0)]
+    while pending:
+        node, depth = pending.pop()
         if isinstance(node, _NESTING_NODES):
             depth += 1
             max_depth = max(max_depth, depth)
-        for child in ast.iter_child_nodes(node):
-            _walk(child, depth)
-
-    _walk(tree, 0)
+        # Expression depth can exceed Python's call stack even when control flow is shallow.
+        pending.extend((child, depth) for child in ast.iter_child_nodes(node))
     return max_depth
 
 

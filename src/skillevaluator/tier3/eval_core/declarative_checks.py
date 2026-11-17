@@ -134,6 +134,9 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     if not modelled:
         return None
     if len(segments) == 1:
+        # A negated shell pipeline records the inverse of the script status.
+        if segments[0][0] == "!":
+            return None
         # Joining decoded tokens would lose quoted argument boundaries.
         return status if _cmd_executes_script(command, script, _shell=shell) is True else None
     invocations = [

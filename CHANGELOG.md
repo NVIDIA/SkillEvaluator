@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Declarative command-success checks retain recorded exit status for a single
+  script command whose quoted path contains spaces. Negated shell commands
+  remain unattributed rather than using the inverse of the script's status.
+
+## 1.0.0 - 2026-11-17
+
 ### Added
 
 - Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit
@@ -471,8 +479,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Declarative command-success checks retain recorded exit status for a single
-  script command whose quoted path contains spaces.
+- Script lint measures control-flow nesting without recursively walking expression
+  nodes, so valid long operator or attribute chains no longer abort advisory
+  checks for that script and subsequent files.
+
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative

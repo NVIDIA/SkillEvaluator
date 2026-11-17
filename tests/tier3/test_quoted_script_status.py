@@ -3,6 +3,10 @@
 
 """A quoted script path must retain its recorded command exit status."""
 
+import shlex
+import subprocess
+import sys
+
 import pytest
 
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
@@ -47,3 +51,62 @@ def test_quoted_script_still_does_not_claim_a_shell_tail_status(tail: str) -> No
     )
 
     assert result["passed"] is None
+
+
+@pytest.mark.parametrize(
+    "script_operand",
+    ["'scripts/my task.py'", '"scripts/my task.py"', r"scripts/my\ task.py"],
+)
+@pytest.mark.parametrize("script_status", [0, 2])
+def test_negated_quoted_script_does_not_claim_the_shell_status(tmp_path, script_operand, script_status):
+    script = tmp_path / "scripts" / "my task.py"
+    script.parent.mkdir()
+    script.write_text("import sys\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8")
+    command = f"! {shlex.quote(sys.executable)} {script_operand} {script_status}"
+    completed = subprocess.run(
+        ["bash", "-c", command],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=10,
+    )
+    assert completed.returncode == int(script_status == 0), completed.stderr
+
+    invoked, succeeded = evaluate_declarative_checks(
+        [
+            {"type": "script_invoked", "script": "scripts/my task.py"},
+            {"type": "command_succeeded", "script": "scripts/my task.py"},
+        ],
+        tool_calls=[
+            {
+                "action": "Bash",
+                "action_input": {"command": command},
+                "observation": f"Process exited with code {completed.returncode}",
+            }
+        ],
+        final_response="",
+        workspace_roots=[],
+    )
+
+    assert invoked["passed"] is True
+    assert succeeded["passed"] is None
+    assert "could not be attributed" in succeeded["reason"]
+
+
+@pytest.mark.parametrize("status", [0, 2])
+def test_literal_exclamation_argument_does_not_hide_script_status(status):
+    (result,) = evaluate_declarative_checks(
+        [{"type": "command_succeeded", "script": "scripts/my task.py"}],
+        tool_calls=[
+            {
+                "action": "Bash",
+                "action_input": {"command": "python 'scripts/my task.py' '!'"},
+                "observation": f"Process exited with code {status}",
+            }
+        ],
+        final_response="",
+        workspace_roots=[],
+    )
+
+    assert result["passed"] is (status == 0)

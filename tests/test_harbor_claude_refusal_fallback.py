@@ -255,7 +255,7 @@ def _refusal_doc_texts() -> dict[str, str]:
     entry = corrections[0]
     blocks = (root / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8").split("\n\n")
     [index] = [index for index, block in enumerate(blocks) if f"{_SWITCH}=1" in block]
-    troubleshooting = (root / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    troubleshooting = (root / "docs" / "tier3-runtime.mdx").read_text(encoding="utf-8")
     [accordion] = re.findall(
         r'<Accordion title="A claude-code trial fails with AgentSafetyRefusalError">(.*?)</Accordion>',
         troubleshooting,
@@ -264,7 +264,7 @@ def _refusal_doc_texts() -> dict[str, str]:
     texts = {
         "CHANGELOG.md": entry,
         "agents-and-sandboxes.mdx": "\n\n".join(blocks[index : index + 2]),
-        "tier3-live-evaluation.mdx": accordion,
+        "tier3-runtime.mdx": accordion,
     }
     return {name: " ".join(text.split()) for name, text in texts.items()}
 
@@ -378,9 +378,9 @@ def test_a_refused_attempt_fails_attempt_coverage_as_the_docs_say(tmp_path: Path
         ):
             assert token in text, (name, token)
     # The model is chosen per agent, not per case.
-    for name in ("CHANGELOG.md", "tier3-live-evaluation.mdx"):
+    for name in ("CHANGELOG.md", "tier3-runtime.mdx"):
         assert "`--agent-model claude-code=MODEL`" in texts[name], name
-    assert "`Unscoreable reward`" in texts["tier3-live-evaluation.mdx"]
+    assert "`Unscoreable reward`" in texts["tier3-runtime.mdx"]
 
 
 @pytest.mark.parametrize("skip_baseline", [True, False], ids=["with-skill-only", "with-baseline"])
@@ -395,7 +395,7 @@ def test_verbose_evaluate_output_lists_the_refused_trial(tmp_path: Path, skip_ba
     render_evaluation_result(results, console=Console(file=stream, force_terminal=False, width=200), verbose=True)
 
     assert f"{refused}: AgentSafetyRefusalError: Command failed (exit 1)" in stream.getvalue()
-    assert "`tier3 evaluate --verbose`" in _refusal_doc_texts()["tier3-live-evaluation.mdx"]
+    assert "`tier3 evaluate --verbose`" in _refusal_doc_texts()["tier3-runtime.mdx"]
 
 
 @pytest.mark.parametrize(

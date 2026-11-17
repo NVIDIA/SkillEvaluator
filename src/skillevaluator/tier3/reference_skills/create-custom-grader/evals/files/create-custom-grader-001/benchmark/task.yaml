@@ -1,12 +1,12 @@
-id: csv-dedupe-bench
-description: Remove duplicate customer rows from a CSV export without losing data.
+id: csv-totals-repair
+description: Repair the CSV totals script so it skips malformed rows and reports the grand total.
 coverage:
-  target_skill: csv-cleaner
-  non_trigger_skills:
-    - text-analyzer
-    - calculator
+  target_skill: csv-totals
+expected_non_trigger_skills:
+  - api-caller
+  - calculator
 prompts:
-  - prompts/default.md
-  - prompts/terse.md
-fixtures: code/
+  - prompts/direct.md
+  - prompts/vague.md
+code: code/
 rubric: rubric.md

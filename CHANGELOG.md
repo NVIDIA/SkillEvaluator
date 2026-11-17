@@ -6,7 +6,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The bundled `api-caller` reference skill passes Tier 2: its two scripts share one URL check in
+  `scripts/url_validation.py` instead of each carrying a copy.
+- Folder validators apply skill-discovery exclusions only below the requested
+  scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
+  no longer loses every live skill, while nested evaluation snapshots remain excluded.
+
 - Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+- The bundled `create-custom-grader` example now ships the benchmark folder and
+  existing skill its first two cases ask the agent to convert, under
+  `evals/files/`, and each case declares `files` so only its own fixture is
+  staged. Previously those cases had no workspace input to work from.
 
 ## 1.0.0 - 2026-11-17
 
@@ -583,11 +593,7 @@ reviewed source revision.
 - Script lint measures control-flow nesting without recursively walking expression
   nodes, so valid long operator or attribute chains no longer abort advisory
   checks for that script and subsequent files.
-- The bundled `api-caller` reference skill passes Tier 2: its two scripts share one URL check in
-  `scripts/url_validation.py` instead of each carrying a copy.
-- The bundled `create-custom-grader` reference skill's Tier 3 cases now stage the benchmark folder and
-  existing skill their prompts describe under `evals/files/`, so agents no longer stop to ask for missing input.
-  The skill's `evals/config.yml` doubles the agent time limit, because those cases take the agent 4 to 5 minutes.
+
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
   finished answer (#757). OpenCode's snapshot passed the workspace file list to

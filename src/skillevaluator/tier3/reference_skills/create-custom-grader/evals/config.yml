@@ -1,5 +1,0 @@
-schema_version: 1
-harbor:
-  # Converting a benchmark or adding a grader takes the agent about 4-5 minutes,
-  # close to the default 300-second agent limit.
-  timeout_multiplier: 2

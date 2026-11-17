@@ -26,7 +26,7 @@ contributors making non-trivial edits.
 - `benchmark-rollout.mdx` — regenerating and promoting `BENCHMARK.md` cards
 - `github-actions.mdx` — reusable skill checks and optional hosted PR feedback
 - `cli-onboarding.mdx` — install the CLI, automate GitHub setup and open an optional test PR
-- `repository-integration.mdx` — choose GitHub or GitLab for skill checks
+- `repository-integration.mdx` — choose GitHub or GitLab for skill checks; pre-commit hooks
 - `gitlab-ci.mdx` — reusable skill checks and downloadable GitLab reports
 - `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption

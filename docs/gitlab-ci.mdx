@@ -77,6 +77,26 @@ its detailed HTML report. JSON, Markdown and SARIF are included.
   <img src="./assets/repository-ci-results-example.png" alt="Example report table showing a failed skill with a quality score of 98.2 and a link to its report" />
 </Frame>
 
+The shared `skill-evaluation` job writes JSON, Markdown and SARIF reports; it
+does not produce JUnit XML yet. To show findings as a native GitLab
+merge-request test report, run SkillEvaluator in your own job with `-r junit`
+and attach the file it writes. `tier1` writes
+`reports/skillevaluator-tier1.junit.xml`:
+
+```yaml title="Run it yourself: JUnit test report"
+skill-junit:
+  script:
+    - skillevaluator tier1 skills/foo -r junit -o reports
+  artifacts:
+    when: always
+    reports:
+      junit: reports/skillevaluator-tier1.junit.xml
+```
+
+`skillevaluator validate` on a folder of skills writes one file per skill
+instead, as `reports/<skill>/skillevaluator-output-<timestamp>.junit.xml`;
+point `junit:` at `reports/*/*.junit.xml` for that layout.
+
 The [public examples](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/examples/README.md)
 include this report preview and a log excerpt without requiring access to a
 separate demo project.

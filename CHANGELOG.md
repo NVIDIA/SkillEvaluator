@@ -438,6 +438,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 content clustering keeps pairwise similarities in packed doubles instead of
+  per-pair dictionary entries, reducing memory use for large skills without changing cluster scores.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

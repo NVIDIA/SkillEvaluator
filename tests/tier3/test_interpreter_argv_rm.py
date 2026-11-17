@@ -165,6 +165,11 @@ _ARGV_RM_THAT_RUNS = [
     # line and after another command alike.
     pytest.param(_payload_as_word(128), id="substitution-as-word-128"),
     pytest.param("true && " + _payload_as_word(128), id="substitution-as-word-128-after-a-command"),
+    # A payload after 63 words of its command's options.
+    pytest.param(
+        "python3 " + "-u " * 62 + '-c "' + _HOME_CLEANUP_CODE.replace("\n", "; ") + '"',
+        id="payload-after-63-option-words",
+    ),
     # Redirections before the interpreter, also between assignments in any
     # order, and a here-string program after another here-string that names
     # no quoted rm.
@@ -586,9 +591,13 @@ _ARGV_RM_FORMS_NOT_MODELED = [
         + _HOME_CLEANUP,
         id="split-text-over-its-budget",
     ),
-    # A payload after more than 64 words of the command's options.
+    # A payload after 64 or more words of the command's options.
     pytest.param(
         "python3 " + "-u " * 70 + '-c "' + _HOME_CLEANUP_CODE.replace("\n", "; ") + '"', id="payload-after-70-options"
+    ),
+    pytest.param(
+        "python3 " + "-u " * 63 + '-c "' + _HOME_CLEANUP_CODE.replace("\n", "; ") + '"',
+        id="payload-after-64-option-words",
     ),
     # A substitution in backticks inside double quotes, a here-document
     # program inside an unquoted $( ), and one after a comment or $'...'

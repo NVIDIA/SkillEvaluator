@@ -679,11 +679,12 @@ forms are not read as argument vectors and keep the result they had before:
   vector, and a `code` argument of up to 64 KiB, are read whatever the size of
   the rest of the call); code nested more than three shells, input documents
   or substitutions deep; a command with more than 256 here-documents, and a
-  line with more than 256 `<<`; a payload after more than 64 words of its
-  command's options, as in `python3 -u -u ... -c "..."`; shell text whose
-  commands that may run a vector hold over 4096 shell words, take over 32 KiB
-  outside here-document bodies, as a payload padded with a 33,000-character
-  comment does, take more than the split has left in the trace, or hold over
+  line with more than 256 `<<`; a payload after 64 or more words of its
+  command's options, as in `python3 -u -u ... -c "..."` with 63 `-u`
+  words and `-c`; shell text whose commands that may run a vector hold over
+  4096 shell words, take over 32 KiB outside here-document bodies, as a
+  payload padded with a 33,000-character comment does, take more than the
+  split has left in the trace, or hold over
   16 substitutions (`$( )`, backticks or `$'...'`) and more than one for each
   40 of their characters, as `python3 -c "..." $(:)$(:)...` does
   (those commands are the ones that name `cd`, `pushd` or `popd` as a word,
@@ -726,8 +727,9 @@ forms are not read as argument vectors and keep the result they had before:
   `/tmp` path, and one whose command is over 1 KiB or that has more than
   eight items naming `rm`, `eval`, `env` or `grep`. A vector is plain when
   each item that names such text is a word the shell needs no quotes for, of
-  letters, digits and `@%+=:,./-_`, as `/home/u/firmware` is. A plain vector
-  is always read, as one `rm` command, so an item that names `rm` is read only
+  letters, digits and `@%+=:,./-_`, as `/home/u/firmware` is. These limits
+  do not apply to a plain vector, which is read, apart from the cases in the
+  next two items, as one `rm` command, so an item that names `rm` is read only
   as a target, not as the start of another `rm` command as in shell text:
   `['rm', '-rf', '/tmp/x', '/tmp/rm', '-rf']` does not receive the finding,
   while `rm -rf /tmp/x /tmp/rm -rf` does, for the second `rm` with no target;

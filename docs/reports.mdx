@@ -761,7 +761,7 @@ completed run directly:
   With standard grading, `reward.json` records `trajectory_source` (the
   trajectory or agent log that was graded) and, under each LLM judge's
   `details`, an `omitted` record showing whether its evidence was truncated to
-  fit the [evidence budget](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets) or, for
+  fit the [evidence budget](/skills/skillevaluator/tier3-grading#evidence-budgets) or, for
   `behavior_check`, the final-response section limit
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied, and
@@ -769,14 +769,14 @@ completed run directly:
   evidence did not reach the judge whole. A `behavior_check` whose required
   evidence is incomplete is reported as an evaluation error with no score,
   which also leaves the trial's `overall_score` null; see
-  [evidence budgets](/skills/skillevaluator/tier3-live-evaluation#evidence-budgets).
+  [evidence budgets](/skills/skillevaluator/tier3-grading#evidence-budgets).
 - **`<agent>/baseline_timeout_tolerance.json`** — written only for an agent
   kept scored by `--tolerate-baseline-timeouts`: the baseline attempts that hit
   the agent execution timeout. `result.json` carries the same record as
   `agents.<agent>.baseline_timeout_tolerance`, a refused agent's
   `agents.<agent>.baseline_timeout_tolerance_rejection` code, and the run-level
   `baseline_timeout_tolerance` (tolerated agents and the launch errors they
-  explain). See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts).
+  explain). See [Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts).
 
 <Note>
   Read commands (`view`, `compare`, `create-eval-dataset --refine`) honor the
@@ -1206,7 +1206,7 @@ a stale `run_config.json` snapshot. Execution status and exit codes are unchange
 
 An arm that ran but failed, for example because one baseline attempt hit the
 agent timeout, fails the agent and the run unless `--tolerate-baseline-timeouts`
-keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)),
+keeps the agent scored (see [Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts)),
 and the other arm keeps its scores. Reports describe such an arm by how many of its attempts scored,
 never as not run. In `BENCHMARK.md`, the agent's Overall and dimension cells
 read `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`, or
@@ -1270,7 +1270,7 @@ Baseline reuse checks configuration and evidence compatibility but deliberately
 excludes concurrency and budget from its identity. Reused baseline measurements
 remain historical observations from the source run, not fresh consumption or
 independent evidence in the current run. Reports retain the source and timestamp;
-see [Reuse a baseline](/skills/skillevaluator/tier3-live-evaluation#reuse-a-baseline).
+see [Reuse a baseline](/skills/skillevaluator/tier3-run-reference#reuse-a-baseline).
 
 | Measurement | Meaning |
 | --- | --- |
@@ -1867,7 +1867,7 @@ Exit codes and a ready-made JSON gating recipe live in
     Turn the JSON report and exit codes into a merge gate, with a copy-paste
     GitHub Actions workflow.
   </Card>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Run the evaluation that produces the results tree on this page.
   </Card>
   <Card title="Custom Graders & Tasks" icon="book" href="/skills/skillevaluator/custom-graders">

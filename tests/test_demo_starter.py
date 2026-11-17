@@ -75,6 +75,7 @@ def test_installed_release_is_checked_against_the_pinned_release_scores(tmp_path
     fixtures = tmp_path / "checkout" / "examples" / "starter"
     shutil.copytree(FIXTURES, fixtures)
     monkeypatch.setattr(demo_starter, "FIXTURES", fixtures)
+    monkeypatch.setattr(demo_starter, "version", lambda _: "0.9.0")
     expected = json.loads((fixtures / "expected.json").read_text(encoding="utf-8"))
 
     def release_cli(command, log, expected_exit):
@@ -148,3 +149,21 @@ def test_output_checks_reject_changed_or_misleading_results(quality_report, sect
     target[key] = value
     with pytest.raises(ValueError):
         check_quality(changed, expected)
+
+
+@pytest.mark.parametrize(
+    ("evaluator_version", "quality_score", "regressed_score"),
+    [("0.9.0", 84.5, 71.0), ("1.0.0", 88.8, 72.8)],
+)
+def test_installed_starter_uses_reviewed_version_scores(
+    monkeypatch, evaluator_version, quality_score, regressed_score
+):
+    # Installed releases have no checkout source origin. Keep the old pinned
+    # guide's contract while qualifying the new wheel against its real outputs.
+    monkeypatch.setattr(demo_starter, "find_spec", lambda _: None)
+    monkeypatch.setattr(demo_starter, "version", lambda _: evaluator_version)
+    expected = demo_starter.load_expected()
+    assert expected["quality"]["score"] == quality_score
+    assert expected["regressed"]["score"] == regressed_score
+    assert "evaluator_versions" not in expected
+    assert "checkout" not in expected

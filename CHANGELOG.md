@@ -6,6 +6,18 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve opaque Claude gateway model IDs across Docker, local, and native Harbor
+  command construction while keeping native Anthropic, Vertex, and Bedrock routes
+  independent from a gateway-backed judge.
+- Count a standalone Tier 2 evaluation as one skill in JSON and HTML reports,
+  and prioritize failed-runtime recovery without hiding authored source or runner
+  instructions.
+- Select starter-demo score expectations by the installed evaluator version,
+  preserving the released 0.9.0 example while recognizing the 1.0.0 scores.
+- Retain the GitLab tools revision in aggregated report provenance.
+- Document the tested editable NeMo Gym installation required by OpenCode and
+  the completed Codex, Claude Code, and OpenCode live paired runs.
+
 - Folder validators apply skill-discovery exclusions only below the requested
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
   no longer loses every live skill, while nested evaluation snapshots remain excluded.

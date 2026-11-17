@@ -342,7 +342,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
 | `--max-cost-usd FLOAT` | unset | Agent inference accounting admission limit, not billed spend or a hard currency ceiling; requires a price book. Judge, setup, container, backend, and infrastructure charges are excluded. |
-| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
+| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-run-options#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--model TEXT` | unset | Global agent model override. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable). |
@@ -353,7 +353,7 @@ The following flags are forwarded to the live-eval engine when Tier 3 is enabled
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts after the run for inspection. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the measured A/B matrix. The CLI value overrides `harbor.agent_runtime_preflight`; without either, no extra agent runs. |
-| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported, and the run is not complete publication evidence. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts). |
+| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported, and the run is not complete publication evidence. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-run-options#baseline-timeouts). |
 
 Flags marked "unset" fall back to their matching keys in `evals/config.yml` where one exists, then to the built-in defaults ([Eval Datasets](/skills/skillevaluator/eval-datasets) documents the config keys and precedence). The exception is `--results-dir`, which resolves independently of `evals/config.yml` (see [Reports & Results](/skills/skillevaluator/reports)).
 
@@ -584,7 +584,7 @@ Runs baseline, each individual skill, and the combined selection. Saves
 configuration. Exit 0 means a comparable experiment completed; positive,
 negative, and zero interaction all use exit 0. Exit 1 means incomplete or
 incomparable evidence. Invalid command arguments use Click's usage-error exit.
-See [Skill interaction experiments](/skills/skillevaluator/tier3-live-evaluation#skill-interaction-experiments)
+See [Skill interaction experiments](/skills/skillevaluator/tier3-experiments#skill-interaction-experiments)
 for the calculation, input restrictions, attempt budget, and interpretation.
 
 ## tier3 compare-versions
@@ -620,7 +620,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | --- | --- | --- |
 | `-a, --agents TEXT` | provider-native | Comma-separated Harbor agents. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. Supported: `claude-code`, `codex`, `opencode`; Experimental: `hermes` (Docker with NVIDIA Build only; see [Experimental Hermes](/skills/skillevaluator/agents-and-sandboxes#experimental-hermes)). The alias `claude` is accepted for `claude-code`. See [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes). |
 | `--env-mode` | `docker` | Where trials run. SkillEvaluator exposes 27 environment modes: 26 Harbor-native modes — `docker`, `daytona`, `e2b`, `modal`, `runloop`, `langsmith`, `ec2`, `gke`, `ack`, `openshift`, `novita`, `apple-container`, `singularity`, `islo`, `tensorlake`, `cwsandbox`, `wandb`, `use-computer`, `blaxel`, `beam`, `skypilot`, `hyperbrowser`, `vercel`, `kata`, `runta`, `mosaic` — plus SkillEvaluator `local` mode. `wandb` runs Harbor's `cwsandbox` backend with W&B authentication, so it needs the `harbor[cwsandbox]==0.25.0` extra; Harbor 0.25 has no `wandb` extra. Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`, `smol`, `sbx`, `sail`, and `kernel` backends are not selectable. See the complete extras and prerequisites matrix in [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#where-trials-run). Installed packages can add more modes; see [Custom execution backends](/skills/skillevaluator/agents-and-sandboxes#custom-execution-backends). |
-| `--backend` | `harbor` | Execution backend: `harbor`, or the experimental `nemo-gym` task-folder adapter. Public Gym 0.7.0 is incompatible; see [Execution backends](/skills/skillevaluator/tier3-live-evaluation#execution-backends). |
+| `--backend` | `harbor` | Execution backend: `harbor`, or the experimental `nemo-gym` task-folder adapter. Public Gym 0.7.0 is incompatible; see [Execution backends](/skills/skillevaluator/tier3-runtime#execution-backends). |
 | `--environment-kwarg`, `--ek` | none | Operator-only `KEY=VALUE` constructor option for Harbor-native non-Docker backends (repeatable). Values accept JSON-compatible types; skill-owned `evals/config.yml` cannot set them. Never pass secrets. Docker and local reject all kwargs, Kata accepts only `kata_runtime` and `kata_dns`, and Harbor runtime-policy fields for overrides, mounts, networks, extra Compose, lifecycle, and pod security are reserved, as are `stream`, `enable_environment_dir_upload`, `auto_mounts`, `auto_mounting`, and `auth`/`forward_compose_env` for `cwsandbox`/`wandb`. Names the selected backend does not accept in Harbor 0.25.0 are rejected. See [Native backend constructor options](/skills/skillevaluator/agents-and-sandboxes#native-backend-constructor-options). |
 | `--autopilot` | off | Create one eval case when no dataset/task source exists, then evaluate. The case is LLM-generated with the configured provider, with a deterministic keyless template fallback; an existing source is never overwritten. |
 | `--skip-baseline` | off | Skip the without-skill baseline (no lift analysis, faster). |
@@ -633,7 +633,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--max-judge-calls INTEGER` | unset | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
 | `--max-attempts-total INTEGER` | unset | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
 | `--max-cost-usd FLOAT` | unset | Agent inference accounting admission limit, not billed spend or a hard currency ceiling; requires a price book. Judge, setup, container, backend, and infrastructure charges are excluded. |
-| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
+| `--price-file FILE` | unset | User-supplied agent inference rates, not billed spend; keyed by exact resolved model identifier. File name/hash and applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-run-options#cost-limits). |
 | `--stop-on-pass / --no-stop-on-pass` | unset | Stop a case's remaining attempts once one passes. |
 | `--n-concurrent INTEGER` | unset | Concurrent eval cases per agent. |
 | `--max-agents INTEGER` | unset | Maximum agents to run in parallel. |
@@ -649,7 +649,7 @@ Use `skillevaluator tier3 PATH` for the complete workflow with automatic missing
 | `--harbor-keep-jobs` | off | Retain Harbor job dirs and artifacts for inspection with [harbor-view](#harbor-view). |
 | `--verbose` | off | Also print the per-evaluator and per-dimension tables and the metric findings after the case summary. |
 | `--agent-runtime-preflight / --no-agent-runtime-preflight` | disabled | Opt into an extra agent-only execution of the first staged task before the full A/B evaluation matrix. |
-| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts). |
+| `--tolerate-baseline-timeouts / --no-tolerate-baseline-timeouts` | disabled | Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported. The CLI value overrides `harbor.tolerate_baseline_timeouts`. See [Baseline timeouts](/skills/skillevaluator/tier3-run-options#baseline-timeouts). |
 | `--timeout-multiplier FLOAT` | unset | Scale Harbor's agent, verifier, and environment-build timeouts (built-in default `1.0`). Must be a finite number greater than 0. |
 | `--override-cpus INTEGER` | unset | Override eval-environment CPU allocation (passed through to Harbor). |
 | `--override-memory-mb INTEGER` | unset | Override eval-environment memory in MB (passed through to Harbor). |

@@ -1,39 +1,26 @@
 ---
-title: Quickstart
-description: Run a keyless quality check on a bundled skill, then add NVIDIA Build for your first model-backed evaluation.
+title: "Run your first check"
+sidebar-title: "Quickstart"
+description: "Get a bundled skill, run a quality check, and read the saved result. No API key required."
 ---
 
-Start with a complete example included in the repository. Choose a keyless
-quality check, or add NVIDIA Build to get feedback from a model.
+Get a quality score and findings for a complete example skill. You'll need
+**Git** and [**uv**](https://docs.astral.sh/uv/getting-started/installation/).
+No API key, GPU, or Docker required.
 
-| Start here | What you need | What you get |
-| --- | --- | --- |
-| [Run without an LLM](#run-without-an-llm) | Git and uv | A deterministic quality score and findings |
-| [Use NVIDIA Build](#use-nvidia-build) | Git, uv, and an NVIDIA Build API key | Model-backed rubric scores and feedback |
+<Steps toc={true}>
 
-For an executable terminal replay with checked outputs, an editable task, a
-deliberate regression and report interpretation, use the
-[reproducible starter demo](/skills/skillevaluator/starter-demo). It uses the same bundled skill.
+### Get the example
 
-## Get the example
-
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
-then clone the repository:
-
-```bash title="Get SkillEvaluator and the sample skill"
+```bash title="Clone the repository"
 git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
 cd SkillEvaluator
 ```
 
-Run the commands below from this checkout. uv provisions Python 3.13 and
-installs the dependencies needed for the selected path. The bundled
-`text-analyzer` skill includes its `SKILL.md` and a working text-analysis script,
-so you can evaluate a complete skill before creating your own.
+The bundled `text-analyzer` skill includes instructions and a working script.
+Keep this terminal open for the following commands.
 
-## Run without an LLM
-
-This path runs offline after installation. It needs no API key, model, security
-scanner, GPU, or Docker runtime.
+### Run without an LLM
 
 ```bash title="Score the bundled skill"
 uv run --python 3.13 skillevaluator quality-check \
@@ -41,99 +28,82 @@ uv run --python 3.13 skillevaluator quality-check \
   -r cli -r json -o reports/first-quality
 ```
 
-The terminal shows a score from 0–100, an A–F grade, and individual findings.
-With the current quality checks, the bundled example scores **88.8/100 (B)**
-with **5 findings**. It passes the default minimum score of 70 and exits `0`.
-The same result is saved to:
+uv installs Python and the required packages on the first run.
+The check itself runs offline.
 
-```text
+### Read your result
+
+The terminal shows your **score out of 100**, **A–F grade**, and findings to fix.
+The default minimum quality score is **70**. Open the saved JSON result at:
+
+```text title="Your saved report"
 reports/first-quality/skillevaluator-quality.json
 ```
 
-This checks static quality across correctness, discoverability, reliability,
-and efficiency. It does not run the security scanners or measure an agent's
-performance. The report's publication status remains `INCOMPLETE` because a
-quality score alone does not supply all required evaluation evidence. See
-[Reports & Results](/skills/skillevaluator/reports) for the full output contract.
+<Note>
+  This is a quality check. Security scanners and live agents have not run,
+  so the report's overall publication status remains **INCOMPLETE** even when
+  the quality check passes.
+</Note>
 
-## Use NVIDIA Build
+</Steps>
 
-Add model-backed rubric feedback for the same example. NVIDIA Build hosts the
-model, so this first model call needs no local GPU or Docker runtime.
+## Check your own skill
 
-Eligible NVIDIA Developer Program accounts have free access to NVIDIA-hosted
-API endpoints for prototyping. Check the
-[NVIDIA access FAQ](https://docs.api.nvidia.com/nim/docs/product) and your
-account for current eligibility, model availability, and rate limits.
+Replace the sample path with the directory containing your `SKILL.md`.
+Keep the report output outside that directory:
 
-1. Open [NVIDIA Build](https://build.nvidia.com/), sign in or create an NVIDIA
-   account, and complete the Developer Program enrollment prompts.
-2. Open a model page, choose **Get API Key**, then generate and copy your key.
-   The [API Catalog quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart)
-   walks through this flow.
-3. Set the provider and key in the same terminal. Replace the example key with
-   the key you copied:
-
-```bash title="Configure NVIDIA Build"
-export SKILL_EVAL_LLM_PROVIDER=nv_build
-export NVIDIA_API_KEY='nvapi-...'
-```
-
-Run the rubric evaluation with the `llm` extra:
-
-```bash title="Get model-backed rubric feedback"
-uv run --python 3.13 --extra llm skillevaluator rubric-eval \
-  src/skillevaluator/tier3/reference_skills/text-analyzer \
-  -r cli -r json -o reports/first-build
-```
-
-The terminal shows the model's rubric scores and feedback, and saves the report
-to:
-
-```text
-reports/first-build/skillevaluator-rubric.json
-```
-
-Scores can vary between model calls. This evaluates the skill's instructions;
-it does not run an agent with the skill. For model overrides or another
-provider, see [Providers & Credentials](/skills/skillevaluator/configuration).
-
-## Where to go next
-
-### Check your own skill
-
-Replace the sample path with a directory containing your `SKILL.md`. Keep the
-report output outside that directory:
-
-```bash title="Evaluate your skill's quality"
+```bash title="Run from the same checkout"
 uv run --python 3.13 skillevaluator quality-check ./my-skill \
   -r cli -r json -o reports/my-skill-quality
 ```
 
-### Add full static validation
+## Use NVIDIA Build
 
-Full static Tier 1 coverage needs the separate
-Semgrep, SkillSpector, and Gitleaks executables. Follow
-[scanner setup](/skills/skillevaluator/installation#system-tools), then run:
+Want model feedback on the instructions? Add a rubric review for the same skill.
 
-```bash title="Run the static Tier 1 suite"
-uv run --python 3.13 skillevaluator tier1 ./my-skill --no-llm
-```
+<Accordion title="Set up a key and run a rubric review">
+  1. Sign in to [NVIDIA Build](https://build.nvidia.com/) and complete the
+     Developer Program enrollment prompts.
+  2. On a model page, choose **Get API Key** and copy your key. See the
+     [API Catalog quickstart](https://docs.api.nvidia.com/nim/docs/api-quickstart)
+     for the account setup steps and the
+     [access FAQ](https://docs.api.nvidia.com/nim/docs/product) for eligibility and limits.
+  3. In the same terminal, replace the example key and run:
 
-`--no-llm` disables model-backed stages; it does not remove scanner
-requirements. Missing required scanner evidence leaves validation `INCOMPLETE`
-and exits nonzero. See [Tier 1: Validation](/skills/skillevaluator/tier1-validation) for the
-checks and exit codes.
+  ```bash title="Add model-backed feedback"
+  export SKILL_EVAL_LLM_PROVIDER=nv_build
+  export NVIDIA_API_KEY='nvapi-...'
+  uv run --python 3.13 --extra llm skillevaluator rubric-eval \
+    src/skillevaluator/tier3/reference_skills/text-analyzer \
+    -r cli -r json -o reports/first-build
+  ```
 
-### Add deduplication or live evaluation
+  Read the rubric feedback in the terminal or open
+  `reports/first-build/skillevaluator-rubric.json`.
+  Scores can vary between calls. This reviews the instructions; it does not
+  run an agent with the skill. No local GPU or Docker is needed.
 
-| Your goal | Additional setup | Guide |
-| --- | --- | --- |
-| Find repeated or overlapping guidance | The `tier2` extra, embeddings, and chat for intra-skill analysis | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) |
-| Measure whether a skill improves an agent | The `tier3` extra, evaluator and agent credentials, a supported agent, and Docker for the default sandbox | [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) |
-| Run the combined pipeline or gate CI | The extras, credentials, scanners, and runtime for the selected tiers | [CLI Reference](/skills/skillevaluator/cli-reference#validate) and [Gate Your CI](/skills/skillevaluator/ci-integration) |
+  For other providers or model overrides, see
+  [Providers & Credentials](/skills/skillevaluator/configuration).
+</Accordion>
 
-The [live evaluation guide](/skills/skillevaluator/tier3-live-evaluation#before-you-start) covers
-runtime readiness and the first with-skill and without-skill comparison.
-[Installation](/skills/skillevaluator/installation#choosing-extras) explains how to add each extra
-to your checkout commands with `uv run --python 3.13 --extra EXTRA`.
+## Where to go next
+
+<CardGroup cols={2}>
+  <Card title="Run a live comparison" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+    Measure whether a skill improves an agent's task results.
+  </Card>
+  <Card title="Add automatic checks" icon="code-branch" href="/skills/skillevaluator/repository-integration">
+    Start with a GitHub or GitLab CI template.
+  </Card>
+  <Card title="Run full static validation" icon="shield" href="/skills/skillevaluator/installation#system-tools">
+    Set up Semgrep, SkillSpector, and Gitleaks for the security checks, then run Tier 1.
+  </Card>
+  <Card title="Try a guided experiment" icon="terminal" href="/skills/skillevaluator/starter-demo">
+    Change the example, introduce a regression, and compare real outputs.
+  </Card>
+</CardGroup>
+
+Find overlapping skills with [Tier 2](/skills/skillevaluator/tier2-deduplication),
+or learn more about your [reports](/skills/skillevaluator/reports).

@@ -952,7 +952,7 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
         f"RUN QUALITY VERDICT: {verdict.upper()}"
     ]
-    block = _doc_block("docs/tier3-live-evaluation.mdx", "For a tolerated agent, the baseline condition stays")
+    block = _doc_block("docs/tier3-run-options.mdx", "For a tolerated agent, the baseline condition stays")
     assert (
         "The run's verdict and the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints read the same agents:"
         in block
@@ -1138,7 +1138,7 @@ def test_failed_baseline_fails_the_run_unless_tolerated_and_the_docs_say_so(tmp_
     assert ("The agent and the Tier 3 run are marked failed." in notice["message"]) is not tolerate
     block = _doc_block("docs/reports.mdx", "An arm that ran but failed")
     assert "fails the agent and the run unless `--tolerate-baseline-timeouts` keeps the agent scored" in block
-    assert "[Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)" in block
+    assert "[Baseline timeouts](/skills/skillevaluator/tier3-run-options#baseline-timeouts)" in block
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])

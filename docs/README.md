@@ -17,7 +17,12 @@ contributors making non-trivial edits.
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `tier1-validation.mdx` — checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — dedup commands, catalogs, thresholds, limits
-- `tier3-live-evaluation.mdx` — skill evaluation with live agents
+- `tier3-live-evaluation.mdx` — first live comparison, from installation to report
+- `tier3-run-options.mdx` — reviewed datasets, run size, cost, and repeat comparisons
+- `tier3-runtime.mdx` — runtime contracts, backend compatibility, and troubleshooting
+- `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback models
+- `tier3-results.mdx` — scores, applicability, verdicts, and incomplete results
+- `tier3-experiments.mdx` — skill interactions and activation validation
 - `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
 - `custom-graders.mdx` — bring-your-own graders and native Harbor tasks

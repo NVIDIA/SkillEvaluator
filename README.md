@@ -212,7 +212,7 @@ retain their applicable stages.
 
 Tier 1 gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
-can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
+can incur charges; see [runtime and cost](docs/tier3-run-options.mdx#plan-for-cost).
 
 Standalone generation needs substantive `evals/EVAL.md` guidance, a `--prompt`
 file with task requests and outcomes, or matching retained traces. `--force`

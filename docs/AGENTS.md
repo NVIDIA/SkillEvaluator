@@ -18,7 +18,12 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
 - `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
-- `tier3-live-evaluation.mdx` — Tier 3 live agent evaluation workflow
+- `tier3-live-evaluation.mdx` — first Tier 3 comparison; keep this task-focused
+- `tier3-run-options.mdx` — dataset review, cost, tuning, and repeat comparisons
+- `tier3-runtime.mdx` — backend compatibility, runtime contracts, and troubleshooting
+- `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback policies
+- `tier3-results.mdx` — scores, applicability, verdicts, and incomplete evidence
+- `tier3-experiments.mdx` — skill interaction and activation experiments
 - `grader-validation.mdx` — independent-label qualification of the shipped verifier
 - `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
@@ -45,6 +50,12 @@ Navigation order, page titles, and slugs are defined in
 [`../fern/fern.config.json`](../fern/fern.config.json).
 
 ## Rules for editing
+
+Keep entry pages focused on the reader's next action: setup, a runnable command,
+the expected output, and a next step. Put advanced contracts and edge cases in
+the linked reference page. Use Steps for ordered actions, Tabs for exclusive
+choices, and Accordions for optional detail; do not put a reference chapter
+ahead of the first runnable example.
 
 1. **Every page needs YAML frontmatter** with `title` and `description`. The
    `title` renders as the page H1 — do **not** also add a `# Heading` in the

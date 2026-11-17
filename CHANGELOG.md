@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Task-first documentation entry pages: a three-step keyless quickstart and a
+  live-evaluation walkthrough with provider tabs, readiness checks, and report
+  interpretation. Detailed Tier 3 run options, runtime behavior, grading,
+  results, and experiments now have separate reference pages; existing topic
+  bookmarks link to their new locations.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.

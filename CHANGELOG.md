@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Folder validators apply skill-discovery exclusions only below the requested
+  scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
+  no longer loses every live skill, while nested evaluation snapshots remain excluded.
+
 - Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
 
 ## 1.0.0 - 2026-11-17

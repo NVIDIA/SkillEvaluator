@@ -15,6 +15,14 @@ All notable changes to SkillEvaluator are documented in this file.
   existing skill its first two cases ask the agent to convert, under
   `evals/files/`, and each case declares `files` so only its own fixture is
   staged. Previously those cases had no workspace input to work from.
+- The bundled `api-caller` example no longer fails Tier 2 deduplication: its
+  two scripts share one HTTP(S) URL check from `scripts/url_safety.py` instead
+  of each defining `_validate_http_url()`, and `call_api.py` no longer repeats the
+  SKILL.md usage section in its module docstring.
+- Tier 3 dataset generation no longer names an import-only helper module, such
+  as `url_safety.py`, as a case's `expected_script` when the skill has a script
+  that does something when run. A skill with one script, or only helpers, keeps
+  its previous choice.
 
 ## 1.0.0 - 2026-11-17
 

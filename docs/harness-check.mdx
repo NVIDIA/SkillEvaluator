@@ -1,11 +1,15 @@
 ---
-title: "Harness Check"
+title: "Tier 1: Harness Check"
+sidebar-title: "Tier 1: Harness Check"
 description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
 ---
 
 No LLM. No agent run. No API key. In about a second, the harness check predicts
 whether each agent harness **loads** your skill, **degrades** it, or **drops** it,
 and what to change.
+
+Choose **GitHub source** on [Installation](/skills/skillevaluator/installation#install),
+then run the command below. Harness Check is not included in PyPI 0.9.0.
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -288,7 +292,7 @@ The rules cover everything between your folder and the model's context.
 | Plugins | Which plugin formats each harness accepts, how plugin skills are named, and components a harness registers but doesn't deliver. |
 
 The full rule list, harness by harness, is in
-[Tier 1: Validation](/skills/skillevaluator/tier1-validation#the-checks) under **harness**.
+[Tier 1: Validation](/skills/skillevaluator/tier1-reference#the-checks) under **harness**.
 
 ## Supported harnesses
 
@@ -384,7 +388,7 @@ with the description as that harness lists it.
   <Accordion title="Does it change pass or fail?">
     No. Its findings are MEDIUM for `not_loaded`, LOW for `degraded` and INFO for
     a note. All three sit below the default gate, so the check never fails a run
-    unless a [policy](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies)
+    unless a [policy](/skills/skillevaluator/tier1-reference#validation-profiles-and-policies)
     raises those severities. `harness-check` exits `0` whatever it finds.
   </Accordion>
   <Accordion title="Is there a score?">
@@ -395,7 +399,7 @@ with the description as that harness lists it.
     No. It predicts loader behavior from versioned profiles without running the
     agent. It doesn't establish which skill reaches a live model or whether the
     skill helps once it is there. That is what
-    [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
+    [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
   </Accordion>
   <Accordion title="Why does it mention my other skills?">
     A harness lists your skill together with the skills installed next to it, and

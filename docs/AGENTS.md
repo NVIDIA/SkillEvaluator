@@ -11,14 +11,24 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 ## What lives here
 
 - `index.mdx` — landing page and three-tier overview (Fern slug `/`)
-- `quickstart.mdx` — install, one provider and key, and first runs
+- `quickstart.mdx` — check a bundled example with the installed CLI
 - `starter-demo.mdx` — reproducible public terminal starter, output checks and adaptation
-- `installation.mdx` — extras, uv, pip, Docker, requirements
+- `installation.mdx` — shared pip, uv, and GitHub installation paths and verification
+- `installation-options.mdx` — upgrades, Docker, release differences, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
-- `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
-- `tier2-deduplication.mdx` — Tier 2 dedup commands, catalogs, thresholds, limits
-- `tier3-live-evaluation.mdx` — Tier 3 live agent evaluation workflow
+- `tier1-validation.mdx` — first static run, report, and next steps
+- `tier1-reference.mdx` — detailed checks, policies, scanners, and exit semantics
+- `tier2-deduplication.mdx` — choose a scope, run deduplication, and read findings
+- `tier2-reference.mdx` — chunking, catalogs, thresholds, algorithms, and limits
+- `tier3-live-evaluation.mdx` — first Tier 3 comparison; keep this task-focused
+- `prepare-dataset.mdx` — author, generate, review, and validate cases before trials
+- `tier3-run-options.mdx` — choose an agent and attempt count for reviewed cases
+- `tier3-run-reference.mdx` — staging contracts, run settings, budgets, and repeat comparisons
+- `tier3-runtime.mdx` — backend compatibility, runtime contracts, and troubleshooting
+- `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback policies
+- `tier3-results.mdx` — scores, applicability, verdicts, and incomplete evidence
+- `tier3-experiments.mdx` — skill interaction and activation experiments
 - `grader-validation.mdx` — independent-label qualification of the shipped verifier
 - `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
@@ -45,6 +55,22 @@ Navigation order, page titles, and slugs are defined in
 [`../fern/fern.config.json`](../fern/fern.config.json).
 
 ## Rules for editing
+
+Keep entry pages focused on the reader's next action: setup, a runnable command,
+the expected output, and a next step. Put advanced contracts and edge cases in
+the linked reference page. Use Steps for ordered actions, Tabs for exclusive
+choices, and Accordions for optional detail; do not put a reference chapter
+ahead of the first runnable example.
+
+Keep pip, uv, uv bootstrap, and direct repository installation in
+`installation.mdx`; keep upgrades and advanced setup in
+`installation-options.mdx`. Default to the lightweight `skillevaluator` install;
+keep `skillevaluator[all]` as an explicit opt-in for all tiers. Distinguish the published PyPI release from
+unreleased GitHub features and dependencies. Tier guides and the
+quickstart link there and use the installed `skillevaluator` command. Avoid
+copying package-manager recipes into each tier or mixing `uv run`, `uv tool
+install`, and pip in a single first-run workflow. Contributor checkout commands
+belong in the development guide.
 
 1. **Every page needs YAML frontmatter** with `title` and `description`. The
    `title` renders as the page H1 — do **not** also add a `# Heading` in the

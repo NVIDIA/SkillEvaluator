@@ -1,51 +1,126 @@
 ---
 title: "Install SkillEvaluator"
 sidebar-title: "Installation"
-description: "One installation for Tier 1 validation, Tier 2 deduplication, and Tier 3 live agent evaluation."
+description: "Install SkillEvaluator with pip, uv, or GitHub source for all three tiers."
 ---
 
-One installation for all three tiers.
+Install once for all three tiers. Choose the package manager you already use.
+The commands below include `[all]`, the dependencies for Tier 1, Tier 2, and Tier 3.
 
 <div id="install">
 <div id="install-the-cli">
-
-```bash title="Install SkillEvaluator"
-uv tool install --python 3.13 "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-```
-
 <div id="requirements">
 
-Requires **uv and Git**. uv sets up Python 3.13 automatically. This installs
-the current GitHub source with all evaluation dependencies.
+<Tabs>
+  <Tab title="pip (PyPI)">
 
-</div>
-</div>
-</div>
+Use **Python 3.12–3.14** in an activated virtual environment.
 
-<div id="get-uv">
+```bash title="Install the PyPI release"
+python -m pip install --upgrade "skillevaluator[all]"
+```
 
-<Accordion title="Need uv?">
-  Run the command for your operating system, then open a new terminal.
-
+<Accordion title="Create a virtual environment first">
   <Tabs>
     <Tab title="macOS / Linux">
 
-  ```bash title="Install uv"
-  curl -LsSf https://astral.sh/uv/install.sh | sh
-  ```
+```bash
+python3.13 -m venv .venv
+source .venv/bin/activate
+```
 
     </Tab>
     <Tab title="Windows">
 
-  ```powershell title="Install uv in PowerShell"
-  powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
-  ```
+```powershell
+py -3.13 -m venv .venv
+.venv\Scripts\Activate.ps1
+```
 
     </Tab>
   </Tabs>
 
-  See [uv's installation guide](https://docs.astral.sh/uv/getting-started/installation/)
-  for other package managers. Install Git too if `git --version` is unavailable.
+  These examples use an installed Python 3.13; Python 3.12 and 3.14 also work.
+  Run the install command after activation. Keep this environment activated
+  whenever you use SkillEvaluator.
+</Accordion>
+
+  </Tab>
+  <Tab title="uv tool (PyPI)">
+
+uv creates an isolated tool environment and sets up Python 3.13 automatically.
+
+```bash title="Install the PyPI release with uv"
+uv tool install --python 3.13 "skillevaluator[all]"
+```
+
+Need uv first? Use the **Install uv** section below.
+
+  </Tab>
+  <Tab title="GitHub source">
+
+Use this for changes not yet on PyPI, including **Harness Check**.
+You need Git and either uv or an activated Python 3.12–3.14 environment.
+
+```bash title="Install current source with uv"
+uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+Or, in your activated environment:
+
+```bash title="Install current source with pip"
+python -m pip install --upgrade --force-reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+The repository can contain unreleased changes. For an editable checkout,
+use the [development guide](/skills/skillevaluator/developer-guide#set-up-a-development-environment).
+
+  </Tab>
+</Tabs>
+
+</div>
+</div>
+</div>
+
+The latest [PyPI release is 0.9.0](https://pypi.org/project/skillevaluator/).
+**Harness Check requires the GitHub source option** until it is released.
+See [release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
+For a smaller base install, omit `[all]`; see [extras](/skills/skillevaluator/installation-options#choosing-extras).
+
+<div id="get-uv">
+
+<Accordion title="Install uv">
+  Choose one method. With pip, use an activated Python environment; the
+  standalone installers work without an existing Python installation.
+
+  <Tabs>
+    <Tab title="pip">
+
+```bash title="Install uv with pip"
+python -m pip install --upgrade uv
+uv --version
+```
+
+    </Tab>
+    <Tab title="macOS / Linux">
+
+```bash title="Install uv"
+curl -LsSf https://astral.sh/uv/install.sh | sh
+```
+
+    </Tab>
+    <Tab title="Windows">
+
+```powershell title="Install uv in PowerShell"
+powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"
+```
+
+    </Tab>
+  </Tabs>
+
+  Open a new terminal after using a standalone installer, then run the
+  `uv tool install` command above. See [uv's installation guide](https://docs.astral.sh/uv/getting-started/installation/)
+  for other package managers.
 </Accordion>
 
 </div>
@@ -56,8 +131,9 @@ the current GitHub source with all evaluation dependencies.
 skillevaluator --version
 ```
 
-You should see a version number. If the command is not found, run
-`uv tool update-shell` and open a new terminal.
+You should see a version number. With pip, keep your virtual environment
+activated. With uv, run `uv tool update-shell` and open a new terminal if the
+command is not found.
 
 <div id="next-steps">
 
@@ -66,7 +142,7 @@ You should see a version number. If the command is not found, run
 | Guide | What you need next |
 | --- | --- |
 | [Tier 1: Validation](/skills/skillevaluator/tier1-validation) | A skill folder. Static checks need no API key. |
-| [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | A skill folder. No API key or agent run. |
+| [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | GitHub source installation and a skill folder. No API key or agent run. |
 | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) | A provider for embeddings and model analysis. |
 | [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | A model API key and Docker. |
 
@@ -81,7 +157,7 @@ Need an example skill? Start with the [quickstart](/skills/skillevaluator/quicks
 <div id="troubleshooting">
 
 **More options:** [Upgrade](/skills/skillevaluator/installation-options#upgrade),
-[pip or Docker](/skills/skillevaluator/installation-options#other-installation-methods),
+[Docker](/skills/skillevaluator/installation-options#other-installation-methods),
 [smaller installs](/skills/skillevaluator/installation-options#choosing-extras),
 [security scanners](/skills/skillevaluator/installation-options#system-tools),
 or [troubleshooting](/skills/skillevaluator/installation-options#troubleshooting).

@@ -28,9 +28,11 @@ not automatically selected as the latest available model. Set
 `SKILL_EVAL_LLM_MODEL` only when you want a different evaluator model; the
 standard judge inherits it unless a judge override is set. Embeddings use their
 own model, and Tier 3 agent selection is separate. With NVIDIA Build, all three
-agents default to Nemotron 3.5 Lightning. OpenCode follows
+agents in current GitHub source default to Nemotron 3.5 Lightning. OpenCode follows
 `SKILL_EVAL_LLM_MODEL`, while Codex and Claude Code keep the Lightning default
 unless you override their models.
+PyPI 0.9.0 uses earlier defaults; see
+[release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
 
 Anthropic and Bedrock need a separate embedding provider for Tier 2; custom
 OpenAI-compatible endpoints require an explicit URL and key, with optional model overrides.

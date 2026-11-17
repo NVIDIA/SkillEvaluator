@@ -6,9 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Central installation guide with one recommended uv workflow for all three
-  tiers, with pip alternatives, scanner setup, and smaller installs on a linked
-  options page. Tier guides and the quickstart use the installed CLI. Navigation
+- Central installation guide with pip and uv PyPI installs, uv bootstrap, and
+  direct GitHub source options for all three tiers. Release differences, scanner
+  setup, and smaller installs are documented on a linked options page. Tier guides and the quickstart use the installed CLI. Navigation
   groups Tier 1 Validation, Tier 1 Harness Check, Tier 2 Deduplication, and
   Tier 3 Live Agent Evaluation in that order.
 - Task-first documentation entry pages: a three-step keyless quickstart and a

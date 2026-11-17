@@ -13,8 +13,8 @@ contributors making non-trivial edits.
 
 - `index.mdx` — landing page and three-tier overview
 - `quickstart.mdx` — check a bundled example with the installed CLI
-- `installation.mdx` — the shared first installation and verification command
-- `installation-options.mdx` — upgrades, alternatives, extras, and scanner setup
+- `installation.mdx` — shared pip, uv, and GitHub installation paths and verification
+- `installation-options.mdx` — upgrades, Docker, release differences, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `tier1-validation.mdx` — checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — dedup commands, catalogs, thresholds, limits

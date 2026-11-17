@@ -1,65 +1,69 @@
 ---
 title: "Installation Options"
-description: "Upgrades, pip and Docker alternatives, optional dependencies, and security scanner setup."
+description: "Upgrades, Docker, optional dependencies, release differences, and security scanner setup."
 ---
 
 For the recommended setup, start with [Install SkillEvaluator](/skills/skillevaluator/installation).
 
 ## Upgrade
 
-Rerun the same installation with `--reinstall` to fetch the current GitHub
-source and refresh the installed tool:
+Use the command for your original installation method. Keep all the extras
+you need when changing an installation.
 
-```bash title="Update the recommended installation"
-uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-skillevaluator --version
+<Tabs>
+  <Tab title="pip (PyPI)">
+
+In the activated environment:
+
+```bash
+python -m pip install --upgrade "skillevaluator[all]"
 ```
 
-If you chose a smaller install, keep your selected extras in this command.
-An install from a virtual environment should be updated with pip inside that
-environment; see the pip alternative below.
+  </Tab>
+  <Tab title="uv tool (PyPI)">
+
+```bash
+uv tool upgrade skillevaluator
+```
+
+To add extras to a smaller install:
+
+```bash
+uv tool install --python 3.13 --reinstall "skillevaluator[all]"
+```
+
+  </Tab>
+  <Tab title="GitHub source">
+
+Refresh the latest source with the **GitHub source** commands on
+[Installation](/skills/skillevaluator/installation#install). They reinstall the
+package even when the development version number has not changed.
+
+  </Tab>
+</Tabs>
+
+Run `skillevaluator --version` afterward. To move from a source install back to
+PyPI, use `python -m pip install --upgrade --force-reinstall "skillevaluator[all]"`
+in its activated environment, or `uv tool install --python 3.13 --reinstall "skillevaluator[all]"`
+for a uv tool.
+
+## Release and source differences
+
+[PyPI 0.9.0](https://pypi.org/project/skillevaluator/0.9.0/) supports the direct
+Tier 1, Tier 2, and Tier 3 workflows. **Harness Check, JUnit reports, and the
+experimental NeMo Gym backend** were added afterward and require the
+**GitHub source** installation. Advanced references describe current source;
+check a command's `--help` against your installed package.
+
+Current source can still report `0.9.0` before the next release, so the version
+number alone does not identify a PyPI installation. NVIDIA Build's evaluator
+default also differs: PyPI 0.9.0 uses `nvidia/nemotron-3-super-120b-a12b`, while
+current source uses `nvidia/nemotron-3.5-lightning-30b-a3b`.
 
 ## Other installation methods
 
-<Accordion title="Use pip with an existing Python installation">
-  Use this instead of `uv tool install` if you prefer managing a Python
-  environment yourself. You need Git and **Python 3.12, 3.13, or 3.14**.
-  Create and activate a virtual environment first, including on macOS with
-  Homebrew Python.
-
-  <Tabs>
-    <Tab title="macOS / Linux">
-
-  ```bash title="Create and activate an environment"
-  python3 -m venv .venv
-  source .venv/bin/activate
-  ```
-
-  If `python3` is outside the supported range, use an installed supported
-  interpreter such as `python3.13` for the first command.
-
-    </Tab>
-    <Tab title="Windows">
-
-  ```powershell title="Create and activate an environment with Python 3.13"
-  py -3.13 -m venv .venv
-  .venv\Scripts\Activate.ps1
-  ```
-
-    </Tab>
-  </Tabs>
-
-  Then install and verify in the activated environment:
-
-  ```bash title="Install with pip"
-  python -m pip install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-  skillevaluator --version
-  ```
-
-  Keep this environment activated when running `skillevaluator`. To update
-  this Git-source installation, rerun the pip command with
-  `--upgrade --force-reinstall`, keeping your chosen extras.
-</Accordion>
+Pip, uv, and direct repository installs are on
+[Installation](/skills/skillevaluator/installation#install).
 
 <Accordion title="Run the CLI in a Docker container">
   This runs SkillEvaluator itself in a container. For the usual Tier 3 setup,
@@ -114,11 +118,11 @@ For an editable checkout and contributor tools, use the
 
   | Selection | Includes |
   | --- | --- |
-  | Base (no extra) | Static Tier 1 checks and quality scoring; no model clients |
+  | Base (no extra) | Quality and structural checks; no model clients |
   | `[llm]` | Model clients for rubric reviews and other LLM-backed checks |
   | `[tier2]` | Deduplication and similarity checks; includes `llm` |
   | `[tier3]` | Live agent evaluation; includes `llm` and `harbor==0.25.0` |
-  | `[security]` | pip-audit for the opt-in dependency audit; Bandit is in the base package |
+  | `[security]` | Bandit and pip-audit on PyPI 0.9.0; current source includes Bandit in the base package |
   | `[all]` | `tier2`, `tier3`, and `security` |
   | `[all,dashboard]` | All evaluation extras plus the local Streamlit dashboard |
   | `[dev]` | Contributor tools for builds, tests, and formatting |
@@ -136,23 +140,36 @@ use these tools:
 
 | Tool | Setup |
 | --- | --- |
-| Bandit | Included with the base package. |
-| SkillSpector | Downloads the pinned release on first use when no executable is found. |
+| Bandit | Included with `[all]` or `[security]` on PyPI 0.9.0; included with the base package in current source. |
+| SkillSpector | Uses a supported installed version or provisions the pinned release on first use; requires uv. |
 | Gitleaks | Downloads the pinned release on first use on Linux and macOS. |
 | Semgrep | Optional unless required by your policy; install separately. |
 | pip-audit | Included with `[all]` or `[security]` for the opt-in dependency audit. |
+
+For **PyPI 0.9.0 installed with pip**, install uv before full scanner validation:
+
+```bash title="Enable SkillSpector provisioning in a pip environment"
+python -m pip install --upgrade uv
+```
+
+Run this in the same activated environment. If you installed SkillEvaluator
+with `uv tool`, uv is already available. The current GitHub source includes uv
+as a base dependency. See [Installation](/skills/skillevaluator/installation#install)
+for the supported installation paths.
 
 The first scanner run needs network access; later runs use cached downloads.
 Missing required scanner evidence is reported as `INCOMPLETE`.
 
 <Accordion title="Preinstall or troubleshoot security scanners">
-  Tier 1 verifies the SHA-256 checksums of its downloaded SkillSpector 2.13.4
-  wheel and Gitleaks 8.30.0 binary. uv is installed with SkillEvaluator as a base
-  dependency and runs SkillSpector in its own environment. A plain pip install
-  therefore does not need a separate `pip install uv` step. An existing uv on
-  PATH is used first.
+  Tier 1 verifies the SHA-256 checksums of its downloaded scanners. PyPI 0.9.0
+  pins SkillSpector 2.13.3; current source pins 2.13.4. Both pin Gitleaks 8.30.0.
+  In current source, uv is installed with SkillEvaluator as a base dependency
+  and runs SkillSpector in its own environment. PyPI 0.9.0 needs uv installed
+  separately, as shown above. An existing uv on PATH is used first.
 
-  Installed scanner executables take precedence. To manage them yourself:
+  Current source accepts an automatically discovered SkillSpector only when it
+  matches the pinned version; otherwise it provisions the pinned release.
+  Explicit scanner path overrides are checked separately. To manage the tools yourself:
 
   ```bash title="Optional scanner installation"
   uv tool install semgrep
@@ -189,9 +206,14 @@ Missing required scanner evidence is reported as `INCOMPLETE`.
     the package.
   </Accordion>
   <Accordion title="Installation says Git or a supported Python is missing">
-    Install Git and make sure `git --version` works. The uv command above
-    downloads Python 3.13 automatically; the pip alternative needs an existing
-    Python 3.12–3.14 interpreter.
+    Git is required only for the GitHub source or checkout paths; check it with
+    `git --version`. The uv installation commands download Python 3.13
+    automatically; pip needs an existing Python 3.12–3.14 interpreter.
+  </Accordion>
+  <Accordion title="harness-check is not recognized">
+    Harness Check was added after PyPI 0.9.0. Choose **GitHub source** on
+    [Installation](/skills/skillevaluator/installation#install) to use it.
+    Upgrading PyPI 0.9.0 without switching sources does not add the command.
   </Accordion>
   <Accordion title="health-check fails even though the CLI installed">
     `skillevaluator --version` verifies the CLI installation.

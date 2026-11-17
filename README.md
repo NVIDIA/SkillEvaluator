@@ -34,16 +34,27 @@ Check skills from your terminal, CI, or agent.
 </tr></thead><tbody><tr valign="top">
 <td>
 
-[Install SkillEvaluator](https://docs.nvidia.com/skills/skillevaluator/installation) once for all three tiers.
+In a Python 3.12–3.14 environment:
+
+```bash
+pip install skillevaluator
+```
+
+<details><summary>Or install with uv</summary>
+
+```bash
+uv tool install --python 3.13 skillevaluator
+```
+
+</details>
 
 Then check your skill, no key:
 
 ```bash
-skillevaluator validate \
-  ./my-skill --tiers 1
+skillevaluator quality-check ./my-skill
 ```
 
-[Try the bundled example](https://docs.nvidia.com/skills/skillevaluator/quickstart).
+[All tiers, uv setup, and source install](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 </td>
 <td>
@@ -76,7 +87,7 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 
 ### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill? Know in seconds.
 
-No LLM inference · No model key · No agent run
+Requires [GitHub source](https://docs.nvidia.com/skills/skillevaluator/installation); not in PyPI 0.9.0. No model key or agent run.
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -95,17 +106,17 @@ Illustrative summary of versioned profiles. Full output can include notes and sc
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` above runs it by default, as part of Tier 1. 🧪 **Ready to go deeper?** Try a
+`validate` on current source includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
 [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
 
-Both use bundled `text-analyzer` and your [installed CLI](https://docs.nvidia.com/skills/skillevaluator/installation).
+Use bundled `text-analyzer` with your [installed CLI](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 | Start here | Requires | First result |
 | --- | --- | --- |
 | [Run without an LLM](#run-without-an-llm) | Installed CLI and Git | A deterministic quality score and findings |
-| [Use NVIDIA Build](#use-nvidia-build) | Installed CLI, Git, and a Build API key | Model-backed rubric scores and feedback |
+| [Use NVIDIA Build](#use-nvidia-build) | `[all]` or `[llm]` install, Git, Build API key | Model-backed rubric scores and feedback |
 
 After installation, get the example:
 
@@ -122,9 +133,9 @@ skillevaluator quality-check \
   -r cli -r json -o reports/first-quality
 ```
 
-No API key, scanner, GPU or Docker is needed. The example scores **88.8/100 (B)**,
-exits `0` and saves `reports/first-quality/skillevaluator-quality.json`. The
-passing threshold defaults to 70.
+No API key, scanner, GPU or Docker is needed. The command reports a score,
+exits `0` when it meets the default threshold of 70, and saves
+`reports/first-quality/skillevaluator-quality.json`. Scores can differ by release.
 
 This checks static quality; publication evidence stays `INCOMPLETE`. Security
 needs scanners; agent impact needs live evaluation. Replace the example path
@@ -132,6 +143,8 @@ with your skill directory. See the
 [keyless walkthrough](docs/quickstart.mdx#run-without-an-llm).
 
 ### Use NVIDIA Build
+
+Add `[all]` or `[llm]` using [Installation](https://docs.nvidia.com/skills/skillevaluator/installation) first.
 
 Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
 **free prototyping**, subject to [access terms and rate limits](https://docs.api.nvidia.com/nim/docs/product).
@@ -152,24 +165,22 @@ The command sends skill documentation to the model and saves feedback in
 `reports/first-build/skillevaluator-rubric.json`. No agent runtime or Docker is
 needed. Completed evaluations can still fail rubric thresholds.
 
-The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
-[Build walkthrough](docs/quickstart.mdx#use-nvidia-build) or [provider configuration](docs/configuration.mdx).
+See [provider setup](docs/configuration.mdx) for Tier 2 embeddings and Tier 3 agents.
 
 ## Three-tier overview
 
 ![Three-tier pipeline: skill, validation, deduplication, live evaluation, reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
-Each tier is independent. The recommended installation includes all three:
+Each tier is independent. Use the [all-tier installation](https://docs.nvidia.com/skills/skillevaluator/installation) for all three:
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
 | Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-validation.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
-| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | No API key or agent run |
+| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | GitHub source; no API key or agent run |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
-Tier 1 fetches pinned, verified SkillSpector and Gitleaks releases when they
-are missing; Semgrep is optional. See [scanners](docs/installation-options.mdx#system-tools).
+Prepare [scanners](docs/installation-options.mdx#system-tools) for your installed release; Semgrep is optional.
 `--no-llm` does not remove scanner requirements; a scanner that cannot run is
 `INCOMPLETE` and exits nonzero.
 [SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized skill

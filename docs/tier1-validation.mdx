@@ -5,7 +5,7 @@ description: "Deterministic quality gates for skills — schema, quality, securi
 ---
 
 Run Tier 1 directly to check a skill's structure, security, quality, and
-dependencies. First, [install SkillEvaluator](/skills/skillevaluator/installation#install),
+dependencies. First, [install SkillEvaluator](/skills/skillevaluator/installation#install) with the all-tier option,
 then run:
 
 ```bash title="Run Tier 1"
@@ -17,7 +17,8 @@ runs rubric judging, LLM security analysis, and finding verification. Without a
 provider, those LLM stages are explicitly reported as skipped. Use `--no-llm`
 for static checks only, or `--llm` to require a provider instead of allowing a
 keyless run. See [scanner setup](/skills/skillevaluator/installation-options#system-tools)
-for first-run downloads and optional tools.
+for first-run downloads and optional tools; PyPI 0.9.0 installed with pip also
+needs uv for automatic SkillSpector setup.
 
 The two-variable [provider setup](/skills/skillevaluator/configuration) is enough to configure the
 LLM stages for NVIDIA Build or OpenAI. Calling `skillevaluator tier1` without a
@@ -109,7 +110,7 @@ for skills. Its Tier 1 LLM checks still run only when requested.
 Direct `tier1 PATH` and `tier1 validate PATH` print the terminal report and
 write JSON and HTML reports by default. Use `-r cli` for terminal-only output.
 
-Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, `html`, `markdown`, `sarif`, `junit`) and written to `-o`/`--output-dir` (default `reports/`). File naming, `BENCHMARK.md`, and the JSON contract are covered in [Reports & Results](/skills/skillevaluator/reports).
+Reports for any of these runs are selected with `-r`/`--report` (`cli`, `json`, `html`, `markdown`, `sarif`) and written to `-o`/`--output-dir` (default `reports/`). The `junit` format also requires the [GitHub source installation](/skills/skillevaluator/installation#install); it is not in PyPI 0.9.0. File naming, `BENCHMARK.md`, and the JSON contract are covered in [Reports & Results](/skills/skillevaluator/reports).
 
 ## Content types
 
@@ -273,6 +274,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
   </Accordion>
 
   <Accordion title="harness — harness compatibility">
+    This check requires the [GitHub source installation](/skills/skillevaluator/installation#install); it is not included in PyPI 0.9.0.
+
     The `harness` check reports, for each agent harness, whether the skill `loads`, is `degraded` (loads, but something is cut, hidden or ignored) or is `not_loaded`, with the rule IDs behind each verdict and the harness version and date the profile was verified against. Supported harnesses: `claude-code`, `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`. All of this is static: no agent or model is run. See [Harness Check](/skills/skillevaluator/harness-check) for a walkthrough with example output.
 
     `validate` runs it by default for all six and lists its findings in the HTML, JSON and SARIF reports; JSON reports also get a `harness_compatibility` block. Use `--checks harness` to run it alone and `--harness codex,claude-code` to narrow the harnesses.

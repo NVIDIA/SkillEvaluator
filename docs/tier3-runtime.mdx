@@ -137,6 +137,10 @@ cloud backend for untrusted code.
 </Warning>
 ## Execution backends
 
+The backend selector and NeMo Gym adapter require the **GitHub source**
+installation; PyPI 0.9.0 uses Harbor. See
+[release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
+
 `--backend` chooses what executes the cases. The default is Harbor. The experimental
 NeMo Gym adapter stages the same task folders and uses the shared verifier and result
 collector, but requires a Gym interface that is not available in the checked public

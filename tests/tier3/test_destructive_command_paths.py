@@ -930,8 +930,9 @@ def test_substitutions_and_words_count_toward_the_trace_limit(monkeypatch) -> No
 
     The lexer reads each backtick substitution as a longer placeholder word,
     so these calls cost several times their length to lex. Counted by length
-    alone, all five would fit in the limit and be lexed whole, only to be
-    read in one pass as text of more than 4,096 tokens.
+    alone, the first two would fit in the limit and be lexed whole, only to
+    be read in one pass as text of more than 4,096 tokens, whose commands
+    then count too; the third would pass the limit.
     """
     lexed: list[int] = []
     walk = checks._rm_shell_words

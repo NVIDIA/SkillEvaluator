@@ -10,6 +10,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## 1.0.1 - 2026-11-17
 
+### Documentation
+
+- Refresh the versioned CI catalog and comments-only setup for 1.0.1, and
+  clarify that all-tier CLI onboarding was already included in 0.9.0.
+  Keep published PyPI availability separate from the new release pins.
+- Describe Harness Check, JUnit and the NeMo Gym adapter as 1.0.1 capabilities
+  while keeping package availability explicit.
+
 ### Fixed
 
 - Disable OpenCode snapshots by default to avoid broken-pipe failures after a

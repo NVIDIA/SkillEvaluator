@@ -96,7 +96,7 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 
 ### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill?
 
-Requires [GitHub source](https://docs.nvidia.com/skills/skillevaluator/installation); not in PyPI 0.9.0. No model key or agent run.
+Included in SkillEvaluator 1.0.1; see [Installation](https://docs.nvidia.com/skills/skillevaluator/installation) for package availability. No model key or agent run.
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -115,7 +115,7 @@ Illustrative summary of versioned profiles. Full output can include notes and sc
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` on current source includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
+`validate` in 1.0.1 includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
 [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
@@ -166,7 +166,7 @@ Each tier is independent. Use the [all-tier installation](https://docs.nvidia.co
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
 | Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-reference.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
-| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | GitHub source; no API key or agent run |
+| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | SkillEvaluator 1.0.1; no API key or agent run |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 

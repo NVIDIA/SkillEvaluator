@@ -172,6 +172,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- `EmbeddingRegistry.query` and `query_entry` no longer call the embedding provider
+  when the catalog has no eligible entries to compare against.
 - The `skillevaluator` agent skill now asks the user before installing the
   CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
   run or using `--env-mode local` (trusted skills only; it does not reuse the
@@ -438,8 +440,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Registry queries skip embedding-provider requests when there are no eligible entries to
-  compare, including an empty registry or a catalog containing only the explicitly excluded entry.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

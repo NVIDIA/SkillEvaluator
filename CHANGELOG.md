@@ -4,6 +4,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 1.0.0 - 2026-11-17
+
 ### Added
 
 - Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit

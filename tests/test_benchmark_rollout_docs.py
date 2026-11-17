@@ -61,7 +61,7 @@ def test_ci_runs_benchmark_gate_with_project_dependencies() -> None:
 
 
 def test_tier3_reference_uses_canonical_dimension_mapping() -> None:
-    reference = (REPO / "docs/tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    reference = (REPO / "docs/tier3-results.mdx").read_text(encoding="utf-8")
 
     assert "| Security | Is it safe to use? | `security` | 1.0 |" in reference
     assert "| Correctness | Is the answer correct? | `accuracy` | 1.0 |" in reference

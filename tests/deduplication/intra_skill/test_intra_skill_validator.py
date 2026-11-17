@@ -122,7 +122,7 @@ class TestEffectiveChunkLimit:
         }
         model = resolve_embedding_provider(environ).model
         vector_dimension = default_model_widths[model]
-        guide = Path(__file__).resolve().parents[3] / "docs" / "tier2-deduplication.mdx"
+        guide = Path(__file__).resolve().parents[3] / "docs" / "tier2-reference.mdx"
         (row,) = [
             line
             for line in guide.read_text(encoding="utf-8").splitlines()

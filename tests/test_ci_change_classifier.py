@@ -34,7 +34,7 @@ def git_repo(tmp_path: Path) -> tuple[Path, str]:
     _git(tmp_path, "config", "user.name", "CI Test")
     (tmp_path / "docs").mkdir()
     (tmp_path / "docs" / "index.mdx").write_text("docs source\n", encoding="utf-8")
-    (tmp_path / "README.md").write_text("root source\n", encoding="utf-8")
+    (tmp_path / "pyproject.toml").write_text("root source\n", encoding="utf-8")
     return tmp_path, _commit(tmp_path, "initial")
 
 
@@ -52,8 +52,15 @@ def git_repo(tmp_path: Path) -> tuple[Path, str]:
         ([b"fern"], False),
         ([b"docs-old/index.mdx"], False),
         ([b"fernicious/docs.yml"], False),
-        ([b"README.md"], False),
-        ([b"CHANGELOG.md"], False),
+        ([b"README.md"], True),
+        ([b"CHANGELOG.md"], True),
+        ([b"CHANGELOG.md", b"docs/index.mdx", b"fern/docs.yml"], True),
+        ([b"CHANGELOG.md", b"src/skillevaluator/cli.py"], False),
+        ([b"changelog.md"], False),
+        ([b"CONTRIBUTING.md"], False),
+        ([b"skills/skillevaluator/README.md"], False),
+        ([b"tests/CHANGELOG.md"], False),
+        ([b"skills/skillevaluator/SKILL.md"], False),
         ([b"src/skillevaluator/tier3/reference_skills/demo/SKILL.md"], False),
         ([b"tests/golden/benchmark_tier1.md"], False),
         ([b"docs/index.mdx", b"src/skillevaluator/cli.py"], False),
@@ -196,7 +203,7 @@ def test_main_checks_the_source_of_a_rename_into_docs(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     repo, base = git_repo
-    _git(repo, "mv", "README.md", "docs/readme.mdx")
+    _git(repo, "mv", "pyproject.toml", "docs/pyproject.mdx")
     head = _commit(repo, "rename into docs")
 
     assert _classify(repo, base, head, tmp_path / "github-output", monkeypatch) == 0
@@ -207,13 +214,13 @@ def test_changed_paths_detects_an_unmodified_copy_source_outside_docs(
     git_repo: tuple[Path, str],
 ) -> None:
     repo, base = git_repo
-    (repo / "docs" / "copied-readme.mdx").write_bytes((repo / "README.md").read_bytes())
+    (repo / "docs" / "copied-root.mdx").write_bytes((repo / "pyproject.toml").read_bytes())
     head = _commit(repo, "copy root file into docs")
 
     paths = changed_paths(repo, base, head)
 
-    assert b"README.md" in paths
-    assert b"docs/copied-readme.mdx" in paths
+    assert b"pyproject.toml" in paths
+    assert b"docs/copied-root.mdx" in paths
     assert is_docs_only(paths) is False
 
 

@@ -576,6 +576,7 @@ def agent_eval_result_from_directory(
         evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
+        execution_backend=_execution_backend_name(engine_result, persisted_result, run_config),
     )
     _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else persisted_result)
     with contextlib.suppress(Exception):
@@ -795,6 +796,7 @@ def build_agent_eval_payload(
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
     enforce_embedded_size: bool = True,
+    execution_backend: str | None = None,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
 
@@ -1072,6 +1074,7 @@ def build_agent_eval_payload(
         "required_checks": verdict_source.get("required_checks") if verdict_source else None,
         "security_clean": verdict_source.get("security_clean") if verdict_source else None,
         "environment": env_mode,
+        "execution_backend": execution_backend,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
@@ -1878,6 +1881,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "security_clean",
             "verdict_reason",
             "environment",
+            "execution_backend",
             "runtime_seconds",
             "score_policy",
             "execution_status",
@@ -4892,6 +4896,20 @@ def _read_attempt_policy(run_dir: Path) -> dict[str, Any]:
     policy.pop("score_definition", None)
     policy.pop("score_policy", None)
     return policy
+
+
+def _execution_backend_name(*sources: object) -> str:
+    """Return the backend a run recorded; Harbor runs record none."""
+    from skillevaluator.tier3.nemo_gym.backend import EXECUTION_BACKENDS, HARBOR_BACKEND
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        backend = source.get("execution_backend")
+        name = backend.get("name") if isinstance(backend, dict) else backend
+        if name in EXECUTION_BACKENDS:
+            return str(name)
+    return HARBOR_BACKEND
 
 
 def _read_run_config(run_dir: Path) -> dict[str, Any]:

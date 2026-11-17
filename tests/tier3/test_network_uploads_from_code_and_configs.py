@@ -1736,6 +1736,22 @@ def test_hostile_calls_take_time_that_grows_linearly_with_their_length(
     assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
+def _mock_calls(names: int, length: int) -> dict[str, Any]:
+    """Return JavaScript code of about *length* characters: Jest mock calls whose argument names got *names* times."""
+    call = "jest.mock(" + "got " * names + ")\n"
+    return _code_call(call * (length // len(call)), language="javascript")
+
+
+def test_mock_calls_are_read_in_time_that_grows_linearly_with_the_names_they_target() -> None:
+    # A mock call's arguments are read up to 2,000 characters. Calls of 500
+    # names take about as long as ten times as many calls of 50 names, so
+    # each name is read once, not once for each name before it.
+    large = _mock_calls(500, 60_000)
+    _assert_clean(check_security([large]))
+    in_pieces, whole = _check_seconds(check_security, [_mock_calls(50, 6_000)] * 10, [large])
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
+
+
 @pytest.mark.parametrize(
     ("cost", "linear"),
     [

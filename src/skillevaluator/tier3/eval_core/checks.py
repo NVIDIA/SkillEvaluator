@@ -8546,15 +8546,15 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
             for start, end in _code_arguments(reader, opener, close)[:2]
             for name in _CODE_IDENTIFIER_RE.findall(reader.code, start, end)
         ]
-        for position, name in enumerate(target):
-            members = target[position + 1 :]
-            if (
-                name in _CODE_CLIENT_NAMES
-                and members
-                and not any(_code_mock_replaces_client(member) for member in members)
-            ):
-                continue
-            mocked.add(name)
+        # The names are walked once from the last, carrying whether a member
+        # after the current name replaces a client, so a long target is not
+        # read again for each name in it.
+        replaced = False
+        for position in range(len(target) - 1, -1, -1):
+            name = target[position]
+            if name not in _CODE_CLIENT_NAMES or position == len(target) - 1 or replaced:
+                mocked.add(name)
+            replaced = replaced or _code_mock_replaces_client(name)
     return frozenset(mocked)
 
 

@@ -483,7 +483,6 @@ _ARGV_TEXT_THAT_DOES_NOT_RUN_RM = [
         "import subprocess, unittest\nwith unittest.mock.patch('subprocess.run'):\n"
         "    subprocess.run(['rm', '-rf', '/home/u'])"
     ),
-    _run_code("import subprocess\ndef test(mocker):\n    pass\nsubprocess.run(['rm', '-rf', '/home/u'])"),
     # Code that replaces a runner, as a dry run or a test does.
     _run_code(
         "import subprocess\nsubprocess.run = lambda *a, **k: print('dry', a)\nsubprocess.run(['rm', '-rf', '/home/u'])"
@@ -510,7 +509,6 @@ _ARGV_TEXT_THAT_DOES_NOT_RUN_RM = [
     ),
     _run_code("x = 1  # execFileSync('rm', ['-rf', '/'])"),
     _run_code("# spawnSync('rm', ['-rf', '/home/u']) would be wrong\nprint('ok')"),
-    _run_code("require('child_process').spawnSync('rm', ['-rf', '/home/u'])"),
     _run_code('help = """\n' + _HOME_CLEANUP + '\n"""\nprint(help)'),
     _run_code("print(['rm', '-rf', '/home/u'])"),
     # Code without a language that is not Python is read as JavaScript only
@@ -644,8 +642,13 @@ _ARGV_RM_FORMS_NOT_MODELED = [
     _run_code("const cp = require('child_process');\ncp.spawnSync(`rm`, [`-rf`, `/home/u`]);", language="js"),
     "node -r ./setup.js -pe \"require('child_process').spawnSync('rm', ['-rf', '/home/u']).status\"",
     "python3 /dev/stdin <<'PY'\nimport subprocess\nsubprocess.run(['rm', '-rf', '/home/u'])\nPY",
-    # JavaScript without a language argument that also parses as Python.
+    # JavaScript without a language argument that also parses as Python, also
+    # on one line.
     _run_code("cp = require('child_process')\ncp.spawnSync('rm', ['-rf', '/home/u'])"),
+    _run_code("require('child_process').spawnSync('rm', ['-rf', '/home/u'])"),
+    # Code that names mocker, mock or monkeypatch is not read, also when it
+    # runs a vector outside the mock.
+    _run_code("import subprocess\ndef test(mocker):\n    pass\nsubprocess.run(['rm', '-rf', '/home/u'])"),
     # Past the first four vectors of a call that are not plain: their items
     # hold rm, eval, env or grep text in a word shlex.join quotes, which the
     # shell-text reading reads again.

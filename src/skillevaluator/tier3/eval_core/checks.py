@@ -2297,17 +2297,35 @@ def _httpie_ignores_stdin(executable: str, cleaned_args: list[str]) -> bool:
     """
     if "--ignore-stdin" in cleaned_args:
         return True
-    if executable not in _XH_EXECUTABLES:
+    return executable in _XH_EXECUTABLES and any(_xh_cluster_ignores_stdin(arg) for arg in cleaned_args)
+
+
+def _xh_cluster_ignores_stdin(arg: str) -> bool:
+    """Whether an xh short-option word, quotes removed, as in -I or -vI, holds -I before any option that takes a value."""
+    if not arg.startswith("-") or arg.startswith("--"):
         return False
-    for arg in cleaned_args:
-        if not arg.startswith("-") or arg.startswith("--"):
-            continue
-        for letter in arg[1:]:
-            if letter == "I":
-                return True
-            if letter in _XH_SHORT_VALUE_FLAGS:
-                break
+    for letter in arg[1:]:
+        if letter == "I":
+            return True
+        if letter in _XH_SHORT_VALUE_FLAGS:
+            return False
     return False
+
+
+def _httpie_stdin_off_positions(words: list[str]) -> tuple[int, int]:
+    """Return the index of the last word that turns off reading standard input for HTTPie, and for xh; -1 for none.
+
+    A client word before that index sees it among its arguments, so it
+    ignores standard input (see _httpie_ignores_stdin); one after it does not.
+    """
+    httpie = xh = -1
+    for index, word in enumerate(words):
+        clean = word.strip("\"'")
+        if clean == "--ignore-stdin":
+            httpie = xh = index
+        elif _xh_cluster_ignores_stdin(clean):
+            xh = index
+    return httpie, xh
 
 
 def _xh_cluster_takes_value(arg: str) -> bool:
@@ -3097,8 +3115,9 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
         # Every client named later is read with its own upload rules, as when
         # it runs directly. A later word naming the same client sees a suffix
         # of the same arguments, so it is skipped once an earlier word's check
-        # covered it; an HTTPie word whose arguments include --ignore-stdin
-        # does not cover a later one, which may not see that flag. Piped or
+        # covered it; an HTTPie or xh word whose arguments turn off standard
+        # input (--ignore-stdin, or xh's -I) covers only a later one that
+        # still sees that flag, so each client is read at most twice. Piped or
         # redirected stdin stays with a text consumer such as grep, so it is
         # not the client's request body; any other command may pass it on. A
         # command runner, or one named after a pass-through wrapper such as
@@ -3147,6 +3166,9 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             *(_RUNNER_NAME_OPTIONS.get(name, ()) for name in {executable, *function_starts})
         )
         seen_clients: set[str] = set()
+        # Where the last word that turns off HTTPie's and xh's standard input
+        # stands (see _httpie_stdin_off_positions), found once when needed.
+        stdin_off: tuple[int, int] | None = None
         for sub_idx in range(cmd_idx + 1, len(command)):
             client = _network_executable(command[sub_idx], assignments, word_names)
             if client in _NETWORK_COMMAND_RUNNERS:
@@ -3178,6 +3200,15 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
             seen_key = f"{client}:capitalized" if capitalized else client
             if client in seen_clients or seen_key in seen_clients:
                 continue
+            if client in _HTTPIE_EXECUTABLES:
+                if stdin_off is None:
+                    stdin_off = _httpie_stdin_off_positions(command)
+                if stdin_off[client in _XH_EXECUTABLES] > sub_idx:
+                    # This word ignores standard input, so an earlier word that
+                    # did covers it; a later word may not.
+                    if f"{client}:ignores" in seen_clients or f"{seen_key}:ignores" in seen_clients:
+                        continue
+                    seen_key = f"{seen_key}:ignores"
             client_args = command[sub_idx + 1 :]
             if not keeps_stdin:
                 client_args = [token for token in client_args if token not in _NETWORK_INPUT_REDIRECTS]
@@ -3185,10 +3216,7 @@ def _network_tokens_exfiltrate(tokens: list[str], _depth: int) -> bool:
                 client_args = [
                     token for token in client_args if token.strip("\"'").casefold() not in _UNSAFE_HTTP_METHODS
                 ]
-            if client not in _HTTPIE_EXECUTABLES or not _httpie_ignores_stdin(
-                client, [a.strip("\"'") for a in client_args]
-            ):
-                seen_clients.add(seen_key)
+            seen_clients.add(seen_key)
             if _network_client_uploads(client, client_args, command_stdin and keeps_stdin):
                 return True
 

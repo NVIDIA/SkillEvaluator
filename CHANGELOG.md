@@ -497,6 +497,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
 - Script lint now runs advisory AST checks on Python files with one leading UTF-8 BOM.
+- Task-list descriptions containing status words retain their text and pending status after reload.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

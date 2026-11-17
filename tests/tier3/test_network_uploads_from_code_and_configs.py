@@ -1695,15 +1695,33 @@ def _httpie_command_built_from_names(length: int) -> dict[str, Any]:
     )
 
 
+def _bindings_followed_in_passes(length: int) -> dict[str, Any]:
+    """Return code of about *length* characters that binds aliases of a session, other names, and a chain in reverse order.
+
+    The chain, r8 = r7 down to r0 = s0, is followed one name per pass, so
+    every pass reads every binding.
+    """
+    count = (length - 160) // 20
+    return _code_call(
+        "import requests\ns0 = requests.Session()\n"
+        + "".join(f"s{number}=s{number - 1}\n" for number in range(1, count))
+        + "".join(f"u{number}=f\n" for number in range(1, count))
+        + "".join(f"r{number}=r{number - 1}\n" for number in range(8, 0, -1))
+        + "r0=s0\nq.put(r8.get(u))\n"
+    )
+
+
 # Hostile calls whose reading once took time that grew with the square of
-# their length, each with the length of its small and large inputs: HTTPie
-# and xh words that all ignore standard input, each of which read every word
-# after it, and such a command that code builds four times as long as itself.
+# their length, each with the length of its small input: HTTPie and xh words
+# that all ignore standard input, each of which read every word after it;
+# such a command that code builds four times as long as itself; and bindings
+# whose names were copied for each binding of each pass.
 _LINEAR_TIME_CALLS = [
     pytest.param(_httpie_words("xh", "-I"), 1_024, id="xh-words-before-I"),
     pytest.param(_httpie_words("xh", "-vI"), 1_024, id="xh-words-before-a-cluster-with-I"),
     pytest.param(_httpie_words("http", "--ignore-stdin"), 1_024, id="http-words-before-ignore-stdin"),
     pytest.param(_httpie_command_built_from_names, 512, id="http-command-built-from-names"),
+    pytest.param(_bindings_followed_in_passes, 6_400, id="bindings-followed-in-passes"),
 ]
 
 

@@ -22,7 +22,7 @@ import re
 import shlex
 import warnings
 from array import array
-from collections.abc import Callable, Iterable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence, Set
 from fnmatch import fnmatchcase
 from typing import Any, NamedTuple
 
@@ -8860,9 +8860,9 @@ def _code_value_chain(reader: _CodeReader, start: int) -> tuple[tuple[str, ...],
 
 def _code_client_chain(
     chain: tuple[str, ...],
-    modules: frozenset[str],
-    clients: frozenset[str],
-    foreign: frozenset[str] = frozenset(),
+    modules: Set[str],
+    clients: Set[str],
+    foreign: Set[str] = frozenset(),
     *,
     call: bool,
 ) -> bool:
@@ -9014,6 +9014,7 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
         if len(chain) == 2 and chain[0] in _CODE_MODULE_LOADERS and chain[1] not in _CODE_CLIENT_NAMES:
             foreign.add(name)
     foreign -= modules | clients
+    # Each pass reads the sets as they stand, without copying them for each binding.
     for _ in range(_CODE_BINDING_PASSES):
         added = False
         for name, chain, _start, _end in bindings:
@@ -9021,7 +9022,7 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
                 continue
             if chain[-1] in modules and (len(chain) == 1 or (len(chain) == 2 and chain[0] in _CODE_MODULE_LOADERS)):
                 modules.add(name)
-            elif _code_client_chain(chain, frozenset(modules), frozenset(clients), frozenset(foreign), call=True):
+            elif _code_client_chain(chain, modules, clients, foreign, call=True):
                 clients.add(name)
             else:
                 continue

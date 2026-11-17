@@ -1,6 +1,8 @@
-# SkillEvaluator
+<div align="center">
 
-![SkillEvaluator wordmark](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/skillevaluator-wordmark.svg)
+# ![SkillEvaluator](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/skillevaluator-wordmark.svg)
+
+<h4>Evaluate and improve AI agent skills and plugins: quality, security, overlap, compatibility, and real impact across agents</h4>
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
@@ -10,6 +12,8 @@
 [![Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
 [![Stars](https://img.shields.io/github/stars/NVIDIA/SkillEvaluator)](https://github.com/NVIDIA/SkillEvaluator/stargazers)
 [![Forks](https://img.shields.io/github/forks/NVIDIA/SkillEvaluator)](https://github.com/NVIDIA/SkillEvaluator/forks)
+
+</div>
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
@@ -46,7 +50,7 @@ uv tool install \
 
 </details>
 
-Then check your skill, no API key:
+Then check your skill, no key:
 
 ```bash
 skillevaluator validate \
@@ -66,7 +70,7 @@ Run this in your GitHub repository. It opens a setup PR:
 skillevaluator ci init
 ```
 
-GitLab and details: [repository guide](https://docs.nvidia.com/skills/skillevaluator/repository-integration).
+GitLab details: [repository guide](https://docs.nvidia.com/skills/skillevaluator/repository-integration).
 
 </td>
 <td>

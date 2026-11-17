@@ -10,7 +10,93 @@ All notable changes to SkillEvaluator are documented in this file.
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
   no longer loses every live skill, while nested evaluation snapshots remain excluded.
 
+- Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+
 ## 1.0.0 - 2026-11-17
+
+### Release overview
+
+SkillEvaluator 1.0.0 adds harness compatibility checks, CI report integrations,
+and improvements to evaluation reliability, security, and reporting. The merged
+source-preparation snapshot is `d8e4e82878a95c44a1881c9e200fb8e568c63923`.
+Compared with published v0.9.0, it contains 210 change PRs plus release-preparation
+PR [#600](https://github.com/NVIDIA/SkillEvaluator/pull/600), or 211 PRs in total.
+PR #498 is already included in v0.9.0 and is excluded from that count.
+Main subsequently incorporated [#611](https://github.com/NVIDIA/SkillEvaluator/pull/611)
+at `0f3d980d1feb322da768c92d1735973f39be3d0d`. The draft scope through that
+revision is 211 change PRs plus #600, or 212 PRs total; final source identities
+must be updated when the release is frozen.
+
+### Highlights
+
+- Make Tier 1 Efficiency, Discoverability, and Correctness rules configurable
+  through `--quality-config`: token-budget, description-length, and reserved-name
+  settings, deductions, messages, and suggestions. Packaged scores stay the same;
+  affected finding IDs and the packaged quality-config digest change once (#611).
+- Add `skillevaluator harness-check` and a Tier 1 compatibility panel for Claude
+  Code, Codex, Copilot CLI, Hermes, OpenClaw, and OpenCode. Versioned static
+  profiles cover discovery, frontmatter, description and delivery limits,
+  invocation fields, duplicate installations, and plugin components. Findings
+  are advisory under the default policy; standalone `harness-check` exits 0.
+- Add JUnit XML reports with `-r junit`. Incomplete checks are errors, checks
+  that did not run are skipped, and failures follow the same gate as exit codes.
+- Add offline pre-commit hooks: `skillevaluator-quality`,
+  `skillevaluator-schema`, and `skillevaluator-lint-scripts`. These hooks need
+  no API key, Docker, network access, or scanner downloads.
+- Add the experimental `tier3 evaluate --backend nemo-gym` adapter, with shared
+  evaluation cases, verifier results, and report formats. Harbor remains the
+  default backend. JSON and HTML identify the backend used.
+- Add opt-in grader qualification coverage policies, risk limits, preflight
+  checks, and retained assessment evidence. These tools and the synthetic pilot
+  do not establish grader reliability or release qualification.
+- Add a reusable workflow for scored Tier 1 PR comments without hosted reports
+  or GitHub Pages. Existing generated CI configurations retain their pins.
+- Improve partial-run evidence, budget-denied and skipped-baseline reporting,
+  token and cost accounting, price provenance, and benchmark verdicts.
+- Expand credential redaction, improve activation and declarative-check evidence,
+  enforce scanner pins, and preserve incomplete scans as incomplete.
+- Refresh HTML reports, improve SARIF path encoding, and add dataset-first
+  onboarding, installation guidance, and a metrics reference.
+
+### Additional fixes included at merge
+
+- [#738](https://github.com/NVIDIA/SkillEvaluator/pull/738): exclude punctuation-only
+  tokens from the text-analyzer's top words.
+- [#737](https://github.com/NVIDIA/SkillEvaluator/pull/737): accept signed calculator
+  conversions and reject trailing or malformed input.
+- [#760](https://github.com/NVIDIA/SkillEvaluator/pull/760): avoid Python lint
+  recursion failures on valid expressions.
+
+All three fixes are included in the merged source snapshot, although they were
+absent from #600's original preparation branch. No main-branch change was missing
+at that merge snapshot.
+
+### Upgrade and compatibility notes
+
+- Python 3.12-3.14 remains supported. Base installation now includes Bandit and
+  uv; Tier 2/3 still require their extras. Managed scanners download on first use.
+- Default author-attribution requirements become advisory. Use `--profile
+  registry` for strict author and metadata-ID requirements. Policy digests change.
+- Rename severity overrides from `SECURITY.Unknown (AE1)` to
+  `SECURITY.Incomplete referenced artifact analysis (AE1)`. AE1 finding IDs
+  change once with the improved finding text.
+- Unverified hook payloads now trigger a Critical security gate failure that
+  severity overrides and `--llm-verify` cannot clear.
+- Managed SkillSpector moves to 2.13.4. NVIDIA Build defaults to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`; SkillSpector's Anthropic/Bedrock defaults
+  move to Claude Opus 5.5. Explicit model overrides remain available.
+- NeMo Gym is experimental and Docker-only. It requires the separately pinned
+  compatible runtime; public `nemo-gym==0.7.0` is incompatible. Specific Codex and
+  Claude Code live runs are recorded; OpenCode currently fails during Gym agent
+  setup. Broader agent/grading combinations still need qualification.
+- Existing CI workflows keep immutable pins and require an explicit update.
+  The 1.0.0 source preparation does not replace final CI image/bundle and package
+  verification, or complete product publication.
+
+The [full PR inventory](https://github.com/NVIDIA/SkillEvaluator/pull/600) and
+[detailed source changelog](https://github.com/NVIDIA/SkillEvaluator/blob/d8e4e82878a95c44a1881c9e200fb8e568c63923/CHANGELOG.md)
+record the release scope. Final published artifacts must identify their own
+reviewed source revision.
 
 ### Added
 
@@ -123,8 +209,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
   `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
   skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
-  with the package. It runs by default, never fails the run, lists its findings in
-  every report and adds a `harness_compatibility` block to JSON. `--harness
+  with the package. It runs by default and is advisory under the default policy;
+  custom policies may promote findings. It lists its findings in every report
+  and adds a `harness_compatibility` block to JSON. `--harness
   codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
   profiles from a directory. The first rules flag a skill installed outside the
   folders a harness scans.
@@ -141,8 +228,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `TARGET` help interface but still needs independent native runtime qualification.
   CLI compatibility is checked before dataset generation or task staging, with bounded combined help output and process-group cleanup on timeout,
   interruption or overflow. Doctor no longer treats an installed version as runtime readiness.
-  Live Codex, Claude Code and OpenCode support remains unverified. The adapter's
-  intended contract runs the Tier 3 cases on NeMo Gym instead
+  Specific Codex and Claude Code live runs are recorded on the pinned runtime.
+  OpenCode currently fails during Gym agent setup before either arm starts.
+  Broader agent/grading combinations, custom-Dockerfile runs and input-file
+  handling still need independent qualification. The adapter's intended
+  contract runs the Tier 3 cases on NeMo Gym instead
   of Harbor (`--backend harbor`, the default, is unchanged). The same
   `evals.json` cases are generated as task folders, and NeMo Gym's own
   orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox
@@ -161,6 +251,21 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
+- Add four configurable quality rules to the `--quality-config` file. Each
+  sets `points`, `message` and `suggestion` plus one setting, and `points: 0`
+  turns it off:
+
+  | Rule | Setting | Packaged value |
+  | --- | --- | --- |
+  | `efficiency.token_budget` | `max_tokens` | 5,000 |
+  | `discoverability.description_too_short` | `min_chars` | 20 |
+  | `discoverability.description_too_long` | `max_chars` | 200 |
+  | `correctness.reserved_name` | `terms` | `anthropic`, `claude` |
+
+  Please note - This change set moves hard coded values into the default
+  quality config file, so scores, deductions and severities are unchanged,
+  but the before/after `finding_id` will be different. A custom file from
+  an earlier version keeps its digest; the packaged digest changes once.
 
 - Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
   SkillSpector now say why SkillSpector stopped inspecting the file that a skill
@@ -484,6 +589,11 @@ All notable changes to SkillEvaluator are documented in this file.
   checks for that script and subsequent files.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.
+- Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
+  finished answer (#757). OpenCode's snapshot passed the workspace file list to
+  `git check-ignore --stdin` for a `/workspace/.git` that does not exist, and git could exit before
+  reading it. The baseline's empty workspace skipped that call. OpenCode trials now run with
+  `"snapshot": false`; a job's `opencode_config` can turn it back on.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative
   percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.

@@ -189,7 +189,7 @@ class ScriptLintValidator(ValidatorBase):
             return
 
         try:
-            tree = ast.parse(content, filename=script.name)
+            tree = ast.parse(content.removeprefix("\ufeff"), filename=script.name)
         except SyntaxError:
             return
 
@@ -232,15 +232,24 @@ class ScriptLintValidator(ValidatorBase):
                 )
             )
 
-        if not content.startswith("#!"):
+        shebang_warning = None
+        if content.startswith("\ufeff#!"):
+            shebang_warning = (
+                f"{fname} shebang is preceded by a UTF-8 BOM and will be ignored",
+                "Save the file as UTF-8 without a BOM",
+            )
+        elif not content.startswith("#!"):
+            shebang_warning = (f"{fname} missing shebang line", "Add: #!/usr/bin/env python3")
+
+        if shebang_warning:
             result.add_finding(
                 Finding(
                     category="SCRIPT_LINT",
                     severity=Severity.LOW,
                     check_name="missing_shebang",
-                    message=f"{fname} missing shebang line",
+                    message=shebang_warning[0],
                     file_path=str(script),
-                    suggestion="Add: #!/usr/bin/env python3",
+                    suggestion=shebang_warning[1],
                 )
             )
 

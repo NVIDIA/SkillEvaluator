@@ -7980,28 +7980,21 @@ _CODE_MOCK_LIBRARY_RES = (
     (re.compile(r"\brespx\s*\.\s*(?:mock|start)\b|\bdef\s+\w+\s*\([^)]{0,300}?\b(?:respx_mock|httpx_mock)\b"), "httpx"),
     (re.compile(r"\baioresponses\s*\("), "aiohttp"),
 )
-# Mocked names that turn off other rules: fetch, urllib's urlopen and
-# Request, the object-store and curl upload spellings (_CODE_UPLOAD_MASKED_RE),
-# and the calls that run shell commands (see _code_shell_commands), with
-# os.exec* and os.spawn* by prefix.
+# Mocked names that turn off other rules: fetch, and urllib's urlopen and
+# Request. The object-store and curl upload spellings
+# (_CODE_UPLOAD_MASKED_RE) and the calls that run shell commands (see
+# _code_shell_commands) count as mocked by the path a mock replaces (see
+# _code_mocks_runner and _code_mocks_masked_upload): these names anywhere
+# in it, these as the member it replaces, or these after a module that
+# holds them (os.system, os.popen, os.exec* and os.spawn*, and
+# child_process's exec* and spawn*). So mock.patch("platform.system") or
+# mock.patch("app.storage.backend") mocks no runner or object store.
 _CODE_URLLIB_MOCK_WORDS = frozenset({"urllib", "urlopen", "Request"})
-_CODE_MASKED_MOCK_WORDS = frozenset(
-    {
-        "boto3",
-        "botocore",
-        "curl_exec",
-        "curl_setopt",
-        "pycurl",
-        "put_object",
-        "s3",
-        "storage",
-        "upload_file",
-        "upload_fileobj",
-        "upload_from_filename",
-        "upload_from_string",
-    }
+_CODE_MASKED_MOCK_MODULES = frozenset({"boto3", "botocore", "curl_exec", "curl_setopt", "pycurl"})
+_CODE_MASKED_MOCK_MEMBERS = frozenset(
+    {"put_object", "s3", "storage", "upload_file", "upload_fileobj", "upload_from_filename", "upload_from_string"}
 )
-_CODE_RUNNER_MOCK_WORDS = frozenset(
+_CODE_RUNNER_MOCK_MODULES = frozenset(
     {
         "Kernel",
         "Open3",
@@ -8012,13 +8005,13 @@ _CODE_RUNNER_MOCK_WORDS = frozenset(
         "getoutput",
         "getstatusoutput",
         "passthru",
-        "popen",
         "proc_open",
         "shell_exec",
         "subprocess",
-        "system",
     }
 )
+_CODE_RUNNER_MOCK_MEMBERS = frozenset({"system", "popen"})
+_CODE_RUNNER_MOCK_PREFIXES = ("exec", "spawn")
 # Other upload spellings, matched with every string and comment blanked:
 # pycurl upload options (pycurl.POSTFIELDS, or c.POSTFIELDS in a setopt
 # call), PHP curl upload options, object-store uploads such as boto3's
@@ -8462,6 +8455,7 @@ class _CodeReader:
         "_go_imports",
         "_import_words",
         "_imports",
+        "_mock_paths",
         "_mocked",
         "_names",
         "_pairs",
@@ -8494,6 +8488,7 @@ class _CodeReader:
         self._doubles: frozenset[str] = frozenset()
         self._names: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
         self._mocked: frozenset[str] | None = None
+        self._mock_paths: list[tuple[str, ...]] = []
 
     @property
     def pairs(self) -> dict[int, int]:
@@ -8537,12 +8532,12 @@ def _code_uploads(reader: _CodeReader) -> bool:
       passed on (see _code_imported_upload_used);
     - pycurl and PHP curl upload options, object-store uploads such as
       put_object and upload_file, and Go's http.Post and http.PostForm
-      (_CODE_UPLOAD_MASKED_RE), unless the code mocks one of
-      _CODE_MASKED_MOCK_WORDS.
+      (_CODE_UPLOAD_MASKED_RE), unless the code mocks one (see
+      _code_mocks_masked_upload).
 
     A client the code mocks (see _code_mocked_names) is not one.
     """
-    if _CODE_UPLOAD_MASKED_RE.search(reader.masked) and reader.mocked.isdisjoint(_CODE_MASKED_MOCK_WORDS):
+    if _CODE_UPLOAD_MASKED_RE.search(reader.masked) and not _code_mocks_masked_upload(reader):
         return True
     return _code_client_call_uploads(reader) or _code_client_upload_call(reader) or _code_imported_upload_used(reader)
 
@@ -8566,6 +8561,9 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
     """
     masked = reader.masked
     mocked: set[str] = set()
+    # The path each mocking call replaces (see _code_mock_path).
+    paths: list[tuple[str, ...]] = []
+    reader._mock_paths = paths
     for pattern, client in _CODE_MOCK_LIBRARY_RES:
         if pattern.search(masked):
             mocked.add(client)
@@ -8583,11 +8581,9 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
         close = reader.pairs.get(opener)
         if close is None or not reader.spend(min(close - opener, _CODE_ARGUMENT_CHARS)):
             continue
-        target = [
-            name
-            for start, end in _code_arguments(reader, opener, close)[:2]
-            for name in _CODE_IDENTIFIER_RE.findall(reader.code, start, end)
-        ]
+        arguments = _code_arguments(reader, opener, close)[:2]
+        target = [name for start, end in arguments for name in _CODE_IDENTIFIER_RE.findall(reader.code, start, end)]
+        paths.append(_code_mock_path(reader, arguments))
         # The names are walked once from the last, carrying whether a member
         # after the current name replaces a client, so a long target is not
         # read again for each name in it.
@@ -8598,6 +8594,76 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
                 mocked.add(name)
             replaced = replaced or _code_mock_replaces_client(name)
     return frozenset(mocked)
+
+
+def _code_mock_path(reader: _CodeReader, arguments: list[tuple[int, int]]) -> tuple[str, ...]:
+    """Return the names of the path a mocking call replaces, from its first two arguments.
+
+    A string first argument names the whole path, as os and system in
+    mock.patch("os.system") or child_process in jest.mock("node:child_process");
+    otherwise the first argument is the object and a string second argument
+    its member, as in monkeypatch.setattr(os, "system", fake) or
+    mock.patch.object(app.storage, "backend"). A value that replaces the
+    target, as fake in mock.patch("os.system", fake), is not part of it.
+    """
+    literals = [reader.literal_at(start + _code_blank_prefix(reader.code, start, end)) for start, end in arguments]
+    if not arguments:
+        return ()
+    if literals[0] is not None:
+        return tuple(_CODE_IDENTIFIER_RE.findall(literals[0][2][:_CODE_ARGUMENT_CHARS]))
+    path = _CODE_IDENTIFIER_RE.findall(reader.code, *arguments[0])
+    if len(literals) > 1 and literals[1] is not None:
+        path += _CODE_IDENTIFIER_RE.findall(literals[1][2][:_CODE_ARGUMENT_CHARS])
+    return tuple(path)
+
+
+def _code_mocks_runner(reader: _CodeReader) -> bool:
+    """Whether code mocks a call that runs shell commands, by the path a mock replaces (see _code_mock_path).
+
+    A path counts when it names one of _CODE_RUNNER_MOCK_MODULES, as
+    subprocess in mock.patch("subprocess.run") or child_process in
+    jest.mock("child_process") does, or names system, popen or a name that
+    starts with exec or spawn right after os, after child_process, or after
+    a name the code binds to child_process, as in mock.patch("os.system") or
+    jest.spyOn(cp, "execSync") after cp = require("child_process"). A mock
+    of another module's member, as in mock.patch("platform.system"), does
+    not count.
+    """
+    aliases: frozenset[str] | None = None
+    for path in reader._mock_paths if reader.mocked is not None else ():
+        if not _CODE_RUNNER_MOCK_MODULES.isdisjoint(path):
+            return True
+        for position in range(1, len(path)):
+            holder, member = path[position - 1], path[position]
+            if member not in _CODE_RUNNER_MOCK_MEMBERS and not member.startswith(_CODE_RUNNER_MOCK_PREFIXES):
+                continue
+            if holder == "os":
+                return True
+            if aliases is None:
+                bindings = _code_bindings(reader) or []
+                aliases = frozenset(name for name, chain, _start, _end in bindings if chain[-1:] == ("child_process",))
+            if holder in aliases:
+                return True
+    return False
+
+
+def _code_mocks_masked_upload(reader: _CodeReader) -> bool:
+    """Whether code mocks an object-store or curl upload (_CODE_UPLOAD_MASKED_RE), by the path a mock replaces.
+
+    A path counts when it names one of _CODE_MASKED_MOCK_MODULES, as boto3
+    in mock.patch("boto3.client") does, when the member it replaces is one
+    of _CODE_MASKED_MOCK_MEMBERS, as in
+    mock.patch.object(s3_client, "upload_file") or
+    jest.mock("@aws-sdk/client-s3"), or when it names Google Cloud's
+    storage, as in mock.patch("google.cloud.storage.Client"). A mock of
+    another member, as in mock.patch("app.storage.backend"), does not count.
+    """
+    for path in reader._mock_paths if reader.mocked is not None else ():
+        if not _CODE_MASKED_MOCK_MODULES.isdisjoint(path) or (path and path[-1] in _CODE_MASKED_MOCK_MEMBERS):
+            return True
+        if any(path[position - 1 : position + 1] == ("cloud", "storage") for position in range(1, len(path))):
+            return True
+    return False
 
 
 def _code_mock_replaces_client(member: str) -> bool:
@@ -12969,9 +13035,8 @@ def _program_uploads(
     names the interpreter; "" leaves the language to *tree*, the code's
     Python syntax tree when it parses. What the code mocks (see
     _code_mocked_names) may be a stand-in, so a mocked client is not read,
-    and no shell command is read when it mocks one of
-    _CODE_RUNNER_MOCK_WORDS (or os.exec* or os.spawn*). Callers read no text
-    over 64 KiB.
+    and no shell command is read when it mocks a call that runs one (see
+    _code_mocks_runner). Callers read no text over 64 KiB.
 
     The reading is charged to *work*, the call's work budget (see
     _CodeWork; without one, a budget for *source* alone): a config's
@@ -12997,10 +13062,10 @@ def _program_uploads(
     reader = _CodeReader(source, views, family, work)
     if _code_uploads(reader):
         return True
-    mocked = reader.mocked
+    runner_mocked = _code_mocks_runner(reader)
     if work.spent:
         return True
-    if not mocked.isdisjoint(_CODE_RUNNER_MOCK_WORDS) or any(word.startswith(("exec", "spawn")) for word in mocked):
+    if runner_mocked:
         return False
     for command in dict.fromkeys(_code_shell_commands(reader, tree)):
         if _network_rule_flags(command, work):

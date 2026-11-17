@@ -10,7 +10,8 @@ All notable changes to SkillEvaluator are documented in this file.
   live evaluation, with a short dataset guide and concise run-settings page.
   Tier 1 and Tier 2 now have short first-run paths; detailed checks, policies,
   algorithms, and run contracts move to linked references with legacy anchors
-  preserved. Installation explains the base package versus `[all]`.
+  preserved. Installation defaults to the lightweight base package and offers
+  `[all]` explicitly for all three tiers.
 
 - Central installation guide with pip and uv PyPI installs, uv bootstrap, and
   direct GitHub source options for all three tiers. Release differences, scanner

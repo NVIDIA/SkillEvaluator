@@ -64,7 +64,8 @@ ahead of the first runnable example.
 
 Keep pip, uv, uv bootstrap, and direct repository installation in
 `installation.mdx`; keep upgrades and advanced setup in
-`installation-options.mdx`. Distinguish the published PyPI release from
+`installation-options.mdx`. Default to the lightweight `skillevaluator` install;
+keep `skillevaluator[all]` as an explicit opt-in for all tiers. Distinguish the published PyPI release from
 unreleased GitHub features and dependencies. Tier guides and the
 quickstart link there and use the installed `skillevaluator` command. Avoid
 copying package-manager recipes into each tier or mixing `uv run`, `uv tool

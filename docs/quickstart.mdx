@@ -6,11 +6,13 @@ description: "Get a bundled skill, run a quality check, and read the saved resul
 
 Get a quality score and findings for a complete example skill.
 [Install SkillEvaluator](/skills/skillevaluator/installation#install) first,
-then return here. This check needs no API key, GPU, or Docker.
+then return here. The lightweight installation is enough; this check needs no API key, GPU, or Docker.
 
 <Steps toc={true}>
 
 ### Get the example
+
+You need Git to download the example.
 
 ```bash title="Clone the repository"
 git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
@@ -62,6 +64,9 @@ skillevaluator quality-check ./my-skill \
 Want model feedback on the instructions? Add a rubric review for the same skill.
 
 <Accordion title="Set up a key and run a rubric review">
+  Add the `llm` extra using [Installation Options](/skills/skillevaluator/installation-options#choosing-extras),
+  or choose the [all-tier installation](/skills/skillevaluator/installation#all-tiers) first.
+
   1. Sign in to [NVIDIA Build](https://build.nvidia.com/) and complete the
      Developer Program enrollment prompts.
   2. On a model page, choose **Get API Key** and copy your key. See the
@@ -83,8 +88,6 @@ Want model feedback on the instructions? Add a rubric review for the same skill.
   Scores can vary between calls. This reviews the instructions; it does not
   run an agent with the skill. No local GPU or Docker is needed.
 
-  The recommended installation includes model support. If you chose the base
-  package, add `llm` using the [installation guide](/skills/skillevaluator/installation-options#choosing-extras).
   For other providers or model overrides, see
   [Providers & Credentials](/skills/skillevaluator/configuration).
 </Accordion>

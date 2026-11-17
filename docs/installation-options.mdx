@@ -16,8 +16,11 @@ you need when changing an installation.
 In the activated environment:
 
 ```bash
-python -m pip install --upgrade "skillevaluator[all]"
+python -m pip install --upgrade skillevaluator
 ```
+
+For an all-tier installation, keep the extras in the upgrade command:
+`python -m pip install --upgrade "skillevaluator[all]"`.
 
   </Tab>
   <Tab title="uv tool (PyPI)">
@@ -35,17 +38,19 @@ uv tool install --python 3.13 --reinstall "skillevaluator[all]"
   </Tab>
   <Tab title="GitHub source">
 
-Refresh the latest source with the **GitHub source** commands on
-[Installation](/skills/skillevaluator/installation#install). They reinstall the
-package even when the development version number has not changed.
+Refresh the latest source using the **GitHub source** command for your
+[lightweight](/skills/skillevaluator/installation#install) or
+[all-tier](/skills/skillevaluator/installation#all-tiers) installation. Keep
+your selected extras when reinstalling, even when the version number has not changed.
 
   </Tab>
 </Tabs>
 
 Run `skillevaluator --version` afterward. To move from a source install back to
-PyPI, use `python -m pip install --upgrade --force-reinstall "skillevaluator[all]"`
-in its activated environment, or `uv tool install --python 3.13 --reinstall "skillevaluator[all]"`
-for a uv tool.
+PyPI, use `python -m pip install --upgrade --force-reinstall skillevaluator`
+in its activated environment, or `uv tool install --python 3.13 --reinstall skillevaluator`
+for a uv tool. Keep `[all]` or your other selected extras in that package name
+when you want to retain their support.
 
 ## Release and source differences
 
@@ -110,11 +115,12 @@ For an editable checkout and contributor tools, use the
 
 ## Choosing extras
 
-<Accordion title="Use a smaller install or add the optional dashboard">
-  In the install and upgrade commands, replace `[all]` with the extras you need.
-  Combine names with commas, such as `[tier2,tier3]`. Omit `[all]` entirely
-  for the base package. A replacement installation must include **all the
-  extras you want to keep**.
+<Accordion title="Choose individual capabilities or add the dashboard">
+  Append the extras you need to `skillevaluator`, such as `skillevaluator[llm]`
+  or `skillevaluator[security]`. Combine names with commas, such as
+  `skillevaluator[tier2,tier3]`. With no brackets, you get the lightweight base
+  package. Upgrade and replacement commands should name **all the extras you
+  want to keep**.
 
   | Selection | Includes |
   | --- | --- |
@@ -135,8 +141,31 @@ For an editable checkout and contributor tools, use the
 
 ## System tools
 
-A quality check needs no external scanner setup. Full static Tier 1 checks
-use these tools:
+A quality check needs no external scanner setup. For full static checks on
+PyPI 0.9.0, add `[security]` to the lightweight install (or choose `[all]`).
+Current source also needs this extra for pip-audit when running Python
+dependency audits:
+
+<Tabs>
+  <Tab title="pip">
+
+```bash title="Add security dependencies in your activated environment"
+python -m pip install --upgrade "skillevaluator[security]"
+```
+
+  </Tab>
+  <Tab title="uv tool">
+
+```bash title="Add security dependencies to the uv tool"
+uv tool install --python 3.13 --reinstall "skillevaluator[security]"
+```
+
+  </Tab>
+</Tabs>
+
+If you already use other extras, include them in these commands too. A uv
+reinstall keeps only the extras named in the command. These dependencies
+support the scanner setup below:
 
 | Tool | Setup |
 | --- | --- |

@@ -1,11 +1,11 @@
 ---
 title: "Install SkillEvaluator"
 sidebar-title: "Installation"
-description: "Install SkillEvaluator with pip, uv, or GitHub source for all three tiers."
+description: "Start with the lightweight SkillEvaluator CLI, then add all-tier dependencies when you need them."
 ---
 
-Install once for all three tiers. Choose the package manager you already use.
-The commands below include `[all]`, the dependencies for Tier 1, Tier 2, and Tier 3.
+Start with the **lightweight CLI** for quality scoring and basic static checks.
+Choose your package manager below. Need all three tiers? [Add the all-tier dependencies](#all-tiers).
 
 <div id="install">
 <div id="install-the-cli">
@@ -17,7 +17,7 @@ The commands below include `[all]`, the dependencies for Tier 1, Tier 2, and Tie
 Use **Python 3.12–3.14** in an activated virtual environment.
 
 ```bash title="Install the PyPI release"
-python -m pip install --upgrade "skillevaluator[all]"
+python -m pip install --upgrade skillevaluator
 ```
 
 <Accordion title="Create a virtual environment first">
@@ -51,7 +51,7 @@ py -3.13 -m venv .venv
 uv creates an isolated tool environment and sets up Python 3.13 automatically.
 
 ```bash title="Install the PyPI release with uv"
-uv tool install --python 3.13 "skillevaluator[all]"
+uv tool install --python 3.13 skillevaluator
 ```
 
 Need uv first? Use the **Install uv** section below.
@@ -63,15 +63,16 @@ Use this for changes not yet on PyPI, including **Harness Check**.
 You need Git and either uv or an activated Python 3.12–3.14 environment.
 
 ```bash title="Install current source with uv"
-uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+uv tool install --python 3.13 --reinstall "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
 Or, in your activated environment:
 
 ```bash title="Install current source with pip"
-python -m pip install --upgrade --force-reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+python -m pip install --upgrade --force-reinstall "skillevaluator @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 ```
 
+When reinstalling, keep any extras you need; see the [all-tier option](#all-tiers).
 The repository can contain unreleased changes. For an editable checkout,
 use the [development guide](/skills/skillevaluator/developer-guide#set-up-a-development-environment).
 
@@ -85,7 +86,7 @@ use the [development guide](/skills/skillevaluator/developer-guide#set-up-a-deve
 The latest [PyPI release is 0.9.0](https://pypi.org/project/skillevaluator/).
 **Harness Check requires the GitHub source option** until it is released.
 See [release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
-For a smaller base install, omit `[all]`; see [extras](/skills/skillevaluator/installation-options#choosing-extras).
+Use the [all-tier option](#all-tiers) below when you need model-backed checks or live evaluation.
 
 <div id="get-uv">
 
@@ -125,7 +126,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
 </div>
 
-<Accordion title="What if I install without [all]?">
+<Accordion title="What does the lightweight install include?">
   `pip install skillevaluator` or `uv tool install skillevaluator` installs
   the lightweight CLI for quality scoring and basic static checks.
 
@@ -135,8 +136,7 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
   `[all]` includes the `tier2`, `tier3`, and `security` extras; provider keys,
   Docker, and the optional dashboard still have separate setup.
 
-  Add all evaluation dependencies later using the
-  [upgrade commands](/skills/skillevaluator/installation-options#upgrade), or
+  Add [all evaluation dependencies](#all-tiers) later, or
   choose [individual extras](/skills/skillevaluator/installation-options#choosing-extras).
   Harness Check still requires the GitHub source installation.
 </Accordion>
@@ -151,16 +151,63 @@ You should see a version number. With pip, keep your virtual environment
 activated. With uv, run `uv tool update-shell` and open a new terminal if the
 command is not found.
 
+<div id="all-tiers">
+
+## Add all tiers
+
+Use `skillevaluator[all]` for Tier 1 security dependencies, Tier 2, and Tier 3.
+These commands also add the extras to an existing lightweight installation.
+
+<Tabs>
+  <Tab title="pip">
+
+In your activated Python environment:
+
+```bash title="Install all evaluation dependencies"
+python -m pip install --upgrade "skillevaluator[all]"
+```
+
+  </Tab>
+  <Tab title="uv tool">
+
+```bash title="Install all evaluation dependencies with uv"
+uv tool install --python 3.13 --reinstall "skillevaluator[all]"
+```
+
+  </Tab>
+  <Tab title="GitHub source">
+
+With uv:
+
+```bash
+uv tool install --python 3.13 --reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+Or in your activated Python environment:
+
+```bash
+python -m pip install --upgrade --force-reinstall "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
+```
+
+  </Tab>
+</Tabs>
+
+Provider credentials, Docker, and [scanner setup](/skills/skillevaluator/installation-options#system-tools)
+still depend on the checks you run. The dashboard is a separate extra.
+For just one capability, [choose individual extras](/skills/skillevaluator/installation-options#choosing-extras).
+
+</div>
+
 <div id="next-steps">
 
 ## Choose an evaluation
 
 | Guide | What you need next |
 | --- | --- |
-| [Tier 1: Validation](/skills/skillevaluator/tier1-validation) | A skill folder. Static checks need no API key. |
+| [Tier 1: Validation](/skills/skillevaluator/tier1-validation) | A skill folder and [scanner setup](/skills/skillevaluator/installation-options#system-tools) for full validation. No API key for static checks. |
 | [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | GitHub source installation and a skill folder. No API key or agent run. |
-| [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) | A provider for embeddings and model analysis. |
-| [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | A [reviewed dataset](/skills/skillevaluator/prepare-dataset), a model API key, and Docker. |
+| [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) | The [all-tier option](#all-tiers) and a provider for embeddings and model analysis. |
+| [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | The [all-tier option](#all-tiers), a [reviewed dataset](/skills/skillevaluator/prepare-dataset), a model API key, and Docker. |
 
 Need an example skill? Start with the [quickstart](/skills/skillevaluator/quickstart).
 

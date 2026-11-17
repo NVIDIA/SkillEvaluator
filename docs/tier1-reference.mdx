@@ -9,14 +9,15 @@ This reference keeps the detailed rules and advanced workflows in one place.
 
 
 Run Tier 1 directly to check a skill's structure, security, quality, and
-dependencies. First, [install SkillEvaluator](/skills/skillevaluator/installation#install) with the all-tier option,
-then run:
+dependencies. First, [install SkillEvaluator](/skills/skillevaluator/installation#install),
+complete [scanner setup](/skills/skillevaluator/installation-options#system-tools) for full validation, then run:
 
 ```bash title="Run Tier 1"
 skillevaluator tier1 ./my-skill
 ```
 
-Static checks need no model key. With a configured provider, this command also
+Static checks need no model key. With the [llm extra](/skills/skillevaluator/installation-options#choosing-extras)
+and a configured provider, this command also
 runs rubric judging, LLM security analysis, and finding verification. Without a
 provider, those LLM stages are explicitly reported as skipped. Use `--no-llm`
 for static checks only, or `--llm` to require a provider instead of allowing a

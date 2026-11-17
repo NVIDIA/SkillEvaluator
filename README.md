@@ -171,7 +171,7 @@ See [provider setup](docs/configuration.mdx) for Tier 2 embeddings and Tier 3 ag
 
 ![Three-tier pipeline: skill, validation, deduplication, live evaluation, reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
-Each tier is independent. Use the [all-tier installation](https://docs.nvidia.com/skills/skillevaluator/installation) for all three:
+Each tier is independent. Use the [all-tier installation](https://docs.nvidia.com/skills/skillevaluator/installation#all-tiers) for all three:
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |

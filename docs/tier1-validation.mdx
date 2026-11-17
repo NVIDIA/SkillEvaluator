@@ -5,7 +5,7 @@ description: "Run static checks on a skill, read the saved report, and fix the f
 ---
 
 Check a skill's structure, security, quality, and dependencies before using it.
-[Install SkillEvaluator](/skills/skillevaluator/installation#install) with the all-tier option first.
+[Install SkillEvaluator](/skills/skillevaluator/installation#install) first.
 This walkthrough needs no model key, GPU, or Docker.
 
 <Steps toc={true}>
@@ -15,10 +15,10 @@ This walkthrough needs no model key, GPU, or Docker.
 Use a folder containing `SKILL.md`. Replace `./my-skill` below with that folder.
 Need an example? Start with the [bundled skill](/skills/skillevaluator/quickstart#get-the-example).
 
-The first scanner run needs network access to download missing tools. If you
-installed PyPI 0.9.0 with pip, complete the
-[scanner setup](/skills/skillevaluator/installation-options#system-tools) to enable
-SkillSpector provisioning with uv. Current source includes uv.
+Before full static validation, complete [scanner setup](/skills/skillevaluator/installation-options#system-tools).
+Add the `security` extra for the full scanner workflow. PyPI 0.9.0 also needs
+uv for SkillSpector provisioning; current source includes Bandit and uv but
+still uses the extra for Python dependency audits. First-use downloads need network access.
 
 ### Run static validation
 
@@ -70,7 +70,9 @@ LLM stages are skipped in this walkthrough. The quality threshold defaults to
     does not establish complete Tier 1 evidence.
   </Accordion>
   <Accordion title="Add model feedback">
-    [Configure a provider](/skills/skillevaluator/configuration), then run:
+    Add the [llm extra](/skills/skillevaluator/installation-options#choosing-extras)
+    or use the [all-tier installation](/skills/skillevaluator/installation#all-tiers),
+    then [configure a provider](/skills/skillevaluator/configuration) and run:
 
     ```bash
     skillevaluator tier1 ./my-skill --llm -o reports/tier1-model

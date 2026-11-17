@@ -10,7 +10,7 @@ your own complete [Harbor](https://github.com/harbor-framework/harbor) task.
 Harbor is the open-source agent evaluation framework that executes Tier 3
 trials. Scaffolding is keyless and takes one command; running a custom-graded
 evaluation needs the same Tier 3 stack as any live eval — see
-[Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+[Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 ## Grading modes
 
@@ -172,7 +172,7 @@ Role log directories retain their host locations, so use
 deriving a parent from a role directory or writing `../artifacts` from it.
 
 Your grader reads Harbor's `trajectory.json` as written. Unlike the standard
-grader, it does not [rebuild a missing or empty trajectory](/skills/skillevaluator/tier3-live-evaluation#the-graded-trajectory)
+grader, it does not [rebuild a missing or empty trajectory](/skills/skillevaluator/tier3-grading#the-graded-trajectory)
 from agent logs, so handle that case explicitly. A step's `message` and an
 observation result's `content` can each be a string or a list of content parts
 (`text`, `image`, or `audio`), so read both forms.

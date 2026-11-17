@@ -3612,6 +3612,11 @@ def _tier1_workflow(
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
     _offer_scanner_install(checks, skip)
+    # Validators build finding paths from this root, so it is made absolute, as
+    # validate does: a relative root leaves finding paths relative to the working
+    # directory, and the report roots would then prefix the skill folder twice.
+    target_label = str(skill_path)
+    skill_path = skill_path.resolve()
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
@@ -3625,14 +3630,14 @@ def _tier1_workflow(
         skillspector_baseline=skillspector_baseline,
     )
     # Resolved after the run so configuration errors still leave no output.
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    output_dir = _resolve_file_report_output_location(skill_path, output_dir, report_formats)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("tier1"),
         policy=policy,
-        target_path=str(skill_path),
+        target_path=target_label,
         **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 1 checks failed or were incomplete")

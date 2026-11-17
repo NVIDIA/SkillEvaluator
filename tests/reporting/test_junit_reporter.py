@@ -653,6 +653,41 @@ def test_single_check_command_paths_are_relative_to_git_root(tmp_path: Path, mon
     assert '"uri": "skills/demo/SKILL.md"' in sarif_text
 
 
+def test_tier1_workflow_with_a_relative_path_reports_git_root_relative_files(tmp_path: Path, monkeypatch) -> None:
+    """``tier1 skills/demo`` from the repository root names ``skills/demo/SKILL.md`` once, in JUnit and SARIF."""
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "demo"
+    shutil.copytree(_TEXT_ANALYZER, skill)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    reports = tmp_path / "reports"
+
+    def tier1(skill_path: Path, **_: object) -> list[ValidationResult]:
+        # Validators build finding paths from the root they are handed.
+        result = ValidationResult(validator_name="QUALITY")
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.HIGH,
+                check_name="quality_correctness",
+                message="issue",
+                file_path=str(skill_path / "SKILL.md"),
+                line_number=2,
+            )
+        )
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.tier_workflows.run_tier1_workflow", tier1)
+    monkeypatch.chdir(repo)
+
+    CliRunner().invoke(cli, ["tier1", "skills/demo", "-r", "junit", "-r", "sarif", "-o", str(reports)])
+
+    (junit,) = reports.glob("*.junit.xml")
+    files = {case.attrib.get("file") for case in _cases(ET.fromstring(junit.read_text(encoding="utf-8")))}
+    assert files == {"skills/demo/SKILL.md"}
+    (sarif,) = reports.glob("*.sarif.json")
+    assert '"uri": "skills/demo/SKILL.md"' in sarif.read_text(encoding="utf-8")
+
+
 def test_target_identity_qualifies_suite_and_classname() -> None:
     result = ValidationResult(validator_name="SCHEMA")
     result.add_success("manifest_exists", "Found SKILL.md")

@@ -190,7 +190,7 @@ def test_scaffold_rejects_contract_invalid_existing_dataset_before_publish(
 def test_docs_limit_the_empty_expected_output_rejection_to_the_object_shape(tmp_path: Path) -> None:
     # Only the {"skill_name", "evals"} shape requires a reference; a flat dataset is
     # legacy, so an empty one is accepted and leaves accuracy and goal_accuracy N/A.
-    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    docs = (Path(__file__).resolve().parents[1] / "docs" / "tier3-results.mdx").read_text(encoding="utf-8")
     normalized = " ".join(docs.split())
     assert 'reject an empty `expected_output` only in a `{"skill_name", "evals"}` dataset' in normalized
     assert (

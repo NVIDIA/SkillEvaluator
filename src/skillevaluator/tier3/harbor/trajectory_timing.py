@@ -192,7 +192,8 @@ def _native_timing_ms(steps: list[dict[str, Any]]) -> tuple[float | None, float 
         calls.extend(step_calls)
     intervals: list[tuple[float, float]] = []
     durations: list[float] = []
-    tool_ms: float | None = 0.0 if llm_ms is not None else None
+    # No tool calls establishes zero independently of the availability of LLM timing.
+    tool_ms: float | None = 0.0
     for call in calls:
         extra = call.get("extra") if isinstance(call, dict) else None
         interval = _interval_ms(extra)

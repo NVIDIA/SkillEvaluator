@@ -176,6 +176,17 @@ def test_overflowing_native_timing_preserves_other_component(llm_ms, tool_ms, ex
     assert trajectory_timing(trajectory) == expected
 
 
+def test_overflowing_native_llm_timing_preserves_known_zero_tool_time() -> None:
+    trajectory = {
+        "steps": [
+            {"source": "agent", "extra": {"llm_duration_ms": 1e308}, "tool_calls": []}
+            for _ in range(2)
+        ]
+    }
+
+    assert trajectory_timing(trajectory) == {"llm_seconds": None, "tool_seconds": 0.0, "source": "atif"}
+
+
 def test_native_atif_extras_win_over_inference() -> None:
     trajectory = {
         "steps": [

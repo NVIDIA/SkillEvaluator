@@ -39,7 +39,7 @@ All notable changes to SkillEvaluator are documented in this file.
   `python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/home/u'])"`,
   `spawnSync('rm', ['-rf', '/home/u'])` or an execution tool's `code`
   argument, and for an argument-vector command such as
-  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 0.9.0. The
+  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 1.0.0. The
   vector is checked as the shell command it names, from where the interpreter
   starts, so a `/tmp` target, a force-only `rm -f` of a file outside system
   and home paths, and a cache or trial output cleanup still score `1.0`. The

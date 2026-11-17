@@ -225,7 +225,7 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 </Steps>
 
 <Note>
@@ -266,7 +266,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
 | `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
 | `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
-| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines) |
+| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-reference#audited-skillspector-baselines) |
 | `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Raw error and warning records across all validators; a finding that two validators report counts twice |
@@ -355,7 +355,7 @@ A single-skill target writes its report at the top of `reports/`, and a folder t
     `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set. The scanners fail closed:
     `validate` exits non-zero and the report stays non-green until every
     required scanner runs and returns valid evidence. See the workflow above or
-    [Installation: System tools](/skills/skillevaluator/installation#system-tools).
+    [Installation: System tools](/skills/skillevaluator/installation-options#system-tools).
   </Accordion>
   <Accordion title="Claude answers HTTP 400 'is not a valid fallback target'">
     The reusable SkillEvaluator workflows pass only their documented inputs

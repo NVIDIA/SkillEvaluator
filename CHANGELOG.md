@@ -6,7 +6,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Folder validators apply skill-discovery exclusions only below the requested
+  scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
+  no longer loses every live skill, while nested evaluation snapshots remain excluded.
+
 - Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+- The bundled `create-custom-grader` example now ships the benchmark folder and
+  existing skill its first two cases ask the agent to convert, under
+  `evals/files/`, and each case declares `files` so only its own fixture is
+  staged. Previously those cases had no workspace input to work from.
 - The bundled `api-caller` example no longer fails Tier 2 deduplication: its
   two scripts share one HTTP(S) URL check from `scripts/url_safety.py` instead
   of each defining `_validate_http_url()`, and `call_api.py` no longer repeats the

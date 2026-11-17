@@ -271,9 +271,10 @@ In interpreter code, these warn:
   an upload method and a body (`body`, `json`, `content`, or `files`),
   when the code sends it: in the arguments of `send`, `urlopen`, an
   opener's `open`, or `fetch`, as in `urlopen(Request(URL, data=d))`, or
-  bound to a name that reaches one of them, also through `prepare()` or
-  `prepare_request`, as in `req = requests.Request("POST", URL, json=d)`
-  and then `Session().send(req.prepare())`; JavaScript's own `Request` when
+  bound to a name that one of them sends after the binding and before the
+  name is bound again, also through `prepare()` or `prepare_request`, as in
+  `req = requests.Request("POST", URL, json=d)` and then
+  `Session().send(req.prepare())`; JavaScript's own `Request` when
   `fetch` sends it, as in `fetch(new Request(URL, options))` or
   `const req = new Request(URL, options)` and then `fetch(req)`, with an
   upload method in its options, also through an options variable; Go's
@@ -311,7 +312,10 @@ These do not warn:
   words inside strings;
 - a request object that is not sent: an HTTP client's `Request` that the
   code only builds, prepares, or prints, as in
-  `print(requests.Request("POST", URL, json=d).prepare().body)`, or builds
+  `print(requests.Request("POST", URL, json=d).prepare().body)`, whose URL or
+  method alone is passed on, as in `webbrowser.open(req.url)`, that is bound
+  again before a sending call names it, as when `req` holds a `GET` request
+  by the time of `urlopen(req)`, or that the code builds
   with an upload method and no body, as in
   `httpx.Request(method="POST", url=URL)` passed to an error; JavaScript's
   own `Request` that `fetch` does not send, as in a route handler test that

@@ -577,6 +577,20 @@ _OTHER_LANGUAGE_UPLOADS = [
     f"python3 - <<'PY'\nimport requests\nreq = requests.Request('POST', '{_URL}', json=payload)\n"
     "requests.Session().send(req.prepare())\nPY",
     f"python3 - <<'PY'\nimport httpx\nhttpx.Client().send(httpx.Request(method='PUT', url='{_URL}', content=d))\nPY",
+    # A request sent after it is built: as an attribute, in a loop, or into the name that held it.
+    (
+        "python3 - <<'PY'\nimport requests\nclass Up:\n    def run(self):\n"
+        f"        self.req = requests.Request('POST', '{_URL}', json=d)\n"
+        "        requests.Session().send(self.req.prepare())\nUp().run()\nPY"
+    ),
+    (
+        "python3 - <<'PY'\nimport requests\ns = requests.Session()\nfor item in items:\n"
+        f"    req = requests.Request('POST', '{_URL}', data=item)\n    s.send(req.prepare())\nPY"
+    ),
+    (
+        f"python3 - <<'PY'\nimport requests\ns = requests.Session()\nreq = requests.Request('PUT', '{_URL}', data=d)"
+        ".prepare()\nreq = s.send(req)\nPY"
+    ),
     # A real client's send counts beside a test client's.
     (
         "python3 - <<'PY'\nimport httpx\nmock = httpx.Client(transport=httpx.MockTransport(h))\n"
@@ -947,6 +961,25 @@ _REQUESTS_BUILT_NOT_SENT = [
     (
         "import urllib.request\nreq = urllib.request.Request('https://api.example.com/items', data=b'{}')\n"
         "print(req.data)\nwith urllib.request.urlopen('https://example.com') as r:\n    print(r.status)"
+    ),
+    # Only the request's URL or method is passed on, the name is bound again
+    # before urlopen sends it, or urlopen comes before the request is built.
+    (
+        "import requests, webbrowser\nreq = requests.Request('POST', 'https://api.example.com/items', data={'a': 1})\n"
+        "webbrowser.open(req.url)"
+    ),
+    (
+        "import json, requests\nreq = requests.Request('POST', 'https://api.example.com/items', data={'a': 1})\n"
+        "ws.send(json.dumps(dict(method=req.method)))"
+    ),
+    (
+        "import urllib.request\n"
+        "req = urllib.request.Request('https://api.example.com/items', data=b'{}', method='POST')\n"
+        "req = urllib.request.Request('https://example.com')\nurllib.request.urlopen(req)"
+    ),
+    (
+        "import urllib.request\nurllib.request.urlopen(req)\n"
+        "req = urllib.request.Request('https://api.example.com/items', data=b'{}')\nprint(req.data)"
     ),
     # A test client sends the request to a handler or app in the same process.
     (

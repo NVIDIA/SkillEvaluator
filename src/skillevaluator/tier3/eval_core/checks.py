@@ -8141,6 +8141,9 @@ _CODE_QUOTE_STOP_RES = {
     "`": re.compile(r"[\\`]"),
 }
 _CODE_IDENTIFIER_RE = re.compile(r"[A-Za-z_$][\w$]*")
+# An attribute read after a name, as .url after req in req.url, and not a
+# method called, as .prepare( is in req.prepare().
+_CODE_ATTRIBUTE_READ_RE = re.compile(r"\s*(?:\.|->)\s*[A-Za-z_$][\w$]*(?![\w$])(?!\s*\()")
 # A string longer than this, or with a newline, is file content rather than call text.
 _CODE_SHORT_LITERAL_CHARS = 40
 # Shell commands that interpreter code runs (see _code_shell_commands) are
@@ -9713,9 +9716,12 @@ class _CodeSends(NamedTuple):
     # that any sending call opened up to there closes.
     openers: list[int]
     reach: list[int]
-    # The names a sending call's arguments hold, followed back through the
-    # values bound to them.
-    names: frozenset[str]
+    # Where code sends each name, in order: the openers of the sending calls
+    # whose arguments pass it, and the value starts of the bindings, sent
+    # after them, whose values pass it (see _code_request_sends).
+    sent_at: dict[str, list[int]]
+    # Where each name's bindings end, in order.
+    bound_at: dict[str, list[int]]
     # Each binding as (value start, value end, name), by start, and the
     # starts alone.
     values: list[tuple[int, int, str]]
@@ -9730,10 +9736,11 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     test client: one the code binds only to a test double (see
     _code_client_names), or one that names a test double or app=, as
     httpx.Client(transport=httpx.MockTransport(handler)) does. The names
-    its arguments hold, read up to _CODE_ARGUMENT_CHARS characters, are
-    sent, and so are the
-    names in the value bound to a sent name, followed for up to
-    _CODE_BINDING_PASSES rounds, as req is in prepared = req.prepare() or
+    its arguments pass (see _code_passed_names), read up to
+    _CODE_ARGUMENT_CHARS characters, are sent there, and so are the names
+    that the value of a binding passes, where the binding is, when the code
+    sends the name it binds after it (see _code_sent_after), followed for up
+    to _CODE_BINDING_PASSES rounds, as req is in prepared = req.prepare() or
     prepared = s.prepare_request(req) before s.send(prepared). The text
     read is charged to the reader's work.
     """
@@ -9743,7 +9750,7 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
         return None
     openers: list[int] = []
     reach: list[int] = []
-    names: set[str] = set()
+    sent_at: dict[str, list[int]] = {}
     for match in _CODE_CALL_RE.finditer(masked):
         if match[1] not in _CODE_REQUEST_SEND_CALLS:
             continue
@@ -9771,25 +9778,66 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
             return None
         openers.append(opener)
         reach.append(max(close, reach[-1] if reach else 0))
-        names.update(name.lstrip("$@") for name in _CODE_IDENTIFIER_RE.findall(masked, opener + 1, end))
+        for name in _code_passed_names(reader, opener + 1, end):
+            sent_at.setdefault(name, []).append(opener)
+    bound_at: dict[str, list[int]] = {}
+    for name, _chain, _start, end in bindings:
+        bound_at.setdefault(name, []).append(end)
+    for ends in bound_at.values():
+        ends.sort()
+    values = sorted((start, end, name) for name, _chain, start, end in bindings)
+    sends = _CodeSends(openers, reach, sent_at, bound_at, values, [start for start, _end, _name in values])
     followed: set[int] = set()
     for _ in range(_CODE_BINDING_PASSES):
-        added = False
+        added: list[tuple[str, int]] = []
         for index, (name, _chain, start, end) in enumerate(bindings):
-            if index in followed or name not in names:
+            if index in followed or name not in sent_at or not _code_sent_after(sends, name, end):
                 continue
             followed.add(index)
             stop = min(end, start + _CODE_RECEIVER_CHARS)
             if not reader.spend(stop - start):
                 return None
-            found = {word.lstrip("$@") for word in _CODE_IDENTIFIER_RE.findall(masked, start, stop)} - names
-            if found:
-                names |= found
-                added = True
+            added += [(word, start) for word in _code_passed_names(reader, start, stop)]
         if not added:
             break
-    values = sorted((start, end, name) for name, _chain, start, end in bindings)
-    return _CodeSends(openers, reach, frozenset(names), values, [start for start, _end, _name in values])
+        for word, start in added:
+            sent_at.setdefault(word, []).append(start)
+        for word in {word for word, _start in added}:
+            sent_at[word].sort()
+    return sends
+
+
+def _code_passed_names(reader: _CodeReader, start: int, stop: int) -> set[str]:
+    """Return the names code between start and stop passes, without $ or @.
+
+    A name only read through an attribute, as req in req.url or req.method,
+    passes a value of it rather than itself; one whose method is called, as
+    req in req.prepare(), or that is itself an attribute, as req in
+    self.req, passes.
+    """
+    masked = reader.masked
+    return {
+        match[0].lstrip("$@")
+        for match in _CODE_IDENTIFIER_RE.finditer(masked, start, stop)
+        if _CODE_ATTRIBUTE_READ_RE.match(masked, match.end(), stop) is None
+    }
+
+
+def _code_sent_after(sends: _CodeSends, name: str, end: int) -> bool:
+    """Whether code sends *name* after a binding of it that ends at end, before a later binding of it ends.
+
+    So req = Request(...) is not sent by urlopen(req) when the code binds
+    req again in between, or when urlopen(req) comes first.
+    """
+    positions = sends.sent_at.get(name)
+    if not positions:
+        return False
+    sent = bisect.bisect_left(positions, end)
+    if sent == len(positions):
+        return False
+    ends = sends.bound_at.get(name, [])
+    rebound = bisect.bisect_right(ends, end)
+    return rebound == len(ends) or ends[rebound] > positions[sent]
 
 
 def _code_request_sent(reader: _CodeReader, sends: _CodeSends, start: int) -> bool | None:
@@ -9817,12 +9865,12 @@ def _code_request_sent(reader: _CodeReader, sends: _CodeSends, start: int) -> bo
         if not reader.spend(1):
             return None
         if start < value_end:
-            if name in sends.names:
+            if _code_sent_after(sends, name, value_end):
                 return True
             unpacked = _code_unpacked_names(reader, value_start)
             if unpacked is None:
                 return None
-            if not sends.names.isdisjoint(unpacked):
+            if any(_code_sent_after(sends, unpacked_name, value_end) for unpacked_name in unpacked):
                 return True
         position -= 1
     return False

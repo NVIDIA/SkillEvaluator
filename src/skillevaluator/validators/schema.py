@@ -38,7 +38,11 @@ from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
 from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
+from skillevaluator.validators.frontmatter_parser import (
+    FRONTMATTER_PATTERN,
+    format_validation_location,
+    load_frontmatter_yaml,
+)
 from skillevaluator.validators.policy import AUTHOR_SHAPE_PATTERN, ValidationPolicy, default_policy
 
 logger = get_logger(__name__)
@@ -463,7 +467,7 @@ class SchemaValidator(ValidatorBase):
         frontmatter_yaml, markdown_content = match.groups()
 
         try:
-            data = yaml.safe_load(frontmatter_yaml)
+            data = load_frontmatter_yaml(frontmatter_yaml)
         except yaml.YAMLError as e:
             # Extract line number from YAML error if available
             line_num = getattr(e, "problem_mark", None)

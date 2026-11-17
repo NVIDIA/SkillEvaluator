@@ -18,7 +18,7 @@ from markdown_it.rules_inline import html_inline
 from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, load_frontmatter_yaml
 
 _MARKDOWN_PARSER = MarkdownIt("commonmark", {"html": True, "linkify": False})
 _TEXT_ONLY_HTML_TAGS = frozenset(
@@ -228,7 +228,7 @@ def markdown_link_targets(content: str, *, include_images: bool = False) -> list
     markdown_content = content
     if frontmatter:
         try:
-            frontmatter_data = yaml.safe_load(frontmatter.group(1))
+            frontmatter_data = load_frontmatter_yaml(frontmatter.group(1))
         except (yaml.YAMLError, ValueError, RecursionError):
             frontmatter_data = None
         if isinstance(frontmatter_data, dict):

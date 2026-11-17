@@ -34,6 +34,16 @@ class ParsedFrontmatter:
     line_count: int
 
 
+def load_frontmatter_yaml(raw: str) -> Any:
+    """Load frontmatter while reporting scalar-constructor failures as YAML errors."""
+    try:
+        return yaml.safe_load(raw)
+    except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
+        # SafeLoader raises native exceptions for impossible dates and invalid
+        # explicitly tagged values such as ``!!int ""`` and ``!!bool maybe``.
+        raise yaml.YAMLError(str(exc)) from exc
+
+
 def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, ValidationResult]:
     """Parse YAML frontmatter from a markdown file.
 
@@ -61,7 +71,7 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     frontmatter_yaml, markdown_content = match.groups()
 
     try:
-        data = yaml.safe_load(frontmatter_yaml)
+        data = load_frontmatter_yaml(frontmatter_yaml)
     except yaml.YAMLError as e:
         result.add_error(f"Invalid YAML in frontmatter: {e}")
         return None, result

@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 frontmatter checks report impossible YAML dates and malformed tagged
+  scalar values through their existing parse-error paths instead of aborting
+  schema, version, quality, or Markdown link analysis with a Python exception.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

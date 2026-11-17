@@ -3152,7 +3152,7 @@ def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")
-@pytest.mark.parametrize("report_format", ["json", "markdown", "html", "sarif"])
+@pytest.mark.parametrize("report_format", ["json", "markdown", "html", "sarif", "junit"])
 def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, report_format: str) -> None:
     # On Linux, os.listdir returns the name b"caf\xe9.md" as "caf\udce9.md".
     skill = tmp_path / "skill"
@@ -3177,8 +3177,8 @@ def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, re
         output_dir=output_dir,
         target_path=str(skill),
         announce_paths=False,
-        sarif_scan_root=skill,
-        sarif_repository_root=tmp_path,
+        scan_root=skill,
+        repository_root=tmp_path,
     )
 
     (report,) = [path for path in output_dir.iterdir() if path.name != "BENCHMARK.md"]
@@ -3186,3 +3186,6 @@ def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, re
     assert "Unexpected" in text
     if report_format == "sarif":
         assert "skill/caf%E9.md" in text
+    if report_format == "junit":
+        assert 'file="skill/caf%E9.md"' in text
+        assert "Unexpected 'caf\\xe9.md' in skill root" in text

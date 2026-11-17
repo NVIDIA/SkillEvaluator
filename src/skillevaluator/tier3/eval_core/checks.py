@@ -5696,7 +5696,9 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     See _RM_EVAL_PREFIXES; function NAME before a body counts as one too. A
     command ends at a newline, ";", "&", "|", a parenthesis or a backtick. A
     redirection and its target word are not words of the command. A
-    ``$'...'`` word reads decoded and a ``$"..."`` word as ``"..."``. A
+    ``$'...'`` word reads decoded and a ``$"..."`` word as ``"..."``, and a
+    double-quoted word runs past the quotes of a substitution in it (see
+    _rm_double_quote_end), as in ``"$(eval "$X -rf /w")"``. A
     comment is skipped, and a here-document body is read on its own, as the
     walk reads them, so a quote in either pairs with no quote outside it.
     Where a quote does not close, the text is also read with its quotes and
@@ -5727,6 +5729,7 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     word: list[str] | None = None
     target = False  # The next word is a redirection target.
     unterminated = False  # A quote does not close.
+    nested_quotes = True  # Each substitution in double quotes so far closes.
     index = 0
     while index < len(text):
         match = _RM_GATE_TOKEN_RE.match(text, index)
@@ -5765,6 +5768,13 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
         if first == "\\":
             word.append(token[1:])
         elif match.group("ansi_c") is not None or first in "'\"":
+            if nested_quotes and first == '"' and ("$(" in token or "`" in token):
+                # A quote inside a substitution in double quotes does not close them, as in "$(eval "$X")".
+                # Once one does not close, which scans the rest of the text, the rest is read as before.
+                end = _rm_double_quote_end(text, match.start())
+                nested_quotes = end is not None
+                if end is not None:
+                    token, index = text[match.start() : end], end
             closed = _RM_GATE_CLOSED_RE.fullmatch(token) is not None
             unterminated |= not closed
             if match.group("ansi_c") is not None:
@@ -5783,6 +5793,33 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
         return True
     # The one-pass reading reads text whose quote does not close with its quotes dropped.
     return unterminated and _rm_may_build_rm(_rm_plain_forms(text)[0], _depth + 1)
+
+
+_RM_DOUBLE_QUOTE_STEP_RE = re.compile(r'\\.|"|\$\(|`', re.DOTALL)
+
+
+def _rm_double_quote_end(text: str, start: int) -> int | None:
+    """Return the end of the double-quoted string that opens at *start*, or None where it does not close.
+
+    A ``$( )`` or backtick substitution in it is command text of its own, as
+    _rm_shell_words reads it, so a quote inside one does not close the string.
+    """
+    index = start + 1
+    while (match := _RM_DOUBLE_QUOTE_STEP_RE.search(text, index)) is not None:
+        step, index = match.group(), match.end()
+        if step == '"':
+            return index
+        if step == "$(":
+            end = _rm_group_end(text, match.start() + 1)
+            if end is None:
+                return None
+            index = end + 1
+        elif step == "`":
+            close = _RM_BACKTICK_END_RE.match(text, index)
+            if close is None:
+                return None
+            index = close.end()
+    return None
 
 
 def _rm_may_name(text: str, names: tuple[str, ...]) -> bool:

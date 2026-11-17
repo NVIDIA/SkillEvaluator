@@ -1549,6 +1549,11 @@ _RM_RUN_THROUGH_EVERY_SPELLING = [
     "cat <<EOF\n$(r''m -rf /workspace)\nEOF",
     "cat <<EOF\n$(rm '-rf' /workspace)\nEOF",
     'cat <<EOF\n`"rm" -rf /workspace`\nEOF',
+    # A substitution in double quotes is command text of its own, so a double quote in it opens a new string.
+    'x="$(eval "$X -rf /workspace")"',
+    'printf %s "$(eval "$X -rf /workspace")"',
+    'out="$(git grep -O"$X -rf" needle)"',
+    'x="`eval "$X -rf /workspace"`"',
     # A locale-quoted option after an expansion in eval text.
     "eval '$CMD $\"-rf\" /workspace'",
     "eval '$CMD' $\"-rf\" /workspace",
@@ -2002,6 +2007,8 @@ def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, c
         "eval $'$X -rf'",
         "git grep -O'less -R' needle",
         "git grep -O'$PAGER' needle",
+        'echo "$(eval "$LS -R")"',
+        'x="$(git grep -O"less -R" needle)"',
         'eval "$GREP -n -r pattern src"',
         "eval $'cp' a b",
         "env FOO=1 python -s app.py",

@@ -153,6 +153,29 @@ def test_partial_native_tool_timing_does_not_report_subtotal() -> None:
     assert trajectory_timing(trajectory) == {"llm_seconds": 1.2, "tool_seconds": None, "source": "atif"}
 
 
+@pytest.mark.parametrize(
+    ("llm_ms", "tool_ms", "expected"),
+    [
+        (1e308, 500, {"llm_seconds": None, "tool_seconds": 1.0, "source": "atif"}),
+        (250, 1e308, {"llm_seconds": 0.5, "tool_seconds": None, "source": "atif"}),
+        (1e308, 1e308, None),
+    ],
+)
+def test_overflowing_native_timing_preserves_other_component(llm_ms, tool_ms, expected) -> None:
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "extra": {"llm_duration_ms": llm_ms},
+                "tool_calls": [{"extra": {"duration_ms": tool_ms}}],
+            }
+            for _ in range(2)
+        ]
+    }
+
+    assert trajectory_timing(trajectory) == expected
+
+
 def test_native_atif_extras_win_over_inference() -> None:
     trajectory = {
         "steps": [

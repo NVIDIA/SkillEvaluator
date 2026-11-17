@@ -155,6 +155,21 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
+- Add four configurable quality rules to the `--quality-config` file. Each
+  sets `points`, `message` and `suggestion` plus one setting, and `points: 0`
+  turns it off:
+
+  | Rule | Setting | Packaged value |
+  | --- | --- | --- |
+  | `efficiency.token_budget` | `max_tokens` | 5,000 |
+  | `discoverability.description_too_short` | `min_chars` | 20 |
+  | `discoverability.description_too_long` | `max_chars` | 200 |
+  | `correctness.reserved_name` | `terms` | `anthropic`, `claude` |
+
+  Please note - This change set moves hard coded values into the default
+  quality config file, so scores, deductions and severities are unchanged,
+  but the before/after `finding_id` will be different. A custom file from
+  an earlier version keeps its digest; the packaged digest changes once.
 
 - Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
   SkillSpector now say why SkillSpector stopped inspecting the file that a skill

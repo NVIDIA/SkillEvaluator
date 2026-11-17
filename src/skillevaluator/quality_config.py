@@ -7,6 +7,8 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+from collections.abc import Callable
+from functools import partial
 from importlib.resources import files
 from math import isfinite
 from pathlib import Path
@@ -16,9 +18,7 @@ import yaml
 
 DEFAULT_QUALITY_CONFIG = files("skillevaluator.config").joinpath("quality-default.yaml")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
-_TOP_LEVEL_KEYS = frozenset({"expected_headers", "error_handling"})
 _EXPECTED_HEADER_KEYS = frozenset({"heading", "alternatives", "points", "message", "suggestion"})
-_ERROR_HANDLING_LIST_KEYS = {"mentioned": "terms", "scripts": "markers", "lib": "markers"}
 
 
 class QualityConfigError(ValueError):
@@ -61,11 +61,69 @@ class ErrorHandlingConfig(TypedDict):
     lib: CodeErrorHandlingRule
 
 
+class TokenBudgetRule(TypedDict):
+    """Deduction when the estimated SKILL.md token count is above max_tokens."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    max_tokens: int
+
+
+class EfficiencyConfig(TypedDict):
+    """Efficiency rules; a rule with points 0 is skipped."""
+
+    token_budget: TokenBudgetRule
+
+
+class DescriptionTooShortRule(TypedDict):
+    """Deduction when the frontmatter description is shorter than min_chars."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    min_chars: int
+
+
+class DescriptionTooLongRule(TypedDict):
+    """Deduction when the frontmatter description is longer than max_chars."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    max_chars: int
+
+
+class DiscoverabilityConfig(TypedDict):
+    """Discoverability rules; a rule with points 0 is skipped."""
+
+    description_too_short: DescriptionTooShortRule
+    description_too_long: DescriptionTooLongRule
+
+
+class ReservedNameRule(TypedDict):
+    """Deduction when the frontmatter name contains one of the terms (whole word, any case)."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    terms: list[str]
+
+
+class CorrectnessConfig(TypedDict):
+    """Correctness rules; a rule with points 0 is skipped."""
+
+    reserved_name: ReservedNameRule
+
+
 class QualityConfig(TypedDict):
     """Validated deterministic quality configuration."""
 
     expected_headers: list[ExpectedHeader]
     error_handling: ErrorHandlingConfig
+    efficiency: EfficiencyConfig
+    discoverability: DiscoverabilityConfig
+    correctness: CorrectnessConfig
 
 
 class QualityConfigProvenance(TypedDict):
@@ -124,17 +182,83 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
-def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | None) -> ErrorHandlingConfig:
+# A reserved word is matched against a skill name, which allows only letters, digits and hyphens.
+_RESERVED_TERM_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
+
+
+def _validate_reserved_terms(value: object, source: str, location: str) -> list[str]:
+    """Validate reserved name words, stored without surrounding whitespace.
+
+    Unlike the generic entry lists, these are echoed in the finding and matched against a
+    constrained name format, so padded duplicates and words that can never match are rejected.
+    """
+    if not isinstance(value, list) or not value:
+        raise QualityConfigError(f"{source}: {location} must be a non-empty list")
+    terms: list[str] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise QualityConfigError(f"{source}: {location}[{index}] must be a non-blank string")
+        term = entry.strip()
+        if not _RESERVED_TERM_RE.fullmatch(term):
+            raise QualityConfigError(
+                f"{source}: {location}[{index}] '{term}' can never match a skill name; "
+                "use only letters, digits and single hyphens between them"
+            )
+        if term.casefold() in seen:
+            raise QualityConfigError(f"{source}: duplicate entry '{term}' in {location}")
+        seen.add(term.casefold())
+        terms.append(term)
+    return terms
+
+
+# Upper bound for integer settings. YAML builds hex, octal and binary integers of any size, and
+# one past Python's int-to-str digit limit would crash the digest instead of failing as a usage error.
+_MAX_INT_SETTING = 10**9
+
+
+def _validate_positive_int(value: object, source: str, location: str) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1 <= value <= _MAX_INT_SETTING:
+        raise QualityConfigError(f"{source}: {location} must be a positive integer no greater than {_MAX_INT_SETTING}")
+    return value
+
+
+# Sections made of named rules. Every rule takes points, message and suggestion, plus the one
+# rule-specific key listed here with the function that validates it.
+_RuleSetting = tuple[str, Callable[[object, str, str], object]]
+_RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
+    "error_handling": {
+        "mentioned": ("terms", partial(_validate_entries, ignore_case=True)),
+        "scripts": ("markers", partial(_validate_entries, ignore_case=False)),
+        "lib": ("markers", partial(_validate_entries, ignore_case=False)),
+    },
+    "efficiency": {
+        "token_budget": ("max_tokens", _validate_positive_int),
+    },
+    "discoverability": {
+        "description_too_short": ("min_chars", _validate_positive_int),
+        "description_too_long": ("max_chars", _validate_positive_int),
+    },
+    "correctness": {
+        "reserved_name": ("terms", _validate_reserved_terms),
+    },
+}
+_TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})
+
+
+def _parse_rule_section(section: str, raw: object, source: str, base: dict | None) -> dict:
+    """Validate one rule section. With a base, keys the section omits keep the base value."""
+    rules = _RULE_SECTIONS[section]
     if not isinstance(raw, dict):
-        raise QualityConfigError(f"{source}: error_handling must be a mapping")
-    _reject_unknown_keys(raw, frozenset(_ERROR_HANDLING_LIST_KEYS), source, "error_handling")
+        raise QualityConfigError(f"{source}: {section} must be a mapping")
+    _reject_unknown_keys(raw, frozenset(rules), source, section)
     parsed = {}
-    for name, list_key in _ERROR_HANDLING_LIST_KEYS.items():
-        location = f"error_handling.{name}"
+    for name, (setting, validate_setting) in rules.items():
+        location = f"{section}.{name}"
         block = raw.get(name) if base is None else raw.get(name, {})
         if not isinstance(block, dict):
             raise QualityConfigError(f"{source}: {location} must be a mapping")
-        allowed = frozenset({"points", "message", "suggestion", list_key})
+        allowed = frozenset({"points", "message", "suggestion", setting})
         _reject_unknown_keys(block, allowed, source, location)
         if base is None:
             missing = sorted(allowed - block.keys())
@@ -145,11 +269,9 @@ def _parse_error_handling(raw: object, source: str, base: ErrorHandlingConfig | 
             "points": _validate_points(merged["points"], source, location),
             "message": _validate_text(merged["message"], source, f"{location}.message"),
             "suggestion": _validate_text(merged["suggestion"], source, f"{location}.suggestion"),
-            list_key: _validate_entries(
-                merged[list_key], source, f"{location}.{list_key}", ignore_case=list_key == "terms"
-            ),
+            setting: validate_setting(merged[setting], source, f"{location}.{setting}"),
         }
-    return parsed  # type: ignore[return-value]
+    return parsed
 
 
 class _UniqueKeySafeLoader(yaml.SafeLoader):
@@ -226,7 +348,6 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         raise QualityConfigError(f"{source}: expected_headers must be a list")
     _reject_unknown_keys(raw, _TOP_LEVEL_KEYS, source, "top level")
     if not headers_declared:
-        packaged_config = load_quality_config()
         raw = {**raw, "expected_headers": []}
 
     expected_headers: list[ExpectedHeader] = []
@@ -274,23 +395,24 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
         )
 
     if path is None:
-        error_handling = _parse_error_handling(raw.get("error_handling"), source, base=None)
-        config: QualityConfig = {"expected_headers": expected_headers, "error_handling": error_handling}
+        sections = {name: _parse_rule_section(name, raw.get(name), source, base=None) for name in _RULE_SECTIONS}
+        config: QualityConfig = {"expected_headers": expected_headers, **sections}  # type: ignore[typeddict-item]
         return config, dict(config)
-    raw_error_handling = raw.get("error_handling", {})
-    packaged = load_quality_config()["error_handling"]
+    packaged = load_quality_config()
     if not headers_declared:
-        expected_headers = [dict(rule) for rule in packaged_config["expected_headers"]]  # type: ignore[misc]
-    error_handling = _parse_error_handling(raw_error_handling, source, base=packaged)
+        expected_headers = [dict(rule) for rule in packaged["expected_headers"]]  # type: ignore[misc]
     declared: dict = {"expected_headers": expected_headers} if headers_declared else {}
-    declared_error_handling = {
-        name: {key: error_handling[name][key] for key in block}
-        for name, block in raw_error_handling.items()
-        if block
-    }
-    if declared_error_handling:
-        declared["error_handling"] = declared_error_handling
-    return {"expected_headers": expected_headers, "error_handling": error_handling}, declared
+    sections = {}
+    for name in _RULE_SECTIONS:
+        raw_section = raw.get(name, {})
+        sections[name] = _parse_rule_section(name, raw_section, source, base=packaged[name])  # type: ignore[literal-required]
+        # Only the keys the file sets are declared, so the digest ignores inherited packaged values.
+        declared_rules = {
+            rule: {key: sections[name][rule][key] for key in block} for rule, block in raw_section.items() if block
+        }
+        if declared_rules:
+            declared[name] = declared_rules
+    return {"expected_headers": expected_headers, **sections}, declared  # type: ignore[typeddict-item]
 
 
 def quality_config_digest(config: QualityConfig | dict) -> str:

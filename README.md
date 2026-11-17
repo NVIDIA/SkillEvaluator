@@ -26,27 +26,22 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Get started
 
-Install the CLI:
+Install the CLI in a Python 3.12–3.14 environment:
 
 ```bash
 pip install skillevaluator
 ```
 
-<details><summary>Or use uv, or run from a clone</summary>
+<details><summary>Or use uv</summary>
 
 ```bash
-uv tool install skillevaluator
-```
-
-From a clone, with [uv](https://docs.astral.sh/uv/getting-started/installation/):
-
-```bash
-git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
-cd SkillEvaluator
-uv run --python 3.13 skillevaluator --help
+uv tool install --python 3.13 skillevaluator
 ```
 
 </details>
+
+For uv setup or direct GitHub source installation, see
+[Installation](https://docs.nvidia.com/skills/skillevaluator/installation).
 
 Then check skills from your terminal, CI, or agent:
 
@@ -58,11 +53,10 @@ Then check skills from your terminal, CI, or agent:
 Quickly check your skill without an LLM key:
 
 ```bash
-skillevaluator validate \
-  ./my-skill --tiers 1
+skillevaluator quality-check ./my-skill
 ```
 
-Run all tiers with a [free build.nvidia.com key](#run-all-three-tiers-with-a-free-nvidia-build-key). Same command, no tiers flag:
+After [all-tier setup with NVIDIA Build](#run-all-three-tiers-with-a-free-nvidia-build-key), run the combined pipeline:
 
 ```bash
 skillevaluator validate \
@@ -102,11 +96,13 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 
 ### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill?
 
-Know in seconds: 🧠 **No LLM** &nbsp;·&nbsp; 🔑 **No key** &nbsp;·&nbsp; 🤖 **No agent run**
+Requires [GitHub source](https://docs.nvidia.com/skills/skillevaluator/installation); not in PyPI 0.9.0. No model key or agent run.
 
 ```bash
 skillevaluator harness-check ./my-skill
 ```
+
+Illustrative summary of versioned profiles. Full output can include notes and schema diagnostics.
 
 ```text
 ╭─ Harness compatibility · my-skill ──────────────────────────────────────────────────────╮
@@ -119,7 +115,7 @@ skillevaluator harness-check ./my-skill
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` above runs it by default, as part of Tier 1. 🧪 **Ready to go deeper?** Try a
+`validate` on current source includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
 [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
@@ -132,11 +128,11 @@ skillevaluator quality-check ./my-skill
 
 No API key, scanner, GPU or Docker is needed. It prints a score out of 100 with a
 grade and the findings behind it; the passing threshold defaults to 70. This is
-static quality only: security and agent impact come with the full run below. See the
+static quality only; publication evidence stays `INCOMPLETE`. Security and agent impact need additional checks. See the
 [keyless walkthrough](docs/quickstart.mdx#run-without-an-llm).
 
 No skill yet? Clone the repository and use the bundled
-`src/skillevaluator/tier3/reference_skills/text-analyzer`, which scores **88.8/100 (B)**.
+`src/skillevaluator/tier3/reference_skills/text-analyzer`. Scores can differ by release.
 
 ### Run all three tiers with a free NVIDIA Build key
 
@@ -145,7 +141,7 @@ Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
 
 1. Sign in at [build.nvidia.com](https://build.nvidia.com/) and complete enrollment.
 2. Open a model page, select **Get API Key**, and generate your key.
-3. Install every tier, set the provider and key, then validate:
+3. Complete [scanner setup](docs/installation-options.mdx#system-tools), start Docker, and [prepare a reviewed dataset](docs/prepare-dataset.mdx). Install every tier, set the provider and key, then validate:
 
 ```bash
 pip install "skillevaluator[all]"
@@ -154,8 +150,9 @@ export NVIDIA_API_KEY='nvapi-...'
 skillevaluator validate ./my-skill
 ```
 
-Without `--tiers`, `validate` runs all three, and the one key covers them: model
-checks in Tier 1, embeddings in Tier 2 and supported agents in Tier 3. Tier 3 also
+Without `--tiers`, `validate` runs all three. The key covers embeddings and chat
+in Tier 2 and supported agents in Tier 3; add `--llm` for model checks in Tier 1.
+For uv or GitHub installations, use the matching [all-tier install](https://docs.nvidia.com/skills/skillevaluator/installation#all-tiers) instead of the pip command above. Tier 3 also
 needs Docker running; add `--tiers 1,2` to skip it. More in
 [Run the combined pipeline](#run-the-combined-pipeline), the
 [Build walkthrough](docs/quickstart.mdx#use-nvidia-build) and [provider configuration](docs/configuration.mdx).
@@ -164,16 +161,16 @@ needs Docker running; add `--tiers 1,2` to skip it. More in
 
 ![Three-tier pipeline: skill, validation, deduplication, live evaluation, reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
-Each tier is independent. Add its extra to your command:
+Each tier is independent. Use the [all-tier installation](https://docs.nvidia.com/skills/skillevaluator/installation#all-tiers) for all three:
 
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
-| Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-validation.mdx#the-checks)? | `uv run skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
-| Tier 2: Deduplication | Does guidance repeat or overlap? | `uv run --extra tier2 skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
-| Tier 3: Live Evaluation | Does the skill help the agent? | `uv run --extra tier3 skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
+| Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-reference.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
+| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | GitHub source; no API key or agent run |
+| Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
+| Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 
-Tier 1 fetches pinned, verified SkillSpector and Gitleaks releases when they
-are missing; Semgrep is optional. See [scanners](docs/installation.mdx#system-tools).
+Prepare [scanners](docs/installation-options.mdx#system-tools) for your installed release; Semgrep is optional.
 `--no-llm` does not remove scanner requirements; a scanner that cannot run is
 `INCOMPLETE` and exits nonzero.
 [SkillSpector](https://github.com/NVIDIA/SkillSpector) provides specialized skill
@@ -189,8 +186,8 @@ sources or creates one skill-grounded case with limited coverage. See
 After setting up the provider, scanners, and agent sandbox, run all three tiers:
 
 ```bash
-uv run --python 3.13 --extra all skillevaluator doctor --env-mode docker
-uv run --python 3.13 --extra all skillevaluator validate ./my-skill
+skillevaluator doctor --env-mode docker
+skillevaluator validate ./my-skill
 ```
 
 `doctor` checks readiness, not inference success. `validate` runs all tiers with
@@ -200,7 +197,7 @@ retain their applicable stages.
 
 Tier 1 gates `validate`. Tier 2 gates unless `--no-block-on-dedup` is set;
 Tier 3 gates only with `--block-on-agent-eval`. Model and managed-sandbox usage
-can incur charges; see [runtime and cost](docs/tier3-live-evaluation.mdx#plan-for-cost).
+can incur charges; see [runtime and cost](docs/tier3-run-reference.mdx#plan-for-cost).
 
 Standalone generation needs substantive `evals/EVAL.md` guidance, a `--prompt`
 file with task requests and outcomes, or matching retained traces. `--force`
@@ -209,12 +206,12 @@ below replaces the autopilot starter; `--refine` refines it. Explicit
 unauthored negatives.
 
 ```bash
-uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my-skill --full --prompt eval-guidance.md --force
+skillevaluator tier3 create-eval-dataset ./my-skill --full --prompt eval-guidance.md --force
 ```
 
 ## Run from a source checkout
 
-Prefix commands with `uv run --python 3.13`; see [extras](docs/installation.mdx#choosing-extras).
+For an editable environment, follow the [development setup](docs/developer-guide.mdx#set-up-a-development-environment).
 
 ## Research and citation
 

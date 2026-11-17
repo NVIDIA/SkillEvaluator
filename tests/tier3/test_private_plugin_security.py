@@ -402,6 +402,37 @@ def test_rm_check_counts_each_here_document_body_it_checks_for_eval_text_toward_
     assert 0 < len(checked) <= checks._RM_MAX_EXTRA_CHARS // checks._rm_read_cost(bodies[0]) + 1
 
 
+@pytest.mark.parametrize("scanner", ["plugin", "host"])
+def test_rm_check_counts_each_word_it_checks_for_eval_text_toward_the_trace_limit(security, monkeypatch, scanner):
+    """The check of a word for eval text counts toward the limit, also where it finds none, and stops once spent.
+
+    main's walk reads each of these calls, as each runs rm. Only the strict
+    readings check its words for eval, env -S or pager text, so that check
+    of each quoted word naming eval is their work too. Uncounted, it would
+    run on every word of every call, however long the trace.
+    """
+    from skillevaluator.tier3.eval_core import checks
+
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO", {})
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO_HELD", [0])
+    checked: list[str] = []
+    check = checks._rm_reads_again_as_commands
+
+    def counted(text, _depth=0):
+        if _depth == 0 and text.startswith("xeval"):  # A word as the walk reads it, without its quotes.
+            checked.append(text)
+        return check(text, _depth)
+
+    monkeypatch.setattr(checks, "_rm_reads_again_as_commands", counted)
+    words = [[f"'xeval{k}_{number}'" for number in range(200)] for k in range(40)]
+    calls = [call(f"rm -rf /tmp/q{k}; echo " + " ".join(each)) for k, each in enumerate(words)]
+    result = security.scan_plugin_security(calls) if scanner == "plugin" else checks.check_security(calls)
+
+    assert "destructive_command" not in kinds(result)
+    # Each word counts before its check, so the checks stop where the next word would pass the limit.
+    assert 0 < sum(checks._rm_read_cost(word) for word in checked) <= checks._RM_MAX_EXTRA_CHARS
+
+
 @pytest.mark.parametrize("scanner", ["plugin", "host", "workdirs", "links"])
 def test_rm_check_reads_here_documents_only_as_main_does_where_it_reads_as_main(security, monkeypatch, scanner):
     """A reading as main reads keeps a here-document body only for its "rm -", as main does.

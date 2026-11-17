@@ -5502,9 +5502,11 @@ _RM_MAX_FALLBACK_FRAGMENTS = 65_536
 # more, about the work of reading a short text, and _RM_EXTRA_CHARS_PER_WORD
 # more for each word, shell operator and substitution, which cost the lexer and
 # the walk more than a character does. So does each here-document body the
-# lexer checks for them beyond main's "rm -". A longer text is read in one
-# pass, where each command and body it holds counts before its check. This
-# bounds their work to about a second.
+# lexer checks for them beyond main's "rm -", and, at any length, each call,
+# word and substitution the eval gate checks, unless the gate opens a strict
+# reading of it, which counts it instead (see _rm_gated). A longer text that is
+# read is read in one pass, where each command and body it holds counts before
+# its check. This bounds their work to about a second.
 _RM_MAX_EXTRA_CHARS = 262_144
 _RM_EXTRA_CHARS_PER_READ = 64
 _RM_EXTRA_CHARS_PER_WORD = 10
@@ -5835,11 +5837,44 @@ def _rm_may_name(text: str, names: tuple[str, ...]) -> bool:
     return any(name in plain for name in names)
 
 
-def _rm_candidate(text: str) -> bool:
-    """True for text the rm check reads: an rm with an option, or eval or env -S text."""
+# The names without which the eval gate (see _rm_reads_again_as_commands) finds no text it reads again.
+_RM_GATE_NAMES = ("eval", "env", "grep")
+
+
+def _rm_candidate(text: str, extra_chars: list[int] | None = None) -> bool:
+    """True for text the rm check reads: an rm with an option, or eval or env -S text.
+
+    Where the strict readings count the texts they check in *extra_chars*,
+    the eval gate's check of *text* counts there first (see _rm_gated).
+    """
     if not _rm_may_name(text, ("rm", "eval", "env", "grep")):
         return False  # No form of the text names any of these.
-    return re.search(r"\brm\s+-", text) is not None or _rm_may_build_rm(text)
+    if re.search(r"\brm\s+-", text) is not None:
+        return True
+    return _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(text, _rm_may_build_rm, extra_chars)
+
+
+def _rm_gated(text: str, gate: Callable[[str], bool], extra_chars: list[int] | None) -> bool:
+    """Answer the eval *gate* for *text*, which counts toward *extra_chars* first (see _rm_read_cost), at any length.
+
+    The gate is the strict readings' work, so it stops with them: where the
+    count is spent, or *text* would take it past ``_RM_MAX_EXTRA_CHARS``,
+    the gate does not run, *text* spends the count, and the answer is
+    False. Where the gate opens a strict reading of *text* (True), that
+    reading counts what it checks of *text* before each check (see
+    _rm_targets_outside_tmp), so *text* is not counted here as well;
+    otherwise it counts here. Without *extra_chars*, the gate runs.
+    """
+    if extra_chars is None:
+        return gate(text)
+    cost = _rm_read_cost(text)
+    if extra_chars[0] + cost > _RM_MAX_EXTRA_CHARS:
+        extra_chars[0] += cost
+        return False
+    if gate(text):
+        return True
+    extra_chars[0] += cost
+    return False
 
 
 def _rm_group_end(text: str, start: int) -> int | None:
@@ -7832,7 +7867,8 @@ def _rm_targets_outside_tmp(
     here otherwise), before each check of it, also when it is then not read
     (see _rm_read_cost); so does a here-document body or substitution,
     which only these readings check beyond main's "rm -", before the checks
-    that keep it from them (see _rm_shell_words). Past
+    that keep it from them (see _rm_shell_words), and a word or substitution
+    the eval gate checks (see _rm_gated). Past
     ``_RM_MAX_EXTRA_CHARS`` characters there, strict readings stop and find
     nothing, so a text that would take the count past them is not read, and
     the bodies left are read as main reads them.
@@ -8030,6 +8066,17 @@ def _rm_targets_outside_tmp(
     # Each decoded $'...' text read below as eval or env -S text, and whether it was read as joined: the
     # same text read again from the command line that eval or env -S reads would give the same answer.
     decoded_read: dict[str, bool] = {}
+    # The answer for each word and substitution of this text checked below for an rm or eval text (see
+    # _rm_candidate), whose check counts toward the strict readings' limit, so a repeat is not counted again.
+    # Here-document bodies were counted when the lexer checked them, and unescaped text counts on its own below.
+    candidates: dict[str, bool] = {}
+
+    def counted_candidate(text: str) -> bool:
+        known = candidates.get(text)
+        if known is None:
+            known = candidates[text] = _rm_candidate(text, _extra_chars)
+        return known
+
     ansi_c_words = 0  # The $'...' words before this payload.
     for payload, kind in zip(payloads, kinds):  # noqa: B905 -- same length; the verifier runs on Python 3.9.
         # In eval or env -S text, a substitution or here-document runs in the shell that reads it again,
@@ -8056,7 +8103,7 @@ def _rm_targets_outside_tmp(
                 or (
                     more
                     and (
-                        _rm_candidate(text)
+                        (counted_candidate(text) if kind in {"substitution", "ansi_c"} else _rm_candidate(text))
                         or (dynamic and _rm_may_name_recursive_rm(text))
                         # A substitution runs its text as commands, where a quoted rm name runs too.
                         or (substitution and _names and _rm_names_rm(text))
@@ -8127,7 +8174,7 @@ def _rm_targets_outside_tmp(
     for index, token in enumerate(tokens):
         workdirs = token_workdirs[index]
         plain = re.search(r"\brm\s+-", token) is not None
-        if plain or (more and _rm_candidate(token)):
+        if plain or (more and counted_candidate(token)):
             strict = _strict or not plain
             find_protected = _find_protected or (
                 not _xargs_only and find_exec_protected(index, workdirs, extra if strict else _budget)
@@ -8247,7 +8294,14 @@ def _rm_targets_outside_tmp(
     return False
 
 
-def _rm_reading(pattern: Any, text: str, matched: bool, symlink_seen: bool, main_only: bool = False) -> bool | None:
+def _rm_reading(
+    pattern: Any,
+    text: str,
+    matched: bool,
+    symlink_seen: bool,
+    main_only: bool = False,
+    extra_chars: list[int] | None = None,
+) -> bool | None:
     """Say how check_security reads an action for rm: not at all (None), as main does (False), or strictly (True).
 
     The destructive-command regex (*matched*) and the xargs-only query open
@@ -8258,13 +8312,22 @@ def _rm_reading(pattern: Any, text: str, matched: bool, symlink_seen: bool, main
     lowercased, as in ``$'\\U00000072m'``, or that holds xargs and rm, as in
     ``xargs $'rm' -rf``), opens a strict walk, where only that text and an rm
     that runs as a command can give the finding: in ``grep 'rm' -rn .`` rm
-    is grep's argument.
+    is grep's argument. The check for that text is the strict readings'
+    work, so the action's text counts toward the trace's *extra_chars*
+    first (see _rm_gated); once that count is spent, nothing else opens a
+    walk.
     """
     if matched or _rm_targets_outside_tmp(text, _xargs_only=True, _symlink_seen=symlink_seen):
         return False
     if main_only:
         return None
-    if (_rm_may_count_as_rm(text) and _rm_may_build_rm(text)) or any(
+    if _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(
+        text, lambda gated: _rm_may_count_as_rm(gated) and _rm_may_build_rm(gated), extra_chars
+    ):
+        return True
+    if _rm_extra_spent(extra_chars):
+        return None
+    if any(
         pattern.search(form.lower()) or ("xargs" in form.lower() and _RM_NAME_WORD_RE.search(form))
         for form in _rm_name_forms(text)
     ):
@@ -8484,7 +8547,9 @@ def check_security(
                 matched = pattern.search(action_text_lower) is not None
                 rm_main_only = label == "rm -rf" and (_rm_repr_call(tc) or _rm_extra_spent(rm_extra_chars))
                 rm_strict = (
-                    _rm_reading(pattern, action_text, matched, symlink_seen, main_only=rm_main_only)
+                    _rm_reading(
+                        pattern, action_text, matched, symlink_seen, main_only=rm_main_only, extra_chars=rm_extra_chars
+                    )
                     if label == "rm -rf"
                     else None
                 )

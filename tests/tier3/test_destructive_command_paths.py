@@ -925,6 +925,34 @@ def test_within_the_trace_limit_a_later_call_keeps_the_finding(last: str) -> Non
     assert result["score"] == 0.0
 
 
+def test_the_eval_gate_counts_each_call_it_checks_toward_the_trace_limit(monkeypatch) -> None:
+    """Checking a call the pattern does not match for eval text counts toward the limit, also where it finds none.
+
+    Each call names eval, rm and an -rf option, so the eval gate reads it,
+    here-documents and all, and none holds eval text, so no reading follows.
+    Uncounted, that check would run on every call, however long the trace.
+    """
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO", {})
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO_HELD", [0])
+    read: list[str] = []
+    gate = checks._rm_reads_again_as_commands
+
+    def recorded(text: str, depth: int = 0) -> bool:
+        if depth == 0:
+            read.append(text)
+        return gate(text, depth)
+
+    monkeypatch.setattr(checks, "_rm_reads_again_as_commands", recorded)
+    heredocs = "".join(f"cat <<E{number}\nE{number}\n" for number in range(20))
+    commands = [f": {number}\necho eval -rf rm\n{heredocs}" for number in range(400)]
+    result = check_security([{"action": "Bash", "action_input": {"command": command}} for command in commands])
+
+    assert result["score"] == 1.0
+    # Each call counts before the gate reads it, so the gate stops where the next call would pass the limit.
+    assert set(read) <= set(commands)
+    assert 0 < sum(checks._rm_read_cost(text) for text in read) <= checks._RM_MAX_EXTRA_CHARS
+
+
 def test_substitutions_and_words_count_toward_the_trace_limit(monkeypatch) -> None:
     """A text counts more toward the limit for each substitution and word, so dense text is not lexed past it.
 
@@ -1622,6 +1650,8 @@ def test_xargs_reads_each_simple_command_once(monkeypatch, name: str) -> None:
 
 def test_one_pass_eval_fragments_read_each_simple_command_once(monkeypatch) -> None:
     """In one-pass text, an eval fragment with many rm words after xargs costs one reading of each simple command."""
+    # This text alone would take the strict readings past their trace limit, so they would not check it.
+    monkeypatch.setattr(checks, "_RM_MAX_EXTRA_CHARS", 1 << 30)
     calls = _counted_calls(monkeypatch, "_rm_wrapped_command_index")
     command = "".join(f"eval x{i} -f ( xargs --help " + "rm " * 1_000 + ");" for i in range(24)) + " echo '"
     result = check_security([{"action": "Bash", "action_input": {"command": command}}])
@@ -1766,6 +1796,8 @@ def test_the_eval_gate_remembers_a_bounded_number_of_answers(monkeypatch) -> Non
 def test_the_eval_gate_reads_a_call_over_64_kib_once(monkeypatch, command: str) -> None:
     """Each reading of a long call asks the gate about its text; the gate reads that text once."""
     monkeypatch.setattr(checks, "_RM_GATE_LAST_LONG", [None])
+    # This call alone would take the strict readings past their trace limit, so the gate would not read it.
+    monkeypatch.setattr(checks, "_RM_MAX_EXTRA_CHARS", 1 << 30)
     texts: list[str] = []
     gate = checks._rm_reads_again_as_commands
 

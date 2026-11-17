@@ -120,46 +120,41 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
-- Add a `correctness` section to the `--quality-config` file with a
-  `reserved_name` rule, so the reserved words checked in the skill name are no
-  longer fixed in code. The rule sets `terms`, `points`, `message`, and
-  `suggestion`; `points: 0` turns it off, which also removes its HIGH finding.
-  The section is optional and overlays the packaged values the same way the
-  other rule sections do. Scores are unchanged without a custom file. The
-  finding message now names the words it matched (`Name contains reserved
-  word: claude`) instead of listing every reserved word. The schema check keeps
-  its own fixed list and is not affected. The packaged `quality_config` digest
-  changes once, because `quality-default.yaml` gained the section. The
-  `QUALITY_RESERVED_NAMES` constant is removed; read
-  `load_quality_config()["correctness"]["reserved_name"]["terms"]` instead. The
-  other Correctness rules stay in code for now.
-- Add a `discoverability` section to the `--quality-config` file with a
-  `description_too_short` rule, so the 20-character minimum for the
-  frontmatter description is no longer fixed in code. The rule sets
-  `min_chars`, `points`, `message`, and `suggestion`; `points: 0` turns it off.
-  The section is optional and overlays the packaged values the same way
-  `error_handling` and `efficiency` do. Scores are unchanged without a custom
-  file. The finding message is reworded: the length and the minimum now follow
-  the message (`Description too short (recommend 50-150 chars): 12 chars,
-  minimum 20`). The packaged `quality_config` digest changes once, because
-  `quality-default.yaml` gained the section. The other Discoverability rules
-  stay in code for now.
-- Add an `efficiency` section to the `--quality-config` file with a
-  `token_budget` rule, so the 5,000-token recommendation for `SKILL.md` is no
-  longer fixed in code. The rule sets `max_tokens`, `points`, `message`, and
-  `suggestion`; `points: 0` turns it off. The section is optional and overlays
-  the packaged values the same way `error_handling` does, so a file that sets
-  only `max_tokens` changes nothing else. Reports show the limit in force as
-  `recommended_max_tokens`. Scores are unchanged without a custom file. The
-  finding message is reworded: the estimate and the limit now follow the
-  message (`Large skill. ...: ~6200 estimated tokens at 4 characters per token,
-  recommended max <5000; a real tokenizer may count more`) instead of
-  sitting inside it. The packaged `quality_config` digest changes once, because
-  `quality-default.yaml` gained the section. The
-  `QUALITY_RECOMMENDED_MAX_TOKENS` constant is removed; read
-  `load_quality_config()["efficiency"]["token_budget"]["max_tokens"]` instead.
-  A `QualityScoreResult` built directly, without the validator, no longer
-  reports `recommended_max_tokens`.
+- Add `efficiency`, `discoverability` and `correctness` sections to the
+  `--quality-config` file, one rule each, so these values are no longer fixed
+  in code:
+  - `efficiency.token_budget` sets `max_tokens` (5,000), the recommended
+    `SKILL.md` size. Reports show the limit in force as
+    `recommended_max_tokens`.
+  - `discoverability.description_too_short` sets `min_chars` (20), the
+    shortest frontmatter description that passes.
+  - `correctness.reserved_name` sets `terms` (`anthropic`, `claude`), the words
+    a skill name may not contain. `points: 0` also removes its HIGH finding.
+    The schema check keeps its own fixed list.
+
+  Each rule also sets `points`, `message`, and `suggestion`, and `points: 0`
+  turns it off. The sections are optional and overlay the packaged values the
+  same way `error_handling` does. Scores are unchanged without a custom file,
+  and the other rules in these areas stay in code for now. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the sections.
+
+  The three finding messages are reworded: the measured values follow the
+  configured message, as in `Large skill. ...: ~6200 estimated tokens at 4
+  characters per token, recommended max <5000; a real tokenizer may count
+  more`, `Description too short (recommend 50-150 chars): 12 chars, minimum
+  20`, and `Name contains reserved word: claude`, which names only the words
+  that matched. Because the message is part of the ID, these findings'
+  `finding_id` changes once with this release, and reserved-name findings are
+  grouped per matched word instead of as one finding across skills. With a
+  custom file, the configured `max_tokens` or `min_chars` is part of the
+  message, so changing it changes the ID again.
+
+  The `QUALITY_RECOMMENDED_MAX_TOKENS` and `QUALITY_RESERVED_NAMES` constants
+  are removed; read `load_quality_config()["efficiency"]["token_budget"]
+  ["max_tokens"]` and `load_quality_config()["correctness"]["reserved_name"]
+  ["terms"]` instead. A `QualityScoreResult` built directly, without the
+  validator, no longer reports `recommended_max_tokens`.
 
 - Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
   SkillSpector now say why SkillSpector stopped inspecting the file that a skill

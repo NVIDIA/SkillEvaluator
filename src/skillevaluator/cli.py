@@ -3591,7 +3591,6 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    _offer_scanner_install(checks, skip)
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
@@ -3603,6 +3602,7 @@ def _tier1_workflow(
         profile=policy,
         previous_version=previous_version,
         skillspector_baseline=skillspector_baseline,
+        prepare_scanners=lambda: _offer_scanner_install(checks, skip),
     )
     # Resolved after the run so configuration errors still leave no output.
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)

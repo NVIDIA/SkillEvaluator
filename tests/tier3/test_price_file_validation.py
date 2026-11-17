@@ -14,20 +14,26 @@ _RATE_FIELDS = ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok")
 
 
 @pytest.mark.parametrize(
-    "contents",
+    ("contents", "duplicate_key"),
     [
-        '{"model":{"input_per_mtok":2,"output_per_mtok":4},"model":{"input_per_mtok":0,"output_per_mtok":0}}',
-        '{"model":{"input_per_mtok":2,"input_per_mtok":0,"output_per_mtok":4}}',
-        '{"model":{"input_per_mtok":2,"output_per_mtok":4,"output_per_mtok":0}}',
-        '{"model":{"input_per_mtok":2,"output_per_mtok":4,"cached_input_per_mtok":1,"cached_input_per_mtok":0}}',
-        '{"model":{"input_per_mtok":2,"input_\\u0070er_mtok":0,"output_per_mtok":4}}',
+        (
+            '{"model":{"input_per_mtok":2,"output_per_mtok":4},"model":{"input_per_mtok":0,"output_per_mtok":0}}',
+            "model",
+        ),
+        ('{"model":{"input_per_mtok":2,"input_per_mtok":0,"output_per_mtok":4}}', "input_per_mtok"),
+        ('{"model":{"input_per_mtok":2,"output_per_mtok":4,"output_per_mtok":0}}', "output_per_mtok"),
+        (
+            '{"model":{"input_per_mtok":2,"output_per_mtok":4,"cached_input_per_mtok":1,"cached_input_per_mtok":0}}',
+            "cached_input_per_mtok",
+        ),
+        ('{"model":{"input_per_mtok":2,"input_\\u0070er_mtok":0,"output_per_mtok":4}}', "input_per_mtok"),
     ],
     ids=["model", "input", "output", "cached", "escaped-key"],
 )
-def test_duplicate_price_keys_are_rejected(tmp_path: Path, contents: str) -> None:
+def test_duplicate_price_keys_are_rejected(tmp_path: Path, contents: str, duplicate_key: str) -> None:
     path = tmp_path / "prices.json"
     path.write_text(contents, encoding="utf-8")
-    with pytest.raises(BudgetConfigurationError, match="duplicate"):
+    with pytest.raises(BudgetConfigurationError, match=f"duplicate JSON object key {duplicate_key!r}"):
         PriceBook.load(path)
 
 
@@ -37,7 +43,8 @@ def test_invalid_price_scalars_have_configuration_errors(tmp_path: Path, field: 
     rates = {"input_per_mtok": 2, "output_per_mtok": 4, "cached_input_per_mtok": 1, field: value}
     path = tmp_path / "prices.json"
     path.write_text(json.dumps({"model": rates}), encoding="utf-8")
-    with pytest.raises(BudgetConfigurationError):
+    message = "must not be booleans" if isinstance(value, bool) else "prices must be finite and non-negative"
+    with pytest.raises(BudgetConfigurationError, match=message):
         PriceBook.load(path)
 
 

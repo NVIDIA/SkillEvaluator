@@ -33,7 +33,7 @@ def _unique_price_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
         if key in result:
-            raise ValueError("duplicate JSON object key in price file")
+            raise ValueError(f"duplicate JSON object key {key!r} in price file")
         result[key] = value
     return result
 
@@ -66,7 +66,9 @@ class PriceBook:
                 input_price = float(value["input_per_mtok"])
                 output_price = float(value["output_per_mtok"])
                 cached_input_price = float(value.get("cached_input_per_mtok", input_price))
-            except (KeyError, TypeError, ValueError, OverflowError) as exc:
+            except OverflowError as exc:
+                raise BudgetConfigurationError(f"{path}: {model} prices must be finite and non-negative") from exc
+            except (KeyError, TypeError, ValueError) as exc:
                 raise BudgetConfigurationError(
                     f"{path}: {model} must provide input_per_mtok and output_per_mtok, with optional cached_input_per_mtok"
                 ) from exc

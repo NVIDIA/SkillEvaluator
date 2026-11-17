@@ -392,6 +392,16 @@ All notable changes to SkillEvaluator are documented in this file.
   one-line tagline and the badge row. The separate text title is gone.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
+- The README's **Get started** section now installs first
+  (`pip install skillevaluator`, with `uv tool install` and a clone-and-`uv run`
+  path in a collapsed section) and then shows three ways to use it, each under a
+  header card: the CLI, the CI template, or the agent skill. The CLI column gives
+  the `--tiers 1` check that needs no LLM key and the all-tiers run with a free
+  NVIDIA Build key. The harness check heading is shorter, with its three points
+  (no LLM, no key, no agent run) on their own line. **Quickstart** is now two
+  steps: `skillevaluator quality-check ./my-skill` without a key, then
+  `skillevaluator validate ./my-skill` with a free NVIDIA Build key for all
+  three tiers.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
@@ -447,6 +457,7 @@ All notable changes to SkillEvaluator are documented in this file.
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
   no longer loses every live skill, while nested evaluation snapshots remain excluded.
 
+- API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and
@@ -465,6 +476,7 @@ All notable changes to SkillEvaluator are documented in this file.
   incomplete cases are reported as unresolved instead of failed.
 
 - Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
+- Script lint now runs advisory AST checks on Python files with one leading UTF-8 BOM.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

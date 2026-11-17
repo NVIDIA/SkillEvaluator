@@ -4759,13 +4759,26 @@ def _counts_as_judge_call(attempt: object) -> bool:
     return not (method == "ragas" and "prompt_sha256" in attempt)
 
 
+def _valid_budget_metric(value: Any, *, integer: bool = False) -> bool:
+    """Reject malformed usage before summing it or converting it to a float."""
+    if type(value) not in ((int,) if integer else (int, float)) or value < 0:
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
 def _budget_usage(job_dir: Path) -> dict[str, Any]:
     """Read attempt usage from Harbor's retained trajectory and judge artifacts."""
     usage: dict[str, Any] = {}
+    tokens_complete = True
+    cost_complete = True
     for trajectory_path in job_dir.glob("**/trajectory.json"):
         try:
             payload = json.loads(trajectory_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            tokens_complete = cost_complete = False
             continue
         final_metrics = payload.get("final_metrics", {}) if isinstance(payload, dict) else {}
         if isinstance(final_metrics, dict):
@@ -4773,25 +4786,43 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
             completion = final_metrics.get("total_completion_tokens")
             cached = final_metrics.get("total_cached_tokens")
             cost = final_metrics.get("total_cost_usd")
-            if isinstance(prompt, int) and isinstance(completion, int):
+            if _valid_budget_metric(prompt, integer=True) and _valid_budget_metric(completion, integer=True):
                 usage["input_tokens"] = usage.get("input_tokens", 0) + prompt
                 usage["output_tokens"] = usage.get("output_tokens", 0) + completion
-                if isinstance(cached, int) and not isinstance(cached, bool):
+                if _valid_budget_metric(cached, integer=True):
                     usage["cached_input_tokens"] = usage.get("cached_input_tokens", 0) + cached
-            if isinstance(cost, int | float) and not isinstance(cost, bool):
+            else:
+                tokens_complete = False
+            if _valid_budget_metric(cost):
                 usage["cost_usd"] = usage.get("cost_usd", 0.0) + float(cost)
+            else:
+                cost_complete = False
+        else:
+            tokens_complete = cost_complete = False
+
+    token_keys = ("input_tokens", "output_tokens", "cached_input_tokens")
+    if not tokens_complete or any(not _valid_budget_metric(usage[key], integer=True) for key in token_keys if key in usage):
+        for key in token_keys:
+            usage.pop(key, None)
+    if not cost_complete or ("cost_usd" in usage and not _valid_budget_metric(usage["cost_usd"])):
+        usage.pop("cost_usd", None)
+
     judge_calls = 0
     saw_judge_artifact = False
+    judge_complete = True
     for artifact_path in job_dir.glob("**/judge_attempts.json"):
         saw_judge_artifact = True
         try:
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError):
+        except (OSError, ValueError, RecursionError):
+            judge_complete = False
             continue
         attempts = payload.get("attempts") if isinstance(payload, dict) else payload
-        if isinstance(attempts, list):
+        if isinstance(attempts, list) and all(isinstance(attempt, dict) for attempt in attempts):
             judge_calls += sum(1 for attempt in attempts if _counts_as_judge_call(attempt))
-    if saw_judge_artifact:
+        else:
+            judge_complete = False
+    if saw_judge_artifact and judge_complete:
         usage["judge_calls"] = judge_calls
     return usage
 

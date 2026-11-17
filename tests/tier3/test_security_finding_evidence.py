@@ -2754,6 +2754,32 @@ def _grows_linearly(in_pieces: float, whole: float) -> bool:
     return whole < 1.6 * in_pieces + 0.05
 
 
+@pytest.mark.parametrize(
+    ("cost", "linear"),
+    [
+        pytest.param(lambda length: length * 1e-5, True, id="linear"),
+        pytest.param(lambda length: length * 1e-5 * (1 + length / 2_000_000), True, id="linear-with-a-small-tail"),
+        pytest.param(lambda length: length * 1e-5 * (1 + length / 200_000), False, id="linear-with-a-large-tail"),
+        pytest.param(lambda length: length * length * 1e-9, False, id="quadratic"),
+    ],
+)
+def test_the_linear_growth_bound_tells_linear_from_quadratic_on_a_simulated_clock(
+    monkeypatch: pytest.MonkeyPatch, cost: Callable[[int], float], linear: bool
+) -> None:
+    # Masking that takes a set time for a length, on a clock that only that
+    # masking moves, so that the result does not depend on the runner. The
+    # judge evidence test measures the same way with the same bound: ten
+    # pieces of 20,000 characters against the whole 200,000.
+    clock = [0.0]
+    monkeypatch.setattr(time, "thread_time", lambda: clock[0])
+
+    def mask(text: str) -> None:
+        clock[0] += cost(len(text))
+
+    in_pieces, whole = _masking_seconds(mask, "ab", 20_000, 200_000)
+    assert _grows_linearly(in_pieces, whole) is linear, (in_pieces, whole)
+
+
 def test_the_linear_growth_bound_rejects_reading_each_run_again(monkeypatch: pytest.MonkeyPatch) -> None:
     # The same measurement and bound fail for a reading that reads a word or
     # the rest of a quoted string again from each name in it, as the

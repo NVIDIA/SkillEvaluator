@@ -376,7 +376,7 @@ with the description as that harness lists it.
 - **When a skill never triggers.** Check first that the harness loads it and how much of the description reaches the model's skill list.
 - **When you move a skill to another harness.** A skill written for Claude Code often relies on placeholders and fields that other harnesses ignore.
 - **When the skills folder grows.** Harnesses give the skill list a budget. Past it, descriptions get shortened and skills get left out.
-- **In CI.** It runs with `validate` on every change, so a loading problem shows up in the report without blocking the merge.
+- **In CI.** Include it in `validate` to report loading problems on each change. Findings are advisory by default; an active policy can make them block the run.
 
 ## Good to know
 
@@ -392,8 +392,9 @@ with the description as that harness lists it.
     quality score, run `skillevaluator quality-check`.
   </Accordion>
   <Accordion title="Does it replace a live evaluation?">
-    No. It tells you whether the skill reaches the model. It doesn't tell you
-    whether the skill helps once it is there. That is what
+    No. It predicts loader behavior from versioned profiles without running the
+    agent. It doesn't establish which skill reaches a live model or whether the
+    skill helps once it is there. That is what
     [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
   </Accordion>
   <Accordion title="Why does it mention my other skills?">

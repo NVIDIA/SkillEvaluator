@@ -537,7 +537,7 @@ def test_pre_merge_paid_tier_advice_does_not_route_through_ci_demo():
     assert "rejects a setup that has not merged" in docs
     assert "Use `ci demo` after the setup merges." in docs
     advanced = " ".join((ROOT / "docs/advanced-ci.mdx").read_text().split())
-    assert "`skillevaluator ci demo` works only after the setup has merged." in advanced
+    assert "`skillevaluator ci demo --tiers 1,2,3` works only after the setup has merged." in advanced
 
 
 def _heredoc(script, marker):

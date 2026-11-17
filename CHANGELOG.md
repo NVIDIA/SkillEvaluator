@@ -471,6 +471,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Script lint measures control-flow nesting without recursively walking expression
+  nodes, so valid long operator or attribute chains no longer abort advisory
+  checks for that script and subsequent files.
+
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative

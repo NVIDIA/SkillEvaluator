@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Report source links encode reserved characters and UTF-8 names in Git refs
+  and relative paths, so names containing `#`, `%`, or spaces still link to the
+  intended skill directory on GitHub and GitLab.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

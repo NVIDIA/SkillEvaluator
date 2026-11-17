@@ -20,6 +20,7 @@ import json
 import posixpath
 import re
 import shlex
+import threading
 import warnings
 from array import array
 from collections.abc import Callable, Iterable, Mapping, Sequence
@@ -7132,13 +7133,21 @@ _JS_ARGV_RE = re.compile(
 )
 
 
+# warnings.catch_warnings saves and restores the process-wide filter list, so
+# two threads that parse at once could each restore the copy the other saved
+# and leave the ignore filter of _parse_python in place for the whole
+# process; parses that change the filters take turns.
+_PARSE_WARNINGS_LOCK = threading.Lock()
+
+
 def _parse_python(source: str) -> ast.Module | None:
     """Parse Python source, or return None when it does not parse.
 
     Warnings the parser raises, such as a SyntaxWarning for an invalid escape
-    in a string, are not printed: the code is read, not run.
+    in a string, are not printed: the code is read, not run. The filters are
+    changed under _PARSE_WARNINGS_LOCK (see there).
     """
-    with warnings.catch_warnings():
+    with _PARSE_WARNINGS_LOCK, warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             return ast.parse(source)
@@ -9794,19 +9803,17 @@ def _rm_argv_deletes_outside_tmp(
             commands.setdefault((command, dirs), vector)
     if not commands:
         return False
-    with warnings.catch_warnings():
-        # The link checks parse Python with ast.parse, which may warn (see _parse_python).
-        warnings.simplefilter("ignore")
-        # Interpreter code is read for links in linear time (see _rm_argv_symlink_call_seen).
-        symlink_seen = (
-            symlink_seen
-            or _rm_symlink_creation_seen(shell_text, _call_seen=_rm_argv_symlink_call_seen)
-            or (
-                bool(code)
-                and ("symlink" in code or re.search(r"\b(?:ln|cp)\b", code) is not None)
-                and _rm_argv_symlink_call_seen(language or "", code, tree)
-            )
+    # Interpreter code is read for links in linear time (see _rm_argv_symlink_call_seen), and parsed
+    # without printing parser warnings (see _parse_python).
+    symlink_seen = (
+        symlink_seen
+        or _rm_symlink_creation_seen(shell_text, _call_seen=_rm_argv_symlink_call_seen)
+        or (
+            bool(code)
+            and ("symlink" in code or re.search(r"\b(?:ln|cp)\b", code) is not None)
+            and _rm_argv_symlink_call_seen(language or "", code, tree)
         )
+    )
 
     def lifted(command: str, dirs: tuple[str, ...]) -> bool:
         # main's cache and agent output cleanup rules lift the command as they lift it alone. Every cache

@@ -16,6 +16,7 @@ from __future__ import annotations
 import ast
 import itertools
 import shlex
+import threading
 import time
 import warnings
 from collections.abc import Callable
@@ -926,6 +927,46 @@ def test_python_code_with_invalid_escapes_is_read_without_printing_warnings(secu
 
     assert result["score"] == score, result
     assert [str(warning.message) for warning in caught] == []
+
+
+def test_parses_on_two_threads_leave_the_warning_filters_as_they_were(monkeypatch: pytest.MonkeyPatch) -> None:
+    # catch_warnings saves and restores the process-wide filter list, so a
+    # parse that starts on one thread while another runs saves the other's
+    # ignore filter, and when it ends last it puts that filter back for good,
+    # so every later warning in the process is dropped. Parses take turns:
+    # the second starts only once the first has ended.
+    parse = ast.parse
+    inside = {"first": threading.Event(), "second": threading.Event()}
+    release = {"first": threading.Event(), "second": threading.Event()}
+
+    def waiting_parse(source: str, *args: Any, **kwargs: Any) -> ast.AST:
+        if source in inside:
+            inside[source].set()
+            release[source].wait(5)
+        return parse(source, *args, **kwargs)
+
+    first = threading.Thread(target=checks._parse_python, args=("first",))
+    second = threading.Thread(target=checks._parse_python, args=("second",))
+    with warnings.catch_warnings():
+        filters = list(warnings.filters)
+        with monkeypatch.context() as patch:
+            patch.setattr(ast, "parse", waiting_parse)
+            first.start()
+            try:
+                assert inside["first"].wait(5)
+                second.start()
+                together = inside["second"].wait(0.5)
+                release["first"].set()
+                first.join(5)
+            finally:
+                for event in release.values():
+                    event.set()
+                first.join(5)
+                if second.ident is not None:
+                    second.join(5)
+        left = list(warnings.filters)
+    assert not together
+    assert left == filters
 
 
 def test_a_code_argument_is_parsed_only_when_it_names_a_quoted_rm_and_a_runner(monkeypatch: pytest.MonkeyPatch) -> None:

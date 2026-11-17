@@ -438,6 +438,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
+  such as `case` and `case-` retain separate rewards, trajectories and attempt records.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

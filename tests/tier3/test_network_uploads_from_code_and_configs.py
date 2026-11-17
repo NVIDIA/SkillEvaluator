@@ -1022,6 +1022,10 @@ _GO_REQUESTS_BUILT_NOT_SENT = [
     _GO_IMPORTS + "func TestCreate(t *testing.T) {\n"
     '\treq, err := http.NewRequest(http.MethodPost, "/items", bytes.NewBufferString("{}"))\n'
     "\tif err != nil {\n\t\tt.Fatal(err)\n\t}\n\trec := httptest.NewRecorder()\n\thandler.ServeHTTP(rec, req)\n}\n",
+    # Bound behind if, and only printed.
+    _GO_IMPORTS + "func main() {\n"
+    '\tif req, err := http.NewRequest("POST", "https://api.example.com/items", nil); err == nil {\n'
+    "\t\tfmt.Println(req.Method)\n\t}\n}\n",
 ]
 _GO_REQUESTS_SENT = [
     _GO_IMPORTS + "func main() {\n"
@@ -1031,6 +1035,18 @@ _GO_REQUESTS_SENT = [
     f'\treq, err := http.NewRequestWithContext(ctx, http.MethodPut, "{_URL}", body)\n'
     "\tif err != nil {\n\t\treturn\n\t}\n\tresp, err := http.DefaultClient.Do(req)\n\tfmt.Println(resp, err)\n}\n",
     _GO_IMPORTS + f'func main() {{ req, _ := http.NewRequest("PATCH", "{_URL}", nil); http.DefaultClient.Do(req) }}\n',
+    # Names bound behind Go's if, switch or var keyword.
+    _GO_IMPORTS + "func main() {\n"
+    f'\tif req, err := http.NewRequest("POST", "{_URL}", nil); err == nil {{\n'
+    "\t\thttp.DefaultClient.Do(req)\n\t}\n}\n",
+    _GO_IMPORTS + "func main() {\n"
+    f'\tif ok {{\n\t}} else if req, err := http.NewRequest("PUT", "{_URL}", nil); err == nil {{\n'
+    "\t\thttp.DefaultClient.Do(req)\n\t}\n}\n",
+    _GO_IMPORTS + "func main() {\n"
+    f'\tswitch req, err := http.NewRequest("POST", "{_URL}", nil); {{\n'
+    "\tcase err == nil:\n\t\thttp.DefaultClient.Do(req)\n\t}\n}\n",
+    _GO_IMPORTS + f'var req, _ = http.NewRequest("POST", "{_URL}", nil)\n\n'
+    "func main() {\n\thttp.DefaultClient.Do(req)\n}\n",
 ]
 
 

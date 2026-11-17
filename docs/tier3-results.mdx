@@ -280,7 +280,8 @@ In interpreter code, these warn:
   upload method in its options, also through an options variable; Go's
   `http.NewRequest` or `NewRequestWithContext` with an upload method when a
   client's `Do` sends it, as in `req, _ := http.NewRequest("POST", URL, body)`
-  and then `client.Do(req)`;
+  and then `client.Do(req)`, also when `if`, `switch`, or `var` binds it, as
+  in `if req, err := http.NewRequest(...); err == nil {`;
   `getattr(requests, "post")` called, bound, or passed on; and
   `xhr.open("POST", ...)`;
 - pycurl and PHP curl upload options, unless an on/off option such as

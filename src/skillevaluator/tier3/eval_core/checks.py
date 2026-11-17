@@ -8049,6 +8049,9 @@ _CODE_NAMED_CALLS = _CODE_REQUEST_CALLS | {"fetch", "Request", "getattr", "open"
 _CODE_REQUEST_MODULES = _CODE_CLIENT_NAMES | {"urllib", "urllib2"}
 # Go's calls that build a request for a client's Do to send.
 _CODE_GO_REQUEST_CALLS = frozenset({"NewRequest", "NewRequestWithContext"})
+# Go keywords that may stand before names bound together, as in
+# if req, err := http.NewRequest(...); err == nil { or var req, _ = ...
+_CODE_GO_BINDING_KEYWORDS = frozenset({"if", "switch", "var"})
 # Calls that send a request object built with such a Request or Go's
 # NewRequest (see _code_request_sends): send, as in Session().send(prepared)
 # or httpx.Client().send(request), urlopen, fetch, and these on a receiver:
@@ -9885,10 +9888,12 @@ def _code_unpacked_names(reader: _CodeReader, value_start: int) -> list[str] | N
     _code_bindings) names only the last. The names are read back from the
     = within _CODE_RECEIVER_CHARS characters, and count only when two or
     more stand at the start of a statement: at the start of the code or
-    after a newline, ;, { or }. A keyword argument, as in f(a, b=value),
-    binds none. JavaScript's let a, b = value binds only b, so code read
-    as JavaScript, Perl or PHP has none. The text read is charged to the
-    reader's work.
+    after a newline, ;, { or }, or, in code that may be Go, after Go's if,
+    switch or var (_CODE_GO_BINDING_KEYWORDS), as in
+    if req, err := value; err == nil { or var req, _ = value. A keyword
+    argument, as in f(a, b=value), binds none. JavaScript's let a, b = value
+    binds only b, so code read as JavaScript, Perl or PHP has none. The text
+    read is charged to the reader's work.
     """
     if reader.family not in {"python", "ruby", "go", ""}:
         return []
@@ -9913,6 +9918,15 @@ def _code_unpacked_names(reader: _CodeReader, value_start: int) -> list[str] | N
         if idx < limit or masked[idx] != ",":
             break
         idx -= 1
+    if len(names) >= 2 and reader.family in {"go", ""} and idx >= limit and masked[idx] not in "\n;{}":
+        # Go's if, switch or var before the names, as in if req, err := value.
+        end = idx + 1
+        while idx >= limit and (masked[idx].isalnum() or masked[idx] in "_$"):
+            idx -= 1
+        if not reader.spend(value_start - idx):
+            return None
+        whole = idx < 0 or (idx >= limit and not masked[idx].isalnum() and masked[idx] not in "_$.")
+        return names if whole and masked[idx + 1 : end] in _CODE_GO_BINDING_KEYWORDS else []
     if not reader.spend(value_start - idx):
         return None
     if len(names) < 2 or (idx >= 0 and (idx < limit or masked[idx] not in "\n;{}")):

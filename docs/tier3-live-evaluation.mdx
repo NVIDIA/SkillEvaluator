@@ -1303,7 +1303,7 @@ scored tool calls that did productive work. For Claude Code, Codex and OpenCode
 tool names, reading, searching, listing, writing, editing or patching files,
 running commands and activating a skill are productive, and so are MCP tools
 named `mcp__server__tool` (Claude Code and reconstructed native Codex JSONL with
-recorded server identity). Codex records without server identity and OpenCode
+recorded server identity, including names containing `__`). Codex records without server identity and OpenCode
 MCP calls are classified by their tool name, so most count as wasted. Help, version and
 install commands and searches rooted at `/` are wasted. Planning and
 bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,

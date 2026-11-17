@@ -445,7 +445,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Codex JSONL reconstruction preserves recorded MCP server and tool names as
   `mcp__server__tool`, allowing tool efficiency to recognize MCP work and apply
-  the existing filesystem-root search policy.
+  the existing filesystem-root search policy. Their separately recorded identity
+  also keeps server names containing `__` intact for scoring and plugin reports.
 
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.

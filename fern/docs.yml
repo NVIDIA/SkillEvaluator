@@ -29,48 +29,60 @@ navigation:
   - section: Get Started
     skip-slug: true
     contents:
-      - page: Quickstart
-        path: ../docs/quickstart.mdx
-        slug: quickstart
-      - page: Reproducible Terminal Demo
-        path: ../docs/starter-demo.mdx
-        slug: starter-demo
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation
-      - page: Providers & Credentials
-        path: ../docs/configuration.mdx
-        slug: configuration
+      - page: Quickstart
+        path: ../docs/quickstart.mdx
+        slug: quickstart
+      - page: Repository Integration
+        path: ../docs/repository-integration.mdx
+        slug: repository-integration
       - page: Evaluate from Your Agent
         path: ../docs/agent-skill.mdx
         slug: agent-skill
+  - section: Set Up
+    skip-slug: true
+    contents:
+      - page: Providers & Credentials
+        path: ../docs/configuration.mdx
+        slug: configuration
+      - page: Agents & Sandboxes
+        path: ../docs/agents-and-sandboxes.mdx
+        slug: agents-and-sandboxes
   - section: Evaluate Your Skill
     skip-slug: true
     contents:
       - page: "Tier 1: Validation"
         path: ../docs/tier1-validation.mdx
         slug: tier1-validation
+      - page: "Tier 1: Harness Check"
+        path: ../docs/harness-check.mdx
+        slug: harness-check
       - page: "Tier 2: Deduplication"
         path: ../docs/tier2-deduplication.mdx
         slug: tier2-deduplication
-      - page: "Tier 3: Live Evaluation"
+      - page: "Tier 3: Live Agent Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Prepare a Dataset
+        path: ../docs/prepare-dataset.mdx
+        slug: prepare-dataset
+      - page: Configure a Tier 3 Run
+        path: ../docs/tier3-run-options.mdx
+        slug: tier3-run-options
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation
-      - page: Eval Datasets
-        path: ../docs/eval-datasets.mdx
-        slug: eval-datasets
       - page: Trace Datasets
         path: ../docs/trace-datasets.mdx
         slug: trace-datasets
-      - page: Agents & Sandboxes
-        path: ../docs/agents-and-sandboxes.mdx
-        slug: agents-and-sandboxes
       - page: Custom Graders & Tasks
         path: ../docs/custom-graders.mdx
         slug: custom-graders
+      - page: Reproducible Terminal Demo
+        path: ../docs/starter-demo.mdx
+        slug: starter-demo
   - section: Results & CI
     skip-slug: true
     contents:
@@ -86,9 +98,6 @@ navigation:
       - page: "BENCHMARK.md Rollout and Backfill"
         path: ../docs/benchmark-rollout.mdx
         slug: benchmark-rollout
-      - page: Repository Integration
-        path: ../docs/repository-integration.mdx
-        slug: repository-integration
       - page: GitHub Actions
         path: ../docs/github-actions.mdx
         slug: github-actions
@@ -104,6 +113,36 @@ navigation:
   - section: Reference
     skip-slug: true
     contents:
+      - page: Installation Options
+        path: ../docs/installation-options.mdx
+        slug: installation-options
+      - page: Tier 1 Checks and Policies
+        path: ../docs/tier1-reference.mdx
+        slug: tier1-reference
+      - page: Tier 2 Checks and Limits
+        path: ../docs/tier2-reference.mdx
+        slug: tier2-reference
+      - section: Live Evaluation
+        skip-slug: true
+        contents:
+          - page: Run Options and Cost
+            path: ../docs/tier3-run-reference.mdx
+            slug: tier3-run-reference
+          - page: Dataset Format and Policy
+            path: ../docs/eval-datasets.mdx
+            slug: eval-datasets
+          - page: Interpret Results
+            path: ../docs/tier3-results.mdx
+            slug: tier3-results
+          - page: Grading and Evidence
+            path: ../docs/tier3-grading.mdx
+            slug: tier3-grading
+          - page: Runtime and Backends
+            path: ../docs/tier3-runtime.mdx
+            slug: tier3-runtime
+          - page: Interaction and Activation
+            path: ../docs/tier3-experiments.mdx
+            slug: tier3-experiments
       - page: CLI Reference
         path: ../docs/cli-reference.mdx
         slug: cli-reference

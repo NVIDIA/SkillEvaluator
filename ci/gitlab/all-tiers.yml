@@ -223,7 +223,7 @@ skill-evaluation-native:
           apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm
         fi
       fi
-      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
       env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --extra "tier$SKILL_EVAL_TIER" --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
       export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
       if [ "$SKILL_EVAL_TIER" = 3 ]; then
@@ -353,7 +353,7 @@ skill-evaluation-aggregate:
   script:
     - |
       set -eu
-      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
       env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
       export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
       mkdir -p skill-evaluator-results/tier1

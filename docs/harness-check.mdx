@@ -1,0 +1,432 @@
+---
+title: "Tier 1: Harness Check"
+sidebar-title: "Tier 1: Harness Check"
+description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
+---
+
+No LLM. No agent run. No API key. In about a second, the harness check predicts
+whether each agent harness **loads** your skill, **degrades** it, or **drops** it,
+and what to change.
+
+Choose **GitHub source** on [Installation](/skills/skillevaluator/installation#install),
+then run the command below. Harness Check is not included in PyPI 0.9.0.
+
+```bash
+skillevaluator harness-check ./my-skill
+```
+
+Results use versioned harness profiles. Add `-v` to see their verified versions
+and dates, or `--harness-version HARNESS=VERSION` to flag a different release.
+See the [CLI reference](/skills/skillevaluator/cli-reference#harness-check) for all options.
+
+A skill can follow the [Agent Skills specification](https://agentskills.io/) and
+still never reach the model. Every harness has its own loader, with its own YAML
+parser, folders and size limits. The same `SKILL.md` can work in Claude Code and
+be dropped by Codex without an error. The harness check finds those differences
+before your users do.
+
+<CardGroup cols={3}>
+  <Card title="Static" icon="bolt">
+    It reads the files on disk. No model, no agent, no sandbox, no key.
+  </Card>
+  <Card title="Six harnesses" icon="layer-group">
+    Claude Code, Codex, Copilot CLI, Hermes, OpenClaw and OpenCode in one run.
+  </Card>
+  <Card title="Fixes included" icon="wrench">
+    Every finding names the rule, what the harness does, and the change that fixes it.
+  </Card>
+</CardGroup>
+
+## What you get
+
+This example skill has two small problems. The front matter has `license` twice,
+and the body uses `$ARGUMENTS`.
+
+```text title="skillevaluator harness-check ./my-skill"
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
+│                                                                                  │
+│  ✓ claude-code  loads                                                    1 note  │
+│  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
+│                 or duplicate keys).                                              │
+│  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
+│                 parsing is strict.                                               │
+│  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
+│                 model sees the literal text.                                     │
+│  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
+│                 duplicate keys).                                                 │
+│  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
+│                 keys.                                                            │
+│                                                                                  │
+│  Doesn't change pass/fail.  Details and fixes: -v                                │
+╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
+Tier 1 schema also fails for my-skill: [SCHEMA-HIGH] Duplicate frontmatter key 'license': YAML parsers disagree on it (Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value). Run `skillevaluator validate --tiers 1` for details.
+```
+
+Read it from the top:
+
+- **The first row** has one mark per harness, so you see the result at a glance.
+- **Each line below** is one harness: its verdict and its most serious finding.
+  `+1 more` means it has more findings. `1 note` counts notes that don't change the verdict.
+  A harness with nothing to report gets no line.
+- **The bottom corner** is the tally, here 4 of 6 not loaded.
+- **The line under the panel** appears when the same problem also fails a Tier 1
+  schema check, and points you to `validate --tiers 1`.
+
+Each harness gets one of three verdicts:
+
+| Mark | Verdict | What it means |
+| --- | --- | --- |
+| `✓` | `loads` | No loading or degradation rule matched. Read any notes: another installed copy may take precedence. |
+| `!` | `degraded` | The skill loads, but something is cut, hidden or ignored. |
+| `✗` | `not_loaded` | The harness drops the skill. The model never sees it. |
+
+The compact view labels a finding with its outcome when the rule names one, such
+as `not found`, `rejected`, `listing shortened` or `delivery truncated`.
+
+## See every finding and its fix
+
+Add `-v` for the detailed view. `--harness` narrows it to the harnesses you care about.
+
+```bash
+skillevaluator harness-check ./my-skill --harness codex,hermes -v
+```
+
+```text
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✗ codex   ! hermes                                                              │
+│                                                                                  │
+│  ✗ codex   NOT LOADED    verified 0.166.0, 2026-11-01                            │
+│            ✗ NOT LOADED  Skill dropped: invalid YAML (tabs or duplicate keys).   │
+│                          [CX-STRICT-YAML]                                        │
+│                          → Use spaces, not tabs, and remove duplicate keys.      │
+│                            confidence: high                                      │
+│            ! degraded    $ARGUMENTS is not substituted: the model sees the       │
+│                          literal text.  [CX-ARGUMENTS]                           │
+│                          → Describe the expected input in words instead of       │
+│                          $ARGUMENTS.                                             │
+│                            confidence: medium                                    │
+│  ! hermes  degraded      verified main @ c419cf7c864a (binary reports            │
+│                          2026.9.24), 2026-11-01                                  │
+│            · note        Duplicate keys: last value wins.  [HM-DUP-KEY]          │
+│                          → Remove the duplicate frontmatter key.                 │
+│                            confidence: high                                      │
+│            ! degraded    $ARGUMENTS is not substituted: the model sees the       │
+│                          literal text.  [HM-ARGUMENTS]                           │
+│                          → Describe the expected input in words instead of       │
+│                          $ARGUMENTS.                                             │
+│                            confidence: high                                      │
+│                                                                                  │
+│  Description in the model's skill list (from the profile):                       │
+│  hermes  cut to 60 chars  “Write release notes from merged pull requests. Use    │
+│                           when t…”                                               │
+│                                                                                  │
+│  Doesn't change pass/fail.                                                       │
+╰──────────────────────────────────────────────────────────── ✗ 1 of 2 not loaded ─╯
+```
+
+The detailed view adds:
+
+- **The rule ID** in brackets, such as `CX-STRICT-YAML`, so you can search for it or refer to it.
+- **The fix** after the arrow.
+- **A confidence level** for each rule.
+- **The harness release and date** each profile was verified against.
+- **Your description as the model sees it**, for each harness that shortens it in its skill list.
+
+Remove the duplicate key, replace `$ARGUMENTS` with words, and run it again:
+
+```text title="skillevaluator harness-check ./my-skill"
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
+│  ✓ claude-code   ✓ codex   ✓ copilot-cli   ✓ hermes   ✓ openclaw   ✓ opencode    │
+│                                                                                  │
+│  ✓ copilot-cli  loads                                                    1 note  │
+│  ✓ opencode     loads                                                    1 note  │
+│                                                                                  │
+│  Doesn't change pass/fail.  Details and fixes: -v                                │
+╰────────────────────────────────────────────────────────────────── ✓ 6 of 6 load ─╯
+```
+
+## Fix what it finds
+
+Every finding comes with its own fix, so recovering is a short loop.
+
+<Steps>
+
+### Run it with `-v`
+
+The detailed view prints the fix for each finding after the arrow. The JSON
+output has the same text in the `fix` field.
+
+### Fix `✗ not loaded` first
+
+Those harnesses never show your skill to the model, so nothing else matters
+until they are fixed. Then work through `! degraded`. Notes are optional.
+
+### Run it again
+
+Repeat until the tally reads `6 of 6 load`. One change often clears several
+harnesses at once, because the same problem trips more than one loader.
+
+</Steps>
+
+These are the findings you are most likely to meet:
+
+| You see | Why | Fix |
+| --- | --- | --- |
+| Skill dropped: invalid YAML | Codex, Copilot CLI, OpenClaw and OpenCode parse front matter strictly. | Indent with spaces, not tabs, and use each front matter key once. |
+| No usable description | Codex, OpenClaw and OpenCode drop a skill without one. The others list it badly. | Add a non-empty `description` as plain text. |
+| Non-canonical name | `skill.md` or `Skill.md` is not `SKILL.md`. Codex and Hermes never load it. | Rename the file to `SKILL.md`, with that exact casing. |
+| Not found | The skill sits in a folder this harness does not read. | Install it in the folder the finding names, such as `.claude/skills` for Claude Code or `.agents/skills` for Codex. |
+| Symlinked `SKILL.md` skipped | Codex, Hermes and OpenClaw skip a symlinked manifest. | Copy `SKILL.md` into the folder. If you symlink a folder, OpenClaw requires its target to stay within the skills root. |
+| Description cut in the skill list | Codex cuts at 1,024 characters, Claude Code at 1,536, and Copilot CLI drops the skill past 1,024 UTF-16 units. | Put the trigger first and keep the description under 1,024 characters. |
+| Skill list over budget | The skills in this folder have more description text than the harness lists. | Shorten descriptions, or install fewer skills in that folder. |
+| Delivery truncated | `SKILL.md` is larger than the harness reads in one go. | Move detail into `references/` files. The tightest limit is OpenClaw, at about 15,000 characters. |
+| `$ARGUMENTS` is not substituted | Claude Code substitutes `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}`. OpenCode also substitutes `$ARGUMENTS` through `/command`; its skill tool leaves it literal. | Describe the expected input in words, and use paths relative to `SKILL.md`. |
+| `disable-model-invocation` is ignored | Codex, Hermes and OpenCode don't honour it. | For Codex, add `agents/openai.yaml` with `policy: {allow_implicit_invocation: false}`. |
+
+<Tip>
+  Only ship to some harnesses? Narrow the check with `--harness codex,claude-code`,
+  so findings for the others stay out of your way.
+</Tip>
+
+## Two ways to run it
+
+<Tabs>
+  <Tab title="On its own">
+    Use `harness-check` when this is the only answer you want. It takes a skill
+    folder, a folder of skills, or a plugin folder. Its findings never change the
+    exit code.
+
+    ```bash
+    skillevaluator harness-check ./my-skill
+    ```
+
+    ```bash title="Only the harnesses you ship to"
+    skillevaluator harness-check ./my-skill --harness codex,claude-code
+    ```
+
+    ```bash title="Every skill in a folder"
+    skillevaluator harness-check ./skills
+    ```
+
+    ```bash title="Save the result as JSON"
+    skillevaluator harness-check ./my-skill --json harness.json
+    ```
+  </Tab>
+  <Tab title="Inside validate">
+    `validate` runs the harness check as part of Tier 1, for all six harnesses.
+    You don't have to ask for it.
+
+    ```bash
+    skillevaluator validate ./my-skill --tiers 1
+    ```
+
+    To run only the harness check, and still get the report files:
+
+    ```bash
+    skillevaluator validate ./my-skill --tiers 1 --checks harness
+    ```
+
+    ```text
+    ╭─ Tier 1 · Static & Security ─────────────────────────────────────────────────────╮
+    │    checks      ! harness                                                         │
+    │    summary     1/1 checks passed                                                 │
+    │    harness     4 not loaded · 1 degraded  (see below)                            │
+    ╰────────────────────────────────────────────────────────────────── ✓ pass · 0.1s ─╯
+    ╭─ Harness compatibility ──────────────────────────────────────────────────────────╮
+    │  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
+    │                                                                                  │
+    │  ✓ claude-code  loads                                                    1 note  │
+    │  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
+    │                 or duplicate keys).                                              │
+    │  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
+    │                 parsing is strict.                                               │
+    │  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
+    │                 model sees the literal text.                                     │
+    │  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
+    │                 duplicate keys).                                                 │
+    │  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
+    │                 keys.                                                            │
+    │                                                                                  │
+    │  Doesn't change pass/fail.  Details and fixes: -v                                │
+    ╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
+    ╭──────────────────────────────────────────────────────────────────────────────────╮
+    │   ✓ PASS   Passed required checks  ·  exit 0                                     │
+    │  Tier 1: 1 of 1 checks passed; 0 failed, 0 incomplete, 0 skipped, 0 N/A          │
+    │  Tier 2: Not run (not requested)                                                 │
+    │  Tier 3: Not run (not requested)                                                 │
+    │  Publication eligibility: Incomplete                                             │
+    │                                                                                  │
+    │  ! harness: skill won't load in codex, copilot-cli, openclaw, opencode · skill   │
+    │  loads degraded in hermes                                                        │
+    ╰──────────────────────────────────────────────────────────────────────────────────╯
+    ```
+
+    The run still passes. The harness check shows up in four places: `! harness`
+    in the checks line, a `harness` line in the Tier 1 summary, the same panel
+    as above, and a note in the result box. `--harness` and `-v` work here too.
+  </Tab>
+</Tabs>
+
+| | `harness-check` | `validate` |
+| --- | --- | --- |
+| Runs | Only the harness check | Selected checks in the requested tiers (default: 1, 2, 3). Dependency auditing is opt-in; use `--tiers 1` to limit the tiers |
+| Exit code | `0` whatever it finds. A usage error or a folder with no skills is nonzero | Set by the selected checks and active policy. Harness findings are advisory by default; a policy override can make them blocking |
+| Files | `--json FILE` | HTML and JSON reports by default. Choose formats with `-r`, for example `-r json,html,sarif` to include SARIF |
+| Model setup flags | Yes, see [Match your setup](#match-your-setup) | No |
+
+## What it checks
+
+The rules cover everything between your folder and the model's context.
+
+| Area | What it looks for |
+| --- | --- |
+| Front matter | Duplicate keys, tab indentation, a UTF-8 BOM, a missing front matter block, and long custom fields that never reach the model. |
+| Description | Missing or empty descriptions and harness limits: Hermes shortens its skill-list description to 60 characters; Copilot CLI rejects descriptions over 1,024 UTF-16 units. |
+| Location | `SKILL.md` casing, nested or symlinked manifests, how deep a harness scans, and whether the skill sits in a folder the harness reads. |
+| Catalog | Your skill counted with the skills installed next to it: skill-list budgets, duplicate names, and near-identical descriptions. |
+| Delivery | Size limits when the model opens the skill, such as OpenCode's 51,200 bytes or 2,000 lines and Hermes's 100,000 characters. |
+| Placeholders | Whether `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` reach the model literally; substitution depends on the harness and invocation path. |
+| Invocation | `disable-model-invocation`, `allowed-tools` and Claude Code-only fields that other harnesses ignore. |
+| Gates | Hermes `platforms` and OpenClaw `metadata.openclaw.requires`, which hide the skill on hosts that don't match. |
+| Plugins | Which plugin formats each harness accepts, how plugin skills are named, and components a harness registers but doesn't deliver. |
+
+The full rule list, harness by harness, is in
+[Tier 1: Validation](/skills/skillevaluator/tier1-reference#the-checks) under **harness**.
+
+## Supported harnesses
+
+| Harness | Name for `--harness` |
+| --- | --- |
+| Claude Code | `claude-code` |
+| OpenAI Codex CLI | `codex` |
+| GitHub Copilot CLI | `copilot-cli` |
+| Hermes Agent | `hermes` |
+| OpenClaw | `openclaw` |
+| OpenCode | `opencode` |
+
+## Where the rules come from
+
+Each harness has a profile that ships with SkillEvaluator. The profiles come from
+repeated runs of each harness in which the request sent to the model was
+captured, so a rule describes what the harness did, not what its documentation says.
+
+Harnesses change between releases, so every profile records the release and date
+it was verified against, and `-v` shows them.
+
+- `--harness-version codex=0.170.0` adds a note when you run a release other than the verified one.
+- `--harness-profiles DIR` uses your own profile YAML files, so you can try newer profiles without waiting for a release.
+
+## Match your setup
+
+Some limits depend on how you run the harness. `harness-check` takes four flags for that:
+
+| Flag | What you are telling it |
+| --- | --- |
+| `--context-tokens N` | The context window of your model, in tokens. |
+| `--custom-provider` | Your model is served through a custom or OpenAI-compatible provider. |
+| `--explicit-invocation` | Skills are activated by an explicit mention, such as Codex `$skill`. |
+| `--headless` | The harness runs non-interactively, such as `claude -p` in CI. |
+
+Without them, the check assumes an unknown context window, a native provider, a
+model that opens the skill by itself, and an interactive session. See the
+[CLI reference](/skills/skillevaluator/cli-reference#harness-check) for every flag.
+
+## JSON output
+
+`--json FILE` writes a `harness_compatibility` block with one entry per skill and harness.
+`validate` puts the same block in its JSON report.
+
+```json title="harness.json (one harness shown)"
+{
+  "harness_compatibility": {
+    "/path/to/my-skill": [
+      {
+        "harness": "codex",
+        "display_name": "OpenAI Codex CLI",
+        "status": "not_loaded",
+        "verified_version": "0.166.0",
+        "verified_date": "2026-11-01",
+        "findings": [
+          {
+            "id": "CX-STRICT-YAML",
+            "effect": "not_loaded",
+            "message": "Skill dropped: invalid YAML (tabs or duplicate keys).",
+            "fix": "Use spaces, not tabs, and remove duplicate keys.",
+            "confidence": "high"
+          },
+          {
+            "id": "CX-ARGUMENTS",
+            "effect": "degraded",
+            "message": "$ARGUMENTS is not substituted: the model sees the literal text.",
+            "fix": "Describe the expected input in words instead of $ARGUMENTS.",
+            "confidence": "medium"
+          }
+        ],
+        "catalog": { "size": 1, "desc_chars": 504, "folder": "" }
+      }
+    ]
+  }
+}
+```
+
+`status` is `loads`, `degraded` or `not_loaded`. A finding's `effect` is one of
+those last two, or `advisory` for a note. Each entry also has a `listed` field
+with the description as that harness lists it.
+
+## When it helps
+
+- **Before you publish.** One skill, six harnesses, about a second. Fix what gets dropped before anyone installs it.
+- **When a skill never triggers.** Check first that the harness loads it and how much of the description reaches the model's skill list.
+- **When you move a skill to another harness.** A skill written for Claude Code often relies on placeholders and fields that other harnesses ignore.
+- **When the skills folder grows.** Harnesses give the skill list a budget. Past it, descriptions get shortened and skills get left out.
+- **In CI.** Include it in `validate` to report loading problems on each change. Findings are advisory by default; an active policy can make them block the run.
+
+## Good to know
+
+<AccordionGroup>
+  <Accordion title="Does it change pass or fail?">
+    No. Its findings are MEDIUM for `not_loaded`, LOW for `degraded` and INFO for
+    a note. All three sit below the default gate, so the check never fails a run
+    unless a [policy](/skills/skillevaluator/tier1-reference#validation-profiles-and-policies)
+    raises those severities. `harness-check` exits `0` whatever it finds.
+  </Accordion>
+  <Accordion title="Is there a score?">
+    No. You get a verdict per harness and a tally such as 4 of 6 not loaded. For a
+    quality score, run `skillevaluator quality-check`.
+  </Accordion>
+  <Accordion title="Does it replace a live evaluation?">
+    No. It predicts loader behavior from versioned profiles without running the
+    agent. It doesn't establish which skill reaches a live model or whether the
+    skill helps once it is there. That is what
+    [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
+  </Accordion>
+  <Accordion title="Why does it mention my other skills?">
+    A harness lists your skill together with the skills installed next to it, and
+    that list has a budget. A skill under a harness root such as `.claude/skills`
+    is counted with everything in that folder. A `catalog` line in the panel names
+    the folder.
+  </Accordion>
+  <Accordion title="When do the install-location rules apply?">
+    Only when the skill sits under a harness root such as `.claude/skills` or
+    `.agents/skills`. A skill in a working folder is not flagged for being in the
+    wrong place.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Tier 1: Validation" icon="shield-check" href="/skills/skillevaluator/tier1-validation">
+    The other static checks that run with it, and every harness rule.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference#harness-check">
+    Every `harness-check` flag and its default.
+  </Card>
+  <Card title="Agents & Sandboxes" icon="robot" href="/skills/skillevaluator/agents-and-sandboxes">
+    Run the same agents live once the skill loads.
+  </Card>
+  <Card title="Reports & Results" icon="chart-column" href="/skills/skillevaluator/reports">
+    Where the harness findings appear in the HTML, JSON and SARIF reports.
+  </Card>
+</CardGroup>

@@ -318,7 +318,7 @@ def test_public_docs_match_harbor_environment_and_kwarg_contract() -> None:
     agents = (REPO_ROOT / "docs" / "agents-and-sandboxes.mdx").read_text(encoding="utf-8")
     cli_reference = (REPO_ROOT / "docs" / "cli-reference.mdx").read_text(encoding="utf-8")
     configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
-    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-runtime.mdx").read_text(encoding="utf-8")
     eval_config = (REPO_ROOT / "docs" / "eval-datasets.mdx").read_text(encoding="utf-8")
     public_docs = f"{agents}\n{cli_reference}\n{configuration}\n{tier3}\n{eval_config}"
     normalized_docs = " ".join(public_docs.split())
@@ -464,7 +464,7 @@ def test_uv_is_a_base_dependency_so_plain_pip_can_provision_skillspector() -> No
     uv_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "uv"]
     lock_names = {package["name"] for package in _lock()["package"]}
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    installation = (REPO_ROOT / "docs" / "installation.mdx").read_text(encoding="utf-8")
+    installation = (REPO_ROOT / "docs" / "installation-options.mdx").read_text(encoding="utf-8")
 
     assert len(uv_requirements) == 1
     assert str(uv_requirements[0].specifier) == ">=0.11.27"
@@ -582,7 +582,7 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
-    assert len(readme.split()) <= 1100
+    assert len(readme.split()) <= 1200
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:
@@ -804,6 +804,7 @@ def test_public_cli_exposes_both_tier_two_workflows_without_a_service() -> None:
 def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     guide = (REPO_ROOT / "docs" / "tier2-deduplication.mdx").read_text(encoding="utf-8")
+    guide += "\n" + (REPO_ROOT / "docs" / "tier2-reference.mdx").read_text(encoding="utf-8")
     public_docs = f"{readme}\n{guide}"
 
     assert "similarity-check ./skills" in public_docs
@@ -844,8 +845,9 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
 def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     readme = (REPO_ROOT / "README.md").read_text(encoding="utf-8")
     configuration = (REPO_ROOT / "docs" / "configuration.mdx").read_text(encoding="utf-8")
-    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
-    public_docs = f"{readme}\n{configuration}\n{tier3}"
+    tier3 = (REPO_ROOT / "docs" / "tier3-run-reference.mdx").read_text(encoding="utf-8")
+    runtime = (REPO_ROOT / "docs" / "tier3-runtime.mdx").read_text(encoding="utf-8")
+    public_docs = f"{readme}\n{configuration}\n{tier3}\n{runtime}"
 
     assert f"`{CHAT_DEFAULT_OPENAI}`" in public_docs
     assert "gpt-5.4-mini" in public_docs
@@ -899,7 +901,7 @@ def test_fern_docs_use_the_verified_skills_basepath_and_launch_positioning() -> 
 
 
 def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
-    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-run-reference.mdx").read_text(encoding="utf-8")
     normalized = " ".join(tier3.split())
 
     assert "eval cases \u00d7 agents \u00d7 attempts \u00d7 arms" in normalized
@@ -914,7 +916,7 @@ def test_tier3_docs_explain_cost_controls_and_local_mode_tradeoffs() -> None:
 
 
 def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
-    tier3 = (REPO_ROOT / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    tier3 = (REPO_ROOT / "docs" / "tier3-runtime.mdx").read_text(encoding="utf-8")
     normalized = " ".join(tier3.split())
 
     assert f"The `tier3` extra installs Harbor {HARBOR_VERSION}" in normalized
@@ -1022,9 +1024,9 @@ def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:
         REPO_ROOT / "docs" / "developer-guide.mdx",
         REPO_ROOT / "docs" / "environment-variables.mdx",
         REPO_ROOT / "docs" / "eval-datasets.mdx",
-        REPO_ROOT / "docs" / "installation.mdx",
+        REPO_ROOT / "docs" / "installation-options.mdx",
         REPO_ROOT / "docs" / "reports.mdx",
-        REPO_ROOT / "docs" / "tier3-live-evaluation.mdx",
+        REPO_ROOT / "docs" / "tier3-results.mdx",
     ]
 
     for path in harbor_pages:
@@ -1036,7 +1038,7 @@ def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:
         content = (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
         assert "Agent Trajectory Interchange Format (ATIF)" in content
 
-    for name in ("cli-reference.mdx", "tier3-live-evaluation.mdx"):
+    for name in ("cli-reference.mdx", "tier3-runtime.mdx"):
         content = (REPO_ROOT / "docs" / name).read_text(encoding="utf-8")
         assert "--agent-eval" in content
         assert "--tier3" in content

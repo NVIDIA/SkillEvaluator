@@ -8,7 +8,7 @@ Global options go before the command: `skillevaluator -v validate <skill-dir>`.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report` | `cli,json,html` for `tier1 PATH`, `tier2 PATH`, `validate`; `cli` for focused commands | `cli`, `json`, `html`, `markdown`, `sarif`; comma-separated or repeated |
+| `-r, --report` | `cli,json,html` for `tier1 PATH`, `tier2 PATH`, `validate`; `cli` for focused commands | `cli`, `json`, `html`, `markdown`, `sarif`, `junit`; comma-separated or repeated |
 | `-o, --output-dir` | `reports` | Report directory |
 
 Passing `-r` is honored exactly: `-r cli` writes no files. Basenames:

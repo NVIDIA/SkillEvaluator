@@ -421,6 +421,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Documentation-only CI follows imports through collected test modules and
+  package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
   30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be

@@ -87,7 +87,10 @@ def select_docs_tests(root: Path) -> list[str]:
     # A test can read documentation through a helper, and that helper through
     # another one, so follow imports until nothing new turns up.
     while True:
-        helper_names = {path.stem for path in reading if not _is_test_file(path)}
+        # Collected test modules can also supply helpers. A package's reader
+        # lives in __init__.py but is imported by the package directory's name.
+        helper_names = {path.stem for path in reading}
+        helper_names.update(path.parent.name for path in reading if path.name == "__init__.py")
         found = {path for path, names in imports.items() if names & helper_names}
         if not found:
             break

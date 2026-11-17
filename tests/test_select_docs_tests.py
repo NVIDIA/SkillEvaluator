@@ -94,6 +94,40 @@ def test_lists_only_collected_test_files(tmp_path: Path) -> None:
     assert select_docs_tests(tmp_path) == ["tests/test_prefixed.py", "tests/tier3/suffixed_test.py"]
 
 
+@pytest.mark.parametrize("helper_module", ["test_doc_reader", "doc_reader_test"])
+def test_follows_a_documentation_reader_in_another_collected_test_module(
+    tmp_path: Path, helper_module: str
+) -> None:
+    _write(
+        tmp_path,
+        f"tests/{helper_module}.py",
+        'def read_page():\n    return (ROOT / "README.md").read_text()\n\ndef test_smoke():\n    assert True\n',
+    )
+    _write(
+        tmp_path,
+        "tests/test_consumer.py",
+        f'from {helper_module} import read_page\n\ndef test_readme_contract():\n    assert "required" in read_page()\n',
+    )
+
+    assert select_docs_tests(tmp_path) == sorted([f"tests/{helper_module}.py", "tests/test_consumer.py"])
+
+
+def test_follows_a_documentation_reader_in_a_package_initializer(tmp_path: Path) -> None:
+    _write(
+        tmp_path,
+        "tests/doc_helpers/__init__.py",
+        'def read_page():\n    return (ROOT / "README.md").read_text()\n',
+    )
+    _write(tmp_path, "tests/middle.py", "from doc_helpers import read_page\n")
+    _write(
+        tmp_path,
+        "tests/test_consumer.py",
+        'from middle import read_page\n\ndef test_readme_contract():\n    assert "required" in read_page()\n',
+    )
+
+    assert select_docs_tests(tmp_path) == ["tests/test_consumer.py"]
+
+
 def test_selects_a_test_file_it_cannot_parse(tmp_path: Path) -> None:
     """Its imports are unknown, so it cannot be ruled out; pytest then reports the syntax error."""
     _write(tmp_path, "tests/test_broken.py", "def broken(:\n")

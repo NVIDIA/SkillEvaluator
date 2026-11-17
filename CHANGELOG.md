@@ -438,6 +438,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- SARIF reporting retains findings on cyclic symbolic links on Python 3.12, resolving
+  artifact locations as far as possible instead of aborting the entire report.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

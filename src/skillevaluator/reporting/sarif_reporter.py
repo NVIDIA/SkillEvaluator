@@ -90,14 +90,23 @@ def _positive_start_line(line_number: Any) -> int | None:
     return None
 
 
+def _resolve_for_reporting(path: Path) -> Path:
+    """Resolve accessible path components without failing on a cyclic link.
+
+    Python 3.12's non-strict ``Path.resolve()`` still raises for link loops.
+    A report must be able to identify those links as the finding's artifact.
+    """
+    return Path(os.path.realpath(path))
+
+
 def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:
     """Resolve a validator file path against the scanned skill directory."""
     normalized = file_path.replace("\\", "/")
     path = Path(normalized)
     if scan_root is not None and not path.is_absolute():
-        return (scan_root / path).resolve()
+        return _resolve_for_reporting(scan_root / path)
     if path.is_absolute():
-        return path.resolve()
+        return _resolve_for_reporting(path)
     return path
 
 
@@ -147,7 +156,7 @@ def _unresolved_artifact_path(file_path: str, scan_root: Path | None) -> Path | 
     if not path.is_absolute():
         if scan_root is None:
             return None
-        path = scan_root.resolve() / path
+        path = _resolve_for_reporting(scan_root) / path
     return Path(os.path.normpath(path))
 
 
@@ -163,8 +172,8 @@ def _workspace_relative_path(
     target is outside it keeps the path of the link, which is what the
     finding is about.
     """
-    root = workspace_root.resolve()
-    candidates = [path.resolve()]
+    root = _resolve_for_reporting(workspace_root)
+    candidates = [_resolve_for_reporting(path)]
     unresolved = _unresolved_artifact_path(file_path, scan_root)
     if unresolved is not None:
         candidates.append(unresolved)
@@ -193,7 +202,7 @@ def _normalize_artifact_uri(
         relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
         if relative is not None:
             return _relative_reference(relative.as_posix())
-        return _file_uri(path.resolve())
+        return _file_uri(_resolve_for_reporting(path))
     if path.is_absolute():
         return _file_uri(path)
     return _relative_reference(path.as_posix())

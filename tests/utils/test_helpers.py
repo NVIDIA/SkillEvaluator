@@ -269,6 +269,18 @@ def test_every_git_root_lookup_names_a_non_ascii_root(tmp_path: Path, monkeypatc
     assert lookup(repo_root / "skills") == repo_root.resolve()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Windows strips trailing whitespace in directory names")
+@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n"])
+@pytest.mark.parametrize("lookup", [resolve_git_root, find_git_repo_root, git_root_for], ids=lambda f: f.__name__)
+def test_every_git_root_lookup_preserves_trailing_whitespace(tmp_path: Path, folder: str, lookup) -> None:
+    repo_root = tmp_path / folder
+    _init_git_repo(repo_root, "git@github.com:example/project.git")
+    skill_dir = repo_root / "skills"
+    skill_dir.mkdir()
+
+    assert lookup(skill_dir) == repo_root.resolve()
+
+
 class TestResolveGitRemoteUrl:
     """Tests for the Git remote URL resolver used in HTML report links."""
 

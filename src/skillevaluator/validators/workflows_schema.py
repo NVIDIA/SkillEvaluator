@@ -84,6 +84,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
             workflow_name = workflow_dir.name
 
             if workflow_result.passed:
+                result.merge_advisories_with_prefix(workflow_result, workflow_name)
                 result.add_success(
                     check_name=workflow_name,
                     message="passed",
@@ -278,6 +279,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
             ref_name = ref_file.stem
 
             if ref_result.passed:
+                result.merge_advisories_with_prefix(ref_result, f"reference/{ref_name}")
                 result.add_success(
                     check_name=ref_name,
                     message="valid",

@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Offline Tier 1 hooks for skill repositories. Each hook maps the files
+# pre-commit passes to skill roots and runs one key-free check per skill.
+# The files pattern covers every skill directory the schema check allows.
+# require_serial keeps every file in one process, so each skill is checked
+# and printed once instead of once per parallel chunk.
+# See docs/repository-integration.mdx.
+
+- id: skillevaluator-quality
+  name: SkillEvaluator quality score
+  description: Score each touched skill against the quality bar. Offline; no API key, network, Docker, or scanner download.
+  entry: skillevaluator precommit-run quality
+  language: python
+  require_serial: true
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
+
+- id: skillevaluator-schema
+  name: SkillEvaluator schema
+  description: Validate SKILL.md frontmatter and skill layout. Offline; no API key, network, Docker, or scanner download.
+  entry: skillevaluator precommit-run schema
+  language: python
+  require_serial: true
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'
+
+- id: skillevaluator-lint-scripts
+  name: SkillEvaluator script lint
+  description: Advisory lint of Python scripts in a touched skill. Offline; no API key, network, Docker, or scanner download.
+  entry: skillevaluator precommit-run lint-scripts
+  language: python
+  require_serial: true
+  # Findings are advisory and never fail the commit; verbose shows them anyway.
+  verbose: true
+  files: '(^|/)((SKILL|skill)\.md$|(agents|assets|config|evals|references|scripts|tests|tools)/)'

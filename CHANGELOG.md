@@ -433,6 +433,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Direct Tier 1 validates the target, selected checks and LLM configuration before
+  preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and
   package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a

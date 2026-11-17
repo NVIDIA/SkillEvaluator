@@ -88,7 +88,7 @@ def test_fail_includes_file_and_line() -> None:
     root = ET.fromstring(JUnitReporter().render_all([result]))
     case = root.find("testsuite/testcase")
     assert case is not None
-    assert case.attrib["name"] == "aws-access-key-id"
+    assert case.attrib["name"] == "aws-access-key-id (config/settings.py:15)"
     assert case.attrib["file"] == "config/settings.py"
     assert case.attrib["line"] == "15"
     failure = case.find("failure")
@@ -158,7 +158,7 @@ def test_incomplete_scan_does_not_skip_other_cases() -> None:
 
     root = ET.fromstring(JUnitReporter().render_all([result]))
     cases = {case.attrib["name"]: case for case in _cases(root)}
-    for name in ("check_a", "check_b", "check_c", "skillspector_timeout"):
+    for name in ("check_a", "check_b", "check_c", "skillspector_timeout (SKILL.md)"):
         assert cases[name].find("skipped") is None
         assert cases[name].find("failure") is None
     incomplete = cases["incomplete/skillspector"]
@@ -319,7 +319,7 @@ def test_warning_findings_are_not_failures() -> None:
 
     root = ET.fromstring(JUnitReporter().render_all([result]))
     cases = {case.attrib["name"]: case for case in _cases(root)}
-    warning = cases["quality_reliability"]
+    warning = cases["quality_reliability (SKILL.md)"]
     assert warning.find("failure") is None
     warning_out = warning.find("system-out")
     assert warning_out is not None
@@ -369,13 +369,13 @@ def test_medium_finding_recorded_as_blocking_is_a_failure() -> None:
 
     root = ET.fromstring(JUnitReporter().render_all([result]))
     cases = {case.attrib["name"]: case for case in _cases(root)}
-    pickle_case = cases["B301:blacklist"]
+    pickle_case = cases["B301:blacklist (scripts/load.py:7)"]
     failure = pickle_case.find("failure")
     assert failure is not None
     assert "scripts/load.py:7" in (failure.text or "")
     assert pickle_case.attrib["file"] == "scripts/load.py"
     assert pickle_case.attrib["line"] == "7"
-    assert cases["B108:hardcoded_tmp_directory"].find("failure") is None
+    assert cases["B108:hardcoded_tmp_directory (scripts/tmp.py:2)"].find("failure") is None
     assert "error" not in cases
     assert int(root.attrib["failures"]) == 2
     _assert_counts_match(root)
@@ -478,7 +478,7 @@ def test_advisory_tier2_findings_and_errors_are_not_failures() -> None:
     root = ET.fromstring(JUnitReporter().render_all([result]))
     cases = {case.attrib["name"]: case for case in _cases(root)}
     assert all(case.find("failure") is None for case in cases.values())
-    finding_out = cases["duplicate_section"].find("system-out")
+    finding_out = cases["duplicate_section (SKILL.md:12)"].find("system-out")
     assert finding_out is not None
     assert (finding_out.text or "").startswith("Advisory, does not gate: SKILL.md:12: Section duplicates")
     assert int(root.attrib["failures"]) == 0
@@ -614,3 +614,41 @@ def test_catalog_with_repeated_leaf_names_keeps_identities_distinct(tmp_path: Pa
     assert identities
     assert len(identities) == len(set(identities))
     assert classnames == {"group-a/demo", "group-b/demo"}
+
+
+def _findings_result(order: list[tuple[str, str, int | None]]) -> ValidationResult:
+    result = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for check_name, file_path, line in order:
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.LOW,
+                check_name=check_name,
+                message=f"{check_name} in {file_path}",
+                file_path=file_path,
+                line_number=line,
+            )
+        )
+    return result
+
+
+def test_finding_case_names_do_not_depend_on_finding_order() -> None:
+    findings = [
+        ("quality_correctness", "SKILL.md", 12),
+        ("quality_correctness", "SKILL.md", 40),
+        ("quality_correctness", "references/api.md", None),
+    ]
+
+    def names(order: list[tuple[str, str, int | None]]) -> set[str]:
+        root = ET.fromstring(JUnitReporter().render_all([_findings_result(order)]))
+        return {case.attrib["name"] for case in _cases(root)}
+
+    first = names(findings)
+    assert first == {
+        "quality_correctness (SKILL.md:12)",
+        "quality_correctness (SKILL.md:40)",
+        "quality_correctness (references/api.md)",
+    }
+    assert names(list(reversed(findings))) == first
+    added = names([("quality_correctness", "SKILL.md", 5), *findings])
+    assert first <= added

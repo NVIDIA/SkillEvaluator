@@ -355,7 +355,10 @@ merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
 | `system-out` | Score and threshold when recorded, and non-failing finding text |
 
 Counts on `testsuites` and each `testsuite` (`tests`, `failures`, `errors`,
-`skipped`, `time`) match the cases they contain. File paths are relative to the scanned
+`skipped`, `time`) match the cases they contain. A finding case is named
+after its check and location, `check_name (path:line)` (or `check_name (path)`
+when no line was recorded), so adding or reordering findings does not rename
+the others in CI test history. File paths are relative to the scanned
 root, using the same resolution rules and percent-encoding as SARIF, so a file
 name that is not valid UTF-8 stays distinct (`caf%E9.md`). In other text such a
 name is backslash-escaped (`caf\xe9.md`), then characters XML 1.0 forbids are

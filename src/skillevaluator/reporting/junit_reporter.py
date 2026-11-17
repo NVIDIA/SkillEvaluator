@@ -18,6 +18,8 @@ When the reporter knows the evaluated target, suite names and testcase
 classnames are qualified with its repository-relative path (for example
 ``group-a/demo::Schema & Repository Governance``), so reports from several
 targets collected into one CI test report keep distinct test identities.
+A finding case is named after its check and location (``check (path:line)``), so
+its identity does not shift when other findings are added or reordered.
 """
 
 from __future__ import annotations
@@ -166,6 +168,19 @@ def _failure_body(finding: Finding, file_path: str) -> str:
     return body
 
 
+def _finding_case_name(check_name: str, file_path: str, line: int | None) -> str:
+    """Return a finding case name keyed on its location, not its position in the list.
+
+    ``quality_correctness (SKILL.md:12)`` stays the same when other findings are
+    added or reordered, so CI test history keyed on suite, class and name holds.
+    """
+    stem = check_name or "finding"
+    if not file_path:
+        return stem
+    location = f"{file_path}:{line}" if line is not None else file_path
+    return f"{stem} ({location})"
+
+
 def _unique_name(base: str, used: set[str]) -> str:
     stem = base or "check"
     name = stem
@@ -279,7 +294,7 @@ def _cases_for_result(
         file_path = _junit_file_path(finding.file_path, workspace_root, scan_root)
         line = _positive_start_line(finding.line_number)
         failed = finding_blocks(result, finding)
-        name = _unique_name(_xml_text(finding.check_name) or "finding", used)
+        name = _unique_name(_finding_case_name(_xml_text(finding.check_name), file_path, line), used)
         detail = _failure_body(finding, file_path)
         cases.append(
             _Case(

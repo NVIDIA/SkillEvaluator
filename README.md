@@ -25,7 +25,7 @@ the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
 
 ## Get started
 
-Three ways in, one CLI, same results.
+Check skills from your terminal, CI, or agent.
 
 <table><thead><tr>
 <th width="33%" align="left">1. Run the CLI directly</th>
@@ -87,7 +87,7 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 </td>
 </tr></tbody></table>
 
-### ⚡ Will your agent load your skill? Know in seconds.
+### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill? Know in seconds.
 
 No LLM inference · No model key · No agent run
 
@@ -108,10 +108,8 @@ Illustrative summary of versioned profiles. Full output can include notes and sc
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` above runs [this check](https://docs.nvidia.com/skills/skillevaluator/harness-check)
-by default, as part of Tier 1.
-
-> 🧪 **Ready to go deeper?** Try a [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
+`validate` above runs it by default, as part of Tier 1. 🧪 **Ready to go deeper?** Try a
+[live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
 

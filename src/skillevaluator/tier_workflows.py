@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -75,7 +76,9 @@ def run_tier1_workflow(
     pii_waivers: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
+    prepare_scanners: Callable[[], None] | None = None,
 ) -> list[ValidationResult]:
+    """Validate local configuration before optional scanner preparation and checks."""
     require_skill(skill_path)
     if checks is not None and not checks.strip(", \t\n"):
         raise click.UsageError("--checks must name at least one static check.")
@@ -90,6 +93,8 @@ def run_tier1_workflow(
             import openai  # noqa: F401 -- fail before scanning if the LLM extra is absent
         except ImportError as exc:
             raise click.ClickException("Install skillevaluator[llm] to run LLM checks.") from exc
+    if prepare_scanners is not None:
+        prepare_scanners()
     results = tier1.run_validation(
         skill_path,
         checks=selected,

@@ -12,6 +12,16 @@ All notable changes to SkillEvaluator are documented in this file.
   results, and experiments now have separate reference pages; existing topic
   bookmarks link to their new locations.
   The README harness panel is labelled as an illustrative profile summary.
+- Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
+  exposes `skillevaluator-quality`, `skillevaluator-schema`, and
+  `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
+  maps changed files to skill roots and runs each check without an API key,
+  network, Docker, or scanner download.
+- JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
+  artifacts. One testsuite is emitted per check group, failures include
+  file:line when recorded and follow the same gate as the exit code, incomplete
+  scanners are reported as errors, and checks that did not run are skipped
+  rather than reported as passed.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.
@@ -439,6 +449,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Direct Tier 1 validates the target, selected checks and LLM configuration before
+  preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and
   package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a

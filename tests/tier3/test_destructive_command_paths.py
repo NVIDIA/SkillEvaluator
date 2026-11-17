@@ -930,8 +930,9 @@ def test_substitutions_and_words_count_toward_the_trace_limit(monkeypatch) -> No
 
     The lexer reads each backtick substitution as a longer placeholder word,
     so these calls cost several times their length to lex. Counted by length
-    alone, all five would fit in the limit and be lexed whole, only to be
-    read in one pass as text of more than 4,096 tokens.
+    alone, the first two would fit in the limit and be lexed whole, only to
+    be read in one pass as text of more than 4,096 tokens, whose commands
+    then count too; the third would pass the limit.
     """
     lexed: list[int] = []
     walk = checks._rm_shell_words
@@ -1215,6 +1216,8 @@ _RM_THAT_RUNS = [
     "eval ${X}$'\\x20-rf\\x20/workspace'",
     "env -S $X$'\\x20-rf\\x20/workspace'",
     "eval $'rm -rf /tmp/x' && eval $'rm -rf /tmp/y' /workspace",
+    # Only the $'...' word that eval reads is read as its text, also after other $'...' words.
+    "echo $'x' $'y'; eval z$'$X -rf '/workspace",
     # Text that spells the placeholder for a $'...' word keeps the finding where the words may name rm.
     "echo ${__rm_ansi_c}; eval $'rm -rf /tmp/x' /workspace",
     # git runs the pager of git grep -O with the names of the matching files after it.
@@ -1298,7 +1301,7 @@ def test_a_quoted_rm_name_that_is_an_argument_keeps_mains_reading(security_check
 
 @pytest.mark.parametrize("other", [None, "pytest -q", _SKILL_CALL], ids=["alone", "after-pytest", "after-skill"])
 @pytest.mark.parametrize("command", _QUOTED_RM_COMMANDS)
-def test_a_quoted_rm_name_that_is_a_command_word_keeps_the_finding(security_check, command: str, other) -> None:
+def test_a_quoted_rm_name_that_is_a_command_word_gets_the_finding(security_check, command: str, other) -> None:
     result = security_check(command) if other is None else security_check(other, command)
 
     [finding] = _destructive_findings(result)
@@ -1345,7 +1348,7 @@ def test_a_quoted_rm_name_in_an_array_literal_keeps_mains_result(security_check,
 
 
 @pytest.mark.parametrize("command", _COMMANDS_BESIDE_ARRAY_LITERALS)
-def test_a_command_beside_an_array_literal_keeps_the_finding(security_check, command: str) -> None:
+def test_a_command_beside_an_array_literal_gets_the_finding(security_check, command: str) -> None:
     result = security_check(command)
 
     assert _destructive_findings(result)
@@ -1549,6 +1552,11 @@ _RM_RUN_THROUGH_EVERY_SPELLING = [
     "cat <<EOF\n$(r''m -rf /workspace)\nEOF",
     "cat <<EOF\n$(rm '-rf' /workspace)\nEOF",
     'cat <<EOF\n`"rm" -rf /workspace`\nEOF',
+    # A substitution in double quotes is command text of its own, so a double quote in it opens a new string.
+    'x="$(eval "$X -rf /workspace")"',
+    'printf %s "$(eval "$X -rf /workspace")"',
+    'out="$(git grep -O"$X -rf" needle)"',
+    'x="`eval "$X -rf /workspace"`"',
     # A locale-quoted option after an expansion in eval text.
     "eval '$CMD $\"-rf\" /workspace'",
     "eval '$CMD' $\"-rf\" /workspace",
@@ -1975,7 +1983,7 @@ def test_a_target_after_a_dollar_quote_word_keeps_the_finding(security_check, wr
         'echo \'eval "$CMD" -rf "$DIR"\'',
     ],
 )
-def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, command: str) -> None:
+def test_eval_text_that_only_shows_a_command_gets_the_finding(security_check, command: str) -> None:
     """eval text is read wherever rm text is, also where nothing runs it, as a known trade-off.
 
     main reads rm text in quoted words and in every here-document body, since
@@ -2002,6 +2010,8 @@ def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, c
         "eval $'$X -rf'",
         "git grep -O'less -R' needle",
         "git grep -O'$PAGER' needle",
+        'echo "$(eval "$LS -R")"',
+        'x="$(git grep -O"less -R" needle)"',
         'eval "$GREP -n -r pattern src"',
         "eval $'cp' a b",
         "env FOO=1 python -s app.py",
@@ -2025,6 +2035,10 @@ def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, c
         "eval $'cp' -r a b",
         "env -S $'cp' -r a b",
         "eval " + "$'a'" * 4_700,
+        # A $'...' word that eval or env -S does not read is another command's argument.
+        "eval $'true'; echo $'$X -rf /workspace'",
+        "echo $'$X -rf /workspace'; eval $'true'",
+        "eval $'true' && grep $'$X -R pattern' file",
         # Text eval runs three levels deep reads the same past the lexer's limits.
         'eval "eval \\"eval \\\\\\"echo rm -x done\\\\\\"\\""\necho ' + "a" * 70_000,
         # A word that only holds rm, as run_rm_tests does, is not rm text.

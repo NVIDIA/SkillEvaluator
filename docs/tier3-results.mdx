@@ -355,6 +355,12 @@ As another command's argument, as in `grep 'rm' -rn .` or
 array literal, as in `cmd=("rm" -rf build)` or
 `declare -a cmd=('rm' '-rf' 'build')`, are values, not a command, so they do
 not receive it either, also where `"${cmd[@]}"` runs them later.
+Such an argument or array word does receive the finding four or more `$( )`
+levels deep, where the check stops splitting words and any `rm` text it
+reads there gets the finding, as in
+`echo $(echo $(echo $(echo $(git 'rm' -r --cached build))))`, and after a
+`$(` or backtick that does not close, whose command is read with its quotes
+dropped, as in ``echo `git 'rm' -r --cached build``.
 In a quoted word or here-document read as commands, such as `bash -c` text,
 a here-string or text piped to a shell, a quoted name counts only where that
 text also holds `rm` text that the pattern below matches, so
@@ -401,10 +407,15 @@ even when it only cleans `/tmp` or prints; such text over 64 KiB does too.
 These readings stop once the texts they check count 256 KiB of a trace.
 Each text of up to 64 KiB counts before each check of it, also one they
 then do not read, such as a here-document body or substitution that runs
-no `rm`, or a command of text read in one pass: its length, 64 characters
-more, and 10 more for each word, newline, shell operator character (`;`,
-`&`, `|`, `(`, `)`, `<` or `>`), backtick, `$(` and `$'...'` word in it,
-which cost the lexer and the walk more than a character does. Text read
+no `rm`: its length, 64 characters more, and 10 more for each word,
+newline, shell operator character (`;`, `&`, `|`, `(`, `)`, `<` or `>`),
+backtick, `$(` and `$'...'` word in it, which cost the lexer and the walk
+more than a character does. A longer text does not count as a whole: it is
+read in one pass, where each command and here-document body that reading
+checks counts the same way before its check, at any length. So four calls
+of `rm -rf /tmp/x; echo` and 70,000 more characters spend the limit, while
+five such calls with 60,000 characters, which the check splits into words
+and in which no reading checks a text, count nothing. Text read
 again, such as `eval` text or a
 command read in pieces, counts again at each level it is read. A text that
 would take the count past 256 KiB is not read: it, the rest of its call and

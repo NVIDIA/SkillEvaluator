@@ -4,6 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym) with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+
 ### Fixed
 
 - Folder validators apply skill-discovery exclusions only below the requested
@@ -55,9 +59,9 @@ must be updated when the release is frozen.
 - Add offline pre-commit hooks: `skillevaluator-quality`,
   `skillevaluator-schema`, and `skillevaluator-lint-scripts`. These hooks need
   no API key, Docker, network access, or scanner downloads.
-- Add the experimental `tier3 evaluate --backend nemo-gym` adapter, with shared
-  evaluation cases, verifier results, and report formats. Harbor remains the
-  default backend. JSON and HTML identify the backend used.
+- 🎯 **NeMo Gym integration:** run Tier 3 evaluations through NeMo Gym with
+  SkillEvaluator’s grading and reports. [Get started](https://docs.nvidia.com/skills/skillevaluator/nemo-gym).
+  The integration is experimental; Harbor remains the default backend.
 - Add opt-in grader qualification coverage policies, risk limits, preflight
   checks, and retained assessment evidence. These tools and the synthetic pilot
   do not establish grader reliability or release qualification.

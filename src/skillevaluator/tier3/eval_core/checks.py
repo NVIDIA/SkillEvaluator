@@ -7257,7 +7257,7 @@ def _rm_decoded_tokens(tokens: list[str], payloads: list[str], kinds: list[str])
 
 
 def _rm_decoded_rereads(
-    tokens: list[str], payloads: list[str], kinds: list[str]
+    tokens: list[str], payloads: list[str], kinds: list[str], read: set[int] | None = None
 ) -> list[list[tuple[str, bool]]] | None:
     """Return _rm_reread_texts for each segment of *tokens*, with each ``$'...'`` word decoded in place.
 
@@ -7266,7 +7266,8 @@ def _rm_decoded_rereads(
     ``eval $'rm -rf /tmp/x' /workspace`` runs ``rm -rf /tmp/x /workspace``
     and ``eval r$'m -rf /workspace'`` runs ``rm -rf /workspace``. Only texts
     that hold such a word are returned. Where _rm_decoded_tokens returns
-    None, so does this.
+    None, so does this. *read* gets the place of each ``$'...'`` word,
+    counted among those words, that a returned text holds.
     """
     decoded = [_rm_ansi_c_text(payload) for payload, kind in zip(payloads, kinds) if kind == "ansi_c"]  # noqa: B905
     names = _rm_decoded_tokens(tokens, payloads, kinds)
@@ -7286,7 +7287,11 @@ def _rm_decoded_rereads(
 
     def decoded_word(match: re.Match[str]) -> str:
         index = int(match.group(1))
-        return decoded[index] if index < len(decoded) else match.group()
+        if index >= len(decoded):
+            return match.group()
+        if read is not None:
+            read.add(index)
+        return decoded[index]
 
     def decode(text: str) -> str | None:
         return re.sub(r"\$\{__rm_ansi_c_([0-9]+)\}", decoded_word, text) if "${__rm_ansi_c_" in text else None
@@ -7993,8 +7998,10 @@ def _rm_targets_outside_tmp(
     ]
     # A $'...' word that eval or env -S reads again is read as that text, decoded.
     ansi_c_reread = any("${__rm_ansi_c}" in text for texts in rereads for text, _ in texts)
+    # The place of each such word among the $'...' words, where the placeholders map to them.
+    reread_words: set[int] = set()
     # The text read again is also read with each $'...' word decoded in place, as the shell joins it.
-    decoded_rereads = _rm_decoded_rereads(tokens, payloads, kinds) if ansi_c_reread else []
+    decoded_rereads = _rm_decoded_rereads(tokens, payloads, kinds, reread_words) if ansi_c_reread else []
     # Where the decoded text is read, the text with its placeholders is not: the shell runs only the former.
     decoded = decoded_rereads is not None and ansi_c_reread
     if decoded_rereads is None:
@@ -8023,10 +8030,13 @@ def _rm_targets_outside_tmp(
     # Each decoded $'...' text read below as eval or env -S text, and whether it was read as joined: the
     # same text read again from the command line that eval or env -S reads would give the same answer.
     decoded_read: dict[str, bool] = {}
+    ansi_c_words = 0  # The $'...' words before this payload.
     for payload, kind in zip(payloads, kinds):  # noqa: B905 -- same length; the verifier runs on Python 3.9.
         # In eval or env -S text, a substitution or here-document runs in the shell that reads it again,
-        # so its text is read the same way.
-        dynamic = _dynamic or (kind == "ansi_c" and ansi_c_reread)
+        # so its text is read the same way. Of the $'...' words, only those that text holds are read so;
+        # where its placeholders do not map to them, every one is.
+        dynamic = _dynamic or (kind == "ansi_c" and (ansi_c_words in reread_words if decoded else ansi_c_reread))
+        ansi_c_words += kind == "ansi_c"
         joined = kind == "ansi_c" and ansi_c_joined
         substitution = kind in {"substitution", "unescaped"}
         # A $'...' word is also read with its escapes decoded, as eval and env -S see it.

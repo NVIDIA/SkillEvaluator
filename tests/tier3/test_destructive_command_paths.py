@@ -1215,6 +1215,8 @@ _RM_THAT_RUNS = [
     "eval ${X}$'\\x20-rf\\x20/workspace'",
     "env -S $X$'\\x20-rf\\x20/workspace'",
     "eval $'rm -rf /tmp/x' && eval $'rm -rf /tmp/y' /workspace",
+    # Only the $'...' word that eval reads is read as its text, also after other $'...' words.
+    "echo $'x' $'y'; eval z$'$X -rf '/workspace",
     # Text that spells the placeholder for a $'...' word keeps the finding where the words may name rm.
     "echo ${__rm_ansi_c}; eval $'rm -rf /tmp/x' /workspace",
     # git runs the pager of git grep -O with the names of the matching files after it.
@@ -2032,6 +2034,10 @@ def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, c
         "eval $'cp' -r a b",
         "env -S $'cp' -r a b",
         "eval " + "$'a'" * 4_700,
+        # A $'...' word that eval or env -S does not read is another command's argument.
+        "eval $'true'; echo $'$X -rf /workspace'",
+        "echo $'$X -rf /workspace'; eval $'true'",
+        "eval $'true' && grep $'$X -R pattern' file",
         # Text eval runs three levels deep reads the same past the lexer's limits.
         'eval "eval \\"eval \\\\\\"echo rm -x done\\\\\\"\\""\necho ' + "a" * 70_000,
         # A word that only holds rm, as run_rm_tests does, is not rm text.

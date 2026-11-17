@@ -6238,7 +6238,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
 
     def test_llm_verify_docs_state_the_answering_model_rule_of_rubric_evaluation(self) -> None:
         """Both labels come from the same client, so the two docs paragraphs state one rule."""
-        page = Path(__file__).parents[2] / "docs" / "tier1-validation.mdx"
+        page = Path(__file__).parents[2] / "docs" / "tier1-reference.mdx"
         paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
         [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
         [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]

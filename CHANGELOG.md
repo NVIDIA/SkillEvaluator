@@ -4,8 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 1.0.1 - 2026-11-17
+
 ### Fixed
 
+- Disable OpenCode snapshots by default to avoid broken-pipe failures after a
+  completed task, while preserving explicit user snapshot settings.
 - Preserve opaque Claude gateway model IDs across Docker, local, and native Harbor
   command construction while keeping native Anthropic, Vertex, and Bedrock routes
   independent from a gateway-backed judge.

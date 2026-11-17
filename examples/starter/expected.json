@@ -13,6 +13,9 @@
   },
   "quality": {"score": 84.5, "grade": "B", "status": "passed", "exit_code": 0, "publication": "incomplete"},
   "regressed": {"score": 71.0, "grade": "C", "status": "failed", "exit_code": 1, "publication": "fail"},
-  "evaluator_versions": {"1.0.0": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}},
+  "evaluator_versions": {
+    "1.0.0": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}},
+    "1.0.1": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}
+  },
   "checkout": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}
 }

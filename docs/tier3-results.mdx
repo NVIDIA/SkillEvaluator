@@ -221,7 +221,8 @@ those lines does.
 
 Interpreter code that a call runs is read for HTTP uploads too. That code is:
 
-- a `-c` or `-e` payload (PHP's `-r`; every `-e` line of `ruby` and `perl`),
+- a `-c` or `-e` payload (PHP's `-r`; every `-e` line of `ruby` and `perl`,
+  also after `-n`, `-p`, `-a`, or `-l`, as in `perl -lne CODE .env`),
   also behind a command that runs a later word as a program, such as
   `strace`, `watch`, `xargs`, `find -exec`, `dotenv --`, `uv run`,
   `poetry run`, `conda run`, `bundle exec`, or `nix develop -c`, or one of
@@ -364,8 +365,9 @@ chain longer than 300 characters, or a name bound by a loop; a client
 `Request` sent through a function's return value or a loop name, as in
 `s.send(build().prepare())`; a client read through another module's export,
 as in `lib.axios.post(...)` after `const lib = require("./lib")`; a config
-read through process substitution; a script or config that an earlier call wrote;
-and code over 64 KiB.
+read through process substitution; a `perl` or `ruby` option with a value
+attached before the code, as in `perl -0777 -ne CODE` or `perl -F, -ane CODE`;
+a script or config that an earlier call wrote; and code over 64 KiB.
 
 Each tool call the reader reads has one work budget, shared by every program,
 shell text, and config the call runs: 32 units per character of the call's

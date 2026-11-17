@@ -6395,11 +6395,15 @@ def _rm_xargs_steps(words: list[str]) -> list[tuple[str, int]]:
     return steps
 
 
-def _rm_inline_code(executable: str, words: list[str], index: int, *, every: bool = False) -> str | None:
+def _rm_inline_code(
+    executable: str, words: list[str], index: int, *, every: bool = False, flags: frozenset[str] = frozenset()
+) -> str | None:
     """Read only an interpreter's inline source, excluding its script argv.
 
     With *every*, each inline source option counts, as ruby and perl run
-    every -e line, and the sources are joined by newlines.
+    every -e line, and the sources are joined by newlines. *flags* are
+    options that take no value, beyond the grammar's, as -n and -p are for
+    perl and ruby (see _UPLOAD_LOOP_FLAGS).
     """
     args = _interpreter_operands(words, index, {})
     if executable == "deno":
@@ -6417,6 +6421,7 @@ def _rm_inline_code(executable: str, words: list[str], index: int, *, every: boo
             "value": grammar["value"] | {"-o", "-O"},
         }
     code_options = grammar["code"] - ({"-m"} if executable == "python" else set())
+    boolean = grammar["boolean"] | flags
     # Sources read so far with *every*; without it the first is returned at once.
     codes: list[str] = []
     cursor = 0
@@ -6435,7 +6440,7 @@ def _rm_inline_code(executable: str, words: list[str], index: int, *, every: boo
             continue
         if option in grammar["terminal"] or option in grammar["code"]:
             return "\n".join(codes) or None
-        if option in grammar["boolean"]:
+        if option in boolean:
             continue
         if name in grammar["value"]:
             cursor += not equals
@@ -6456,7 +6461,7 @@ def _rm_inline_code(executable: str, words: list[str], index: int, *, every: boo
             if short_option in grammar["value"]:
                 cursor += offset == len(option) - 1
                 break
-            if short_option not in grammar["boolean"]:
+            if short_option not in boolean:
                 return "\n".join(codes) or None
     return "\n".join(codes) or None
 
@@ -8256,6 +8261,10 @@ _UPLOAD_LOAD_OPTION_RES = {
 }
 # PHP options: those that take the code to run, those that take another
 # value, and those that take none.
+# Options of perl and ruby that run the -e code in a loop over input lines
+# (-n, and -p, which also prints each line) or split each line (perl's -a),
+# as in perl -ne CODE .env or ruby -pe CODE; they take no value.
+_UPLOAD_LOOP_FLAGS = {"perl": frozenset({"-n", "-p", "-a"}), "ruby": frozenset({"-n", "-p"})}
 _PHP_CODE_OPTIONS = frozenset({"-r", "-B", "-R", "-E"})
 _PHP_VALUE_OPTIONS = frozenset({"-c", "-d", "-z"})
 _PHP_FLAG_OPTIONS = frozenset({"-C", "-e", "-H", "-n", "-q"})
@@ -10371,7 +10380,11 @@ def _upload_inline_code(words: list[str], index: int) -> tuple[str, str] | None:
                     *_without_load_options(_UPLOAD_LOAD_OPTION_RES[name], words[position + 1 :]),
                 ]
             code = _rm_inline_code(
-                "python" if name in {"pypy", "py"} else executable, program, position, every=name in {"ruby", "perl"}
+                "python" if name in {"pypy", "py"} else executable,
+                program,
+                position,
+                every=name in {"ruby", "perl"},
+                flags=_UPLOAD_LOOP_FLAGS.get(name, frozenset()),
             )
         if code is not None:
             return executable, code

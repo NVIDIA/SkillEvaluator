@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- The bundled `create-custom-grader` example now ships the benchmark folder and
+  existing skill its first two cases ask the agent to convert, under
+  `evals/files/`, and each case declares `files` so only its own fixture is
+  staged. Previously those cases had no workspace input to work from.
+
 ## 1.0.0 - 2026-11-17
 
 ### Added

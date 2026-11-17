@@ -8063,6 +8063,8 @@ _CODE_METHOD_KEY_RE = re.compile(r"\bmethod['\"]?\s*[:=]\s*['\"](?:post|put|patc
 _CODE_METHOD_KEY_VARIABLE_RE = re.compile(r"\bmethod['\"]?\s*[:=]\s*([A-Za-z_$][\w$]*)", re.IGNORECASE)
 _CODE_GO_METHOD_RE = re.compile(r"\bMethod(?:Post|Put|Patch)\b")
 _CODE_UPLOAD_METHODS = frozenset({"post", "put", "patch"})
+# Every HTTP method, as urllib3's urlopen(method, url, body) takes first.
+_CODE_HTTP_METHODS = _CODE_UPLOAD_METHODS | {"get", "head", "delete", "options", "trace", "connect"}
 # data= with a value other than None, as in Request(url, data=body).
 _CODE_DATA_KEYWORD_RE = re.compile(r"\bdata\s*=(?!=)(?!\s*None\b)")
 # A request body among a Request's arguments: body, json, content or files
@@ -9348,7 +9350,9 @@ def _code_client_call_uploads(reader: _CodeReader) -> bool:
       request is after "from requests import request": such a key, or an
       upload method as an argument, quoted, in a variable or as Go's
       http.MethodPost;
-    - urlopen on any receiver: data, by keyword or as its second argument;
+    - urlopen on any receiver: data, by keyword or as its second argument
+      unless the first is an HTTP method, as urllib3's urlopen("GET", url)
+      has;
     - getattr of a client and "post", "put" or "patch", when called, bound
       or passed on (see _code_reference_runs);
     - open on an XMLHttpRequest, with an upload method first.
@@ -9730,8 +9734,9 @@ def _code_call_sends(
     if "positional" in kinds and len(arguments) >= 2:
         first = reader.literal_at(arguments[0][0] + _code_blank_prefix(reader.code, *arguments[0]))
         second = masked[arguments[1][0] : arguments[1][1]].strip()
+        # urlopen(url, data) sends data; urllib3's urlopen("GET", url) names a method and a URL.
         if (
-            (first is None or first[2].casefold() not in _CODE_UPLOAD_METHODS)
+            (first is None or first[2].casefold() not in _CODE_HTTP_METHODS)
             and second
             and second != "None"
             and not re.match(r"[A-Za-z_]\w*\s*=(?!=)", second)

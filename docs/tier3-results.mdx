@@ -263,7 +263,8 @@ In interpreter code, these warn:
 - a call that sends an upload method or data: `fetch` or a client called with
   a `POST`, `PUT`, or `PATCH` method, also through a variable or an options
   object; `request("POST", ...)` on a client; `urlopen` with data other than
-  `None`; the `Request` of an HTTP client or of urllib, such as
+  `None`, but not urllib3's `urlopen("GET", url)`, whose second argument
+  follows a method; the `Request` of an HTTP client or of urllib, such as
   `requests.Request`, `httpx.Request`, `urllib.request.Request`, or a
   `Request` imported from one of them, with data other than `None`, or with
   an upload method and a body (`body`, `json`, `content`, or `files`),

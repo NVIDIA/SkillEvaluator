@@ -615,6 +615,9 @@ _CODE_THAT_SENDS_NOTHING = [
     "from requests import get\nget('https://example.com')",
     "import requests as r\nr.get('https://example.com', params={'q': 1})",
     "import urllib.request as u\nprint(u.urlopen(u.Request('https://example.com', headers={'A': 'b'})).status)",
+    # urllib3's urlopen takes the method first, so its second argument is the URL, not data.
+    "import urllib3\npool = urllib3.PoolManager()\nprint(pool.urlopen('GET', url).status)",
+    "import urllib3\nurllib3.PoolManager().urlopen('HEAD', url, headers={'A': 'b'})",
     "import requests\nprint(requests.__version__)",
     # A docstring, comment or string that mentions an upload is not a call.
     "'''Example: requests.post(url, data=x)'''\nimport requests\nprint(requests.get('https://example.com'))",

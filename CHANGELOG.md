@@ -438,6 +438,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Cosine comparisons preserve the direction of subnormal embedding vectors
+  instead of inflating their similarity through a rounded tiny norm.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

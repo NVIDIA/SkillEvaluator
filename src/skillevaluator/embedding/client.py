@@ -75,6 +75,12 @@ def normalize_embedding_vector(
     )
     if norm == 0.0:
         return values
+    if norm < sys.float_info.min:
+        # A subnormal norm loses significant digits even when hypot avoids
+        # underflow. Rescale first so normalization preserves the direction.
+        scale = max(abs(value) for value in values)
+        values = [value / scale for value in values]
+        norm = math.hypot(*values)
     return [value / norm for value in values]
 
 

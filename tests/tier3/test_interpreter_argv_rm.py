@@ -73,6 +73,13 @@ def _destructive(result: dict[str, Any]) -> list[dict[str, Any]]:
 _HOME_CLEANUP = _python("run(['rm', '-rf', '/home/u'])")
 _HOME_CLEANUP_CODE = "import subprocess\nsubprocess.run(['rm', '-rf', '/home/u'])"
 
+
+def _payload_as_word(position: int) -> str:
+    """Return an interpreter command whose word *position* is a substitution that runs _HOME_CLEANUP."""
+    variables = " ".join(f"$F{index}" for index in range(position - 4))
+    return f"python3 -c 'print(1)' {variables} $({_HOME_CLEANUP})"
+
+
 _ARGV_RM_THAT_RUNS = [
     _HOME_CLEANUP,
     _python("call(['rm', '-rf', '/workspace/data'])"),
@@ -154,6 +161,10 @@ _ARGV_RM_THAT_RUNS = [
     ),
     pytest.param(_HOME_CLEANUP + " $(true) " + "word " * 4100, id="payload-and-substitution-before-4100-words"),
     pytest.param(_HOME_CLEANUP + " ${x} " + "aaaaaaa " * 4000, id="payload-and-expansion-before-4000-words"),
+    # The 128th word of an interpreter command is read, at the start of a
+    # line and after another command alike.
+    pytest.param(_payload_as_word(128), id="substitution-as-word-128"),
+    pytest.param("true && " + _payload_as_word(128), id="substitution-as-word-128-after-a-command"),
     # Redirections before the interpreter, also between assignments in any
     # order, and a here-string program after another here-string that names
     # no quoted rm.
@@ -793,6 +804,10 @@ _ARGV_RM_FORMS_NOT_MODELED = [
         "const { spawnSync } = require('child_process');\nspawnSync('rm', /* x */ ['-rf', '/home/u']);",
         language="javascript",
     ),
+    # A substitution past the first 128 words of an interpreter command, at
+    # the start of a line and after another command alike.
+    pytest.param(_payload_as_word(129), id="substitution-as-word-129"),
+    pytest.param("true && " + _payload_as_word(129), id="substitution-as-word-129-after-a-command"),
     # Text that holds the held-string mark is split whole, so a payload's
     # many arguments count in full.
     pytest.param(

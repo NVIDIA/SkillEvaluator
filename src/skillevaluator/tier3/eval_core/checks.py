@@ -6732,10 +6732,11 @@ _RM_ARGV_SYNTAX_ONLY_RE = re.compile(r"[\d;&|<>(){}!-]*")
 
 
 def _rm_argv_cut_words(command: str, max_words: int) -> str:
-    """Return a command of shell text cut before its run of blanks after the first *max_words* such runs.
+    """Return a command of shell text cut at the run of blanks after its first *max_words* words.
 
-    The runs count outside quotes, backticks, ``$'...'`` strings and
-    parentheses, ``$( )`` included; a command with no more runs, or that
+    The runs of blanks that end words count outside quotes, backticks,
+    ``$'...'`` strings and parentheses, ``$( )`` included, and blanks before
+    the first word end none; a command with no more such runs, or that
     reaches a comment first, is returned whole. The words after the cut are
     the program's own arguments, which may be many, so they are left out of
     the split, substitutions among them too.
@@ -6745,7 +6746,10 @@ def _rm_argv_cut_words(command: str, max_words: int) -> str:
         return command
     if _QUOTED_SYNTAX_MARK in command or _QUOTED_NEWLINE.strip() in command:
         return command
-    gaps_left = max_words
+    # Blanks before the first word, as after "&&" or ";", end no word, so a command keeps as many
+    # words after another command as at the start of a line.
+    first_word = len(command) - len(command.lstrip())
+    words_left = max_words
     depth = index = 0
     while index < len(command):
         match = _RM_COMMAND_TOKEN_RE.match(command, index)
@@ -6755,10 +6759,10 @@ def _rm_argv_cut_words(command: str, max_words: int) -> str:
         if token == "#" and (not index or command[index - 1] in " \t\n;&|()<>"):
             return command
         if not depth and token[0] not in "'\"\\`" and not token.startswith(_RM_DOLLAR_QUOTE):
-            gaps = [gap.start() for gap in re.finditer(r"[ \t]+", token)]
-            if len(gaps) > gaps_left:
-                return command[: index + gaps[gaps_left]]
-            gaps_left -= len(gaps)
+            gaps = [gap.start() for gap in re.finditer(r"[ \t]+", token) if index + gap.start() >= first_word]
+            if len(gaps) >= words_left:
+                return command[: index + gaps[words_left - 1]]
+            words_left -= len(gaps)
         depth = depth + 1 if token == "(" else max(depth - 1, 0) if token == ")" else depth
         index = end
     return command

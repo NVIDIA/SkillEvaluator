@@ -67,6 +67,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.helpers import resolve_git_root
 from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
@@ -617,6 +618,19 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )
+
+
+def _report_roots(target_path: Path) -> dict[str, Path]:
+    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+
+    The repository root is the Git root containing *target_path*, so a finding
+    reads the same repository-relative ``file`` from every command; outside Git
+    it falls back to the target folder.
+    """
+    repository_root = resolve_git_root(target_path)
+    if repository_root is None:
+        repository_root = target_path if target_path.is_dir() else target_path.parent
+    return {"scan_root": target_path, "repository_root": repository_root}
 
 
 def _resolve_file_report_output_location(
@@ -2617,7 +2631,7 @@ def validate(
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
+    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
     if external and profile and profile not in {"default", "external"}:
@@ -3024,9 +3038,6 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
-    sarif_repository_root = resolve_git_root(target_path)
-    if sarif_repository_root is None:
-        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -3056,10 +3067,7 @@ def validate(
         explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
-        sarif_scan_root=target_path,
-        sarif_repository_root=sarif_repository_root,
-        scan_root=target_path,
-        repository_root=sarif_repository_root,
+        **_report_roots(target_path),
         catalog_root=catalog_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
@@ -3261,8 +3269,7 @@ def quality_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("quality"),
-        scan_root=target_path,
-        repository_root=target_path,
+        **_report_roots(target_path),
     ):
         raise click.ClickException("quality check failed")
 
@@ -3279,8 +3286,7 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("rubric"),
-        scan_root=target_path,
-        repository_root=target_path,
+        **_report_roots(target_path),
     ):
         raise click.ClickException("rubric evaluation failed")
 
@@ -3308,8 +3314,7 @@ def security_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
-        scan_root=target_path,
-        repository_root=target_path,
+        **_report_roots(target_path),
     ):
         raise click.ClickException("security scan failed")
 
@@ -3333,8 +3338,7 @@ def pii_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
-        scan_root=target_path,
-        repository_root=target_path,
+        **_report_roots(target_path),
     ):
         raise click.ClickException("PII scan failed")
 
@@ -3350,8 +3354,7 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("script-lint"),
-        scan_root=target_path,
-        repository_root=target_path,
+        **_report_roots(target_path),
     ):
         raise click.ClickException("script lint failed")
 
@@ -3452,8 +3455,7 @@ def similarity_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=similarity_basename,
-        scan_root=content_path,
-        repository_root=content_path,
+        **_report_roots(content_path),
     ):
         raise click.ClickException("similarity check failed")
 
@@ -3484,8 +3486,7 @@ def context_optimization_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
-        scan_root=skill_path,
-        repository_root=skill_path,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("context optimization check failed")
 
@@ -3521,8 +3522,7 @@ def dedup_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("dedup"),
-        scan_root=skill_path,
-        repository_root=skill_path,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("dedup scan failed")
 
@@ -3633,8 +3633,7 @@ def _tier1_workflow(
         basename=report_basename("tier1"),
         policy=policy,
         target_path=str(skill_path),
-        scan_root=skill_path,
-        repository_root=skill_path,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 1 checks failed or were incomplete")
 
@@ -3704,8 +3703,7 @@ def _tier2_workflow(
         output_dir=resolved_output_dir,
         basename=basename,
         target_path=str(skill_path),
-        scan_root=skill_path,
-        repository_root=skill_path,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 2 checks failed or were incomplete")
 

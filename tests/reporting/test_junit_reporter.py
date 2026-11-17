@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import shutil
+import subprocess
 import xml.etree.ElementTree as ET
 from pathlib import Path
 
@@ -16,9 +17,7 @@ from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting.junit_reporter import JUnitReporter, junit_target_identity
 from skillevaluator.tier1.commands import emit_reports
 
-_TEXT_ANALYZER = (
-    Path(__file__).resolve().parents[2] / "src/skillevaluator/tier3/reference_skills/text-analyzer"
-)
+_TEXT_ANALYZER = Path(__file__).resolve().parents[2] / "src/skillevaluator/tier3/reference_skills/text-analyzer"
 
 
 def _cases(root: ET.Element) -> list[ET.Element]:
@@ -577,9 +576,7 @@ def test_paths_are_relative_to_scanned_root(tmp_path: Path) -> None:
         )
     )
 
-    root = ET.fromstring(
-        JUnitReporter(workspace_root=repo, scan_root=skill).render_all([result])
-    )
+    root = ET.fromstring(JUnitReporter(workspace_root=repo, scan_root=skill).render_all([result]))
     case = root.find("testsuite/testcase")
     assert case is not None
     assert case.attrib["file"] == "skills/demo/SKILL.md"
@@ -620,6 +617,40 @@ def test_quality_check_cli_writes_junit_xml(tmp_path: Path) -> None:
     assert int(root.attrib["tests"]) >= 1
     _assert_counts_match(root)
     ET.fromstring(matches[0].read_text(encoding="utf-8"))
+
+
+def test_single_check_command_paths_are_relative_to_git_root(tmp_path: Path, monkeypatch) -> None:
+    """A single-check command reports the same repository-relative file as ``validate``, in JUnit and SARIF."""
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "demo"
+    shutil.copytree(_TEXT_ANALYZER, skill)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    reports = tmp_path / "reports"
+
+    def lint(_path: Path) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="SCRIPT_LINT")
+        result.add_finding(
+            Finding(
+                category="SCRIPT_LINT",
+                severity=Severity.HIGH,
+                check_name="script_lint",
+                message="Unsafe call",
+                file_path="SKILL.md",
+                line_number=2,
+            )
+        )
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.cli.run_lint_scripts", lint)
+
+    CliRunner().invoke(cli, ["lint-scripts", str(skill), "-r", "junit", "-r", "sarif", "-o", str(reports)])
+
+    (junit,) = reports.glob("*.junit.xml")
+    files = {case.attrib.get("file") for case in _cases(ET.fromstring(junit.read_text(encoding="utf-8")))}
+    assert "skills/demo/SKILL.md" in files
+    (sarif,) = reports.glob("*.sarif.json")
+    sarif_text = sarif.read_text(encoding="utf-8")
+    assert '"uri": "skills/demo/SKILL.md"' in sarif_text
 
 
 def test_target_identity_qualifies_suite_and_classname() -> None:

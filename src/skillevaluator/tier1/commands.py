@@ -652,8 +652,6 @@ def emit_reports(
     explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
-    sarif_scan_root: Path | None = None,
-    sarif_repository_root: Path | None = None,
     scan_root: Path | None = None,
     repository_root: Path | None = None,
     catalog_root: Path | None = None,
@@ -675,6 +673,10 @@ def emit_reports(
     The JSON report records *target_path* too. *explicit_skill_name* names
     the one skill a single-skill run validated, so the JSON ``skills`` list
     names it even when no finding path or quality score does.
+
+    *scan_root* is the evaluated target and *repository_root* the base that
+    SARIF and JUnit file paths are made relative to (the Git root when the
+    target is inside a repository); both formats get the same pair.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -704,17 +706,12 @@ def emit_reports(
                 expected_skill_name=expected_skill_name,
             )
         elif fmt == "sarif":
-            reporter = reporter_cls(
-                workspace_root=sarif_repository_root,
-                scan_root=sarif_scan_root,
-            )
+            reporter = reporter_cls(workspace_root=repository_root, scan_root=scan_root)
         elif fmt == "junit":
-            junit_workspace = repository_root if repository_root is not None else sarif_repository_root
-            junit_scan = scan_root if scan_root is not None else sarif_scan_root
             reporter = reporter_cls(
-                workspace_root=junit_workspace,
-                scan_root=junit_scan,
-                target_identity=junit_target_identity(junit_scan, junit_workspace, catalog_root),
+                workspace_root=repository_root,
+                scan_root=scan_root,
+                target_identity=junit_target_identity(scan_root, repository_root, catalog_root),
             )
         elif fmt == "json":
             reporter = reporter_cls(

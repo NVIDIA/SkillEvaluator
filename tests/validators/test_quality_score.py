@@ -1965,6 +1965,17 @@ class TestDiscoverabilityDescriptionTooShortConfig:
 
         assert _short_description_issues(_validate_with(skill_dir, tmp_path)) == []
 
+    def test_empty_description_is_not_reported_as_too_short(self, tmp_path: Path):
+        assert _short_description_issues(_validate_with(_write_described_skill(tmp_path, '""'), tmp_path)) == []
+
+    def test_description_key_without_a_value_is_counted_as_the_text_none(self, tmp_path: Path):
+        # YAML reads a bare `description:` as null, which the scorer has always turned into "None".
+        # The docs describe this; treating it as empty would change scores, so it is pinned here.
+        result = _validate_with(_write_described_skill(tmp_path, ""), tmp_path)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"].endswith(": 4 chars, minimum 20")
+
 
 def _reserved_name_issues(result) -> list[dict]:
     issues = result.metadata["quality_scores"]["dimensions"]["correctness"]["issues"]

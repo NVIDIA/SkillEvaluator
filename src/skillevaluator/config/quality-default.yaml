@@ -59,8 +59,9 @@ efficiency:
 # Discoverability rules. They overlay the same way as error_handling and efficiency.
 discoverability:
   # The frontmatter description, with surrounding whitespace removed, has fewer than min_chars
-  # characters. A skill with no description is not checked here. The finding appends the
-  # length and the minimum to the message.
+  # characters. A skill without a description key, or with an empty one, is not checked here; a
+  # key left without a value is read as null and counted as the 4-character text "None". The
+  # finding appends the length and the minimum to the message.
   description_too_short:
     points: 20
     message: "Description too short (recommend 50-150 chars)"

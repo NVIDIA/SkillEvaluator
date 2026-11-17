@@ -177,6 +177,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 3 lift intervals compute faster when every case has the same lift;
+  results are unchanged.
 - The `skillevaluator` agent skill now asks the user before installing the
   CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
   run or using `--env-mode local` (trusted skills only; it does not reuse the
@@ -443,8 +445,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 3 bootstrap statistics reuse the sample mean when every case has the same lift,
-  avoiding redundant random draws in paired intervals and lift ladders without changing their results.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

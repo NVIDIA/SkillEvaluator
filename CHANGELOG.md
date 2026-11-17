@@ -453,6 +453,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Rebuilding validation results after severity overrides or scanner finding
+  deduplication no longer repeatedly scans accumulated independent diagnostics;
+  diagnostic order, duplicate-warning options and summary counts are preserved.
+
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.

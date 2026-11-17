@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -126,6 +127,74 @@ def test_explicit_dataset_preserves_non_files_fixture_paths(tmp_path: Path) -> N
     wrapper = stage_wrapper_skill(_package(root), tmp_path / "out", evals_source=source)
     [entry] = json.loads((wrapper.path / "evals/evals.json").read_text())
     assert _inputs(wrapper, entry, tmp_path / "task") == {"data/input.txt": b"input"}
+
+
+@pytest.mark.parametrize(
+    ("case_ids", "expected"),
+    [
+        (["Case", "case"], ["Case", "case-2"]),
+        (["Case", "case-2", "case"], ["Case", "case-2", "case-3"]),
+        (["CON", "con.txt", "LPT1"], ["case-CON", "case-con.txt", "case-LPT1"]),
+        (["NUL.tar.gz", "com9.log", "LPT0", "COM10"], ["case-NUL.tar.gz", "case-com9.log", "LPT0", "COM10"]),
+        (["CON", "case-CON", "con"], ["case-CON", "case-CON-2", "case-con-3"]),
+        (["x" * 129], ["x" * 128]),
+        (["x" * 127 + ".z"], ["x" * 127]),
+        (["x" * 128] * 2, ["x" * 128, "x" * 126 + "-2"]),
+        (
+            ["x" * 128, "x" * 126 + "-2", "x" * 128],
+            ["x" * 128, "x" * 126 + "-2", "x" * 126 + "-3"],
+        ),
+        (["regular", "regular", "another"], ["regular", "regular-2", "another"]),
+        (
+            ["name. ", "..ok..", "trail...", "---", "two words", "0", "mixed.Case_2"],
+            ["name", "ok", "trail", "plugin-eval-case", "two-words", "0", "mixed.Case_2"],
+        ),
+    ],
+    ids=[
+        "case-fold",
+        "occupied-suffix",
+        "reserved",
+        "reserved-extensions",
+        "reserved-prefix-collision",
+        "long",
+        "truncation-dot",
+        "long-duplicate",
+        "long-suffix",
+        "unchanged",
+        "unchanged-sanitization",
+    ],
+)
+def test_explicit_plugin_case_ids_can_be_staged_as_harbor_tasks(
+    tmp_path: Path, case_ids: list[str], expected: list[str]
+) -> None:
+    root = _tree(
+        tmp_path / "plugin", {".claude-plugin/plugin.json": {"name": "demo"}, "skills/a/SKILL.md": _skill("a")}
+    )
+    source = _tree(tmp_path / "data", {"evals.json": [{"id": case_id, "prompt": "task"} for case_id in case_ids]})
+    wrapper = stage_wrapper_skill(_package(root), tmp_path / "out", evals_source=source)
+    entries = json.loads((wrapper.path / "evals/evals.json").read_text())
+    assert [entry["id"] for entry in entries] == expected
+    subprocess.run(["git", "init", "-q", str(wrapper.path)], check=True)
+    tasks = generate_harbor_tasks(wrapper.path, tmp_path / "tasks")
+    assert {task.name for task in tasks} == set(expected)
+
+
+def test_member_prefix_keeps_generated_case_ids_within_the_harbor_limit(tmp_path: Path) -> None:
+    member = "a" * 64
+    root = _tree(
+        tmp_path / "plugin",
+        {
+            ".claude-plugin/plugin.json": {"name": "demo"},
+            f"skills/{member}/SKILL.md": _skill(member),
+            f"skills/{member}/evals/evals.json": [{"id": "b" * 80, "prompt": "task"}],
+        },
+    )
+    wrapper = stage_wrapper_skill(_package(root), tmp_path / "out")
+    [entry] = json.loads((wrapper.path / "evals/evals.json").read_text())
+    assert entry["id"] == member + "-" + "b" * 63
+    subprocess.run(["git", "init", "-q", str(wrapper.path)], check=True)
+    [task] = generate_harbor_tasks(wrapper.path, tmp_path / "tasks")
+    assert task.name == entry["id"]
 
 
 @pytest.mark.parametrize("ref", ["missing.txt", "../outside.txt", "evals.json", "results/secret.txt"])

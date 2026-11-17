@@ -443,6 +443,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep generated plugin evaluation case IDs within Harbor's portable path contract, including length limits, Windows device names, and case-insensitive collisions.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

@@ -72,7 +72,7 @@ def _read(root: SecureRoot, path: str) -> tuple[dict[str, Any], str | None]:
         if not isinstance(result, dict):
             raise ValueError("expected an object")
         return result, None
-    except (OSError, ValueError, SecurePathError) as exc:
+    except (OSError, ValueError, RecursionError, SecurePathError) as exc:
         return {}, f"missing or corrupt {path}: {str(exc)[:160]}"
 
 

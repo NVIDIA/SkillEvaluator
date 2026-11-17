@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep deeply nested retained JSON from aborting run discovery and Tier 3
+  history. Undecodable runs are excluded from the latest-run fallback and
+  shown with unavailable lift in history, while healthy runs remain readable.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

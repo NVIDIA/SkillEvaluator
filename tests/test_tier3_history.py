@@ -148,6 +148,25 @@ def test_unavailable_lift_is_never_zero(tmp_path, failure):
     assert row["lift_status"] == "unavailable" and row["lift_reasons"]
 
 
+@pytest.mark.parametrize("artifact", ["run_config.json", "result.json"])
+def test_deeply_nested_artifact_does_not_hide_other_history_runs(tmp_path, artifact):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    (broken / artifact).write_text('{"nested":' + "[" * 10_000 + "0" + "]" * 10_000 + "}")
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["lift_status"] == "unavailable"
+    assert any(artifact in reason for reason in rows[1]["lift_reasons"])
+
+
 def test_unknown_old_identity_does_not_create_a_trend(tmp_path):
     skill = tmp_path / "demo"
     first = _run(skill / "evals/results", 1)

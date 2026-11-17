@@ -30,6 +30,17 @@ def _write_completed_run(root: Path, run_id: str) -> Path:
     return run_dir
 
 
+@pytest.mark.parametrize("artifact", ["run_config.json", "result.json"])
+def test_latest_results_skips_run_with_deeply_nested_json(tmp_path: Path, artifact: str) -> None:
+    skill_path = tmp_path / "demo"
+    root = skill_path / "evals" / "results"
+    healthy = _write_completed_run(root, "20260705_120000")
+    broken = _write_completed_run(root, "20260705_130000")
+    (broken / artifact).write_text('{"nested":' + "[" * 10_000 + "0" + "]" * 10_000 + "}", encoding="utf-8")
+
+    assert resolve_latest_results(skill_path) == healthy
+
+
 def _write_authenticated_current_run(
     root: Path,
     run_id: str,

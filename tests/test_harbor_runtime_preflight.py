@@ -2050,7 +2050,9 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=2)
+    # This checks configuration classification, independently of SDK startup speed.
+    # Separate deadline tests cover blocked credential providers and worker limits.
+    result = runtime_preflight.probe_model(provider, timeout_seconds=30)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"

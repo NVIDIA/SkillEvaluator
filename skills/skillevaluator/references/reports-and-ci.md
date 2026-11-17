@@ -39,6 +39,12 @@ skillevaluator validate <skills-dir> --profile default --tiers 1 -c \
   -r json,markdown,sarif -o reports --min-score 70
 ```
 
+Add `junit` to `-r` when the CI system shows native test reports (GitLab
+`artifacts:reports:junit`, Jenkins, Azure Pipelines). `tier1` writes
+`skillevaluator-tier1.junit.xml`; `validate` on a skills folder writes
+`<skill>/skillevaluator-output-<timestamp>.junit.xml` per skill. JUnit
+failures follow the same gate as the exit code.
+
 Adopt progressively: run with `|| true` (advisory), then gate on Tier 1,
 raise `--min-score`, add `--llm --tiers 1,2` with a masked provider secret,
 and finally an advisory Tier 3 job (`--block-on-agent-eval` when ready).

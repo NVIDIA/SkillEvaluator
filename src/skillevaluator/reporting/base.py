@@ -2725,5 +2725,6 @@ class ReporterBase(ABC):
             "html": ".html",
             "markdown": ".md",
             "sarif": ".sarif.json",
+            "junit": ".junit.xml",
         }
         return extensions.get(self.name, ".txt")

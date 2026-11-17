@@ -327,3 +327,101 @@ Some limits depend on how you run the harness. `harness-check` takes four flags 
 Without them, the check assumes an unknown context window, a native provider, a
 model that opens the skill by itself, and an interactive session. See the
 [CLI reference](/skills/skillevaluator/cli-reference#harness-check) for every flag.
+
+## JSON output
+
+`--json FILE` writes a `harness_compatibility` block with one entry per skill and harness.
+`validate` puts the same block in its JSON report.
+
+```json title="harness.json (one harness shown)"
+{
+  "harness_compatibility": {
+    "/path/to/my-skill": [
+      {
+        "harness": "codex",
+        "display_name": "OpenAI Codex CLI",
+        "status": "not_loaded",
+        "verified_version": "0.166.0",
+        "verified_date": "2026-11-01",
+        "findings": [
+          {
+            "id": "CX-STRICT-YAML",
+            "effect": "not_loaded",
+            "message": "Skill dropped: invalid YAML (tabs or duplicate keys).",
+            "fix": "Use spaces, not tabs, and remove duplicate keys.",
+            "confidence": "high"
+          },
+          {
+            "id": "CX-ARGUMENTS",
+            "effect": "degraded",
+            "message": "$ARGUMENTS is not substituted: the model sees the literal text.",
+            "fix": "Describe the expected input in words instead of $ARGUMENTS.",
+            "confidence": "medium"
+          }
+        ],
+        "catalog": { "size": 1, "desc_chars": 504, "folder": "" }
+      }
+    ]
+  }
+}
+```
+
+`status` is `loads`, `degraded` or `not_loaded`. A finding's `effect` is one of
+those last two, or `advisory` for a note. Each entry also has a `listed` field
+with the description as that harness lists it.
+
+## When it helps
+
+- **Before you publish.** One skill, six harnesses, about a second. Fix what gets dropped before anyone installs it.
+- **When a skill never triggers.** Check first that the harness loads it and how much of the description reaches the model's skill list.
+- **When you move a skill to another harness.** A skill written for Claude Code often relies on placeholders and fields that other harnesses ignore.
+- **When the skills folder grows.** Harnesses give the skill list a budget. Past it, descriptions get shortened and skills get left out.
+- **In CI.** It runs with `validate` on every change, so a loading problem shows up in the report without blocking the merge.
+
+## Good to know
+
+<AccordionGroup>
+  <Accordion title="Does it change pass or fail?">
+    No. Its findings are MEDIUM for `not_loaded`, LOW for `degraded` and INFO for
+    a note. All three sit below the default gate, so the check never fails a run
+    unless a [policy](/skills/skillevaluator/tier1-validation#validation-profiles-and-policies)
+    raises those severities. `harness-check` exits `0` whatever it finds.
+  </Accordion>
+  <Accordion title="Is there a score?">
+    No. You get a verdict per harness and a tally such as 4 of 6 not loaded. For a
+    quality score, run `skillevaluator quality-check`.
+  </Accordion>
+  <Accordion title="Does it replace a live evaluation?">
+    No. It tells you whether the skill reaches the model. It doesn't tell you
+    whether the skill helps once it is there. That is what
+    [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
+  </Accordion>
+  <Accordion title="Why does it mention my other skills?">
+    A harness lists your skill together with the skills installed next to it, and
+    that list has a budget. A skill under a harness root such as `.claude/skills`
+    is counted with everything in that folder. A `catalog` line in the panel names
+    the folder.
+  </Accordion>
+  <Accordion title="When do the install-location rules apply?">
+    Only when the skill sits under a harness root such as `.claude/skills` or
+    `.agents/skills`. A skill in a working folder is not flagged for being in the
+    wrong place.
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Tier 1: Validation" icon="shield-check" href="/skills/skillevaluator/tier1-validation">
+    The other static checks that run with it, and every harness rule.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference#harness-check">
+    Every `harness-check` flag and its default.
+  </Card>
+  <Card title="Agents & Sandboxes" icon="robot" href="/skills/skillevaluator/agents-and-sandboxes">
+    Run the same agents live once the skill loads.
+  </Card>
+  <Card title="Reports & Results" icon="chart-column" href="/skills/skillevaluator/reports">
+    Where the harness findings appear in the HTML, JSON and SARIF reports.
+  </Card>
+</CardGroup>

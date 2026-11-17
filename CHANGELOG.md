@@ -361,7 +361,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - New **Harness Check** docs page: what `skillevaluator harness-check` reports
   and how to read its panel, with real output, the detailed view and how to fix
   findings, what the rules check, the harnesses it covers, and how to run it on
-  its own or inside `validate`. The Tier 1 guide and the CLI reference link to it.
+  its own or inside `validate`, the JSON block, and when the check helps. The
+  Tier 1 guide and the CLI reference link to it.
   Clarify description rejection versus truncation, invocation-specific argument
   substitution, folder-symlink target limits, and validation report/gate defaults.
 - The README opens with a three-column **Get started** section: run the CLI

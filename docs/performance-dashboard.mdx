@@ -9,11 +9,11 @@ measurements remain unavailable.
 
 ## Start the dashboard
 
-Install the optional Python dashboard and open saved JSON reports or individual
-retained Tier 3 run directories:
+Add `[all,dashboard]` using the
+[installation guide](/skills/skillevaluator/installation-options#choosing-extras), then
+open saved JSON reports or individual retained Tier 3 run directories:
 
 ```bash
-uv tool install --python 3.13 --reinstall "skillevaluator[all,dashboard] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
 skillevaluator dashboard reports/run-a.json reports/run-b.json
 skillevaluator dashboard ./my-skill/evals/results/<run-id>
 # Start with an empty dashboard and upload several JSON reports in the browser:

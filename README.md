@@ -7,12 +7,14 @@
 [![PyPI](https://img.shields.io/pypi/v/skillevaluator.svg?label=PyPI)](https://pypi.org/project/skillevaluator/)
 [![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
-[![NVIDIA Developer Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
+[![Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
+[![Stars](https://img.shields.io/github/stars/NVIDIA/SkillEvaluator)](https://github.com/NVIDIA/SkillEvaluator/stargazers)
+[![Forks](https://img.shields.io/github/forks/NVIDIA/SkillEvaluator)](https://github.com/NVIDIA/SkillEvaluator/forks)
 
 > 📺 **Livestream:** [Ask the Experts: Evaluating Agent Skills](https://www.youtube.com/watch?v=4rI0zATFxYI)
 
-SkillEvaluator checks AI agent skills and measures their effect on task results:
-start with quality checks, then compare runs with and without a skill.
+SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
+on task results: start with quality checks, then compare runs with and without a skill.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -82,9 +84,33 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 </td>
 </tr></tbody></table>
 
+### ⚡ Will your agent load your skill? Know in seconds.
+
+No LLM inference · No model key · No agent run
+
+```bash
+skillevaluator harness-check ./my-skill
+```
+
+```text
+╭─ Harness compatibility · my-skill ──────────────────────────────────────────────────────╮
+│  ⚠️ codex        degraded    Description cut to 1,021 chars + '...' in the skill list   │
+│  ❌ claude-code  not loaded  .agents/skills is not scanned                              │
+│  ✅ opencode     loads                                                                  │
+│  ✅ hermes       loads                                                                  │
+│  ✅ openclaw     loads                                                                  │
+│  ❌ copilot-cli  not loaded  description is 1,028 UTF-16 units, 4 over the 1,024 limit  │
+╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
+```
+
+`validate` above runs [this check](https://docs.nvidia.com/skills/skillevaluator/harness-check)
+by default, as part of Tier 1.
+
+> 🧪 **Ready to go deeper?** Try a [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
+
 ## Quickstart
 
-Both paths use bundled `text-analyzer`.
+Both use bundled `text-analyzer`.
 
 | Start here | Requires | First result |
 | --- | --- | --- |
@@ -99,8 +125,7 @@ git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
 cd SkillEvaluator
 ```
 
-uv provisions Python 3.13 and dependencies. For standalone installation, see
-[Installation](https://docs.nvidia.com/skills/skillevaluator/installation).
+uv provisions Python 3.13 and dependencies.
 
 ### Run without an LLM
 
@@ -145,7 +170,7 @@ The same key supports Tier 2 embeddings and supported Tier 3 agents. See the
 
 ## Three-tier overview
 
-![SkillEvaluator three-tier pipeline: Skill → Tier 1 Validation → Tier 2 Deduplication → Tier 3 Live Evaluation → Reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
+![Three-tier pipeline: skill, validation, deduplication, live evaluation, reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
 
 Each tier is independent. Add its extra to your command:
 
@@ -197,15 +222,14 @@ uv run --python 3.13 --extra tier3 skillevaluator tier3 create-eval-dataset ./my
 
 ## Run from a source checkout
 
-Use `uv run --python 3.13` with the relevant extra. See
-[Installation](docs/installation.mdx#choosing-extras) for extras and standalone upgrades.
+Prefix commands with `uv run --python 3.13`; see [extras](docs/installation.mdx#choosing-extras).
 
 ## Research and citation
 
 Resources: [paper](https://arxiv.org/abs/2608.20614),
 [PDF](https://arxiv.org/pdf/2608.20614),
 [DOI](https://doi.org/10.48550/arXiv.2608.20614),
-[BibTeX](https://arxiv.org/bibtex/2608.20614), and the
+[BibTeX](https://arxiv.org/bibtex/2608.20614), and
 [NVIDIA Developer blog](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/).
 Cite the paper and record the SkillEvaluator release or commit; see [CITATION.cff](CITATION.cff).
 
@@ -216,9 +240,6 @@ setup, tier guides, reports, CI integration, CLI reference, and
 [performance dashboard](docs/reports.mdx#performance-dashboard).
 
 ## Installation and third-party software
-
-Follow the [installation guide](https://docs.nvidia.com/skills/skillevaluator/installation)
-to choose the full installation or a smaller per-tier setup.
 
 This project will download and install additional third-party open source
 software projects. Review the license terms of these open source projects before
@@ -232,7 +253,7 @@ Read [CONTRIBUTING.md](CONTRIBUTING.md) and run:
 make lint && make test && make build
 ```
 
-See [project governance](GOVERNANCE.md) and the [Code of Conduct](CODE_OF_CONDUCT.md).
+See [project governance](GOVERNANCE.md) and [Code of Conduct](CODE_OF_CONDUCT.md).
 
 ## Support
 
@@ -249,12 +270,12 @@ issue.
 
 ## Releases
 
-Release changes are recorded in [CHANGELOG.md](CHANGELOG.md) and
+See [CHANGELOG.md](CHANGELOG.md) and
 [GitHub Releases](https://github.com/NVIDIA/SkillEvaluator/releases).
 
 ## License
 
-Apache License 2.0 — see [LICENSE](LICENSE), [NOTICE](NOTICE), and
+Apache License 2.0: see [LICENSE](LICENSE), [NOTICE](NOTICE), and
 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
 
 Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.

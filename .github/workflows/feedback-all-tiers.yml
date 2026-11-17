@@ -47,7 +47,7 @@ jobs:
           python-version: '3.12'
       - name: Install the locked trusted feedback runtime
         run: |
-          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.11.27
+          python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
           env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$RUNNER_TEMP/uv-cache" sync --locked --no-dev --extra publisher --project "$GITHUB_WORKSPACE" --python 3.12 --default-index https://pypi.org/simple
           echo "$GITHUB_WORKSPACE/.venv/bin" >> "$GITHUB_PATH"
       - name: Verify current head and producer before updating one comment

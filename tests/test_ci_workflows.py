@@ -38,6 +38,9 @@ NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
 PULL_REQUEST_TESTS_IF = (
     "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}"
 )
+DOCS_ONLY_TESTS_IF = (
+    "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only == 'true' }}"
+)
 MAIN_COVERAGE_IF = "${{ github.event_name != 'pull_request' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
@@ -137,11 +140,21 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert job["runs-on"] == "ubuntu-latest"
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
 
-    full_lane_step_names = {
+    # The docs lane runs the documentation tests, so it needs the project
+    # installed. It also scans for private integration names, because the scan
+    # reads the documentation a docs-only pull request changes.
+    both_lane_step_names = {
         "Set up Python",
         "Set up uv",
         "Install dependencies",
         "Scan OSS source boundary",
+    }
+    both_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in both_lane_step_names}
+    assert set(both_lane_steps) == both_lane_step_names
+    assert all("if" not in step for step in both_lane_steps.values())
+
+    full_lane_step_names = {
+        "Lint committed BENCHMARK.md fixtures for leak patterns",
         "Lint",
     }
     full_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in full_lane_step_names}
@@ -149,6 +162,19 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert all(step["if"] == NOT_DOCS_ONLY_IF for step in full_lane_steps.values())
 
     step_names = [step.get("name") for step in job["steps"]]
+    # A docs-only pull request skips every other job, so this step is the only
+    # place its documentation tests run.
+    docs_tests = job["steps"][step_names.index("Run documentation tests")]
+    assert docs_tests["if"] == DOCS_ONLY_TESTS_IF
+    assert docs_tests["shell"] == "bash"
+    docs_tests_run = docs_tests["run"].splitlines()
+    assert docs_tests_run[0] == "set -euo pipefail"
+    # The selection is captured with a plain assignment so that a failing
+    # selector stops the step. pytest with no paths would run the whole suite.
+    assert 'docs_tests="$(python -m scripts.select_docs_tests)"' in docs_tests_run
+    assert 'mapfile -t docs_test_files <<< "$docs_tests"' in docs_tests_run
+    assert 'uv run pytest -q -n auto "${docs_test_files[@]}"' in docs_tests_run
+    assert "<(" not in docs_tests["run"], "a process substitution would hide a failing selector"
     pull_request_tests = job["steps"][step_names.index("Run tests")]
     main_tests = job["steps"][step_names.index("Run tests with coverage")]
     # Pull requests wait on this required job, so they run it like the 3.13 and
@@ -168,12 +194,17 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
         "--cov-report=xml:coverage.xml",
     ]
     pytest_steps = [step.get("name") for step in job["steps"] if "pytest" in step.get("run", "")]
-    assert pytest_steps == ["Run tests", "Run tests with coverage"], "exactly one pytest step runs per event"
+    assert pytest_steps == [
+        "Run documentation tests",
+        "Run tests",
+        "Run tests with coverage",
+    ], "exactly one pytest step runs per event"
 
     node_step = next(step for step in job["steps"] if step.get("name") == "Set up Node.js for docs")
     docs_step = next(step for step in job["steps"] if step.get("name") == "Validate Fern documentation")
     # A failing suite must not hide a docs break, and the docs verdict should
     # not wait for the suite.
+    assert step_names.index("Validate Fern documentation") < step_names.index("Run documentation tests")
     assert step_names.index("Validate Fern documentation") < step_names.index("Run tests")
     assert "if" not in node_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert len(node_step["uses"].split("@", 1)[1]) == 40
@@ -189,12 +220,20 @@ def test_html_parser_patch_boundary_coverage_uses_available_runner_artifacts() -
     # Floating the OS can make these historical patch interpreters unavailable,
     # preventing the compatibility regression tests from running at all.
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
+    versions = ["3.12.11", "3.13.5"]
     setup_python = next(step for step in job["steps"] if step.get("uses", "").startswith("actions/setup-python@"))
-    assert setup_python["with"]["python-version"] == "${{ matrix.python-version }}"
-    commands = _runs(job)
-    assert "tests/validators/test_markdown.py" in commands
-    assert "tests/test_cli_html_parser_compat.py" in commands
+    assert setup_python["with"]["python-version"].split() == versions
+    # One job runs both patch releases, each against the same two test files.
+    test_steps = [step for step in job["steps"] if "pytest" in step.get("run", "")]
+    assert len(test_steps) == len(versions)
+    for version, step in zip(versions, test_steps, strict=True):
+        assert f"uv sync --extra dev --locked --python {version}\n" in step["run"]
+        assert f"uv run --python {version} pytest -q " in step["run"]
+        assert "tests/validators/test_markdown.py" in step["run"]
+        assert "tests/test_cli_html_parser_compat.py" in step["run"]
+    # A failure on the first interpreter must not hide the result for the second.
+    assert "if" not in test_steps[0]
+    assert test_steps[1]["if"] == RUN_UNLESS_CANCELLED_IF
 
 
 def test_ci_skips_every_other_required_job_only_after_classification() -> None:
@@ -232,9 +271,8 @@ def test_html_parser_compatibility_keeps_old_python_versions_on_a_supported_runn
 
     # setup-python publishes these older patch builds for Ubuntu 24.04, not 26.04.
     assert job["runs-on"] == "ubuntu-24.04"
-    assert job["strategy"]["matrix"]["python-version"] == ["3.12.11", "3.13.5"]
     python_step = next(step for step in job["steps"] if _action_repository(step.get("uses", "")) == "actions/setup-python")
-    assert python_step["with"]["python-version"] == "${{ matrix.python-version }}"
+    assert python_step["with"]["python-version"].split() == ["3.12.11", "3.13.5"]
 
 
 def test_security_keeps_gitleaks_always_on_and_skips_only_nonessential_jobs() -> None:
@@ -397,6 +435,68 @@ def test_every_workflow_pins_every_action_to_a_commit() -> None:
                 assert not _local_reference_escapes_repo(uses), f"{workflow_name}: {uses}"
                 continue
             assert re.fullmatch(r"[^@]+@[0-9a-f]{40}", uses), f"{workflow_name}: {uses}"
+
+
+def _uv_pins() -> list[tuple[str, str | None]]:
+    """Every place CI chooses a uv version, as ``(where, version)``.
+
+    ``version`` is ``None`` for a ``setup-uv`` step that names none, because that
+    step installs whatever uv is newest on the day it runs.
+    """
+    pins: list[tuple[str, str | None]] = []
+    for workflow_name in _workflow_names():
+        for step in _all_steps(_load(workflow_name)):
+            if _action_repository(step.get("uses", "")) == "astral-sh/setup-uv":
+                pins.append((f"{workflow_name}: setup-uv", step.get("with", {}).get("version")))
+    for path in [*sorted(WORKFLOWS.iterdir()), *sorted((ROOT / "ci" / "gitlab").glob("*.yml"))]:
+        if path.suffix not in {".yml", ".yaml"}:
+            continue
+        for found in re.findall(r"\buv==([^\s'\"\\]+)", path.read_text(encoding="utf-8")):
+            pins.append((f"{path.relative_to(ROOT)}: pip install", found))
+    # The hash-locked bootstrap behind the Tier 1 image and the privileged publisher.
+    requirements = ROOT / "ci" / "requirements"
+    for name in ("uv.in", "uv.txt"):
+        first = (requirements / name).read_text(encoding="utf-8").split(maxsplit=1)[0]
+        pinned = re.fullmatch(r"uv==(\S+)", first)
+        assert pinned, f"ci/requirements/{name} must start with an exact uv pin, not {first!r}"
+        pins.append((f"ci/requirements/{name}", pinned.group(1)))
+    return pins
+
+
+def _assert_one_uv_version(pins: Sequence[tuple[str, str | None]]) -> None:
+    assert pins, "no uv pins found"
+    unpinned = [where for where, version in pins if version is None]
+    assert not unpinned, f"pin uv with version:, not the latest release: {unpinned}"
+    where_by_version: dict[str | None, set[str]] = {}
+    for where, version in pins:
+        where_by_version.setdefault(version, set()).add(where)
+    assert len(where_by_version) == 1, "CI runs more than one uv version: " + "; ".join(
+        f"{version} in {sorted(places)}" for version, places in sorted(where_by_version.items())
+    )
+
+
+def test_every_ci_uv_install_uses_the_one_reviewed_version() -> None:
+    """GitHub jobs, GitLab jobs, the Tier 1 image and the publisher all run one uv.
+
+    Covers ``setup-uv`` steps (including an older action pin with no ``version:``),
+    ``pip install uv==...`` lines, and the hash-locked ``ci/requirements/uv.*``.
+    """
+    pins = _uv_pins()
+    _assert_one_uv_version(pins)
+    assert re.fullmatch(r"\d+\.\d+\.\d+", str(pins[0][1])), f"pin an exact version, not {pins[0][1]!r}"
+
+
+@pytest.mark.parametrize(
+    "pins",
+    [
+        pytest.param([("ci.yml: setup-uv", "0.13.8"), ("ci.yml: setup-uv", None)], id="unpinned-setup-uv"),
+        pytest.param([("ci.yml: setup-uv", "0.13.8"), ("ci/requirements/uv.in", "0.13.4")], id="mixed-versions"),
+        pytest.param([], id="no-pins"),
+    ],
+)
+def test_uv_version_guard_rejects_drift(pins: list[tuple[str, str | None]]) -> None:
+    with pytest.raises(AssertionError):
+        _assert_one_uv_version(pins)
 
 
 def test_every_workflow_does_not_persist_checkout_credentials() -> None:

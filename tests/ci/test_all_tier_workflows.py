@@ -338,7 +338,7 @@ def test_all_tier_runtimes_sync_the_reviewed_lock_with_pinned_uv():
     paid_install = next(
         s for s in evaluation["jobs"]["paid-tiers"]["steps"] if s.get("name", "").startswith("Install only")
     )["run"]
-    assert "uv==0.11.27" in paid_install
+    assert "uv==0.13.8" in paid_install
     assert "sync --locked --no-dev" in paid_install
     assert '--extra "tier${TIER}"' in paid_install
     assert 'evaluator/.venv/bin" >> "$GITHUB_PATH"' in paid_install
@@ -351,7 +351,7 @@ def test_all_tier_runtimes_sync_the_reviewed_lock_with_pinned_uv():
     assert "--extra publisher" in feedback
     for name in ("skill-evaluation-native", "skill-evaluation-aggregate"):
         script = "\n".join(load("ci/gitlab/all-tiers.yml")[name]["script"])
-        assert "uv==0.11.27" in script
+        assert "uv==0.13.8" in script
         assert "sync --locked --no-dev" in script
         assert '--project "$SKILL_EVAL_TOOLS_DIR"' in script
         assert 'export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"' in script

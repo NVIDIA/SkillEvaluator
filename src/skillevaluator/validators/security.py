@@ -6110,13 +6110,17 @@ class SecurityValidator(ValidatorBase):
     )
     # Match version/tag as identifier tokens, including separator and camel-case styles.
     # Plain substrings such as ``conversion`` and ``staging`` are not version labels.
+    # The camel-case words around the label are written as one run each
+    # (``[A-Z][A-Za-z0-9]*``), not as a repeated word group: a repeated group can
+    # split a run of letters in exponentially many ways, and a long identifier
+    # before an IPv4-shaped value then stalls the scan.
     _VERSION_LABEL_PATTERN = re.compile(
         r"(?:"
         r"(?i:(?<![a-z0-9])(?:[a-z0-9]+[_-])*(?:versions?|tags?)(?:[_-][a-z0-9]+)*(?![a-z0-9]))"
-        r"|(?<![A-Za-z0-9])(?:[A-Za-z][a-z0-9]*)*(?:Version|Versions|Tag|Tags)"
-        r"(?:[A-Z][A-Za-z0-9]*)*(?![A-Za-z0-9])"
+        r"|(?<![A-Za-z0-9])(?:[A-Za-z][A-Za-z0-9]*)?(?:Version|Versions|Tag|Tags)"
+        r"(?:[A-Z][A-Za-z0-9]*)?(?![A-Za-z0-9])"
         r"|(?<![A-Za-z0-9])(?:version|versions|tag|tags)"
-        r"(?:[A-Z][A-Za-z0-9]*)+(?![A-Za-z0-9])"
+        r"[A-Z][A-Za-z0-9]*(?![A-Za-z0-9])"
         r")"
     )
     _PACKAGE_VERSION_CALL_PATTERN = re.compile(

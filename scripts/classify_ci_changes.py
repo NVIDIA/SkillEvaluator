@@ -15,12 +15,16 @@ from collections.abc import Sequence
 from pathlib import Path
 
 DOC_PREFIXES = (b"docs/",)
-DOC_FILES = frozenset({b"fern/docs.yml"})
+# The root changelog and readme are documentation too: nearly every docs pull
+# request adds a changelog line, and that line used to send it down the full
+# lane. The docs lane runs the tests that read these files, so a broken entry is
+# still caught on the pull request.
+DOC_FILES = frozenset({b"fern/docs.yml", b"CHANGELOG.md", b"README.md"})
 KNOWN_STATUSES = frozenset(b"ACDMRTUXB")
 
 
 def is_docs_only(paths: Sequence[bytes]) -> bool:
-    """Return whether every changed path belongs to published documentation."""
+    """Return whether every changed path is documentation the docs lane covers."""
     return bool(paths) and all(path.startswith(DOC_PREFIXES) or path in DOC_FILES for path in paths)
 
 

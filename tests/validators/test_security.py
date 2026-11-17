@@ -45,9 +45,7 @@ from skillevaluator.validators.security import (
     _skillspector_unscanned_names,
 )
 
-_SKILLSPECTOR_2_9_6_NO_LLM_REPORT = (
-    Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
-)
+_SKILLSPECTOR_2_9_6_NO_LLM_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.9.6-no-llm.json"
 _SKILLSPECTOR_2_11_1_PE3_REPORT = Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
 # build.sh as scanned for the captured 2.11.1 PE3 report: line 2 is a
 # read-only UID-map mount, line 3 a real credential-file read.
@@ -94,8 +92,7 @@ _SKILLSPECTOR_2_11_2_DOCS_ONLY_NOT_APPLICABLE_ANALYZERS = {
 _SKILLSPECTOR_UNIVERSAL_ANALYZERS = {
     analyzer_id
     for analyzer_id in _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS
-    if analyzer_id in {"artifact_integrity", "static_yara"}
-    or analyzer_id.startswith("static_patterns_")
+    if analyzer_id in {"artifact_integrity", "static_yara"} or analyzer_id.startswith("static_patterns_")
 }
 
 
@@ -134,8 +131,7 @@ def _skillspector_json_report(
 ) -> dict:
     """Return the pinned SkillSpector JSON report shape used by contract tests."""
     normalized_issues = [
-        {"confidence": 1.0, "finding_id": f"finding-{index}", **issue}
-        for index, issue in enumerate(issues or [])
+        {"confidence": 1.0, "finding_id": f"finding-{index}", **issue} for index, issue in enumerate(issues or [])
     ]
     components_by_key: dict[tuple, dict] = {}
     for issue in normalized_issues:
@@ -150,9 +146,7 @@ def _skillspector_json_report(
         source_key = next(((key, source[key]) for key in source), ("", ""))
         components_by_key.setdefault((source_key, path), {"path": path, "executable": False, **source})
     components = list(components_by_key.values())
-    analyzer_ids = _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS + (
-        _SKILLSPECTOR_SEMANTIC_ANALYZERS if llm_requested else ()
-    )
+    analyzer_ids = _SKILLSPECTOR_2_10_REQUIRED_ANALYZERS + (_SKILLSPECTOR_SEMANTIC_ANALYZERS if llm_requested else ())
     return {
         "skill": {
             "name": "test-skill",
@@ -1044,9 +1038,7 @@ Run the documented workflow.
         assert email_findings[0].line_content == "Contact contributor@contributors.company.com for private support."
 
     @pytest.mark.parametrize("newline", ["\n", "\r\n"])
-    def test_bom_prefixed_frontmatter_author_email_not_flagged_in_security_scan(
-        self, tmp_path: Path, newline: str
-    ):
+    def test_bom_prefixed_frontmatter_author_email_not_flagged_in_security_scan(self, tmp_path: Path, newline: str):
         """UTF-8 BOM must not turn a valid frontmatter author email into a PII finding."""
         skill_dir = tmp_path / "bom-public-author-skill"
         skill_dir.mkdir()
@@ -1314,7 +1306,16 @@ Call us at 555-123-4567 or +1-555-987-6543
 
     @pytest.mark.parametrize(
         "domain",
-        ["example.com", "example.net", "example.org", "test.com", "unit.test", "unit.example", "unit.invalid", "unit.localhost"],
+        [
+            "example.com",
+            "example.net",
+            "example.org",
+            "test.com",
+            "unit.test",
+            "unit.example",
+            "unit.invalid",
+            "unit.localhost",
+        ],
     )
     @pytest.mark.parametrize(
         "domain_format",
@@ -1350,9 +1351,17 @@ Call us at 555-123-4567 or +1-555-987-6543
     @pytest.mark.parametrize(
         "domain",
         [
-            "company.com", "notexample.net", "example.net.company.com", "example.invalid.company.com",
-            "example.com-extra.net", "test.company.com", "example.organic", "company.invalidity",
-            "company.examplecorp", "localhost.company.com", "test.com.company.com",
+            "company.com",
+            "notexample.net",
+            "example.net.company.com",
+            "example.invalid.company.com",
+            "example.com-extra.net",
+            "test.company.com",
+            "example.organic",
+            "company.invalidity",
+            "company.examplecorp",
+            "localhost.company.com",
+            "test.com.company.com",
         ],
     )
     def test_nonplaceholder_email_domains_remain_pii(self, tmp_path: Path, domain: str):
@@ -1899,9 +1908,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         payload = _skillspector_json_report()
         payload["suppressed_count"] = 2
         payload["suppressed"] = [{"id": "one"}, {"id": "two"}]
-        payload["analysis_completeness"].update(
-            {"findings_before_filtering": 2, "findings_after_filtering": 2}
-        )
+        payload["analysis_completeness"].update({"findings_before_filtering": 2, "findings_after_filtering": 2})
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
             stdout=json.dumps(payload),
@@ -2527,9 +2534,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 "is_complete": False,
                 "status": "partial",
                 "fully_inspected_files": 4,
-                "ledger_exceptions": [
-                    {"reason_code": "reference_unresolved", "fatal": False} for _ in range(12)
-                ],
+                "ledger_exceptions": [{"reason_code": "reference_unresolved", "fatal": False} for _ in range(12)],
             }
         )
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
@@ -2607,9 +2612,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 "partial": 1 if analyzer_state == "degraded" else 0,
             }
         )
-        payload["analysis_completeness"]["analyzer_statuses"].append(
-            {**analyzer_status, "message": limitations[0]}
-        )
+        payload["analysis_completeness"]["analyzer_statuses"].append({**analyzer_status, "message": limitations[0]})
         payload["analysis_completeness"].update(
             {
                 "is_complete": False,
@@ -3475,9 +3478,9 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
             success=True,
-            stdout=(
-                Path(__file__).parents[1] / "fixtures" / f"skillspector-{version}-no-llm.json"
-            ).read_text(encoding="utf-8"),
+            stdout=(Path(__file__).parents[1] / "fixtures" / f"skillspector-{version}-no-llm.json").read_text(
+                encoding="utf-8"
+            ),
             stderr="",
             exit_code=0,
         )
@@ -3491,14 +3494,20 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
     @pytest.mark.parametrize("version", ["2.10.0", "2.11.0", "2.11.1"])
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_requires_bundled_execution_surface_since_2_11(
-        self, mock_tools, sample_skill_dir: Path, version: str,
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        version: str,
     ) -> None:
-        payload = json.loads((
-            Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-safe-no-llm.json"
-        ).read_text(encoding="utf-8"))
+        payload = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-safe-no-llm.json").read_text(
+                encoding="utf-8"
+            )
+        )
         payload["metadata"]["skillspector_version"] = version
         payload["analysis_completeness"]["analyzer_statuses"] = [
-            item for item in payload["analysis_completeness"]["analyzer_statuses"]
+            item
+            for item in payload["analysis_completeness"]["analyzer_statuses"]
             if item["analyzer_id"] != "bundled_execution_surface"
         ]
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
@@ -3513,16 +3522,19 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
     )
     @patch("skillevaluator.validators.security.Tools")
     def test_skillspector_captured_classification_distinct_pe3(
-        self, mock_tools, sample_skill_dir: Path, mutation: str | None,
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        mutation: str | None,
     ) -> None:
         # Captured from NVIDIA/SkillSpector v2.11.1 with --no-llm. build.sh:
         # docker run -v /etc/passwd:/etc/passwd:ro image
         # cat /etc/passwd
         # build.sh is not on disk here, so the tagged mount row cannot be
         # re-checked against its source and stays reported.
-        payload = json.loads((
-            Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json"
-        ).read_text(encoding="utf-8"))
+        payload = json.loads(
+            (Path(__file__).parents[1] / "fixtures" / "skillspector-2.11.1-pe3-no-llm.json").read_text(encoding="utf-8")
+        )
         first, second = [issue for issue in payload["issues"] if issue["id"] == "PE3"]
         assert first["match_fingerprint"] == second["match_fingerprint"]
         assert first["finding_id"] != second["finding_id"]
@@ -3931,9 +3943,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
     ) -> None:
         payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
         disabled_status = next(
-            status
-            for status in payload["analysis_completeness"]["analyzer_statuses"]
-            if status["status"] == "disabled"
+            status for status in payload["analysis_completeness"]["analyzer_statuses"] if status["status"] == "disabled"
         )
         disabled_status.update({"status": "failed", "reason_code": "analyzer_failed"})
         result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
@@ -4075,11 +4085,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         section: str,
         field: str,
     ) -> None:
-        issues = (
-            [{"id": "M1", "severity": "MEDIUM", "finding": "advisory", field: []}]
-            if section == "issue"
-            else []
-        )
+        issues = [{"id": "M1", "severity": "MEDIUM", "finding": "advisory", field: []}] if section == "issue" else []
         payload = _skillspector_json_report(issues)
         if issues:
             payload["risk_assessment"] = {
@@ -4100,9 +4106,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         mock_tools,
         sample_skill_dir: Path,
     ) -> None:
-        payload = _skillspector_json_report(
-            [{"id": "M1", "severity": "MEDIUM", "finding": "advisory"}]
-        )
+        payload = _skillspector_json_report([{"id": "M1", "severity": "MEDIUM", "finding": "advisory"}])
         payload["issues"][0].pop("finding_id")
         payload["risk_assessment"] = {
             "score": 10,
@@ -4259,9 +4263,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
                 }
             ]
         )
-        payload["analysis_completeness"].update(
-            {"findings_before_filtering": 2, "findings_after_filtering": 2}
-        )
+        payload["analysis_completeness"].update({"findings_before_filtering": 2, "findings_after_filtering": 2})
         payload["risk_assessment"] = {
             "score": 7,
             "severity": "LOW",
@@ -4291,9 +4293,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             for path, line in (("SKILL.md", 8), ("reference.md", 3))
         ]
         payload = _skillspector_json_report(issues)
-        payload["analysis_completeness"].update(
-            {"findings_before_filtering": 1, "findings_after_filtering": 1}
-        )
+        payload["analysis_completeness"].update({"findings_before_filtering": 1, "findings_after_filtering": 1})
         payload["risk_assessment"] = {
             "score": 25,
             "severity": "MEDIUM",
@@ -4427,9 +4427,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         ]
         payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
         payload["issues"] = issues
-        payload["components"] = [
-            {"path": file_name, "executable": False} for file_name in ("a.md", "b.md")
-        ]
+        payload["components"] = [{"path": file_name, "executable": False} for file_name in ("a.md", "b.md")]
         payload["analysis_completeness"].update(
             {
                 "total_components": 2,
@@ -4476,8 +4474,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
         payload["issues"] = issues
         payload["components"] = [
-            {"path": f"file-{occurrence_index}.md", "executable": False}
-            for occurrence_index in range(3)
+            {"path": f"file-{occurrence_index}.md", "executable": False} for occurrence_index in range(3)
         ]
         payload["analysis_completeness"].update(
             {
@@ -4682,10 +4679,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "recommendation": "DO_NOT_INSTALL",
         }
         payload["components"] = [
-            *[
-                {"path": f"scripts/check_{index}.py", "executable": True}
-                for index in range(5)
-            ],
+            *[{"path": f"scripts/check_{index}.py", "executable": True} for index in range(5)],
             {"path": "BENCHMARK.md", "executable": False},
         ]
         payload["analysis_completeness"].update(
@@ -5107,9 +5101,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         ]
         payload = _skillspector_json_report(issues)
         if case == "hidden":
-            payload["analysis_completeness"].update(
-                {"findings_before_filtering": 7, "findings_after_filtering": 7}
-            )
+            payload["analysis_completeness"].update({"findings_before_filtering": 7, "findings_after_filtering": 7})
         payload["risk_assessment"] = {
             "score": 0,
             "severity": "LOW",
@@ -5211,9 +5203,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             ]
         )
         payload = _skillspector_json_report(issues)
-        payload["analysis_completeness"].update(
-            {"findings_before_filtering": 8, "findings_after_filtering": 8}
-        )
+        payload["analysis_completeness"].update({"findings_before_filtering": 8, "findings_after_filtering": 8})
         payload["risk_assessment"] = {
             "score": 88,
             "severity": "CRITICAL",
@@ -8804,9 +8794,7 @@ class TestSpdxAndIpFalsePositiveHardening:
         result = SecurityValidator().validate_pii_only(skill_dir)
 
         assert [
-            finding.metadata.get("matched_value")
-            for finding in result.findings
-            if finding.check_name == "ip_addresses"
+            finding.metadata.get("matched_value") for finding in result.findings if finding.check_name == "ip_addresses"
         ] == ["8.8.8.8"]
 
     @pytest.mark.parametrize(
@@ -9024,9 +9012,7 @@ class TestSkillspectorReferencedImages:
 
         assert result.incomplete_scans == ["skillspector-llm"]
         assert len(result.findings) == 2
-        assert result.warnings.count(
-            "[SECURITY-MEDIUM] Prompt Injection: Ignore prior instructions in SKILL.md:8"
-        ) == 2
+        assert result.warnings.count("[SECURITY-MEDIUM] Prompt Injection: Ignore prior instructions in SKILL.md:8") == 2
         assert result.summary.warnings == len(result.warnings)
 
     @pytest.mark.parametrize(
@@ -9764,7 +9750,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:8 [reference_resolution; reference_unresolved]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:8 [reference_resolution; reference_unresolved]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -10131,7 +10118,8 @@ class TestSkillspectorMissingReferences:
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
             "SKILL.md:8 [reference_resolution; reference_missing]; "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -10232,7 +10220,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -10290,7 +10279,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert not result.warnings
 
@@ -10488,7 +10478,8 @@ class TestSkillspectorMissingReferences:
         assert rerun.incomplete_scans == ["skillspector"]
         assert rerun.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert not rerun.warnings
 
@@ -10512,7 +10503,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert _missing_reference_notes(payload, skill.resolve(), reference_root=root.resolve()) is None
         assert _missing_reference_notes(payload, skill.resolve(), reference_root=skill.resolve()) is not None
@@ -10556,7 +10548,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert (
             "[setup-helper] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
-            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "(status 'partial'): SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ) in result.errors
         assert not any("does not bundle" in warning for warning in result.warnings)
         # The folder is the reference root only while it is scanned; the skill on its own still passes.
@@ -10728,7 +10721,8 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ["skillspector"]
         assert result.errors == [
             "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
-            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete" + _REFERENCE_REJECTION_HELP
+            "SKILL.md:10 [reference_resolution; reference_missing]; security scan did not complete"
+            + _REFERENCE_REJECTION_HELP
         ]
         assert _missing_reference_notes(payload, skill, reference_root=None) is None
         assert validator.validate_security_only(skill).incomplete_scans == []
@@ -11279,7 +11273,9 @@ def _caveat_error(labels: str, *, description: str = "caveats that SkillEvaluato
         f"skillspector JSON field 'analysis_completeness' reports {description} "
         f"(status 'complete_with_caveats'): {labels}; security scan did not complete"
     )
-    return message + _REFERENCE_REJECTION_HELP if description == "caveats that SkillEvaluator does not accept" else message
+    return (
+        message + _REFERENCE_REJECTION_HELP if description == "caveats that SkillEvaluator does not accept" else message
+    )
 
 
 def _other_caveat_error(labels: str) -> str:

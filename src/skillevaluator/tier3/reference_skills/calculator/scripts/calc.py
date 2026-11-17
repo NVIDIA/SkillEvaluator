@@ -58,7 +58,7 @@ CONVERSIONS = {
 
 
 def try_conversion(expr: str) -> str | None:
-    m = re.match(
+    m = re.fullmatch(
         r"([\d.]+)\s+(\w+)\s+to\s+(\w+)",
         expr.strip(),
         re.IGNORECASE,
@@ -76,7 +76,7 @@ def try_conversion(expr: str) -> str | None:
 
 
 def try_percentage(expr: str) -> str | None:
-    m = re.match(r"([\d.]+)%\s+of\s+([\d.]+)", expr.strip(), re.IGNORECASE)
+    m = re.fullmatch(r"([\d.]+)%\s+of\s+([\d.]+)", expr.strip(), re.IGNORECASE)
     if not m:
         return None
     pct = float(m.group(1))

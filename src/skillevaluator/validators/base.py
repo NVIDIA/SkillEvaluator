@@ -213,7 +213,7 @@ class ValidatorBase(ABC):
         skill_dirs: set[Path] = set()
         for manifest_name in SKILL_MANIFEST_VARIANTS:
             for skill_md in root_path.rglob(manifest_name):
-                if any(part in SCAN_EXCLUDED_DIRS for part in skill_md.parts):
+                if any(part in SCAN_EXCLUDED_DIRS for part in skill_md.relative_to(root_path).parts):
                     continue
                 skill_dirs.add(skill_md.parent)
         return sorted(skill_dirs)

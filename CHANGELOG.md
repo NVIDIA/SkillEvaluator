@@ -443,6 +443,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Folder validators apply skill-discovery exclusions only below the requested
+  scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
+  no longer loses every live skill, while nested evaluation snapshots remain excluded.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.tier1.commands import run_lint_scripts, run_quality_check
+from skillevaluator.utils.tier2_paths import is_link_or_reparse
 from skillevaluator.validators.policy import resolve_policy
 from skillevaluator.validators.schema import SchemaValidator
 
@@ -74,11 +75,12 @@ def skill_root_for(
 ) -> Path | None:
     """Return the nearest ancestor of *path* that contains ``SKILL.md`` or ``skill.md``.
 
-    Deleted skills and paths that never sit under a skill are ignored. Search
+    Deleted skills and paths outside *cwd* or never under a skill are ignored. Search
     stops at *cwd* (the repository root pre-commit runs from) so a stray
     manifest above the project is not treated as a skill root. A manifest in
     a ``SCAN_EXCLUDED_DIRS`` folder (``evals/``, ``.versions/``, ...) is not
-    a skill root either; the walk continues up to the real skill.
+    a skill root either; the walk continues up to the real skill. A changed
+    directory link belongs to the skill containing the link, not its target.
 
     ``_cache`` and ``_manifest_cache`` let ``collect_skill_roots`` share
     lookups across paths so each directory is listed once per invocation.
@@ -87,7 +89,7 @@ def skill_root_for(
     candidate = parse_hook_path(path)
     if not candidate.is_absolute():
         candidate = cwd / candidate
-    if candidate.name in SKILL_MANIFEST_VARIANTS:
+    if candidate.name in SKILL_MANIFEST_VARIANTS or is_link_or_reparse(candidate):
         start = candidate.parent
     elif candidate.exists() and candidate.is_dir():
         start = candidate
@@ -101,6 +103,12 @@ def skill_root_for(
         limit = cwd.resolve()
     except OSError:
         limit = cwd
+
+    try:
+        if not start.resolve().is_relative_to(limit):
+            return None
+    except OSError:
+        return None
 
     root: Path | None = None
     for ancestor in [start, *start.parents]:

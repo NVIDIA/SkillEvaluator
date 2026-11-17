@@ -361,7 +361,32 @@ def test_skill_root_ignores_manifest_above_cwd(tmp_path: Path) -> None:
     assert run_precommit("schema", ["scripts/a.py"], cwd=repo) == (0, [])
 
 
-def test_precommit_cli_exit_codes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "parent-relative"])
+def test_skill_root_does_not_map_a_skill_outside_cwd(tmp_path: Path, relative: bool) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = _write_skill(tmp_path / "repo-other", "outside")
+    path = Path("../repo-other/outside/SKILL.md") if relative else outside / "SKILL.md"
+
+    assert skill_root_for(path, cwd=repo) is None
+    assert run_precommit("schema", [path], cwd=repo) == (0, [])
+
+
+def test_changed_directory_link_maps_to_its_own_skill(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    inside = _write_skill(repo, "inside")
+    outside = _write_skill(tmp_path, "outside")
+    link = inside / "linked-skill"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    assert collect_skill_roots([link], cwd=repo) == [inside.resolve()]
+
+
+def test_precommit_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     skill = _write_skill(tmp_path, "cli-skill")
     runner = CliRunner()
 

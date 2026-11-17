@@ -8,8 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
   artifacts. One testsuite is emitted per check group, failures include
-  file:line when recorded, and incomplete or unrun checks are skipped rather
-  than reported as passed.
+  file:line when recorded and follow the same gate as the exit code, incomplete
+  scanners are reported as errors, and checks that did not run are skipped
+  rather than reported as passed.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.

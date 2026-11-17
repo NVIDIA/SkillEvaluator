@@ -1301,7 +1301,7 @@ def test_a_quoted_rm_name_that_is_an_argument_keeps_mains_reading(security_check
 
 @pytest.mark.parametrize("other", [None, "pytest -q", _SKILL_CALL], ids=["alone", "after-pytest", "after-skill"])
 @pytest.mark.parametrize("command", _QUOTED_RM_COMMANDS)
-def test_a_quoted_rm_name_that_is_a_command_word_keeps_the_finding(security_check, command: str, other) -> None:
+def test_a_quoted_rm_name_that_is_a_command_word_gets_the_finding(security_check, command: str, other) -> None:
     result = security_check(command) if other is None else security_check(other, command)
 
     [finding] = _destructive_findings(result)
@@ -1348,7 +1348,7 @@ def test_a_quoted_rm_name_in_an_array_literal_keeps_mains_result(security_check,
 
 
 @pytest.mark.parametrize("command", _COMMANDS_BESIDE_ARRAY_LITERALS)
-def test_a_command_beside_an_array_literal_keeps_the_finding(security_check, command: str) -> None:
+def test_a_command_beside_an_array_literal_gets_the_finding(security_check, command: str) -> None:
     result = security_check(command)
 
     assert _destructive_findings(result)
@@ -1983,7 +1983,7 @@ def test_a_target_after_a_dollar_quote_word_keeps_the_finding(security_check, wr
         'echo \'eval "$CMD" -rf "$DIR"\'',
     ],
 )
-def test_eval_text_that_only_shows_a_command_keeps_the_finding(security_check, command: str) -> None:
+def test_eval_text_that_only_shows_a_command_gets_the_finding(security_check, command: str) -> None:
     """eval text is read wherever rm text is, also where nothing runs it, as a known trade-off.
 
     main reads rm text in quoted words and in every here-document body, since

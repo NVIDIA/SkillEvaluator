@@ -355,6 +355,12 @@ As another command's argument, as in `grep 'rm' -rn .` or
 array literal, as in `cmd=("rm" -rf build)` or
 `declare -a cmd=('rm' '-rf' 'build')`, are values, not a command, so they do
 not receive it either, also where `"${cmd[@]}"` runs them later.
+Such an argument or array word does receive the finding four or more `$( )`
+levels deep, where the check stops splitting words and any `rm` text it
+reads there gets the finding, as in
+`echo $(echo $(echo $(echo $(git 'rm' -r --cached build))))`, and after a
+`$(` or backtick that does not close, whose command is read with its quotes
+dropped, as in ``echo `git 'rm' -r --cached build``.
 In a quoted word or here-document read as commands, such as `bash -c` text,
 a here-string or text piped to a shell, a quoted name counts only where that
 text also holds `rm` text that the pattern below matches, so

@@ -1684,38 +1684,50 @@ def test_only_adds_markers_rejects_a_marker_taken_back() -> None:
     ],
 )
 def test_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
-    small, large = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, unit, 25_000, 250_000)
-    # Ten times the text takes about ten times as long. A step quadratic in
-    # the number of markers took twenty times as long on the escaped quotes
-    # between markers. The margin allows for a slow CI runner.
-    assert large < 16 * small + 0.05
+    in_pieces, whole = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, unit, 25_000, 250_000)
+    # The text masked whole takes about as long as in ten pieces. A step
+    # quadratic in the number of markers took twice as long on the escaped
+    # quotes between markers.
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
 def _masking_seconds(
     mask: Callable[[str], object], unit: str | Callable[[int], str], small: int, large: int
 ) -> tuple[float, float]:
-    """Return the CPU seconds *mask* takes on *unit* repeated to *small* and to *large* characters.
+    """Return the CPU seconds *mask* takes on *large* characters of *unit* in pieces of *small* characters, and whole.
 
     *unit* may also be a function that returns the text for a length. The
-    two texts are masked in turn, three times each, and the fastest time of
-    each counts, so a burst of load on a busy CI runner slows both rather
-    than only the large one. The time is this thread's CPU time with garbage
-    collection paused: neither another process or thread holding the CPU nor
-    a collection of the test worker's whole heap is counted.
+    pieces are the text of *small* characters masked large // small times,
+    the whole is the text of *large* characters masked once: the same work,
+    which takes as long either way when masking is linear in the text. The
+    two are timed in turn, three times each, and the fastest time of each
+    counts. The time is this thread's CPU time with garbage collection
+    paused: neither another process or thread holding the CPU nor a
+    collection of the test worker's whole heap is counted.
+
+    The pieces are timed together rather than one piece against the whole
+    text because on a loaded CI runner a reading that takes a tenth of the
+    time finds an idle moment the long one never does, and the ratio of the
+    two then grows with the load, not with the text.
     """
+    count = large // small
     if callable(unit):
-        texts = (unit(small), unit(large))
+        piece, text = unit(small), unit(large)
     else:
-        texts = (unit * (small // len(unit)), unit * (large // len(unit)))
+        piece = unit * (small // len(unit))
+        text = piece * count
     fastest = [math.inf, math.inf]
     collecting = gc.isenabled()
     gc.disable()
     try:
         for _ in range(3):
-            for index, text in enumerate(texts):
-                started = time.thread_time()
-                mask(text)
-                fastest[index] = min(fastest[index], time.thread_time() - started)
+            started = time.thread_time()
+            for _ in range(count):
+                mask(piece)
+            fastest[0] = min(fastest[0], time.thread_time() - started)
+            started = time.thread_time()
+            mask(text)
+            fastest[1] = min(fastest[1], time.thread_time() - started)
     finally:
         if collecting:
             gc.enable()
@@ -2722,23 +2734,24 @@ _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING = _repeated(
 )
 def test_masking_credentials_behind_flags_grows_linearly_with_the_text(make_text: Callable[[int], str]) -> None:
     # Judge evidence is masked whole, with no 2,000-character scan window, so
-    # the flag rule and the readings it starts must stay close to linear: ten
-    # times the text takes about ten times as long. A flag inside the word
+    # the flag rule and the readings it starts must stay close to linear: the
+    # text masked whole takes about as long as in ten pieces. A flag inside the word
     # value of an earlier flag ("--password a\ --db-password=a", or an argv
     # list in JSON repeated as JSON, where every quote is escaped) must not
     # read the rest of that word again, nor may a flag before a long word, nor
     # each name that a masked value hides (see the next test).
-    small, large = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, make_text, 10_000, 100_000)
-    assert _grows_linearly(small, large), (small, large)
+    in_pieces, whole = _masking_seconds(eval_core_checks._mask_finding_evidence_credentials, make_text, 10_000, 100_000)
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
-def _grows_linearly(small: float, large: float) -> bool:
-    """Whether masking a text ten times as long took *large* CPU seconds against *small*: about ten times as long.
+def _grows_linearly(in_pieces: float, whole: float) -> bool:
+    """Whether masking a text whole took *whole* CPU seconds against *in_pieces* for the text in pieces: about as long.
 
-    The margin allows for a slow CI runner. A reading that grows with the
-    square of the text takes tens of times as long.
+    The margin allows for the whole text's larger working set on a loaded CI
+    runner. A reading that grows with the square of the text takes twice as
+    long whole or more: each of ten pieces does a hundredth of its work.
     """
-    return large < 16 * small + 0.05
+    return whole < 1.6 * in_pieces + 0.05
 
 
 def test_the_linear_growth_bound_rejects_reading_each_run_again(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2747,18 +2760,19 @@ def test_the_linear_growth_bound_rejects_reading_each_run_again(monkeypatch: pyt
     # assignment rule's reading of each name on its own would without keeping
     # the runs it has read: then masking 30,000 characters of value-less
     # flags in a quoted string takes about 50 to 70 times as long as masking
-    # 3,000, and the gap grows with the text.
+    # 3,000, five to seven times as long as masking the ten pieces, and the
+    # gap grows with the text.
     mask = eval_core_checks._mask_finding_evidence_credentials
-    small, large = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
-    assert _grows_linearly(small, large), (small, large)
+    in_pieces, whole = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
     def read_again(self: Any, pattern: re.Pattern[str], start: int) -> int | None:
         match = pattern.match(self.text, start)
         return None if match is None else match.end()
 
     monkeypatch.setattr(eval_core_checks._AssignmentValues, "_run_end", read_again)
-    small, large = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
-    assert not _grows_linearly(small, large), (small, large)
+    in_pieces, whole = _masking_seconds(mask, _VALUE_LESS_FLAGS_IN_A_QUOTED_STRING, 3_000, 30_000)
+    assert not _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
 @pytest.mark.parametrize(

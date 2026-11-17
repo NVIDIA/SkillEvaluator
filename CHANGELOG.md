@@ -120,44 +120,21 @@ All notable changes to SkillEvaluator are documented in this file.
   cannot be confirmed stopped after a timeout or interruption, no further arm starts
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
-- Add `efficiency`, `discoverability` and `correctness` sections to the
-  `--quality-config` file, so these values are no longer fixed in code:
-  - `efficiency.token_budget` sets `max_tokens` (5,000), the recommended
-    `SKILL.md` size. Reports show the limit in force as
-    `recommended_max_tokens`.
-  - `discoverability.description_too_short` sets `min_chars` (20), the
-    shortest frontmatter description that passes, and
-    `discoverability.description_too_long` sets `max_chars` (200), the
-    longest. The two are checked independently.
-  - `correctness.reserved_name` sets `terms` (`anthropic`, `claude`), the words
-    a skill name may not contain. `points: 0` also removes its HIGH finding.
-    The schema check keeps its own fixed list.
+- Add four configurable quality rules to the `--quality-config` file. Each
+  sets `points`, `message` and `suggestion` plus one setting, and `points: 0`
+  turns it off:
 
-  Each rule also sets `points`, `message`, and `suggestion`, and `points: 0`
-  turns it off. The sections are optional and overlay the packaged values the
-  same way `error_handling` does. Scores are unchanged without a custom file,
-  and the other rules in these areas stay in code for now. The packaged
-  `quality_config` digest changes once, because `quality-default.yaml` gained
-  the sections.
+  | Rule | Setting | Packaged value |
+  | --- | --- | --- |
+  | `efficiency.token_budget` | `max_tokens` | 5,000 |
+  | `discoverability.description_too_short` | `min_chars` | 20 |
+  | `discoverability.description_too_long` | `max_chars` | 200 |
+  | `correctness.reserved_name` | `terms` | `anthropic`, `claude` |
 
-  The four finding messages are reworded: the measured values follow the
-  configured message, as in `Large skill: ~6200 estimated tokens at 4
-  characters per token, recommended max <5000; a real tokenizer may count
-  more` (the agentskills.io guidance moves from this message to its
-  suggestion), `Description too short (recommend 50-150 chars): 12 chars, minimum
-  20`, `Description very long (recommend 50-150 chars): 251 chars, maximum
-  200`, and `Name contains reserved word: claude`, which names only the words
-  that matched. Because the message is part of the ID, these findings'
-  `finding_id` changes once with this release, and reserved-name findings are
-  grouped per matched word instead of as one finding across skills. With a
-  custom file, the configured `max_tokens`, `min_chars` or `max_chars` is part
-  of the message, so changing it changes the ID again.
-
-  The `QUALITY_RECOMMENDED_MAX_TOKENS` and `QUALITY_RESERVED_NAMES` constants
-  are removed; read `load_quality_config()["efficiency"]["token_budget"]
-  ["max_tokens"]` and `load_quality_config()["correctness"]["reserved_name"]
-  ["terms"]` instead. A `QualityScoreResult` built directly, without the
-  validator, no longer reports `recommended_max_tokens`.
+  Please note - This change set moves hard coded values into the default
+  quality config file, so scores, deductions and severities are unchanged,
+  but the before/after `finding_id` will be different. A custom file from
+  an earlier version keeps its digest; the packaged digest changes once.
 
 - Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
   SkillSpector now say why SkillSpector stopped inspecting the file that a skill

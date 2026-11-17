@@ -1,125 +1,67 @@
 ---
 title: "SkillEvaluator"
-description: "An open-source, multi-tier framework for evaluating AI agent artifacts, starting with agent skills."
+description: "Check an agent skill, measure its effect on a real agent, or add automatic checks to your repository."
 layout: overview
 ---
 
-SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts, starting with agent skills: deterministic quality gates, semantic overlap detection, synthetic eval dataset generation, and live agent evaluation.
+Check your agent skills for quality and security, then measure whether they help an agent complete real tasks.
 
-Agent skills are folders of instructions and supporting files that extend AI agents, as defined by the [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of the [NVIDIA Verified Skills pipeline](https://docs.nvidia.com/skills/), published from the [NVIDIA/skills catalog](https://github.com/NVIDIA/skills). Tier 1 integrates [SkillSpector](https://github.com/NVIDIA/SkillSpector) for specialized security scanning; see [Installation](/skills/skillevaluator/installation#system-tools) for the security setup.
-
-<Note>
-  SkillEvaluator's support level is **Experimental**: community-supported on a best-effort basis through [GitHub Issues](https://github.com/NVIDIA/SkillEvaluator/issues), with no SLA. See [SUPPORT.md](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md).
-</Note>
-
-<a id="try-it-in-two-minutes" />
+<div id="try-it-in-two-minutes">
 
 ## Start with a first result
 
-Choose a deterministic quality check or an LLM-backed rubric review. Both routes
-use the bundled `text-analyzer` skill, so you can run them before preparing your
-own skill. Neither route needs Docker or an agent runtime. Set up your chosen
-agent and sandbox when you move on to [live Tier 3 evaluation](/skills/skillevaluator/tier3-live-evaluation).
+<Card title="Run your first check" icon="rocket" href="/skills/skillevaluator/quickstart">
+  **Install → check the example → read your result.**
 
-### Run without an LLM
+  Use a bundled skill to get a quality score and actionable findings.
+  The quickstart links to installation and walks through a bundled skill.
+  No API key, GPU, or Docker required for this check.
+</Card>
 
-Install [uv](https://docs.astral.sh/uv/getting-started/installation/) and Git,
-then clone the repository and run the base package:
+</div>
 
-```bash title="Quality check with no API key"
-git clone --depth 1 https://github.com/NVIDIA/SkillEvaluator.git
-cd SkillEvaluator
-uv run --python 3.13 skillevaluator quality-check src/skillevaluator/tier3/reference_skills/text-analyzer -r cli -r json -o reports/first-quality
-```
+## What do you want to do?
 
-Read the score, grade, and findings in the terminal, and open
-`reports/first-quality/skillevaluator-quality.json` for the saved result.
-This checks documentation quality; measuring the skill's effect on an agent
-requires a [live evaluation](/skills/skillevaluator/tier3-live-evaluation).
-
-The [keyless Quickstart](/skills/skillevaluator/quickstart#run-without-an-llm) explains the result
-and how to check your own skill. The full static security suite has additional
-[scanner requirements](/skills/skillevaluator/installation#system-tools), even though it also
-runs without an LLM or API key.
-
-### Use NVIDIA Build
-
-For an LLM-backed rubric review, get an API key from
-[NVIDIA Build](https://build.nvidia.com/), then run from the same checkout:
-
-```bash title="LLM-backed rubric review"
-export SKILL_EVAL_LLM_PROVIDER=nv_build
-export NVIDIA_API_KEY='nvapi-...'
-uv run --python 3.13 --extra llm skillevaluator rubric-eval src/skillevaluator/tier3/reference_skills/text-analyzer -r cli -r json -o reports/first-build
-```
-
-The `llm` extra installs the provider clients for this model call. The
-[NVIDIA Build Quickstart](/skills/skillevaluator/quickstart#use-nvidia-build) covers access,
-outputs, and the distinction between rubric scores and observed agent behavior.
+<CardGroup cols={3}>
+  <Card title="Test a skill with an agent" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+    Run the same tasks with and without your skill. Open a report comparing the results.
+  </Card>
+  <Card title="Add checks to your repository" icon="code-branch" href="/skills/skillevaluator/repository-integration">
+    Copy a GitHub or GitLab template. Get automatic quality and security reports when skills change.
+  </Card>
+  <Card title="Evaluate from your agent" icon="robot" href="/skills/skillevaluator/agent-skill">
+    Install the SkillEvaluator skill and ask your agent to run an evaluation.
+  </Card>
+</CardGroup>
 
 ## The three tiers
 
-Each tier answers one question about your skill.
+Choose the check that answers your question. Each tier can run independently.
 
-<CardGroup cols={3}>
-  <Card title="Tier 1: Validation" href="/skills/skillevaluator/tier1-validation">
-    **Is this skill safe and well-formed?** Deterministic schema, quality, security, PII, license, and script checks that run offline — plus optional LLM-as-judge scoring.
-  </Card>
-  <Card title="Tier 2: Deduplication" href="/skills/skillevaluator/tier2-deduplication">
-    **Does it overlap with what exists?** Embedding similarity finds repeated guidance inside one skill and overlapping skills across a collection or catalog.
-  </Card>
-  <Card title="Tier 3: Live Evaluation" href="/skills/skillevaluator/tier3-live-evaluation">
-    **Does it actually help the agent?** A real agent runs generated tasks with and without the skill, inside a sandbox, and the difference is measured.
-  </Card>
-</CardGroup>
+| Your question | Evaluation |
+| --- | --- |
+| Is my skill well-formed and safe to use? | [Tier 1: Validation](/skills/skillevaluator/tier1-validation) |
+| Will my agent load the skill correctly? | [Tier 1: Harness Check](/skills/skillevaluator/harness-check) |
+| Does it repeat or overlap with existing guidance? | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) |
+| Does it improve an agent's results? | [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) |
 
-Every tier is an independent entry point — run any command directly; nothing requires running the earlier tiers first.
+Need a specific option? Open [Installation](/skills/skillevaluator/installation),
+[Providers & Credentials](/skills/skillevaluator/configuration),
+[Reports & Results](/skills/skillevaluator/reports), or the
+[CLI Reference](/skills/skillevaluator/cli-reference).
 
-| Tier | Representative commands | Requires |
-| --- | --- | --- |
-| [Tier 1](/skills/skillevaluator/tier1-validation) | `tier1 PATH`, `quality-check`, `security-scan`, `pii-scan`, `lint-scripts`, `rubric-eval` | No API key for deterministic checks; external Semgrep, SkillSpector, and Gitleaks executables for full scanner coverage; a provider key for LLM checks |
-| [Tier 2](/skills/skillevaluator/tier2-deduplication) | `context-optimization-check`, `similarity-check` | An embeddings provider; intra-skill analysis also needs a chat LLM — local OpenAI-compatible endpoints work |
-| [Tier 3](/skills/skillevaluator/tier3-live-evaluation) | `create-eval-dataset`, `tier3 evaluate`, `compare` | No credential for keyless templates and report inspection; a provider key for LLM generation and grading; live evaluation also needs the agent CLI with its credential and a Docker, local OS, or cloud sandbox |
+<Accordion title="About SkillEvaluator and support">
+  SkillEvaluator is an open-source, multi-tier framework for evaluating AI agent artifacts,
+  starting with agent skills: deterministic quality gates, semantic overlap detection,
+  synthetic eval dataset generation, and live agent evaluation.
 
-## How a run flows
+  It is part of [NVIDIA Verified Skills](https://docs.nvidia.com/skills/) and the
+  [NVIDIA/skills catalog](https://github.com/NVIDIA/skills). Tier 1 integrates
+  [SkillSpector](https://github.com/NVIDIA/SkillSpector) for security scanning.
 
-<Frame background="subtle" caption="The SkillEvaluator three-tier pipeline">
-  <img src="./assets/pipeline-overview.svg" alt="SkillEvaluator pipeline: skill directory through Tier 1 static validation, Tier 2 semantic deduplication, and Tier 3 live agent evaluation, producing reports and a verdict" />
-</Frame>
-
-`skillevaluator validate ./my-skill` runs all three tiers by default, with
-Tier 3 autopilot reusing an existing evaluation source or creating one starter
-case when none exists. Tier 1's deterministic gates run offline. Tier 2 and the optional Tier 1 LLM checks need a provider key, and Tier 3 adds the agent credential and a sandbox. Every run ends in [reports](/skills/skillevaluator/reports) — CLI, JSON, HTML, or Markdown.
-
-## What Tier 3 measures
-
-- **Five dimensions** — Security, Correctness, Discoverability, Effectiveness, and Efficiency: human-readable scores that lead every standard grading report.
-- **Skill Lift** — the measured difference between the with-skill and without-skill runs; the number that says whether the skill earns its place.
-- **pass@k** — multi-attempt reliability, reported separately from the dimension scores.
-
-How to read all three, and the on-disk results contract, live in [Reports & Results](/skills/skillevaluator/reports).
-
-## Explore the docs
-
-<CardGroup cols={2}>
-  <Card title="Quickstart" icon="rocket" href="/skills/skillevaluator/quickstart">
-    Run a bundled quality check without an LLM, or use NVIDIA Build for a rubric review.
-  </Card>
-  <Card title="Evaluate from Your Agent" icon="robot" href="/skills/skillevaluator/agent-skill">
-    Install the SkillEvaluator skill in Codex, Claude Code, OpenCode, or OpenClaw and evaluate skills by asking.
-  </Card>
-  <Card title="Gate Your CI" icon="shield" href="/skills/skillevaluator/ci-integration">
-    Make SkillEvaluator a merge gate — exit codes, a GitHub Actions recipe, and progressive adoption.
-  </Card>
-  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
-    Every command, every flag, exact defaults.
-  </Card>
-  <Card title="Contributing" icon="book" href="/skills/skillevaluator/developer-guide">
-    Dev environment, tests, docs workflow, and how to submit a change.
-  </Card>
-</CardGroup>
-
-- [SkillEvaluator on GitHub](https://github.com/NVIDIA/SkillEvaluator)
-- [Support](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md) — best-effort, through GitHub Issues
-- [Security policy](https://github.com/NVIDIA/SkillEvaluator/blob/main/SECURITY.md) — report vulnerabilities privately, never in a public issue
-- [License](https://github.com/NVIDIA/SkillEvaluator/blob/main/LICENSE) — Apache-2.0
+  **Experimental:** community-supported on a best-effort basis, with no SLA.
+  [Get support](https://github.com/NVIDIA/SkillEvaluator/blob/main/SUPPORT.md),
+  [report a security vulnerability privately](https://github.com/NVIDIA/SkillEvaluator/blob/main/SECURITY.md),
+  or [contribute](/skills/skillevaluator/developer-guide).
+  SkillEvaluator is [Apache-2.0 licensed](https://github.com/NVIDIA/SkillEvaluator/blob/main/LICENSE).
+</Accordion>

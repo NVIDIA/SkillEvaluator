@@ -125,6 +125,8 @@ def _augment(
             if component is not None:
                 row.setdefault("properties", {})["pluginComponent"] = component
         return json.dumps(data, indent=reporter.indent, ensure_ascii=True, allow_nan=False)
+    if reporter.name == "junit":
+        return document
     if reporter.name == "html":
         return reporter.render_all(results, plugin_static=payload)
     if reporter.name in {"markdown", "benchmark"}:

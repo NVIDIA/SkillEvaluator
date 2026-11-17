@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 import pytest
+from tests.tier3.test_security_finding_evidence import _grows_linearly, _masking_seconds
 
 from skillevaluator.tier3.eval_core import checks
 from skillevaluator.tier3.eval_core.checks import check_security
@@ -255,6 +256,20 @@ _ARGV_RM_THAT_RUNS = [
             + "subprocess.run(['rm', '-rf', '/home/u'])"
         ),
         id="many-plain-vectors",
+    ),
+    # The vectors of one source are read while they hold at most 4096 items
+    # in all, each use of a bound vector counted again.
+    pytest.param(
+        _run_code(
+            "import subprocess\ncmd = ['ls', '-l', 'a', 'b']\n"
+            + "subprocess.run(cmd)\n" * 1023
+            + "subprocess.run(['rm', '-rf', '/home/u'])"
+        ),
+        id="vector-within-the-item-budget",
+    ),
+    pytest.param(
+        _run_code("import subprocess\ncmd = ['rm', '-rf', '/home/u'" + ", 'a'" * 4093 + "]\nsubprocess.run(cmd)"),
+        id="vector-of-4096-items",
     ),
     # A relative recursive target counts wherever the code runs it, also when
     # the code sets its own directory, as in shell text.
@@ -771,6 +786,20 @@ _ARGV_RM_FORMS_NOT_MODELED = [
     pytest.param(
         "python3 <<< \"import subprocess; subprocess.run(['rm', '-rf', '/home/u'])\"" + " | cat" * 2000,
         id="here-string-pipeline-past-the-split-budget",
+    ),
+    # A vector after vectors of the same source that hold 4096 items, each
+    # use of a bound vector counted again, and a vector of more items.
+    pytest.param(
+        _run_code(
+            "import subprocess\ncmd = ['ls', '-l', 'a', 'b']\n"
+            + "subprocess.run(cmd)\n" * 1024
+            + "subprocess.run(['rm', '-rf', '/home/u'])"
+        ),
+        id="vector-past-the-item-budget",
+    ),
+    pytest.param(
+        _run_code("import subprocess\ncmd = ['rm', '-rf', '/home/u'" + ", 'a'" * 4094 + "]\nsubprocess.run(cmd)"),
+        id="vector-of-4097-items",
     ),
 ]
 
@@ -1327,6 +1356,35 @@ def test_interpreter_code_is_read_for_links_in_linear_time(monkeypatch: pytest.M
         assert checks._rm_argv_deletes_outside_tmp(call, symlink_seen=False, workdirs=("/workspace",), budget=[32_768])
 
 
+def _spread_vector_code(length: int) -> str:
+    """Return about *length* characters of Python that spreads one bound vector into one call many times."""
+    items = ", 'a'" * (length // 10)
+    stars = ", ".join(["*cmd"] * (length // 12))
+    return f"import subprocess\ncmd = ['rm', '-rf', '/'{items}]\nsubprocess.run([{stars}])"
+
+
+def _passed_vector_code(length: int) -> str:
+    """Return about *length* characters of Python that passes one bound vector to many calls."""
+    items = ", 'a'" * (length // 10)
+    return f"import subprocess\ncmd = ['rm', '-rf', '/'{items}]\n" + "subprocess.run(cmd)\n" * (length // 40)
+
+
+@pytest.mark.parametrize(
+    "make_code", [pytest.param(_spread_vector_code, id="spread"), pytest.param(_passed_vector_code, id="passed")]
+)
+def test_a_bound_vector_used_many_times_is_read_in_linear_time(make_code: Callable[[int], str]) -> None:
+    # Each *cmd of a call, and each call that passes cmd, read all of cmd's
+    # items again, so the time grew with the vector's length times its uses:
+    # 64 KiB of such code took over half a minute and gigabytes of memory.
+    # Each vector is read once and the vectors of one source hold at most
+    # 4096 items, so the code read whole takes about as long as in ten pieces.
+    def check(code: str) -> object:
+        return check_security([_run_code(code)])
+
+    in_pieces, whole = _masking_seconds(check, make_code, 2_000, 20_000)
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
+
+
 def test_default_values_of_an_unused_function_are_read_once(monkeypatch: pytest.MonkeyPatch) -> None:
     # Each default value of a function the code never uses may run; they are
     # collected once for the function, not once for each of them.
@@ -1398,8 +1456,8 @@ def test_long_version_like_names_are_read_without_the_version_pattern(security_c
 def test_a_run_of_escaped_quotes_is_held_in_linear_time() -> None:
     # A pattern for a whole double-quoted string started again at each quote
     # of a run of escaped quotes, which took over ten seconds on this command;
-    # the strings to hold are found in one pass. No other test here asserts a
-    # time, and this bound is far above what the pass takes.
+    # the strings to hold are found in one pass. No other test here bounds a
+    # time in seconds, and this bound is far above what the pass takes.
     command = "cd " + '\\"' * 32_000
     started = time.process_time()
     assert checks._rm_argv_hold_quotes(command, []) == command

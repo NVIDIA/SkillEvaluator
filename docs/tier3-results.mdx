@@ -732,6 +732,10 @@ forms are not read as argument vectors and keep the result they had before:
   `['rm', '-f', 'f{1..300}.txt', '/etc/hosts']` does. Python and Node pass
   braces literally, while shell text expands them, and a target that expands
   past 256 words counts as protected there;
+- the vectors of Python code not yet read once those read come to 4,096
+  items, each use of a bound vector counting again, as an `rm` vector after
+  1,024 calls of `subprocess.run(cmd)` with a four-item `cmd`, and a vector
+  of more items than are left, such as `[*cmd, *cmd, ...]` of a long `cmd`;
 - Python code that does not parse. Python code is parsed by the Python that
   runs the grader, so the host checker and the Harbor verifier can differ:
   code that needs a newer Python than the task image has, and code nested

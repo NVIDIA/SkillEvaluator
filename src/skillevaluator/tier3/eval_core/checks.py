@@ -7102,6 +7102,12 @@ _PY_ARGV_RUNNERS = frozenset(
 )
 _PY_EXEC_RE = re.compile(r"os\.(exec|spawn)([lv])p?(e?)")
 _PY_SPAWN_EXEC = frozenset({"asyncio.create_subprocess_exec", "asyncio.subprocess.create_subprocess_exec"})
+# How many items the argument vectors that _python_argv_lists collects from
+# one source may hold in all. A bound vector is read once however often the
+# code uses it, but each use adds its items, so a long vector passed or
+# spread thousands of times would make the vectors grow with its length
+# times its uses.
+_PY_ARGV_MAX_ITEMS = 4096
 # Mocking replaces functions with stand-ins, so code that mocks is not read.
 _PY_MOCK_MODULES = frozenset({"mock", "unittest.mock"})
 _PY_MOCK_NAMES = frozenset({"mock", "mocker", "monkeypatch", "MonkeyPatch"})
@@ -7406,6 +7412,13 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
     caller has parsed it already. The tree is walked once; which names are
     used, and which are bound to vectors, is worked out only for code that
     needs it.
+
+    Vectors are collected, in the order the walk finds their calls, while
+    their items come to at most _PY_ARGV_MAX_ITEMS in all; a vector that
+    would pass that ends the collection. Each literal or bound vector is read
+    once however often the code uses it, but each use counts its items, so
+    the time stays linear in the source also when it passes a long vector, or
+    spreads it with ``*name``, thousands of times.
     """
     tree = tree if tree is not None else _parse_python(source)
     if tree is None:
@@ -7422,6 +7435,11 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
     if not runners:
         return []
     bound: dict[str, ast.AST] | None = None
+    # What each vector node reads as, spread with *name or *[...] and as a whole vector, worked out once.
+    spread: dict[Any, list[str] | None] = {}
+    whole: dict[Any, list[str] | None] = {}
+    items_left = _PY_ARGV_MAX_ITEMS
+    full = False
 
     def bound_value(node: Any) -> Any:
         nonlocal bound
@@ -7431,11 +7449,16 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
         return node
 
     def items(nodes: list[Any]) -> list[str] | None:
-        # Str literals, and *name or *[...] of a literal vector, one level deep.
+        # Str literals, and *name or *[...] of a literal vector, one level deep. A vector with more items
+        # than are left to collect ends the collection.
+        nonlocal full
         values: list[str] = []
         for node in nodes:
             if isinstance(node, ast.Starred):
-                expanded = _python_literal_strings(bound_value(node.value))
+                value = bound_value(node.value)
+                if value not in spread:
+                    spread[value] = _python_literal_strings(value)
+                expanded = spread[value]
                 if expanded is None:
                     return None
                 values += expanded
@@ -7443,11 +7466,18 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
                 values.append(node.value)
             else:
                 return None
+            if len(values) > items_left:
+                full = True
+                return None
         return values
 
     def vector(node: Any) -> list[str] | None:
         node = bound_value(node)
-        return items(node.elts) if isinstance(node, (ast.List, ast.Tuple)) else None
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            return None
+        if node not in whole:
+            whole[node] = items(node.elts)
+        return whole[node]
 
     vectors: list[list[str]] = []
     for call in _python_calls_that_may_run(runners, by_type, parents):
@@ -7480,11 +7510,16 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
             if not args or (form == "v" and len(args) != 2):
                 continue
             program, argv = args[0], vector(args[1]) if form == "v" else items(args[1:])
+        if full:
+            break
         if program is not None:
             path = _python_literal_strings([program])
             argv = [path[0], *argv[1:]] if path and argv else None
         if argv:
-            vectors.append(argv)
+            if len(argv) > items_left:
+                break
+            items_left -= len(argv)
+            vectors.append(list(argv))
     return vectors
 
 

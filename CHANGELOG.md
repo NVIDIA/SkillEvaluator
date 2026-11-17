@@ -121,13 +121,14 @@ All notable changes to SkillEvaluator are documented in this file.
   beside it and the failure is reported. After a timeout, the failed run still keeps
   the scores of the arms that finished.
 - Add `efficiency`, `discoverability` and `correctness` sections to the
-  `--quality-config` file, one rule each, so these values are no longer fixed
-  in code:
+  `--quality-config` file, so these values are no longer fixed in code:
   - `efficiency.token_budget` sets `max_tokens` (5,000), the recommended
     `SKILL.md` size. Reports show the limit in force as
     `recommended_max_tokens`.
   - `discoverability.description_too_short` sets `min_chars` (20), the
-    shortest frontmatter description that passes.
+    shortest frontmatter description that passes, and
+    `discoverability.description_too_long` sets `max_chars` (200), the
+    longest. The two are checked independently.
   - `correctness.reserved_name` sets `terms` (`anthropic`, `claude`), the words
     a skill name may not contain. `points: 0` also removes its HIGH finding.
     The schema check keeps its own fixed list.
@@ -139,16 +140,17 @@ All notable changes to SkillEvaluator are documented in this file.
   `quality_config` digest changes once, because `quality-default.yaml` gained
   the sections.
 
-  The three finding messages are reworded: the measured values follow the
+  The four finding messages are reworded: the measured values follow the
   configured message, as in `Large skill. ...: ~6200 estimated tokens at 4
   characters per token, recommended max <5000; a real tokenizer may count
   more`, `Description too short (recommend 50-150 chars): 12 chars, minimum
-  20`, and `Name contains reserved word: claude`, which names only the words
+  20`, `Description very long (recommend 50-150 chars): 251 chars, maximum
+  200`, and `Name contains reserved word: claude`, which names only the words
   that matched. Because the message is part of the ID, these findings'
   `finding_id` changes once with this release, and reserved-name findings are
   grouped per matched word instead of as one finding across skills. With a
-  custom file, the configured `max_tokens` or `min_chars` is part of the
-  message, so changing it changes the ID again.
+  custom file, the configured `max_tokens`, `min_chars` or `max_chars` is part
+  of the message, so changing it changes the ID again.
 
   The `QUALITY_RECOMMENDED_MAX_TOKENS` and `QUALITY_RESERVED_NAMES` constants
   are removed; read `load_quality_config()["efficiency"]["token_budget"]

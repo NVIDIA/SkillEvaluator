@@ -85,10 +85,20 @@ class DescriptionTooShortRule(TypedDict):
     min_chars: int
 
 
+class DescriptionTooLongRule(TypedDict):
+    """Deduction when the frontmatter description is longer than max_chars."""
+
+    points: int | float
+    message: str
+    suggestion: str
+    max_chars: int
+
+
 class DiscoverabilityConfig(TypedDict):
     """Discoverability rules; a rule with points 0 is skipped."""
 
     description_too_short: DescriptionTooShortRule
+    description_too_long: DescriptionTooLongRule
 
 
 class ReservedNameRule(TypedDict):
@@ -192,6 +202,7 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
     },
     "discoverability": {
         "description_too_short": ("min_chars", _validate_positive_int),
+        "description_too_long": ("max_chars", _validate_positive_int),
     },
     "correctness": {
         "reserved_name": ("terms", partial(_validate_entries, ignore_case=True)),

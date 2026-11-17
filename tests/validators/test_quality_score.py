@@ -1792,6 +1792,80 @@ def _short_description_issues(result) -> list[dict]:
     return [issue for issue in issues if "chars, minimum" in issue["message"]]
 
 
+def _long_description_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+    return [issue for issue in issues if "chars, maximum" in issue["message"]]
+
+
+class TestDiscoverabilityDescriptionTooLongConfig:
+    def test_packaged_rule_fires_only_above_200_characters(self, tmp_path: Path):
+        at_maximum = _validate_with(_write_described_skill(tmp_path / "at", "Use for logs. " + "x" * 186), tmp_path)
+        above = _validate_with(_write_described_skill(tmp_path / "above", "Use for logs. " + "x" * 187), tmp_path)
+
+        assert _long_description_issues(at_maximum) == []
+        (issue,) = _long_description_issues(above)
+        assert issue["message"] == "Description very long (recommend 50-150 chars): 201 chars, maximum 200"
+        assert issue["suggestion"] == "Keep descriptions concise for progressive disclosure"
+        assert issue["deduction"] == 5
+        assert issue["severity"] == "info"
+
+    def test_custom_maximum_moves_the_threshold_in_both_directions(self, tmp_path: Path):
+        config = "discoverability:\n  description_too_long:\n    max_chars: {}\n"
+        long_skill = _write_described_skill(tmp_path / "long", "Use for logs. " + "x" * 236)
+        short_skill = _write_described_skill(tmp_path / "short", "Use for parsing application logs")
+
+        raised = _validate_with(long_skill, tmp_path, config.format(300))
+        lowered = _validate_with(short_skill, tmp_path, config.format(30))
+
+        assert _long_description_issues(raised) == []
+        (issue,) = _long_description_issues(lowered)
+        assert issue["message"].endswith(": 32 chars, maximum 30")
+        assert _long_description_issues(_validate_with(short_skill, tmp_path)) == []
+
+    @pytest.mark.parametrize("points", [0, 5])
+    def test_maximum_below_the_minimum_keeps_the_short_description_rule(self, tmp_path: Path, points: int):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs")
+        config = f"discoverability:\n  description_too_long:\n    max_chars: 10\n    points: {points}\n"
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        (short,) = _short_description_issues(result)
+        assert short["message"].endswith(": 12 chars, minimum 20")
+        if points:
+            (long,) = _long_description_issues(result)
+            assert long["message"].endswith(": 12 chars, maximum 10")
+        else:
+            assert _long_description_issues(result) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "discoverability:\n  description_too_long:\n    points: 3\n"
+            "    message: Description runs long\n    suggestion: Trim it\n"
+        )
+
+        result = _validate_with(_write_described_skill(tmp_path, "Use for logs. " + "x" * 236), tmp_path, config)
+
+        (issue,) = _long_description_issues(result)
+        assert issue["message"] == "Description runs long: 250 chars, maximum 200"
+        assert issue["suggestion"] == "Trim it"
+        assert issue["deduction"] == 3
+
+    def test_zero_points_turns_the_rule_off_without_changing_other_rules(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs. " + "x" * 236)
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "discoverability:\n  description_too_long:\n    points: 0\n")
+
+        def other_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if "chars, maximum" not in issue["message"]]
+
+        assert _long_description_issues(disabled) == []
+        assert other_issues(disabled) == other_issues(default)
+        scores = [r.metadata["quality_scores"]["dimensions"]["discoverability"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 5
+
+
 class TestDiscoverabilityDescriptionTooShortConfig:
     def test_packaged_rule_fires_only_below_20_characters(self, tmp_path: Path):
         at_minimum = _validate_with(_write_described_skill(tmp_path / "at", "Use for parsing logs"), tmp_path)
@@ -1821,6 +1895,16 @@ class TestDiscoverabilityDescriptionTooShortConfig:
         assert issue["message"].endswith(": 32 chars, minimum 40")
         assert _short_description_issues(default) == []
 
+    def test_custom_minimum_below_the_packaged_20_is_honored(self, tmp_path: Path):
+        config = "discoverability:\n  description_too_short:\n    min_chars: 10\n"
+
+        lowered = _validate_with(_write_described_skill(tmp_path / "lowered", "Use for logs"), tmp_path, config)
+        below = _validate_with(_write_described_skill(tmp_path / "below", "Use for X"), tmp_path, config)
+
+        assert _short_description_issues(lowered) == []
+        (issue,) = _short_description_issues(below)
+        assert issue["message"].endswith(": 9 chars, minimum 10")
+
     @pytest.mark.parametrize("points", [0, 20])
     def test_minimum_above_200_keeps_the_long_description_rule(self, tmp_path: Path, points: int):
         skill_dir = _write_described_skill(tmp_path, "Use for parsing logs. " + "x" * 230)
@@ -1831,9 +1915,10 @@ class TestDiscoverabilityDescriptionTooShortConfig:
 
         def long_issues(result) -> list[str]:
             issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
-            return [issue["message"] for issue in issues if issue["message"].startswith("Description very long")]
+            return [issue["message"] for issue in issues if "chars, maximum" in issue["message"]]
 
-        assert long_issues(default) == long_issues(raised) == ["Description very long (252 chars, recommend 50-150)"]
+        expected = ["Description very long (recommend 50-150 chars): 252 chars, maximum 200"]
+        assert long_issues(default) == long_issues(raised) == expected
         if points:
             (issue,) = _short_description_issues(raised)
             assert issue["message"].endswith(": 252 chars, minimum 300")

@@ -584,6 +584,37 @@ def test_packaged_description_too_short_matches_former_hard_coded_values() -> No
     assert type(rule["points"]) is int
 
 
+PACKAGED_DESCRIPTION_TOO_LONG = {
+    "points": 5,
+    "message": "Description very long (recommend 50-150 chars)",
+    "suggestion": "Keep descriptions concise for progressive disclosure",
+    "max_chars": 200,
+}
+
+
+def test_packaged_description_too_long_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["discoverability"]["description_too_long"]
+
+    assert rule == PACKAGED_DESCRIPTION_TOO_LONG
+    assert type(rule["points"]) is int
+
+
+def test_custom_file_with_only_a_description_maximum_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability:\n  description_too_long:\n    max_chars: 300\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["discoverability"] == {
+        "description_too_short": PACKAGED_DESCRIPTION_TOO_SHORT,
+        "description_too_long": {**PACKAGED_DESCRIPTION_TOO_LONG, "max_chars": 300},
+    }
+    assert {key: value for key, value in config.items() if key != "discoverability"} == {
+        key: value for key, value in packaged.items() if key != "discoverability"
+    }
+
+
 def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_value(tmp_path: Path) -> None:
     config_path = tmp_path / "quality.yaml"
     config_path.write_text("discoverability:\n  description_too_short:\n    min_chars: 40\n", encoding="utf-8")
@@ -591,7 +622,10 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
 
     config = load_quality_config(config_path)
 
-    assert config["discoverability"]["description_too_short"] == {**PACKAGED_DESCRIPTION_TOO_SHORT, "min_chars": 40}
+    assert config["discoverability"] == {
+        "description_too_short": {**PACKAGED_DESCRIPTION_TOO_SHORT, "min_chars": 40},
+        "description_too_long": PACKAGED_DESCRIPTION_TOO_LONG,
+    }
     assert {key: value for key, value in config.items() if key != "discoverability"} == {
         key: value for key, value in packaged.items() if key != "discoverability"
     }
@@ -601,7 +635,17 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
     ("body", "match"),
     [
         ("discoverability: []\n", r"discoverability must be a mapping"),
-        ("discoverability:\n  description_too_long: {}\n", r"unknown key\(s\) in discoverability: description_too_long"),
+        ("discoverability:\n  vague_words: {}\n", r"unknown key\(s\) in discoverability: vague_words"),
+        ("discoverability:\n  description_too_long: 200\n", r"discoverability\.description_too_long must be a mapping"),
+        (
+            "discoverability:\n  description_too_long:\n    max_char: 300\n",
+            r"unknown key\(s\) in discoverability\.description_too_long: max_char "
+            r"\(allowed: max_chars, message, points, suggestion\)",
+        ),
+        ("discoverability:\n  description_too_long:\n    max_chars: 0\n", r"\.max_chars must be a positive integer"),
+        ("discoverability:\n  description_too_long:\n    max_chars: 200.5\n", r"\.max_chars must be a positive integer"),
+        ("discoverability:\n  description_too_long:\n    max_chars: true\n", r"\.max_chars must be a positive integer"),
+        ("discoverability:\n  description_too_long:\n    points: -5\n", r"\.points must be a non-negative"),
         ("discoverability:\n  description_too_short: 20\n", r"discoverability\.description_too_short must be a mapping"),
         (
             "discoverability:\n  description_too_short:\n    min_char: 30\n",
@@ -627,6 +671,12 @@ def test_custom_digest_declares_only_the_discoverability_keys_the_file_sets(tmp_
 
     assert _digest(config_path) == quality_config_digest(
         {"discoverability": {"description_too_short": {"min_chars": 40}}}
+    )
+
+    config_path.write_text("discoverability: {description_too_long: {max_chars: 300}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest(
+        {"discoverability": {"description_too_long": {"max_chars": 300}}}
     )
 
 

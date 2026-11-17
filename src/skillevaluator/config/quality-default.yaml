@@ -65,6 +65,13 @@ discoverability:
     message: "Description too short (recommend 50-150 chars)"
     suggestion: "Add more context: what tasks does this skill handle?"
     min_chars: 20
+  # The description, with surrounding whitespace removed, has more than max_chars characters.
+  # The finding appends the length and the maximum to the message.
+  description_too_long:
+    points: 5
+    message: "Description very long (recommend 50-150 chars)"
+    suggestion: "Keep descriptions concise for progressive disclosure"
+    max_chars: 200
 
 # Correctness rules. They overlay the same way as the sections above.
 correctness:

@@ -731,13 +731,14 @@ class QualityScoreValidator(ValidatorBase):
                     f"{too_short['message']}: {len(desc)} chars, minimum {too_short['min_chars']}",
                     too_short["suggestion"],
                 )
-            # Independent of the configurable minimum: a min_chars above 200 must not hide this rule.
-            if len(desc) > 200:
+            # Checked independently of the minimum, so neither limit can hide the other rule.
+            too_long = self.quality_config["discoverability"]["description_too_long"]
+            if too_long["points"] and len(desc) > too_long["max_chars"]:
                 dim.deduct(
-                    5,
+                    too_long["points"],
                     "info",
-                    f"Description very long ({len(desc)} chars, recommend 50-150)",
-                    "Keep descriptions concise for progressive disclosure",
+                    f"{too_long['message']}: {len(desc)} chars, maximum {too_long['max_chars']}",
+                    too_long["suggestion"],
                 )
 
             trigger_words = ["use", "when", "for", "helps", "allows"]

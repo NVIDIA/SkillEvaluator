@@ -3191,10 +3191,11 @@ _PAREN_PASSWORD = f"{_BASIC_PASSWORD[:7]}(x){_BASIC_PASSWORD[7:]}"
 _PAREN_TAIL = _BASIC_PASSWORD[7:]
 
 _MORE_COMMAND_FORM_FINDINGS = [
+    # The network rule reads requests.put on a client as an upload, so the first two also warn, masked the same way.
     pytest.param(
         "python3 -c \"import requests; from requests.auth import HTTPBasicAuth; requests.put('https://api.example/v1',"
         f" auth=HTTPBasicAuth('bob', '{_BASIC_PASSWORD}'))\" && rm -rf /srv/app/cache",
-        "destructive_command",
+        ("destructive_command", "network_exfiltration_risk"),
         "python3 -c \"import requests; from requests.auth import HTTPBasicAuth; requests.put('https://api.example/v1',"
         ' auth=<redacted>)" && rm -rf /srv/app/cache',
         id="python-c-call-value",
@@ -3202,7 +3203,7 @@ _MORE_COMMAND_FORM_FINDINGS = [
     pytest.param(
         "python3 - <<'PY'\nimport requests\nrequests.put('https://api.example/v1',"
         f" auth=requests.auth.HTTPDigestAuth('svc', '{_BASIC_PASSWORD}'))\nPY\nrm -rf /srv/app/cache",
-        "destructive_command",
+        ("destructive_command", "network_exfiltration_risk"),
         "python3 - <<'PY'\nimport requests\nrequests.put('https://api.example/v1', auth=<redacted>)\nPY\nrm -rf /srv/app/cache",
         id="heredoc-dotted-call-value",
     ),
@@ -3314,11 +3315,14 @@ _MORE_COMMAND_FORM_FINDINGS = [
 @pytest.mark.parametrize("copy", ["template", "eval_core"])
 @pytest.mark.parametrize(("command", "finding_type", "expected"), _MORE_COMMAND_FORM_FINDINGS)
 def test_more_command_forms_keep_no_credential_in_findings(
-    copy: str, command: str, finding_type: str, expected: str
+    copy: str, command: str, finding_type: str | tuple[str, ...], expected: str
 ) -> None:
     result = _security(copy, {"action": "Bash", "action_input": {"command": command}})
+    finding_types = (finding_type,) if isinstance(finding_type, str) else finding_type
 
-    assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [(finding_type, expected)]
+    assert [(finding["type"], finding["evidence"]) for finding in result["findings"]] == [
+        (kind, expected) for kind in finding_types
+    ]
     assert _BASIC_PASSWORD not in json.dumps(result)
     assert _API_TOKEN not in json.dumps(result)
 

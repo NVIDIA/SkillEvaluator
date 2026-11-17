@@ -466,3 +466,326 @@ def test_digest_does_not_declare_packaged_headings_when_the_key_is_omitted(tmp_p
     assert _digest(omitted) != _digest(empty)
     assert _digest(bare) == quality_config_digest({})
     assert _digest(bare) != _digest(None)
+
+
+# Longer than Python's 4300-digit int-to-str limit once written in decimal; YAML still loads it.
+_HUGE_HEX = "0x" + "f" * 4000
+
+
+def test_integer_settings_accept_the_largest_allowed_value(tmp_path: Path) -> None:
+    config = load_quality_config(_write_config(tmp_path, "efficiency:\n  token_budget:\n    max_tokens: 1000000000\n"))
+
+    assert config["efficiency"]["token_budget"]["max_tokens"] == 10**9
+
+
+PACKAGED_TOKEN_BUDGET = {
+    "points": 15,
+    "message": "Large skill",
+    "suggestion": (
+        "Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase "
+        "token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy. "
+        "Keep required sections concise; move detailed examples, reference material, "
+        "and supporting docs to the references/ directory"
+    ),
+    "max_tokens": 5000,
+}
+
+
+def test_packaged_token_budget_matches_former_hard_coded_values() -> None:
+    token_budget = load_quality_config()["efficiency"]["token_budget"]
+
+    assert token_budget == PACKAGED_TOKEN_BUDGET
+    assert type(token_budget["points"]) is int
+
+
+def test_custom_file_with_only_a_token_limit_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("efficiency:\n  token_budget:\n    max_tokens: 8000\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["efficiency"]["token_budget"] == {**PACKAGED_TOKEN_BUDGET, "max_tokens": 8000}
+    assert config["expected_headers"] == packaged["expected_headers"]
+    assert config["error_handling"] == packaged["error_handling"]
+
+
+def test_custom_file_without_efficiency_keeps_the_packaged_token_budget(tmp_path: Path) -> None:
+    assert load_quality_config(_write_config(tmp_path, ""))["efficiency"]["token_budget"] == PACKAGED_TOKEN_BUDGET
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("efficiency: []\n", r"efficiency must be a mapping"),
+        ("efficiency:\n", r"efficiency must be a mapping"),
+        ("efficiency:\n  repetition: {}\n", r"unknown key\(s\) in efficiency: repetition"),
+        ("efficiency:\n  token_budget: 8000\n", r"efficiency\.token_budget must be a mapping"),
+        (
+            "efficiency:\n  token_budget:\n    max_token: 8000\n",
+            r"unknown key\(s\) in efficiency\.token_budget: max_token "
+            r"\(allowed: max_tokens, message, points, suggestion\)",
+        ),
+        ("efficiency:\n  token_budget:\n    max_tokens: 0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: -1\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: 5000.0\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens: true\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ('efficiency:\n  token_budget:\n    max_tokens: "8000"\n', r"efficiency\.token_budget\.max_tokens must be a positive"),
+        ("efficiency:\n  token_budget:\n    max_tokens:\n", r"efficiency\.token_budget\.max_tokens must be a positive"),
+        (
+            "efficiency:\n  token_budget:\n    max_tokens: 1000000001\n",
+            r"\.max_tokens must be a positive integer no greater than 1000000000",
+        ),
+        (f"efficiency:\n  token_budget:\n    max_tokens: {_HUGE_HEX}\n", r"\.max_tokens must be a positive integer no"),
+        ("efficiency:\n  token_budget:\n    points: -1\n", r"efficiency\.token_budget\.points must be a non-negative"),
+        ('efficiency:\n  token_budget:\n    message: ""\n', r"efficiency\.token_budget\.message must be a non-empty"),
+    ],
+)
+def test_quality_config_rejects_invalid_efficiency(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_packaged_file_must_declare_every_token_budget_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from skillevaluator import quality_config
+
+    incomplete = tmp_path / "incomplete-default.yaml"
+    incomplete.write_text(
+        quality_config.DEFAULT_QUALITY_CONFIG.read_text(encoding="utf-8").replace("    max_tokens: 5000\n", ""),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(quality_config, "DEFAULT_QUALITY_CONFIG", incomplete)
+
+    with pytest.raises(QualityConfigError, match=r"efficiency\.token_budget is missing key\(s\): max_tokens"):
+        load_quality_config()
+
+
+def test_custom_digest_declares_only_the_efficiency_keys_the_file_sets(tmp_path: Path) -> None:
+    def write(name: str, body: str) -> Path:
+        path = tmp_path / name
+        path.write_text(body, encoding="utf-8")
+        return path
+
+    limit_only = write("limit-only.yaml", "efficiency: {token_budget: {max_tokens: 8000}}\n")
+    other_limit = write("other-limit.yaml", "efficiency: {token_budget: {max_tokens: 9000}}\n")
+    empty_rule = write("empty-rule.yaml", "efficiency: {token_budget: {}}\n")
+    both_sections = write(
+        "both.yaml", "efficiency: {token_budget: {max_tokens: 8000}}\nerror_handling: {lib: {points: 0}}\n"
+    )
+
+    assert _digest(limit_only) == quality_config_digest({"efficiency": {"token_budget": {"max_tokens": 8000}}})
+    assert _digest(other_limit) != _digest(limit_only)
+    assert _digest(empty_rule) == quality_config_digest({})
+    assert _digest(both_sections) == quality_config_digest(
+        {"efficiency": {"token_budget": {"max_tokens": 8000}}, "error_handling": {"lib": {"points": 0}}}
+    )
+
+
+PACKAGED_DESCRIPTION_TOO_SHORT = {
+    "points": 20,
+    "message": "Description too short (recommend 50-150 chars)",
+    "suggestion": "Add more context: what tasks does this skill handle?",
+    "min_chars": 20,
+}
+
+
+def test_packaged_description_too_short_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["discoverability"]["description_too_short"]
+
+    assert rule == PACKAGED_DESCRIPTION_TOO_SHORT
+    assert type(rule["points"]) is int
+
+
+PACKAGED_DESCRIPTION_TOO_LONG = {
+    "points": 5,
+    "message": "Description very long (recommend 50-150 chars)",
+    "suggestion": "Keep descriptions concise for progressive disclosure",
+    "max_chars": 200,
+}
+
+
+def test_packaged_description_too_long_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["discoverability"]["description_too_long"]
+
+    assert rule == PACKAGED_DESCRIPTION_TOO_LONG
+    assert type(rule["points"]) is int
+
+
+def test_custom_file_with_only_a_description_maximum_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability:\n  description_too_long:\n    max_chars: 300\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["discoverability"] == {
+        "description_too_short": PACKAGED_DESCRIPTION_TOO_SHORT,
+        "description_too_long": {**PACKAGED_DESCRIPTION_TOO_LONG, "max_chars": 300},
+    }
+    assert {key: value for key, value in config.items() if key != "discoverability"} == {
+        key: value for key, value in packaged.items() if key != "discoverability"
+    }
+
+
+def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability:\n  description_too_short:\n    min_chars: 40\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["discoverability"] == {
+        "description_too_short": {**PACKAGED_DESCRIPTION_TOO_SHORT, "min_chars": 40},
+        "description_too_long": PACKAGED_DESCRIPTION_TOO_LONG,
+    }
+    assert {key: value for key, value in config.items() if key != "discoverability"} == {
+        key: value for key, value in packaged.items() if key != "discoverability"
+    }
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("discoverability: []\n", r"discoverability must be a mapping"),
+        ("discoverability:\n  vague_words: {}\n", r"unknown key\(s\) in discoverability: vague_words"),
+        ("discoverability:\n  description_too_long: 200\n", r"discoverability\.description_too_long must be a mapping"),
+        (
+            "discoverability:\n  description_too_long:\n    max_char: 300\n",
+            r"unknown key\(s\) in discoverability\.description_too_long: max_char "
+            r"\(allowed: max_chars, message, points, suggestion\)",
+        ),
+        ("discoverability:\n  description_too_long:\n    max_chars: 0\n", r"\.max_chars must be a positive integer"),
+        ("discoverability:\n  description_too_long:\n    max_chars: 200.5\n", r"\.max_chars must be a positive integer"),
+        ("discoverability:\n  description_too_long:\n    max_chars: true\n", r"\.max_chars must be a positive integer"),
+        (
+            f"discoverability:\n  description_too_long:\n    max_chars: {_HUGE_HEX}\n",
+            r"\.max_chars must be a positive integer no greater than 1000000000",
+        ),
+        ("discoverability:\n  description_too_long:\n    points: -5\n", r"\.points must be a non-negative"),
+        ("discoverability:\n  description_too_short: 20\n", r"discoverability\.description_too_short must be a mapping"),
+        (
+            "discoverability:\n  description_too_short:\n    min_char: 30\n",
+            r"unknown key\(s\) in discoverability\.description_too_short: min_char "
+            r"\(allowed: message, min_chars, points, suggestion\)",
+        ),
+        ("discoverability:\n  description_too_short:\n    min_chars: 0\n", r"\.min_chars must be a positive integer"),
+        ("discoverability:\n  description_too_short:\n    min_chars: 20.5\n", r"\.min_chars must be a positive integer"),
+        ("discoverability:\n  description_too_short:\n    min_chars: true\n", r"\.min_chars must be a positive integer"),
+        (
+            f"discoverability:\n  description_too_short:\n    min_chars: {_HUGE_HEX}\n",
+            r"\.min_chars must be a positive integer no greater than 1000000000",
+        ),
+        ("discoverability:\n  description_too_short:\n    points: -5\n", r"\.points must be a non-negative"),
+    ],
+)
+def test_quality_config_rejects_invalid_discoverability(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_custom_digest_declares_only_the_discoverability_keys_the_file_sets(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("discoverability: {description_too_short: {min_chars: 40}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest(
+        {"discoverability": {"description_too_short": {"min_chars": 40}}}
+    )
+
+    config_path.write_text("discoverability: {description_too_long: {max_chars: 300}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest(
+        {"discoverability": {"description_too_long": {"max_chars": 300}}}
+    )
+
+
+PACKAGED_RESERVED_NAME = {
+    "points": 15,
+    "message": "Name contains reserved word",
+    "suggestion": "Remove reserved words from skill name",
+    "terms": ["anthropic", "claude"],
+}
+
+
+def test_packaged_reserved_name_matches_former_hard_coded_values() -> None:
+    rule = load_quality_config()["correctness"]["reserved_name"]
+
+    assert rule == PACKAGED_RESERVED_NAME
+    assert type(rule["points"]) is int
+
+
+def test_custom_file_with_only_reserved_terms_keeps_every_other_packaged_value(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("correctness:\n  reserved_name:\n    terms: [acme]\n", encoding="utf-8")
+    packaged = load_quality_config()
+
+    config = load_quality_config(config_path)
+
+    assert config["correctness"]["reserved_name"] == {**PACKAGED_RESERVED_NAME, "terms": ["acme"]}
+    assert {key: value for key, value in config.items() if key != "correctness"} == {
+        key: value for key, value in packaged.items() if key != "correctness"
+    }
+
+
+def test_reserved_terms_are_stored_without_surrounding_whitespace(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, 'correctness:\n  reserved_name:\n    terms: [" Acme ", claude-code]\n')
+
+    assert load_quality_config(config_path)["correctness"]["reserved_name"]["terms"] == ["Acme", "claude-code"]
+    assert _digest(config_path) == quality_config_digest(
+        {"expected_headers": [], "correctness": {"reserved_name": {"terms": ["Acme", "claude-code"]}}}
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "match"),
+    [
+        ("correctness: []\n", r"correctness must be a mapping"),
+        ("correctness:\n  name_format: {}\n", r"unknown key\(s\) in correctness: name_format"),
+        ("correctness:\n  reserved_name: [acme]\n", r"correctness\.reserved_name must be a mapping"),
+        (
+            "correctness:\n  reserved_name:\n    words: [acme]\n",
+            r"unknown key\(s\) in correctness\.reserved_name: words \(allowed: message, points, suggestion, terms\)",
+        ),
+        ("correctness:\n  reserved_name:\n    terms: []\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
+        ("correctness:\n  reserved_name:\n    terms: acme\n", r"correctness\.reserved_name\.terms must be a non-empty list"),
+        ('correctness:\n  reserved_name:\n    terms: [" "]\n', r"correctness\.reserved_name\.terms\[0\] must be a non-blank"),
+        (
+            "correctness:\n  reserved_name:\n    terms: [Acme, acme]\n",
+            r"duplicate entry 'acme' in correctness\.reserved_name\.terms",
+        ),
+        ("correctness:\n  reserved_name:\n    points: -1\n", r"correctness\.reserved_name\.points must be a non-negative"),
+        (
+            'correctness:\n  reserved_name:\n    terms: [claude, "claude "]\n',
+            r"duplicate entry 'claude' in correctness\.reserved_name\.terms",
+        ),
+        (
+            'correctness:\n  reserved_name:\n    terms: [claude, " Claude"]\n',
+            r"duplicate entry 'Claude' in correctness\.reserved_name\.terms",
+        ),
+        (
+            'correctness:\n  reserved_name:\n    terms: ["Claude Code"]\n',
+            r"correctness\.reserved_name\.terms\[0\] 'Claude Code' can never match a skill name",
+        ),
+        (
+            "correctness:\n  reserved_name:\n    terms: [acme, claude_code]\n",
+            r"correctness\.reserved_name\.terms\[1\] 'claude_code' can never match a skill name",
+        ),
+        ("correctness:\n  reserved_name:\n    terms: [-acme]\n", r"terms\[0\] '-acme' can never match a skill name"),
+        ("correctness:\n  reserved_name:\n    terms: [acme--corp]\n", r"'acme--corp' can never match a skill name"),
+    ],
+)
+def test_quality_config_rejects_invalid_correctness(tmp_path: Path, body: str, match: str) -> None:
+    config_path = _write_config(tmp_path, body)
+
+    with pytest.raises(QualityConfigError, match=rf"^{tmp_path}.*{match}"):
+        load_quality_config(config_path)
+
+
+def test_custom_digest_declares_only_the_correctness_keys_the_file_sets(tmp_path: Path) -> None:
+    config_path = tmp_path / "quality.yaml"
+    config_path.write_text("correctness: {reserved_name: {terms: [acme]}}\n", encoding="utf-8")
+
+    assert _digest(config_path) == quality_config_digest({"correctness": {"reserved_name": {"terms": ["acme"]}}})

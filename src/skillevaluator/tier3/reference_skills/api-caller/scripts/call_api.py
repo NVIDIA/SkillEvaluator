@@ -147,7 +147,10 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
     for key, value in params.items():
         placeholder = "{" + key + "}"
         if placeholder in url_path:
-            url_path = url_path.replace(placeholder, quote(str(value), safe=""))
+            path_value = str(value)
+            if path_value in {".", ".."}:
+                raise ValueError(f"Path parameter '{key}' must not be '.' or '..'")
+            url_path = url_path.replace(placeholder, quote(path_value, safe=""))
         else:
             query_params[key] = value
 
@@ -239,7 +242,11 @@ def main():
             )
             sys.exit(1)
 
-        url = build_url_from_spec(spec, path, params)
+        try:
+            url = build_url_from_spec(spec, path, params)
+        except ValueError as exc:
+            _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
+            sys.exit(1)
         method = spec_method
 
         print(f"Resolved OpenAPI operation: {method} {url}", file=sys.stderr)

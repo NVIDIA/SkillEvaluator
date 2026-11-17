@@ -431,7 +431,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- API caller now percent-encodes scalar OpenAPI path values as individual segments.
+- API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - Documentation-only CI follows imports through collected test modules and
   package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a

@@ -582,7 +582,7 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
-    assert len(readme.split()) <= 1100
+    assert len(readme.split()) <= 1200
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:

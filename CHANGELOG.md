@@ -730,6 +730,8 @@ reviewed source revision.
   nodes, so valid long operator or attribute chains no longer abort advisory
   checks for that script and subsequent files.
 
+- Redact generated NVIDIA Build bridge credentials from retained agent logs,
+  session files, and trajectories while preserving recorded usage metrics.
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
   finished answer (#757). OpenCode's snapshot passed the workspace file list to

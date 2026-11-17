@@ -24,6 +24,7 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorLocalClaudeCode,
     SkillEvaluatorLocalCodex,
+    SkillEvaluatorLocalNvidiaBuildClaudeCode,
     SkillEvaluatorLocalNvidiaBuildCodex,
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
@@ -55,6 +56,144 @@ class _RecordingEnvironment:
         configs = [content for destination, content in self.uploads if destination == remote_path]
         assert configs, f"no Codex config was uploaded to {remote_path}"
         return tomllib.loads(configs[-1])
+
+
+@pytest.mark.parametrize(
+    "agent_type",
+    [
+        SkillEvaluatorNvidiaBuildClaudeCode,
+        SkillEvaluatorNvidiaBuildCodex,
+        SkillEvaluatorLocalNvidiaBuildClaudeCode,
+        SkillEvaluatorLocalNvidiaBuildCodex,
+    ],
+)
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+def test_bridge_capability_is_redacted_after_cleanup_and_log_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_type: type, outcome: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    agent = agent_type(logs_dir=logs, model_name="nvidia/synthetic-model")
+    cleaned = False
+
+    async def start(_environment: object) -> None:
+        agent._nvidia_build_bridge_started = True
+        agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
+        agent._nvidia_build_bridge_client_token = token
+
+    async def prepare(_environment: object) -> None:
+        return None
+
+    async def cleanup(_environment: object) -> None:
+        nonlocal cleaned
+        cleaned = True
+        agent._nvidia_build_bridge_started = False
+        agent._nvidia_build_bridge_origin = None
+        agent._nvidia_build_bridge_client_token = None
+
+    async def run(_self: object, **_kwargs: object) -> None:
+        if outcome == "failure":
+            raise RuntimeError("synthetic agent failure")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(agent, "_start_bridge", start)
+    monkeypatch.setattr(agent, "_prepare_bridge_client", prepare)
+    monkeypatch.setattr(agent, "_cleanup_bridge", cleanup)
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "run", run)
+    monkeypatch.setattr(local_agents.SkillEvaluatorCodex, "run", run)
+    if outcome == "success":
+        asyncio.run(agent.run("synthetic task", object(), SimpleNamespace()))
+    else:
+        error = RuntimeError if outcome == "failure" else asyncio.CancelledError
+        with pytest.raises(error):
+            asyncio.run(agent.run("synthetic task", object(), SimpleNamespace()))
+    assert cleaned and agent._nvidia_build_bridge_client_token is None
+
+    # Harbor downloads these files only after run() and bridge cleanup return.
+    session = logs / "sessions" / "synthetic.jsonl"
+    session.parent.mkdir()
+    payload = {"observation": "ordinary output " + token, "usage": {"input_tokens": 13, "output_tokens": 7}}
+    stream = json.dumps(payload) + "\n"
+    (logs / "claude-code.txt").write_text(stream)
+    session.write_text(stream)
+    opaque = logs / "binary.dat"
+    opaque.write_bytes(b"\x00ordinary\xff" + token.encode() + b"\x00")
+
+    def populate(_self: object, context: SimpleNamespace) -> None:
+        for path in (logs / "claude-code.txt", session, opaque):
+            assert token.encode() not in path.read_bytes(), "capability reached native trajectory conversion"
+        parsed = json.loads(session.read_text())
+        context.n_input_tokens = parsed["usage"]["input_tokens"]
+        context.n_output_tokens = parsed["usage"]["output_tokens"]
+        # A converter can also use state captured before the raw files were scrubbed.
+        (logs / "trajectory.json").write_text(json.dumps({"steps": [parsed], "metadata": {"client": token}}))
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    monkeypatch.setattr(local_agents.SkillEvaluatorCodex, "populate_context_post_run", populate)
+    context = SimpleNamespace()
+    agent.populate_context_post_run(context)
+
+    assert context.n_input_tokens == 13 and context.n_output_tokens == 7
+    for path in (logs / "claude-code.txt", session, logs / "trajectory.json", opaque):
+        assert token.encode() not in path.read_bytes()
+    assert json.loads(session.read_text())["usage"] == payload["usage"]
+    assert b"\x00ordinary\xff" in opaque.read_bytes() and opaque.read_bytes().endswith(b"\x00")
+    assert token not in repr(vars(agent))
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory_symlink", "hardlink"])
+def test_bridge_artifact_redaction_refuses_links_without_changing_outside_files(tmp_path: Path, kind: str) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    token = "synthetic-local-capability-" + "x" * 24
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside = outside_dir / "untouched.txt"
+    original = ("ordinary output " + token).encode()
+    outside.write_bytes(original)
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    try:
+        if kind == "hardlink":
+            os.link(outside, logs / "linked.txt")
+        elif kind == "directory_symlink":
+            (logs / "linked").symlink_to(outside_dir, target_is_directory=True)
+        else:
+            (logs / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("platform cannot create this link")
+
+    with pytest.raises(SecurePathError):
+        _redact_bridge_artifacts(logs, {token})
+    assert outside.read_bytes() == original
+
+
+def test_bridge_artifacts_are_redacted_and_private_state_cleared_when_conversion_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    token = "synthetic-local-capability-" + "x" * 24
+    agent = SkillEvaluatorNvidiaBuildClaudeCode(logs_dir=tmp_path, model_name="nvidia/synthetic-model")
+    agent._nvidia_build_artifact_tokens = {token}
+    (tmp_path / "claude-code.txt").write_text("ordinary output " + token)
+
+    def populate(_self: object, _context: object) -> None:
+        (tmp_path / "trajectory.json").write_text(json.dumps({"metadata": {"client": token}, "usage": 13}))
+        raise RuntimeError("synthetic converter failure")
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    with pytest.raises(RuntimeError, match="synthetic converter failure"):
+        agent.populate_context_post_run(SimpleNamespace())
+    assert token not in (tmp_path / "claude-code.txt").read_text()
+    assert token not in (tmp_path / "trajectory.json").read_text()
+    assert json.loads((tmp_path / "trajectory.json").read_text())["usage"] == 13
+    assert token not in repr(vars(agent))
 
 
 class _MergingRecordingEnvironment(BaseEnvironment):

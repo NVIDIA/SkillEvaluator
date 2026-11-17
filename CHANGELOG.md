@@ -378,6 +378,8 @@ All notable changes to SkillEvaluator are documented in this file.
   line per harness, and links to the Harness Check page and to live evaluation.
   The intro now mentions plugins. The README word limit in the packaging test
   goes from 1,100 to 1,200 to fit the example.
+- The README header is centred: the wordmark is the page title, followed by a
+  one-line tagline and the badge row. The separate text title is gone.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
 

@@ -25,9 +25,7 @@ def summarize_dataset(entries: list[dict[str, Any]]) -> dict[str, Any]:
     behaviors = sum(
         _has_judge_reference(entry.get("expected_behavior"))
         or (
-            isinstance(checks := entry.get("checks"), list)
-            and bool(checks)
-            and not validate_declarative_checks(checks)
+            isinstance(checks := entry.get("checks"), list) and bool(checks) and not validate_declarative_checks(checks)
         )
         for entry in entries
     )

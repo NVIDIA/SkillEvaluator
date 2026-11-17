@@ -392,6 +392,16 @@ All notable changes to SkillEvaluator are documented in this file.
   one-line tagline and the badge row. The separate text title is gone.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
+- The README's **Get started** section now installs first
+  (`pip install skillevaluator`, with `uv tool install` and a clone-and-`uv run`
+  path in a collapsed section) and then shows three ways to use it, each under a
+  header card: the CLI, the CI template, or the agent skill. The CLI column gives
+  the `--tiers 1` check that needs no LLM key and the all-tiers run with a free
+  NVIDIA Build key. The harness check heading is shorter, with its three points
+  (no LLM, no key, no agent run) on their own line. **Quickstart** is now two
+  steps: `skillevaluator quality-check ./my-skill` without a key, then
+  `skillevaluator validate ./my-skill` with a free NVIDIA Build key for all
+  three tiers.
 
 - A new Metrics Reference page defines every number the CLI, HTML report, JSON
   report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five

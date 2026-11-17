@@ -6,6 +6,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
+  exposes `skillevaluator-quality`, `skillevaluator-schema`, and
+  `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
+  maps changed files to skill roots and runs each check without an API key,
+  network, Docker, or scanner download.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.

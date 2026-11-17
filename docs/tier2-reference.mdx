@@ -1,0 +1,672 @@
+---
+title: "Tier 2 Reference"
+sidebar-title: "Tier 2 Reference"
+description: "Deduplication algorithms, similarity classifications, catalog behavior, limits, and CI contracts."
+---
+
+For a first check, follow [Find repeated or overlapping skills](/skills/skillevaluator/tier2-deduplication).
+
+Tier 2 finds redundant content — inside a single skill and across a skill
+collection — using embedding similarity, with chat-LLM verification for
+intra-skill candidates. First, [install SkillEvaluator](/skills/skillevaluator/installation#all-tiers) with the all-tier option
+to include Tier 2 support.
+
+Tier 2 needs a configured embeddings provider; intra-skill
+analysis also needs a chat LLM. See
+[Providers & Credentials](/skills/skillevaluator/configuration) to set both up, including the
+[fully local recipe](/skills/skillevaluator/configuration#fully-local-setup) when skill content
+must not leave your machine.
+
+Both checks read local files only.
+No external vector database or catalog service is required.
+
+## Tier 2 in automatic CI
+
+The [all-tier onboarding path](/skills/skillevaluator/advanced-ci)
+runs Tier 2 as an advisory check, independently from the Tier 1 image and paired
+Tier 3 evaluation. Configure chat and embedding provider credentials as CI
+secrets. Tier 2 does not read `evals/`; committed native datasets are needed
+only for [Tier 3](/skills/skillevaluator/tier3-live-evaluation). Missing credentials or a central
+dataset mapping produce an actionable incomplete result before paid work.
+
+When the configured skill roots hold more than one skill, CI compares the
+selected skills with a catalog built from all of them, including skills that
+did not change. One `SKILL.md` among them whose frontmatter is not a valid YAML
+mapping with a non-empty string `name` and `description`, such as `name: 2048`,
+`name: yes`, or `description: [Draft]`, stops that catalog before any embedding
+request. Tier 2 then checks no skill and is incomplete. Its reason says that a
+skill's frontmatter is the cause, and the retained catalog diagnostics name
+every such skill by its path in the repository. Quote such a value, as in
+`name: "2048"`. A `SKILL.md` that is not valid UTF-8, such as one saved as
+UTF-16 or as Windows-1252 with an accented letter, stops the catalog with the
+same reason and is named the same way; save it as UTF-8.
+Frontmatter over a [structure or length limit](#defaults-and-safety-limits)
+also stops the catalog, but with the reason that points at provider and
+embedding configuration, and the diagnostics then name no skill, not even one
+whose frontmatter is invalid as described above. Run `similarity-check` on the
+skill root to find the manifest over the limit.
+
+The aggregate artifact preserves native Tier 2 JSON and HTML, including
+deduplication and catalog-similarity findings. Failed, missing or incomplete
+Tier 2 results stay advisory and do not block a passing Tier 1 CI gate; they are
+never relabeled as completed passes. See
+[retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence).
+
+## Run Tier 2
+
+```bash title="Check one skill"
+skillevaluator tier2 ./my-skill
+```
+
+This runs intra-skill analysis. To also compare with other skills, supply a
+saved local JSON catalog:
+
+```bash title="Check inside the skill and against a catalog"
+skillevaluator tier2 ./my-skill --catalog ./skill-catalog.json
+```
+
+Without `--catalog`, the output explicitly reports that inter-skill comparison
+did not run; it does not claim the skill is distinct from a catalog it never
+checked. Use `similarity-check ./skills --save-catalog ./skill-catalog.json` to
+build the catalog. Direct Tier 2 takes one skill directory; the expert
+`similarity-check` command also supports collection scans.
+
+Direct Tier 2 prints the terminal report and writes JSON and HTML reports to
+`reports/` by default. Use `-r cli` for terminal-only output, or
+`-o/--output-dir` to choose a different report directory.
+
+For NVIDIA Build or OpenAI, the same provider and key configure both chat and
+embeddings; no separate embedding variables are needed. See
+[Providers & Credentials](/skills/skillevaluator/configuration) for other providers.
+
+## Which check do you need
+
+<CardGroup cols={2}>
+  <Card title="Is my skill repeating itself?" icon="copy" href="#detect-redundancy-inside-one-skill">
+    **Intra-skill deduplication** — `context-optimization-check` walks one
+    skill directory and flags sections that restate each other, so the skill
+    stops burning context on duplicate guidance.
+  </Card>
+  <Card title="Does my skill overlap the collection?" icon="shield" href="#compare-skills-across-a-collection">
+    **Inter-skill similarity** — `similarity-check` compares skills across a
+    collection, or one candidate against a saved local catalog, and classifies
+    each overlapping pair.
+  </Card>
+</CardGroup>
+
+<Note>
+`dedup-scan` is an alias for `context-optimization-check` with the
+same analysis options. The default report basenames identify which command name
+was invoked.
+</Note>
+
+The two checks differ in what they call out to:
+
+| | Intra-skill (`context-optimization-check`) | Inter-skill (`similarity-check`) |
+| --- | --- | --- |
+| **Scope** | Within one skill directory | Across a collection, or one candidate against a local catalog |
+| **Needs** | Embeddings provider **and** a chat LLM | Embeddings provider only — no chat LLM is ever called |
+| **Comparison** | Pairwise cosine similarity, then Union-Find clustering, then LLM verification | Pairwise cosine similarity, or one target compared with catalog entries |
+| **Embedding storage** | Ephemeral, in memory per run | Ephemeral for a direct scan, or a versioned local JSON catalog |
+
+## Detect redundancy inside one skill
+
+The repository's exact SPDX-only HTML preamble is excluded from Markdown
+chunks, so required license metadata cannot create duplicate-content findings.
+Comments with any additional text or directive remain part of the comparison.
+
+As a skill grows, its directory accumulates repeated content: sections copied
+between `SKILL.md` and reference documents, near-identical guidance under
+different headings, script docstrings that restate the main instructions. That
+repetition consumes context without adding information.
+
+Not every similarity is redundant. A short overview in `SKILL.md` and a
+detailed explanation in `references/` are intentional progressive disclosure.
+Tier 2 therefore runs two stages — embeddings find likely overlap, then a chat
+LLM classifies its purpose:
+
+| Stage | What runs | What it produces |
+| --- | --- | --- |
+| **1. Embedding clustering** | Chunks are batch-embedded with the configured embeddings provider; pairs at or above the threshold are grouped with Union-Find | Candidate clusters of overlapping chunks |
+| **2. LLM verification** | The actual text of each candidate cluster goes to the configured provider model for classification | A verdict, a confidence score, reasoning, and a suggested author action |
+
+```bash title="Scan one skill for repeated content"
+skillevaluator context-optimization-check ./my-skill
+```
+
+Useful options:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--threshold` | `0.8` | Minimum cosine score for a chunk pair to join a candidate cluster |
+| `--model` | configured embedding model | Embedding model override for this run |
+| `--llm-model` | configured provider model | Chat-LLM model override for the verification stage |
+
+The default intra-skill threshold (`0.80`) is higher than the inter-skill
+default because sections from the same skill naturally share more domain
+vocabulary.
+
+### What gets chunked
+
+| Extension | Chunking strategy |
+| --- | --- |
+| `.md`, `.mdc` | Heading-based sections; eligible sections over 3,000 characters are split into bounded pieces, preferring paragraph and line boundaries |
+| `.py` | Module docstrings plus class and function signatures with their docstrings; implementation bodies are not included |
+| `.sh` | Function bodies and comment blocks of at least three consecutive comment lines |
+| Other extensions | Skipped |
+
+Tier 2 parses Markdown frontmatter, the text between a file's opening `---` line
+and the next `---` line, only when it is a YAML mapping. It parses a mapping
+within the [frontmatter structure limits](#defaults-and-safety-limits), so YAML
+aliases and merge keys are never expanded past them. A file whose mapping
+frontmatter exceeds a limit fails the scan with a CRITICAL
+`manifest_complexity_limit` finding that names the file, before any provider
+call. Text between the `---` lines that is not a mapping, such as a list or
+prose after a thematic break, is never checked against these limits.
+
+Valid mapping frontmatter is removed from Markdown before chunking. Malformed,
+empty, or non-mapping frontmatter remains part of the analyzed text. Every
+retained chunk keeps its source file and line range, so findings point you to
+the exact overlapping sections.
+
+A shell function starts at a `name() {` or `function name() {` header at the
+start of a line and runs to the matching closing brace. The name is letters,
+digits, and underscores, and the `{` may sit on the next line. Indented
+headers, `function name {` without parentheses, and names with hyphens are not
+chunked as functions. Every `{` and `}` inside a function counts, including
+those in strings and comments. A header without a matching closing brace
+yields no function chunk. Braces and line numbers are indexed in one pass over
+the script, so a script with many functions or unclosed headers is not
+rescanned once per header.
+
+Each embedding input is capped at 3,000 characters, including long table rows,
+Python docstrings, and shell functions. Oversized Markdown sections are packed
+paragraph by paragraph up to the cap, and paragraphs under 80 characters stay
+attached to a neighbouring paragraph rather than becoming chunks of their own.
+Pieces split from one section, docstring, or function do not count as
+duplicates of each other. An independent copy can still join a duplicate
+cluster, and the finding then lists the split source once with its merged line
+range. Python pieces retain the enclosing source range because cleaned
+docstrings and function signatures are not contiguous text.
+
+### Verdicts and what to do about them
+
+| Verdict | Meaning | Your action |
+| --- | --- | --- |
+| `DUPLICATE` | Content repeats the same information without a meaningful addition | Consolidate into one location; the finding is actionable |
+| `INTENTIONAL_DETAIL` | One section summarizes content another section develops in detail | Keep it — progressive disclosure is not reported as a finding |
+| `RELATED_BUT_DISTINCT` | Sections cover the same topic for different purposes or from different angles | Keep it — not reported as a finding |
+
+Duplicate findings map to severities by confidence:
+
+| Condition | Severity |
+| --- | --- |
+| `DUPLICATE` with confidence >= 0.70 | HIGH — blocking |
+| `DUPLICATE` with confidence < 0.70 | MEDIUM — advisory |
+| Short, same-file duplicate dominated by comment or configuration-style text | Capped at LOW — advisory |
+
+Each candidate cluster is reviewed in one chat-LLM request that carries every
+member's file, section, line range, and text. When that request (the system
+prompt plus the cluster text) would exceed 64,000 characters, text that repeats
+exactly is listed once as `SHARED CONTENT n`. A Markdown section's text starts
+with its own heading line, so the text compared is the body after that line:
+the same body under different headings is listed once too. Each occurrence
+keeps its own entry with its file, section, line range, and heading line, plus
+a reference to the shared text. A repeated text is listed once only when that
+shortens the request. A short one, such as a one-line body, stays inline because
+its reference would be longer than the text; the heading line stays with every
+occurrence either way, so heading length does not affect this. The most
+repeated texts are numbered first, because a reference to block 10 or later is
+one character longer than one to blocks 1-9, and the texts listed once are the
+ones that shorten the request most. Distinct text, including text that differs
+by a single character, is always sent in full; nothing is sampled or dropped to
+fit.
+A cluster that is still over 64,000 characters stops the scan as incomplete
+(`llm_prompt_size_limit`), as described below. A duplicate or
+`llm_refused` finding names up to 64 member locations and source files and
+counts the rest; its `source_files` metadata in the JSON report lists every
+file.
+
+The chat LLM answers each cluster with one JSON verdict. A reply that wraps
+exactly one JSON object in prose or a Markdown fence is accepted, which matters
+on Bedrock and other endpoints that answer with prompt-only JSON. A reply with
+no complete object or with more than one counts as a failed analysis. An object
+nested inside an array or inside a malformed container is never used as the
+verdict, and neither is an object with a repeated key, a `NaN` or `Infinity`
+value, a number too large for a float, or more than 128 levels of nesting.
+The verdict must be one of the three names above. When present, the confidence
+must be a JSON number from 0 to 1, and the rationale and suggestion must be
+strings of at most 8,192 characters each. A missing confidence reads as 0, so a
+`DUPLICATE` verdict without one maps to MEDIUM in the table above, and a missing
+rationale or suggestion reads as empty. A reply that breaks any of these rules
+counts as a failed analysis rather than a finding, whatever its verdict: for
+example a confidence of `85` (a percentage), `true`, or `"0.9"` (a string), or
+a suggestion that is `null` or a list. This applies to `INTENTIONAL_DETAIL` and
+`RELATED_BUT_DISTINCT` replies too, although they never become findings.
+
+If chat-LLM analysis fails for a candidate cluster, Tier 2 reports the
+incomplete analysis as a blocking error rather than treating the content as
+clean.
+
+The same applies when a skill exceeds a work limit on content that was
+already collected: the content-chunk or comparison-work limit, or a limit on
+the LLM review (the number of candidate clusters, or prompt size per cluster
+or in total). Tier 2 stops and reports the scan as **INCOMPLETE**, not
+as a duplicate-content finding, with an execution error that names the limit;
+the JSON report records it under `work_limit`. A policy severity override
+cannot turn the incomplete scan into a pass. Split the skill or remove repeated
+material, then rerun.
+
+A model that declines to classify a cluster (a safety refusal, which some
+models return for security-themed skill content) is reported differently. The
+refusal is no evidence of duplication, and the same model usually refuses
+again on a rerun, so Tier 2 records a MEDIUM `llm_refused` finding that names
+the overlapping sections and does not block. Review that overlap by hand, or
+rerun with another chat model (`--llm-model` or `SKILL_EVAL_LLM_MODEL`). To make
+a refusal block `validate`, raise `CONTENT_DEDUP.llm_refused` to `high` in a
+[policy overlay](/skills/skillevaluator/tier1-reference#validation-profiles-and-policies).
+
+The JSON report's `llm_analysis` names the configured `provider` and `model`.
+A server-side fallback model can answer a cluster in the configured model's
+place: on the native Claude API, a Claude 5.5 or later model's refusal is
+answered by the fallback model in the same call. So `llm_analysis.models_used`
+lists every model that gave a cluster's verdict (it is absent when none did),
+and each duplicate finding names the model that gave its verdict as
+`llm_model_used`, with `llm_provider`, in its metadata. A model name that is
+not a plain identifier, such as a URL or a key, reads `unresolved`. An
+`llm_refused` finding has no answering model and keeps naming the configured
+one as `llm_model`. A cluster whose analysis fails gives no verdict, so no
+model is listed for it, and the blocking error for failed clusters names the
+configured model.
+
+## Compare skills across a collection
+
+`similarity-check` recursively discovers skill manifests, embeds each skill's
+name and description by default, and reports pairs at or above the selected
+threshold.
+
+```bash title="Scan a collection for overlapping skills"
+skillevaluator similarity-check ./skills
+```
+
+Every match lands in one of five classifications:
+
+| Classification | Score | Severity and default behavior |
+| --- | --- | --- |
+| `EXACT_DUPLICATE` | >= 0.95 | CRITICAL — blocking |
+| `HIGH_SIMILARITY` | >= 0.90 | HIGH — blocking |
+| `SIMILAR` | >= 0.75 | MEDIUM — advisory |
+| `LOOSELY_RELATED` | >= 0.50 | LOW — advisory |
+| `DISTINCT` | < 0.50 | INFO — advisory; below the default reporting threshold |
+
+The threshold controls which score bands are returned; it does not change the
+classification boundaries. The default (`0.75`) reports `SIMILAR` and stronger
+matches.
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--threshold` | `0.75` | Minimum reported cosine score |
+| `--full-body` | off | Embed each discovered `SKILL.md` in full, including frontmatter, chunked at 512 tokens with 64-token overlap and average pooling — instead of only the name and description. Supporting files are not included |
+| `--model` | configured embedding model | Embedding model override for this run |
+| `--type skill` | `auto` | Explicit skill discovery when automatic detection is not suitable |
+| `--max-entries` | `1024` | Maximum selected manifests in a fresh collection; accepts `1` through `5000` |
+| `--max-scalar-comparisons` | `128000000` | Maximum comparisons multiplied by embedding dimensions; accepts a positive integer |
+
+The entry budget is independent of the 256-file limit inside one skill. A
+343-skill collection fits the defaults, including with 2,048-dimensional
+embeddings. Entry and comparison budgets are separate: a pairwise scan needs
+`n * (n - 1) / 2 * dimensions` scalar comparisons, so increasing the entry
+budget may also require increasing the comparison budget. For example, 500
+skills with 2,048-dimensional embeddings need 255,488,000 scalar comparisons:
+
+```bash title="Allow a larger comparison workload"
+skillevaluator similarity-check ./skills --max-entries 500 --max-scalar-comparisons 256000000
+```
+
+`similarity-check` reads `name` (`title` for rules and workflows) and
+`description` from each manifest's frontmatter, within the same
+[frontmatter structure limits](#defaults-and-safety-limits) as context
+deduplication. A manifest whose frontmatter exceeds a limit stops the scan with
+an error that names it, before any embedding request. So does a `name` or
+`description` longer than 16,384 characters, the per-field limit for catalog
+text, in every embedding mode. Description mode embeds `name: description`, so
+there the two values together must also fit in 16,384 characters. A list,
+mapping, number, date, or boolean is never converted to text. Such a value, for
+example `name: 2048` or `name: yes`, excludes the manifest with the reason
+`non_string_name_or_description`. A missing value, or one that is empty, zero,
+or false (`""`, `[]`, `{}`, `0`, `false`, `no`), excludes it with the reason
+`missing_name_or_description` instead. Invalid YAML and frontmatter that is not
+a mapping have their own reasons. Quote a value such as `name: "2048"` or
+`name: "yes"` to keep it a string. Errors name a manifest by its path under the
+scan root, or by its directory and file name when one manifest is read on its
+own, such as a catalog query target.
+
+The entry budget counts selected manifests even when their frontmatter is
+invalid. It applies before any embedding request and never truncates a scan.
+Every selected manifest is accounted for: reports include `collection_coverage`
+with `selected_count`, `indexed_count`, and `skipped_count`. Here indexed means
+valid manifests eligible for embedding; a provider or work-limit error can still
+stop the index build. Missing frontmatter, malformed YAML, a non-mapping header,
+a missing name/title or description, or one that is not a string, produces an
+exclusion reason. Up to 100 exclusions are listed with collection-relative paths
+(each bounded to 512 characters); `omitted_exclusions` counts additional
+diagnostics. An excluded manifest makes the scan **INCOMPLETE** and blocking,
+even when the indexed subset has no matches. Matches in the valid subset remain
+available. Fix excluded manifests and rerun; an incomplete collection cannot
+replace or create a saved catalog. Unsafe paths and input limits continue to
+stop discovery outright.
+
+For Python callers reusing an `EmbeddingRegistry`, each successful
+`build_from_directory()` or `build_from_paths()` replaces the entire indexed
+selection, vector dimensions and committed coverage. An empty directory build
+clears the index. A failed build preserves the prior index and its catalog-saving
+eligibility; `latest_attempt_coverage` retains the attempted directory selection
+for error diagnostics. Builds do not append: pass the complete intended
+selection when rebuilding a registry. This replaces the previous undocumented
+merge behavior, which could retain stale entries or discard incomplete-coverage
+provenance.
+
+Fresh pairwise scans check the comparison budget after the first validated
+embedding batch (or first full-body vector), before requesting the remaining
+embeddings or saving a catalog. Python index-only builds remain available for
+single-target queries that fit the smaller query budget. A failure names the
+option to adjust. Increasing
+either budget can increase provider usage or processing time. Neither option
+changes the separate path, input-byte, catalog-file, vector, or result limits.
+
+Collection discovery allows up to 20,000 paths, independently of the
+4,096-path limit inside one skill. Each visited directory and file counts,
+including files that are not selected as manifests; excluded directories count
+once, but their contents are pruned. This accommodates all 5,000 supported
+entries when each skill has a directory and `SKILL.md`. Collections with more
+supporting files or deeper layouts may reach the path ceiling before the
+selected-entry budget.
+
+Selected manifests also share a fixed 8 MiB input-byte budget, with a 1 MiB
+per-manifest limit. Both apply to the complete manifest bytes even in the
+default description-only embedding mode; supporting files count toward
+discovered paths, but not these selected-manifest byte totals. For example,
+2,500 manifests averaging 4 KiB exceed the collection byte budget even though
+the entry count fits. Discovery stops with an explicit error before embedding;
+`--max-entries` and `--max-scalar-comparisons` do not raise either byte limit.
+Check total manifest sizes as well as path counts before planning a scale run.
+
+For a saved catalog query, `--max-entries` does not reduce the catalog's existing
+5,000-entry capacity. Its comparison work is `catalog entries * dimensions`,
+bounded by `--max-scalar-comparisons`.
+
+### Measured real-provider scale examples
+
+Qualification with public-skill fixtures and real 2,048-dimensional NVIDIA Build
+embeddings measured these examples, **not guaranteed entry-count limits**:
+
+| Workload | Measured example |
+| --- | --- |
+| Saved description-mode catalog within 32 MiB | About 1,000 entries; 1,024 independently built, saved, reloaded and queried |
+| Saved full-body catalog within 32 MiB | About 800 entries in serializer/reload replay; 512 independently built, saved, reloaded and queried |
+| In-memory pairwise comparison and candidate/text queries | Qualified to 5,000 description-mode entries, without saving that catalog |
+
+Replay of the retained provider vectors found fitting saved-catalog prefixes of
+1,283 description-mode and 827 full-body entries. These storage measurements are
+fixture-dependent, not additional end-to-end provider runs. Metadata, paths,
+dimensions and vector float representations affect serialized size. The public
+5,000-entry fixture used manifest projections and relocated copies, not 5,000
+distinct full skill bodies.
+
+The 5,000-entry pairwise run explicitly allowed 25,594,880,000 scalar comparisons
+and 5,000 selected entries; it did not fit the default comparison budget. Its
+saved catalog exceeded 32 MiB. In-memory qualification does **not** qualify dense
+persistence at that size. No file format or limit changes follow from these
+measurements; check your own workload against every independent budget.
+
+### Reproduce scale and limit measurements
+
+The repository includes `scripts/benchmark_tier2_scale.py` as a separate CLI,
+so scale runs do not add runtime to the unit suite:
+
+```bash title="Synthetic limit matrix (no provider requests)"
+uv run python scripts/benchmark_tier2_scale.py --output /tmp/tier2-scale.json
+```
+
+The default matrix covers 1,024, 2,500 and 5,000 selected manifests, flat and
+nested layouts, one supporting file per skill, clean and malformed collections,
+and description and full-body modes. It measures extraction, index building,
+all-pairs scans, catalog save/load, saved candidate queries when a catalog fits,
+and fresh-scan comparison preflight. JSON records stage wall time and peak
+Python allocations, coverage, vector dimensions, scalar work, index bytes,
+budget overrides, and synthetic embedding calls/input bytes. Provider tokens are
+unmeasured (`null`); the client makes zero provider requests. Full-body synthetic
+vectors do not simulate provider token chunking or HTTP request latency.
+
+These are synthetic limit measurements, **not production throughput or embedding
+quality claims**. Memory tracing adds runtime overhead and excludes native
+allocations. At 2,048 dimensions, even 1,024 entries exceed the default all-pairs
+work budget; 5,000 need 25,594,880,000 scalar operations. A catalog can also exceed
+the independent 32 MiB serialized-file ceiling. The benchmark records these
+rejections instead of raising limits silently; saved candidate queries run only
+when serialization succeeds. Use a measured real provider/catalog workload to
+establish an operational envelope for your model and machine.
+
+```bash title="Small smoke run; then explicitly allow a measured workload"
+uv run python scripts/benchmark_tier2_scale.py --sizes 8 --dimensions 64 --output /tmp/tier2-smoke.json
+uv run python scripts/benchmark_tier2_scale.py --sizes 1024 --layouts flat --modes description --malformed-counts 0 --max-scalar-comparisons 1072693248 --output /tmp/tier2-1024.json
+```
+
+## Use a local catalog
+
+For repeated screening — say, every new skill submission against your team's
+existing set — save the collection once and query candidates against it.
+
+<Steps toc={true}>
+  <Step title="Build the catalog">
+    ```bash title="Save a reusable local catalog"
+    skillevaluator similarity-check ./skills --save-catalog ./skill-catalog.json
+    ```
+
+    `--save-catalog` builds a versioned JSON catalog from the supplied
+    collection. Catalogs use compact JSON so formatting whitespace does not
+    consume the 32 MiB file budget; vector values and the schema are unchanged.
+  </Step>
+  <Step title="Screen a candidate">
+    ```bash title="Compare one candidate against the catalog"
+    skillevaluator similarity-check ./candidate-skill --catalog ./skill-catalog.json
+    ```
+
+    `--catalog` requires an existing catalog and a candidate directory
+    containing a root `SKILL.md`. It compares only that candidate against the
+    catalog entries — it does not compare catalog entries with one another, and
+    it never silently rebuilds a missing catalog.
+  </Step>
+</Steps>
+
+Re-screening a skill that is already in the catalog does not report it as a
+duplicate of its own entry. A catalog does not record the directory it was
+built from, so an entry is skipped as the candidate's own only when all of
+these hold:
+
+- Its content fingerprint matches what the query compares: the name and
+  description, or the whole `SKILL.md` with `--full-body`.
+- Its path ends the candidate's path — `alpha` for `./skills/alpha` in a
+  catalog built from `./skills` — which locates the catalog's tree around the
+  candidate.
+- Of up to eight other catalog skills, spread evenly across the catalog's
+  path-sorted list, more than half are present unchanged at their recorded
+  paths in that tree, without symlinks. Skills that contain the candidate or are nested inside it are not
+  checked, because a copied folder carries them too.
+
+At most one entry is skipped, and the result records it under
+`excluded_catalog_paths`. A catalog with no other skill entry never skips one.
+A verbatim copy elsewhere — in a staging folder, another repository, or a new
+folder of the same repository — is still compared and reported, unless it sits
+in a copy of most of the catalog's tree, such as a second checkout of the same
+repository, which counts as the same tree. An edited skill whose compared
+content changed no longer matches its old entry and is compared with it like
+any other skill; to screen edited skills, build the catalog from the same tree
+you screen.
+
+Catalogs contain finite embedding vectors, relative skill paths, display names,
+descriptions, content fingerprints, and provider, model, mode, and
+endpoint-fingerprint metadata for compatibility checks. They never contain API
+keys.
+
+The provider, model, endpoint, vector length, and description-versus-full-body
+mode used for a query must be compatible with the catalog. A missing,
+malformed, incompatible, non-finite, or oversized catalog is rejected with an
+actionable error — query with matching settings, or rebuild the catalog with
+the settings you intend to use.
+
+Catalogs stay local unless you explicitly share them. Because they contain
+embeddings and other data derived from skill content, review them before
+sharing like any other generated project artifact.
+
+## Inside validate
+
+`validate` runs the intra-skill deduplication pass by default as part of a full
+evaluation. When the optional Tier 2 dependencies or an embeddings provider are
+unavailable, the pass skips gracefully with a warning. The full skill pipeline
+also includes Tier 3, which needs provider access and a sandbox. Use
+`--no-tier2` (or `--no-dedup`) to disable only the deduplication pass:
+
+```bash title="Skip the Tier 2 pass"
+skillevaluator validate ./my-skill --no-dedup
+```
+
+This still runs Tier 3 with autopilot. For keyless static checks only, select
+`skillevaluator validate ./my-skill --tiers 1`.
+
+All Tier 2 commands accept the standard report options (`-r cli,json,html,markdown`
+and `-o`). HIGH and CRITICAL findings, along with blocking analysis errors,
+produce a non-zero exit code; MEDIUM and LOW findings are advisory. Exit
+behavior is identical in every output mode, so these commands work as CI gates
+— see [Gate Your CI](/skills/skillevaluator/ci-integration).
+
+Inside the combined `validate` pipeline, Tier 2 also gates by default. Pass
+`--no-block-on-dedup` to keep the scan and its findings in every report without
+letting those findings change `validate`'s exit code. Use `--no-dedup` only when
+you intend to skip Tier 2 entirely.
+
+## Defaults and safety limits
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| Inter-skill reporting threshold | `0.75` | Reports `SIMILAR` and stronger matches |
+| Intra-skill clustering threshold | `0.80` | Selects candidate chunk pairs for clustering |
+| Full-body chunking | 512 tokens, 64-token overlap | Chunked average pooling for `--full-body` embeddings |
+| Minimum content chunk | 80 characters | Drops sections and chunks too small to compare usefully; short paragraphs of an oversized section stay attached to a neighbour |
+| Embedding input cap | 3,000 characters | Caps every Markdown, Python, and shell embedding input; oversized Markdown sections are packed at paragraph boundaries |
+| High-confidence duplicate boundary | `0.70` | Maps actionable duplicate verdicts to HIGH rather than MEDIUM |
+| Frontmatter structure | 100 nesting levels, 20,000 nodes, 1,024 alias references, 1,024 items per mapping or sequence, 65,536 characters per value, integers up to 14,000 bits (about 4,200 digits) | Bounds every Markdown mapping frontmatter Tier 2 parses; aliases and merge keys count after expansion. A decimal integer longer than 4,300 digits, Python's default limit for converting text to an integer, counts as invalid YAML, not as a limit failure |
+| Inter-skill name and description | 16,384 characters each | Per-field catalog text limit, in every embedding mode; description mode also caps `name: description` at 16,384 characters. A value that is not a string excludes the manifest and makes the scan incomplete |
+| Intra-skill content chunks | 1,024 | Per-skill ceiling, checked before any embedding request |
+| Intra-skill comparison work | 536,346,624 scalar comparisons | Bounds all-pairs clustering; allows all 1,024 chunks with embeddings of up to 1,024 dimensions, 836 chunks at 1,536 (OpenAI's default `text-embedding-3-small`), 724 at 2,048 (NVIDIA Build's default `nvidia/nemotron-3-embed-1b` and the OpenAI-compatible default `nvidia/nvidia/nemotron-3-embed-1b`), 591 at 3,072, and 512 at 4,096 |
+| Intra-skill LLM review clusters | 50 | Most candidate clusters sent for chat-LLM review in one skill |
+| Intra-skill cluster members | 1,024 | Same as the chunk ceiling, so it never stops a scan on its own; the review prompt limits decide |
+| Intra-skill review prompt | 64,000 characters | One cluster's request, system prompt included; exactly repeated text (a Markdown section's body after its heading line) is listed once before this limit applies, when that shortens the request |
+| Intra-skill verdict text | 8,192 characters | Longest rationale or suggestion accepted in one chat-LLM verdict; a longer one fails that cluster's analysis |
+| Intra-skill review prompts in total | 1,000,000 characters | All cluster requests for one skill, checked before the first chat-LLM call |
+
+Intra-skill clustering compares every pair of chunks, so its work is
+`n * (n - 1) / 2 * dimensions`. A skill over the chunk ceiling stops before any
+embedding request. A skill within the ceiling whose embeddings are too wide for
+its chunk count stops after the first embedding batch, which sets the width.
+With the 2,048-dimensional default model of NVIDIA Build or of the
+OpenAI-compatible provider, for example, a skill with 725 to 1,024 chunks stops
+there.
+Either way the scan is reported as **INCOMPLETE**. For the comparison-work
+limit (`scalar_comparison_limit`), the execution error and the JSON
+`work_limit` record name the effective chunk limit for that embedding width
+(`effective_chunk_limit`) and the skill's chunk count (`chunk_count`).
+Split the skill, remove repeated material, or use a narrower embedding model.
+
+Tier 2 treats skill content and catalog files as untrusted input. Before any
+provider call, it rejects linked roots and manifests, hard-linked selected
+files, non-regular files, paths outside the verified scan root, and all
+redirects except two kinds of contained compatibility alias. The exact
+`CLAUDE.md -> AGENTS.md` file alias is validated but never followed; its exactly
+named, independently discovered, single-link regular sibling target is scanned
+once. A directory alias such as `.agents -> .claude` is accepted only when its
+name is not a scanned file type, its raw link text is relative with `..` only
+as leading segments, the target stays below the scan root and is neither the
+root nor one of the alias's own parent directories, and the same walk finds
+that target as a regular directory. The alias is never followed, so the target
+directory is scanned once. Absolute links and Windows junctions, broken links,
+links that escape the root, and aliases that point at another link remain
+rejected. Explicit limits bound
+discovered paths, file counts, per-file and total input bytes, frontmatter
+structure, content chunks,
+candidate clusters, catalog size and entry count, vector length, returned
+matches, and pairwise scalar work. Catalog loading also rejects duplicate JSON
+keys, unexpected fields, invalid identities, non-finite vectors, and
+incompatible provider metadata. Increase the documented collection budgets only
+for a workload you intend to process. Splitting a collection into independent
+batches omits comparisons between batches and is not a complete deduplication
+scan.
+
+### What leaves your machine
+
+- A default inter-skill scan sends skill names and descriptions to the
+  configured embeddings provider. With `--full-body`, the scan
+  sends each discovered `SKILL.md` in full, including frontmatter, in embedding
+  chunks; supporting files are not sent.
+- Intra-skill analysis sends retained content chunks to the configured
+  embeddings provider. Only candidate clusters found by the embedding stage are
+  sent to the configured chat LLM for classification.
+- `similarity-check` never calls a chat LLM.
+- Catalog files are read and written locally; SkillEvaluator does not upload
+  them to a catalog service.
+
+Use the [fully local provider recipe](/skills/skillevaluator/configuration#fully-local-setup) when
+skill content must not leave the machine, and review your provider's data
+handling terms before sending confidential skill content to a hosted endpoint.
+
+### Edge cases
+
+<AccordionGroup>
+  <Accordion title="Intra-skill analysis">
+    | Scenario | Behavior |
+    | --- | --- |
+    | Skill contains only `SKILL.md` | Checks repeated sections within that file |
+    | Fewer than two chunks remain | Succeeds with "Not enough content to compare" |
+    | Markdown has no headings | Treats the body as a preamble and attempts paragraph splitting when oversized; retains the original section if no eligible split is produced |
+    | Unsupported extension | Skips the file |
+    | Duplicate sections occur in one file | Reports the relevant headings and line ranges |
+    | Skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the alias, then scans `AGENTS.md` once |
+    | Skill carries large generated snapshots (`evals`, `.evals`, `results`, `.results`, `versions`, `.versions`) | Excluded directories are pruned during traversal, so their contents never count toward the discovered-path limit |
+    | Skill contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same skill | Skips the alias without following it, then scans the target directory once |
+    | A directory is a Windows junction, other reparse point, or a symbolic link that does not qualify as a contained alias | Rejected during the walk, before descent |
+    | Embedding or chat-LLM analysis is incomplete | Reports an error; does not claim a clean result |
+    | Skill exceeds the content-chunk, comparison-work, or LLM-review limit (candidate clusters or prompt size) | Stops before the remaining analysis and reports the scan as incomplete; no duplicate-content finding is added |
+    | Markdown mapping frontmatter exceeds a structure limit, for example through chained YAML aliases or merge keys | Fails closed with a CRITICAL `manifest_complexity_limit` finding before any provider call |
+    | Text between the `---` lines is a list, prose, or other YAML that is not a mapping | Stays in the analyzed text and is never checked against the frontmatter structure limits |
+    | The chat LLM declines to classify a cluster | Reports an advisory MEDIUM `llm_refused` finding for that cluster's sections |
+  </Accordion>
+  <Accordion title="Inter-skill analysis">
+    | Scenario | Behavior |
+    | --- | --- |
+    | Direct collection has fewer than two skills | Returns an actionable input error |
+    | Catalog source collection is empty | Refuses to save an empty catalog |
+    | Catalog path is missing | Returns an error and does not rebuild it silently |
+    | Candidate lacks a root `SKILL.md`, or its frontmatter is not a valid YAML mapping with a non-empty string name and description | Rejects the catalog query and says what the frontmatter needs |
+    | A manifest's frontmatter exceeds a structure limit, or its name or description is longer than 16,384 characters | Fails with an error that names the manifest, before any embedding request |
+    | A manifest's name or description is not a string, such as `name: 2048`, or its frontmatter is not a mapping | Excludes the manifest with a coverage reason, as for invalid YAML, and reports the scan as incomplete. In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog and names the skill |
+    | A skill contains an exactly named, single-link regular `AGENTS.md` plus `CLAUDE.md -> AGENTS.md` | Validates and skips the unrelated compatibility alias while discovering `SKILL.md` |
+    | The collection contains a relative directory alias such as `.agents -> .claude` whose target is a regular directory in the same collection | Skips the alias without following it, so manifests in the target are discovered once |
+    | Candidate matches multiple catalog entries | Reports matches in descending similarity order |
+    | Provider, endpoint, model, mode, or vector length differs | Rejects the catalog; query with matching settings or rebuild it |
+    | Catalog is malformed, non-finite, or oversized | Rejects it before comparison |
+  </Accordion>
+</AccordionGroup>
+
+## Next steps
+
+<CardGroup cols={2}>
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+    Prove the skill changes agent behavior with a live A/B evaluation.
+  </Card>
+  <Card title="Providers & Credentials" icon="book" href="/skills/skillevaluator/configuration">
+    Configure an embeddings provider — including a fully local setup.
+  </Card>
+  <Card title="CLI Reference" icon="terminal" href="/skills/skillevaluator/cli-reference">
+    Every Tier 2 flag, default, and report option.
+  </Card>
+</CardGroup>

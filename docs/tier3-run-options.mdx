@@ -1,0 +1,148 @@
+---
+title: "Configure a Tier 3 Run"
+description: "Start from a reviewed dataset, choose an agent and attempt count, then inspect the comparison."
+---
+
+Start with a **reviewed dataset**, then choose how to run it.
+[New to Tier 3? Follow the full walkthrough](/skills/skillevaluator/tier3-live-evaluation).
+
+<CardGroup cols={3}>
+  <Card title="1. Prepare" icon="list-check" href="#before-you-run">
+    Review your cases and check readiness.
+  </Card>
+  <Card title="2. Choose a run" icon="play" href="#choose-a-run">
+    Start with one agent and one attempt.
+  </Card>
+  <Card title="3. Read the result" icon="chart-simple" href="#read-your-result">
+    Check coverage before comparing scores.
+  </Card>
+</CardGroup>
+
+## Before you run
+
+- [Install SkillEvaluator](/skills/skillevaluator/installation#all-tiers) with the all-tier option.
+- Configure a [model provider](/skills/skillevaluator/configuration) and start Docker.
+- Have reviewed cases in `./my-skill/evals/evals.json`. [Prepare your dataset](/skills/skillevaluator/prepare-dataset) if it is missing.
+
+```bash title="Check the dataset and runtime"
+skillevaluator tier3 validate ./my-skill --strict
+skillevaluator doctor --env-mode docker
+```
+
+Treat a missing dataset as **not ready**, even if validation exits `0`. Fix
+errors and warnings before continuing. Native task bundles use
+the [task workflow](/skills/skillevaluator/custom-graders) instead of `evals.json`.
+
+## Choose a run
+
+<Tabs>
+  <Tab title="First comparison">
+
+```bash title="Use your provider's default agent"
+skillevaluator tier3 evaluate ./my-skill --env-mode docker --n-attempts 1
+```
+
+Runs one attempt per selected case in each arm: with the skill and without it.
+This explicit command requires an existing evaluation source; it does not
+create a missing dataset unless you add `--autopilot`.
+
+  </Tab>
+  <Tab title="Choose an agent">
+
+```bash title="Example: use Codex with an OpenAI provider"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker --n-attempts 1
+```
+
+Configure OpenAI before using this example. For OpenCode, Claude Code, or a
+model override, follow [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
+
+  </Tab>
+  <Tab title="Repeat attempts">
+
+```bash title="Try each case up to three times"
+skillevaluator tier3 evaluate ./my-skill --env-mode docker --n-attempts 3 --stop-on-pass
+```
+
+A passing attempt stops the remaining attempts for that case. This can still
+use more model calls than a single-attempt run. `--stop-on-pass` requires more
+than one attempt.
+
+  </Tab>
+</Tabs>
+
+<Note>
+  Model and sandbox usage can incur charges. Planned trials are
+  **cases × agents × attempts × 2 arms**; each trial can make multiple model
+  calls. Attempt count does not limit the number of selected cases. Keep the baseline enabled when
+  you need Skill Lift.
+</Note>
+
+<Accordion title="Use an existing run configuration">
+  Settings in `evals/config.yml` still apply. Check `harbor.max_cases` and
+  budget settings before assuming the run covers the full dataset.
+  See [run policy](/skills/skillevaluator/eval-datasets#run-policy-evalsconfigyml).
+
+  If that file enables `harbor.stop_on_pass`, turn it off when switching to
+  one attempt:
+
+  ```bash
+  skillevaluator tier3 evaluate ./my-skill --env-mode docker --n-attempts 1 --no-stop-on-pass
+  ```
+</Accordion>
+
+## Read your result
+
+```bash title="Open the latest report"
+skillevaluator view ./my-skill
+```
+
+| Check | What to do |
+| --- | --- |
+| Run status and coverage | Resolve missing or failed trials before interpreting improvement. |
+| Skill Lift | Compare scored outcomes across the same cases in both arms. |
+| Trial details | Inspect failures, skill activation, and outputs before changing the skill. |
+
+Reports are written under `./my-skill/evals/results/` by default.
+[Interpret the report](/skills/skillevaluator/tier3-results).
+
+## More control
+
+<div id="prepare-and-review-a-fuller-evaluation">
+<div id="check-readiness">
+<div id="generate-an-eval-dataset">
+<div id="review-the-cases">
+<div id="run-the-comparison">
+<div id="read-the-report">
+<div id="plan-for-cost">
+<div id="cost-and-local-mode">
+<div id="tune-the-run">
+<div id="reuse-a-baseline">
+<div id="compare-skill-versions">
+<div id="baseline-only-runs">
+<div id="baseline-timeouts">
+<div id="cost-limits">
+
+<Accordion title="Dataset staging, cost, and advanced run settings">
+  - [Generate, review, and stage cases](/skills/skillevaluator/tier3-run-reference#prepare-and-review-a-fuller-evaluation)
+  - [Estimate trial volume and control cost](/skills/skillevaluator/tier3-run-reference#plan-for-cost)
+  - [All run settings and interactions](/skills/skillevaluator/tier3-run-reference#tune-the-run)
+  - [Reuse a baseline](/skills/skillevaluator/tier3-run-reference#reuse-a-baseline)
+  - [Compare skill versions](/skills/skillevaluator/tier3-run-reference#compare-skill-versions)
+  - [Baseline-only runs and timeouts](/skills/skillevaluator/tier3-run-reference#baseline-only-runs)
+  - [Budget limits and accounting](/skills/skillevaluator/tier3-run-reference#cost-limits)
+</Accordion>
+
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>
+</div>

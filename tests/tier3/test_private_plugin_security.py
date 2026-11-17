@@ -248,8 +248,8 @@ def test_current_rm_xargs_and_symlink_hardening_is_retained(security, command, d
         "env -S 'rm\\_-rf\\_/workspace'",
         "echo 'eval $CMD -rf /workspace'",
         # The shell joins a $'...' word that eval or env -S reads with the text after it.
-        "eval $'${X}rm -rf '/workspace",
-        "env -S $'${X}rm -rf '/workspace",
+        "eval $'${X:-rm} -rf '/workspace",
+        "env -S $'$X -rf '/workspace",
         "eval $'$X -rf '/workspace",
         "git grep -O'$X -rf' needle",
         # eval and env -S read a $'...' word decoded and joined with the words around it.

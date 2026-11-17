@@ -2894,7 +2894,7 @@ def test_documented_agent_cli_versions_match_the_pins() -> None:
     docs = Path(__file__).resolve().parents[1] / "docs"
     pages = {
         page: " ".join((docs / page).read_text(encoding="utf-8").split())
-        for page in ("agents-and-sandboxes.mdx", "tier3-live-evaluation.mdx")
+        for page in ("agents-and-sandboxes.mdx", "tier3-runtime.mdx")
     }
     for page, text in pages.items():
         assert f"Codex {runner._CODEX_VERSION}" in text, page

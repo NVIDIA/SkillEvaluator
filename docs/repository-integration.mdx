@@ -114,10 +114,13 @@ repos:
       - id: skillevaluator-lint-scripts
 ```
 
-Then `pre-commit install`. On each commit, pre-commit passes the changed skill
-files (`SKILL.md`, `skill.md`, and anything under the skill directories the schema check
-allows: `agents/`, `assets/`, `config/`, `evals/`, `references/`, `scripts/`,
-`tests/`, `tools/`) to the selected hooks.
+Then `pre-commit install`. The first commit (or `pre-commit install
+--install-hooks`) builds the hook environment, which needs network access to
+fetch SkillEvaluator and its dependencies from the pinned repo and PyPI; later
+runs reuse the cached environment. On each commit, pre-commit passes the changed
+skill files (`SKILL.md`, `skill.md`, and anything under the skill directories the
+schema check allows: `agents/`, `assets/`, `config/`, `evals/`, `references/`,
+`scripts/`, `tests/`, `tools/`) to the selected hooks.
 
 `--min-score` and `--quality-config` are forwarded to the quality check, the
 same options `quality-check` takes. Omit `args` to keep the default quality bar
@@ -146,8 +149,8 @@ on the skill to see every finding.
 
 ### What the hooks do not run
 
-These hooks stay offline: no API key, no network, no Docker, and no scanner
-download.
+Once the hook environment is installed, running the checks stays offline: no
+API key, no network, no Docker, and no scanner download.
 
 They do **not** run:
 

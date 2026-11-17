@@ -607,14 +607,14 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     | Field | Packaged value | Meaning |
     | --- | --- | --- |
-    | `terms` | `[anthropic, claude]` | Whole words, any case. `claude` matches `claude-helper` but not `claudette-helper` |
+    | `terms` | `[anthropic, claude]` | Whole words, any case. `claude` matches `claude-helper` but not `claudette-helper`. A term may contain only letters, digits and single hyphens between them, as in `claude-code`, because a skill name allows nothing else. Spaces around a term are ignored |
     | `points` | `15` | Non-negative number deducted from Correctness. `0` turns the rule off |
     | `message` | `Name contains reserved word` | Start of the finding message |
     | `suggestion` | `Remove reserved words from skill name` | Fix suggestion attached to the finding |
 
     The finding appends the matched terms to `message`, as in `Name contains reserved word: claude`. Several matches still deduct `points` once. This is an error-level rule: its finding is HIGH and fails the quality check whatever the score, so `points: 0` removes that failure as well as the deduction. The schema check has its own fixed list (`anthropic`, `claude`) that this file does not change, so with the default checks a name containing either word is still rejected there. The other Correctness rules are not configurable yet.
 
-    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens`, `min_chars` or `max_chars` that is not a whole number from 1 to 1,000,000,000, an empty `terms` or `markers` list, or a repeated entry in one of those lists is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
+    The file is checked before any validation runs. A file that is missing, unreadable, not UTF-8, invalid YAML, has an unknown key (such as `point` instead of `points`), lists the same heading twice, has a negative or non-numeric `points`, a `max_tokens`, `min_chars` or `max_chars` that is not a whole number from 1 to 1,000,000,000, an empty `terms` or `markers` list, a repeated entry in one of those lists, or a reserved-name term that could never match a skill name (such as `Claude Code` or `claude_code`) is a usage error: the command exits with code 2 and names the file and the problem. `validate` checks the file even when `--checks` leaves out `quality`.
 
     ```text title="Example error"
     Error: Invalid value for '--quality-config': quality.yaml: unknown key(s) in expected_headers[0]: point (allowed: alternatives, heading, message, points, suggestion)

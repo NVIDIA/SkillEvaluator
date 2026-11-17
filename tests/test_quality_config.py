@@ -730,6 +730,15 @@ def test_custom_file_with_only_reserved_terms_keeps_every_other_packaged_value(t
     }
 
 
+def test_reserved_terms_are_stored_without_surrounding_whitespace(tmp_path: Path) -> None:
+    config_path = _write_config(tmp_path, 'correctness:\n  reserved_name:\n    terms: [" Acme ", claude-code]\n')
+
+    assert load_quality_config(config_path)["correctness"]["reserved_name"]["terms"] == ["Acme", "claude-code"]
+    assert _digest(config_path) == quality_config_digest(
+        {"expected_headers": [], "correctness": {"reserved_name": {"terms": ["Acme", "claude-code"]}}}
+    )
+
+
 @pytest.mark.parametrize(
     ("body", "match"),
     [
@@ -748,6 +757,24 @@ def test_custom_file_with_only_reserved_terms_keeps_every_other_packaged_value(t
             r"duplicate entry 'acme' in correctness\.reserved_name\.terms",
         ),
         ("correctness:\n  reserved_name:\n    points: -1\n", r"correctness\.reserved_name\.points must be a non-negative"),
+        (
+            'correctness:\n  reserved_name:\n    terms: [claude, "claude "]\n',
+            r"duplicate entry 'claude' in correctness\.reserved_name\.terms",
+        ),
+        (
+            'correctness:\n  reserved_name:\n    terms: [claude, " Claude"]\n',
+            r"duplicate entry 'Claude' in correctness\.reserved_name\.terms",
+        ),
+        (
+            'correctness:\n  reserved_name:\n    terms: ["Claude Code"]\n',
+            r"correctness\.reserved_name\.terms\[0\] 'Claude Code' can never match a skill name",
+        ),
+        (
+            "correctness:\n  reserved_name:\n    terms: [acme, claude_code]\n",
+            r"correctness\.reserved_name\.terms\[1\] 'claude_code' can never match a skill name",
+        ),
+        ("correctness:\n  reserved_name:\n    terms: [-acme]\n", r"terms\[0\] '-acme' can never match a skill name"),
+        ("correctness:\n  reserved_name:\n    terms: [acme--corp]\n", r"'acme--corp' can never match a skill name"),
     ],
 )
 def test_quality_config_rejects_invalid_correctness(tmp_path: Path, body: str, match: str) -> None:

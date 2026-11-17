@@ -182,6 +182,36 @@ def _validate_entries(value: object, source: str, location: str, *, ignore_case:
     return list(value)
 
 
+# A reserved word is matched against a skill name, which allows only letters, digits and hyphens.
+_RESERVED_TERM_RE = re.compile(r"[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*")
+
+
+def _validate_reserved_terms(value: object, source: str, location: str) -> list[str]:
+    """Validate reserved name words, stored without surrounding whitespace.
+
+    Unlike the generic entry lists, these are echoed in the finding and matched against a
+    constrained name format, so padded duplicates and words that can never match are rejected.
+    """
+    if not isinstance(value, list) or not value:
+        raise QualityConfigError(f"{source}: {location} must be a non-empty list")
+    terms: list[str] = []
+    seen: set[str] = set()
+    for index, entry in enumerate(value):
+        if not isinstance(entry, str) or not entry.strip():
+            raise QualityConfigError(f"{source}: {location}[{index}] must be a non-blank string")
+        term = entry.strip()
+        if not _RESERVED_TERM_RE.fullmatch(term):
+            raise QualityConfigError(
+                f"{source}: {location}[{index}] '{term}' can never match a skill name; "
+                "use only letters, digits and single hyphens between them"
+            )
+        if term.casefold() in seen:
+            raise QualityConfigError(f"{source}: duplicate entry '{term}' in {location}")
+        seen.add(term.casefold())
+        terms.append(term)
+    return terms
+
+
 # Upper bound for integer settings. YAML builds hex, octal and binary integers of any size, and
 # one past Python's int-to-str digit limit would crash the digest instead of failing as a usage error.
 _MAX_INT_SETTING = 10**9
@@ -210,7 +240,7 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSetting]] = {
         "description_too_long": ("max_chars", _validate_positive_int),
     },
     "correctness": {
-        "reserved_name": ("terms", partial(_validate_entries, ignore_case=True)),
+        "reserved_name": ("terms", _validate_reserved_terms),
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})

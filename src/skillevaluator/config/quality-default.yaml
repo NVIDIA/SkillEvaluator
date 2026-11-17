@@ -78,7 +78,8 @@ discoverability:
 correctness:
   # The frontmatter name contains one of the terms as a whole word (any case). This is an
   # error-level rule: its finding is HIGH and fails the quality check whatever the score.
-  # The finding appends the matched terms to the message. The schema check keeps its own
+  # The finding appends the matched terms to the message. A term may contain only letters,
+  # digits and single hyphens, like a skill name. The schema check keeps its own
   # reserved-word list, which this file does not change.
   reserved_name:
     points: 15

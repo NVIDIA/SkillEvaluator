@@ -1972,6 +1972,14 @@ def _reserved_name_issues(result) -> list[dict]:
 
 
 class TestCorrectnessReservedNameConfig:
+    def test_padded_and_hyphenated_terms_match_and_are_reported_without_padding(self, tmp_path: Path):
+        config = 'correctness:\n  reserved_name:\n    terms: [" claude ", claude-code]\n'
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-code-helper"), tmp_path, config)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: claude, claude-code"
+
     def test_packaged_rule_reports_the_matched_term_as_a_gate_failure(self, tmp_path: Path):
         from skillevaluator.models.result import Severity
 

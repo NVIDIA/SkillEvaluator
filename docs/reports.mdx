@@ -920,9 +920,10 @@ tool names, these calls are productive: reading, searching, listing, writing,
 editing or patching files (`Write`, `Edit`, `MultiEdit`, `apply_patch`, `LS`,
 OpenCode `list`, Codex `list_dir` and `grep_files`, and similar), running
 commands and activating a skill. MCP tools named `mcp__server__tool`, as Claude
-Code records them, are productive too. Codex records an MCP call under the bare
-tool name and OpenCode as `server_tool`, so these calls are classified by their
-name like any other tool, and most such names count as wasted. A Codex name
+Code records them, are productive too. When reconstructing native Codex JSONL,
+the recorded `server` and `tool` fields produce the same MCP name. Codex records
+without server identity and OpenCode names such as `server_tool` are classified
+by their name like any other tool, and most such names count as wasted. A Codex name
 with a namespace, such as `functions.apply_patch`, is classified by the part
 after the last dot. Help, version and install commands are wasted, whether
 written as text or recorded as an argument list, as is any tool outside these

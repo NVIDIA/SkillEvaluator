@@ -473,6 +473,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
+- The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative
+  percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.
+  Such input, and a malformed number like `1.2.3 km to miles`, now gets the usual `Error:` line instead
+  of a wrong result or a traceback.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

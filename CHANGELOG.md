@@ -172,6 +172,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Claude Code log recovery pairs batched and delayed tool results without repeatedly
+  scanning earlier tool calls, reducing reconstruction time for long trajectories.
 - The `skillevaluator` agent skill now asks the user before installing the
   CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
   run or using `--env-mode local` (trusted skills only; it does not reuse the

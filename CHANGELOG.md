@@ -443,6 +443,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep file, check, and severity totals when validation results are merged with member prefixes, so collection JSON summaries agree with their retained findings without double-counting schema findings.
+
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

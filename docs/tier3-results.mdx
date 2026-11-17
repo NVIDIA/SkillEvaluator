@@ -416,7 +416,8 @@ where it reads that text, unless it finds such text, whose reading then
 counts it. It reads only text that, with quotes and backslashes dropped,
 holds `eval`, `env` beside an `S` or `--s`, or `grep` beside an `O` or
 `--op`, and a call only where it also names `rm` beside an `r` or `f`
-option or holds an expansion beside a recursive option. So
+option or holds an expansion beside a recursive option; a call that holds
+such text but names no such `rm` counts its length alone. So
 `source .venv/bin/activate && python -m pytest -q` and
 `grep -rn 'def main' src/` count nothing. A longer text that is read does
 not count as a whole: it is

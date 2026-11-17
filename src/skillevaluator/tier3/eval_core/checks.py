@@ -8338,14 +8338,15 @@ def _rm_reading(
         return False
     if main_only:
         return None
-    # The gate's own first test, then the rm test, only scan the text without lexing it, so they count nothing.
-    if (
-        _rm_may_name(text, _RM_GATE_NAMES)
-        and _rm_gate_reads(text)
-        and _rm_may_count_as_rm(text)
-        and _rm_gated(text, extra_chars)
-    ):
-        return True
+    # The gate's own first test only scans the text, so it counts nothing. The rm test scans up to
+    # 30 spellings of text the gate would read, so once the count is spent it is not run, and text
+    # it turns away counts its length (it is not lexed, so not the per-word cost of _rm_read_cost).
+    if _rm_may_name(text, _RM_GATE_NAMES) and _rm_gate_reads(text) and not _rm_extra_spent(extra_chars):
+        if _rm_may_count_as_rm(text):
+            if _rm_gated(text, extra_chars):
+                return True
+        elif extra_chars is not None:
+            extra_chars[0] += len(text)
     if _rm_extra_spent(extra_chars):
         return None
     if any(

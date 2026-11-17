@@ -20,6 +20,7 @@ from tests.tier3.test_security_finding_evidence import (
     _KEY_BLOCK,
     _READINGS_THAT_START_THE_TEXT,
     _generated_texts,
+    _grows_linearly,
     _masking_seconds,
     _only_adds_markers,
 )
@@ -1768,10 +1769,11 @@ def test_judge_evidence_masking_escaped_again_only_adds_markers(monkeypatch: pyt
     ],
 )
 def test_judge_evidence_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
-    small, large = _masking_seconds(eval_template._redact_judge_evidence, unit, 20_000, 200_000)
-    # Ten times the text takes about ten times as long. The margin allows for
-    # a slow CI runner.
-    assert large < 16 * small + 0.05
+    in_pieces, whole = _masking_seconds(eval_template._redact_judge_evidence, unit, 20_000, 200_000)
+    # The text masked whole takes about as long as in ten pieces, with the
+    # same margin for a slow CI runner as the finding evidence tests. Masking
+    # that grows with the square of the text takes ten times as long whole.
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:

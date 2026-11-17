@@ -35,12 +35,13 @@ class ParsedFrontmatter:
 
 
 def load_frontmatter_yaml(raw: str) -> Any:
-    """Load frontmatter while reporting scalar-constructor failures as YAML errors."""
+    """Load frontmatter while reporting native loading failures as YAML errors."""
     try:
         return yaml.safe_load(raw)
-    except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
+    except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError, RecursionError) as exc:
         # SafeLoader raises native exceptions for impossible dates and invalid
         # explicitly tagged values such as ``!!int ""`` and ``!!bool maybe``.
+        # Deep nesting can also exceed the parser's Python recursion limit.
         raise yaml.YAMLError(str(exc)) from exc
 
 

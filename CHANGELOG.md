@@ -471,8 +471,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 1 frontmatter checks report impossible YAML dates and malformed tagged
-  scalar values through their existing parse-error paths instead of aborting
+- Tier 1 frontmatter checks report impossible YAML dates, malformed tagged scalar
+  values, and nesting beyond the parser's recursion limit through their existing
+  parse-error paths instead of aborting
   schema, version, quality, harness, or Markdown link analysis with a Python exception.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.

@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Malformed YAML scalar constructors use the existing frontmatter error paths."""
+"""Native YAML loading failures use the existing frontmatter error paths."""
 
 from pathlib import Path
 
@@ -17,7 +17,16 @@ from skillevaluator.validators.schema import SchemaValidator
 from skillevaluator.validators.version import VersionValidator
 
 
-@pytest.fixture(params=["2026-02-30", '!!int ""', "!!bool maybe", "!!float invalid", "!!timestamp invalid"])
+@pytest.fixture(
+    params=[
+        "2026-02-30",
+        '!!int ""',
+        "!!bool maybe",
+        "!!float invalid",
+        "!!timestamp invalid",
+        pytest.param("[" * 2000 + "leaf" + "]" * 2000, id="excessive-nesting"),
+    ]
+)
 def malformed_skill(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
     skill = tmp_path / "malformed-skill"
     skill.mkdir()
@@ -79,3 +88,24 @@ def test_harness_tab_check_handles_scalar_errors(malformed_skill: Path) -> None:
     # A tab inside a block scalar is valid YAML, so construction reaches the
     # invalid explicitly tagged value rather than failing during scanning.
     assert _tab_indent_breaks_yaml("note: |\n  \ttext\n" + raw_yaml)
+
+
+def test_ordinary_nested_yaml_keeps_values_and_body_links(tmp_path: Path) -> None:
+    skill = tmp_path / "ordinary-skill"
+    skill.mkdir()
+    manifest = skill / "SKILL.md"
+    content = (
+        "---\nname: ordinary-skill\n"
+        "description: A skill for checking ordinary frontmatter. Use when testing validation.\n"
+        "extra:\n  enabled: true\n  values: [1, [two, null]]\n---\n\n"
+        "# Example\n\nRead [the guide](guide.md).\n"
+    )
+    manifest.write_text(content, encoding="utf-8")
+
+    parsed, result = parse_frontmatter(manifest)
+
+    assert result.passed
+    assert parsed is not None
+    assert parsed.yaml_data["extra"] == {"enabled": True, "values": [1, ["two", None]]}
+    assert not any(finding.check_name == "yaml_syntax" for finding in SchemaValidator().validate(skill).findings)
+    assert "guide.md" in markdown_link_targets(content)

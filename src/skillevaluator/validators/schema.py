@@ -200,7 +200,7 @@ def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
     """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
     try:
         root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError):
         return []
     duplicates: list[tuple[str, int]] = []
     stack: list[tuple[yaml.Node, str]] = [(root, "")] if root is not None else []

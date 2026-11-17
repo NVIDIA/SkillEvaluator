@@ -85,6 +85,7 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `html` | Standalone HTML report (default) | A human needs to review or archive a run |
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
+| `junit` | JUnit XML | CI systems that show native test reports need a JUnit artifact |
 
 HTML reports use a shared NVIDIA presentation across all three tiers, with
 numbered Insights cards, expandable findings, and tables alongside charts.
@@ -94,8 +95,8 @@ Saved Light, Dark and System choices take precedence when browser storage is
 available; System follows changes to the device preference.
 Reports, including charts, work without a network connection.
 
-```bash title="One run, four report files"
-skillevaluator validate ./my-skill -r json,html,markdown,sarif -o reports
+```bash title="One run, five report files"
+skillevaluator validate ./my-skill -r json,html,markdown,sarif,junit -o reports
 ```
 
 For gating a pipeline on the JSON output, see [Gate Your CI](/skills/skillevaluator/ci-integration).
@@ -332,11 +333,49 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`); the `cli` format
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` format
 prints to the terminal and never writes a file. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
 and never clobbers the previous run.
+
+## JUnit report
+
+`-r junit` writes one XML file for CI test-report consumers such as GitLab
+merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
+
+| JUnit element | SkillEvaluator source |
+| --- | --- |
+| `testsuites` | One document per run |
+| `testsuite` | One check group (`ValidationResult`) |
+| `testcase` | One check, finding, gate failure, or incomplete scanner |
+| `failure` | A blocking finding, with `file:line` when recorded; an independent error on a group whose scanners all completed (schema errors, `No SKILL.md found`) as a case named `error`; or a gate failure, such as a minimum score, as a case named `gate_failure` |
+| `error` | An `incomplete/<tool>` case for a scanner that did not complete, with `type="incomplete"` and the scanner's own reason when one was recorded (for example `skillspector not installed`); and, on a group with an incomplete scanner, each independent error that is not a gate failure (a crash or unusable scanner output, such as `Bandit did not return valid JSON; scan did not complete`) as a case named `error` with `type="execution"`. Other checks and findings in that group keep their real passed or failed status |
+| `skipped` | A check group that did not run and does not fail the gate, as one case with its skip reason. A blocking group that was skipped is a `gate_failure` instead |
+| `system-out` | Score and threshold when recorded, and non-failing finding text |
+
+Counts on `testsuites` and each `testsuite` (`tests`, `failures`, `errors`,
+`skipped`, `time`) match the cases they contain. A finding case is named
+after its check and location, `check_name (path:line)` (or `check_name (path)`
+when no line was recorded), so adding or reordering findings does not rename
+the others in CI test history. File paths are relative to the Git repository
+root that contains the target (the target folder when it is not in a Git
+repository), from `validate` and from single-check commands alike. SARIF uses the
+same base, resolution rules, and percent-encoding, so a file
+name that is not valid UTF-8 stays distinct (`caf%E9.md`). In other text such a
+name is backslash-escaped (`caf\xe9.md`), then characters XML 1.0 forbids are
+stripped. An incomplete scan is never emitted as an all-passed suite, and a
+run that failed on one never reports `failures` and `errors` both zero.
+
+Failures follow the same gate as the exit code. When `validate` marks a group
+as blocking and it fails the gate with no failing case of its own, for example
+a scored Tier 3 verdict of FAIL or NEUTRAL under `--block-on-agent-eval`, the
+suite gets a `gate_failure` case whose message is the cause: the first error,
+the Tier 3 verdict, or the skip reason. An advisory group (Tier 3 without
+`--block-on-agent-eval`, Tier 2 with `--no-block-on-dedup`) never adds a
+`failure` or `error`; its findings, errors, and execution errors are kept in
+`system-out` with an `Advisory, does not gate:` prefix, and its incomplete
+scanners are `skipped`.
 
 ## HTML report
 

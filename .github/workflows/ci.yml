@@ -384,11 +384,17 @@ jobs:
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
+          tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias
 
+  # Tier 2 is platform-independent Python, and Linux and Windows run the same
+  # tests on every pull request. This job never failed for a macOS-specific
+  # reason, so it runs after merge only. Its one macOS-only test, the /tmp
+  # alias test, runs in the Tier 3 macOS job above on every pull request. The
+  # job stays defined, and is skipped on pull requests, so the required check
+  # of the same name still reports.
   tier2-macos:
     name: Tier 2 (macos-latest)
-    needs: classify-changes
-    if: ${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}
+    if: ${{ github.event_name != 'pull_request' }}
     runs-on: macos-latest
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0

@@ -31,7 +31,9 @@ REQUIRED_CI_JOBS = {
     "tier3-macos": "Tier 3 macOS contract and progress",
     "native-windows-local-mode": "Native Windows local mode fails closed",
 }
-HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"}
+# Required jobs that are skipped on every pull request and run after merge.
+AFTER_MERGE_ONLY_CI_JOBS = {"tier2-macos"}
+HEAVY_CI_JOBS = set(REQUIRED_CI_JOBS) - {"test-python-312"} - AFTER_MERGE_ONLY_CI_JOBS
 RUN_UNLESS_CANCELLED_IF = "${{ !cancelled() }}"
 FULL_LANE_IF = "${{ !cancelled() && needs.classify-changes.outputs.docs_only != 'true' }}"
 NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
@@ -42,6 +44,7 @@ DOCS_ONLY_TESTS_IF = (
     "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only == 'true' }}"
 )
 MAIN_COVERAGE_IF = "${{ github.event_name != 'pull_request' }}"
+AFTER_MERGE_ONLY_IF = "${{ github.event_name != 'pull_request' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
     "cancel-in-progress": "true",
@@ -242,6 +245,26 @@ def test_ci_skips_every_other_required_job_only_after_classification() -> None:
     for job_id in HEAVY_CI_JOBS:
         assert jobs[job_id]["needs"] == "classify-changes"
         assert jobs[job_id]["if"] == FULL_LANE_IF
+
+
+def test_tier2_runs_on_macos_after_merge_only_and_keeps_its_required_name() -> None:
+    jobs = _load("ci.yml")["jobs"]
+
+    for job_id in AFTER_MERGE_ONLY_CI_JOBS:
+        job = jobs[job_id]
+        # The job is skipped on pull requests, not removed: a skipped job still
+        # reports, so the required check of the same name does not block a merge.
+        assert job["name"] == REQUIRED_CI_JOBS[job_id]
+        assert job["if"] == AFTER_MERGE_ONLY_IF
+        # The classifier only runs on pull requests, where this job never runs.
+        assert "needs" not in job
+
+    # The one Tier 2 test that only runs on macOS keeps running on pull requests.
+    assert (
+        "tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias"
+        in _runs(jobs["tier3-macos"])
+    )
+    assert jobs["tier3-macos"]["if"] == FULL_LANE_IF
 
 
 def test_full_lane_keeps_the_existing_commands_and_runners() -> None:

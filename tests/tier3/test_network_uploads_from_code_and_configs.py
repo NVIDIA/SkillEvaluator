@@ -549,6 +549,11 @@ _OTHER_LANGUAGE_UPLOADS = [
     f"python3 - <<'PY'\nimport requests\nreq = requests.Request('POST', '{_URL}', json=payload)\n"
     "requests.Session().send(req.prepare())\nPY",
     f"python3 - <<'PY'\nimport httpx\nhttpx.Client().send(httpx.Request(method='PUT', url='{_URL}', content=d))\nPY",
+    # A real client's send counts beside a test client's.
+    (
+        "python3 - <<'PY'\nimport httpx\nmock = httpx.Client(transport=httpx.MockTransport(h))\n"
+        f"real = httpx.Client()\nreq = httpx.Request('POST', '{_URL}', json=d)\nmock.send(req)\nreal.send(req)\nPY"
+    ),
     _code_call(
         f"import {{ Request, fetch }} from 'undici';\nconst req = new Request('{_URL}', {{ method: 'POST', body: d }});\n"
         "await fetch(req);",
@@ -894,6 +899,24 @@ _REQUESTS_BUILT_NOT_SENT = [
     (
         "import urllib.request\nreq = urllib.request.Request('https://api.example.com/items', data=b'{}')\n"
         "print(req.data)\nwith urllib.request.urlopen('https://example.com') as r:\n    print(r.status)"
+    ),
+    # A test client sends the request to a handler or app in the same process.
+    (
+        "import httpx\nclient = httpx.Client(transport=httpx.MockTransport(handler))\n"
+        "client.send(httpx.Request('POST', 'https://api.example.com/items', json={'a': 1}))"
+    ),
+    (
+        "import httpx\nhttpx.Client(transport=httpx.MockTransport(handler)).send(\n"
+        "    httpx.Request('POST', 'https://api.example.com/items', json={'a': 1})\n)"
+    ),
+    (
+        "import httpx\nasync def test_items():\n"
+        "    async with httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url='http://test') as client:\n"
+        "        req = httpx.Request('POST', 'http://test/items', json={'a': 1})\n        r = await client.send(req)"
+    ),
+    (
+        "import httpx\nclient = httpx.Client(app=app, base_url='http://test')\n"
+        "req = httpx.Request('POST', 'http://test/items', json={'a': 1})\nclient.send(req)"
     ),
 ]
 

@@ -8458,6 +8458,7 @@ class _CodeReader:
 
     __slots__ = (
         "_bindings",
+        "_doubles",
         "_go_imports",
         "_import_words",
         "_imports",
@@ -8490,6 +8491,7 @@ class _CodeReader:
         self._imports: list[tuple[str, str, bool, int, int]] | None = None
         self._import_words: dict[bool, frozenset[str]] = {}
         self._go_imports: frozenset[str] | None = None
+        self._doubles: frozenset[str] = frozenset()
         self._names: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
         self._mocked: frozenset[str] | None = None
 
@@ -9119,10 +9121,9 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
             stop = min(end, start + _CODE_RECEIVER_CHARS)
             if not reader.spend(stop - start):
                 return None
-            values = _CODE_IDENTIFIER_RE.findall(short, start, stop)
-            double = not _CODE_TEST_DOUBLE_NAMES.isdisjoint(values) or _CODE_APP_KEYWORD_RE.search(short, start, stop)
-            (doubles if double else others).add(name)
+            (doubles if _code_names_test_double(reader, start, stop) else others).add(name)
         doubles -= others
+    reader._doubles = frozenset(doubles)
     chains: dict[str, list[tuple[str, ...]]] = {}
     for name, chain, _start, _end in bindings:
         chains.setdefault(name, []).append(chain)
@@ -9180,6 +9181,15 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
             break
     reader._names = (frozenset(modules), frozenset(clients), frozenset(foreign - modules - clients))
     return reader._names
+
+
+def _code_names_test_double(reader: _CodeReader, start: int, stop: int) -> bool:
+    """Whether code between start and stop names a test double (_CODE_TEST_DOUBLE_NAMES) or passes app=."""
+    names = _CODE_IDENTIFIER_RE.findall(reader.short, start, stop)
+    return (
+        not _CODE_TEST_DOUBLE_NAMES.isdisjoint(names)
+        or _CODE_APP_KEYWORD_RE.search(reader.short, start, stop) is not None
+    )
 
 
 def _code_called(reader: _CodeReader, end: int) -> bool:
@@ -9638,8 +9648,12 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     """Read once where code sends a request object; None when over budget.
 
     A sending call is one of _CODE_REQUEST_SEND_CALLS (open and Do only on
-    a receiver, as builtin open reads a file). The names its arguments hold,
-    read up to _CODE_ARGUMENT_CHARS characters, are sent, and so are the
+    a receiver, as builtin open reads a file), on a receiver that is not a
+    test client: one the code binds only to a test double (see
+    _code_client_names), or one that names a test double or app=, as
+    httpx.Client(transport=httpx.MockTransport(handler)) does. The names
+    its arguments hold, read up to _CODE_ARGUMENT_CHARS characters, are
+    sent, and so are the
     names in the value bound to a sent name, followed for up to
     _CODE_BINDING_PASSES rounds, as req is in prepared = req.prepare() or
     prepared = s.prepare_request(req) before s.send(prepared). The text
@@ -9647,7 +9661,7 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     """
     masked = reader.masked
     bindings = _code_bindings(reader)
-    if bindings is None:
+    if bindings is None or _code_client_names(reader) is None:
         return None
     openers: list[int] = []
     reach: list[int] = []
@@ -9655,11 +9669,20 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     for match in _CODE_CALL_RE.finditer(masked):
         if match[1] not in _CODE_REQUEST_SEND_CALLS:
             continue
-        if match[1] in _CODE_RECEIVER_SEND_CALLS:
-            before = match.start()
-            while before > 0 and masked[before - 1] in " \t\r\n":
-                before -= 1
-            if not (masked[before - 1 : before] == "." or masked[max(0, before - 2) : before] in {"->", "::"}):
+        before = match.start()
+        while before > 0 and masked[before - 1] in " \t\r\n":
+            before -= 1
+        dotted = masked[before - 1 : before] == "." or masked[max(0, before - 2) : before] in {"->", "::"}
+        if match[1] in _CODE_RECEIVER_SEND_CALLS and not dotted:
+            continue
+        if dotted:
+            # A test client sends a request to a handler or app in the same process.
+            chain, chain_start = _code_receiver(reader, before - (1 if masked[before - 1] == "." else 2))
+            if not reader.spend(before - chain_start):
+                return None
+            if chain is not None and (
+                not reader._doubles.isdisjoint(chain) or _code_names_test_double(reader, chain_start, before)
+            ):
                 continue
         opener = match.end() - 1
         close = reader.pairs.get(opener)

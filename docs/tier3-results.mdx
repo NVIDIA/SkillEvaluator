@@ -300,7 +300,9 @@ These do not warn:
   `data = await request.post()`;
 - test clients and test doubles, such as `TestClient(app)`, `supertest`,
   `httpx.MockTransport`, `ASGITransport`, a client built with httpx's
-  `app=`, aiohttp's `TestClient`, and `test_request_context(method="POST")`;
+  `app=`, aiohttp's `TestClient`, and `test_request_context(method="POST")`,
+  and a request such a client sends, as in `client.send(req)` after
+  `client = httpx.Client(transport=httpx.MockTransport(handler))`;
 - names that hold a client's result rather than the client, as `v` in
   `v = Version(requests.get(URL).json()["version"])` and then `v.post`, and
   words inside strings;

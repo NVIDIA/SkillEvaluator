@@ -441,7 +441,6 @@ All notable changes to SkillEvaluator are documented in this file.
 - Full-body embeddings stop once a chunk covers the document end, avoiding extra
   embedding inputs and pooled weight for already-covered tails. Rebuild saved
   full-body catalogs to use the corrected pooling.
-
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

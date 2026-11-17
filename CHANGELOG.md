@@ -8,7 +8,23 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym) with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 
+## 1.0.1 - 2026-11-17
+
 ### Fixed
+
+- Disable OpenCode snapshots by default to avoid broken-pipe failures after a
+  completed task, while preserving explicit user snapshot settings.
+- Preserve opaque Claude gateway model IDs across Docker, local, and native Harbor
+  command construction while keeping native Anthropic, Vertex, and Bedrock routes
+  independent from a gateway-backed judge.
+- Count a standalone Tier 2 evaluation as one skill in JSON and HTML reports,
+  and prioritize failed-runtime recovery without hiding authored source or runner
+  instructions.
+- Select starter-demo score expectations by the installed evaluator version,
+  preserving the released 0.9.0 example while recognizing the 1.0.0 scores.
+- Retain the GitLab tools revision in aggregated report provenance.
+- Document the tested editable NeMo Gym installation required by OpenCode and
+  the completed Codex, Claude Code, and OpenCode live paired runs.
 
 - Folder validators apply skill-discovery exclusions only below the requested
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`

@@ -315,6 +315,21 @@ See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci
     Start Docker or configure the selected `--env-mode`, then re-run
     `skillevaluator doctor` with the same agent and environment.
   </Accordion>
+  <Accordion title="NeMo Gym cannot find the OpenCode runtime installer">
+    Use the [pinned editable source-checkout installation](/skills/skillevaluator/nemo-gym#install-the-pinned-gym). At this Gym
+    revision, a non-editable wheel installation creates component-resource
+    symlinks that its Docker uploader preserves as dangling host-path links.
+    OpenCode then fails before execution with a missing
+    `install_opencode_runtime.sh`. Repoint `SKILL_EVAL_NEMO_GYM_BIN` at the
+    editable installation and rerun; the checkout must remain available.
+  </Accordion>
+  <Accordion title="NeMo Gym cannot resolve or reach its service host">
+    Set `SKILL_EVAL_NEMO_GYM_HOST` to a host LAN or bridge IPv4 address reachable
+    from the Docker task containers. For example, on macOS with networking on
+    `en0`, use `export SKILL_EVAL_NEMO_GYM_HOST=$(ipconfig getifaddr en0)`.
+    Use the interface serving your Docker traffic; the configured address must
+    belong to the host because Gym also binds its services there.
+  </Accordion>
   <Accordion title="Docker reports that all predefined address pools have been fully subnetted">
     A trial's Compose project normally creates its own Docker network, and
     Docker carves each one from a limited set of default address pools. Each

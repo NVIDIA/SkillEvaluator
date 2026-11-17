@@ -75,13 +75,28 @@ def test_task_content_containing_error_label_remains_successful(tmp_path: Path) 
     assert result.stderr == ""
 
 
-@pytest.mark.parametrize("status_word", ["pending", "in_progress", "completed", "cancelled"])
-def test_task_status_words_survive_persistence(status_word: str, tmp_path: Path) -> None:
-    content = f"Investigate ({status_word}) labels after merge"
+@pytest.mark.parametrize(
+    ("content", "operation", "status", "checkbox"),
+    [
+        ("Investigate (pending) labels after merge", None, "pending", " "),
+        ("Investigate (in_progress) labels after merge", None, "pending", " "),
+        ("Investigate (completed) labels after merge", None, "pending", " "),
+        ("Investigate (cancelled) labels after merge", None, "pending", " "),
+        ("Check (completed)", "complete", "completed", "x"),
+        ("Check (completed)", "cancel", "cancelled", "~"),
+    ],
+)
+def test_task_status_words_survive_persistence(
+    content: str, operation: str | None, status: str, checkbox: str, tmp_path: Path
+) -> None:
     state_path = tmp_path / "todo.md"
     env = {"TASK_LIST_STATE_PATH": str(state_path)}
 
     added = _run_script("tasks", "add", "--content", content, env=env)
+    if operation:
+        updated = _run_script("tasks", operation, "--task_id", "task_1", env=env)
+        assert updated.returncode == 0
+        assert updated.stderr == ""
     listed = _run_script("tasks", "list", env=env)
     state, error = _load_script("tasks")._load_state(state_path)
 
@@ -91,10 +106,11 @@ def test_task_status_words_survive_persistence(status_word: str, tmp_path: Path)
     assert state["tasks"]["task_1"] == {
         "id": "task_1",
         "content": content,
-        "status": "pending",
+        "status": status,
     }
-    assert content in listed.stdout
-    assert f"- [ ] task_1: {content} (pending)" in state_path.read_text(encoding="utf-8")
+    if status != "cancelled":
+        assert content in listed.stdout
+    assert f"- [{checkbox}] task_1: {content} ({status})" in state_path.read_text(encoding="utf-8")
 
 
 @pytest.mark.parametrize(

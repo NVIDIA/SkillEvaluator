@@ -154,6 +154,21 @@ def test_collector_failure_details_flow_into_generated_report(tmp_path: Path) ->
         expected_cases=1,
         expected_case_ids=["case-001"],
     )
+    (results_dir / "dataset_snapshot.json").write_text(
+        json.dumps({"dataset": [{"id": "case-001", "question": "Reconcile the ledger", "expected_skill": "demo"}]})
+    )
+    (results_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "agents": {
+                    "opencode": {
+                        "execution_status": "failed",
+                        "pass_at_k": {"with_skill": {"k": 1, "cases": {"case-001": {"attempts_missing": 1}}}},
+                    }
+                }
+            }
+        )
+    )
     output = _render_report("demo", results_dir).read_text(encoding="utf-8")
 
     assert "With skill aggregate job" in output
@@ -161,6 +176,8 @@ def test_collector_failure_details_flow_into_generated_report(tmp_path: Path) ->
     assert "result.json" in output
     assert "case-001__attempt" in output
     assert "AgentTimeoutError: Agent timed out after 600 seconds" in output
+    preview = output.split('id="tier3-next-steps-preview"', 1)[1].split("</p>", 1)[0]
+    assert "execution errors" in preview
 
 
 def test_failed_agent_has_no_synthetic_score_in_comparison_or_html(tmp_path: Path) -> None:

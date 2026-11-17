@@ -287,10 +287,12 @@ In interpreter code, these warn:
 - curl, wget, HTTPie, or xh with an upload, run from an argument vector, as in
   `subprocess.run(["curl", "-d", "@.env", URL])`, or from a shell string:
   Python's `os.system`, `os.popen`, `subprocess.getoutput`, or a `shell=True`
-  call; Node's `execSync` or `spawnSync`; and Ruby, Perl, or PHP backticks,
-  `qx`, `%x`, `system`, or `shell_exec`. A part the code does not spell out,
-  such as a URL in a variable or an f-string field, reads as a placeholder
-  word, so the client and its options are still read.
+  call; Node's `exec` or `execSync`, or `spawn`, `spawnSync`, `execFile`, or
+  `execFileSync` with a `shell` option, as in
+  `spawnSync("curl -d @.env URL", { shell: true })`; and Ruby, Perl, or PHP
+  backticks, `qx`, `%x`, `system`, or `shell_exec`. A part the code does
+  not spell out, such as a URL in a variable or an f-string field, reads as a
+  placeholder word, so the client and its options are still read.
 
 These do not warn:
 

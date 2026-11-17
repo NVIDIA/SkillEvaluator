@@ -4801,7 +4801,9 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
             tokens_complete = cost_complete = False
 
     token_keys = ("input_tokens", "output_tokens", "cached_input_tokens")
-    if not tokens_complete or any(not _valid_budget_metric(usage[key], integer=True) for key in token_keys if key in usage):
+    if not tokens_complete or any(
+        not _valid_budget_metric(usage[key], integer=True) for key in token_keys if key in usage
+    ):
         for key in token_keys:
             usage.pop(key, None)
     if not cost_complete or ("cost_usd" in usage and not _valid_budget_metric(usage["cost_usd"])):

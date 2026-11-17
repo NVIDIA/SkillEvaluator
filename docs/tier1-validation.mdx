@@ -1,11 +1,12 @@
 ---
-title: "Tier 1: Static and Security Validation"
+title: "Tier 1: Validation"
 sidebar-title: "Tier 1: Validation"
 description: "Deterministic quality gates for skills — schema, quality, security, PII, license, code-integrity, Unicode, and script checks, plus optional LLM judging."
 ---
 
 Run Tier 1 directly to check a skill's structure, security, quality, and
-dependencies:
+dependencies. First, [install SkillEvaluator](/skills/skillevaluator/installation#install),
+then run:
 
 ```bash title="Run Tier 1"
 skillevaluator tier1 ./my-skill
@@ -15,8 +16,8 @@ Static checks need no model key. With a configured provider, this command also
 runs rubric judging, LLM security analysis, and finding verification. Without a
 provider, those LLM stages are explicitly reported as skipped. Use `--no-llm`
 for static checks only, or `--llm` to require a provider instead of allowing a
-keyless run. Full scanner coverage still requires the external tools listed in
-[Installation](/skills/skillevaluator/installation#system-tools).
+keyless run. See [scanner setup](/skills/skillevaluator/installation-options#system-tools)
+for first-run downloads and optional tools.
 
 The two-variable [provider setup](/skills/skillevaluator/configuration) is enough to configure the
 LLM stages for NVIDIA Build or OpenAI. Calling `skillevaluator tier1` without a
@@ -68,19 +69,19 @@ for skills. Its Tier 1 LLM checks still run only when requested.
   skillevaluator validate ./my-skill
   ```
 
-  By default you get a compact pipeline view in the terminal — a per-check ticker per tier — and the run writes HTML and JSON report files unless you pass `-r` explicitly, which is then honored exactly (including `-r cli` for terminal-only output). Add `--verbose` for the full per-check detail stream instead of the compact view. The full pipeline needs the [provider and runtime setup](/skills/skillevaluator/quickstart); use `--tiers 1` for static checks only. The exit code is `0` when every gate passes and `1` when one fails.
+  By default you get a compact pipeline view in the terminal — a per-check ticker per tier — and the run writes HTML and JSON report files unless you pass `-r` explicitly, which is then honored exactly (including `-r cli` for terminal-only output). Add `--verbose` for the full per-check detail stream instead of the compact view. The full pipeline needs the [provider and runtime setup](/skills/skillevaluator/tier3-live-evaluation#before-you-start); use `--tiers 1` for static checks only. The exit code is `0` when every gate passes and `1` when one fails.
 
-  ### Run the complete offline gate
+  ### Run static checks only
 
-  Install the scanners, then select only Tier 1 for a fully hermetic run:
+  Select only Tier 1 to run the static checks without model calls:
 
-  ```bash title="Complete offline Tier 1"
-  brew install gitleaks semgrep
-  uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
+  ```bash title="Static Tier 1"
   skillevaluator validate ./my-skill --tiers 1
   ```
 
-  With Semgrep, SkillSpector, and Gitleaks installed, every required scanner produces evidence and the run is deterministic — the same input yields the same exit code, with nothing leaving your machine. Run `skillevaluator doctor --tier 1` first to confirm that each scanner resolves and reports a supported version.
+  Tier 1 can download required scanners on first use. For an offline environment,
+  prepare them using [Installation: System tools](/skills/skillevaluator/installation-options#system-tools).
+  Run `skillevaluator doctor --tier 1` to check the scanners' paths and supported versions.
 
   ### Narrow to specific checks
 
@@ -447,7 +448,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Default Tier 1 does not import or execute target-controlled Python code. The `test_discovery` result is filename evidence only: it counts regular, in-tree, non-symlink `test_*.py` and `*_test.py` candidates without parsing or importing them. It reports `execution_performed=false` and `coverage_measured=false`; test success and code coverage must be established separately in a trusted project environment or an explicit sandbox.
 
-    A missing, timed-out, crashed, or malformed Bandit, Semgrep, Gitleaks, or SkillSpector run is treated as `INCOMPLETE`: terminal and saved reports are non-green and `validate` exits non-zero. When Semgrep runs but cannot fully parse some files (for example a shell or JavaScript file with syntax Semgrep's parser rejects), the check stays `INCOMPLETE` because Semgrep skips the code it cannot parse, so findings there are missed. The report names up to 20 of those files, relative to the skill and with the line of the first error, keeps Semgrep's findings for the other files, and lists them in the `semgrep_unparsed_files` field of the JSON report, up to 1,000 files; `semgrep_unparsed_files_omitted` counts any beyond that. Fix the syntax error, or check whether it comes from Semgrep's parser or its rule configuration. See [Scanner setup](#scanner-setup) for installation.
+    A missing required scanner, or a timed-out, crashed, or malformed Bandit, Semgrep, Gitleaks, or SkillSpector run, is treated as `INCOMPLETE`: terminal and saved reports are non-green and `validate` exits non-zero. When Semgrep runs but cannot fully parse some files (for example a shell or JavaScript file with syntax Semgrep's parser rejects), the check stays `INCOMPLETE` because Semgrep skips the code it cannot parse, so findings there are missed. The report names up to 20 of those files, relative to the skill and with the line of the first error, keeps Semgrep's findings for the other files, and lists them in the `semgrep_unparsed_files` field of the JSON report, up to 1,000 files; `semgrep_unparsed_files_omitted` counts any beyond that. Fix the syntax error, or check whether it comes from Semgrep's parser or its rule configuration. See [Scanner setup](#scanner-setup) for installation.
   </Accordion>
 
   <Accordion title="unicode — smuggling detection">
@@ -757,7 +758,11 @@ The command line rejects a malformed waiver file before the run starts, with exi
 
 ## Scanner setup
 
-Bandit installs with SkillEvaluator; install `skillevaluator[security]` for pip-audit, which the opt-in dependency audit uses. Install Semgrep and SkillSpector in separate tool environments, and install Gitleaks separately — it is a Go binary, not a pip package. See [Installation](/skills/skillevaluator/installation) for commands and the extras table.
+Bandit installs with SkillEvaluator. Tier 1 provisions SkillSpector and, on
+Linux and macOS, Gitleaks when they are missing; the first run needs network
+access. Semgrep is optional unless `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
+See the [installation guide](/skills/skillevaluator/installation-options#system-tools)
+for scanner setup, offline preparation, and the optional dependency-audit extra.
 
 Semgrep uses a policy packaged with the installed distribution, with metrics and version checks disabled; Tier 1 never fetches a registry policy at runtime. The other public Tier 1 configuration also ships inside the package under `skillevaluator/config/`: `pii_patterns.yaml`, `unicode_smuggle_patterns.yaml`, `license_config.yaml`, and `profiles/default.yaml`.
 
@@ -854,13 +859,19 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     turn an incomplete scan into a pass.
   </Accordion>
   <Accordion title="Gitleaks is not installed">
-    Install it with `brew install gitleaks` or download a binary from the official [Gitleaks releases](https://github.com/gitleaks/gitleaks/releases).
+    On Linux and macOS, SkillEvaluator downloads Gitleaks on first use. If that
+    download cannot complete, follow [scanner setup](/skills/skillevaluator/installation-options#system-tools)
+    to prepare it for your environment.
   </Accordion>
   <Accordion title="A scanner is missing">
-    Bandit installs with SkillEvaluator; reinstall it if Bandit is missing. Install pip-audit with `skillevaluator[security]`. Install Semgrep separately with `brew install semgrep` or `uv tool install semgrep`, and SkillSpector with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4`. Required scanner failures remain `INCOMPLETE` until the scanner is installed and returns valid evidence. `skillevaluator doctor --tier 1` lists every scanner the selected checks need, with its resolved path and version.
+    Run `skillevaluator doctor --tier 1` to identify the scanner and its resolved
+    path or version, then follow [scanner setup](/skills/skillevaluator/installation-options#system-tools).
+    Required scanner failures remain `INCOMPLETE` until the scanner returns
+    valid evidence. Missing optional Semgrep is reported as skipped unless
+    `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
   </Accordion>
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
-    SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. The finding's suggestion names the helper and the reason, such as `static_parse_limit (static_patterns_tool_misuse)`. Check the installed release with `skillspector --version` and upgrade with `uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4`. If the exception remains after the upgrade, investigate it like any other incomplete scan.
+    SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. The finding's suggestion names the helper and the reason, such as `static_parse_limit (static_patterns_tool_misuse)`. Check the resolved release with `skillevaluator doctor --tier 1` and follow [scanner setup](/skills/skillevaluator/installation-options#system-tools) to update an older installation. If the exception remains after the upgrade, investigate it like any other incomplete scan.
   </Accordion>
   <Accordion title="SkillSpector could not fully model the hooks">
     With SkillSpector v2.12.0 and later, a skill, folder or hooks-only plugin

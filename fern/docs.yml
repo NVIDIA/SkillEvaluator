@@ -29,12 +29,12 @@ navigation:
   - section: Get Started
     skip-slug: true
     contents:
+      - page: Installation
+        path: ../docs/installation.mdx
+        slug: installation
       - page: Quickstart
         path: ../docs/quickstart.mdx
         slug: quickstart
-      - page: "Tier 3: First Run"
-        path: ../docs/tier3-live-evaluation.mdx
-        slug: tier3-live-evaluation
       - page: Repository Integration
         path: ../docs/repository-integration.mdx
         slug: repository-integration
@@ -44,9 +44,6 @@ navigation:
   - section: Set Up
     skip-slug: true
     contents:
-      - page: Installation
-        path: ../docs/installation.mdx
-        slug: installation
       - page: Providers & Credentials
         path: ../docs/configuration.mdx
         slug: configuration
@@ -59,12 +56,15 @@ navigation:
       - page: "Tier 1: Validation"
         path: ../docs/tier1-validation.mdx
         slug: tier1-validation
-      - page: Harness Check
+      - page: "Tier 1: Harness Check"
         path: ../docs/harness-check.mdx
         slug: harness-check
       - page: "Tier 2: Deduplication"
         path: ../docs/tier2-deduplication.mdx
         slug: tier2-deduplication
+      - page: "Tier 3: Live Agent Evaluation"
+        path: ../docs/tier3-live-evaluation.mdx
+        slug: tier3-live-evaluation
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation
@@ -110,6 +110,9 @@ navigation:
   - section: Reference
     skip-slug: true
     contents:
+      - page: Installation Options
+        path: ../docs/installation-options.mdx
+        slug: installation-options
       - section: Live Evaluation
         skip-slug: true
         contents:

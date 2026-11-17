@@ -12,12 +12,13 @@ contributors making non-trivial edits.
 ## Layout
 
 - `index.mdx` — landing page and three-tier overview
-- `quickstart.mdx` — install, one provider and key, and first runs
-- `installation.mdx` — extras, uv, pip, Docker, requirements
+- `quickstart.mdx` — check a bundled example with the installed CLI
+- `installation.mdx` — the shared first installation and verification command
+- `installation-options.mdx` — upgrades, alternatives, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `tier1-validation.mdx` — checks, profiles, scanner setup, exit codes
 - `tier2-deduplication.mdx` — dedup commands, catalogs, thresholds, limits
-- `tier3-live-evaluation.mdx` — first live comparison, from installation to report
+- `tier3-live-evaluation.mdx` — first live comparison, from model setup to report
 - `tier3-run-options.mdx` — reviewed datasets, run size, cost, and repeat comparisons
 - `tier3-runtime.mdx` — runtime contracts, backend compatibility, and troubleshooting
 - `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback models

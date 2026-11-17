@@ -268,7 +268,7 @@ harbor:
       model: gpt-6.1-sol
 ```
 
-You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) for the full run workflow.
+You can also supply that model at invocation time with `--agent-model codex=MODEL`. See [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) for the full run workflow.
 
 In Docker mode, credential values are never rendered on the `docker compose exec` command line — the bridge receives them through a mode-0600 file inside the container that is consumed and removed before the agent starts.
 
@@ -349,7 +349,7 @@ Setting `SKILLSPECTOR_PROVIDER` yourself overrides the bridge, but it must name 
   <Card title="Tier 2: Deduplication" icon="copy" href="/skills/skillevaluator/tier2-deduplication">
     Put your embedding provider to work — find overlap within and across skills.
   </Card>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Run a live agent evaluation with the two-credential setup above.
   </Card>
 </CardGroup>

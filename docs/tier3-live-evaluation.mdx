@@ -1,15 +1,22 @@
 ---
-title: "Run a Live Evaluation"
-sidebar-title: "Tier 3: First run"
+title: "Tier 3: Live Agent Evaluation"
+sidebar-title: "Tier 3: Live Agent Evaluation"
 description: "Connect a model, run an agent with and without your skill, and open the comparison report."
 ---
 
 Does your skill help an agent complete a task? Run the same tasks **with and
 without your skill**, then open a report showing the difference: **Skill Lift**.
 
+<div id="install-live-evaluation-support">
+
+First, [install SkillEvaluator](/skills/skillevaluator/installation#install),
+then return here to connect your model and run the comparison.
+
+</div>
+
 <CardGroup cols={3}>
   <Card title="1. Set up" icon="key" href="#before-you-start">
-    Install the CLI and connect one model provider.
+    Connect one model provider and check readiness.
   </Card>
   <Card title="2. Run" icon="play" href="#start-with-one-command">
     Start a comparison in Docker.
@@ -21,21 +28,11 @@ without your skill**, then open a report showing the difference: **Skill Lift**.
 
 ## Before you start
 
-You need [uv](https://docs.astral.sh/uv/getting-started/installation/), Git,
-Docker running, a model API key, and a skill folder containing `SKILL.md`.
+Have Docker running, a model API key, and a skill folder containing `SKILL.md`.
 Replace `./my-skill` below with that folder. New to skills? Try the
 [bundled keyless example](/skills/skillevaluator/quickstart) first.
 
 <Steps toc={true}>
-
-### Install live evaluation support
-
-```bash title="Install the CLI with the Tier 3 extra"
-uv tool install --python 3.13 "skillevaluator[tier3] @ git+https://github.com/NVIDIA/SkillEvaluator.git"
-```
-
-Already installed? Add `--reinstall` to refresh it with the `tier3` extra.
-[Other installation options](/skills/skillevaluator/installation#install).
 
 ### Connect a model
 

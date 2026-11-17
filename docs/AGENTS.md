@@ -11,9 +11,10 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 ## What lives here
 
 - `index.mdx` — landing page and three-tier overview (Fern slug `/`)
-- `quickstart.mdx` — install, one provider and key, and first runs
+- `quickstart.mdx` — check a bundled example with the installed CLI
 - `starter-demo.mdx` — reproducible public terminal starter, output checks and adaptation
-- `installation.mdx` — extras, uv, pip, Docker, requirements
+- `installation.mdx` — the shared first installation and verification command
+- `installation-options.mdx` — upgrades, alternatives, extras, and scanner setup
 - `configuration.mdx` — providers, embeddings, and Tier 3 credential roles
 - `agent-skill.mdx` — installing and using the `skills/skillevaluator` agent skill
 - `tier1-validation.mdx` — Tier 1 checks, profiles, scanner setup, exit codes
@@ -56,6 +57,13 @@ the expected output, and a next step. Put advanced contracts and edge cases in
 the linked reference page. Use Steps for ordered actions, Tabs for exclusive
 choices, and Accordions for optional detail; do not put a reference chapter
 ahead of the first runnable example.
+
+Keep the recommended installation in `installation.mdx` and alternatives in
+`installation-options.mdx`. Tier guides and the
+quickstart link there and use the installed `skillevaluator` command. Avoid
+copying package-manager recipes into each tier or mixing `uv run`, `uv tool
+install`, and pip in a single first-run workflow. Contributor checkout commands
+belong in the development guide.
 
 1. **Every page needs YAML frontmatter** with `title` and `description`. The
    `title` renders as the page H1 — do **not** also add a `# Heading` in the

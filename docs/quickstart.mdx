@@ -4,9 +4,9 @@ sidebar-title: "Quickstart"
 description: "Get a bundled skill, run a quality check, and read the saved result. No API key required."
 ---
 
-Get a quality score and findings for a complete example skill. You'll need
-**Git** and [**uv**](https://docs.astral.sh/uv/getting-started/installation/).
-No API key, GPU, or Docker required.
+Get a quality score and findings for a complete example skill.
+[Install SkillEvaluator](/skills/skillevaluator/installation#install) first,
+then return here. This check needs no API key, GPU, or Docker.
 
 <Steps toc={true}>
 
@@ -23,13 +23,12 @@ Keep this terminal open for the following commands.
 ### Run without an LLM
 
 ```bash title="Score the bundled skill"
-uv run --python 3.13 skillevaluator quality-check \
+skillevaluator quality-check \
   src/skillevaluator/tier3/reference_skills/text-analyzer \
   -r cli -r json -o reports/first-quality
 ```
 
-uv installs Python and the required packages on the first run.
-The check itself runs offline.
+The check runs offline with your installed CLI.
 
 ### Read your result
 
@@ -54,7 +53,7 @@ Replace the sample path with the directory containing your `SKILL.md`.
 Keep the report output outside that directory:
 
 ```bash title="Run from the same checkout"
-uv run --python 3.13 skillevaluator quality-check ./my-skill \
+skillevaluator quality-check ./my-skill \
   -r cli -r json -o reports/my-skill-quality
 ```
 
@@ -74,7 +73,7 @@ Want model feedback on the instructions? Add a rubric review for the same skill.
   ```bash title="Add model-backed feedback"
   export SKILL_EVAL_LLM_PROVIDER=nv_build
   export NVIDIA_API_KEY='nvapi-...'
-  uv run --python 3.13 --extra llm skillevaluator rubric-eval \
+  skillevaluator rubric-eval \
     src/skillevaluator/tier3/reference_skills/text-analyzer \
     -r cli -r json -o reports/first-build
   ```
@@ -84,6 +83,8 @@ Want model feedback on the instructions? Add a rubric review for the same skill.
   Scores can vary between calls. This reviews the instructions; it does not
   run an agent with the skill. No local GPU or Docker is needed.
 
+  The recommended installation includes model support. If you chose the base
+  package, add `llm` using the [installation guide](/skills/skillevaluator/installation-options#choosing-extras).
   For other providers or model overrides, see
   [Providers & Credentials](/skills/skillevaluator/configuration).
 </Accordion>
@@ -97,8 +98,8 @@ Want model feedback on the instructions? Add a rubric review for the same skill.
   <Card title="Add automatic checks" icon="code-branch" href="/skills/skillevaluator/repository-integration">
     Start with a GitHub or GitLab CI template.
   </Card>
-  <Card title="Run full static validation" icon="shield" href="/skills/skillevaluator/installation#system-tools">
-    Set up Semgrep, SkillSpector, and Gitleaks for the security checks, then run Tier 1.
+  <Card title="Run full static validation" icon="shield" href="/skills/skillevaluator/installation-options#system-tools">
+    Check scanner setup for Semgrep, SkillSpector, and Gitleaks, then run Tier 1.
   </Card>
   <Card title="Try a guided experiment" icon="terminal" href="/skills/skillevaluator/starter-demo">
     Change the example, introduce a regression, and compare real outputs.

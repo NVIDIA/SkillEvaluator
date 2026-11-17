@@ -464,7 +464,7 @@ def test_uv_is_a_base_dependency_so_plain_pip_can_provision_skillspector() -> No
     uv_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "uv"]
     lock_names = {package["name"] for package in _lock()["package"]}
     notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
-    installation = (REPO_ROOT / "docs" / "installation.mdx").read_text(encoding="utf-8")
+    installation = (REPO_ROOT / "docs" / "installation-options.mdx").read_text(encoding="utf-8")
 
     assert len(uv_requirements) == 1
     assert str(uv_requirements[0].specifier) == ">=0.11.27"
@@ -1023,7 +1023,7 @@ def test_harbor_atif_and_agent_eval_alias_are_defined() -> None:
         REPO_ROOT / "docs" / "developer-guide.mdx",
         REPO_ROOT / "docs" / "environment-variables.mdx",
         REPO_ROOT / "docs" / "eval-datasets.mdx",
-        REPO_ROOT / "docs" / "installation.mdx",
+        REPO_ROOT / "docs" / "installation-options.mdx",
         REPO_ROOT / "docs" / "reports.mdx",
         REPO_ROOT / "docs" / "tier3-results.mdx",
     ]

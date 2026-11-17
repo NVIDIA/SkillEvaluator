@@ -1,11 +1,14 @@
 ---
-title: "Harness Check"
+title: "Tier 1: Harness Check"
+sidebar-title: "Tier 1: Harness Check"
 description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
 ---
 
 No LLM. No agent run. No API key. In about a second, the harness check predicts
 whether each agent harness **loads** your skill, **degrades** it, or **drops** it,
 and what to change.
+
+[Install SkillEvaluator](/skills/skillevaluator/installation#install), then run:
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -395,7 +398,7 @@ with the description as that harness lists it.
     No. It predicts loader behavior from versioned profiles without running the
     agent. It doesn't establish which skill reaches a live model or whether the
     skill helps once it is there. That is what
-    [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
+    [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) measures, by running the agent.
   </Accordion>
   <Accordion title="Why does it mention my other skills?">
     A harness lists your skill together with the skills installed next to it, and

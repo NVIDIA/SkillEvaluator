@@ -1,12 +1,14 @@
 ---
-title: "Tier 2: Semantic Deduplication"
+title: "Tier 2: Deduplication"
 sidebar-title: "Tier 2: Deduplication"
 description: "Detect redundant content within one skill and overlapping skills across a collection using embedding similarity."
 ---
 
 Tier 2 finds redundant content — inside a single skill and across a skill
 collection — using embedding similarity, with chat-LLM verification for
-intra-skill candidates. It needs a configured embeddings provider; intra-skill
+intra-skill candidates. First, [install SkillEvaluator](/skills/skillevaluator/installation#install).
+
+Tier 2 needs a configured embeddings provider; intra-skill
 analysis also needs a chat LLM. See
 [Providers & Credentials](/skills/skillevaluator/configuration) to set both up, including the
 [fully local recipe](/skills/skillevaluator/configuration#fully-local-setup) when skill content
@@ -655,7 +657,7 @@ handling terms before sending confidential skill content to a hosted endpoint.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Tier 3: Live Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
+  <Card title="Tier 3: Live Agent Evaluation" icon="flask" href="/skills/skillevaluator/tier3-live-evaluation">
     Prove the skill changes agent behavior with a live A/B evaluation.
   </Card>
   <Card title="Providers & Credentials" icon="book" href="/skills/skillevaluator/configuration">

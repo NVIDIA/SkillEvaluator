@@ -8,7 +8,7 @@ layout: reference
     `skillevaluator --help` output. Re-verify every flag table each release;
     tests/golden/cli_surface.json also records compatibility aliases hidden in help. */}
 
-This page lists every `skillevaluator` command with its full flag set and exact defaults. If you want task-oriented guidance instead, start from the tier guides: [Tier 1: Validation](/skills/skillevaluator/tier1-validation), [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication), and [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+This page lists every `skillevaluator` command with its full flag set and exact defaults. If you want task-oriented guidance instead, start from the tier guides: [Tier 1: Validation](/skills/skillevaluator/tier1-validation), [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication), and [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 [Harbor](https://github.com/harbor-framework/harbor) is the open-source agent
 evaluation framework behind the Tier 3 task, environment, trial, and trajectory
@@ -606,7 +606,7 @@ Unavailable comparisons print reasons and exit nonzero.
 
 ## tier3 evaluate
 
-Run Tier 3 live agent evaluation: real agents attempt your eval cases with and without the skill, and the difference becomes Skill Lift. Requires the `tier3` extra, a provider key for grading, a credential the selected agents can use — with NVIDIA Build in `--env-mode docker`, `kata`, or `local`, the one `NVIDIA_API_KEY` covers both roles — and a running backend (Docker by default). The full walkthrough is [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+Run Tier 3 live agent evaluation: real agents attempt your eval cases with and without the skill, and the difference becomes Skill Lift. Requires the `tier3` extra, a provider key for grading, a credential the selected agents can use — with NVIDIA Build in `--env-mode docker`, `kata`, or `local`, the one `NVIDIA_API_KEY` covers both roles — and a running backend (Docker by default). The full walkthrough is [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 ```bash title="Live evaluation with codex in Docker"
 skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
@@ -937,7 +937,7 @@ one of them failed.
 ## dashboard
 
 Open the optional local tables dashboard. Install the
-[`dashboard` extra](/skills/skillevaluator/installation#choosing-extras) first, then pass JSON
+[`dashboard` extra](/skills/skillevaluator/installation-options#choosing-extras) first, then pass JSON
 reports, retained run directories, or directories containing reports. With no
 paths, upload JSON files in the browser.
 

@@ -130,3 +130,21 @@ def test_evaluate_plugin_refuses_grants_without_probes_before_running(tmp_path, 
     assert "--probe-mcp-env requires --probe-mcp" in result.output
     assert runs == []
     assert not (tmp_path / "refused").exists()
+
+
+@pytest.mark.parametrize("probe", [(), ("--no-probe-mcp",)], ids=["absent", "disabled"])
+def test_validate_reports_the_plugin_target_error_first_for_a_skill(tmp_path, probe):
+    source = tmp_path / "demo-skill"
+    source.mkdir()
+    (source / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill.\n---\n\n# Demo\n",
+        encoding="utf-8",
+    )
+    args = ["validate", str(source), "--tiers", "1", "-r", "json", "-o", str(tmp_path / "refused")]
+
+    result = CliRunner().invoke(cli, [*args, *probe, "--probe-mcp-env", "TOKEN"])
+
+    assert result.exit_code == 2, (result.output, result.exception)
+    assert "Plugin controls require a plugin target" in result.output
+    assert "--probe-mcp-env requires --probe-mcp" not in result.output
+    assert not (tmp_path / "refused").exists()

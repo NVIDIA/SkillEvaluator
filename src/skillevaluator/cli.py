@@ -2792,7 +2792,6 @@ def validate(
     checks and applicable bundled-skill quality/lint/version checks are included.
     """
     _record_validate_json_report(None)
-    _require_probe_mcp_for_grants(probe_mcp, probe_mcp_env)
     requested_path = target_path
     if harness:
         from skillevaluator.harness import load_profiles
@@ -2867,6 +2866,8 @@ def validate(
     plugin_options = None
     plugin_source_path = target_path
     if resolved_type == CONTENT_TYPE_PLUGIN:
+        # A non-plugin target reports the plugin-target error below instead.
+        _require_probe_mcp_for_grants(probe_mcp, probe_mcp_env)
         from skillevaluator.cli_core import resolve_plugin_path
         from skillevaluator.evaluation.options import PluginOptions
 

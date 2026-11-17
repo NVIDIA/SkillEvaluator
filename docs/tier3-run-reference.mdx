@@ -1,0 +1,605 @@
+---
+title: "Tier 3 Run Reference"
+description: "Review your dataset, control run size and cost, and compare repeatable evaluations."
+---
+
+For the guided workflow, start with [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+This reference covers dataset staging, execution controls, budgets, and repeat comparisons.
+
+## Prepare and review a fuller evaluation
+
+Use this workflow when you want to review tasks before running an agent.
+`tier3 evaluate` runs the accepted source; it generates a missing dataset only
+with `--autopilot`. The shorter `tier3 PATH` workflow generates a starter
+automatically when no source exists.
+
+<Steps toc={true}>
+
+### Check readiness
+
+```bash title="Verify the runtime before spending compute"
+skillevaluator doctor --env-mode docker
+```
+
+`doctor` takes seconds and names anything missing: the evaluator provider,
+the selected backend's prerequisites, and unsupported agent names. Add
+`--verify-models` to live-probe each agent's model against the provider's
+catalog — one pass, warn, or fail row per agent — and `--agent-model AGENT=MODEL`
+to check an override before committing to a run. Warnings identify catalog
+results that do not authoritatively prove inference access. If you need proof
+before the measured matrix, `--agent-runtime-preflight` adds an agent-only
+execution of the first staged task. It does not invoke a separate
+standard-grader-only route before the evaluation reaches grading.
+`skillevaluator health-check` is the quicker
+CLI-and-backend variant; [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes) covers
+both in depth.
+
+### Generate an eval dataset
+
+Write task requests and observable outcomes in `eval-guidance.md` first; headings
+alone do not qualify. If you already ran autopilot, add `--force` to replace its
+starter, or `--refine --from-results ./saved-run` to refine from matching retained
+results. Auto leaves existing datasets unchanged without either overwrite flag.
+See [Grounding sources](/skills/skillevaluator/eval-datasets#choose-a-grounding-source).
+
+```bash title="Write the four-bucket dataset to evals/evals.json"
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
+```
+
+`--full` with an LLM provider generates all four buckets (explicit, implicit,
+contextual, and negative). With `--no-llm`, template mode emits the three
+positive buckets and adds a negative case only when the author guidance supplies an
+off-skill prompt under a supported negative heading. Generation uses your
+configured evaluator provider by default; `--no-llm` falls back to keyless local
+templates. The dataset format, `EVAL.md` guidance, and refinement options live
+in [Eval Datasets](/skills/skillevaluator/eval-datasets).
+
+### Review the cases
+
+Open `evals/evals.json`. Each entry has an `id`, a `prompt` the agent will
+receive, an `expected_output`, and optional `assertions` the grader checks.
+Edit freely — the generated cases are a starting point, and the run is only as
+good as its dataset.
+
+Each eval entry can declare task inputs with a `files` string or list. Paths are
+relative to `evals/` (for example, `"files/case-001/input.txt"`) and only those
+declared paths are staged into that task's `/workspace/input/`. An explicit
+empty list or `null` stages no task input. For backward compatibility, omitting
+the `files` field stages the entire shared `evals/files/` directory.
+
+An `evals/` directory directly owned by a skill package is evaluator-only. Tier
+3 resolves the selected task source once and copies only the evaluator inputs it
+can consume into one private temporary snapshot. That projection includes the
+active dataset and configuration, selected fixtures, the first consumed grader,
+the complete authored custom environment, and native tasks when selected.
+Legacy entries that omit `files` retain the complete shared `evals/files/`
+corpus. Unrelated evaluator subtrees and generated results are not copied. Every
+agent and baseline arm reads the same snapshot, preventing a concurrent source
+replacement from mixing dataset, fixture, grader, custom-environment, or
+native-task identities. The snapshot is removed when the run returns and
+requires temporary space only for the selected compatibility scope.
+
+Tier 3 does not install evaluator-owned directories from the target or any
+nested, reference, or workspace skill into agent-visible copies. Runtime skill
+projection and `--copy-repo` also omit every generated path excluded by the
+versioned publication-source digest. The active report directory and the whole
+catalog report root are explicitly excluded from full repo context, preventing
+a repeated run from exposing prior reports or Tier 3 evidence to the agent. An
+in-repository report directory is excluded only after SkillEvaluator reserves
+or authenticates it as generated output; a nonempty unowned directory is
+rejected instead of silently removing authored files from `--copy-repo`.
+Authenticated historical result roots remain excluded after the configured
+output location is changed; a present marker that is copied, stale, or cannot
+be authenticated fails staging closed instead of copying that tree. Custom result roots created
+outside `evals/` by a pre-marker version cannot be identified safely after the
+configured location changes. Move or delete that old content before
+`--copy-repo` or another full-context evaluation, then rerun with the current
+version if replacement evidence is needed. Runtime assets that the agent needs
+as part of the installed skill should live outside skill-owned `evals/`. Task
+fixtures should live under `evals/files/` (preferred) or another non-control
+subtree such as `evals/data/`, and should be declared as task inputs with
+`files`. A `files` declaration cannot select evaluator control material:
+dataset/configuration files, graders, developer eval guidance, benchmark
+conversion reports, native Harbor tasks, custom environments, evaluator tests,
+or generated results.
+
+Publication identity covers the evaluated skill tree itself. A Tier 3 run that
+actually stages linked or full-repository context, or separately configured
+external reference/workspace skills, still executes and remains available for
+diagnosis, but its publication evidence fails closed as `INCOMPLETE`.
+Full-repository selection also depends on Git/operator state excluded from the
+skill digest, even when the repository root is the skill directory. Keep
+publication-certifying runtime inputs inside the evaluated skill tree without
+repository-context staging. Binding arbitrary repository projections under a
+separate, versioned identity is not currently supported.
+
+MCP declarations are read only from a bounded, stable, single-link regular
+`evals/environment/mcp_servers.toml` through a descriptor-anchored evaluator
+root. Linked configuration files or parents, hardlinks, reparse points, and
+files replaced during the read fail task generation before output mutation. On
+Windows, the selected-file handle also denies concurrent writes and deletion
+for the read.
+
+Native Harbor task `environment.mcp_servers` declarations use the same MCP
+approval policy before staging, including declarations in task-level and
+per-step verifier environments. For generated tasks,
+`evals/environment/mcp_servers.toml` accepts approved `$VAR` and `${VAR}` header
+references; generated Harbor task TOML uses the braced form required by Harbor
+0.25. Source files and the agent's MCP JSON keep their original references.
+
+`evals/environment/input/` is reserved and is not copied into generated tasks.
+Directory-level custom Docker `COPY input/` remains buildable for an empty entry
+using an empty context directory. Missing, dynamic, linked, hardlinked, aliased,
+or escaping input sources fail closed. Native Harbor tasks and Compose input
+contexts use the same omitted-versus-explicit selection rules.
+
+The final evaluator layer replaces `/workspace/input`, `/workspace/repo`, and
+supported agent skill-discovery roots. Custom Docker `preserve` mode also
+requires a statically known final `USER` so the projection can be installed and
+the original user restored. Custom Dockerfiles and base images remain trusted
+executable environment inputs: these controls isolate evaluation fixtures and
+supported discovery roots; they are not a security boundary against an image
+that intentionally changes system binaries or startup behavior.
+
+Evaluator-owned in-skill output uses a path-bound authenticity marker backed by
+a local key. A copied, forged, or stale marker cannot authorize replacement at
+another path. A custom key path set through
+`SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE` must remain outside every evaluated
+skill source.
+
+### Run the comparison
+
+```bash title="With-skill vs. without-skill in Docker"
+skillevaluator tier3 ./my-skill --env-mode docker
+```
+
+Every supported agent harness works the same way:
+
+```bash title="Choose an agent harness"
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker
+skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker
+```
+
+Use `--agent-model AGENT=MODEL` whenever the evaluator provider's default model
+is not valid for that agent — for example, `codex` needs an OpenAI-compatible
+Responses model. When the run completes, results land in a timestamped
+directory:
+
+<FileTree>
+- evals/
+  - results/
+    - 20260709_141530_12345_a1b2c3d4e5f6/
+      - result.json
+      - run_config.json
+      - report.html
+      - codex/
+        - lift.json
+        - with-skill/
+        - without-skill/
+</FileTree>
+
+### Read the report
+
+```bash title="Open the HTML report, then compare across agents"
+skillevaluator view ./my-skill
+skillevaluator compare ./my-skill
+```
+
+`view` opens the latest HTML report; `compare` summarizes stored results across
+agents and arms. [Reports & Results](/skills/skillevaluator/reports) explains everything the run
+wrote and how to interpret it. To ask follow-up questions about one run and get
+grounded advice on skill changes, pass its run directory to
+[`tier3 feedback`](/skills/skillevaluator/cli-reference#tier3-feedback).
+
+</Steps>
+## Plan for cost
+
+Tier 3 performs live model and agent calls, so it can incur provider charges
+and, with a managed cloud environment, sandbox charges. A useful estimate of
+the trial volume is:
+
+```text
+eval cases × agents × attempts × arms
+```
+
+A standard comparison has two arms (with-skill and without-skill). Each trial
+can make multiple agent-model requests, standard grading adds evaluator-model
+calls, dataset generation can add more, and the optional runtime preflight adds
+one extra agent execution per agent. Actual charges therefore depend on the selected
+models, token usage, agent behavior, and environment pricing; SkillEvaluator
+does not estimate a fixed dollar amount. Check the current pricing for your
+[NVIDIA API Catalog](https://build.nvidia.com/),
+[OpenAI](https://openai.com/api/pricing/),
+[Anthropic](https://docs.anthropic.com/en/docs/about-claude/pricing), or
+[Amazon Bedrock](https://aws.amazon.com/bedrock/pricing/) provider and, when
+applicable, your cloud sandbox vendor.
+
+Start with one agent, a small reviewed dataset, and `--n-attempts 1`. During
+dataset iteration, `--skip-baseline` removes the without-skill arm and usually
+cuts the live trial count roughly in half, but that run cannot produce Skill
+Lift. Re-enable the baseline for any result you intend to compare or publish.
+For multi-attempt runs, `--stop-on-pass` can avoid remaining attempts after a
+pass; it is rejected with `--n-attempts 1`. To try a large dataset before
+paying for every case, `--max-cases N` (or `harbor.max_cases`) runs only the
+first N cases in staged order: eval dataset order, or task-directory name
+order for native Harbor tasks. The run records the selection in
+`run_config.json`, its dataset snapshot covers only the cases that ran, and
+reports mark it publication-incomplete when cases were skipped. By contrast,
+`--n-concurrent` and `--max-agents` control parallelism and elapsed time; they
+do not reduce the total planned trials or model work.
+
+With `--stop-on-pass`, an attempt that hits Harbor's agent execution timeout
+does not end the case: the next attempt runs, and when a later attempt of the
+same case completes with a score, it recovers the timeout. The timed-out
+attempt is never scored, and its failure stays in the agent's results under
+`recovered_trial_failures`. It still used one of the case's attempts, so
+reports count it on its own: the HTML **Attempt Details** row shows it as
+`A1: timed out, recovered`, or as a count (`1 timed out, recovered`) when the
+report did not keep its attempt number, and keeps it in the attempt total. A
+case that timed out on attempt 1 and passed on attempt 2 of 3 reads
+`1 of 3 scored` and `passed on attempt 2`, and `tier3 evaluate` prints one
+line for each agent with recovered timeouts. Without `--stop-on-pass` there is
+no recovery: a timed-out attempt leaves the arm's attempt coverage incomplete.
+
+### Cost and local mode
+
+`--env-mode local` avoids managed cloud-sandbox charges by running the agent
+on your machine. It does **not** automatically eliminate model charges: a
+hosted evaluator or agent provider is still billed normally, and local compute
+and runtime become your responsibility. If both the evaluator and agent are
+configured to use compatible locally hosted models, external API charges may
+also be avoided.
+
+```bash title="Small local trial"
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode local \
+  --n-attempts 1
+```
+
+Local mode is experimental and provides weaker isolation than Docker or a
+managed sandbox. Use it only for trusted skills and workspaces; saving sandbox
+cost is not worth running untrusted code directly on the host.
+## Tune the run
+
+The high-signal flags, with defaults:
+
+| Flag | Default | Effect |
+| --- | --- | --- |
+| `--n-attempts` | `1` | Attempts per eval case; values above one add pass@k context |
+| `--pass-threshold` | `0.5` | Score an attempt needs to count as passed |
+| `--n-concurrent` | `4` | Concurrent eval cases per agent |
+| `--max-agents` | selected-agent count | Maximum agents run in parallel |
+| `--max-cases` | every case | Run only the first N eval cases; a run that skips cases is not publication evidence |
+| `--skip-baseline` | off | Skip the without-skill arm; faster, but no Skill Lift |
+| `--reuse-baseline RUN` | off | Reuse a compatible fresh baseline from a retained run id, or `latest` |
+| `--skip-with-skill` | off | Run only the without-skill arm, for example to calibrate a task set; the report shows baseline scores with no Skill Lift or skill verdict |
+| `--stop-on-pass` | off | Stop a case's remaining attempts once one passes |
+| `--agent-runtime-preflight` | off | Add one agent-only execution of the first staged task per agent before the full A/B matrix; `--no-agent-runtime-preflight` overrides a config value that enables it |
+| `--tolerate-baseline-timeouts` | off | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; see [Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts) |
+| `--progress` | `auto` | Progress rendering: `auto`, `rich` (live TTY view with secret redaction), `plain`, or `off` |
+| `--progress-interval` | mode default | Seconds between progress heartbeats: 1 for `rich`, 60 for `plain` lines in CI and redirected output |
+| `--autopilot` | off | When no evaluation source exists, generate exactly one eval case — with the configured provider, falling back to a deterministic keyless template — never overwriting an existing source |
+| `--grading-mode` | `default` | `default`, `default_plus_custom`, or `custom_only` — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders) |
+| `--results-dir` | `evals/results`, or `SKILLEVALUATOR_RESULTS_DIR` when set | Write results under an external root instead of the skill directory; custom in-skill roots are rejected |
+| `--harbor-keep-jobs` | off | Retain Harbor job directories for inspection |
+| `--timeout-multiplier` | `1.0` | Scale Harbor's agent, verifier, and environment-build timeouts; must be a finite number greater than 0 whose scaled timeouts stay finite |
+| `--copy-repo` | off | Copy the surrounding repository into the task environment |
+| `--include-skills` | none | Stage additional skill directories; requires `--skill-workspace-mode group` |
+
+With `--stop-on-pass`, `--n-concurrent` still limits concurrent eval cases per
+agent. Each case's attempts run one after another and stop after the first
+passing score. The with-skill and without-skill arms run one after the other,
+and each uses the full `--n-concurrent` budget. For example, two agents with
+`--n-concurrent 4` run up to eight trials at once, fewer when fewer cases
+remain.
+
+Run budgets (`--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, and priced `--max-cost-usd`) control admission between
+logical units of work. Already admitted work can take measured usage above a
+cap, including on the final unit. These are admission boundaries, so a priced
+cost budget does not guarantee a hard dollar cap.
+
+Concurrent admission reserves each in-flight attempt using the largest measured
+per-attempt usage seen so far in this run, separately for agent tokens, judge
+calls, and priced cost. Estimates come only from real telemetry. When a bounded
+dimension has no measurement yet, only one logical calibration unit (such as a
+with-skill/baseline pair) may be in flight across the run. Other workers wait
+until every admitted attempt in that unit finishes, even if its first attempt
+already provided a measurement. If bounded usage is unmeasured, admission stops
+under the existing unknown-usage rule.
+For each bounded dimension with an estimate, admission checks
+`used + (in-flight attempts + proposed attempts) × estimate` against the cap.
+If that projection exceeds a cap while work is in flight, the worker waits for
+completion and re-checks fresh usage; waiting alone does not mark attempts
+`not_run`. If the projection still exceeds a cap with nothing in flight, the
+unit is denied, even when measured usage is below the cap. Its members retain
+`reason: budget_exhausted` and add `basis: estimate`; `budget.exhausted_basis`
+also identifies estimate-based exhaustion. The budget summary shows measured
+usage and the estimated next unit, rather than implying usage reached the cap.
+Attempt-count limits and stopping on unknown bounded usage are unchanged.
+
+If every attempt for an agent arm is denied by the budget, no Harbor job is
+created for that arm. It is reported as skipped with `skip_reason:
+budget_exhausted`, zero expected and scored attempts, and no execution error.
+The run remains incomplete because the budget left planned attempts not run.
+An empty Harbor job that was expected to execute attempts still fails validation.
+This also applies with `--stop-on-pass`: every planned case and attempt must have
+an explicit budget denial before an arm is considered not run. A reused baseline
+remains baseline evidence when the with-skill arm is denied; it does not become
+the run's overall score. Records with an explicit non-budget reason do not reduce
+the required attempt coverage.
+
+Reservation reduces but does not eliminate in-flight overshoot. Estimates can
+grow, an attempt can exceed its estimate, and the calibration unit is
+unestimated. A run can also stop below its cap because of an estimate. Caps
+remain admission boundaries, not hard ceilings; there is no
+hard currency ceiling. `budget.reservation` records the
+`largest_measured_attempt` policy, `estimate_per_attempt` (or `not measured`),
+`in_flight_attempts`, `waits` (all condition waits), `calibration_waits` (the
+calibration subset), and `unestimated_admissions` (attempts admitted with at
+least one bounded usage dimension still unmeasured). `estimate_denials` counts
+logical units refused after estimate-based exhaustion; `denied_unit_size`
+records the size of the unit that first caused that exhaustion.
+
+Cost summaries cover agent inference accounting only, using user-supplied
+rates with a provider-reported cost fallback, not billed spend. Judge inference,
+setup, containers, backend fees, and infrastructure charges are not included.
+Unknown agent cost is not treated as zero; measured subtotals remain visible,
+and unknown cost stops further admission when a cost limit is configured.
+
+`budget.status` and `exhausted_limit` describe admission decisions;
+`budget.partial` records attempts left not run. Separately,
+`budget.observed_overruns` maps each exceeded limit to its measured `used`,
+configured `limit`, and `excess` (with attempts measured by started attempts).
+Only usage strictly above a cap is an overrun; completion exactly at a cap
+remains within it. Summaries derive these facts from usage and limits,
+including for older saved runs. Missing or partially measured bounded usage
+is reported as unverified, and unconfigured limits are not checked. An observed
+overrun alone does not change scores, execution success, or partial-run status.
+
+After execution, `run_config.json`, `result.json.run_config.budget`, and
+`result.json.budget` contain the same final accounting. Reports also prefer
+the top-level result budget when rebuilding older runs with stale run configs.
+Terminal, HTML, and benchmark reports show the shared budget summary, including
+exhaustion, not-run attempts, measured overruns, and unverified bounded usage.
+
+When `budget.not_run` is non-empty, the run-level summary verdict is
+`incomplete`: the budget left planned work unexecuted, not evaluated failures.
+Admitted attempts keep their per-case and per-agent scores. Any displayed
+Skill Lift covers admitted attempts only; it is not a complete-run verdict
+that the skill helps. An overrun without not-run attempts retains its verdict.
+Budget reporting does not change admission, scoring, execution status, or
+command exit codes.
+
+In a terminal, `--progress auto` uses the `rich` view: one table of the run
+plan and its stages that keeps the same height for the whole run. Each row is
+one line, and a long value ends in an ellipsis instead of wrapping. The agent
+models, provider and run plan are also printed in full above the table
+whenever they change. The table shows the most recently updated stages in a
+fixed number of rows, at least six and at least one per agent. When the run
+ends, the table left on screen lists every stage. Its details wrap in full
+when the terminal leaves the Detail column at least 20 columns; in a narrower
+terminal each row stays on one line. The view redraws only when a stage
+changes or a heartbeat updates elapsed times. If drawing fails, including a
+terminal write that would block, the table stops updating with its stages as
+they were, a line says that the run continues, and no further progress is
+shown for that run; the final results still print. When the terminal also
+refuses that line, or the write that shows the cursor again, a line saying
+that the run went on is printed and the cursor is shown when the run ends. If
+the terminal refused only that line, a stream that keeps what the terminal
+refused, as standard error does, sends that line then instead of the later
+one, although after a failed first frame both can appear. If the terminal
+still refuses writes when the run ends, such a stream sends the later line and
+the write that shows the cursor once the terminal takes writes again, but only
+if its buffer has room for them. A buffer already full of a refused table can
+drop that line and leave the cursor hidden. When any run ends, whether or not
+drawing failed, the view drops its own copy of output the terminal still
+refuses, such as a refused final table, so it does not draw that output over
+lines printed since. A stream that keeps what the terminal refused, as
+standard error does, can still send it later, and a table sent then can still
+erase those lines.
+
+Every `tier3 evaluate` flag, including resource overrides and Dockerfile
+modes, is in the [CLI Reference](/skills/skillevaluator/cli-reference).
+
+<Tip>
+While iterating on a dataset, `--skip-baseline` roughly halves the runtime.
+Re-enable the baseline arm for any run whose Skill Lift you intend to trust.
+</Tip>
+
+### Reuse a baseline
+
+Use `skillevaluator tier3 evaluate ./my-skill --reuse-baseline latest` to run
+the with-skill arm against an existing without-skill baseline in the same
+results root. An explicit retained run id can replace `latest`. This option
+cannot be combined with `--skip-baseline` or `--skip-with-skill`.
+
+Reuse requires matching datasets and case coverage, selected agents and resolved
+models (including model sources), environment configuration, judge/scorer,
+attempt policy, evaluator version, and workspace/repository-context settings.
+Skill content and evaluated revision are separate from baseline compatibility.
+The source must have a successful, complete, freshly executed without-skill arm
+with readable persisted case/attempt evidence. Older runs without that evidence,
+failed or partial baselines, and runs which themselves reused a baseline are
+not sources. Keep the original fresh run if you want to reuse it again.
+
+An incompatible explicit id fails before agent jobs launch and lists the
+rejection reasons. `latest` searches completed runs newest first; if none is
+compatible, evaluation runs a fresh baseline and records bounded rejection
+diagnostics. Reports identify the source and timestamp when reuse succeeds.
+The new run retains its own baseline rows. Fresh execution counts and reused
+trial counts are separate; reused evidence is not another independent attempt.
+Cost savings depend on the run, including agent, judge, and environment usage.
+Baseline compatibility deliberately excludes concurrency and budget. It does
+not establish actual judge-model agreement. Reused resource measurements are
+historical observations from the source run, not fresh consumption or independent
+evidence in this run; consider these limits alongside task outcomes when
+interpreting resource differences.
+
+### Compare skill versions
+
+Add `--compare-to RUN` to compare the current with-skill arm with a retained
+run's with-skill arm. This is separate from Skill Lift, which still compares
+with-skill against no-skill. It can be combined with `--reuse-baseline latest`:
+
+```bash
+skillevaluator tier3 evaluate ./my-skill --compare-to RUN --reuse-baseline latest
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR
+skillevaluator tier3 compare-versions ./my-skill --current CURRENT --prior PRIOR --json
+```
+
+Both runs must have compatible datasets/cases, agents and resolved models,
+environment, judge/scoring policy, attempts, evaluator version, and workspace
+configuration. The prior with-skill arm must have complete successful scored
+evidence; it may itself have reused a no-skill baseline. An incompatible
+explicit id is refused before agent execution. `--compare-to latest` searches
+newest first for an eligible different skill revision, records bounded rejected
+candidates, and continues without a version comparison if none is available.
+An explicitly selected identical skill identity is allowed but flagged as
+not a version change.
+
+Version deltas use the same per-case pairing and score policy as Skill Lift.
+A negative available delta is marked as a regression; missing or unscored
+evidence is unavailable, never zero or a regression. Reports show the source
+run/revision and prior-to-current score transition. `compare-versions` is
+read-only, needs no provider credentials, and uses the same results-root
+resolution via `--results-dir`. It exits nonzero when comparison is unavailable.
+The static semver option `--previous-version` is unrelated and unchanged.
+
+### Baseline-only runs
+
+`--skip-with-skill` is the counterpart of `--skip-baseline`: it stages and runs
+only the without-skill arm. Use it to measure how agents do on a task set
+before the skill exists, or to re-measure a baseline after a model or harness
+change without paying for with-skill trials.
+
+```bash title="Baseline-only calibration run"
+skillevaluator tier3 evaluate ./my-skill --agents codex --skip-with-skill
+```
+
+The run is reported as a baseline calibration, not a skill evaluation. The
+overall score and best agent come from the baseline arm, the with-skill arm is
+recorded as `skipped`, with-skill scores and Skill Lift are unavailable (shown
+as `skipped` or N/A, never 0.0), and the verdict stays NEUTRAL because no skill
+was measured. The two flags are mutually
+exclusive, and baseline isolation rules still apply: a config that sets
+`harbor.pre_agent_setup` (or `setup_commands`) is rejected, because the
+baseline arm must stay isolated from skill-owned setup commands. `validate`
+does not accept `--skip-with-skill`, so a baseline-only run can never satisfy a
+Tier 3 gate.
+
+### Baseline timeouts
+
+By default, any attempt that errors or goes unscored fails its agent, and any
+failed agent fails the whole run: one baseline attempt that hits the agent
+execution timeout leaves the run with no overall score or verdict, even though
+the verdict reads only with-skill dimensions. `--tolerate-baseline-timeouts` (or
+`harbor.tolerate_baseline_timeouts: true` in `evals/config.yml`) keeps such an
+agent scored on its with-skill arm. `--no-tolerate-baseline-timeouts`
+overrides a config value that enables it.
+
+```bash title="Keep agents whose baseline timed out"
+skillevaluator tier3 evaluate ./my-skill --agents claude-code,codex --tolerate-baseline-timeouts
+```
+
+The option applies only to an agent whose with-skill arm completed and whose
+baseline has at least one attempt that ended in `AgentTimeoutError` (an attempt
+a later `--stop-on-pass` attempt recovered does not count). The agent stays
+scored only when every one of these holds; otherwise it fails as before, and
+the run warning names the rule that did not hold:
+
+- Its with-skill arm scored every attempt with no errors.
+- Every missing baseline attempt is a trial that ended in Harbor's
+  `AgentTimeoutError`, matched case by case and, with `--stop-on-pass` or a
+  cost limit (each attempt then runs as its own job), attempt by attempt.
+  Attempts that a [cost limit](/skills/skillevaluator/tier3-run-reference#cost-limits) left `not_run` are not expected,
+  so they are not missing. A setup timeout,
+  process exit, verifier failure or any other baseline error is not
+  tolerated. Native multi-step tasks are not covered: Harbor records their
+  agent timeouts on the step rather than on the trial, so such a baseline is
+  refused (`step_timeout_not_supported`).
+- Every timed-out attempt shows agent output (output tokens above zero; a
+  count past the JSON-safe integer range is not evidence).
+- Each timed-out attempt left an agent log, and no log shows a known provider
+  overload, rate limit, quota or authentication error identifier (such as
+  `rate_limit_error`, `insufficient_quota`, `Error code: 429` or a `429`
+  status field). This is a best-effort check: a provider error worded in a
+  way it does not know is not caught.
+- Every other agent completed, at least one of them completed both arms, and
+  the run has no other launch errors. A single-agent run never qualifies.
+- The run grades standard dimensions (not `custom_only`) and runs both arms.
+  A baseline reused with `--reuse-baseline` did not run in this run, so the
+  option does not apply to it.
+
+For a tolerated agent, the baseline condition stays `failed` with its errors,
+and its baseline scores, Skill Lift, pass@k lift and security attribution are
+not reported. The reports, and the findings panel that `tier3 evaluate` prints
+with `--verbose`, rank it below every agent with a complete baseline, so the
+best agent, overall score and lift come from complete evidence. The run's
+verdict and the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+read the same agents: a tolerated agent that passes every dimension
+does not make the run PASS, and when every agent with a complete baseline
+never activated the skill the verdict is INCONCLUSIVE. When the best agent
+never activated the skill, the findings panel is left out rather than showing
+a tolerated agent's findings. `BENCHMARK.md` and `report.html` keep the "Needs
+attention" note and name each tolerated agent on its own line, for example
+`Baseline incomplete for opencode (1 of 2 attempts scored)`, also when a cost
+limit leaves the report without a completed-agent result.
+
+`result.json` records the timed-out attempts under the agent's
+`baseline_timeout_tolerance` (also written to
+`<agent>/baseline_timeout_tolerance.json`; at most 32 attempts are listed, and
+`failed_attempts` is the exact count). An agent that was refused gets
+`baseline_timeout_tolerance_rejection` with the rule's code. The run-level
+`baseline_timeout_tolerance` lists the tolerated agents and the launch errors
+their timeouts explain (at most 32, with `explained_launch_errors_total`). The
+run lists a warning for each tolerated or refused agent, and `run_config.json`
+records `harbor.tolerate_baseline_timeouts`. The option changes no execution,
+so `--reuse-baseline`, `--compare-to` and `tier3 history` do not compare it:
+runs with and without it still pair. The missing baseline attempts
+still count, so the run is not complete publication evidence and does not
+satisfy a blocking Tier 3 gate.
+## Cost limits
+
+Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, and `--price-file`. The price file is
+JSON keyed by model identifier; each model entry requires `input_per_mtok` and
+`output_per_mtok`, and may set `cached_input_per_mtok` (defaulting to the
+input rate). Duplicate JSON object keys and boolean rates are rejected; rates
+must be finite and non-negative. Cached prompt tokens use the cached rate and
+remaining prompt tokens use the input rate. A model key must exactly match the
+resolved agent model. Relative `harbor.price_file` paths resolve from the source
+skill directory.
+
+The price file is user-supplied, not a verified billing rate card. Its currency
+is as supplied by the file, labelled USD by `--max-cost-usd`; no currency
+conversion or billing verification occurs. `budget.pricing` records
+`source: user_price_file`, the file name without its absolute path, the SHA-256
+of the exact loaded bytes, and `rates_per_mtok` for models whose rates actually
+derived an attempt cost (empty before any such derivation). The effective cached
+rate is recorded even when it defaults to the input rate.
+`verified_against_provider_billing` is always false.
+
+For each attempt, complete agent input/output token telemetry takes precedence
+over provider-reported cost. Cost is uncached input times the input rate, plus
+cached input times the cached rate, plus output times the output rate, divided
+by one million. Cached tokens are clamped to input tokens; missing cached counts
+are treated as uncached. If input/output telemetry is missing, reported agent
+cost is used instead; otherwise cost is unmeasured, never invented or treated as
+zero. An unknown attempt retains earlier measured subtotals and stops further
+cost-bounded admission.
+
+`budget.charge_coverage.attempts_by_derivation` counts completed accounting
+records as `price_file`, `provider_reported`, or `unmeasured`. The coverage policy
+excludes judge inference, environment setup, containers, backend fees, and
+infrastructure. Judge evidence does not supply structured token counts for
+pricing; prompt/reply character counts are not converted to tokens or money.
+Neither the computed cost nor a provider-reported fallback verifies billed
+spend, and the admission boundary is not a hard currency ceiling.
+
+Token and cost limits cover agent inference only. `--max-judge-calls` counts
+recorded judge attempts, excluding `salvage` entries, transport retries, and
+requests made internally by RAGAS. Measured usage totals are retained even
+when another attempt has no telemetry; that attempt is tracked as unmeasured.
+Attempts that cannot start after a limit is reached are reported as `not_run`,
+and the resulting run is partial.

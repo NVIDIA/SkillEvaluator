@@ -59,13 +59,17 @@ CONVERSIONS = {
 
 def try_conversion(expr: str) -> str | None:
     m = re.match(
-        r"([\d.]+)\s+(\w+)\s+to\s+(\w+)",
+        r"([-]?\d+(?:\.\d+)?)\s+(\w+)\s+to\s+(\w+)$",
         expr.strip(),
         re.IGNORECASE,
     )
     if not m:
         return None
-    value = float(m.group(1))
+    value_str = m.group(1)
+    try:
+        value = float(value_str)
+    except ValueError:
+        return None
     from_unit = m.group(2).lower()
     to_unit = m.group(3).lower()
     fn = CONVERSIONS.get((from_unit, to_unit))
@@ -76,11 +80,16 @@ def try_conversion(expr: str) -> str | None:
 
 
 def try_percentage(expr: str) -> str | None:
-    m = re.match(r"([\d.]+)%\s+of\s+([\d.]+)", expr.strip(), re.IGNORECASE)
+    m = re.match(r"([-]?\d+(?:\.\d+)?)%\s+of\s+([-]?\d+(?:\.\d+)?)$", expr.strip(), re.IGNORECASE)
     if not m:
         return None
-    pct = float(m.group(1))
-    base = float(m.group(2))
+    pct_str = m.group(1)
+    base_str = m.group(2)
+    try:
+        pct = float(pct_str)
+        base = float(base_str)
+    except ValueError:
+        return None
     result = pct / 100 * base
     return f"Result: {result:g}"
 

@@ -11,6 +11,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
   maps changed files to skill roots and runs each check without an API key,
   network, Docker, or scanner download.
+- JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
+  artifacts. One testsuite is emitted per check group, failures include
+  file:line when recorded and follow the same gate as the exit code, incomplete
+  scanners are reported as errors, and checks that did not run are skipped
+  rather than reported as passed.
 - The Tier 3 report data and JSON report record which execution backend ran the
   evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
   `environment`.

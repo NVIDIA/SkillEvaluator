@@ -539,6 +539,50 @@ def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
     assert "SkillSpector 2.13.3, LLM didn't run" in _text(_scanners_row([security]))
     security.metadata["incomplete_scans"] = ["skillspector"]
     assert not _only_llm_stages_missing(security)
+    assert "SkillSpector 2.13.3, scan incomplete" in _text(_scanners_row([security]))
+    security.metadata["scanners"] = {}
+    assert "SkillSpector didn't run" in _text(_scanners_row([security]))
+
+
+def test_unresolved_reference_is_explained_in_what_to_fix():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    security = ValidationResult(validator_name="Security Scan", passed=False)
+    security.metadata["incomplete_scans"] = ["skillspector"]
+    security.metadata["scanners"] = {"skillspector": "2.13.4"}
+    security.add_error(
+        "skillspector JSON field 'analysis_completeness' reports caveats that SkillEvaluator does not accept "
+        "(status 'complete_with_caveats'): SKILL.md:8 [reference_resolution; reference_missing]; "
+        "security scan did not complete. Missing references require a standalone target."
+    )
+
+    _ok, rows = summarize_tier1([security])
+    text = _text(rows)
+    assert "SkillSpector 2.13.4, scan incomplete" in text
+    assert "SkillSpector ran, but couldn't resolve the file reference at SKILL.md:8" in text
+    assert "validate this skill on its own" in text
+
+
+def test_unresolved_reference_keeps_spaces_in_the_path():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    security = ValidationResult(validator_name="Security Scan", passed=False)
+    security.metadata["incomplete_scans"] = ["skillspector"]
+    security.metadata["scanners"] = {"skillspector": "2.13.4"}
+    security.add_error(
+        "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+        "scripts/run.py:3 [runtime_limit; analyzers=sc8]; "
+        "reference docs/setup.md:8 [reference_resolution; reference_missing]; "
+        "my skill/notes v2.md:12 [reference_resolution; reference_missing]; "
+        "security scan did not complete"
+    )
+
+    _ok, rows = summarize_tier1([security])
+    text = _text(rows)
+    assert "at reference docs/setup.md:8, my skill/notes v2.md:12," in text
+    assert "scripts/run.py" not in text
 
 
 def test_tier1_summary_counts_validators_and_their_sub_checks():

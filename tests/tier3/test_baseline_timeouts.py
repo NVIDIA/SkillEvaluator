@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 from datetime import UTC, datetime, timedelta
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -32,7 +33,7 @@ from skillevaluator.tier3.harbor.baseline_timeouts import (
     settle,
     unexplained_launch_errors,
 )
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.collector import _build_comparison, collect_harbor_results
 
 SKILL = "demo"
 CASES = ["case-001", "case-002"]
@@ -248,12 +249,12 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     assert opencode["execution_status"] == "succeeded"
     assert opencode["execution_errors"] == []
     assert opencode["overall_with_skill"] is not None
-    # The baseline stays honest: failed, with its errors, and never scored or compared.
+    # The baseline stays failed, with its errors and no aggregate or comparison.
     baseline = opencode["conditions"]["without_skill"]
     assert baseline["execution_status"] == "failed"
     assert (baseline["scored_attempts"], baseline["expected_attempts"]) == (1, 2)
     assert "Scored attempt coverage is 1/2" in baseline["execution_errors"]
-    assert opencode["without_skill"] == {}
+    assert opencode["without_skill"] == SCORES
     assert opencode["overall_without_skill"] is None
     assert opencode["lift"] == {}
     assert opencode["pass_at_k"]["lift"] == {}
@@ -261,6 +262,12 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     assert (opencode["expected_attempts"], opencode["scored_attempts"]) == (4, 3)
     assert results["comparison"]["metrics"]["accuracy"]["opencode"]["without_skill"] is None
     assert results["comparison"]["metrics"]["accuracy"]["opencode"]["lift"] is None
+    comparison = json.loads((tmp_path / "results" / "comparison.json").read_text(encoding="utf-8"))
+    assert comparison["metrics"]["accuracy"]["opencode"] == {
+        "with_skill": SCORES["accuracy"],
+        "without_skill": None,
+        "lift": None,
+    }
     assert opencode[RECORD_KEY] == {
         "status": "partial",
         "reason": "agent_execution_timeout",
@@ -285,6 +292,28 @@ def test_tolerated_agent_stays_scored_on_its_with_skill_arm(tmp_path: Path) -> N
     ]
     assert results["agents"]["codex"]["execution_status"] == "succeeded"
     assert results["agents"]["codex"]["lift"]
+
+
+@pytest.mark.parametrize("failed_arm", ["with_skill", "without_skill"])
+def test_succeeded_agent_comparison_withholds_failed_arm(failed_arm: str) -> None:
+    agent = {
+        "execution_status": "succeeded",
+        "conditions": {
+            arm: {"execution_status": "failed" if arm == failed_arm else "succeeded"}
+            for arm in ("with_skill", "without_skill")
+        },
+        "with_skill": {"accuracy": 0.9},
+        "without_skill": {"accuracy": 0.8},
+        "lift": {"accuracy": {"delta": 0.1}},
+    }
+
+    comparison = _build_comparison({"opencode": agent})["metrics"]["accuracy"]["opencode"]
+
+    assert comparison == {
+        "with_skill": None if failed_arm == "with_skill" else 0.9,
+        "without_skill": None if failed_arm == "without_skill" else 0.8,
+        "lift": None,
+    }
 
 
 def test_reports_reload_the_tolerated_agent_from_disk(tmp_path: Path) -> None:
@@ -795,8 +824,8 @@ def test_reports_rank_tolerated_agents_below_their_complete_peer(tmp_path: Path)
     assert ".t3-overview-lead .tolerated-baseline { display:block;" in html
     for agent in ("claude-code", "opencode"):
         assert f"Baseline incomplete for <strong>{agent}</strong> (1 of 2 attempts scored)" in html
-    assert html.count("<code>--tolerate-baseline-timeouts</code>, so its baseline and uplift are not reported.") == 2
-    assert "not reported.</span><span" not in html
+    assert html.count("<code>--tolerate-baseline-timeouts</code>; baseline and uplift unavailable.") == 2
+    assert "unavailable.</span><span" not in html
 
 
 def test_reports_never_fall_back_to_a_tolerated_agent(tmp_path: Path) -> None:
@@ -867,15 +896,45 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert f"> **Tier 3 completed-agent result: {verdict.upper()}**" in benchmark
     assert f"| Tier 3 | Live agent evaluation | **{verdict.upper()}** |" in benchmark
     assert lead in html
-    # The HTML overview says once that the tolerated baseline needs attention:
-    # in the completed-agent lead, or in its own note when the lead reads
-    # inconclusive, as BENCHMARK.md does in both cases.
-    overview = html.split('<div class="t3-overview-lead">', 1)[1].split("</div>", 1)[0]
-    lead_attention = "Other execution failures need attention."
-    tolerated_attention = "<strong>Needs attention:</strong> baseline timeouts were tolerated."
+
+    # The completed-agent lead names other execution failures when its verdict
+    # fails. Each tolerated baseline keeps one scoped coverage/limitation cue,
+    # including when another complete agent never activated the skill.
+    class OverviewSummary(HTMLParser):
+        def __init__(self) -> None:
+            super().__init__()
+            self.depth = 0
+            self.matches = 0
+            self.parts: list[str] = []
+
+        def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+            if tag == "div" and (self.depth or dict(attrs).get("id") == "tier3-overview-summary"):
+                if not self.depth:
+                    self.matches += 1
+                self.depth += 1
+
+        def handle_endtag(self, tag: str) -> None:
+            if tag == "div" and self.depth:
+                self.depth -= 1
+
+        def handle_data(self, data: str) -> None:
+            if self.depth:
+                self.parts.append(data)
+
+    # The summary includes nested divs before the tolerated-baseline notice.
+    summary = OverviewSummary()
+    summary.feed(html)
+    summary.close()
+    assert summary.matches == 1
+    assert summary.depth == 0
+    overview = " ".join("".join(summary.parts).split())
+    assert lead.removeprefix("<strong>").removesuffix("</strong>") in overview
+    lead_attention = "Other execution failures need attention;"
+    tolerated_attention = "baseline timeouts were tolerated by"
     assert (lead_attention in overview) is (verdict == "fail")
-    assert (tolerated_attention in overview) is (verdict == "inconclusive")
-    assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in overview
+    assert overview.count(tolerated_attention) == 1
+    assert "Baseline incomplete for opencode (1 of 2 attempts scored)" in overview
+    assert "--tolerate-baseline-timeouts; baseline and uplift unavailable." in overview
     assert "**Needs attention:** other execution failures remain." in benchmark
     if verdict == "inconclusive":
         # The tolerated agent did activate the skill, so Insights names whose trials never did.
@@ -893,10 +952,67 @@ def test_verdict_comes_from_the_complete_peer_not_a_tolerated_agent(
     assert [line.strip() for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
         f"RUN QUALITY VERDICT: {verdict.upper()}"
     ]
-    block = _doc_block("docs/tier3-live-evaluation.mdx", "For a tolerated agent, the baseline condition stays")
+    block = _doc_block("docs/tier3-run-reference.mdx", "For a tolerated agent, the baseline condition stays")
     assert (
         "The run's verdict and the `RUN QUALITY VERDICT` line that `tier3 evaluate` prints read the same agents:"
         in block
+    )
+
+
+def test_printed_verdict_ignores_an_untolerated_failed_agent_like_the_reports(tmp_path: Path) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # Without tolerance opencode's baseline timeout fails the agent, although its with-skill
+    # arm passes everything. The reports set it aside and read only codex, which misses its
+    # goals, so the printed run verdict must not turn PASS from the failed agent's with-skill arm.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    failing = {**dict.fromkeys(SCORES, 0.3), "security": 1.0}
+    jobs = tmp_path / "jobs"
+    _arm(jobs, "opencode", "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+    _arm(jobs, "opencode", "without", [("case-001", "scored"), ("case-002", "timeout")])
+    _arm(jobs, "codex", "with", [(case, "scored") for case in CASES], scores=failing, details=_activation(True))
+    _arm(jobs, "codex", "without", [(case, "scored") for case in CASES], scores=failing)
+    results = _collect(tmp_path, [LAUNCH_ERROR.format(agent="opencode", count=1)], tolerate_baseline_timeouts=False)
+    assert results["agents"]["opencode"]["execution_status"] == "failed"
+    assert results["agents"]["opencode"]["conditions"]["with_skill"]["execution_status"] == "succeeded"
+
+    payload, benchmark, _html, _message = _render_reports_and_message(tmp_path, results)
+
+    assert payload["best_agent"] == "codex"
+    assert "> **Tier 3 completed-agent result: FAIL**" in benchmark
+    terminal = render_result(results)
+    assert [line for line in terminal.splitlines() if line.startswith("RUN QUALITY VERDICT:")] == [
+        "RUN QUALITY VERDICT: FAIL"
+    ]
+
+
+def test_printed_verdict_names_the_baseline_when_every_agent_fails_only_its_baseline(tmp_path: Path) -> None:
+    from skillevaluator.tier3.result_display import render_result
+
+    # Both agents score their with-skill arms, but each baseline times out and is not
+    # tolerated. The reports read no completed agent (verdict neutral, "No complete agent
+    # result"), so the printed run verdict is INCOMPLETE, and it blames the baseline arm,
+    # never the with-skill arm that ran.
+    passing = {**SCORES, "goal_accuracy": 1.0}
+    jobs = tmp_path / "jobs"
+    for agent in ("opencode", "codex"):
+        _arm(jobs, agent, "with", [(case, "scored") for case in CASES], scores=passing, details=_activation(True))
+        _arm(jobs, agent, "without", [("case-001", "scored"), ("case-002", "timeout")])
+    errors = [LAUNCH_ERROR.format(agent=agent, count=1) for agent in ("opencode", "codex")]
+    results = _collect(tmp_path, errors, tolerate_baseline_timeouts=False)
+    for agent in results["agents"].values():
+        assert agent["execution_status"] == "failed"
+        assert agent["conditions"]["with_skill"]["execution_status"] == "succeeded"
+
+    payload, benchmark, _html, _message = _render_reports_and_message(tmp_path, results)
+
+    assert payload["verdict"] == "neutral"
+    assert "> **Tier 3: No complete agent result**" in benchmark
+    lines = render_result(results).splitlines()
+    index = lines.index("RUN QUALITY VERDICT: INCOMPLETE")
+    assert lines[index + 1] == (
+        "no agent completed its baseline arm, so the run has no complete agent result; "
+        "per-agent verdicts cover the with-skill arm only"
     )
 
 
@@ -1022,7 +1138,7 @@ def test_failed_baseline_fails_the_run_unless_tolerated_and_the_docs_say_so(tmp_
     assert ("The agent and the Tier 3 run are marked failed." in notice["message"]) is not tolerate
     block = _doc_block("docs/reports.mdx", "An arm that ran but failed")
     assert "fails the agent and the run unless `--tolerate-baseline-timeouts` keeps the agent scored" in block
-    assert "[Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)" in block
+    assert "[Baseline timeouts](/skills/skillevaluator/tier3-run-reference#baseline-timeouts)" in block
 
 
 @pytest.mark.parametrize("kwargs", [{"grading_mode": "custom_only"}, {"skip_baseline": True}])
@@ -1319,9 +1435,8 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
     assert benchmark.count("**Needs attention:**") == 1
     assert "Baseline incomplete for <strong>opencode</strong> (1 of 2 attempts scored)" in html
     attention = "**Needs attention:** baseline timeouts were tolerated."
-    html_attention = (
-        '<span class="tolerated-baseline"><strong>Needs attention:</strong> baseline timeouts were tolerated.</span>'
-    )
+    html_attention = "baseline timeouts were tolerated by"
+    assert html.count(html_attention) == 1
     if codex_short:
         # Nothing before the note names other failures, so it names the cause.
         assert "Completed agent: **codex**" not in benchmark
@@ -1338,9 +1453,9 @@ def test_reports_name_tolerated_agents_without_a_completed_agent_result(tmp_path
         # The completed-agent lead already says that other failures need attention.
         assert "Completed agent: **codex**" in benchmark
         assert "**Needs attention:** other execution failures remain." in benchmark
-        assert "Other execution failures need attention. This is not a whole-run or publication PASS." in html
+        assert "Other execution failures need attention; not a whole-run or publication PASS." in html
         assert attention not in benchmark
-        assert html_attention not in html
+        assert "<strong>Needs attention:</strong> baseline timeouts were tolerated." not in html
 
 
 # -- pure rules -----------------------------------------------------------------

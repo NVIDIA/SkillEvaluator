@@ -543,9 +543,10 @@ def agent_eval_result_from_directory(
         persisted_skill_name if isinstance(persisted_skill_name, str) and persisted_skill_name else skill_path.name
     )
     run_config = _read_run_config(run_dir)
-    result_truth = engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir)
+    persisted_result = _persisted_run_result(run_dir)
+    result_truth = engine_result if isinstance(engine_result, dict) else persisted_result
     if not isinstance(result_truth, dict) or not isinstance(result_truth.get("budget"), dict):
-        result_truth = _persisted_run_result(run_dir)
+        result_truth = persisted_result
     if isinstance(result_truth, dict) and isinstance(result_truth.get("budget"), dict):
         run_config = {**(run_config or {}), "budget": result_truth["budget"]}
     payload = build_agent_eval_payload(
@@ -557,7 +558,10 @@ def agent_eval_result_from_directory(
         run_config=run_config,
         env_mode=env_mode,
         runtime_seconds=_runtime_seconds(engine_result),
-        harbor_viewer=_harbor_viewer_from_engine_result(engine_result),
+        harbor_viewer=_merge_harbor_viewer_summaries(
+            _harbor_viewer_from_engine_result(engine_result),
+            _harbor_viewer_from_engine_result(persisted_result),
+        ),
         run_dir=run_dir,
         comparison=_read_comparison(run_dir),
         evaluated_at=evaluated_at or _evaluated_at_from_run(run_dir, engine_result),
@@ -572,8 +576,9 @@ def agent_eval_result_from_directory(
         evaluated_source=evaluated_source,
         use_llm_judge=use_llm_judge,
         enforce_embedded_size=enforce_embedded_size,
+        execution_backend=_execution_backend_name(engine_result, persisted_result, run_config),
     )
-    _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else _persisted_run_result(run_dir))
+    _apply_engine_failure(payload, engine_result if isinstance(engine_result, dict) else persisted_result)
     with contextlib.suppress(Exception):
         source = json.loads((run_dir / "result.json").read_text(encoding="utf-8"))
         if isinstance(source, dict) and isinstance(source.get("agents"), dict):
@@ -649,6 +654,8 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
     if isinstance(run_id, str):
         result.metadata["run_id"] = run_id
     best = payload.get("best_agent") or "n/a"
+    from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
     if payload.get("execution_status") == "succeeded" and _finite_float(payload.get("overall_score")) is not None:
         if payload.get("mode") == "baseline_only":
             result.add_success(
@@ -663,6 +670,12 @@ def _validation_result_from_payload(payload: dict[str, Any] | None) -> Validatio
                 f"best agent {best}",
             )
         result.passed = True
+    elif (
+        payload.get("execution_status") == "skipped"
+        and not payload.get("execution_errors")
+        and budget_fully_denied(payload.get("budget"))
+    ):
+        result.mark_scan_incomplete("Tier 3 run budget")
     else:
         errors = payload.get("execution_errors") or ["Tier 3 evaluation did not produce a complete scored run"]
         for error in errors:
@@ -783,6 +796,7 @@ def build_agent_eval_payload(
     evaluated_source: dict[str, Any] | None = None,
     use_llm_judge: bool = True,
     enforce_embedded_size: bool = True,
+    execution_backend: str | None = None,
 ) -> dict[str, Any] | None:
     """Assemble the canonical Tier 3 ``agent_eval`` payload from loaded agent data.
 
@@ -910,7 +924,9 @@ def build_agent_eval_payload(
             str(error) for agent in agent_payloads.values() for error in agent.get("execution_errors", []) if error
         )
     )
-    statuses = [agent.get("execution_status") for agent in agent_payloads.values()]
+    statuses = [
+        agent.get("execution_status") for agent in agent_payloads.values() if agent.get("execution_status") != "skipped"
+    ]
     if statuses and all(status == "succeeded" for status in statuses):
         execution_status = "succeeded"
     elif any(status == "failed" for status in statuses):
@@ -968,7 +984,10 @@ def build_agent_eval_payload(
     dataset_summary = (
         dict(persisted_dataset_summary)
         if isinstance(persisted_dataset_summary, dict)
-        else _dataset_summary(public_dataset, canonical_trials)
+        else _dataset_summary(
+            public_dataset,
+            [trial for trial in canonical_trials if not trial.get("diagnostic_only")],
+        )
     )
     from skillevaluator.tier3.dataset_sufficiency import MIN_NEGATIVE_CASES, assess_dataset_sufficiency
 
@@ -1055,6 +1074,7 @@ def build_agent_eval_payload(
         "required_checks": verdict_source.get("required_checks") if verdict_source else None,
         "security_clean": verdict_source.get("security_clean") if verdict_source else None,
         "environment": env_mode,
+        "execution_backend": execution_backend,
         "runtime_seconds": _finite_float(runtime_seconds) or 0.0,
         "evaluated_at": evaluated_at,
         "evaluator_version": evaluator_version,
@@ -1206,7 +1226,7 @@ def build_agent_eval_payload(
         "metric_labels": metric_labels,
         "attempt_policy": policy,
         "budget": budget_metadata,
-        "budget_summary": budget_line(budget_metadata) if isinstance(budget_metadata, dict) else None,
+        "budget_summary": budget_line(budget_metadata, agents=agents) if isinstance(budget_metadata, dict) else None,
         "dataset": public_dataset,
         "case_diagnostics": case_diagnostics,
         "provenance": _build_provenance(
@@ -1861,6 +1881,7 @@ def _replace_with_minimal_payload(payload: dict[str, Any], report_budget: _Repor
             "security_clean",
             "verdict_reason",
             "environment",
+            "execution_backend",
             "runtime_seconds",
             "score_policy",
             "execution_status",
@@ -2519,19 +2540,25 @@ def _build_agent(
     pass_with_skill = info.get("pass_with_skill")
     pass_threshold = _finite_float(pass_with_skill.get("pass_threshold")) if isinstance(pass_with_skill, dict) else None
     pass_threshold = pass_threshold if pass_threshold is not None else 0.5
-    trials = _normalize_trials(info.get("rewards") or [], with_metrics, pass_threshold=pass_threshold)
+    trials = _normalize_trials(
+        info.get("diagnostic_rewards", info.get("rewards")) or [], with_metrics, pass_threshold=pass_threshold
+    )
     baseline_trials = _normalize_trials(
-        info.get("rewards_baseline") or [],
+        info.get("diagnostic_rewards_baseline", info.get("rewards_baseline")) or [],
         baseline_metrics,
         pass_threshold=pass_threshold,
     )
+    for key, rows in (("diagnostic_rewards", trials), ("diagnostic_rewards_baseline", baseline_trials)):
+        if key in info:
+            for trial in rows:
+                trial["diagnostic_only"] = True
     if not never_activated:
         _attach_baseline_pairs(trials, baseline_trials, with_metrics, comparable_overall=comparable_scores)
     from skillevaluator.tier3.harbor.resource_usage import resource_comparison
 
     resources = resource_comparison(
-        trials,
-        baseline_trials,
+        trials if with_quality_available else [],
+        baseline_trials if baseline_quality_available else [],
         with_complete=with_quality_available and info.get("rewards_complete") is True,
         baseline_complete=baseline_quality_available and info.get("rewards_baseline_complete") is True,
     )
@@ -3565,6 +3592,8 @@ def _normalize_trials(
             "scores": scores,
             "overall": _complete_mean([overall_score(item) for item in group]) if group_is_consistent else None,
         }
+        if reward.get("_unscored") is True:
+            trial["scored"] = False
         verdict = attempt_verdict(trial["overall"], pass_threshold, reward=reward)
         trial["attempt_verdict"] = {
             "passed": verdict.passed,
@@ -3635,33 +3664,12 @@ def _normalize_trials(
         if harbor_viewer:
             trial["harbor_viewer"] = harbor_viewer
         trial["activation_validation"] = _trial_activation_validation(group, trial)
+        if trial.get("scored") is False:
+            trial["activation_validation"]["diagnostics"] = [
+                {"code": "attempt_unscored", "message": "Attempt errored or was unscored; activation is unknown."}
+            ]
         out.append(trial)
     return out
-
-
-def _trusted_observed_activation(reward: dict[str, Any]) -> str:
-    """Project collector-issued invocation evidence; never inspect trajectory or scores as proof."""
-    from skillevaluator.tier3.harbor.metrics import (
-        DEFAULT_METRIC_SET,
-        LEGACY_METRIC_SET,
-        metric_is_not_applicable,
-        metric_set_for_reward,
-        metric_value,
-    )
-
-    standard_sets = {DEFAULT_METRIC_SET, LEGACY_METRIC_SET}
-    declared = reward.get("metric_set") or reward.get("metric_set_version")
-    metric_set, metrics = metric_set_for_reward(reward)
-    if (
-        (declared and str(declared) not in standard_sets)
-        or metric_set not in standard_sets
-        or "skill_execution" not in metrics
-        or (metric_value(reward, "skill_execution") is None and not metric_is_not_applicable(reward, "skill_execution"))
-        or reward.get("invocation_evidence_source") != "trajectory"
-    ):
-        return "unknown"
-    invoked = reward.get("skill_invoked")
-    return ("invoked" if invoked else "not_invoked") if type(invoked) is bool else "unknown"
 
 
 def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, Any]) -> dict[str, Any]:
@@ -3671,9 +3679,11 @@ def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, A
     every retained row says non-use, omitted steps may have used the skill.
     Only a collector-produced single/merged root can certify logical non-use.
     """
+    from skillevaluator.tier3.harbor.metrics import trusted_observed_activation
+
     scopes: list[dict[str, Any]] = []
     for index, reward in enumerate(group[:_MAX_EVIDENCE_PER_CARD]):
-        scope: dict[str, Any] = {"reward_row": index, "observed_activation": _trusted_observed_activation(reward)}
+        scope: dict[str, Any] = {"reward_row": index, "observed_activation": trusted_observed_activation(reward)}
         artifacts = reward.get("_activation_artifacts")
         if isinstance(artifacts, dict):
             scope["artifacts"] = {
@@ -3701,7 +3711,7 @@ def _trial_activation_validation(group: list[dict[str, Any]], trial: dict[str, A
     logical_scope = len(group) == 1 and group[0].get("invocation_evidence_scope") == "logical_trial"
     return {
         "expected_activation": None,
-        "observed_activation": _trusted_observed_activation(group[0]) if logical_scope else "unknown",
+        "observed_activation": trusted_observed_activation(group[0]) if logical_scope else "unknown",
         "expectation_status": "unknown",
         "observation_scope": "logical_trial" if logical_scope else "reward_rows_only",
         "evidence_scopes": scopes,
@@ -3846,21 +3856,14 @@ def _harbor_viewer_from_engine_result(engine_result: dict[str, Any] | None) -> d
 def _normalize_harbor_upload_summary(raw: object) -> dict[str, Any]:
     if not isinstance(raw, dict):
         return {}
+    from skillevaluator.reporting.harbor_viewer import _normalize_harbor_upload_jobs
 
     jobs: list[dict[str, str]] = []
     seen: set[str] = set()
-    for upload in raw.get("uploads") or []:
-        if not isinstance(upload, dict):
-            continue
-        job_url = _safe_harbor_viewer_url(upload.get("viewer_url") or upload.get("job_url"))
-        if not job_url or job_url in seen:
-            continue
+    for job in _normalize_harbor_upload_jobs(raw.get("uploads")):
+        job_url = job["url"]
         seen.add(job_url)
-        analysis_url = _safe_harbor_viewer_url(upload.get("analysis_url")) or _build_job_analysis_url(job_url)
-        job: dict[str, str] = {"url": job_url, "analysis_url": analysis_url}
-        name = upload.get("uploaded_job_name") or upload.get("job_name") or upload.get("original_job_name")
-        if isinstance(name, str) and name.strip():
-            job["name"] = name.strip()
+        job["analysis_url"] = job.get("analysis_url") or _build_job_analysis_url(job_url)
         jobs.append(job)
 
     job_url = _safe_harbor_viewer_url(raw.get("job_url"))
@@ -4754,7 +4757,11 @@ def _evaluation_mode(agents: dict[str, dict[str, Any]]) -> str:
         for info in agents.values():
             conditions = info.get("conditions")
             arm = conditions.get(condition) if isinstance(conditions, dict) else None
-            statuses.append(arm.get("execution_status") if isinstance(arm, dict) else None)
+            statuses.append(
+                ("not_run" if arm.get("skip_reason") == "budget_exhausted" else arm.get("execution_status"))
+                if isinstance(arm, dict)
+                else None
+            )
         return statuses
 
     with_statuses = arm_statuses("with_skill")
@@ -4889,6 +4896,20 @@ def _read_attempt_policy(run_dir: Path) -> dict[str, Any]:
     policy.pop("score_definition", None)
     policy.pop("score_policy", None)
     return policy
+
+
+def _execution_backend_name(*sources: object) -> str:
+    """Return the backend a run recorded; Harbor runs record none."""
+    from skillevaluator.tier3.nemo_gym.backend import EXECUTION_BACKENDS, HARBOR_BACKEND
+
+    for source in sources:
+        if not isinstance(source, dict):
+            continue
+        backend = source.get("execution_backend")
+        name = backend.get("name") if isinstance(backend, dict) else backend
+        if name in EXECUTION_BACKENDS:
+            return str(name)
+    return HARBOR_BACKEND
 
 
 def _read_run_config(run_dir: Path) -> dict[str, Any]:

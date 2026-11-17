@@ -5,6 +5,7 @@
 
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import (
@@ -12,6 +13,7 @@ from skillevaluator.reporting import (
     CLIReporter,
     HTMLReporter,
     JSONReporter,
+    JUnitReporter,
     MarkdownReporter,
 )
 
@@ -24,12 +26,11 @@ def _plain(output: str) -> str:
 
 
 def _assert_html_verdict_is_incomplete(output: str) -> None:
-    """The header verdict and the summary verdict both say Incomplete, and nothing says Passed."""
-    header = output.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    """The primary result and the evidence summary say Incomplete, without a passing claim."""
+    hero = output.split('<section class="agent-hero"', 1)[1].split("</section>", 1)[0]
     summary = output.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
 
-    assert 'data-verdict="incomplete"' in header
-    assert '<span class="sr-only">Verdict: </span>Incomplete</span>' in header
+    assert 'hero-command-status verdict-chip warn">Incomplete</p>' in hero
     assert '<span class="verdict-chip warn">Incomplete</span>' in summary
     assert 'data-verdict="pass"' not in output
     assert "verdict-chip pass" not in output
@@ -122,6 +123,18 @@ class TestIncompleteScanReporting:
         output = _plain(CLIReporter().render_all([result]))
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
+
+    def test_junit_marks_incomplete_as_error_not_passed(self):
+        root = ET.fromstring(JUnitReporter().render_all([_incomplete_result()]))
+        cases = list(root.iter("testcase"))
+        assert cases
+        assert all(case.find("skipped") is None for case in cases)
+        errors = [case.find("error") for case in cases if case.find("error") is not None]
+        assert len(errors) == 1
+        assert errors[0].attrib["type"] == "incomplete"
+        assert errors[0].attrib["message"] == "skillspector timed out after 300 seconds"
+        assert int(root.attrib["errors"]) == 1
+        assert int(root.attrib["skipped"]) == 0
 
 
 def test_status_handles_sanitized_finding_without_location():

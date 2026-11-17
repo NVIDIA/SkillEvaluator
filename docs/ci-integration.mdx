@@ -61,10 +61,10 @@ jobs:
       pull-requests: write
       security-events: write
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
 
       - name: Install uv
-        uses: astral-sh/setup-uv@v8
+        uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
         with:
           python-version: "3.13"
 
@@ -74,13 +74,20 @@ jobs:
       - name: Install external Python scanners
         run: |
           uv tool install semgrep
-          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@v2.13.4
+          uv tool install git+https://github.com/NVIDIA/SkillSpector.git@54824463814a0be01360792523ec7245a69190fc # v2.13.4
 
       - name: Install Gitleaks
         run: |
           GITLEAKS_VERSION=8.30.0
-          curl -sSfL "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz" \
-            | tar -xz gitleaks
+          # SHA-256 of the linux_x64 archive, from the release's checksums.txt.
+          # Update it together with GITLEAKS_VERSION.
+          GITLEAKS_SHA256=79a3ab579b53f71efd634f3aaf7e04a0fa0cf206b7ed434638d1547a2470a66e
+          base="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          cd "$RUNNER_TEMP"
+          curl -sSfL --retry 3 "${base}/${archive}" -o "${archive}"
+          printf '%s  %s\n' "${GITLEAKS_SHA256}" "${archive}" | sha256sum -c -
+          tar -xzf "${archive}" gitleaks
           sudo mv gitleaks /usr/local/bin/
 
       - name: Validate skills
@@ -90,7 +97,7 @@ jobs:
 
       - name: Upload reports
         if: always()
-        uses: actions/upload-artifact@v7
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: skillevaluator-reports
           path: reports/
@@ -128,14 +135,14 @@ jobs:
 
       - name: Upload SARIF to GitHub Code Scanning
         if: always() && steps.sarif.outputs.count != '0'
-        uses: github/codeql-action/upload-sarif@v4
+        uses: github/codeql-action/upload-sarif@33d7b85da1a04171e211befe2c739303b9a4c066 # v4.39.3
         with:
           sarif_file: ${{ steps.sarif.outputs.path }}
           category: skillevaluator
 
       - name: Post the Markdown report as a PR comment
         if: always() && github.event_name == 'pull_request'
-        uses: actions/github-script@v9
+        uses: actions/github-script@3a2844b7e9c422d3c10d287c895573f7108da1b3 # v9.0.0
         with:
           script: |
             const fs = require("fs");
@@ -151,6 +158,14 @@ jobs:
               body: fs.readFileSync(`reports/${latest}`, "utf8"),
             });
 ```
+
+Each action is pinned to a commit SHA, with its release in a comment, as in this
+repository's own workflows, so a moved tag cannot change what the job runs.
+To update an action, replace the SHA with the commit of the newer release.
+The same holds for the scanners: SkillSpector installs from the commit behind
+its release tag, and the Gitleaks archive is checked against the SHA-256 from
+the release's `gitleaks_<version>_checksums.txt` before it is unpacked. To
+update either, take the new commit or checksum from the release page.
 
 SkillEvaluator installs Bandit, and the `security` extra adds pip-audit. Semgrep and SkillSpector
 stay in separate uv tool environments, while Gitleaks is installed from its
@@ -210,7 +225,7 @@ You do not have to turn on the strictest gate on day one. A path that works well
 
   ### Add an advisory Tier 3 job
 
-  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation).
+  Run live agent evaluation as a separate job with `skillevaluator tier3 ./my-skill`, or remove `--tiers 1,2` from `validate` to run all three tiers. Both workflows reuse existing evaluation sources and generate one starter case when none exists. Attached Tier 3 is advisory by default; add `--block-on-agent-eval` when the team is ready for its findings or invalid source evidence to fail the merge gate. Standalone Tier 3 exits non-zero when the run itself fails to complete. Expose agent credentials as CI secrets in the job environment — the `env:` block of the workflow step — because SkillEvaluator reads operator credentials from the host environment only. With the `nv_build` provider and `--env-mode docker`, a single `NVIDIA_API_KEY` secret covers the evaluator and all three agents. See [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation).
 </Steps>
 
 <Note>
@@ -251,7 +266,7 @@ When the exit code is not enough — dashboards, custom thresholds, badge genera
 | `benchmark_policy` | object | Persisted `tier2_required` and `tier3_required` evidence policy used for the publication decision |
 | `results[].publication_target` | object | Exact NFC filesystem-entry name, versioned source-tree digest, and digest algorithm used to bind split-tier evidence |
 | `results[].publication_evidence` | object | Validated built-in Tier 1 or Tier 2 producer contract: schema version, producer, tier, and canonical check ID |
-| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-validation#audited-skillspector-baselines) |
+| `results[].skillspector_baseline` | object | Single-skill targets with `--skillspector-baseline`, when SkillSpector is installed: `status`, baseline file name and `sha256:` digest (no local path), scanner versions, suppressed (per stage) and active finding counts, and a message. Absent from merged `security-scan` folder reports; `validate` on a folder records it in each skill's report. See [Audited SkillSpector baselines](/skills/skillevaluator/tier1-reference#audited-skillspector-baselines) |
 | `tier3.run_id` | string | Run-owned Tier 3 identity; duplicated in the Tier 3 summary for consistency checks |
 | `severity_counts` | object | Totals for `critical`, `high`, `medium`, `low` |
 | `total_errors`, `total_warnings` | number | Raw error and warning records across all validators; a finding that two validators report counts twice |
@@ -312,11 +327,16 @@ publication signal. Require `publication_status == "pass"` (or
 A step that enforces a stricter score than the built-in gate:
 
 ```bash title="Gate on quality score with jq"
-report=$(ls -t reports/skillevaluator-output-*.json | head -1)
-jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
+mapfile -t reports < <(find reports -name 'skillevaluator-output-*.json' -type f)
+if [ "${#reports[@]}" -eq 0 ]; then
+  echo "No SkillEvaluator JSON report under reports/" >&2
+  exit 1
+fi
+jq -se --argjson n "${#reports[@]}" \
+  'length == $n and all(.[]; [.quality_summary[]?.overall_score] | length > 0 and min >= 80)' "${reports[@]}"
 ```
 
-`jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](/skills/skillevaluator/reports).
+A single-skill target writes its report at the top of `reports/`, and a folder target writes one per skill under `reports/<skill>/`, so the step checks every report it finds; write them to an empty `reports/` folder. The gate fails closed: a run with no report, an empty report file, or a report without a quality score fails it. `jq -e` exits non-zero when the expression is false, so the step fails the job on its own. For Tier 3 payloads and the full results-on-disk layout, see [Reports & Results](/skills/skillevaluator/reports).
 
 ## Troubleshooting
 
@@ -327,11 +347,15 @@ jq -e '([.quality_summary[]?.overall_score] | min // 100) >= 80' "$report"
   <Accordion title="overall_status is 'incomplete'">
     A required scanner is missing or returned no evidence. Check the report for
     the named scanner: Semgrep, SkillSpector, and Gitleaks are all separate
-    executables, and installing SkillEvaluator alone does not install them. The
-    scanners fail closed: `validate` exits non-zero and the report stays
-    non-green until every required scanner is installed and returns valid
-    evidence. See the workflow above or
-    [Installation: System tools](/skills/skillevaluator/installation#system-tools).
+    executables. When SkillSpector or Gitleaks is not installed, the first
+    Tier 1 run downloads its pinned, checksum-verified release (Gitleaks on
+    Linux and macOS only), so the runner needs network access to GitHub, and
+    to PyPI for SkillSpector. Semgrep is optional and never downloaded; a
+    missing Semgrep makes the run incomplete only when
+    `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set. The scanners fail closed:
+    `validate` exits non-zero and the report stays non-green until every
+    required scanner runs and returns valid evidence. See the workflow above or
+    [Installation: System tools](/skills/skillevaluator/installation-options#system-tools).
   </Accordion>
   <Accordion title="Claude answers HTTP 400 'is not a valid fallback target'">
     The reusable SkillEvaluator workflows pass only their documented inputs

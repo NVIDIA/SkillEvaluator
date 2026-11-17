@@ -20,7 +20,8 @@ import json
 import posixpath
 import re
 import shlex
-from collections.abc import Callable, Mapping
+from array import array
+from collections.abc import Callable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -402,7 +403,8 @@ _UNAUTHORIZED_PATHS = [
     *_HOME_CREDENTIAL_PATHS,
 ]
 
-# Shell startup and privilege files. A shell command that names one and has a
+# Shell startup and privilege files. A shell command that names one where a path
+# starts, other than as the file a source or . command reads, and has a
 # redirection, tee or sed -i anywhere counts as a write (the keyword rule in
 # check_security).
 _SENSITIVE_WRITE_PATHS = [
@@ -1151,15 +1153,69 @@ def _sensitive_write_target(command: str) -> str | None:
     )
 
 
+# The keyword rule reads an entry only where a path starts, as an apply_patch
+# header is read, so /opt/conda/etc/profile.d/conda.sh does not name
+# /etc/profile.d, while ../etc/sudoers names /etc/sudoers and the default word
+# of "${DEST:-/etc/sudoers.d}" names /etc/sudoers.d. A path attached to a short
+# option or a cluster of them, as in "cp -t/etc/sudoers.d",
+# "curl -4fsSLo/etc/profile.d/x.sh" or "OPTS=-t/etc/sudoers.d", starts after
+# the option letters and digits when the option follows whitespace, a quote or
+# "=". A variable that starts the word, as in "$ROOT/etc/sudoers", may hold
+# the leading part, so it also starts the path, and so does a variable right
+# after such an option, as in "cp -t$ROOT/etc/sudoers.d", while a variable
+# inside a longer path, as in /opt/$X/etc/profile.d, does not. The entry is
+# group 1 of the pattern.
+_KEYWORD_PATH_START = r"(?:(?<![\w~$])|(?<=[\s'\"=])-[a-z0-9]+(?:\$\w+)*|(?<![\w~$/.-])(?:\$\w+)+)"
+# The file a source or . command reads: its first operand. The command starts
+# the text, a line (also after a "\n" escape, as an argv list prints a
+# newline), a list after ";", "&", "|", "(", "{" or "`", or a quote that opens
+# a string (the script of a "bash -c"), after at most one shell keyword such
+# as "then" or "do". A "." anywhere else, as in "cp -r . /etc/profile.d" or
+# 'cp -r "$SRC" . /etc/profile.d', is an operand of another command.
+_SOURCED_FILE_RE = re.compile(
+    r"(?:^|\\n|[\n;&|({`]|(?<![^\s\[,=(])['\"])[ \t]*(?:(?:if|then|elif|else|do|while|until)[ \t]+)?"
+    r"(?:source|\.)[ \t]+(['\"]?)([^\s;&|()<>'\"`]+)\1(?=$|[\s;&|()<>'\"`])"
+)
+
+
+def _keyword_rule_entry(lowered: str) -> str | None:
+    """Return the longest entry the keyword rule finds in lowercased command text.
+
+    An entry counts where a path starts, except inside the file a source or .
+    command reads, so "source ~/.bashrc; npm test 2>&1" names none while
+    ". ./patch.sh ~/.bashrc 2>/dev/null" still names ~/.bashrc.
+    """
+    # The sourced files are in order and do not overlap, so only the last one
+    # that starts at or before a mention can hold it.
+    sourced = [match.span(2) for match in _SOURCED_FILE_RE.finditer(lowered)]
+    starts = [start for start, _ in sourced]
+
+    def outside_sourced_file(mention: re.Match[str]) -> bool:
+        index = bisect.bisect_right(starts, mention.start(1)) - 1
+        return index < 0 or sourced[index][1] < mention.end(1)
+
+    return max(
+        (
+            entry
+            for entry in _SENSITIVE_WRITE_PATHS
+            if any(
+                outside_sourced_file(mention)
+                for mention in re.finditer(f"{_KEYWORD_PATH_START}({re.escape(entry)})", lowered)
+            )
+        ),
+        key=len,
+        default=None,
+    )
+
+
 def _sensitive_command_write_match(
     tool_call: dict[str, Any], path_text: str, action_text_lower: str, *, shell_patch: bool
 ) -> str | None:
     """Return the longest protected entry matched by the legacy or home-path write rule."""
-    lowered = path_text.lower()
     legacy_entry = None
-    # Preserve the earlier raw-substring rule, including its legacy spellings.
+    # The earlier keyword rule, in its legacy spellings (_keyword_rule_entry).
     if re.search(r"(>>|>\s*|tee\b|sed\s+-i|cat\s+>|printf\s+.*>)", action_text_lower):
-        legacy_entry = max((entry for entry in _SENSITIVE_WRITE_PATHS if entry in lowered), key=len, default=None)
+        legacy_entry = _keyword_rule_entry(path_text.lower())
     texts = [path_text] if shell_patch else _shell_write_texts(tool_call)
     entries = [legacy_entry, *(_sensitive_write_target(text) for text in texts)]
     return max((entry for entry in entries if entry is not None), key=len, default=None)
@@ -1441,11 +1497,15 @@ def _apply_patch_protected_entry(patch: str, workdir: str | None) -> str | None:
 
 
 def _apply_patch_command_evidence(command: str) -> str:
-    """Return a shell apply_patch command as evidence: the command before the patch body, secrets masked."""
+    """Return a shell apply_patch command as evidence: the command before the patch body, secrets masked.
+
+    The text before the body is masked before it is cut to 400 characters, so
+    the cut cannot split a credential into a part no pattern recognizes.
+    """
     body = _APPLY_PATCH_BODY_RE.search(command)
     if body is None:
         return _redact_network_evidence(command)
-    return f"{_redact_network_evidence(command[: body.start()].strip())[:400]} [apply_patch body omitted]".lstrip()
+    return f"{_redact_finding_evidence(command[: body.start()].strip(), 400)} [apply_patch body omitted]".lstrip()
 
 
 def _keeps_patch_header(path: str, workdir: str | None) -> bool:
@@ -3263,7 +3323,9 @@ def _security_finding(
 # assigned to a credential name (_authToken=..., api_key: ..., DB_PASS=...);
 # and common token prefixes. Only the first _FINDING_EVIDENCE_SCAN_CHARS
 # characters are scanned, and each pass reads that text in linear time. A
-# quoted value ends at its closing quote or at the end of its line.
+# quoted value ends at its closing quote or at the end of its line. The same
+# forms are masked in text whose quotes are escaped up to three times, as tool
+# calls repeated in a RAGAS prompt are (see _mask_unescaped_views).
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
@@ -3356,33 +3418,77 @@ _FINDING_EVIDENCE_COOKIE_HEADER_RE = re.compile(
 # --with-token < token.txt" the flag or key has no value on the command line.
 # A double-quoted value whose quotes are JSON-escaped (\"VALUE\"), as a shell
 # string reads in tool-call arguments and other JSON text, ends at the escaped
-# closing quote or the end of the line.
+# closing quote or the end of the line. Inside a single-quoted command string
+# ("ssh host '...'", "bash -c '...'") a value quoted with the '"'"' or '\''
+# idiom, which closes that string, writes a quote and opens it again, runs to
+# the next such idiom or the end of the line, so the words after its first
+# one and the quoting of the text after it are read as the shell reads them
+# ("ssh host './deploy --password '"'"'two words'"'"' && ...'").
 _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?"
-_FINDING_EVIDENCE_FLAG_VALUE = (
-    "(?:"
-    + _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
+_FINDING_EVIDENCE_QUOTE_IDIOM = r"'(?:\"'\"|\\')'"
+_FINDING_EVIDENCE_QUOTE_IDIOM_RE = re.compile(_FINDING_EVIDENCE_QUOTE_IDIOM)
+_FINDING_EVIDENCE_QUOTED_FLAG_VALUE = (
+    _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
     + "|"
     + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
-    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
 )
+_FINDING_EVIDENCE_FLAG_VALUE = "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\])+)"
 # Any long flag whose name holds a credential word ("--password", "--db-password",
-# "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), and the
-# short "-password", "-token" and "-secret" forms. A space-separated value that
-# starts with "-" is the next flag. A long flag name is matched as a whole run
-# and checked for a credential word afterwards (see _mask_credential_flags), so
-# a long run is read once. A name that ends in -stdin, -file, -jar, -path or
-# -dir takes a file or none ("--password-stdin", "--token-file", "--cookie-jar"),
-# so the word after it is kept.
-_FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME = r"-(?:password|passwd|(?:access-|auth-)?token|secret|api-?key)|--[a-z0-9-]+"
+# "--client-secret", "--github-token", "--oauth2-bearer", "--cookie"), with "-"
+# or "_" between its words ("--db_password", "--api_key", as gflags and absl
+# tools spell them), and the short "-password", "-token", "-secret" and
+# "-api_key" forms. A space-separated value that starts with "-" is the next
+# flag. A long flag name is matched as a whole run and checked for a
+# credential word afterwards (see _mask_credential_flags), so a long run is
+# read once. A name that ends in -stdin, -file, -jar, -path or -dir (or
+# _stdin, _file, ...) takes a file or none ("--password-stdin",
+# "--token-file", "--cookie-jar"), so the word after it is kept.
+_FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME = (
+    r"-(?:password|passwd|(?:access[-_]|auth[-_])?token|secret|api[-_]?key)|--[a-z0-9_-]+"
+)
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE = re.compile(
     r"(?<![^\s'\"])(" + _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME + r")(?:[ \t]+(?!-)|=)",
     re.IGNORECASE,
 )
 _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE = re.compile(
-    r"password|passwd|passphrase|token|secret|api-?key|credential|bearer|cookie", re.IGNORECASE
+    r"password|passwd|passphrase|token|secret|api[-_]?key|credential|bearer|cookie", re.IGNORECASE
 )
-_FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"-(?:stdin|file|jar|path|dir)$", re.IGNORECASE)
-_FINDING_EVIDENCE_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_FLAG_VALUE)
+_FINDING_EVIDENCE_FLAG_LOCATION_RE = re.compile(r"[-_](?:stdin|file|jar|path|dir)$", re.IGNORECASE)
+# The flag rule reads a value as a quoted value or a word (see
+# _AssignmentValues.flag_value_end).
+_FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE = re.compile(_FINDING_EVIDENCE_QUOTED_FLAG_VALUE)
+_FINDING_EVIDENCE_FLAG_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`\\])+")
+# A flag name with "_" was read before only by the rules after the flag rule,
+# so its unquoted value also ends at ";", "|" or "&", where the assignment rule
+# ends a word, and a "NAME=VALUE" right after it is still masked
+# ("--api_key K1;TOKEN=..."). A name with "_" joined to its value by "="
+# ("--api_key=VALUE") or followed by a separator ("--api_key = VALUE") is left
+# to the assignment rule (see _mask_credential_flags), and so is a value
+# that holds a credential name, or that such a name follows with no space,
+# whose value the assignment rule masks past the flag value's end
+# ("--api_key API_TOKEN=\"...\"", "--api_key K1,TOKEN=\"...\"", "--db_password
+# password: ...", "--api_key 'TOKEN='VALUE"; see _AssignmentValues.runs_past).
+# Any other value is masked whole, as after the "-" spelling
+# ("--set_secret SLACK_TOKEN_URL=...", "--db_password K1,TOKEN=x"). The same
+# holds for the value of a quoted config key or one after "--" (see
+# _FINDING_EVIDENCE_CONFIG_SET_RE).
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE = (
+    "(?:" + _FINDING_EVIDENCE_QUOTED_FLAG_VALUE + r"|(?![|&;<>])(?:\\.|[^\s'\"`\\;|&])+)"
+)
+_FINDING_EVIDENCE_UNDERSCORED_FLAG_WORD_RE = re.compile(r"(?:\\.|[^\s'\"`\\;|&])+")
+# What a name that ends a value, or follows it with no space, may hold past
+# the value's end up to its separator: the rest of the name, its closing quote
+# or bracket and spaces (see _FINDING_EVIDENCE_ASSIGNMENT_NAME).
+_FINDING_EVIDENCE_NAME_TAIL_RE = re.compile(r"[\w.-]*\\?[\"']?\]?[ \t]*")
+# A name whose value the flag or header rules mask (see _AssignmentValues.runs_past).
+_FINDING_EVIDENCE_FLAG_OR_HEADER_NAME_RE = re.compile(
+    r"^-|\b(?:api-key|auth-token|access-token|private-token|cookie|authorization)$", re.IGNORECASE
+)
 # "-u", "-U" and "--user" also name ordinary options (python -u, pip -U, pip
 # --user), so only a value with a colon is masked: "user:password", or an API
 # key with an empty password ("-u KEY:"). curl also takes it attached
@@ -3408,21 +3514,44 @@ _FINDING_EVIDENCE_USER_FLAG_RE = re.compile(
 # client ("mysql -uroot -pVALUE"); elsewhere it is a flag such as "mkdir -p",
 # "ssh -p 2222" or "git log -p". "login" is a subcommand only as a word after a
 # command word, not after a flag or "=" ("git log --author=login -p", "find
-# -name login -print").
+# -name login -print"). Each rule's command words and the rest of its pattern,
+# whose group 1 ends where the password starts, are also read apart (see
+# _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS).
+_FINDING_EVIDENCE_LOGIN_COMMAND = r"(?<![^\s;&|('\"`])[^\s'\"`;&|()<>-][^\s'\"`;&|()<>]{0,63}[ \t]+login(?=[ \t])"
+_FINDING_EVIDENCE_LOGIN_PASSWORD_REST = r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=)?)" + _FINDING_EVIDENCE_FLAG_VALUE
 _FINDING_EVIDENCE_LOGIN_PASSWORD_RE = re.compile(
-    r"((?<![^\s;&|('\"`])[^\s'\"`;&|()<>-][^\s'\"`;&|()<>]{0,63}[ \t]+login(?=[ \t])"
-    r"[^|;&\r\n]{0,256}?[ \t]-p(?:[ \t]+(?!-)|=)?)" + _FINDING_EVIDENCE_FLAG_VALUE
+    "(" + _FINDING_EVIDENCE_LOGIN_COMMAND + _FINDING_EVIDENCE_LOGIN_PASSWORD_REST
 )
 _FINDING_EVIDENCE_SSHPASS_RE = re.compile(r"(\bsshpass[ \t]+-p[ \t]*)" + _FINDING_EVIDENCE_FLAG_VALUE)
 # The MySQL client is a command word, run by name or from a bin directory
 # ("/usr/bin/mysql"), not a path component ("find /var/lib/mysql -path ...").
-# find's -path, -perm, -print and -prune are not attached passwords.
-_FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
-    r"((?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
+# find's -path, -perm, -print and -prune are not attached passwords. The
+# password may be quoted as a flag value is, also with the '"'"' idiom.
+_FINDING_EVIDENCE_MYSQL_COMMAND = (
+    r"(?<![^\s;&|('\"`])(?:[^\s'\"`;&|()<>]{0,128}/s?bin/)?"
     r"(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mariadb|mariadb-dump)(?=[ \t])"
+)
+_FINDING_EVIDENCE_MYSQL_PASSWORD_REST = (
     r"[^|;&\r\n]{0,256}?[ \t]-p)(?!ath\b|erm\b|rint|rune\b)(?:"
     + _FINDING_EVIDENCE_ESCAPED_QUOTED_VALUE
-    + r"|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|[^\s'\"`|;&]+)"
+)
+_FINDING_EVIDENCE_MYSQL_PASSWORD_RE = re.compile(
+    "(" + _FINDING_EVIDENCE_MYSQL_COMMAND + _FINDING_EVIDENCE_MYSQL_PASSWORD_REST
+)
+# The login and MySQL rules read up to 256 characters past the command words
+# for the first "-p" in text where the flag rule has masked the flag values,
+# so a "-p", ";" or line break inside such a value is gone and a long value
+# counts as its marker ('docker login -u bot --token "x -p y" -p VALUE').
+# Each rule's command words and the rest of its pattern, read apart for that
+# (see _hidden_credential_spans).
+_FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS = (
+    (re.compile(_FINDING_EVIDENCE_LOGIN_COMMAND), re.compile("(" + _FINDING_EVIDENCE_LOGIN_PASSWORD_REST)),
+    (re.compile(_FINDING_EVIDENCE_MYSQL_COMMAND), re.compile("(" + _FINDING_EVIDENCE_MYSQL_PASSWORD_REST)),
 )
 # "aws configure set aws_secret_access_key VALUE" and a .netrc entry
 # ("machine HOST login USER password VALUE"). A .netrc entry may span lines,
@@ -3440,12 +3569,57 @@ _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE = re.compile(
 # carry its own value ("--location=global"). The value is masked when the last
 # part of NAME names a credential ("//registry.npmjs.org/:_authToken",
 # "npmAuthToken", "github.token"), so "credential.helper store" and
-# "always-auth true" are kept. "git config --get" and "--unset" read or remove
-# a key and take no value.
+# "always-auth true" are kept. NAME may be single- or double-quoted, with the
+# double quotes JSON-escaped as in tool-call arguments (git config
+# \"github.token\" VALUE, also escaped again, with three backslashes), and may
+# follow a "--" that ends the options. "git config --get" and "--unset" read
+# or remove a key and take no value. A separator word after NAME ("password =
+# VALUE", "token := VALUE") is no value; the assignment rule reads that form
+# (see _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE).
+# The assignment rule also reads a quoted NAME, or one after "--", whose value
+# starts with a separator ('npm config set -- password ="..."'), as it did
+# before this rule read those NAMEs, and the unquoted value of such a NAME
+# ends at ";", "|" or "&", as a "_" flag's does, so a "NAME=VALUE" right after
+# it is still masked ('npm config set -- password K1;TOKEN="..."').
+# The command may start a line after a "\n", "\r" or "\t" escape, whose letter
+# joins its first word for a word boundary ("db\nnpm config set ...").
+_FINDING_EVIDENCE_CONFIG_SET_COMMAND = (
+    r"(?:\b|(?<=\\[nrt]))(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
+)
+_FINDING_EVIDENCE_CONFIG_SET_KEY = (
+    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}(?:[ \t]+(--)(?=[ \t]))?[ \t]+"
+    r"(\\{0,3}\"|')?([^\s'\"`=-][^\s'\"`=]{0,255})(?(3)\3)[ \t]+(?!-)(?(2)(?![=:]))(?(3)(?![=:])))"
+)
+_FINDING_EVIDENCE_CONFIG_SET_NAME = "(" + _FINDING_EVIDENCE_CONFIG_SET_COMMAND + _FINDING_EVIDENCE_CONFIG_SET_KEY
+_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR = r"(?::=|=>|[=:])(?!\S)"
 _FINDING_EVIDENCE_CONFIG_SET_RE = re.compile(
-    r"(\b(?:(?:npm|pnpm|yarn)[ \t]+config[ \t]+set|(?:npm|pnpm)[ \t]+set|git[ \t]+config)"
-    r"(?:[ \t]+--?(?!-|get|unset)[\w-]{1,32}(?:=[^\s'\"`]{1,64})?){0,3}[ \t]+"
-    r"([^\s'\"`=-][^\s'\"`=]{0,255})[ \t]+(?!-))" + _FINDING_EVIDENCE_FLAG_VALUE
+    _FINDING_EVIDENCE_CONFIG_SET_NAME
+    + "(?!"
+    + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
+    + ")(?(2)"
+    + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
+    + "|(?(3)"
+    + _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE
+    + "|"
+    + _FINDING_EVIDENCE_FLAG_VALUE
+    + "))"
+)
+# An unquoted NAME followed by a separator word. When NAME names a
+# credential, the config set rule masked that word as the value before it left
+# this form to the assignment rule, which then read each name from the word
+# after the separator, so the assignment rule reads each name inside the value
+# of NAME again, and reads names from that word, also when an auth scheme word
+# starts there ("npm config set _auth = token=\"...\"", "npm config set
+# _authToken = token = \"...\""; see _mask_credential_assignments). The
+# command word may be a marker, as the flag rule leaves it after a flag that
+# takes no value ("--use_token npm config set _auth = token=\"...\""), so the
+# assignment rule reads that form as it does after the command word.
+_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE = re.compile(
+    "((?:"
+    + _FINDING_EVIDENCE_CONFIG_SET_COMMAND
+    + r"|<redacted>[ \t]+(?:config[ \t]+set|set|config))"
+    + _FINDING_EVIDENCE_CONFIG_SET_KEY
+    + _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR
 )
 _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE = re.compile(r"[./:]")
 _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE = re.compile(
@@ -3472,6 +3646,17 @@ _FINDING_EVIDENCE_NETRC_PASSWORD_RE = re.compile(
 # curl's "-b NAME=VALUE" sends a cookie; "-b FILE" reads a cookie jar and is
 # kept. This follows the report excerpts' _CLI_COOKIE_FLAG_RE.
 _FINDING_EVIDENCE_COOKIE_FLAG_RE = re.compile(r"((?<![^\s'\"])-b[ \t]+)(?=[^\s]*=)" + _FINDING_EVIDENCE_FLAG_VALUE)
+# The rules, in order, that mask the credential a command or flag word starts
+# after the flag and argv rules: each masks the text after its group 1.
+_FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES = (
+    _FINDING_EVIDENCE_USER_FLAG_RE,
+    _FINDING_EVIDENCE_LOGIN_PASSWORD_RE,
+    _FINDING_EVIDENCE_SSHPASS_RE,
+    _FINDING_EVIDENCE_MYSQL_PASSWORD_RE,
+    _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE,
+    _FINDING_EVIDENCE_NETRC_PASSWORD_RE,
+    _FINDING_EVIDENCE_COOKIE_FLAG_RE,
+)
 # The same flags as quoted elements of an argv list: the element after a
 # credential flag (subprocess.run(["tool", "--password", "VALUE"])), after
 # "-u", "-U", "--user" or "--proxy-user" when it holds a colon, after "-b" when
@@ -3525,24 +3710,62 @@ _FINDING_EVIDENCE_ARGV_MYSQL_RE = re.compile(
     + _FINDING_EVIDENCE_ARGV_QUOTE
     + r"[ \t]*,"
 )
+# A login or MySQL client element starting at a position (see
+# _attached_argv_password_spans).
+_FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE = re.compile(
+    "(?=(" + _FINDING_EVIDENCE_ARGV_LOGIN_RE.pattern + "|" + _FINDING_EVIDENCE_ARGV_MYSQL_RE.pattern + "))"
+)
 _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE = re.compile(
     r"(?<!\\)((?:\\\\){0,3}" + _FINDING_EVIDENCE_ARGV_QUOTE + r")-p(?!ath\b|erm\b|rint|rune\b)([^\"'\r\n]+)\1"
 )
+# Words that every match of some patterns the rules search whole texts for
+# holds, in groups: a match holds a word of each group. A text that lacks
+# all the words of a group is not searched (see _pattern_may_match), so a
+# long text pays only for the searches that can match in it.
+_FINDING_EVIDENCE_PATTERN_WORDS: dict[re.Pattern[str], tuple[tuple[str, ...], ...]] = {
+    _FINDING_EVIDENCE_LOGIN_PASSWORD_RE: (("login",), ("-p",)),
+    _FINDING_EVIDENCE_SSHPASS_RE: (("sshpass",),),
+    _FINDING_EVIDENCE_MYSQL_PASSWORD_RE: (("mysql", "mariadb"), ("-p",)),
+    _FINDING_EVIDENCE_NETRC_PASSWORD_RE: (("password",), ("machine", "login", "account")),
+    _FINDING_EVIDENCE_COOKIE_FLAG_RE: (("-b",),),
+    _FINDING_EVIDENCE_CONFIG_SET_RE: (("npm", "yarn", "git"), ("config", "set")),
+    _FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE: (("npm", "yarn", "git", "<redacted>"), ("config", "set")),
+    _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS[0][0]: (("login",),),
+    _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS[1][0]: (("mysql", "mariadb"),),
+    _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE: (('"-p', "'-p"),),
+}
 # Bearer, Basic, Token and Digest stay visible after a credential name too
 # ("Authorization: Bearer <redacted>").
 _FINDING_EVIDENCE_AUTH_SCHEME = r"(?:(?:bearer|basic|token|digest)[ \t]+)?"
 # An assignment's name is matched as a whole word run, and checked for a
 # credential word afterwards, so a long run is read once. A name right after
-# "/" is a URL host or path segment. A name may close a JSON-escaped quote
-# inside a shell string ('\"password\": \"...\"') or a subscript
-# (os.environ["API_KEY"] = ...). "name = value" (INI) and "name: value" (YAML,
-# JSON) may have spaces around the separator, but "=" with no space before it
-# is a shell assignment, whose value starts right after it ("GITHUB_TOKEN= rm
-# ..." assigns nothing). ":=" and "=>" are separators too (token := "...").
+# "/" is a URL host or path segment, unless that "/" is a delimiter of a sed
+# "s/PATTERN/REPLACEMENT/" expression whose "s" starts a word: a name may start
+# the pattern ("s/password=.*/password=NEW/", where it masks the rest of the
+# expression) or the replacement ("s/CHANGEME/password=NEW/",
+# "s/.*api_key.*/api_key: NEW/"; see _assignment_name_matches). A name may
+# close a JSON-escaped quote inside a shell string ('\"password\": \"...\"') or
+# a subscript (os.environ["API_KEY"] = ...). "name = value" (INI) and "name:
+# value" (YAML, JSON) may have spaces around the separator, but "=" with no
+# space before it is a shell assignment, whose value starts right after it
+# ("GITHUB_TOKEN= rm ..." assigns nothing). ":=" and "=>" are separators too
+# (token := "...").
+_FINDING_EVIDENCE_ASSIGNMENT_NAME = (
+    r"([\w.-]+)(\\?[\"']?\]?)([ \t]*(?::=|=>)[ \t]*|[ \t]*:[ \t]*|[ \t]+=[ \t]*|=)" + _FINDING_EVIDENCE_AUTH_SCHEME
+)
 _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE = re.compile(
-    r"(?<![\w./-])([\w.-]+)(\\?[\"']?\]?)([ \t]*(?::=|=>)[ \t]*|[ \t]*:[ \t]*|[ \t]+=[ \t]*|=)"
-    + _FINDING_EVIDENCE_AUTH_SCHEME,
+    r"(?:(?<![\w./-])|(?<=(?<![\w./-])s/))" + _FINDING_EVIDENCE_ASSIGNMENT_NAME,
     re.IGNORECASE,
+)
+# The "s/PATTERN/" of a sed expression; its replacement starts after it. A
+# "/s/" URL path segment is not one.
+_FINDING_EVIDENCE_SED_PATTERN_RE = re.compile(r"(?<![\w./-])s/(?:\\.|[^/\\\r\n]){0,256}/")
+_FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE = re.compile(_FINDING_EVIDENCE_ASSIGNMENT_NAME, re.IGNORECASE)
+# A whole "s/PATTERN/REPLACEMENT/" expression, each part read up to 256
+# characters. A name may start the pattern after "S/" too, as the assignment
+# name rule ignores case.
+_FINDING_EVIDENCE_SED_EXPRESSION_RE = re.compile(
+    r"s/(?:\\.|[^/\\\r\n]){0,256}(?:/(?:\\.|[^/\\\r\n]){0,256}/?)?", re.IGNORECASE
 )
 # "auth" also starts author and authority, which name no credential. A name
 # that ends in a "_pass", "_pwd" or "pw" part ("DB_PASS", "MYSQL_PWD", "PW")
@@ -3584,14 +3807,66 @@ _FINDING_EVIDENCE_COUNT_VALUE_RE = re.compile(r"[0-9]{1,12}(?![\w.-])")
 _FINDING_EVIDENCE_COUNTER_VALUE_RE = re.compile(
     r"[0-9]{1,12}(?![\w.-])|\$\(\(|(?:true|false|null|none)(?![\w.-])", re.IGNORECASE
 )
-# A value: a masked private key, a JSON-escaped or quoted string, a
-# parenthesized tuple (auth=("bob", "...")), or one word, which may hold
-# escaped spaces ("correct\ horse").
-_FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
+# A value: a masked private key, a JSON-escaped or quoted string, a string
+# in escaped single quotes as in Python source ('DB_PASSWORD=\'two words\''),
+# which, as a JSON-escaped one, ends at its escaped closing quote or the end
+# of the line, a string quoted with the '"'"' or '\'' idiom inside a
+# single-quoted command string, as a flag value is (see
+# _FINDING_EVIDENCE_QUOTED_FLAG_VALUE), a parenthesized tuple
+# (auth=("bob", "...")), a call
+# (auth=HTTPBasicAuth("bob", "..."), auth=requests.auth.HTTPDigestAuth(...)),
+# or one word, which may hold escaped spaces ("correct\ horse"). The arguments
+# of a tuple or call may hold one level of calls
+# (auth=HTTPBasicAuth(getpass.getuser(), "...")), and those of a call may span
+# lines, as a formatter splits a long call. A call is read only when its ")"
+# ends a word or comes before ",", ")", "]" or "}", and only when it runs past
+# the word read from the same start (see _assignment_value_match), so a word
+# with parentheses in it ("Pa(ss)word", "Pa(ss),word") is still read whole.
+_FINDING_EVIDENCE_TUPLE_ARGUMENTS = r"(?:[^()\r\n]|\([^()\r\n]{0,64}\)){0,256}"
+_FINDING_EVIDENCE_CALL_ARGUMENTS = r"(?:[^()]|\([^()]{0,64}\)){0,256}"
+_FINDING_EVIDENCE_WORD_VALUE = r"(?:\\.|[^\s'\"`;|&\\])+"
+_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE = (
     _FINDING_EVIDENCE_PRIVATE_KEY_MARKER
-    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?|\([^()\r\n]{0,256}\)?"
-    + r"|(?:\\.|[^\s'\"`;|&\\])+"
+    + r"|\\\"(?:[^\"\\\r\n]|\\(?!\"))*(?:\\\")?|\\'(?:[^'\\\r\n]|\\(?!'))*(?:\\')?"
+    + "|"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r"[^'\r\n]*(?:"
+    + _FINDING_EVIDENCE_QUOTE_IDIOM
+    + r")?|\"(?:\\.|[^\"\\\r\n])*\"?|'[^'\r\n]*'?"
+    + r"|\("
+    + _FINDING_EVIDENCE_TUPLE_ARGUMENTS
+    + r"\)?|(?P<call>[A-Za-z_][\w.]{0,63}\("
+    + _FINDING_EVIDENCE_CALL_ARGUMENTS
+    + r"\)(?![^\s'\"`;|&\\),\]}]))"
 )
+_FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE = re.compile(
+    _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE + "|" + _FINDING_EVIDENCE_WORD_VALUE
+)
+# The same value without its word reading (see _AssignmentValues.value_end).
+_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE_RE = re.compile(_FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE)
+_FINDING_EVIDENCE_WORD_VALUE_RE = re.compile(_FINDING_EVIDENCE_WORD_VALUE)
+# The start of a value that the assignment rule reads as a word: no quote,
+# backslash, parenthesis, marker or call (see _AssignmentValues.runs_past).
+_FINDING_EVIDENCE_WORD_VALUE_START_RE = re.compile(r"(?![A-Za-z_][\w.]{0,63}\()[^\s'\"`\\(<;|&]")
+# The same tuple and call values with each quoted argument read whole, a
+# JSON-escaped (\"...\"), double- or single-quoted string closed on its line,
+# so a parenthesis inside one is not read as the end of the value or the start
+# of a nested call (auth=HTTPBasicAuth("bob", "Zq1)x1Kv"), auth=("bob",
+# "pa(ss")). A quote that closes no such string ends this reading, and a
+# value is read this way only when it runs past the reading above (see
+# _assignment_value_match).
+_FINDING_EVIDENCE_QUOTED_ARGUMENT = r"\\\"(?:[^\"\\\r\n]|\\(?!\"))*\\\"|\"(?:\\.|[^\"\\\r\n])*\"|'[^'\r\n]*'"
+_FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE = re.compile(
+    r"\((?:"
+    + _FINDING_EVIDENCE_QUOTED_ARGUMENT
+    + r"|\\(?!\")|[^()'\"\\\r\n]|\([^()\r\n]{0,64}\)){0,256}\)"
+    + r"|(?P<call>[A-Za-z_][\w.]{0,63}\((?:"
+    + _FINDING_EVIDENCE_QUOTED_ARGUMENT
+    + r"|\\(?!\")|[^()'\"\\]|\([^()]{0,64}\)){0,256}\)(?![^\s'\"`;|&\\),\]}]))"
+)
+# A tuple value read up to its first parenthesis, as it was read before a
+# tuple could hold a call (see _flat_value_end).
+_FINDING_EVIDENCE_FLAT_TUPLE_VALUE_RE = re.compile(r"\([^()\r\n]{0,256}\)?")
 # Inside a quoted string a value that does not open its own quote runs to the
 # string's closing quote ('password: correct horse battery staple'), or to the
 # closing escaped quote when the string itself is JSON-escaped. It also ends at
@@ -3604,6 +3879,19 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
     "\\'": re.compile(r"(?:\\(?![n'])|[^'\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
     '\\"': re.compile(r"(?:\\(?![n\"])|[^\"\\&\r\n]" + _FINDING_EVIDENCE_NEXT_FORM_FIELD + ")+"),
 }
+# The value of a config set NAME after a separator word inside a quoted string
+# is the rest of a shell command there, so it also ends at a shell operator
+# and at an escaped quote, with the spaces before them: the command after it
+# stays readable, and a password quoted with escaped quotes after it is left
+# to its own rule ("os.system('npm config set _auth = token=\"...\" && mysql
+# -u root -p\'VALUE\' db')").
+_FINDING_EVIDENCE_CONFIG_REST_SPACES = r"[ \t]+(?=[^\s'\"\\;|&]|\\(?![n'\"]))"
+_FINDING_EVIDENCE_CONFIG_QUOTED_REST_RES = {
+    opening: re.compile(
+        r"(?:\\(?![n'\"\r\n])|[^" + opening[-1] + r"\\;|&\s]|" + _FINDING_EVIDENCE_CONFIG_REST_SPACES + ")+"
+    )
+    for opening in _FINDING_EVIDENCE_QUOTED_REST_RES
+}
 # A name need not open its quoted string ('  password: VALUE',
 # "username=bob&password=VALUE", "export DB_PASSWORD=VALUE"). Quotes are read
 # forward from the start of each line in one pass over the text: a backslash
@@ -3612,6 +3900,10 @@ _FINDING_EVIDENCE_QUOTED_REST_RES = {
 # ("curl -d'user=bob&password=VALUE'") does. Unlike in a shell, a line break
 # ends any string here.
 _FINDING_EVIDENCE_QUOTE_CHAR_RE = re.compile(r"[\\'\"\r\n]")
+# A name that starts a line after a JSON-escaped line break or tab begins with
+# the letter of the escape ("\nauth=..." is read as the name "nauth"), because
+# a word may follow a backslash.
+_FINDING_EVIDENCE_LINE_BREAK_ESCAPES = ("\\n", "\\r", "\\t")
 # A quoted shell command holds shell assignments, whose value is one word: a
 # "-c" string ("sh -c 'TOKEN=x make deploy'"), an eval string and a remote
 # ssh command ('ssh host "TOKEN=x ./deploy.sh && rm -rf /srv/app"'). Any
@@ -3637,6 +3929,41 @@ _FINDING_EVIDENCE_TOKEN_PREFIX_RE = re.compile(
     r"(?<![A-Za-z0-9_-])(gh[pousr]_|github_pat_|glpat-|npm_|xox[abeoprs]-|hf_)([A-Za-z0-9_-]{8,})"
 )
 _FINDING_EVIDENCE_IDENTIFIER_BODY_RE = re.compile(r"[a-z]+(?:_[a-z]+)+")
+# Tool-call arguments are JSON, and a RAGAS request writes them into its prompt
+# as JSON again, so a command can reach evidence with each quote escaped twice
+# ([\\\"--password\\\", \\\"VALUE\\\"], --password \\\"VALUE MORE\\\") or three
+# times. The patterns above read a quote with at most one backslash before it,
+# so they kept such a value, or masked only its first word. They did the same
+# with a single-quoted value whose quotes are escaped once, as in Python source
+# (\'--password\', \'VALUE\'; --password \'VALUE MORE\'), JSON or not.
+# So the text is also read with one level of string escapes removed, and then
+# with two: \\, \", \', \/, \n, \r, \t and \uXXXX are decoded wherever they
+# appear, inside a quoted string or not, and any other backslash is read as
+# written, as is \u0000, since the Harbor verifier's masker drops NUL
+# characters. A double quote after an even run of backslashes (none, or an
+# escaped backslash: "C:\\tmp\\") ends a string of the text it is read from,
+# so that run is kept as written. Decoded, the quote would read as escaped in
+# the first reading, and a value that the second reading masks there would not
+# end at that string's end: a JSON string that ends in a shell line
+# continuation, "tool --token \\", would lose its closing quote. Each reading
+# is masked with the same patterns, and what they mask there is masked in the
+# text as written too, where that still reads in clear (see
+# _mask_unescaped_views). Nothing the text as written masks is kept, so a
+# reading only adds markers.
+_BACKSLASH_RUN_RE = re.compile(r"(\\+)(u[0-9A-Fa-f]{4}|[\s\S])?")
+# A double quote after an even run of backslashes, which ends (or opens) a
+# string of the text it is in.
+_STRING_END_RE = re.compile(r'(?<!\\)(?:\\\\)*"')
+_UNESCAPED_CHARS = {"n": "\n", "r": "\r", "t": "\t", '"': '"', "'": "'", "/": "/"}
+_UNESCAPE_LEVELS = 2
+# A masker only replaces values with markers, so the text it keeps between two
+# markers is found in the text it read, in order, and what lies between was
+# masked. The JWT pattern writes "jwt-" before its marker, the Harbor verifier
+# writes [REDACTED] for a credential its process holds, and markers next to
+# each other are read as one.
+_MASKED_MARKERS_RE = re.compile(
+    r"((?:(?:jwt-)?<redacted>|" + re.escape(_FINDING_EVIDENCE_PRIVATE_KEY_MARKER) + r"|\[REDACTED\])+)"
+)
 
 
 def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
@@ -3660,6 +3987,234 @@ def _redact_finding_evidence(text: Any, limit: int = 500) -> str:
 
 
 def _mask_finding_evidence_credentials(text: str, *, preserve_header_format: bool = False) -> str:
+    """Mask supported credential forms, also in text escaped again, without imposing a caller's evidence budget."""
+
+    def mask(view: str) -> str:
+        return _mask_finding_evidence_credentials_as_written(view, preserve_header_format=preserve_header_format)
+
+    return _mask_unescaped_views(text, mask(text), mask)
+
+
+def _mask_unescaped_views(text: str, masked: str, mask: Callable[[str], str]) -> str:
+    """Return *masked*, which *mask* wrote for *text*, also masking what *mask* masks in *text* unescaped.
+
+    *text* is read with one level of escapes removed, then with two. A span is
+    masked only where the text that *masked* keeps around it places it for
+    certain, and only where *masked* still keeps it: a marker is never taken
+    back, and a span next to a marker joins it.
+    """
+    # The Harbor verifier's masker drops NUL characters, so the text it keeps
+    # would no longer be found in the text it read. A reading keeps \u0000 as
+    # written, so it holds a NUL only where the text does.
+    if "\\" not in text or "\x00" in text:
+        return masked
+    spans: list[tuple[int, int]] = []
+    view = text
+    view_starts: list[array[int]] = []
+    for _ in range(_UNESCAPE_LEVELS):
+        source = view
+        view, starts = _unescaped(source)
+        if starts is None:
+            break
+        string_ends: list[int] | None = None
+        for start, end in _masked_spans(view, mask(view)):
+            start, end = starts[start], starts[end]
+            # The text the reading decodes lies inside strings of the text it
+            # was read from, so a value of the reading ends at a quote that
+            # ends such a string, and one that starts right after that quote
+            # was read from the text around the strings.
+            if string_ends is None:
+                string_ends = [match.end() - 1 for match in _STRING_END_RE.finditer(source)]
+            index = bisect.bisect_left(string_ends, start - 1)
+            if index < len(string_ends) and string_ends[index] == start - 1:
+                continue
+            if index < len(string_ends) and string_ends[index] < end:
+                end = string_ends[index]
+            if start == end:
+                continue
+            # Back through each earlier reading to the text as written.
+            for level_starts in reversed(view_starts):
+                start, end = level_starts[start], level_starts[end]
+            spans.append((start, end))
+        view_starts.append(starts)
+        if "\\" not in view:
+            break
+    return _mask_spans(text, masked, spans) if spans else masked
+
+
+def _unescaped(text: str) -> tuple[str, array[int] | None]:
+    """Return *text* with one level of string escapes decoded, and where each of its characters starts in *text*.
+
+    The starts end with len(text), so the span [start, end) of the result is
+    [starts[start], starts[end]) in *text*. They are None when no escape is
+    decoded.
+    """
+    parts: list[str] = []
+    starts = array("q")
+    pos = 0
+    for match in _BACKSLASH_RUN_RE.finditer(text):
+        run, after = match.group(1), match.group(2) or ""
+        escapes = len(run) % 2 == 1 and (after in _UNESCAPED_CHARS or (len(after) == 5 and after != "u0000"))
+        if (len(run) == 1 and not escapes) or (after == '"' and len(run) % 2 == 0):
+            continue
+        parts.append(text[pos : match.start()])
+        starts.extend(range(pos, match.start()))
+        # Each escaped backslash is one backslash, and an odd one escapes the
+        # character after it.
+        parts.append("\\" * (len(run) // 2))
+        starts.extend(range(match.start(), match.start() + len(run) - 1, 2))
+        pos = match.start() + len(run) // 2 * 2
+        if escapes:
+            parts.append(chr(int(after[1:], 16)) if len(after) == 5 else _UNESCAPED_CHARS[after])
+            starts.append(pos)
+            pos = match.end()
+    if not parts:
+        return text, None
+    parts.append(text[pos:])
+    starts.extend(range(pos, len(text) + 1))
+    return "".join(parts), starts
+
+
+def _masker_reading(text: str) -> tuple[str, array[int] | None]:
+    """Return *text* as the masker reads it, without shell line continuations, and where each of its characters is.
+
+    The positions are None when *text* holds no line continuation.
+    """
+    if _LINE_CONTINUATION_RE.search(text) is None:
+        return text, None
+    starts = array("q")
+    pos = 0
+    for match in _LINE_CONTINUATION_RE.finditer(text):
+        starts.extend(range(pos, match.start()))
+        pos = match.end()
+    starts.extend(range(pos, len(text)))
+    return _LINE_CONTINUATION_RE.sub("", text), starts
+
+
+def _masked_spans(text: str, masked: str) -> list[tuple[int, int]]:
+    """Return the spans of *text* that *masked*, a masker's output for it, masks in any placement of what it keeps.
+
+    Where the text kept on both sides of a marker is placed for certain, the
+    span is what lies between. A piece of kept text that fits in more than
+    one place (" -p " in 'docker login -u bot --token "x -p y" -p VALUE', once
+    the token value and the password are masked) gives the span from where
+    the piece before it ends at the earliest to where the piece after it
+    starts at the latest, so the span holds what was masked in every
+    placement, and what lies between those places too.
+    """
+    read, read_starts = _masker_reading(text)
+    kept = _MASKED_MARKERS_RE.split(masked)[::2]
+    places = _kept_text_places(read, kept)
+    if places is None:
+        return []
+    early, late = places
+    spans: list[tuple[int, int]] = []
+    for index in range(len(kept) - 1):
+        start, end = early[index] + len(kept[index]), late[index + 1]
+        if start >= end:
+            continue
+        spans.append((start, end) if read_starts is None else (read_starts[start], read_starts[end - 1] + 1))
+    return spans
+
+
+def _place_kept_text(read: str, kept: list[str]) -> list[int] | None:
+    """Return where each piece of *kept*, the text a masker kept between its markers, starts in *read*, the text it read.
+
+    A piece placed at the same index as early and as late as it fits (see
+    _kept_text_places) is there in every placement; any other is -1. None: a
+    piece is missing.
+    """
+    places = _kept_text_places(read, kept)
+    if places is None:
+        return None
+    early, late = places
+    return [start if start == late[index] else -1 for index, start in enumerate(early)]
+
+
+def _kept_text_places(read: str, kept: list[str]) -> tuple[list[int], list[int]] | None:
+    """Return where each piece of *kept*, the text a masker kept between its markers, starts at the earliest and latest.
+
+    The pieces are placed in order in *read*, the text the masker read, once
+    as early and once as late as they fit. A first piece that starts *read*
+    and a last piece that ends it are placed there, as a masker at most strips
+    whitespace from the ends of its result. None: a piece is missing.
+    """
+    count = len(kept)
+    early: list[int] = []
+    pos = 0
+    for index, piece in enumerate(kept):
+        found = read.find(piece, pos)
+        if index == count - 1 and read.endswith(piece):
+            found = len(read) - len(piece) if len(read) - len(piece) >= pos else -1
+        if found < 0:
+            return None
+        early.append(found)
+        pos = found + len(piece)
+    # The latest places are found from the end, in the reversed text, so that
+    # each search reads it once.
+    backwards = read[::-1]
+    late = [0] * count
+    pos = 0
+    for index in range(count - 1, -1, -1):
+        found = backwards.find(kept[index][::-1], pos)
+        late[index] = len(read) - found - len(kept[index])
+        pos = found + len(kept[index])
+    if read.startswith(kept[0]):
+        late[0] = 0
+    return early, late
+
+
+def _mask_spans(text: str, masked: str, spans: list[tuple[int, int]]) -> str:
+    """Return *masked*, a masker's output for *text*, with the parts of *spans* (of *text*) that it keeps masked."""
+    read, read_starts = _masker_reading(text)
+    if read_starts is not None:
+        spans = [(bisect.bisect_left(read_starts, start), bisect.bisect_left(read_starts, end)) for start, end in spans]
+    merged: list[list[int]] = []
+    for start, end in sorted(span for span in spans if span[0] < span[1]):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    pieces = _MASKED_MARKERS_RE.split(masked)
+    starts = _place_kept_text(read, pieces[::2]) if merged else None
+    if starts is None:
+        return masked
+    parts: list[str] = []
+    # Whether the result so far ends with a marker, and whether that marker
+    # is one this function added. A marker that follows another one joins it.
+    marked = added = False
+    first_span = 0
+    for index, piece in enumerate(pieces):
+        if index % 2:
+            if added:
+                parts.pop()
+            if not marked or added:
+                parts.append(piece)
+            marked, added = True, False
+            continue
+        start = starts[index // 2]
+        pos = 0
+        if start >= 0:
+            while first_span < len(merged) and merged[first_span][1] <= start:
+                first_span += 1
+            probe = first_span
+            while probe < len(merged) and merged[probe][0] < start + len(piece):
+                cut_start, cut_end = max(merged[probe][0] - start, 0), min(merged[probe][1] - start, len(piece))
+                probe += 1
+                if cut_start > pos:
+                    parts.append(piece[pos:cut_start])
+                    marked = added = False
+                if not marked:
+                    parts.append("<redacted>")
+                    marked = added = True
+                pos = cut_end
+        if pos < len(piece):
+            parts.append(piece[pos:])
+            marked = added = False
+    return "".join(parts)
+
+
+def _mask_finding_evidence_credentials_as_written(text: str, *, preserve_header_format: bool = False) -> str:
     """Mask supported credential forms without imposing a caller's evidence budget."""
     # Remove shell continuations before matching values: they can join an
     # attached password to its flag. Ordinary line breaks stay intact.
@@ -3672,17 +4227,10 @@ def _mask_finding_evidence_credentials(text: str, *, preserve_header_format: boo
         redacted = pattern.sub(r"\1<redacted>", redacted)
     redacted = _mask_credential_flags(redacted)
     redacted = _mask_argv_credentials(redacted)
-    for pattern in (
-        _FINDING_EVIDENCE_USER_FLAG_RE,
-        _FINDING_EVIDENCE_LOGIN_PASSWORD_RE,
-        _FINDING_EVIDENCE_SSHPASS_RE,
-        _FINDING_EVIDENCE_MYSQL_PASSWORD_RE,
-        _FINDING_EVIDENCE_AWS_CONFIGURE_SET_RE,
-        _FINDING_EVIDENCE_NETRC_PASSWORD_RE,
-        _FINDING_EVIDENCE_COOKIE_FLAG_RE,
-    ):
-        redacted = pattern.sub(r"\1<redacted>", redacted)
-    redacted = _FINDING_EVIDENCE_CONFIG_SET_RE.sub(_mask_config_set_value, redacted)
+    for pattern in _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES:
+        if _pattern_may_match(pattern, redacted):
+            redacted = pattern.sub(r"\1<redacted>", redacted)
+    redacted = _mask_config_set_values(redacted)
     redacted = _mask_credential_assignments(redacted, preserve_header_format=preserve_header_format)
     # Structured values are masked before known token substrings, so a token
     # prefix inside a longer password cannot leave the password's tail behind.
@@ -3744,24 +4292,353 @@ def _mask_authorization_headers(text: str) -> str:
 
 def _mask_credential_flags(text: str) -> str:
     """Mask the value of each flag whose name holds a credential word ("--client-secret VALUE")."""
+    values = _AssignmentValues(text)
+    spans: list[tuple[int, int]] = []
+    # Each flag inside the value of an earlier "_" flag whose own value runs
+    # past that value: the flag's name and the rest of its value (see below).
+    inner_flags: list[tuple[int, int, tuple[int, int]]] = []
+    pos = 0
+    underscored_value = False
+    # Whether the last masked value is a word that ends at whitespace, a
+    # quote, a backtick or the end of the text, not at ";", "|" or "&".
+    word_value = False
+    for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
+        inner = match.start() < pos
+        if (
+            # A flag inside the value of an earlier "-" flag is not read (see below).
+            (inner and not underscored_value)
+            # Nor is one inside a "_" flag's word value whose own value is the
+            # rest of that word: it ends where that value does (see below).
+            or (inner and word_value and match.end() < pos and not text.startswith(("'", '"', "\\", "<"), match.end()))
+            or not _is_credential_flag_name(match.group(1))
+            # A name with "_" joined to its value by "=" ("--api_key=VALUE")
+            # or followed by a separator ("--api_key = VALUE", "-access_token
+            # := VALUE") is left to the assignment rule, which read it before,
+            # reads a tuple or call value whole and reads past the separator.
+            or ("_" in match.group(1) and (match.group().endswith("=") or text.startswith(("=", ":"), match.end())))
+        ):
+            continue
+        underscored = "_" in match.group(1)
+        start = match.end()
+        end = values.flag_value_end(start, underscored)
+        # A value of a name with "_" that holds a credential name whose value
+        # the assignment rule masks past this value is left to that rule too
+        # ("--api_key API_TOKEN=\"...\"").
+        if end is None or (underscored and values.runs_past(start, end)):
+            continue
+        if inner:
+            # A flag inside the value of an earlier one is not read on its
+            # own. A flag inside the value of a "_" flag was read before,
+            # when that value was not masked, and that value may end at the
+            # quote that opens this flag's value ('--set_secret "a
+            # --db_password "VALUE'), so the rest of this flag's value is
+            # masked as a credential that value hides.
+            if end > pos:
+                inner_flags.append((match.start(), start, (max(pos, start), end)))
+            continue
+        spans.append((start, end))
+        pos = end
+        underscored_value = underscored
+        quoted = _FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE.match(text, start) is not None
+        word_value = not quoted and text[end : end + 1] not in (";", "|", "&")
+    if not spans:
+        return text
+    # A masked value may also cut an argv list element the argv rule reads
+    # next ('--api_key "a --use-token "["mysql", "-pVALUE"]'), so that rule
+    # reads the list elements of *text* here too, with these values masked.
+    hidden = _hidden_credential_spans(text, spans, values, inner_flags)
+    return _redact_spans(text, spans + hidden + _argv_credential_spans(text, spans))
+
+
+def _hidden_credential_spans(
+    text: str,
+    value_spans: list[tuple[int, int]],
+    values: _AssignmentValues,
+    inner_flags: Sequence[tuple[int, int, tuple[int, int]]] = (),
+    masked_values: list[tuple[int, int]] | None = None,
+) -> list[tuple[int, int]]:
+    """Return the text later rules mask for each credential that masking the values *value_spans* hides from them.
+
+    A flag that takes no value ("--use_token") reads the next word as its
+    value, and a value word runs over a JSON-escaped line break ("--api_key
+    K1\\nlogin bob password VALUE"). Once such a value is masked, a rule in
+    _FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES or the config set rule no longer
+    reads a credential whose command part, from its first word up to the
+    password, the value overlaps or ends right before ("--use_token mysql -u
+    root -pVALUE", "--use_token 'v'\\ndocker login -p VALUE"), so the password
+    that rule masks in *text* is returned. The password of a login or MySQL
+    credential whose command words the value overlaps or ends right before is
+    also read as that rule reads it once *value_spans* and the other masked
+    values *masked_values* (each in order) are masked, so a "-p", ";" or line
+    break inside a value after the command words does not end or hide it
+    ('--use_token docker login --token "x -p y" -p VALUE'). So it is when a
+    value inside the
+    password removes every colon the -u rule needs ('-u "bob --api_key
+    \\"x a:VALUE"'). A .netrc password of several words ends at a
+    value inside it ("login bob password X --use_token Y VALUE"), so its rest
+    from that value on is returned. So it is for an argv list element masked
+    as a flag's value ('["tool", "--password", "v"]\\ndocker login -p VALUE').
+    Each of *inner_flags* (the start of a flag inside a masked value, where
+    its value starts, and the rest of that value past the masked value) is
+    such a credential too, whose command part is the flag's name.
+
+    Text returned may hide another credential in turn, or a name the
+    assignment rule reads, also one its start cuts ("-pVALUEpassword:
+    VALUE"), so the same is done for it, and the rest of the value of such a
+    name past it is returned too (each name read on its own, see
+    _AssignmentValues). Each credential and name is read once, so this stays
+    close to linear on long text.
+    """
+    if not value_spans:
+        return []
+    # Each rule's credentials, which do not overlap one another.
+    found = {
+        pattern: _pattern_matches(pattern, text)
+        for pattern in (*_FINDING_EVIDENCE_COMMAND_CREDENTIAL_RES, _FINDING_EVIDENCE_CONFIG_SET_RE)
+    }
+    # A rule that finds nothing in the text matches at no start in it either.
+    rules = [pattern for pattern, matches in found.items() if matches]
+    found[_FINDING_EVIDENCE_CONFIG_SET_RE] = [
+        match
+        for match in found[_FINDING_EVIDENCE_CONFIG_SET_RE]
+        if _mask_config_set_value(match, values) != match.group()
+    ]
+    # Each credential's command part and the password it hides.
+    command_parts = [
+        _SpanIndex([(match.start(), match.end(1), (match.end(1), match.end())) for match in matches])
+        for matches in found.values()
+        if matches
+    ]
+    # The login and MySQL rules' command words, each with the rest of its
+    # rule, read in the text with the values masked (see above).
+    masked = _MaskedSpans(text, sorted(value_spans + masked_values) if masked_values else value_spans)
+    command_words = [
+        _SpanIndex(words)
+        for words in (
+            [(match.start(), match.end(), (rest, match.end())) for match in _pattern_matches(command, text)]
+            for command, rest in _FINDING_EVIDENCE_COMMAND_PASSWORD_PARTS
+        )
+        if words
+    ]
+    if inner_flags:
+        command_parts.append(_SpanIndex(list(inner_flags)))
+    user_passwords = _SpanIndex([(match.end(1), match.end(), match) for match in found[_FINDING_EVIDENCE_USER_FLAG_RE]])
+    netrc_passwords = _SpanIndex(
+        [
+            (match.end(1), match.end(), match)
+            for match in found[_FINDING_EVIDENCE_NETRC_PASSWORD_RE]
+            if not text.startswith(("'", '"', '\\"'), match.end(1))
+        ]
+    )
+    # The names the assignment rule reads, found once a hidden span needs them.
+    names: _SpanIndex | None = None
+    hidden: list[tuple[int, int]] = []
+    # The indexes in *hidden* of spans inside one before them (see below).
+    inside: set[int] = set()
+    starts_read: set[int] = set()
+
+    def take_credentials(start: int, end: int) -> None:
+        # A credential is hidden also when the masked text ends right before it.
+        for index in command_parts:
+            hidden.extend(index.take(start, end + 1))
+        for index in command_words:
+            for rest, position in index.take(start, end + 1):
+                password = masked.match(rest, position)
+                if password is not None:
+                    hidden.append(password)
+        take_credentials_at(start)
+        # Other rules still read a password whose start is left when the
+        # masked text lies inside it. The -u rule also needs a colon left in
+        # it. The .netrc rule reads a password of several words up to the
+        # marker, so only the rest from the masked text on is returned: masked
+        # from its start, that password would be read again from the marker
+        # as a first word, which runs on over ";", "|", "&", "<" and ">".
+        for match in user_passwords.take(start, end):
+            if ":" not in text[match.end(1) : start] and ":" not in text[end : match.end()]:
+                hidden.append((match.end(1), match.end()))
+        hidden.extend((max(start, match.end(1)), match.end()) for match in netrc_passwords.take(start, end))
+
+    def take_credentials_at(start: int) -> None:
+        # A credential is hidden also when it starts where the masked text
+        # does, inside the password of another credential of its rule, which
+        # the search above does not find ("--use_token aws configure set
+        # aws_secret_access_key aws configure set aws_secret_access_key VALUE").
+        if start not in starts_read:
+            starts_read.add(start)
+            for pattern in rules:
+                match = pattern.match(text, start)
+                if match is not None and (
+                    pattern is not _FINDING_EVIDENCE_CONFIG_SET_RE
+                    or _mask_config_set_value(match, values) != match.group()
+                ):
+                    hidden.append((match.end(1), match.end()))
+
+    for start, end in value_spans:
+        take_credentials(start, end)
+    index = 0
+    while index < len(hidden):
+        start, end = hidden[index]
+        index += 1
+        if index - 1 in inside:
+            # A span inside one before it would take nothing that one has not.
+            take_credentials_at(start)
+            continue
+        take_credentials(start, end)
+        reach = end
+        if names is None:
+            names = _SpanIndex(
+                [
+                    (name.start(), name.end(), name)
+                    for name, _ in _assignment_name_matches(text, _config_separator_name_ends(text))
+                ]
+            )
+        for name in names.take(start, end):
+            value_end = values.value_end(name)
+            if value_end is not None and value_end > end:
+                # Names come in order, so a value that ends no further than
+                # one before it here lies inside that one's span.
+                if value_end <= reach:
+                    inside.add(len(hidden))
+                reach = max(reach, value_end)
+                hidden.append((max(start, name.start()), value_end))
+    # A .netrc password word stops before "\n", also between the two
+    # backslashes of an escaped one ("login bob password VALUE\\n..."). Masked
+    # without its first backslash, the rest would read as a JSON-escaped line
+    # break, which ends what later rules read, so the backslashes a span ends
+    # with are kept. Spans that end at the same place are looked at once.
+    kept_ends = {}
+    for end in {end for _, end in hidden}:
+        kept = end
+        while kept and text[kept - 1] == "\\":
+            kept -= 1
+        kept_ends[end] = kept
+    return [(start, kept_ends[end]) for start, end in hidden if start < kept_ends[end]]
+
+
+class _SpanIndex:
+    """Spans of text, each with an item, whose starts and ends both run in order; each item is taken out once."""
+
+    def __init__(self, entries: list[tuple[int, int, Any]]) -> None:
+        self._starts = [start for start, _, _ in entries]
+        self._ends = [end for _, end, _ in entries]
+        self._items = [item for _, _, item in entries]
+        # For each entry, the first one from it on that is not taken yet.
+        self._next = list(range(len(entries) + 1))
+
+    def take(self, start: int, end: int) -> list[Any]:
+        """Take out and return, in order, the items not taken yet whose spans overlap *start*:*end*."""
+        index = bisect.bisect_right(self._ends, start)
+        # Starts run in order, so no entry from the first that ends past
+        # *start* on overlaps when that one starts at *end* or later.
+        if index == len(self._starts) or self._starts[index] >= end:
+            return []
+        items = []
+        index = self._untaken(index)
+        stop = bisect.bisect_left(self._starts, end)
+        while index < stop:
+            items.append(self._items[index])
+            self._next[index] = index + 1
+            index = self._untaken(index + 1)
+        return items
+
+    def _untaken(self, index: int) -> int:
+        found = index
+        while self._next[found] != found:
+            found = self._next[found]
+        # Each entry passed on the way now points at the one found.
+        while self._next[index] != found:
+            self._next[index], index = found, self._next[index]
+        return found
+
+
+class _MaskedSpans:
+    """*text* with its *spans*, which run in order, masked as _redact_spans masks them, read at positions of *text*."""
+
+    def __init__(self, text: str, spans: Sequence[tuple[int, int]]) -> None:
+        self._text = text
+        self._spans = spans
+        self._masked: str | None = None
+        # Each marker's start and end in *text*, its start in the masked
+        # text, and how much shorter the masked text is past it.
+        self._starts: list[int] = []
+        self._ends: list[int] = []
+        self._masked_starts: list[int] = []
+        self._shifts: list[int] = []
+
+    def match(self, pattern: re.Pattern[str], position: int) -> tuple[int, int] | None:
+        """Return where group 1 and the match of *pattern* end in *text* when read at *position* (None: no match).
+
+        *pattern* is read in the masked text, or in *text* when *position*
+        lies inside a span, which is then read as it is.
+        """
+        if self._masked is None:
+            self._mask()
+        index = bisect.bisect_right(self._starts, position) - 1
+        if index >= 0 and position < self._ends[index]:
+            found = pattern.match(self._text, position)
+            return None if found is None else (found.end(1), found.end())
+        found = pattern.match(self._masked, position - (self._shifts[index] if index >= 0 else 0))
+        return None if found is None else (self._text_position(found.end(1)), self._text_position(found.end()))
+
+    def _mask(self) -> None:
+        merged: list[list[int]] = []
+        for start, end in self._spans:
+            if merged and start <= merged[-1][1]:
+                merged[-1][1] = max(merged[-1][1], end)
+            else:
+                merged.append([start, end])
+        parts: list[str] = []
+        pos = shift = 0
+        for start, end in merged:
+            parts.append(self._text[pos:start])
+            parts.append("<redacted>")
+            self._starts.append(start)
+            self._ends.append(end)
+            self._masked_starts.append(start - shift)
+            shift += end - start - len("<redacted>")
+            self._shifts.append(shift)
+            pos = end
+        parts.append(self._text[pos:])
+        self._masked = "".join(parts)
+
+    def _text_position(self, position: int) -> int:
+        """Return the position in *text* of *position* in the masked text (a marker's start or end inside it)."""
+        index = bisect.bisect_right(self._masked_starts, position) - 1
+        if index < 0:
+            return position
+        if position < self._masked_starts[index] + len("<redacted>"):
+            return self._starts[index] if position == self._masked_starts[index] else self._ends[index]
+        return position + self._shifts[index]
+
+
+def _pattern_may_match(pattern: re.Pattern[str], text: str) -> bool:
+    """Return whether *text* holds a word of each group that _FINDING_EVIDENCE_PATTERN_WORDS lists for *pattern*."""
+    return all(any(word in text for word in words) for words in _FINDING_EVIDENCE_PATTERN_WORDS.get(pattern, ()))
+
+
+def _pattern_matches(pattern: re.Pattern[str], text: str) -> list[re.Match[str]]:
+    """Return the matches of *pattern* that finditer finds in *text*, searching only a text it can match."""
+    return list(pattern.finditer(text)) if _pattern_may_match(pattern, text) else []
+
+
+def _redact_spans(text: str, spans: list[tuple[int, int]]) -> str:
+    """Replace each span of *text* in *spans* with "<redacted>", and spans that overlap or touch with one."""
     parts: list[str] = []
     pos = 0
-    for match in _FINDING_EVIDENCE_CREDENTIAL_FLAG_NAME_RE.finditer(text):
-        if match.start() < pos or not _is_credential_flag_name(match.group(1)):
+    for start, end in sorted(spans):
+        if parts and start <= pos:
+            pos = max(pos, end)
             continue
-        value = _FINDING_EVIDENCE_FLAG_VALUE_RE.match(text, match.end())
-        if value is None:
-            continue
-        parts.append(text[pos : value.start()])
+        parts.append(text[pos:start])
         parts.append("<redacted>")
-        pos = value.end()
+        pos = end
     parts.append(text[pos:])
     return "".join(parts)
 
 
 def _is_credential_flag_name(name: str) -> bool:
     return (
-        name.lower() not in {"--max-tokens", "--token-limit"}
+        name.lower().replace("_", "-") not in {"--max-tokens", "--token-limit"}
         and _FINDING_EVIDENCE_CREDENTIAL_FLAG_WORD_RE.search(name) is not None
         and _FINDING_EVIDENCE_FLAG_LOCATION_RE.search(name) is None
     )
@@ -3769,7 +4646,23 @@ def _is_credential_flag_name(name: str) -> bool:
 
 def _mask_argv_credentials(text: str) -> str:
     """Mask the list element after a quoted credential flag (["tool", "--password", "VALUE"])."""
-    parts: list[str] = []
+    spans = _argv_credential_spans(text)
+    if not spans:
+        # The text is unchanged, and its attached "-pVALUE" elements were read with the list.
+        return text
+    text = _redact_spans(text, spans)
+    # An attached "-pVALUE" element is read again once the list is masked,
+    # which may bring a login or MySQL client element into reach.
+    return _redact_spans(text, _attached_argv_password_spans(text))
+
+
+def _argv_credential_spans(text: str, flag_values: list[tuple[int, int]] | None = None) -> list[tuple[int, int]]:
+    """Return the text the argv rule masks in *text* and what that hides from later rules.
+
+    *flag_values* are the flag values the flag rule masks in *text*, in order.
+    """
+    values = _AssignmentValues(text)
+    spans: list[tuple[int, int]] = []
     pos = 0
     for match in _FINDING_EVIDENCE_ARGV_FLAG_RE.finditer(text):
         flag = match.group(2)
@@ -3793,40 +4686,288 @@ def _mask_argv_credentials(text: str) -> str:
         elif flag == "-b":
             masked = "=" in value.group()
         else:
-            masked = _is_credential_flag_name(flag)
+            # The element after a name with "_" that holds a credential name
+            # whose value the assignment rule masks past the element is left
+            # to that rule, as a "_" flag's value on the command line is.
+            masked = _is_credential_flag_name(flag) and not (
+                "_" in flag and values.runs_past(value.start(), value.end())
+            )
         if not masked:
             continue
-        parts.append(text[pos : value.start()])
-        parts.append("<redacted>")
+        spans.append((value.start(), value.end()))
         pos = value.end()
-    parts.append(text[pos:])
-    return _mask_attached_argv_values("".join(parts))
+    # A masked element may hide a later credential's command as a flag value
+    # does: in '["tool", "--use_token", "login"]\ndocker login -p VALUE' the
+    # login rule reads "]\ndocker" as a command word only after the quote. An
+    # attached "-pVALUE" element is read in the list as it was before its
+    # elements were masked, so a login or MySQL client element that a flag
+    # which takes no value reads as its value (["wrap", "--use_token",
+    # "mysql", "-uroot", "-pVALUE"]) still counts.
+    hidden = _hidden_credential_spans(text, spans, values, masked_values=flag_values)
+    return spans + hidden + _attached_argv_password_spans(text)
 
 
-def _mask_attached_argv_values(text: str) -> str:
-    """Mask an attached "-pVALUE" element that follows a login or MySQL client element."""
-    parts: list[str] = []
-    pos = 0
-    for match in _FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE.finditer(text):
-        window = max(0, match.start() - 256)
-        if (
-            _FINDING_EVIDENCE_ARGV_LOGIN_RE.search(text, window, match.start()) is None
-            and _FINDING_EVIDENCE_ARGV_MYSQL_RE.search(text, window, match.start()) is None
-        ):
-            continue
-        parts.append(text[pos : match.start(2)])
-        parts.append("<redacted>")
-        pos = match.end(2)
-    parts.append(text[pos:])
-    return "".join(parts)
+def _attached_argv_password_spans(text: str) -> list[tuple[int, int]]:
+    """Return where the value of each attached "-pVALUE" element after a login or MySQL client element is.
+
+    The login or MySQL client element must lie in the 256 characters before
+    the "-pVALUE" element. The elements are read once, at every position, so
+    one that starts inside another (\\"login\\" at its backslash and at its
+    quote) is found as a search of those 256 characters finds it.
+    """
+    passwords = _pattern_matches(_FINDING_EVIDENCE_ARGV_ATTACHED_PASSWORD_RE, text)
+    if not passwords:
+        return []
+    elements = [(found.start(), found.end(1)) for found in _FINDING_EVIDENCE_ARGV_COMMAND_ELEMENT_RE.finditer(text)]
+    starts = [start for start, _ in elements]
+    # For each element, the first end among it and the elements after it.
+    first_ends = [end for _, end in elements]
+    for index in range(len(first_ends) - 2, -1, -1):
+        first_ends[index] = min(first_ends[index], first_ends[index + 1])
+    spans: list[tuple[int, int]] = []
+    for match in passwords:
+        index = bisect.bisect_left(starts, match.start() - 256)
+        if index < len(starts) and first_ends[index] <= match.start():
+            spans.append((match.start(2), match.end(2)))
+    return spans
 
 
-def _mask_config_set_value(match: re.Match[str]) -> str:
-    """Mask the value of a config set command whose key names a credential."""
-    key = _FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(match.group(2))[-1]
-    if _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(key) is None:
+def _config_key_names_a_credential(key: str) -> bool:
+    """Return whether the last part of config set key *key* names a credential."""
+    return (
+        _FINDING_EVIDENCE_CONFIG_CREDENTIAL_KEY_RE.search(_FINDING_EVIDENCE_CONFIG_KEY_SPLIT_RE.split(key)[-1])
+        is not None
+    )
+
+
+def _mask_config_set_values(text: str) -> str:
+    """Mask the value of each config set command in *text* whose key names a credential."""
+    if not _pattern_may_match(_FINDING_EVIDENCE_CONFIG_SET_RE, text):
+        return text
+    values = _AssignmentValues(text)
+    return _FINDING_EVIDENCE_CONFIG_SET_RE.sub(lambda match: _mask_config_set_value(match, values), text)
+
+
+def _mask_config_set_value(match: re.Match[str], values: _AssignmentValues) -> str:
+    """Mask the value of a config set command whose key names a credential (*values* reads the names of its text)."""
+    if not _config_key_names_a_credential(match.group(4)):
+        return match.group()
+    # The value of a quoted key or one after "--" that holds a credential
+    # name whose value the assignment rule masks past it is left to that
+    # rule, as a "_" flag's is.
+    if (match.group(2) or match.group(3)) and values.runs_past(match.end(1), match.end()):
         return match.group()
     return match.group(1) + "<redacted>"
+
+
+class _AssignmentValues:
+    """Where the assignment rule masks the value after a name in *text*, each name read on its own.
+
+    The quotes of the text are read once, when first needed, and a word or
+    the rest of a quoted string once for all the names in it (see _run_end),
+    so reading every name in a long text stays close to linear. So is a word
+    the flag rule reads for all the flags in it (see flag_value_end). One is
+    made for each text a rule reads and dropped when the rule is done, so
+    nothing is kept between texts or shared between threads.
+    """
+
+    def __init__(self, text: str) -> None:
+        self.text = text
+        # The quote characters read so far, each with the string open after
+        # it, and where and in which string the quote scan goes on.
+        self._quotes: tuple[list[int], list[int | None]] = ([], [])
+        self._scan_pos: int | None = 0
+        self._scan_opening: int | None = None
+        self._config_name_ends: set[int] | None = None
+        # For each pattern, the runs read so far: their starts, in order, and their ends.
+        self._runs: dict[re.Pattern[str], tuple[list[int], list[int]]] = {}
+
+    def runs_past(self, start: int, end: int) -> bool:
+        """Return whether the assignment rule masks past *end* the value of a credential name in *start*:*end*, or at *end*.
+
+        Masking the value *start*:*end* as a whole would mask only that name
+        and the part of its value inside the masked text ("API_TOKEN=" in
+        'API_TOKEN="..."', "K1,TOKEN=" in 'K1,TOKEN="..."', "TOKEN" in "TOKEN
+        = ...", "'TOKEN='" in "'TOKEN='VALUE"), or hide the quote a name right
+        after it is read in ('""pass= VALUE'), so the rest of its value would
+        stay. A name the assignment rule leaves alone (a location, type or
+        count name, a bare PASS) or whose value ends inside *start*:*end*
+        ("TOKEN=x" in "K1,TOKEN=x") does not count, so the value is masked
+        whole. Each name is read on its own: an earlier name whose value runs
+        over it here may be one a rule before the assignment rule masks ("curl
+        -b auth_token=VALUE", "mysql -ptoken=VALUE", "--password
+        token=VALUE"), which the assignment rule then no longer reads.
+
+        A name whose value starts with a marker counts too: that is what
+        masking leaves of a value it left to the assignment rule
+        ("API_TOKEN=<redacted>", "K1,TOKEN=<redacted>", "'TOKEN='<redacted>",
+        "TOKEN=<redacted>,x"), so masking masked text again keeps the text
+        before that marker. Text masked whole and then again line by line
+        keeps such a value as the whole pass left it, so the rest of a line
+        after an earlier marker still reads as it did. So does a name whose
+        value starts with an escaped single quote, as in a Python string
+        ("API_KEY=\\'two words\\'", "K1,TOKEN=\\'...\\'"): the word reads on
+        over that quote, but the text read with its escapes removed holds
+        the quoted value whole. A flag or header name does not count: a rule
+        before this one masks its value ("K1,--token=<redacted>",
+        "K1,api-key=<redacted>"), and the value it is in is masked whole, as
+        it was when that value was read.
+        """
+        text = self.text
+        # A name that ends the value or follows it is read up to its separator.
+        limit = _FINDING_EVIDENCE_NAME_TAIL_RE.match(text, end).end() + 2
+        # A word value outside a quoted string stays outside one up to *end*,
+        # as a quote in it is escaped. A name inside it joined by "=" to a
+        # value that starts as a word and is no call reads that value as the
+        # rest of the same word, which ends at *end*, so such a name is not
+        # read, and a long word with many names in it is read in linear time.
+        word = (
+            not text.startswith(("'", '"', "\\", _FINDING_EVIDENCE_PRIVATE_KEY_MARKER), start)
+            and self._string_open(start) is None
+        )
+        # Every name ends with a separator that holds "=" or ":", so none is
+        # looked for past the last one.
+        last_separator = max(text.rfind("=", start, limit), text.rfind(":", start, limit))
+        for found in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start, last_separator + 1):
+            if found.start() > end:
+                break
+            # A name's match can run past the last separator only by holding
+            # it, so one that ends before it is the name's whole match.
+            name = (
+                found
+                if found.end() <= last_separator
+                else _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.match(text, found.start())
+            )
+            if (
+                word
+                and name.end() < end
+                and name.group(3) == "="
+                and not name.group(2)
+                and text[name.start() - 1 : name.start()] not in ("'", '"')
+                and _FINDING_EVIDENCE_WORD_VALUE_START_RE.match(text, name.end()) is not None
+            ):
+                continue
+            reading = self._value_reading(name)
+            if reading is None:
+                continue
+            if (
+                text.startswith(("<redacted>", "\\'"), reading[1])
+                and _FINDING_EVIDENCE_FLAG_OR_HEADER_NAME_RE.search(name.group(1)) is None
+            ):
+                return True
+            value_end = self._reading_end(reading)
+            if value_end is not None and value_end > end:
+                return True
+        return False
+
+    def value_end(self, match: re.Match[str]) -> int | None:
+        """Return where the value the assignment rule masks after the name *match* ends, or None when it masks none."""
+        reading = self._value_reading(match)
+        return None if reading is None else self._reading_end(reading)
+
+    def _value_reading(self, match: re.Match[str]) -> tuple[re.Pattern[str] | None, int, re.Match[str] | None] | None:
+        """Return how the assignment rule reads the value after the name *match* (None: it masks none there).
+
+        See _assignment_value_reading.
+        """
+        if _assignment_name_is_kept(self.text, match):
+            return None
+        if self._config_name_ends is None:
+            self._config_name_ends = _config_separator_name_ends(self.text)
+        return _assignment_value_reading(
+            self.text, match, self._string_open, config_value=match.end(1) in self._config_name_ends
+        )
+
+    def _reading_end(self, reading: tuple[re.Pattern[str] | None, int, re.Match[str] | None]) -> int | None:
+        """Return where the value read as *reading* (see _value_reading) ends, or None when there is none."""
+        text = self.text
+        pattern, start, _ = reading
+        if pattern is _FINDING_EVIDENCE_STUCK_VALUE_RE:
+            value = pattern.match(text, start)
+            return None if value is None else value.end()
+        if pattern is not None:
+            return self._run_end(pattern, start)
+        # As _assignment_value_match reads the value, with a word read by _run_end.
+        value = _FINDING_EVIDENCE_QUOTED_OR_CALL_VALUE_RE.match(text, start)
+        if value is None:
+            end = self._run_end(_FINDING_EVIDENCE_WORD_VALUE_RE, start)
+        else:
+            end = value.end()
+            if value.group("call") is not None:
+                word = self._run_end(_FINDING_EVIDENCE_WORD_VALUE_RE, start)
+                if word is not None and word >= end:
+                    end = word
+        quoted = _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE.match(text, start)
+        if quoted is not None and (end is None or quoted.end() > end):
+            return quoted.end()
+        return end
+
+    def flag_value_end(self, start: int, underscored: bool) -> int | None:
+        """Return where the value the flag rule reads at *start* ends (None: it reads none there).
+
+        The value is _FINDING_EVIDENCE_FLAG_VALUE, or for a name with "_"
+        _FINDING_EVIDENCE_UNDERSCORED_FLAG_VALUE, with a word read by
+        _run_end, so the flags inside a long word value ("--db_password
+        a\\ -token=a\\ -token=a...") do not each read the rest of that word.
+        """
+        text = self.text
+        quoted = _FINDING_EVIDENCE_QUOTED_FLAG_VALUE_RE.match(text, start)
+        if quoted is not None:
+            return quoted.end()
+        if text.startswith(("|", "&", ";", "<", ">"), start):
+            return None
+        return self._run_end(
+            _FINDING_EVIDENCE_UNDERSCORED_FLAG_WORD_RE if underscored else _FINDING_EVIDENCE_FLAG_WORD_RE, start
+        )
+
+    def _string_open(self, position: int) -> int | None:
+        """Return where the quoted string open at *position* starts (None: none is), as the quote scan reads it.
+
+        The quotes are read forward once, only as far as a position asked for.
+        """
+        positions, openings = self._quotes
+        while self._scan_pos is not None and (not positions or positions[-1] < position):
+            match = _FINDING_EVIDENCE_QUOTE_CHAR_RE.search(self.text, self._scan_pos)
+            if match is None:
+                self._scan_pos = None
+                break
+            self._scan_pos, self._scan_opening = _scan_quotes(
+                self.text, self._scan_pos, match.start() + 1, self._scan_opening
+            )
+            positions.append(match.start())
+            openings.append(self._scan_opening)
+        index = bisect.bisect_left(positions, position)
+        return openings[index - 1] if index else None
+
+    def _run_end(self, pattern: re.Pattern[str], start: int) -> int | None:
+        """Return where *pattern* ends when matched at *start* (None: no match).
+
+        *pattern* is a run of units, each a character or a backslash and the
+        character after it, that ends where the text read from the run's
+        start stops it: a word, or the rest of a quoted string. A run read
+        from inside one already read, at a unit boundary (not right after a
+        backslash), ends where that run ends, so a long run is read once for
+        all the names in it.
+        """
+        starts, ends = self._runs.setdefault(pattern, ([], []))
+        index = bisect.bisect_right(starts, start) - 1
+        if index >= 0 and start < ends[index] and (starts[index] == start or self.text[start - 1] != "\\"):
+            return ends[index]
+        match = pattern.match(self.text, start)
+        if match is None:
+            return None
+        starts.insert(index + 1, start)
+        ends.insert(index + 1, match.end())
+        return match.end()
+
+
+def _config_separator_name_ends(text: str) -> set[int]:
+    """Return where each config set NAME in *text* ends that names a credential and is followed by a separator word."""
+    return {
+        name.end(4)
+        for name in _pattern_matches(_FINDING_EVIDENCE_CONFIG_SET_SEPARATOR_RE, text)
+        if _config_key_names_a_credential(name.group(4))
+    }
 
 
 def _mask_token_prefix(match: re.Match[str]) -> str:
@@ -3852,85 +4993,90 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
     # The quote state is read forward once, up to each name that needs it.
     scan_pos = 0
     scan_open: int | None = None
-    for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text):
-        name, name_quote, separator = match.group(1, 2, 3)
-        if (
-            match.start() < pos
-            or not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
-            or (
-                _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
-                and _FINDING_EVIDENCE_SECRET_NAME_RE.search(name) is None
-            )
-            or _FINDING_EVIDENCE_TYPE_NAME_RE.search(name) is not None
-            or (
-                _FINDING_EVIDENCE_COUNT_NAME_RE.search(name) is not None
-                and _FINDING_EVIDENCE_COUNT_VALUE_RE.match(text, match.end()) is not None
-            )
-            or (
-                name.lower() == "pass"
-                and (
-                    _FINDING_EVIDENCE_COUNTER_VALUE_RE.match(text, match.end()) is not None
-                    or (
-                        separator.strip() != "="
-                        and separator != ":"
-                        and not name_quote
-                        and not text.startswith(("'", '"'), match.end())
-                    )
-                )
-            )
-        ):
+
+    def string_open(position: int) -> int | None:
+        nonlocal scan_pos, scan_open
+        scan_pos, scan_open = _scan_quotes(text, scan_pos, position, scan_open)
+        return scan_open
+
+    # Where the sed expression ends whose pattern or replacement starts the
+    # name whose value was masked last (0: that name starts neither).
+    sed_end = 0
+    # Where the last value read for a name that starts no sed pattern or
+    # replacement ends, read with no call and no call inside a tuple (see
+    # _flat_value_end), or where its separator ends for a config set NAME that
+    # names a credential and is followed by a separator word, whose value was
+    # not read before (nor the name that an auth scheme word after that
+    # separator starts, see _assignment_name_matches).
+    plain_end = 0
+    config_name_ends = _config_separator_name_ends(text)
+    # Where each marker an earlier rule left starts, and where the value
+    # masked last starts.
+    markers = [found.start() for found in re.finditer("<redacted>", text)]
+    masked_start = 0
+    values = _AssignmentValues(text)
+    for match, name_sed_end in _assignment_name_matches(text, config_name_ends):
+        # A name inside a masked value is skipped, unless it starts a sed
+        # pattern or replacement, or the value is that of a name in a sed
+        # expression, and the masked text ends inside that expression, or it
+        # starts no sed pattern or replacement and no value read for such a
+        # name holds it, as when no sed expression, call, call inside a tuple
+        # or config set value after a separator word is read (see below).
+        overlapped = match.start() < pos
+        if overlapped and pos >= (name_sed_end or sed_end) and (name_sed_end or match.start() < plain_end):
+            # A marker inside the masked value may stand for the line break
+            # or quote that ended it before an earlier rule masked the text
+            # around it, as a flag value runs over a JSON-escaped line break
+            # ('\"password: x --api_key K1\\nb passwd = VALUE' in a tool call's
+            # JSON arguments repeated as JSON, where the value of a name right
+            # after the escaped quote ends at the next line break, but that of
+            # a name further on runs to the end of the outer string). So the
+            # rest of the value of a name past such a marker is masked too, as
+            # that name is read on its own (see _AssignmentValues). So is a
+            # name that starts a line after a JSON-escaped line break, which an
+            # unquoted value ran over as one word ("API_TOKEN=a\nauth=("bob",
+            # "...")"), whose own value may be a tuple, a call or a quoted
+            # string, and so may run past the first value.
+            marker = bisect.bisect_left(markers, masked_start)
+            if (marker < len(markers) and markers[marker] < match.start()) or text.startswith(
+                _FINDING_EVIDENCE_LINE_BREAK_ESCAPES, match.start() - 1
+            ):
+                pos = max(pos, values.value_end(match) or 0)
             continue
-        start = match.end()
-        opening = text[match.start() - 1] if match.start() else ""
-        in_quotes = opening in ("'", '"') and not name_quote
-        quote_start = match.start() - 1
-        escaped = in_quotes and quote_start > 0 and text[quote_start - 1] == "\\"
-        closers = (opening, "\\" + opening)
-        if not in_quotes and not name_quote:
-            # The name may sit further inside a quoted string ("username=bob&password=VALUE").
-            scan_pos, scan_open = _scan_quotes(text, scan_pos, match.start(), scan_open)
-            if scan_open is not None:
-                in_quotes, quote_start, opening = True, scan_open, text[scan_open]
-                closers = (opening,)
-        # In a shell command string or a "-e" program a value is one word.
-        shell_string = (
-            in_quotes
-            and _FINDING_EVIDENCE_SHELL_STRING_RE.search(
-                text[max(0, quote_start - _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK) : quote_start]
-            )
-            is not None
-        )
-        if in_quotes and separator == "=" and not shell_string:
-            # Inside a quoted string "name= value" is not a shell assignment,
-            # so the value may follow spaces ("echo 'password= VALUE' >> f").
-            start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
-        header_prefix = (
-            _FINDING_EVIDENCE_HEADER_VALUE_PREFIX_RE.match(text, start)
-            if preserve_header_format and _FINDING_EVIDENCE_HEADER_FIELD_NAME_RE.fullmatch(name)
-            else None
-        )
-        if header_prefix is not None:
-            value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, header_prefix.start(1))
-        elif in_quotes and text.startswith(closers, start):
-            # The value is empty and the quote after it closes the string that
-            # opened before the name ('grep "token=" ...', "printf 'password: '"),
-            # so it is not the opening quote of a value.
-            value = _FINDING_EVIDENCE_STUCK_VALUE_RE.match(text, text.index(opening, start) + 1)
-        elif (
-            separator == ":"
-            and not name_quote
-            and "." in name
-            and not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name.rsplit(".", 1)[1])
-            and _FINDING_EVIDENCE_PORT_RE.match(text, start)
-        ):
+        if _assignment_name_is_kept(text, match):
             continue
-        elif in_quotes and not shell_string and not text.startswith(("'", '"', "\\'", '\\"', "("), start):
-            # The value is the rest of the quoted string, which may hold
-            # spaces ('password: correct horse battery staple').
-            value = _FINDING_EVIDENCE_QUOTED_REST_RES[("\\" if escaped else "") + opening].match(text, start)
-        else:
-            value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
+        reading = _assignment_value_reading(
+            text,
+            match,
+            string_open,
+            preserve_header_format=preserve_header_format,
+            config_value=match.end(1) in config_name_ends,
+        )
+        if reading is None:
+            continue
+        pattern, start, header_prefix = reading
+        value = _assignment_value_match(text, start) if pattern is None else pattern.match(text, start)
         if value is None:
+            continue
+        if not name_sed_end:
+            plain_end = match.end(3) if match.end(1) in config_name_ends else _flat_value_end(text, value)
+        if overlapped:
+            # The value of a name in the sed pattern ran over this name, which
+            # starts the replacement: in a shell command string a value is one
+            # word, so "s/token: .*/token: NEW/" read "token: .*/token:" as a
+            # name and its value. The masked text runs on to the end of NEW.
+            # So it does for any other credential name inside the value of a
+            # name in a sed expression, whose own value may run past it, as
+            # in "s/TOKEN=.*/export TOKEN='"NEW"'/", where the pattern name's
+            # value ends at the quote before NEW. Such a name is read again
+            # while the masked text ends inside its sed expression, whose
+            # parts are read up to 256 characters, and a name that starts no
+            # sed pattern or replacement is read as it is when no sed
+            # expression is read. So a long masked value is not read again
+            # for each name in it. A name inside a call or tuple value past
+            # its first word or parenthesis is read again too, so its value
+            # may run past the call's ")" ("auth=f(u, token='a) b')").
+            pos = max(pos, value.end())
             continue
         parts.append(text[pos : value.start()])
         replacement = "<redacted>"
@@ -3939,13 +5085,196 @@ def _mask_credential_assignments(text: str, *, preserve_header_format: bool = Fa
             body = value.group()[len(opening) :]
             closing = opening if body.endswith(opening) else ""
             scheme = ""
-            if name.lower() == "authorization":
+            if match.group(1).lower() == "authorization":
                 scheme = re.match(_FINDING_EVIDENCE_AUTH_SCHEME, body, re.IGNORECASE).group()
             replacement = opening + scheme + replacement + closing
         parts.append(replacement)
+        masked_start = value.start()
         pos = value.end()
+        sed_end = name_sed_end
     parts.append(text[pos:])
     return "".join(parts)
+
+
+def _assignment_name_is_kept(text: str, match: re.Match[str]) -> bool:
+    """Return whether the assignment rule keeps the value after the name *match*.
+
+    So it does for a name that names no credential, a location, type or
+    count name, and a bare PASS that is a test result word or a counter.
+    """
+    name, name_quote, separator = match.group(1, 2, 3)
+    return (
+        not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name)
+        or (
+            _FINDING_EVIDENCE_LOCATION_NAME_RE.search(name) is not None
+            and _FINDING_EVIDENCE_SECRET_NAME_RE.search(name) is None
+        )
+        or _FINDING_EVIDENCE_TYPE_NAME_RE.search(name) is not None
+        or (
+            _FINDING_EVIDENCE_COUNT_NAME_RE.search(name) is not None
+            and _FINDING_EVIDENCE_COUNT_VALUE_RE.match(text, match.end()) is not None
+        )
+        or (
+            name.lower() == "pass"
+            and (
+                _FINDING_EVIDENCE_COUNTER_VALUE_RE.match(text, match.end()) is not None
+                or (
+                    separator.strip() != "="
+                    and separator != ":"
+                    and not name_quote
+                    and not text.startswith(("'", '"'), match.end())
+                )
+            )
+        )
+    )
+
+
+def _assignment_value_reading(
+    text: str,
+    match: re.Match[str],
+    string_open: Callable[[int], int | None],
+    *,
+    preserve_header_format: bool = False,
+    config_value: bool = False,
+) -> tuple[re.Pattern[str] | None, int, re.Match[str] | None] | None:
+    """Return how the assignment rule reads the value after the name *match*: (pattern, start, header value prefix).
+
+    The value is *pattern* matched at *start*, or, when *pattern* is None,
+    read at *start* by _assignment_value_match. *string_open* returns where
+    the quoted string open at a position starts (None: none is), as the
+    quote scan reads it. *config_value* says that the name is a config set
+    NAME that a separator word follows. None is returned when the rule reads
+    no value there, as after a host and port ("host.example:8443").
+    """
+    name, name_quote, separator = match.group(1, 2, 3)
+    start = match.end()
+    opening = text[match.start() - 1] if match.start() else ""
+    in_quotes = opening in ("'", '"') and not name_quote
+    quote_start = match.start() - 1
+    escaped = in_quotes and quote_start > 0 and text[quote_start - 1] == "\\"
+    closers = (opening, "\\" + opening)
+    if not in_quotes and not name_quote:
+        # The name may sit further inside a quoted string ("username=bob&password=VALUE").
+        scan_open = string_open(match.start())
+        if scan_open is not None:
+            in_quotes, quote_start, opening = True, scan_open, text[scan_open]
+            closers = (opening,)
+    # In a shell command string or a "-e" program a value is one word.
+    shell_string = (
+        in_quotes
+        and _FINDING_EVIDENCE_SHELL_STRING_RE.search(
+            text[max(0, quote_start - _FINDING_EVIDENCE_SHELL_STRING_LOOKBACK) : quote_start]
+        )
+        is not None
+    )
+    if in_quotes and separator == "=" and not shell_string:
+        # Inside a quoted string "name= value" is not a shell assignment,
+        # so the value may follow spaces ("echo 'password= VALUE' >> f").
+        start = _FINDING_EVIDENCE_SPACES_RE.match(text, start).end()
+    header_prefix = (
+        _FINDING_EVIDENCE_HEADER_VALUE_PREFIX_RE.match(text, start)
+        if preserve_header_format and _FINDING_EVIDENCE_HEADER_FIELD_NAME_RE.fullmatch(name)
+        else None
+    )
+    if header_prefix is not None:
+        return None, header_prefix.start(1), header_prefix
+    if in_quotes and text.startswith(closers, start) and _FINDING_EVIDENCE_QUOTE_IDIOM_RE.match(text, start) is None:
+        # The value is empty and the quote after it closes the string that
+        # opened before the name ('grep "token=" ...', "printf 'password: '"),
+        # so it is not the opening quote of a value, unless that quote starts
+        # a '"'"' or '\'' idiom, which quotes the value.
+        return _FINDING_EVIDENCE_STUCK_VALUE_RE, text.index(opening, start) + 1, None
+    if (
+        separator == ":"
+        and not name_quote
+        and "." in name
+        and not _FINDING_EVIDENCE_CREDENTIAL_NAME_RE.search(name.rsplit(".", 1)[1])
+        and _FINDING_EVIDENCE_PORT_RE.match(text, start)
+    ):
+        return None
+    if in_quotes and not shell_string and not text.startswith(("'", '"', "\\'", '\\"', "("), start):
+        # The value is the rest of the quoted string, which may hold
+        # spaces ('password: correct horse battery staple'), or for a config
+        # set NAME after a separator word the rest of its command there.
+        rests = _FINDING_EVIDENCE_CONFIG_QUOTED_REST_RES if config_value else _FINDING_EVIDENCE_QUOTED_REST_RES
+        return rests[("\\" if escaped else "") + opening], start, None
+    return None, start, None
+
+
+def _assignment_name_matches(text: str, config_name_ends: set[int]) -> list[tuple[re.Match[str], int]]:
+    """Return, in order, each name that may start an assignment in *text*, and where its sed expression ends.
+
+    That is the end of the "s/PATTERN/REPLACEMENT/" expression whose pattern
+    or replacement the name starts, or 0 when it starts neither.
+    *config_name_ends* holds where each config set NAME that names a
+    credential and is followed by a separator word ends.
+    """
+    names: list[tuple[re.Match[str], int]] = []
+    pos: int | None = 0
+    while pos is not None:
+        start, pos = pos, None
+        for match in _FINDING_EVIDENCE_ASSIGNMENT_NAME_RE.finditer(text, start):
+            # A name right after "/" was read only as the start of a sed pattern.
+            sed_end = 0
+            if text[match.start() - 1 : match.start()] == "/":
+                sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, match.start() - 2).end()
+            names.append((match, sed_end))
+            # The config set rule masked the separator word after a config set
+            # NAME as its value before it left this form to the assignment rule,
+            # which then read names from the word after that separator. So an
+            # auth scheme word there still starts a name of its own ("npm config
+            # set _authToken = token = VALUE"), and names after it are read as
+            # they were then.
+            if match.end(1) in config_name_ends:
+                pos = match.end(3)
+                break
+    if "s/" not in text:
+        # No sed expression holds a name.
+        return names
+    matches = {match.start(): (match, sed_end) for match, sed_end in names}
+    for sed in _FINDING_EVIDENCE_SED_PATTERN_RE.finditer(text):
+        sed_end = _FINDING_EVIDENCE_SED_EXPRESSION_RE.match(text, sed.start()).end()
+        if sed.end() in matches:
+            matches[sed.end()] = (matches[sed.end()][0], sed_end)
+        elif (name := _FINDING_EVIDENCE_SED_REPLACEMENT_NAME_RE.match(text, sed.end())) is not None:
+            matches[sed.end()] = (name, sed_end)
+    return [matches[start] for start in sorted(matches)]
+
+
+def _assignment_value_match(text: str, start: int) -> re.Match[str] | None:
+    """Return the value that starts at *start* in *text*, read as a call only when that runs past the word reading.
+
+    A call whose arguments hold a quote or a space (HTTPBasicAuth("bob", "..."))
+    is read to its ")", while a word with parentheses in it ("Pa(ss),word",
+    "f(x))word") is read whole, as a word. A tuple or call whose quoted
+    arguments are read whole is read when it runs further, as when a quoted
+    argument holds a parenthesis (HTTPBasicAuth("bob", "Zq1)x1Kv")).
+    """
+    value = _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE.match(text, start)
+    if value is not None and value.group("call") is not None:
+        word = _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, start)
+        if word is not None and word.end() >= value.end():
+            value = word
+    quoted = _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE.match(text, start)
+    if quoted is not None and (value is None or quoted.end() > value.end()):
+        return quoted
+    return value
+
+
+def _flat_value_end(text: str, value: re.Match[str]) -> int:
+    """Return where *value* ends when a call and a call inside a tuple are not read.
+
+    A call value then ends with its first word ("HTTPBasicAuth(user," in
+    "HTTPBasicAuth(user, password='...')") and a tuple at its first
+    parenthesis, as before those values were read, so each credential name
+    read before past that point is still read.
+    """
+    if value.re is _FINDING_EVIDENCE_ASSIGNMENT_VALUE_RE or value.re is _FINDING_EVIDENCE_QUOTED_ARGUMENTS_VALUE_RE:
+        if value.group("call") is not None:
+            return _FINDING_EVIDENCE_WORD_VALUE_RE.match(text, value.start()).end()
+        if text.startswith("(", value.start()):
+            return _FINDING_EVIDENCE_FLAT_TUPLE_VALUE_RE.match(text, value.start()).end()
+    return value.end()
 
 
 def _scan_quotes(text: str, pos: int, end: int, opening: int | None) -> tuple[int, int | None]:
@@ -6018,7 +7347,10 @@ def _classify_execution_failure(
     }
     declared_names = {normalized(str(name)) for name in dependencies}
     declared = normalized(missing) in declared_names or normalized(aliases.get(missing.lower(), "")) in declared_names
-    used = bool(re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", "")))
+    skill_name = normalized(str(context.get("skill_name") or ""))
+    used = skill_name != normalized(missing) and bool(
+        re.search(r"(?<![\w-])" + re.escape(missing) + r"(?![\w-])", context.get("skill_text", ""))
+    )
     used = (
         used or missing in context.get("script_imports", []) or _command_executes_skill(command, expected_script, paths)
     )

@@ -13,7 +13,12 @@ from uuid import UUID
 
 import pytest
 
-from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
+from skillevaluator.evaluation.tier3_report import build_agent_eval_payload, render_agent_eval_html_report
+from skillevaluator.models import ValidationResult
+from skillevaluator.reporting.base import assess_publication
+from skillevaluator.reporting.summary_copy import pass_at_k_summary
+from skillevaluator.reporting.tier3_scope import completed_agent_result
+from skillevaluator.tier3.case_summary import verdict
 from skillevaluator.tier3.harbor import collector as collector_module
 from skillevaluator.tier3.harbor import report_data
 from skillevaluator.tier3.harbor.collector import (
@@ -22,6 +27,7 @@ from skillevaluator.tier3.harbor.collector import (
 )
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET, DEFAULT_METRICS
 from skillevaluator.tier3.result_display import render_result
+from skillevaluator.tier3.results_location import _legacy_pass_at_k_is_complete
 
 _HARBOR_022_AGENT_RUNTIME_EXCEPTION_TYPES = (
     "AgentAuthenticationError",
@@ -872,6 +878,117 @@ def test_partially_errored_job_preserves_only_completed_trial_coverage(tmp_path:
         }
     ]
     assert any("Scored attempt coverage is 3/4" in error for error in results["execution_errors"])
+
+
+@pytest.mark.parametrize("partial_variant", ["with", "without"])
+@pytest.mark.parametrize("score", [0.0, 1.0])
+def test_partial_arm_retains_scored_evidence_without_enabling_quality(
+    tmp_path: Path, partial_variant: str, score: float
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        for case_id in CASES:
+            value = score if variant == partial_variant and case_id == "case-a" else 1.0
+            _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=1, score=value)
+            trial = jobs_dir / f"demo-opencode-{variant}" / f"{case_id}_attempt001"
+            path = trial / "verifier/reward.json"
+            reward = json.loads(path.read_text(encoding="utf-8"))
+            reward["custom_metrics"] = {"native_quality": {"score": value}}
+            path.write_text(json.dumps(reward), encoding="utf-8")
+            (trial / "agent").mkdir()
+            prompt, completion = (20, 3) if variant == partial_variant and case_id == "case-b" else (10, 2)
+            (trial / "agent/trajectory.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": "ATIF-v1.7",
+                        "agent": {"name": "opencode", "version": "test"},
+                        "steps": [{"step_id": 1, "source": "agent", "message": "Done"}],
+                        "final_metrics": {"total_prompt_tokens": prompt, "total_completion_tokens": completion},
+                    }
+                ),
+                encoding="utf-8",
+            )
+    _write_variant_job_results(jobs_dir)
+    partial_job = jobs_dir / f"demo-opencode-{partial_variant}"
+    failure = {"exception_info": {"exception_type": "AgentTimeoutError", "exception_message": "Agent timed out"}}
+    (partial_job / "case-b_attempt001/result.json").write_text(json.dumps(failure), encoding="utf-8")
+    job_result = json.loads((partial_job / "result.json").read_text(encoding="utf-8"))
+    job_result["stats"]["n_errors"] = 1
+    (partial_job / "result.json").write_text(json.dumps(job_result), encoding="utf-8")
+
+    result = _collect(tmp_path, n_attempts=1, stop_on_pass=False)
+
+    agent = result["agents"]["opencode"]
+    arm = f"{partial_variant}_skill"
+    complete_arm = "without_skill" if partial_variant == "with" else "with_skill"
+    assert result["execution_status"] == agent["execution_status"] == "failed"
+    assert (result["scored_attempts"], result["expected_attempts"]) == (3, 4)
+    condition = agent["conditions"][arm]
+    assert condition["execution_status"] == "failed"
+    assert (condition["scored_attempts"], condition["expected_attempts"]) == (1, 2)
+    assert agent[arm] and set(agent[arm].values()) == {score}
+    assert agent[f"custom_{arm}"] == {"native_quality": score}
+    assert agent[f"overall_{arm}"] is None
+    assert agent["lift"] == agent["custom_lift"] == agent["pass_at_k"]["lift"] == {}
+    partial = agent["pass_at_k"][arm]
+    assert partial["rate"] is None and partial["rate_interval"] is None
+    assert partial["passed_cases"] == int(score == 1.0)
+    assert partial["failed_cases"] == int(score == 0.0)
+    assert partial["attempts_used"] == 1 and partial["max_attempts_possible"] == 2
+    [attempt] = partial["cases"]["case-a"]["attempts"]
+    assert attempt["score"] == score and attempt["passed"] is (score == 1.0)
+    missing = partial["cases"]["case-b"]
+    assert missing["attempts"] == [] and missing["best_score"] is None
+    assert missing["attempts_missing"] == 1 and missing["attempts_used"] == 0
+    summary = json.loads(
+        (tmp_path / "results/opencode" / f"{partial_variant}-skill/summary.json").read_text(encoding="utf-8")
+    )
+    assert summary["pass_at_k"] == partial
+    assert summary["scores"] == agent[arm] and summary["custom_scores"] == agent[f"custom_{arm}"]
+    assert not _legacy_pass_at_k_is_complete(partial, num_trials=1, require_scored_attempt=True)
+    assert "N/A" in pass_at_k_summary(agent["pass_at_k"])
+    assert verdict(result["agents"])[0] == "inconclusive"
+    terminal = render_result(result)
+    check_line = next(line for line in terminal.splitlines() if "REQUIRED CHECKS PASSED" in line)
+    assert check_line.strip(" │").endswith("N/A")
+    if partial_variant == "with":
+        assert "QUALITY VERDICT: FAIL" not in terminal
+
+    complete = agent["pass_at_k"][complete_arm]
+    assert complete["passed_cases"] == complete["attempts_used"] == 2
+    assert complete["failed_cases"] == 0 and complete["rate"] == 1.0
+    assert complete["rate_interval"]["confidence_level"] == 0.95
+    assert agent["conditions"][complete_arm]["execution_status"] == "succeeded"
+    assert set(agent[complete_arm].values()) == {1.0}
+    assert agent[f"custom_{complete_arm}"] == {"native_quality": 1.0}
+
+    loaded = report_data.load_agent_data(tmp_path / "results")
+    assert loaded["opencode"][arm] == loaded["opencode"][f"custom_{arm}"] == {}
+    assert loaded["opencode"][f"pass_{arm}"] == {"attempts_used": 1, "max_attempts_possible": 2}
+    payload = build_agent_eval_payload("demo", loaded, use_llm_judge=False)
+    assert payload["execution_status"] == "failed" and payload["overall_score"] is None
+    assert completed_agent_result(payload) is None
+    assert payload["agents"]["opencode"]["lift"] is None
+    trial_key = "trials" if partial_variant == "with" else "trials_baseline"
+    trials = payload["agents"]["opencode"][trial_key]
+    assert len(trials) == 2 and all(row["diagnostic_only"] for row in trials)
+    assert sum(row.get("scored") is False for row in trials) == 1
+    usage = payload["token_usage"]["agents"]["opencode"]["with_skill" if partial_variant == "with" else "baseline"]
+    assert usage["coverage"]["observed_attempts"] == usage["coverage"]["measured_attempts"] == 2
+    assert usage["coverage"]["unscored_attempts"] == 1
+    assert (
+        usage["totals"]["prompt_tokens"],
+        usage["totals"]["completion_tokens"],
+        usage["totals"]["total_tokens"],
+    ) == (
+        30,
+        5,
+        35,
+    )
+    validation = ValidationResult(validator_name="AGENT_EVAL")
+    validation.metadata["agent_eval"] = payload
+    assessment = assess_publication([validation])
+    assert assessment.status != "pass" and not assessment.tier3.evidence_complete
 
 
 def test_partial_rewards_stay_suppressed_when_not_every_job_error_maps_to_a_trial(tmp_path: Path) -> None:
@@ -2219,6 +2336,88 @@ def test_stop_on_pass_rejects_failed_attempt_before_pass(tmp_path: Path) -> None
     assert result["agents"]["opencode"]["trial_failures"]["with_skill"]
 
 
+def _crash_attempt(jobs_dir: Path, *, variant: str, case_id: str, attempt: int) -> None:
+    """Leave one attempt as an unrecovered agent crash instead of a scored trial."""
+    _write_reward(jobs_dir, variant=variant, case_id=case_id, attempt=attempt, score=1.0)
+    failure = {"exception_info": {"exception_type": "TaskFailure", "exception_message": "attempt crashed"}}
+    (jobs_dir / f"demo-opencode-{variant}" / f"{case_id}_attempt{attempt:03d}" / "result.json").write_text(
+        json.dumps(failure), encoding="utf-8"
+    )
+
+
+@pytest.mark.parametrize("crashed_variant", ["with", "without"])
+def test_stop_on_pass_crash_before_pass_is_missing_not_skipped(tmp_path: Path, crashed_variant: str) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for variant in ("with", "without"):
+        if variant == crashed_variant:
+            _crash_attempt(jobs_dir, variant=variant, case_id="case-a", attempt=1)
+            _write_reward(jobs_dir, variant=variant, case_id="case-a", attempt=2, score=1.0)
+        else:
+            _write_reward(jobs_dir, variant=variant, case_id="case-a", attempt=1, score=1.0)
+    _write_variant_job_results(jobs_dir)
+
+    result = _collect(tmp_path, n_attempts=3, stop_on_pass=True, expected_cases=1, expected_case_ids=["case-a"])
+
+    agent = result["agents"]["opencode"]
+    arm = f"{crashed_variant}_skill"
+    other_arm = "without_skill" if crashed_variant == "with" else "with_skill"
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert (agent["conditions"][arm]["scored_attempts"], agent["conditions"][arm]["expected_attempts"]) == (1, 2)
+    partial = agent["pass_at_k"][arm]
+    assert partial["rate"] is None
+    case = partial["cases"]["case-a"]
+    assert case["passed"] is True and case["first_pass_attempt"] == 2
+    assert case["attempts_used"] == 1
+    # Attempt 1 crashed (a failed attempt, not a skipped one); only attempt 3 was never needed.
+    assert case["attempts_missing"] == 1
+    assert case["attempts_skipped"] == 1
+    # A pass that needed no earlier retry still skips the unused attempts on the healthy arm.
+    healthy = agent["pass_at_k"][other_arm]["cases"]["case-a"]
+    assert (healthy["attempts_missing"], healthy["attempts_skipped"]) == (0, 2)
+
+
+@pytest.mark.parametrize(
+    ("outcomes", "denied", "missing", "skipped"),
+    [
+        pytest.param({1: "crash", 3: "pass"}, [2], 1, 0, id="crash-then-denied-slot-then-pass"),
+        pytest.param({2: "crash", 3: "pass"}, [1], 1, 0, id="denied-first-slot-then-crash-then-pass"),
+        pytest.param({1: "fail", 3: "pass"}, [2], 0, 0, id="scored-fail-then-denied-slot-then-pass"),
+        pytest.param({2: "pass"}, [1], 0, 1, id="denied-first-slot-then-pass"),
+        pytest.param({1: "pass"}, [2], 0, 1, id="pass-then-denied-slot"),
+    ],
+)
+def test_stop_on_pass_budget_denied_slots_are_neither_missing_nor_skipped(
+    tmp_path: Path, outcomes: dict[int, str], denied: list[int], missing: int, skipped: int
+) -> None:
+    jobs_dir = tmp_path / "jobs"
+    for attempt, outcome in outcomes.items():
+        if outcome == "crash":
+            _crash_attempt(jobs_dir, variant="with", case_id="case-a", attempt=attempt)
+        else:
+            _write_reward(
+                jobs_dir, variant="with", case_id="case-a", attempt=attempt, score=1.0 if outcome == "pass" else 0.2
+            )
+    _write_variant_job_results(jobs_dir, variants=("with",))
+    not_run = [
+        {"agent": "opencode", "arm": "with", "case_id": "case-a", "attempt": attempt, "reason": "budget_exhausted"}
+        for attempt in denied
+    ]
+
+    result = _collect(
+        tmp_path,
+        skip_baseline=True,
+        n_attempts=3,
+        stop_on_pass=True,
+        expected_cases=1,
+        expected_case_ids=["case-a"],
+        budget_not_run=not_run,
+    )
+
+    case = result["agents"]["opencode"]["pass_at_k"]["with_skill"]["cases"]["case-a"]
+    assert case["passed"] is True
+    assert (case["attempts_missing"], case["attempts_skipped"]) == (missing, skipped)
+
+
 def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -> None:
     jobs_dir = tmp_path / "jobs"
     _write_reward(jobs_dir, variant="with", case_id="case-a", attempt=1, score=1.0, steps=("prepare",))
@@ -2254,7 +2453,10 @@ def test_multistep_stop_on_pass_uses_authoritative_root_reward(tmp_path: Path) -
     assert result["execution_status"] == "failed"
     assert result["expected_attempts"] == 2
     assert result["scored_attempts"] == 1
-    assert agent["pass_at_k"]["with_skill"] == {}
+    partial = agent["pass_at_k"]["with_skill"]
+    assert partial["rate"] is None
+    assert partial["attempts_used"] == 1
+    assert partial["cases"]["case-a"]["attempts_missing"] == 1
 
 
 def test_duplicate_logical_attempt_ordinals_fail(tmp_path: Path) -> None:
@@ -2568,3 +2770,250 @@ def test_harbor_verifier_and_environment_failures_are_unscored_not_agent_failure
     assert opencode["num_trials_with"] == 0
     assert opencode["agent_runtime_failures"]["with_skill"] == []
     assert results["execution_status"] == "failed"
+
+
+_ADDRESS_POOL_NOTE_START = "Docker has no free network address pools."
+
+
+def _compose_network_failure(docker_error: str) -> str:
+    """Shape a secure Compose failure: the long command line comes before Docker's own error."""
+    command = " ".join(["docker compose --project-name case-001__attempt__env -f /tmp/task/compose.yaml up"] * 12)
+    return (
+        "Docker compose command failed for environment case-001. "
+        f"Command: {command}. Return code: 1. Stdout: . "
+        f"Stderr: failed to create network case-001__attempt__env_default: Error response from daemon: {docker_error}."
+    )
+
+
+@pytest.mark.parametrize(
+    "docker_error",
+    (
+        "all predefined address pools have been fully subnetted",
+        "could not find an available, non-overlapping IPv4 address pool among the defaults to assign to the network",
+        "ALL PREDEFINED ADDRESS POOLS HAVE BEEN FULLY SUBNETTED",
+    ),
+)
+def test_docker_address_pool_exhaustion_is_named_before_the_reason_cut(docker_error: str) -> None:
+    message = _compose_network_failure(docker_error)
+    assert message.casefold().index("address pool") > 600
+
+    exception_type, reason = collector_module._exception_details(
+        {"exception_type": "RuntimeError", "exception_message": message}
+    )
+
+    assert exception_type == "RuntimeError"
+    assert reason.startswith(f"RuntimeError: {_ADDRESS_POOL_NOTE_START} ")
+    assert "`docker network ls --filter label=com.docker.compose.project`" in reason
+    assert "prune" not in reason
+    assert len(reason) == 600
+
+
+def test_docker_address_pool_note_removes_trial_containers_before_networks() -> None:
+    # A leftover container still attached to its network makes `docker network rm` fail.
+    _, reason = collector_module._exception_details(
+        {
+            "exception_type": "RuntimeError",
+            "exception_message": _compose_network_failure("all predefined address pools have been fully subnetted"),
+        }
+    )
+    note = reason.split("RuntimeError: ", 1)[1].split(" Docker compose command failed", 1)[0]
+
+    assert "`docker ps -a --filter label=com.docker.compose.project`" in note
+    assert "`docker network ls --filter label=com.docker.compose.project`" in note
+    assert "check their names" in note
+    assert note.index("`docker rm -f`") < note.index("`docker network rm`")
+    assert note.endswith("; or lower --n-concurrent or --max-agents.")
+    assert "prune" not in note
+
+
+def test_docker_address_pool_note_without_exception_type() -> None:
+    message = (
+        "failed to create network case-001__attempt__env_default: "
+        "Error response from daemon: all predefined address pools have been fully subnetted"
+    )
+
+    _, reason = collector_module._exception_details({"exception_message": message})
+
+    assert reason.startswith(f"{_ADDRESS_POOL_NOTE_START} ")
+    assert reason.endswith(message)
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "Verifier log: Error response from daemon: all predefined address pools have been fully subnetted",
+        "all predefined address pools have been fully subnetted; failed to create network demo_default: denied",
+    ),
+)
+def test_docker_address_pool_error_outside_compose_network_creation_gets_no_note(message: str) -> None:
+    assert collector_module._exception_details({"exception_type": "RuntimeError", "exception_message": message}) == (
+        "RuntimeError",
+        f"RuntimeError: {message}",
+    )
+
+
+@pytest.mark.parametrize(
+    "exception_type",
+    sorted(
+        collector_module._AGENT_RUNTIME_EXCEPTION_TYPES | collector_module._UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES
+    ),
+)
+def test_agent_runtime_failures_get_no_address_pool_note(exception_type: str) -> None:
+    message = _compose_network_failure("all predefined address pools have been fully subnetted")
+
+    assert collector_module._exception_details({"exception_type": exception_type, "exception_message": message}) == (
+        exception_type,
+        f"{exception_type}: {message}"[:600],
+    )
+
+
+def test_agent_failure_quoting_docker_address_pool_error_keeps_its_reason(tmp_path: Path) -> None:
+    # The agent read a log that quotes Docker's error, then failed on its own credential.
+    stdout = "\n".join(
+        (
+            *(f"read fixtures/compose-{index}.log" for index in range(8)),
+            "API Error: 401 Unauthorized",
+            "fixtures/compose-8.log: failed to create network demo_default: Error response from daemon: "
+            "all predefined address pools have been fully subnetted",
+        )
+    )
+    message = f"Command failed (exit 1): opencode run --format json\nstdout: {stdout}\nstderr: exit status 1"
+    trial_dir = tmp_path / "case-001__attempt"
+    trial_dir.mkdir()
+    (trial_dir / "result.json").write_text(
+        json.dumps({"exception_info": {"exception_type": "NonZeroAgentExitCodeError", "exception_message": message}}),
+        encoding="utf-8",
+    )
+
+    reason = _agent_runtime_failure_reason(trial_dir)
+
+    assert reason == f"NonZeroAgentExitCodeError: {message}"
+    assert "API Error: 401 Unauthorized" in reason
+    assert _ADDRESS_POOL_NOTE_START not in reason
+
+
+def test_other_docker_network_failures_get_no_address_pool_note() -> None:
+    message = "failed to create network case-001__attempt__env_default: permission denied"
+
+    assert collector_module._exception_details({"exception_type": "RuntimeError", "exception_message": message}) == (
+        "RuntimeError",
+        f"RuntimeError: {message}",
+    )
+
+
+def test_trial_failure_names_docker_address_pool_exhaustion(tmp_path: Path) -> None:
+    jobs_dir = tmp_path / "jobs"
+    job_dir = jobs_dir / "demo-opencode-with"
+    trial_dir = job_dir / "case-001__attempt"
+    trial_dir.mkdir(parents=True)
+    (trial_dir / "result.json").write_text(
+        json.dumps(
+            {
+                "trial_name": trial_dir.name,
+                "exception_info": {
+                    "exception_type": "RuntimeError",
+                    "exception_message": _compose_network_failure(
+                        "all predefined address pools have been fully subnetted"
+                    ),
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    _write_complete_job_result(job_dir, [trial_dir.name])
+
+    results = collect_harbor_results(
+        skill_name="demo",
+        agents=["opencode"],
+        output_dir=tmp_path / "results",
+        jobs_dir=jobs_dir,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["case-001"],
+        expected_trials=1,
+    )
+
+    assert results["execution_status"] == "failed"
+    [failure] = results["agents"]["opencode"]["trial_failures"]["with_skill"]
+    assert failure["trial"] == "case-001__attempt"
+    assert failure["reason"].startswith(f"RuntimeError: {_ADDRESS_POOL_NOTE_START} ")
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+@pytest.mark.parametrize(
+    "corruption", ["duplicate-ordinal", "excess-ordinal", "unexpected-case", "nonfinite", "unsafe-identity"]
+)
+def test_partial_integrity_failure_clears_scores(tmp_path: Path, variant: str, corruption: str) -> None:
+    jobs = tmp_path / "jobs"
+    _write_reward(jobs, variant=variant, case_id="case-a", attempt=1, score=1.0)
+    if corruption == "duplicate-ordinal":
+        _write_reward(
+            jobs, variant=variant, case_id="case-a", attempt=1, score=0.0, trial_name="duplicate-case-a_attempt001"
+        )
+    elif corruption == "excess-ordinal":
+        _write_reward(jobs, variant=variant, case_id="case-a", attempt=3, score=0.0)
+    elif corruption == "unexpected-case":
+        _write_reward(jobs, variant=variant, case_id="case-extra", attempt=1, score=0.0)
+    else:
+        _write_reward(jobs, variant=variant, case_id="case-b", attempt=1, score=0.0)
+        path = jobs / f"demo-opencode-{variant}/case-b_attempt001/verifier/reward.json"
+        reward = json.loads(path.read_text())
+        if corruption == "nonfinite":
+            reward["accuracy"] = float("nan")
+            reward["overall"] = float("nan")
+        else:
+            reward["entry_id"] = "bad\nidentity"
+        path.write_text(json.dumps(reward))
+    _write_variant_job_results(jobs, variants=(variant,))
+    result = _collect(tmp_path, skip_baseline=variant == "with", skip_with_skill=variant == "without")
+    agent = result["agents"]["opencode"]
+    arm = f"{variant}_skill"
+    assert agent["conditions"][arm]["execution_status"] == "failed"
+    assert agent[arm] == {}
+    assert agent["pass_at_k"][arm] == {}
+    saved = json.loads((tmp_path / "results/opencode" / f"{variant}-skill/summary.json").read_text())
+    assert saved["scores"] == {} and saved["pass_at_k"] == {}
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+@pytest.mark.parametrize("case_detail_cap", [1, 400])
+def test_partial_failed_case_requires_all_attempts(
+    tmp_path: Path, variant: str, case_detail_cap: int, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(collector_module, "PUBLISHED_CASE_DETAILS_MAX", case_detail_cap)
+    jobs = tmp_path / "jobs"
+    for case_id, scores in {"case-a": [0.0], "case-b": [0.0, 0.0], "case-c": [1.0]}.items():
+        for attempt, score in enumerate(scores, start=1):
+            _write_reward(jobs, variant=variant, case_id=case_id, attempt=attempt, score=score)
+    _write_variant_job_results(jobs, variants=(variant,))
+    result = _collect(
+        tmp_path,
+        skip_baseline=variant == "with",
+        skip_with_skill=variant == "without",
+        expected_cases=4,
+        expected_case_ids=["case-a", "case-b", "case-c", "case-d"],
+    )
+    partial = result["agents"]["opencode"]["pass_at_k"][f"{variant}_skill"]
+    assert partial["passed_cases"] == 1
+    assert partial["failed_cases"] == 1
+    assert partial["unresolved_cases"] == 2
+    assert sum(partial[key] for key in ("passed_cases", "failed_cases", "unresolved_cases")) == partial["total_cases"]
+    saved = json.loads((tmp_path / "results/opencode" / f"{variant}-skill/summary.json").read_text())
+    assert saved["pass_at_k"] == partial
+
+
+@pytest.mark.parametrize("variant", ["with", "without"])
+def test_partial_extra_case_count_without_expected_ids_clears_scores(tmp_path: Path, variant: str) -> None:
+    for case_id in ["case-a", "case-b", "case-extra"]:
+        _write_reward(tmp_path / "jobs", variant=variant, case_id=case_id, attempt=1, score=1.0)
+    _write_variant_job_results(tmp_path / "jobs", variants=(variant,))
+    result = _collect(
+        tmp_path,
+        skip_baseline=variant == "with",
+        skip_with_skill=variant == "without",
+        expected_cases=2,
+        expected_case_ids=None,
+    )
+    agent = result["agents"]["opencode"]
+    assert agent[f"{variant}_skill"] == {}
+    assert agent["pass_at_k"][f"{variant}_skill"] == {}

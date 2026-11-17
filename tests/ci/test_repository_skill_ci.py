@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Keep this repository's consumer callers compatible with trusted upstream CI."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -102,3 +103,30 @@ def test_repository_skill_has_committed_complete_dataset_prerequisites():
     for manifest in skills:
         digests = dataset_preflight(manifest.parent)
         assert "evals/evals.json" in digests
+
+
+def test_repository_callers_pin_a_released_evaluator_revision():
+    """The pinned runtime must stay resolvable after the pull request that set it merges.
+
+    GitHub resolves ``uses: owner/repo/path@<sha>`` only for a commit reachable
+    from a branch or tag. A commit taken from a pull-request branch vanishes once
+    that branch is squash-merged and deleted, and every later run then fails before
+    any job starts with "error parsing called workflow ... workflow was not found".
+    Release descriptors name only reviewed commits on main, so the repository's own
+    callers pin one of those.
+    """
+    descriptors = [
+        ROOT / "src/skillevaluator/ci-release-all-tiers.json",
+        *sorted((ROOT / "ci/bundles").glob("*/release.json")),
+    ]
+    released = set()
+    for descriptor in descriptors:
+        data = json.loads(descriptor.read_text())
+        released.update(
+            str(value)
+            for key, value in data.items()
+            if key.endswith("_ref") and re.fullmatch(r"[0-9a-f]{40}", str(value))
+        )
+    assert released
+    runtime = workflow(SCAN)["jobs"]["skills"]["with"]["tools-ref"]
+    assert runtime in released, f"{runtime} is not a workflow_ref or tools_ref of any committed release descriptor"

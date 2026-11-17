@@ -451,6 +451,23 @@ def _budget_number(value: Any, *, cost: bool = False, missing: str = "not measur
     return f"{number:,}"
 
 
+def budget_fully_denied(metadata: object) -> bool:
+    """Return whether every planned attempt was explicitly denied before execution."""
+    if not isinstance(metadata, dict):
+        return False
+    planned = metadata.get("planned_attempts")
+    denied = metadata.get("not_run")
+    return (
+        isinstance(planned, int)
+        and planned > 0
+        and metadata.get("started_attempts") == 0
+        and metadata.get("attempts_not_run") == planned
+        and isinstance(denied, list)
+        and len(denied) == planned
+        and all(isinstance(row, dict) and row.get("reason") == "budget_exhausted" for row in denied)
+    )
+
+
 def budget_incomplete_reason(metadata: object) -> str | None:
     if not isinstance(metadata, dict) or not isinstance(metadata.get("not_run"), list) or not metadata["not_run"]:
         return None
@@ -461,7 +478,7 @@ def budget_incomplete_reason(metadata: object) -> str | None:
     )
 
 
-def budget_line(metadata: dict[str, Any]) -> str:
+def budget_line(metadata: dict[str, Any], *, agents: dict[str, Any] | None = None) -> str:
     # Recompute from usage and limits: cached observations may be absent or stale.
     overruns, incomplete, configured = _budget_observations(metadata)
     observations = "; ".join(
@@ -520,4 +537,28 @@ def budget_line(metadata: dict[str, Any]) -> str:
     limits = metadata.get("limits")
     if isinstance(limits, dict) and limits.get("max_cost_usd") is not None:
         line += "; agent inference only (user-supplied rates; provider-cost fallback), not billed spend"
+    rows = metadata.get("not_run")
+    denied = {
+        (row.get("agent"), row.get("arm"))
+        for row in (rows if isinstance(rows, list) else [])
+        if isinstance(row, dict)
+        and row.get("reason") == "budget_exhausted"
+        and isinstance(row.get("agent"), str)
+        and isinstance(row.get("arm"), str)
+    }
+    for agent, data in (agents if isinstance(agents, dict) else {}).items():
+        if not isinstance(agent, str) or len(agent) > 64 or not agent.replace("-", "").replace("_", "").isalnum():
+            continue
+        conditions = data.get("conditions", {}) if isinstance(data, dict) else {}
+        if not isinstance(conditions, dict):
+            continue
+        for arm in ("with", "without"):
+            condition = conditions.get(f"{arm}_skill", {})
+            if (
+                isinstance(condition, dict)
+                and condition.get("execution_status") == "skipped"
+                and condition.get("expected_attempts") == 0
+                and ((agent, arm) in denied or (agent, f"{arm}_skill") in denied)
+            ):
+                line += f"; {agent} {arm}-skill not run due to budget"
     return line

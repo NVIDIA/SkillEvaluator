@@ -102,7 +102,7 @@ Example: `47.0% → 92.0% (+45.0 points)` means the skill-assisted run scored 92
 
 - Dimension bands: PASS at 50% or above; NEUTRAL from 40% to below 50%; FAIL below 40%.
 - Overall Tier 3 lift: PASS at +5 points or more; FAIL at -10 points or less; values between those bands are NEUTRAL.
-- Overall verdict: PASS only when every configured dimension passes for at least one supported agent. Lift is reported as diagnostic evidence and does not override this gate.
+- Overall verdict: PASS only when every configured dimension passes for at least one supported agent, with no with-skill case failing a required goal-accuracy or security check. A scored unmet goal or security issue in any attempt fails its case and that agent's quality verdict, even if all dimensions pass. Baseline-arm required-check failures do not change this quality verdict. Lift is reported as diagnostic evidence and does not override this gate.
 - The 50% attempt pass threshold is a separate per-task gate; it is not the dimension pass threshold.
 - Effectiveness is the equal-weight mean of goal completion (`goal_accuracy`) and expected workflow adherence (`behavior_check`).
 - Token efficiency is a separate report-only signal. It does not change a dimension score or the overall verdict.
@@ -112,7 +112,7 @@ Which number answers which question:
 
 - **Overall verdict** (top of this card): whether the evidence supports publishing the skill. It needs every required tier, not only Tier 3 scores.
 - **Dimension score**: how well the agent did on one question above when it had the skill, from 0% to 100%.
-- **Overall** row: the equal-weight mean of the five dimension scores with the skill.
+- **Overall** row: when comparable baseline scores are available, the two scores used for published Skill Lift, on the metrics and cases both arms scored comparably. Otherwise, the available arm Overall score(s). These can differ from the headline with-skill score.
 - **Uplift**: the displayed skill score minus the displayed no-skill baseline score. Published Skill Lift compares Overall only on the metrics and cases both arms scored, so it can differ. Uplift does not set the verdict.
 - **pass@k** (HTML report and `pass_at_k_lift.json`): the share of eval cases with at least one passing attempt out of k. It measures how repeatable success is, separately from the dimension scores.
 - **Quality Score** (Tier 1, out of 100): a static review of the skill's files. It is not an input to any Tier 3 score or uplift.

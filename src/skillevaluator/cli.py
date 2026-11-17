@@ -31,6 +31,7 @@ from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_S
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.precommit import CHECKS
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
     TierRow,
@@ -67,6 +68,7 @@ from skillevaluator.tier1.commands import (
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.helpers import resolve_git_root
 from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
@@ -406,6 +408,7 @@ _FILE_REPORT_EXTENSIONS = {
     "html": ".html",
     "markdown": ".md",
     "sarif": ".sarif.json",
+    "junit": ".junit.xml",
 }
 
 
@@ -497,7 +500,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown", "sarif"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -616,6 +619,19 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )
+
+
+def _report_roots(target_path: Path) -> dict[str, Path]:
+    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+
+    The repository root is the Git root containing *target_path*, so a finding
+    reads the same repository-relative ``file`` from every command; outside Git
+    it falls back to the target folder.
+    """
+    repository_root = resolve_git_root(target_path)
+    if repository_root is None:
+        repository_root = target_path if target_path.is_dir() else target_path.parent
+    return {"scan_root": target_path, "repository_root": repository_root}
 
 
 def _resolve_file_report_output_location(
@@ -1271,6 +1287,14 @@ def _ensure_autopilot_dataset(
         return dataset_note
     except click.ClickException:
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if is_missing_tier3_extra(exc):
+            raise click.ClickException(
+                "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+            ) from exc
+        raise click.ClickException(str(exc)) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1975,7 +1999,7 @@ def _finish_pipeline_view(
         details += (context.coverage.text, *context.coverage.details)
     details += (f"Publication eligibility: {context.publication_label}",)
 
-    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
+    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json", "junit": ".junit.xml"}
     links: list[tuple[str, str]] = [
         ("report" if fmt == "html" else fmt, str(output_dir / f"{basename}{ext[fmt]}"))
         for fmt in report_formats
@@ -2002,7 +2026,8 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        state = "didn't run" if only.is_incomplete else "failed"
+        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
+        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -2573,6 +2598,7 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    requested_path = target_path
     if harness:
         from skillevaluator.harness import load_profiles
 
@@ -2601,10 +2627,12 @@ def validate(
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_WORKFLOWS,
+        SKILL_MANIFEST_FILE,
+        WORKFLOWS_MANIFEST_FILE,
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
+    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
     if external and profile and profile not in {"default", "external"}:
@@ -2618,10 +2646,29 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    # A file passed as SKILL.md or workflow-rules.mdc is a manifest by the name it was passed
+    # under. Auto-detection must not read the file a link points to: SKILL.md may be a link
+    # to shared/guide.md, which names no content type.
+    manifest_type = None
+    if target_path.is_file():
+        if requested_path.name.upper() == SKILL_MANIFEST_FILE.upper():
+            manifest_type = CONTENT_TYPE_SKILL
+        elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
+            manifest_type = CONTENT_TYPE_WORKFLOWS
+    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as a SKILL.md already
+    # does for Tier 3, so every tier, the report names, and the default report location
+    # match the directory form. Take the folder from the path as given: resolving first
+    # would move a linked manifest to the folder its link points into. That folder is
+    # now the Tier 2 root, so refuse a linked one as the directory form does.
+    if manifest_type is not None and resolved_type == manifest_type:
+        if dedup:
+            _reject_linked_tier2_root(requested_path.absolute().parent)
+        target_path = requested_path.absolute().parent.resolve()
+        publication_name = publication_target_name(target_path) or target_path.name
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -2992,9 +3039,6 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
-    sarif_repository_root = resolve_git_root(target_path)
-    if sarif_repository_root is None:
-        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -3024,8 +3068,8 @@ def validate(
         explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
-        sarif_scan_root=target_path,
-        sarif_repository_root=sarif_repository_root,
+        **_report_roots(target_path),
+        catalog_root=catalog_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
     if harness_rows and "json" in effective_formats:
@@ -3226,6 +3270,7 @@ def quality_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("quality"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("quality check failed")
 
@@ -3242,6 +3287,7 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("rubric"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("rubric evaluation failed")
 
@@ -3269,6 +3315,7 @@ def security_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("security scan failed")
 
@@ -3292,6 +3339,7 @@ def pii_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("PII scan failed")
 
@@ -3307,8 +3355,35 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("script-lint"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("script lint failed")
+
+
+@cli.command("precommit-run", hidden=True)
+@click.option(
+    "--min-score",
+    type=int,
+    default=QUALITY_DEFAULT_MIN_SCORE,
+    show_default=True,
+    help="Minimum quality score (0-100) when the quality check runs.",
+)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml when the quality check runs.",
+)
+@click.argument("check", type=click.Choice(list(CHECKS)))
+@click.argument("paths", nargs=-1, type=str)
+def precommit_run(min_score: int, quality_config: Path | None, check: str, paths: tuple[str, ...]) -> None:
+    """Map changed files to skill roots and run one offline Tier 1 check per skill."""
+    from skillevaluator.precommit import run_precommit
+
+    code, lines = run_precommit(check, paths, min_score=min_score, quality_config=quality_config)
+    for line in lines:
+        click.echo(line)
+    raise SystemExit(code)
 
 
 @cli.command("similarity-check")
@@ -3407,6 +3482,7 @@ def similarity_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=similarity_basename,
+        **_report_roots(content_path),
     ):
         raise click.ClickException("similarity check failed")
 
@@ -3437,6 +3513,7 @@ def context_optimization_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("context optimization check failed")
 
@@ -3472,6 +3549,7 @@ def dedup_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("dedup"),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("dedup scan failed")
 
@@ -3560,7 +3638,11 @@ def _tier1_workflow(
         policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    _offer_scanner_install(checks, skip)
+    # Validators build finding paths from this root, so it is made absolute, as
+    # validate does: a relative root leaves finding paths relative to the working
+    # directory, and the report roots would then prefix the skill folder twice.
+    target_label = str(skill_path)
+    skill_path = skill_path.resolve()
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
@@ -3572,16 +3654,18 @@ def _tier1_workflow(
         profile=policy,
         previous_version=previous_version,
         skillspector_baseline=skillspector_baseline,
+        prepare_scanners=lambda: _offer_scanner_install(checks, skip),
     )
     # Resolved after the run so configuration errors still leave no output.
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    output_dir = _resolve_file_report_output_location(skill_path, output_dir, report_formats)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("tier1"),
         policy=policy,
-        target_path=str(skill_path),
+        target_path=target_label,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 1 checks failed or were incomplete")
 
@@ -3651,6 +3735,7 @@ def _tier2_workflow(
         output_dir=resolved_output_dir,
         basename=basename,
         target_path=str(skill_path),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 2 checks failed or were incomplete")
 
@@ -4012,6 +4097,14 @@ def evaluate(
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if not is_missing_tier3_extra(exc):
+            raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+        ) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -4302,7 +4395,18 @@ def _run_doctor(
     exit_codes = []
     for selected in selected_tiers:
         if selected == "3":
-            from skillevaluator.tier3.commands import doctor as tier3_doctor
+            try:
+                from skillevaluator.tier3.commands import doctor as tier3_doctor
+            except ImportError as exc:
+                from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+                if not is_missing_tier3_extra(exc):
+                    raise
+                click.echo(
+                    "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
+                )
+                exit_codes.append(1)
+                continue
 
             exit_codes.append(
                 tier3_doctor(

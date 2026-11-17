@@ -8,6 +8,7 @@ from __future__ import annotations
 import re
 
 import pytest
+from native_comparison_assertions import dimension_lift_labels
 
 from skillevaluator.constants import DIMENSION_MAPPING
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
@@ -108,10 +109,8 @@ def test_benchmark_mixed_agents_keep_inconclusive_missing_baseline_and_measured_
 
 def test_html_mixed_agents_identify_activation_suppression_in_every_grid_cell() -> None:
     payload, _, html = _render(_mixed_agents())
-    # The HTML grid interleaves one cell per agent for every dimension and Overall.
-    labels = re.findall(r'<span class="t3-mad-lift"[^>]*>(.*?)</span>', html, flags=re.DOTALL)
-    assert len(labels) == 3 * (len(DIMENSION_MAPPING) + 1)
-    by_agent = {name: labels[index::3] for index, name in enumerate(payload["agents"])}
+    by_agent = dimension_lift_labels(html, list(payload["agents"]), payload["best_agent"])
+    assert all(len(labels) == len(DIMENSION_MAPPING) + 1 for labels in by_agent.values())
     assert by_agent["unactivated"] == ["inconclusive: skill never activated"] * (len(DIMENSION_MAPPING) + 1)
     assert all(re.fullmatch(r"[+-]\d+\.\d{2} lift", label) for label in by_agent["activated"])
     assert by_agent["no-baseline"] == ["no baseline lift"] * (len(DIMENSION_MAPPING) + 1)
@@ -133,8 +132,7 @@ def test_html_grid_names_never_activation_with_or_without_baseline(baseline: boo
             "activated": _agent(activated=True),
         }
     )
-    labels = re.findall(r'<span class="t3-mad-lift"[^>]*>(.*?)</span>', html, flags=re.DOTALL)
-    assert len(labels) == 2 * (len(DIMENSION_MAPPING) + 1)
-    by_agent = {name: labels[index::2] for index, name in enumerate(payload["agents"])}
+    by_agent = dimension_lift_labels(html, list(payload["agents"]), payload["best_agent"])
+    assert all(len(labels) == len(DIMENSION_MAPPING) + 1 for labels in by_agent.values())
     assert by_agent["unactivated"] == ["inconclusive: skill never activated"] * (len(DIMENSION_MAPPING) + 1)
     assert all(re.fullmatch(r"[+-]\d+\.\d{2} lift", label) for label in by_agent["activated"])

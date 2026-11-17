@@ -869,6 +869,12 @@ _HARBOR_RUN_STOPPING_DETAIL = (
     f"2nd Ctrl+C skips wait; stopping Harbor jobs, up to {_HARBOR_RUN_CANCEL_GRACE_SECONDS:g}s of environment cleanup"
 )
 _HARBOR_RUN_REAP_SECONDS = 5.0
+# ``taskkill /T /F`` has to look the task tree up before it kills anything, and
+# that lookup can take longer than reaping a process that was already signalled.
+# Cutting it short leaves the tree running and replaces the run's own error with
+# a cleanup error, so the tree kill gets its own, longer bound. A second Ctrl+C
+# (``_HarborRunCancellation.forced``) still ends the wait early.
+_HARBOR_WINDOWS_TREE_KILL_SECONDS = 30.0
 
 
 @dataclass(frozen=True)
@@ -1458,9 +1464,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 # wrappers check a minimum version for the selected model.
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
-# Harbor would otherwise install ``opencode-ai@latest``. CI's managed local
-# bootstrap installs this same release, so every CI mode shares one pin.
-OPENCODE_VERSION = "1.19.5"
+OPENCODE_VERSION = PINNED_RUNTIME_VERSIONS["opencode"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -3802,6 +3806,34 @@ def _wait_for_harbor_leader(
         return
 
 
+def _wait_for_windows_taskkill(
+    taskkill: subprocess.Popen[bytes],
+    timeout_seconds: float,
+    *,
+    end_grace: threading.Event | None,
+) -> None:
+    """Wait up to ``timeout_seconds`` for ``taskkill`` to exit, or until ``end_grace`` is set.
+
+    The wait is cut into short slices so a set ``end_grace`` (a second Ctrl+C) is
+    noticed within ``_HARBOR_RUN_CANCEL_POLL_SECONDS`` instead of after the whole
+    budget. A ``taskkill`` that is still running when the budget runs out, or
+    when ``end_grace`` is set, raises :class:`subprocess.TimeoutExpired` so the
+    caller stops it and fails closed rather than treating the tree as stopped.
+    """
+    started = time.monotonic()
+    deadline = started + timeout_seconds
+    while True:
+        slice_seconds = min(max(deadline - time.monotonic(), 0.0), _HARBOR_RUN_CANCEL_POLL_SECONDS)
+        try:
+            taskkill.wait(timeout=slice_seconds)
+        except subprocess.TimeoutExpired as exc:
+            now = time.monotonic()
+            if now >= deadline or (end_grace is not None and end_grace.is_set()):
+                raise subprocess.TimeoutExpired(exc.cmd, now - started) from None
+            continue
+        return
+
+
 def _terminate_harbor_process_tree(
     process: subprocess.Popen[bytes],
     *,
@@ -3813,7 +3845,10 @@ def _terminate_harbor_process_tree(
     On POSIX the group receives SIGTERM, then SIGKILL once the leader exits or
     ``grace_seconds`` pass, whichever is first; a set ``end_grace`` skips the
     rest of the grace period. Windows has no SIGTERM that Harbor handles, so
-    its task tree is always stopped with ``taskkill /T /F``.
+    its task tree is always stopped with ``taskkill /T /F`` and ``grace_seconds``
+    does not apply. ``taskkill`` gets up to ``_HARBOR_WINDOWS_TREE_KILL_SECONDS``;
+    a set ``end_grace`` stops that wait early, kills ``taskkill`` and fails
+    closed, because the tree was then not confirmed stopped.
     """
     if os.name == "posix":
         # POSIX process groups do not own a descendant that deliberately calls
@@ -3840,7 +3875,7 @@ def _terminate_harbor_process_tree(
             stdout=subprocess.DEVNULL,
             stderr=subprocess.DEVNULL,
         )
-        taskkill.wait(timeout=_HARBOR_RUN_REAP_SECONDS)
+        _wait_for_windows_taskkill(taskkill, _HARBOR_WINDOWS_TREE_KILL_SECONDS, end_grace=end_grace)
         if taskkill.returncode != 0:
             taskkill_error = RuntimeError("Windows Harbor process-tree cleanup failed")
     except subprocess.TimeoutExpired as exc:
@@ -4883,6 +4918,8 @@ def _run_budgeted_variants(
             for future in as_completed(futures):
                 future.result()
     for variant, _, _ in jobs:
+        if not attempt_job_dirs[variant]:
+            continue
         _merge_attempt_jobs(
             [attempt_job_dirs[variant][key] for key in sorted(attempt_job_dirs[variant])],
             jobs_dir / f"{skill_name}-{agent}-{variant}",
@@ -5360,7 +5397,11 @@ class _RunProgressLifecycle:
         else:
             errors = [str(raw_errors)] if raw_errors else []
         warnings = result.get("warnings") if isinstance(result.get("warnings"), list) else []
-        failed = bool(errors) or result.get("execution_status") not in {None, "succeeded"}
+        from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+        status = result.get("execution_status")
+        budget_denied = status == "skipped" and budget_fully_denied(result.get("budget"))
+        failed = bool(errors) or (status not in {None, "succeeded"} and not budget_denied)
         state = "failed" if failed else "degraded" if warnings else "complete"
         detail = errors[0] if errors else str(warnings[0]) if warnings else "Tier 3 evaluation finished"
         for stage in tuple(self._active_stages):
@@ -6788,6 +6829,7 @@ def _run_harbor_eval_impl(
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,
+        _evaluation_mode,
     )
     from skillevaluator.evaluation.tier3_report import (
         _pick_best_agent as _pick_canonical_best_agent,
@@ -6817,18 +6859,7 @@ def _run_harbor_eval_impl(
         if agent_results:
             best_agent = _pick_best_agent(agent_results)
             if best_agent not in agent_results:
-                conditions = [
-                    agent.get("conditions", {}).get("with_skill", {}).get("execution_status")
-                    if isinstance(agent, dict)
-                    and isinstance(agent.get("conditions"), dict)
-                    and isinstance(agent["conditions"].get("with_skill"), dict)
-                    else None
-                    for agent in agent_results.values()
-                ]
-                baseline_only = bool(agent_results) and (
-                    skip_with_skill
-                    or (len(conditions) == len(agent_results) and all(status == "skipped" for status in conditions))
-                )
+                baseline_only = _evaluation_mode(agent_results) == "baseline_only"
                 # Canonical agent payloads carry the baseline-only score as "baseline".
                 score_field = "baseline" if baseline_only else "with_skill"
                 canonical_agents = {

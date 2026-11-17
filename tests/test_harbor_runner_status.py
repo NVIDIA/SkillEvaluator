@@ -10,9 +10,11 @@ import importlib
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -804,6 +806,208 @@ def test_windows_tree_cleanup_fails_closed_when_taskkill_misses_an_exited_root(
     assert root_process.killed is False
 
 
+class _SimulatedClock:
+    """Stands in for the ``time`` module so a simulated ``taskkill`` can take "seconds" without sleeping."""
+
+    def __init__(self) -> None:
+        self.now = 1000.0
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(time, name)
+
+
+class _SimulatedWindowsProcess:
+    """A process that exits ``exits_after`` simulated seconds after it is created, and at once when killed."""
+
+    def __init__(
+        self,
+        clock: _SimulatedClock,
+        *,
+        pid: int,
+        exits_after: float,
+        on_wait: Callable[[int], None] | None = None,
+    ) -> None:
+        self.clock = clock
+        self.pid = pid
+        self.returncode: int | None = None
+        self.exits_at = clock.now + exits_after
+        self.killed = False
+        self.on_wait = on_wait
+        self.wait_timeouts: list[float | None] = []
+
+    def poll(self) -> int | None:
+        if self.returncode is None and self.clock.now >= self.exits_at:
+            self.returncode = -9 if self.killed else 0
+        return self.returncode
+
+    def kill(self) -> None:
+        self.killed = True
+        self.exits_at = self.clock.now
+
+    def wait(self, timeout: float | None = None) -> int:
+        assert timeout is not None, "a Windows tree cleanup wait must be bounded"
+        self.wait_timeouts.append(timeout)
+        if self.on_wait is not None:
+            self.on_wait(len(self.wait_timeouts))
+        if self.poll() is None:
+            if self.clock.now + timeout < self.exits_at:
+                self.clock.now += timeout
+                raise subprocess.TimeoutExpired(cmd="fake", timeout=timeout)
+            self.clock.now = max(self.clock.now, self.exits_at)
+            self.returncode = -9 if self.killed else 0
+        return int(self.returncode or 0)
+
+
+def _simulate_windows_tree_cleanup(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    taskkill_exits_after: float,
+    on_taskkill_wait: Callable[[int], None] | None = None,
+) -> tuple[_SimulatedClock, _SimulatedWindowsProcess, _SimulatedWindowsProcess]:
+    class WindowsOs:
+        name = "nt"
+
+    clock = _SimulatedClock()
+    taskkill_process = _SimulatedWindowsProcess(
+        clock, pid=99, exits_after=taskkill_exits_after, on_wait=on_taskkill_wait
+    )
+    root_process = _SimulatedWindowsProcess(clock, pid=4242, exits_after=0.0)
+    monkeypatch.setattr(runner, "os", WindowsOs())
+    monkeypatch.setattr(runner, "time", clock)
+    monkeypatch.setattr(runner, "_verified_windows_taskkill_path", lambda: Path("/trusted/taskkill.exe"))
+    monkeypatch.setattr(runner.subprocess, "Popen", lambda *_args, **_kwargs: taskkill_process)
+    return clock, taskkill_process, root_process
+
+
+@pytest.mark.parametrize("taskkill_finishes", [True, False])
+def test_windows_tree_cleanup_gives_taskkill_longer_than_a_plain_reap(
+    monkeypatch: pytest.MonkeyPatch,
+    taskkill_finishes: bool,
+) -> None:
+    """taskkill looks the task tree up before it kills it, which can outlast the budget for reaping an
+    already-signalled process. Cut short, it leaves the tree running and hides the run's own error."""
+    reap_seconds = runner._HARBOR_RUN_REAP_SECONDS
+    poll_seconds = runner._HARBOR_RUN_CANCEL_POLL_SECONDS
+    budget_seconds = runner._HARBOR_WINDOWS_TREE_KILL_SECONDS
+    clock, taskkill_process, root_process = _simulate_windows_tree_cleanup(
+        monkeypatch,
+        taskkill_exits_after=2 * reap_seconds if taskkill_finishes else float("inf"),
+    )
+    started = clock.now
+
+    if taskkill_finishes:
+        runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
+
+        assert taskkill_process.killed is False
+        # It waited past the plain reap budget, in short slices rather than one blocking call.
+        assert clock.now - started == pytest.approx(2 * reap_seconds)
+        assert len(taskkill_process.wait_timeouts) > 1
+        assert max(taskkill_process.wait_timeouts) <= poll_seconds
+    else:
+        # A taskkill that never returns is still stopped, and cleanup still fails closed.
+        with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed"):
+            runner._terminate_harbor_process_tree(root_process)  # type: ignore[arg-type]
+
+        assert taskkill_process.killed is True
+        # It waited out the whole tree-kill budget before giving up, then reaped on the short budget.
+        assert clock.now - started == pytest.approx(budget_seconds, abs=poll_seconds)
+        assert taskkill_process.wait_timeouts[-1] == reap_seconds
+        assert max(taskkill_process.wait_timeouts[:-1]) <= poll_seconds
+    # The root is reaped either way, on the short budget.
+    assert root_process.wait_timeouts == [reap_seconds]
+
+
+def test_windows_tree_cleanup_waits_out_a_slow_taskkill_when_cancellation_is_not_forced(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A first Ctrl+C alone must not shorten the wait: the cancel path passes ``end_grace``, but it is unset."""
+    budget_seconds = runner._HARBOR_WINDOWS_TREE_KILL_SECONDS
+    slow_seconds = budget_seconds - 5.0
+    clock, taskkill_process, root_process = _simulate_windows_tree_cleanup(
+        monkeypatch, taskkill_exits_after=slow_seconds
+    )
+    started = clock.now
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+
+    runner._terminate_harbor_process_tree(
+        root_process,  # type: ignore[arg-type]
+        grace_seconds=runner._HARBOR_RUN_CANCEL_GRACE_SECONDS,
+        end_grace=cancellation.forced,
+    )
+
+    assert taskkill_process.killed is False
+    assert clock.now - started == pytest.approx(slow_seconds)
+    assert root_process.wait_timeouts == [runner._HARBOR_RUN_REAP_SECONDS]
+
+
+@pytest.mark.parametrize("forced_when", ["before-cleanup", "while-taskkill-runs"])
+def test_windows_tree_cleanup_stops_waiting_for_taskkill_once_cancellation_is_forced(
+    monkeypatch: pytest.MonkeyPatch,
+    forced_when: str,
+) -> None:
+    """A second Ctrl+C says "skip wait". The 30 s taskkill budget must not outlast it, and a taskkill that was
+    cut off has not confirmed the tree is gone, so cleanup still fails closed."""
+    cancellation = runner._HarborRunCancellation()
+    cancellation.requested.set()
+    slices_before_forced = 3
+
+    def second_ctrl_c(wait_count: int) -> None:
+        if forced_when == "while-taskkill-runs" and wait_count == slices_before_forced:
+            cancellation.forced.set()
+
+    clock, taskkill_process, root_process = _simulate_windows_tree_cleanup(
+        monkeypatch,
+        taskkill_exits_after=float("inf"),
+        on_taskkill_wait=second_ctrl_c,
+    )
+    if forced_when == "before-cleanup":
+        cancellation.forced.set()
+    started = clock.now
+    poll_seconds = runner._HARBOR_RUN_CANCEL_POLL_SECONDS
+
+    with pytest.raises(RuntimeError, match="process-tree cleanup could not be confirmed") as exc_info:
+        runner._terminate_harbor_process_tree(
+            root_process,  # type: ignore[arg-type]
+            grace_seconds=runner._HARBOR_RUN_CANCEL_GRACE_SECONDS,
+            end_grace=cancellation.forced,
+        )
+
+    expected_slices = 1 if forced_when == "before-cleanup" else slices_before_forced
+    # Noticed within a poll slice of the second Ctrl+C, nowhere near the 30 s budget.
+    assert clock.now - started == pytest.approx(expected_slices * poll_seconds)
+    assert clock.now - started < runner._HARBOR_WINDOWS_TREE_KILL_SECONDS / 10
+    assert isinstance(exc_info.value.__cause__, subprocess.TimeoutExpired)
+    # taskkill is stopped and reaped on the short budget, and so is the root.
+    assert taskkill_process.killed is True
+    assert taskkill_process.wait_timeouts[-1] == runner._HARBOR_RUN_REAP_SECONDS
+    assert root_process.wait_timeouts == [runner._HARBOR_RUN_REAP_SECONDS]
+
+
+def test_windows_tree_cleanup_keeps_a_taskkill_that_finishes_despite_forced_cancellation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Forcing only stops waiting on a taskkill that is still running; one that finishes is a verified cleanup."""
+    _clock, taskkill_process, root_process = _simulate_windows_tree_cleanup(
+        monkeypatch, taskkill_exits_after=runner._HARBOR_RUN_CANCEL_POLL_SECONDS / 2
+    )
+    forced = threading.Event()
+    forced.set()
+
+    runner._terminate_harbor_process_tree(
+        root_process,  # type: ignore[arg-type]
+        grace_seconds=runner._HARBOR_RUN_CANCEL_GRACE_SECONDS,
+        end_grace=forced,
+    )
+
+    assert taskkill_process.killed is False
+    assert taskkill_process.returncode == 0
+    assert root_process.wait_timeouts == [runner._HARBOR_RUN_REAP_SECONDS]
+
+
 @pytest.mark.parametrize("candidate_kind", ["missing", "directory"])
 def test_windows_tree_cleanup_rejects_unverified_system32_taskkill(
     monkeypatch: pytest.MonkeyPatch,
@@ -980,7 +1184,7 @@ def test_stop_on_pass_preserves_nvidia_build_agent_import_path(
     errors = runner._run_agent_pair(
         skill_name="demo",
         agent=agent,
-        model="nvidia/nemotron-3-super-120b-a12b",
+        model="nvidia/nemotron-3.5-lightning-30b-a3b",
         env_mode=env_mode,
         with_skill=tmp_path / "with",
         baseline=None,

@@ -135,7 +135,7 @@ def test_failed_result_outranks_incomplete_in_html_tile_and_header():
     )
     tile = re.search(r'<div class="tier-card ([^"]+)"[^>]+data-target-tab="tier1"', html)
     assert tile and "fail" in tile[1]
-    assert 'data-verdict="fail"' in html
+    assert 'hero-command-status verdict-chip fail">Changes required</p>' in html
     assert "Changes required" in html
 
 
@@ -204,7 +204,7 @@ def test_html_coverage_uses_full_raw_counts_and_preserves_payload():
     original = copy.deepcopy(source)
     html = HTMLReporter().render(source)
     assert "188 scored trials: 101 with skill, 87 baseline" in html
-    assert "Best agent score" in html
+    assert "188 of 240 scored" in html
     assert source == original
 
 
@@ -212,7 +212,7 @@ def test_required_failure_cannot_be_replaced_by_completed_quality_verdict():
     source = result(3, agent_eval={"verdict": "pass", "overall_score": 0.8})
     source.add_error("agent setup failed")
     html = HTMLReporter(report_scope="tier3").render(source)
-    assert re.search(r'header-status-badge[^>]+data-verdict="fail"', html)
+    assert re.search(r'hero-command-status verdict-chip fail">Changes required</p>', html)
     assert 'data-publication-status="not-assessed"' in html
 
 
@@ -534,7 +534,7 @@ def test_standalone_tier3_report_header_follows_failing_tier3_verdict():
     ctx = context([source], report_scope="tier3")
     assert ctx.command_status == Status.FAILED
     html = HTMLReporter(report_scope="tier3", tabs=[{"id": "tier3", "label": "Tier 3"}]).render_all([source])
-    assert re.search(r'header-status-badge[^>]*data-verdict="fail"', html)
+    assert re.search(r'hero-command-status verdict-chip fail">Changes required</p>', html)
     assert "Passed required checks" not in html
 
 

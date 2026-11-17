@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "0.10.0"
+version = "1.0.0"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -106,6 +106,8 @@ dev = [
     "pytest-cov>=6.2.0",
     # pytest-xdist carried over for parallel test execution (-n auto).
     "pytest-xdist>=3.6.0",
+    # Dedicated offline HTML browser checks; never needed by the installed reporter.
+    "playwright==1.65.2",
     # Ruff 0.16 enables new rules that require a dedicated repository-wide cleanup.
     "ruff>=0.15.4,<0.16",
 ]

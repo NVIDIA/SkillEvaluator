@@ -837,6 +837,7 @@ def test_preview_ignores_user_insteadof_rewrite_of_a_supported_origin(
     home.mkdir()
     (home / ".gitconfig").write_text('[url "ssh://git@github.com/"]\n\tinsteadOf = https://github.com/\n')
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", str(home / ".gitconfig"))
     rewritten = subprocess.check_output(["git", "-C", str(repository), "remote", "get-url", "origin"], text=True)
     assert rewritten.startswith("ssh://")
     args = ["ci", "init", "--repo", str(repository), "--no-input", "--mode", "preview"]

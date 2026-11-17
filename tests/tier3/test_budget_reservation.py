@@ -373,7 +373,9 @@ def test_cancellation_wakes_waiter_before_in_flight_job_finishes(monkeypatch, tm
         finally:
             finish_job.set()
             budget.cancel()
-        with pytest.raises(BudgetCancelledError):
+        # Both workers observe cancellation. Either the waiting budget admission or
+        # the in-flight Harbor job can surface first through as_completed().
+        with pytest.raises((BudgetCancelledError, runner._HarborRunCancelledError)):
             future.result(timeout=5)
     assert budget.metadata()["reservation"]["in_flight_attempts"] == 0
     assert budget.metadata()["not_run"] == []

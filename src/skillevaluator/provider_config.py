@@ -49,7 +49,7 @@ _PROVIDER_SETUP_URL = "https://docs.nvidia.com/skills/skillevaluator/configurati
 CHAT_DEFAULT_OPENAI = "gpt-6.1-sol"
 CHAT_DEFAULT_ANTHROPIC = "claude-opus-5-5"
 CHAT_DEFAULT_BEDROCK = "us.anthropic.claude-opus-5-5"
-CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3-super-120b-a12b"
+CHAT_DEFAULT_NVIDIA = "nvidia/nemotron-3.5-lightning-30b-a3b"
 # Gateway catalog IDs are independent of native-provider model names. Operators
 # can override these defaults without changing the configured endpoint or key.
 CHAT_DEFAULT_GATEWAY = "nvidia/nvidia/nemotron-3-super-120b-long-ctx"
@@ -69,9 +69,9 @@ CHAT_DEFAULT_MODELS = {
 # An explicit ``SKILL_EVAL_LLM_MODEL`` still reaches SkillSpector.
 SKILLSPECTOR_DEFAULT_MODELS = {
     "openai": "gpt-6.1-sol",
-    "anthropic": "claude-opus-5",
-    "bedrock": "us.anthropic.claude-opus-5",
-    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+    "anthropic": "claude-opus-5-5",
+    "bedrock": "us.anthropic.claude-opus-5-5",
+    "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }
 SKILLSPECTOR_DEFAULT_REASONING_EFFORT = "medium"

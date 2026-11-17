@@ -23,6 +23,7 @@ from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, Ma
 from skillevaluator.utils.secure_fs import stat_is_link_or_reparse
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.base import Finding, Severity, ValidationResult
+from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.schema import SchemaValidator
 from skillevaluator.validators.security import (
     SecurityValidator,
@@ -2096,6 +2097,83 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         reported = result.errors if blocking else result.warnings
         assert any("fingerprints were ignored" in line and "SkillSpector 2.10.0" in line for line in reported)
         assert not any("fingerprints were ignored" in finding.message for finding in result.findings)
+
+    @patch("skillevaluator.validators.security.Tools")
+    def test_llm_verify_downgrade_drops_the_stale_baseline_blocker_error(
+        self, mock_tools, sample_skill_dir: Path, tmp_path: Path
+    ) -> None:
+        """The stale-fingerprint error explains a remaining blocker, so a downgrade of the last one passes the scan."""
+        baseline = tmp_path / "baseline.yaml"
+        baseline.write_text(
+            'version: 2\nscanner_version: "2.9.0"\nrules: []\nfingerprints:\n'
+            f'  - hash: "sha256:{"0" * 64}"\n    reason: "Reviewed"\n',
+            encoding="utf-8",
+        )
+        issue = {
+            "id": "PI-1",
+            "category": "Prompt Injection",
+            "pattern": "Instruction override",
+            "severity": "HIGH",
+            "finding": "Ignore prior instructions",
+            "location": {"file": "SKILL.md", "start_line": 8},
+        }
+        verdict = {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.side_effect = lambda findings, _path: dict.fromkeys(
+                range(len(findings)), verdict
+            )
+            result = _validate_skillspector_payload(
+                mock_tools,
+                sample_skill_dir,
+                _skillspector_json_report([issue]),
+                exit_code=1,
+                validator=SecurityValidator(use_llm=False, verify_llm=True, skillspector_baseline=baseline),
+            )
+
+        assert result.metadata["skillspector_baseline"]["status"] == "fingerprint_version_mismatch"
+        assert any("downgraded 1 finding(s)" in message for message in result.messages)
+        assert not any(finding.severity in (Severity.HIGH, Severity.CRITICAL) for finding in result.findings)
+        assert result.status == "passed"
+        assert result.errors == []
+
+    @pytest.mark.parametrize("incomplete", [True, False])
+    def test_llm_verify_downgrade_keeps_independent_errors_only_for_an_incomplete_scan(
+        self, incomplete: bool, tmp_path: Path
+    ) -> None:
+        """A downgrade rebuilds the result: a gate failure stays, other errors only when incomplete, a warning once."""
+        result = ValidationResult(validator_name="Security Scan")
+        result.add_structured_finding(
+            Finding(
+                category="SECURITY",
+                severity=Severity.HIGH,
+                check_name="Prompt Injection",
+                message="Ignore prior instructions",
+                file_path="SKILL.md",
+                line_number=8,
+            )
+        )
+        result.add_error("scanner report was cut short")
+        result.fail_gate("scanner status is unknown")
+        result.add_warning("scanner skipped one file")
+        result.add_warning("scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("skillspector")
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.return_value = {
+                0: {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+            }
+            SecurityValidator(verify_llm=True)._verify_findings_with_llm(result, tmp_path)
+
+        assert result.findings[0].metadata["downgraded"] is True
+        expected = ["scanner status is unknown"]
+        if incomplete:
+            expected.append("scanner report was cut short")
+        assert result.errors == expected
+        assert result.summary.errors == len(expected)
+        assert result.warnings == [result.findings[0].to_legacy_string(), "scanner skipped one file"]
+        assert result.summary.warnings == 2
 
     @patch("skillevaluator.validators.security.Tools")
     def test_rule_only_skillspector_baseline_ignores_scanner_version(
@@ -5273,7 +5351,7 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
         assert child_env["OPENAI_API_KEY"] == public_key
         assert child_env["OPENAI_BASE_URL"] == "https://integrate.api.nvidia.com/v1"
         assert child_env["SKILLSPECTOR_PROVIDER"] == "nv_build"
-        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3-super-120b-a12b"
+        assert child_env["SKILLSPECTOR_MODEL"] == "nvidia/nemotron-3.5-lightning-30b-a3b"
         assert "NVIDIA_API_KEY" not in child_env
         assert "ANTHROPIC_API_KEY" not in child_env
         assert retired_name not in child_env
@@ -5377,8 +5455,8 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         ("provider", "credential", "model", "effort"),
         (
             ("openai", "OPENAI_API_KEY", "gpt-6.1-sol", "medium"),
-            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5", None),
-            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5", None),
+            ("anthropic", "ANTHROPIC_API_KEY", "claude-opus-5-5", None),
+            ("bedrock", "AWS_BEARER_TOKEN_BEDROCK", "us.anthropic.claude-opus-5-5", None),
         ),
     )
     def test_skillspector_child_environment_maps_supported_public_provider_defaults(
@@ -5507,9 +5585,9 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
         ("provider", "credentials", "expected"),
         (
             ("openai", {"OPENAI_API_KEY": "provider-test-key"}, "gpt-6.1-sol"),
-            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5"),
-            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5"),
-            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3-super-120b-a12b"),
+            ("anthropic", {"ANTHROPIC_API_KEY": "provider-test-key"}, "claude-opus-5-5"),
+            ("bedrock", {"AWS_BEARER_TOKEN_BEDROCK": "provider-test-key"}, "us.anthropic.claude-opus-5-5"),
+            ("nv_build", {"NVIDIA_API_KEY": "provider-test-key"}, "nvidia/nemotron-3.5-lightning-30b-a3b"),
             (
                 "openai-compatible",
                 {
@@ -6160,7 +6238,7 @@ assert cap is not None and get_max_output_tokens(model) <= cap, (cap, get_max_ou
 
     def test_llm_verify_docs_state_the_answering_model_rule_of_rubric_evaluation(self) -> None:
         """Both labels come from the same client, so the two docs paragraphs state one rule."""
-        page = Path(__file__).parents[2] / "docs" / "tier1-validation.mdx"
+        page = Path(__file__).parents[2] / "docs" / "tier1-reference.mdx"
         paragraphs = [" ".join(block.split()) for block in page.read_text(encoding="utf-8").split("\n\n")]
         [verify] = [text for text in paragraphs if "`llm_model_used`" in text and "`--llm-verify`" in text]
         [rubric] = [text for text in paragraphs if "`llm_model_used`" in text and "`rubric_eval`" in text]
@@ -8535,6 +8613,40 @@ class TestSpdxAndIpFalsePositiveHardening:
 
         assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
 
+    def test_long_identifiers_before_ip_values_do_not_stall_the_scan(self, tmp_path: Path) -> None:
+        """Regression (CWE-1333): the version-label pattern could split a run of letters in exponentially many
+        ways, so a 30-letter identifier before an IPv4-shaped value stalled the PII scan for about a minute and
+        every further letter doubled that. Runs in a subprocess so that a slow scan fails the timeout instead of
+        hanging the suite; the limit is generous because the scan takes about a second."""
+        skill_dir = tmp_path / "long-identifier-skill"
+        skill_dir.mkdir()
+        not_labels = ["a" * 76, "A" * 76, "aB" * 38, "a1" * 38]
+        labels = ["a" * 69 + "Version", "version" + "A" * 69, "Tag" + "Ab1" * 24, "a" * 60 + "_version"]
+        (skill_dir / "SKILL.md").write_text(
+            "".join(f'{name} = "8.8.0.{index}"\n' for index, name in enumerate(not_labels, 1))
+            + "".join(f'{name} = "4.4.0.{index}"\n' for index, name in enumerate(labels, 1)),
+            encoding="utf-8",
+        )
+        # Keep the child on this checkout even if its interpreter has another editable install.
+        code = (
+            "import json, sys\n"
+            f"sys.path.insert(0, {str(Path(__file__).resolve().parents[2] / 'src')!r})\n"
+            "from pathlib import Path\n"
+            "from skillevaluator.validators.security import SecurityValidator\n"
+            "result = SecurityValidator().validate_pii_only(Path(sys.argv[1]))\n"
+            "found = {f.metadata.get('matched_value') for f in result.findings if f.check_name == 'ip_addresses'}\n"
+            "print(json.dumps(sorted(found)))\n"
+        )
+
+        completed = subprocess.run(
+            [sys.executable, "-c", code, str(skill_dir)], capture_output=True, text=True, timeout=60
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        # The long plain identifiers are not version labels, so their values are still reported;
+        # the long labels still mark theirs as release versions.
+        assert json.loads(completed.stdout) == ["8.8.0.1", "8.8.0.2", "8.8.0.3", "8.8.0.4"]
+
     @pytest.mark.parametrize(
         "line",
         [
@@ -8696,6 +8808,48 @@ class TestSpdxAndIpFalsePositiveHardening:
             for finding in result.findings
             if finding.check_name == "ip_addresses"
         ] == ["8.8.8.8"]
+
+    @pytest.mark.parametrize(
+        "line",
+        [
+            "Block requests to the instance metadata endpoint http://169.254.169.254/latest/meta-data/\n",
+            "ECS task credentials are served from http://169.254.170.2/v2/credentials\n",
+            "The interface fell back to the link-local address 169.254.1.1\n",
+        ],
+    )
+    def test_link_local_addresses_are_not_pii(self, tmp_path: Path, line: str) -> None:
+        skill_dir = tmp_path / "link-local-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(line, encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert not any(finding.check_name == "ip_addresses" for finding in result.findings)
+
+    @pytest.mark.parametrize("address", ["8.8.8.8", "169.25.1.1", "169.255.1.1"])
+    def test_addresses_outside_the_link_local_range_remain_pii(self, tmp_path: Path, address: str) -> None:
+        skill_dir = tmp_path / "near-link-local-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(f"Upstream resolver: {address}\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        matched = [
+            finding.metadata.get("matched_value") for finding in result.findings if finding.check_name == "ip_addresses"
+        ]
+        assert matched == [address]
+
+    def test_link_local_address_does_not_hide_a_public_ip_on_its_line(self, tmp_path: Path) -> None:
+        skill_dir = tmp_path / "link-local-and-public-ip-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("Block 169.254.169.254; resolver 8.8.8.8\n", encoding="utf-8")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        matched = [
+            finding.metadata.get("matched_value") for finding in result.findings if finding.check_name == "ip_addresses"
+        ]
+        assert matched == ["8.8.8.8"]
 
 
 def _png_chunk(kind: bytes, data: bytes) -> bytes:
@@ -9314,6 +9468,32 @@ class TestSkillspectorMissingReferences:
         assert result.is_incomplete
         assert not result.passed
 
+    @pytest.mark.parametrize("incomplete", [True, False])
+    def test_finding_deduplication_keeps_every_independent_error_and_lists_a_warning_once(
+        self, incomplete: bool
+    ) -> None:
+        """Dropping a repeated finding lowers nothing, so every error stays, complete scan or not."""
+        result = ValidationResult()
+        finding = Finding(
+            category="SECURITY", severity=Severity.LOW, check_name="advisory", message="Repeated", file_path="SKILL.md"
+        )
+        result.add_structured_finding(finding, is_error=False)
+        result.add_structured_finding(finding, is_error=False)
+        result.add_error("Scanner omitted evidence")
+        result.add_warning("Scanner skipped one file")
+        result.add_warning("Scanner skipped one file")
+        if incomplete:
+            result.mark_scan_incomplete("skillspector")
+
+        SecurityValidator._deduplicate_skillspector_findings(result)
+
+        assert len(result.findings) == 1
+        assert result.errors == ["Scanner omitted evidence"]
+        assert result.summary.errors == 1
+        assert result.warnings == [finding.to_legacy_string(), "Scanner skipped one file"]
+        assert result.summary.warnings == 2
+        assert result.is_incomplete is incomplete
+
     @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
     @pytest.mark.parametrize(
         "gap",
@@ -9489,6 +9669,43 @@ class TestSkillspectorMissingReferences:
         assert result.incomplete_scans == ([] if complete else ["skillspector"])
         if not complete:
             assert "skillspector_reference_caveats" not in result.metadata
+
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.3", "2.13.4"])
+    @pytest.mark.parametrize("left_out", ["helper.sh", ".git/HEAD"])
+    @pytest.mark.parametrize(
+        ("line", "complete"),
+        [
+            # A bold or italic label is Markdown, and a "$" before a space is a shell prompt.
+            ("**Note:** Write the summary to `output/notes.md` and keep it short.", True),
+            ("*Tip:* Write the summary to `output/notes.md` and keep it short.", True),
+            ("**Step 1:** Write the summary to `output/notes.md` and keep it short.", True),
+            ("$ python scripts/summarize.py > output/notes.md", True),
+            # A zero-padded format, whose "%05" decodes to a control character, is no exception.
+            ("$ printf '%05d' 7 > output/notes.md", True),
+            # A wildcard beside a label, a label in code and any other "$" keep their meaning.
+            ("**Note:** Run `bash *` then write the summary to `output/notes.md`.", False),
+            ("Run `sh **Note:**` then write the summary to `output/notes.md`.", False),
+            ("Run `sh $ROOT/setup` then write the summary to `output/notes.md`: $", False),
+        ],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_markdown_label_and_shell_prompt_are_not_wildcards(
+        self, mock_tools, tmp_path: Path, version: str, left_out: str, line: str, complete: bool
+    ) -> None:
+        """``**Note:**`` and ``$ python ...`` do not stand for every file left out of the scan."""
+        original = "Write the summary to `output/notes.md` and keep it short."
+        files = {
+            **_NOTES_WRITER_FILES,
+            "SKILL.md": _NOTES_WRITER_FILES["SKILL.md"].replace(original, line),
+            left_out: "ref: refs/heads/main\n",
+        }
+        skill = _write_skill(tmp_path / "notes-writer", files)
+        payload = json.loads(json.dumps(_reference_report(version)).replace(original, line))
+
+        result = _validate_skillspector_payload(mock_tools, skill, payload)
+
+        assert result.passed is complete
+        assert result.incomplete_scans == ([] if complete else ["skillspector"])
 
     @pytest.mark.parametrize(
         ("version", "reason_code"),
@@ -10347,10 +10564,11 @@ class TestSkillspectorMissingReferences:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
 
+    @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
     def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
-        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, manifest: bool
     ) -> None:
         """``validate`` runs each skill of a folder as its own job, but a line may still name a file beside it."""
         from click.testing import CliRunner
@@ -10365,6 +10583,9 @@ class TestSkillspectorMissingReferences:
             {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        if manifest:
+            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.3", "staged-script"))
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -10644,6 +10865,72 @@ class TestSkillspectorMissingReferences:
             ("Write **all** notes to `output/notes.md`.", "evals", False),
             ("Write each summary to `output/{name}.md`.", "evals", False),
             ("Is the user's summary in `output/notes.md`?", "evals", False),
+            # A bold or italic label outside code is read as its text, and a "$"
+            # before whitespace or the end of the line as a literal "$".
+            ("**Note:** Write the summary to `output/notes.md`.", "evals", False),
+            ("*Tip:* write the summary to `output/notes.md`.", "evals", False),
+            ("1. **Step 1:** write `output/notes.md`.", "evals", False),
+            ("**Step 1, then 2:** write `output/notes.md`.", "evals", False),
+            ("$ python scripts/summarize.py > output/notes.md", "evals", False),
+            ("Write `output/notes.md` and print it: $", "evals", False),
+            # A label is a glob that is not split at its ":", and its text keeps
+            # its globs and expansions; any other wildcard stands for any name.
+            ("Run bash *Note:* then write the summary to `output/notes.md`.", "Note:evil.sh", True),
+            ("*Tools: export DIR=$PWD:* then write the summary to `output/notes.md`.", "evals", True),
+            ("**Run v[e]rsions/setup:** now.", "versions", True),
+            ("**Note:** run `bash *` and write `output/notes.md`.", "install.sh", True),
+            ("Run `sh **Run:**` and write `output/notes.md`.", "install.sh", True),
+            ("Run tool --include=* and write `output/notes.md`.", "install.sh", True),
+            ("Run *:* and write `output/notes.md`.", "install.sh", True),
+            ("Run $ROOT/setup now: $", "versions", True),
+            # That "$" stays part of a word with other shell syntax, which may
+            # then name a file whose name ends in "$"; after another "$" it ends
+            # the parameter "$$". Control and private-use characters in the line,
+            # as written or decoded, do not change how it is read.
+            ("Run sh *a$ now.", "xa$", True),
+            ("Run sh setup?$ now.", "setupx$", True),
+            ("Run `sh *a$ now` and write `output/notes.md`.", "xa$", True),
+            ("Run sh 'a'$ now.", "a$", True),
+            ('Run sh "a$ b*" now.', "a$ bc", True),
+            ("Run sh *a$ now.", "xab", False),
+            ("Run sh $$ now.", "x", True),
+            ("Run sh *a\x05$ now.", "xa\x05$", True),
+            ("Run sh *a\x05$ now.", "xa\x05b", False),
+            ("Run sh *a%05$ now.", "xa\x05b", False),
+            ("Run sh *a\ue000$ now.", "xa\ue000b", False),
+            ("$ printf '%05d' 7 > output/notes.md", ".git", False),
+            ("$ printf '%05d' 7 > output/notes.md", "evals", False),
+            ("$ echo %02 %03 %04 %05 \ue000 > output/notes.md", ".git", False),
+            ("$ printf '%05d' $X > output/notes.md", ".git", True),
+            ("$ sh v*/i*.sh %05 > output/notes.md", "install.sh", True),
+            # Each word of a label is a pattern of its own.
+            ("**Step 1:** write `output/notes.md`.", "steps", False),
+            ("**Step 1:** write `output/notes.md`.", "1x", False),
+            ("**Step 1:** write `output/notes.md`.", "nextstep", True),
+            ("**Step 1:** write `output/notes.md`.", "1:x", True),
+            ("**Run the tests:** write `output/notes.md`.", "xrun", True),
+            # A shell may join words at a quoted or escaped space or delimiter,
+            # which this check does not. On such a line a label and a "$" keep
+            # their meaning as a glob and an expansion, as before, also when the
+            # joined name is elsewhere in the line.
+            ("*a' 'b c:* then write `output/notes.md`.", "xa b", True),
+            ("Run sh *setup' 'h:* now.", "xsetup h:y", True),
+            ("*a\\ b c:* then write `output/notes.md`.", "xa b", True),
+            ("**Note:** run sh setup' 'helper.sh now.", "setup helper.sh", True),
+            ("**Note:** run sh setup\\ h*.sh now.", "evals", True),
+            ('**Say "hi there":** in `output/notes.md`.', "evals", True),
+            ('Run sh "a$ b*" now.', "ab", True),
+            ('$ sh "setup h"*.sh > output/notes.md', "evals", True),
+            # So also when the label or "$" shows only once the line is decoded
+            # and the escaped space only as written, or the reverse.
+            ("Run &\\#36; sh setup\\ h*.sh now.", "setup helper.sh", True),
+            ("&\\#42;&\\#42;Note:&\\#42;&\\#42; sh setup\\ h*.sh", "setup helper.sh", True),
+            ("Run $ sh setup&#39; &#39;h*.sh now.", "setup helper.sh", True),
+            # Quotes around no space or delimiter, or a lone apostrophe, join no words.
+            ("**What's new:** write `output/notes.md`.", "evals", False),
+            ('**Say "hi":** in `output/notes.md`.', "evals", False),
+            ("Run sh 'a'$ now.", "ab", False),
+            ("$ printf 'done' > output/notes.md", "evals", False),
             # zsh groups and ranges, bash extended globs, cmd.exe escapes and
             # variables, PowerShell escapes, Windows 8.3 short names and
             # separators, and zsh EXTENDED_GLOB operators.
@@ -10717,6 +11004,22 @@ class TestSkillspectorMissingReferences:
         avoids = _skillspector_reference_line_avoids(f"# Title\n{line}\n".encode(), row, references, keys)
 
         assert avoids is not named
+
+    def test_stand_in_is_a_private_use_character_that_the_texts_do_not_hold(self) -> None:
+        """Without a free stand-in, a ``$`` before a space is read as an expansion, as before."""
+        from skillevaluator.validators.security import _skillspector_shell_patterns, _skillspector_stand_in
+
+        assert _skillspector_stand_in(["a\x02\x03\x04\x05", ""]) == "\ue000"
+        assert _skillspector_stand_in(["\ue000x", "\ue002"]) == "\ue001"
+        every = "".join(
+            chr(code)
+            for first, last in ((0xE000, 0xF8FF), (0xF0000, 0xFFFFD), (0x100000, 0x10FFFD))
+            for code in range(first, last + 1)
+        )
+        assert _skillspector_stand_in([every[:-1]]) == every[-1]
+        assert _skillspector_stand_in([every[:5000], every[5000:]]) is None
+        assert "*" not in _skillspector_shell_patterns([f"{every[:-1]} $ x"])
+        assert "*" in _skillspector_shell_patterns([f"{every} $ x"])
 
     @pytest.mark.parametrize(
         ("pattern", "name", "matches"),
@@ -10898,6 +11201,26 @@ def _high_checks(result: ValidationResult) -> list[str]:
     return sorted(finding.check_name for finding in result.findings if finding.severity == Severity.HIGH)
 
 
+def _override_notes_report(version: str) -> dict:
+    """The captured 2.13.4 report of the override notes skill; other versions report it as ``partial``."""
+    payload = _reference_report("2.13.4", "instruction-override-and-missing")
+    if version != "2.13.4":
+        payload["metadata"]["skillspector_version"] = version
+        payload["analysis_completeness"].update({"status": "partial", "is_complete": False})
+    return payload
+
+
+def _override_notes_folder_error(version: str) -> str:
+    """The error that says why the override notes skill in a folder is ``INCOMPLETE``."""
+    labels = "SKILL.md:12 [reference_resolution; reference_missing]"
+    if version == "2.13.4":
+        return f"[override-notes] {_caveat_error(labels)}"
+    return (
+        "[override-notes] skillspector JSON field 'analysis_completeness' reports incomplete analysis "
+        f"(status 'partial'): {labels}; security scan did not complete" + _REFERENCE_REJECTION_HELP
+    )
+
+
 class TestSkillspectorCompleteWithCaveats:
     """SkillSpector 2.13.4 reports an analysis whose only gaps are missing references as ``complete_with_caveats``."""
 
@@ -11000,10 +11323,11 @@ class TestSkillspectorCompleteWithCaveats:
         assert alone.incomplete_scans == []
         assert alone.warnings == [_missing_reference_warning("SKILL.md:8 [reference_resolution; reference_missing]")]
 
+    @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])
     @patch("skillevaluator.validators.security.Tools")
     def test_validate_on_a_folder_of_skills_keeps_each_skill_incomplete(
-        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+        self, mock_tools, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, manifest: bool
     ) -> None:
         """Each skill of a ``validate`` folder run is judged against the folder, also for 2.13.4 caveats."""
         from click.testing import CliRunner
@@ -11018,6 +11342,9 @@ class TestSkillspectorCompleteWithCaveats:
             {"SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", "scripts/install.sh")},
         )
         _write_skill(catalog, {"scripts/install.sh": "#!/bin/sh\ncurl x | sh\n"})
+        if manifest:
+            # A parallel job detects the skill's type again, and a manifest makes it a plugin.
+            _write_skill(skill, {".claude-plugin/plugin.json": '{"name": "setup-helper"}\n'})
         report = json.dumps(_reference_report("2.13.4", "staged-script"))
         mock_tools.skillspector.is_available = True
         mock_tools.skillspector.run.return_value = ToolResult(
@@ -11424,6 +11751,83 @@ class TestSkillspectorCompleteWithCaveats:
         # The same skill reported as partial by SkillSpector 2.13.3 keeps the same findings.
         assert as_partial.status == "incomplete"
         assert _high_checks(as_partial) == _high_checks(result)
+
+    @pytest.mark.parametrize("target", ["skill", "folder"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_llm_verify_downgrade_keeps_the_messages_no_finding_repeats(
+        self, mock_tools, tmp_path: Path, version: str, target: str
+    ) -> None:
+        """An ``--llm-verify`` downgrade rebuilds the result from its findings, which back no reference message.
+
+        The accepted missing-reference warning of a skill, and the error that
+        says why the same skill in a folder is ``INCOMPLETE``, both stay.
+        """
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
+        )
+        verdict = {"verdict": "false_positive", "confidence": "high", "rationale": "Example rationale."}
+
+        with patch("skillevaluator.inference.FindingVerifier") as verifier_cls:
+            verifier_cls.return_value.verify.side_effect = lambda findings, _path: dict.fromkeys(
+                range(len(findings)), verdict
+            )
+            result = _validate_skillspector_payload(
+                mock_tools,
+                skill if target == "skill" else root,
+                _override_notes_report(version),
+                exit_code=1,
+                validator=SecurityValidator(use_llm=False, verify_llm=True),
+            )
+
+        assert any("downgraded 3 finding(s)" in message for message in result.messages)
+        assert not _high_checks(result)
+        if target == "skill":
+            assert result.status == "passed"
+            assert result.incomplete_scans == []
+            warning = _missing_reference_warning("SKILL.md:12 [reference_resolution; reference_missing]")
+            assert result.warnings.count(warning) == 1
+        else:
+            assert result.status == "incomplete"
+            assert result.incomplete_scans == ["skillspector"]
+            assert result.errors == [_override_notes_folder_error(version)]
+
+    @pytest.mark.parametrize("target", ["skill", "folder"])
+    @pytest.mark.parametrize("version", ["2.12.0", "2.13.4"])
+    @patch("skillevaluator.validators.security.Tools")
+    def test_policy_override_keeps_the_messages_no_finding_repeats(
+        self, mock_tools, tmp_path: Path, version: str, target: str
+    ) -> None:
+        """A severity override rebuilds the result from its findings, as an ``--llm-verify`` downgrade does.
+
+        The accepted missing-reference warning of a skill, and the error that
+        says why the same skill in a folder is ``INCOMPLETE``, both stay. The
+        ``partial`` error of 2.12.0 is a gate failure, which the rebuild keeps
+        on its own; it is still listed once.
+        """
+        root = tmp_path / "bundle"
+        skill = _write_skill(
+            root / "skills" / "override-notes", {**_NOTES_WRITER_FILES, "SKILL.md": _OVERRIDE_NOTES_SKILL}
+        )
+        result = _validate_skillspector_payload(
+            mock_tools, skill if target == "skill" else root, _override_notes_report(version), exit_code=1
+        )
+        assert len(_high_checks(result)) == 3
+
+        apply_policy([result], ValidationPolicy(severity_overrides={"SECURITY.*": Severity.LOW}))
+
+        assert not _high_checks(result)
+        if target == "skill":
+            assert result.status == "passed"
+            assert result.errors == []
+            warning = _missing_reference_warning("SKILL.md:12 [reference_resolution; reference_missing]")
+            assert result.warnings.count(warning) == 1
+        else:
+            assert result.status == "incomplete"
+            assert result.incomplete_scans == ["skillspector"]
+            assert result.errors == [_override_notes_folder_error(version)]
+            assert result.summary.errors == 1
 
     @pytest.mark.parametrize(
         ("case", "labels"),

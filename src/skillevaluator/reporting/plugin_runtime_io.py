@@ -130,6 +130,19 @@ def _validate(payload: object) -> RuntimePluginReport:
     return RuntimePluginReport(serialized)
 
 
+def runtime_report_from_payload(payload: object) -> RuntimePluginReport:
+    """Validate a bounded, detached snapshot supplied by an in-process caller."""
+    chunks = []
+    size = 0
+    for chunk in json.JSONEncoder(ensure_ascii=True, allow_nan=False).iterencode(payload):
+        size += len(chunk)
+        if size > MAX_OUTPUT_BYTES:
+            raise ValueError("Runtime report exceeds its publication bound")
+        chunks.append(chunk)
+    detached = load_bounded_json("".join(chunks), max_nodes=50_000, max_tokens=50_000, max_collection_items=4096)
+    return _validate(detached)
+
+
 def save_plugin_runtime_report(report: RuntimePluginReport, run_dir: Path) -> None:
     """Atomically retain one bounded sanitized snapshot in the selected run directory."""
     # Writing needs the tier3 output helpers; replay stays free of tier3 imports.

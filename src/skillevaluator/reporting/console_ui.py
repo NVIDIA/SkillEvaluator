@@ -927,8 +927,12 @@ def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
             states[scanner] = (version, MUTED)
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
-                version = r.scanners.get(scanner) if scan != scanner else None
-                states[scanner] = (f"{version}, LLM didn't run" if version else "didn't run", f"bold {RED}")
+                version = r.scanners.get(scanner)
+                if not version:
+                    state = "didn't run"
+                else:
+                    state = f"{version}, LLM didn't run" if scan != scanner else f"{version}, scan incomplete"
+                states[scanner] = (state, f"bold {RED}")
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
         state, style = states[scanner]
@@ -1266,16 +1270,66 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
         rows.append(
             TierRow("quality", [(grade, f"bold {grade_style(grade, status=status)}"), (f"  {score:.1f} / 100", TEXT)])
         )
-    items = [_tier1_fix(r) for r in broken]
-    if setup := [r for r in incomplete if not _only_llm_stages_missing(r)]:
+    items = [item for r in broken for item in _tier1_fixes(r)]
+    items += [item for r in failed for item in _unresolved_reference_fixes(r)]
+    items += [item for r in broken for item in _later_gate_fixes(r)]
+    if setup := [r for r in incomplete if not _only_llm_stages_missing(r) and not _unresolved_reference_fixes(r)]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))
     return not failed, rows + fix_section_rows(items)
 
 
-def _tier1_fix(result: ValidationResult) -> FixItem:
-    problem = _first_error(result) or f"{result.validator_name} failed"
+# Scanner diagnostics list each ledger row as ``path:line [phase; reason]``, rows joined by "; " and the
+# first one following "): ". A path may hold spaces, so it runs from that boundary up to its ``:line``.
+_UNRESOLVED_REFERENCE = re.compile(r"(?:^|; |\): )((?:(?!; |\): ).)+?:\d+) \[reference_resolution; reference_missing\]")
+
+
+def _unresolved_reference_fixes(result: ValidationResult) -> list[FixItem]:
+    """Explain a SkillSpector scan that ran but was not accepted because a file reference didn't resolve."""
+    for text in map(str, result.errors):
+        if "security scan did not complete" in text and (locations := _UNRESOLVED_REFERENCE.findall(text)):
+            return [
+                FixItem(
+                    _short_name(result.validator_name),
+                    f"SkillSpector ran, but couldn't resolve the file reference at {', '.join(locations[:3])}, "
+                    "so the scan counts as incomplete",
+                    ["fix or remove the reference, or validate this skill on its own"],
+                )
+            ]
+    return []
+
+
+def _later_gate_fixes(result: ValidationResult) -> list[FixItem]:
+    """One item for each gate failure after the first of a check that failed beside an incomplete scan.
+
+    The check's own item names only its first gate failure, which is often the error for the gap. Listing
+    the others keeps a failure that outranks the gap, such as the hook gate, from being hidden behind it.
+    """
+    if not result.is_incomplete:
+        return []
+    return [_tier1_fix(result, gate) for gate in list(dict.fromkeys(result.gate_failures))[1:]]
+
+
+def _tier1_fixes(result: ValidationResult) -> list[FixItem]:
+    """One item per distinct critical/high finding, so a check that failed on several shows each one."""
+    serious = [
+        f for f in result.findings if getattr(f.severity, "value", str(f.severity)).lower() in ("critical", "high")
+    ]
+    messages = list(dict.fromkeys(f.message for f in serious))
+    if result.gate_failures or len(messages) < 2:
+        return [_tier1_fix(result)]
+    where = _short_name(result.validator_name)
+    items, shown = [], set()
+    for message in messages:
+        action = next((f.suggestion for f in serious if f.message == message and f.suggestion), None)
+        items.append(FixItem(where, message, [action] if action and action not in shown else []))
+        shown.add(action)
+    return items
+
+
+def _tier1_fix(result: ValidationResult, problem: str = "") -> FixItem:
+    problem = problem or _first_error(result) or f"{result.validator_name} failed"
     action = next((f.suggestion for f in result.findings if f.message == problem and f.suggestion), None)
     if action is None and not result.gate_failures:
         action = first_fix([result])

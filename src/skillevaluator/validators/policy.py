@@ -382,6 +382,7 @@ def apply_policy(
     if policy is None:
         return results
     for result in results:
+        independent_errors: list[str] = []
         independent_warnings: list[str] | None = None
         for finding in result.findings:
             current = (
@@ -391,14 +392,16 @@ def apply_policy(
             if new_severity != current:
                 if independent_warnings is None:
                     # Read before any change: a mirrored line names the old severity.
+                    independent_errors = result.independent_errors()
                     independent_warnings = result.independent_warnings()
                 finding.severity = new_severity
         if independent_warnings is not None:
-            result.recalculate_from_findings()
-            # Rebuilding from findings drops every warning. Keep those no
-            # finding mirrors, such as why a scanner did not complete.
-            for warning in independent_warnings:
-                result.add_warning(warning)
+            # Rebuilding from findings drops every error and warning that no finding
+            # mirrors, such as why a scanner did not complete. An error that explains
+            # blockers the policy has just lowered stays only for an incomplete scan.
+            result.recalculate_keeping_independent(
+                independent_errors, independent_warnings, keep_repeated_warnings=True
+            )
         if isinstance(result.metadata, dict):
             result.metadata["policy"] = policy.to_dict()
     return results

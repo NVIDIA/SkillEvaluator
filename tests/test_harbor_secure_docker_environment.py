@@ -748,9 +748,12 @@ def test_compose_stream_callback_flushes_incomplete_secret_prefix_at_eof(
 
 def test_streaming_and_buffered_redaction_union_is_deterministic_for_offset_overlaps() -> None:
     script = """
+import faulthandler
 import json
 from skillevaluator.tier3.harbor.secure_docker_environment import _StreamingSecretRedactor, _redact
 
+# Bound redaction independently of cold Harbor imports in each hash-seeded child.
+faulthandler.dump_traceback_later(10, exit=True)
 secrets = {"abcdefgh", "ghijklmn"}
 text = "abcdefghijklmn\\n"
 redactor = _StreamingSecretRedactor(secrets)
@@ -768,7 +771,7 @@ print(json.dumps({"streamed": streamed, "buffered": _redact(text, secrets)}))
             check=True,
             capture_output=True,
             text=True,
-            timeout=10,
+            timeout=60,
         )
         outputs.append(json.loads(completed.stdout))
 

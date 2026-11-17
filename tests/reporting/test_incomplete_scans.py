@@ -5,6 +5,7 @@
 
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import (
@@ -12,6 +13,7 @@ from skillevaluator.reporting import (
     CLIReporter,
     HTMLReporter,
     JSONReporter,
+    JUnitReporter,
     MarkdownReporter,
 )
 
@@ -121,6 +123,18 @@ class TestIncompleteScanReporting:
         output = _plain(CLIReporter().render_all([result]))
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
+
+    def test_junit_marks_incomplete_as_error_not_passed(self):
+        root = ET.fromstring(JUnitReporter().render_all([_incomplete_result()]))
+        cases = list(root.iter("testcase"))
+        assert cases
+        assert all(case.find("skipped") is None for case in cases)
+        errors = [case.find("error") for case in cases if case.find("error") is not None]
+        assert len(errors) == 1
+        assert errors[0].attrib["type"] == "incomplete"
+        assert errors[0].attrib["message"] == "skillspector timed out after 300 seconds"
+        assert int(root.attrib["errors"]) == 1
+        assert int(root.attrib["skipped"]) == 0
 
 
 def test_status_handles_sanitized_finding_without_location():

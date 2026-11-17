@@ -2,24 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Generic API Caller
-
-Call any REST API endpoint directly or using an OpenAPI spec.
-
-Usage:
-    # Direct call
-    python call_api.py --url "https://api.example.com/data" --method GET
-
-    # With headers
-    python call_api.py --url "https://api.example.com/data" --headers '{"Authorization": "Bearer TOKEN"}'
-
-    # POST with body
-    python call_api.py --url "https://api.example.com/items" --method POST --data '{"name": "test"}'
-
-    # Using OpenAPI spec
-    python call_api.py --spec "https://api.weather.gov/openapi.json" --operation "point" --params '{"latitude": 37.7749}'
-"""
+"""Call a REST endpoint directly or through an OpenAPI operation. See SKILL.md for usage."""
 
 import argparse
 import json

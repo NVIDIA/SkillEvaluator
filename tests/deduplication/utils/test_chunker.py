@@ -252,9 +252,9 @@ class TestChunkPython:
             __slots__ = ()
             calls = 0
 
-            def splitlines(self, *args, **kwargs):
+            def split(self, *args, **kwargs):
                 type(self).calls += 1
-                return super().splitlines(*args, **kwargs)
+                return super().split(*args, **kwargs)
 
         content = _CountingText(
             "\n".join(

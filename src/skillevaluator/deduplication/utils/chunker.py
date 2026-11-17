@@ -13,8 +13,10 @@ from __future__ import annotations
 
 import ast
 import bisect
+import io
 import logging
 import re
+import tokenize
 from dataclasses import dataclass, field, replace
 from itertools import chain
 from typing import TYPE_CHECKING
@@ -247,6 +249,30 @@ def split_into_paragraphs(
     return paragraphs or [section]
 
 
+def _python_signature(
+    node: ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef,
+    source_lines: list[str],
+) -> str:
+    """Read the complete header, stopping before the first body statement."""
+    first = node.body[0]
+    body_line, body_column = first.lineno, first.col_offset
+    decorators = getattr(first, "decorator_list", [])
+    if decorators:
+        body_line, body_column = decorators[0].lineno, 0
+
+    header_lines = source_lines[node.lineno - 1 : body_line]
+    # AST columns count UTF-8 bytes, unlike string slicing and tokenizer columns.
+    header_lines[-1] = header_lines[-1].encode("utf-8")[:body_column].decode("utf-8")
+    header = "\n".join(header_lines)
+    end_line, end_column = 1, len(header_lines[0])
+    for token in tokenize.generate_tokens(io.StringIO(header).readline):
+        if token.type == tokenize.OP and token.string == ":":
+            # Earlier colons can belong to annotations, defaults, or lambdas.
+            # Comments between the header and body are not signature tokens.
+            end_line, end_column = token.end
+    return "\n".join([*header_lines[: end_line - 1], header_lines[end_line - 1][:end_column]])
+
+
 def chunk_python(
     collected: CollectedFile,
     min_chars: int,
@@ -259,7 +285,12 @@ def chunk_python(
         return []
 
     chunks: list[ContentChunk] = []
-    source_lines = collected.content.splitlines()
+    source = collected.content
+    if "\r" in source:
+        source = source.replace("\r\n", "\n").replace("\r", "\n")
+    # Match Python's physical source rows; Unicode separators can occur inside
+    # literals and must not shift AST line coordinates.
+    source_lines = source.split("\n")
 
     module_doc = ast.get_docstring(tree)
     if module_doc and len(module_doc) >= min_chars:
@@ -284,8 +315,8 @@ def chunk_python(
             else:
                 heading = f"{name}()"
 
-            sig_line = source_lines[node.lineno - 1]
-            text = f"{sig_line}\n{doc}" if doc else sig_line
+            signature = _python_signature(node, source_lines)
+            text = f"{signature}\n{doc}" if doc else signature
 
             if len(text) >= min_chars:
                 end = node.end_lineno or node.lineno

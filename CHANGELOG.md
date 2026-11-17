@@ -438,6 +438,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
+  repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and

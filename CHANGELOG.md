@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- The bundled `api-caller` example no longer fails Tier 2 deduplication: its
+  two scripts share one HTTP(S) URL check from `scripts/url_safety.py` instead
+  of each defining `_validate_http_url()`.
+
 ## 1.0.0 - 2026-11-17
 
 ### Added

@@ -25,18 +25,12 @@ import argparse
 import json
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote, urlencode, urlparse
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from url_safety import validate_http_url
+
 _UNSET = object()
-
-
-def _validate_http_url(url: str) -> str:
-    """Reject local-file and custom URL schemes before making a request."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Only absolute HTTP or HTTPS URLs are supported")
-    return url
 
 
 def make_request(
@@ -55,7 +49,7 @@ def make_request(
     }
 
     try:
-        url = _validate_http_url(url)
+        url = validate_http_url(url)
         # Prepare headers
         req_headers = {
             "User-Agent": "skills-agent/1.0 (api-caller skill)",
@@ -74,7 +68,7 @@ def make_request(
         req = Request(url, data=body, headers=req_headers, method=method)
 
         # Make request
-        # _validate_http_url() rejects non-HTTP schemes before this request.
+        # validate_http_url() rejects non-HTTP schemes before this request.
         with urlopen(req, timeout=timeout) as response:  # nosec B310
             result["status_code"] = response.status
             result["headers"] = dict(response.headers)

@@ -81,6 +81,7 @@ _ARGV_RM_THAT_RUNS = [
     _python("run(args=['/usr/bin/rm', '--recursive', '/workspace'])"),
     _python("run(['rm', '-rf', '/home/u'], shell=False, check=True)"),
     _python("run(['echo', '-rf', '/home/u'], executable='rm')"),
+    _run_code("import asyncio\nasyncio.run(asyncio.create_subprocess_exec('echo', '-rf', '/home/u', executable='rm'))"),
     "python3 -c \"from subprocess import run; run(['rm', '-rf', '/workspace'], check=True)\"",
     "python3 -c \"import subprocess as sp; sp.run(['rm', '-rf', '/home/u'])\"",
     "python3 -c \"import os; os.execvp('rm', ['rm', '-rf', '/home/u'])\"",
@@ -281,6 +282,9 @@ _ARGV_RM_THAT_RUNS = [
     # executable=None, the default, names no program, so argv[0] is the program.
     _python("run(['rm', '-rf', '/home/u'], executable=None)"),
     _run_code("import subprocess\nsubprocess.Popen(['rm', '-rf', '/home/u'], executable=None)"),
+    _run_code("import asyncio\nasyncio.run(asyncio.create_subprocess_exec('rm', '-rf', '/home/u', executable=None))"),
+    # A second positional argument is Popen's bufsize, which names no program.
+    _run_code("import subprocess\nsubprocess.Popen(['rm', '-rf', '/home/u'], -1)"),
     # JavaScript calls are read wherever their name appears outside comments
     # and strings: in a function the code never calls, a constant-false
     # branch, or code that mocks child_process.
@@ -435,6 +439,13 @@ _ARGV_TEXT_THAT_DOES_NOT_RUN_RM = [
     "cat > clean.py <<'PY'\nimport subprocess\nsubprocess.run(['rm', '-rf', '/home/u'])\nPY",
     # The program that runs is not rm, or a shell gets the vector as its arguments.
     "python3 -c \"import os; os.execv('/bin/echo', ['rm', '-rf', '/home/u'])\"",
+    _run_code("import subprocess\nsubprocess.Popen(['rm', '-rf', '/home/u'], -1, '/bin/echo')"),
+    _run_code("import subprocess\nsubprocess.run(['rm', '-rf', '/home/u'], -1, '/bin/echo')"),
+    _run_code("import subprocess\nsubprocess.check_output(['rm', '-rf', '/home/u'], -1, '/bin/echo')"),
+    _run_code("import subprocess\nsubprocess.run(['rm', '-rf', '/home/u'], *[-1, '/bin/echo'])"),
+    _run_code(
+        "import asyncio\nasyncio.run(asyncio.create_subprocess_exec('rm', '-rf', '/home/u', executable='/bin/echo'))"
+    ),
     _python("run(['rm', '-rf', '/home/u'], shell=True)"),
     "node -e \"console.log(\\\"spawnSync('rm', ['-rf', '/home/u'])\\\")\"",
     "node - <<'JS'\n// spawnSync('rm', ['-rf', '/home/u'])\nconsole.log('ok')\nJS",
@@ -756,10 +767,15 @@ _ARGV_RM_FORMS_NOT_MODELED = [
     _HOME_CLEANUP.replace("python3", "$(which python3)", 1),
     "p() { python3 \"$@\"; }; p -c \"import subprocess; subprocess.run(['rm', '-rf', '/home/u'])\"",
     "python3 <<< $'import subprocess\\nsubprocess.run([\\'rm\\', \\'-rf\\', \\'/home/u\\'])'",
-    # A program and its arguments given as separate tool arguments, and an
-    # executable= that is not a string literal.
+    # A program and its arguments given as separate tool arguments, an
+    # executable= that is not a string literal, and Popen's positional executable.
     {"action": "run_command", "action_input": {"command": "rm", "args": ["-rf", "/workspace"]}, "observation": ""},
     _run_code("import shutil, subprocess\nsubprocess.run(['rm', '-rf', '/home/u'], executable=shutil.which('rm'))"),
+    _run_code(
+        "import asyncio, shutil\n"
+        "asyncio.run(asyncio.create_subprocess_exec('rm', '-rf', '/home/u', executable=shutil.which('rm')))"
+    ),
+    _run_code("import subprocess\nsubprocess.Popen(['echo', '-rf', '/home/u'], -1, 'rm')"),
     # JavaScript after a regular expression literal that holds a backtick
     # (on any later line) or // (on its line), and a comment before the array.
     _run_code(

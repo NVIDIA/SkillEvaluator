@@ -480,8 +480,8 @@ from a shell string, is checked as the shell command the vector names. The
 calls read are Python's `subprocess.run`, `call`, `check_call`, `check_output`
 and `Popen` (the vector as the first argument or `args=`, with an
 `executable=` other than `None` naming the program), `os.exec*`, `os.spawn*`,
-`os.posix_spawn`, `os.posix_spawnp` and `asyncio.create_subprocess_exec`,
-named by module (which an earlier notebook cell may have imported) or through
+`os.posix_spawn`, `os.posix_spawnp` and `asyncio.create_subprocess_exec`
+(whose `executable=` names the program in the same way), named by module (which an earlier notebook cell may have imported) or through
 the code's imports, as in `import subprocess as sp` or
 `from subprocess import run`, and Node's `spawn`, `spawnSync`, `execFile` and
 `execFileSync`, matched by name. The code is a `python -c`, `node -e`,
@@ -580,8 +580,12 @@ forms are not read as argument vectors and keep the result they had before:
   assignment expression or a chained assignment, as in
   `subprocess.run(cmd := [...])` and `cmd = base = [...]`, and a program
   given as an item of a vector, as in `os.execvp(cmd[0], cmd)`, as the
-  positional `executable` of `Popen` or by an `executable=` that is not a
-  string literal, as in `executable=shutil.which('rm')`;
+  positional `executable` of `Popen`, also passed on by `run`, `call`,
+  `check_call` or `check_output`, or by an `executable=` that is not a
+  string literal, as in `executable=shutil.which('rm')`: a `subprocess` call
+  with a third positional argument, or a starred one after the first, is not
+  read, so `subprocess.Popen(['rm', '-rf', '/home/u'], -1, '/bin/echo')`
+  does not receive the finding;
 - a runner reached through `__import__('subprocess')`, `getattr`, another name
   it is bound to (`run = subprocess.run`) or a renamed JavaScript import
   (`{ spawnSync: run }`), a program that a Python string, `pty` or an event

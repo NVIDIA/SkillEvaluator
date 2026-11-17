@@ -7400,18 +7400,20 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
     The call must name a function of subprocess, os or asyncio through the
     code's imports (see _python_imported_names) and may run (see
     _python_calls_that_may_run). The vector holds the program first: argv[0]
-    of a subprocess call (or its executable= value other than None), and the path or file
-    argument of os.exec*, os.spawn*, os.posix_spawn and posix_spawnp. Every
-    item must be a str literal; a whole vector may also be a name bound once
-    to such a list (see _python_bound_vectors), and ``*name`` or ``*[...]``
-    of such a vector stands for its items, as in
-    ``create_subprocess_exec(*cmd)``. A call with a shell= value other than
-    False, None or another false constant, or with **kwargs, is skipped,
-    since the vector may then be shell arguments; so is source that does
-    not parse or that mocks. *tree* is the source's syntax tree when the
-    caller has parsed it already. The tree is walked once; which names are
-    used, and which are bound to vectors, is worked out only for code that
-    needs it.
+    of a subprocess call or of create_subprocess_exec (or its executable=
+    value other than None), and the path or file argument of os.exec*,
+    os.spawn*, os.posix_spawn and posix_spawnp. Every item must be a str
+    literal; a whole vector may also be a name bound once to such a list (see
+    _python_bound_vectors), and ``*name`` or ``*[...]`` of such a vector
+    stands for its items, as in ``create_subprocess_exec(*cmd)``. A call
+    with a shell= value other than False, None or another false constant, or
+    with **kwargs, is skipped, since the vector may then be shell arguments;
+    so is a subprocess call with a third positional argument, Popen's
+    executable, or a starred argument after the first, which may hold it,
+    and so is source that does not parse or that mocks. *tree* is the
+    source's syntax tree when the caller has parsed it already. The tree is
+    walked once; which names are used, and which are bound to vectors, is
+    worked out only for code that needs it.
 
     Vectors are collected, in the order the walk finds their calls, while
     their items come to at most _PY_ARGV_MAX_ITEMS in all; a vector that
@@ -7486,16 +7488,20 @@ def _python_argv_lists(source: str, tree: ast.Module | None = None) -> list[list
         name = _python_qualified_name(call.func, names) or ""
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         argv: list[str] | None = None
-        program: Any = None
+        # create_subprocess_exec passes executable= on to Popen, as the subprocess calls do.
+        program: Any = keywords.get("executable") if name in _PY_ARGV_RUNNERS or name in _PY_SPAWN_EXEC else None
+        # executable=None, the default, names no program.
+        if isinstance(program, ast.Constant) and program.value is None:
+            program = None
         if name in _PY_ARGV_RUNNERS:
             shell = keywords.get("shell")
             if shell is not None and not (isinstance(shell, ast.Constant) and not shell.value):
                 continue
+            # Popen's third positional argument, which run, call, check_call and check_output pass on to it, is
+            # its executable, and a starred argument after the first may hold it.
+            if len(call.args) > 2 or any(isinstance(arg, ast.Starred) for arg in call.args[1:]):
+                continue
             argv = vector(call.args[0] if call.args else keywords.get("args"))
-            program = keywords.get("executable")
-            # executable=None, the default, names no program.
-            if isinstance(program, ast.Constant) and program.value is None:
-                program = None
         elif name in _PY_SPAWN_EXEC:
             argv = items(call.args)
         elif name in {"os.posix_spawn", "os.posix_spawnp"} and len(call.args) >= 2:

@@ -137,7 +137,7 @@ does, pass the same config file, with a path relative to the repository root:
 | Hook id | Check | Needs |
 | --- | --- | --- |
 | `skillevaluator-quality` | Composite quality score (`quality-check`) | Python 3.12-3.14 only |
-| `skillevaluator-schema` | `SKILL.md` frontmatter and skill layout (`validate --tiers 1 --checks schema`) | Python 3.12-3.14 only |
+| `skillevaluator-schema` | `SKILL.md` frontmatter and skill layout (`validate --tiers 1 --checks schema`; honours `SKILLEVALUATOR_PROFILE`) | Python 3.12-3.14 only |
 | `skillevaluator-lint-scripts` | Advisory Python script lint (`lint-scripts`) | Python 3.12-3.14 only |
 
 Each hook prints one compact line per skill (`PASS` or `FAIL`) and exits

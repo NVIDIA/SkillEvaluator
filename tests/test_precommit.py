@@ -597,3 +597,28 @@ def test_precommit_cli_rejects_invalid_quality_config(tmp_path: Path) -> None:
     )
     assert missing.exit_code == 2
     assert "does not exist" in missing.output
+
+
+def test_precommit_schema_follows_the_profile_env_var(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill = _write_skill(tmp_path, "profile-skill")
+
+    monkeypatch.delenv("SKILLEVALUATOR_PROFILE", raising=False)
+    code, lines = run_precommit("schema", [str(skill / "SKILL.md")], cwd=tmp_path)
+    assert code == 0
+    assert lines == ["PASS  profile-skill  schema"]
+
+    monkeypatch.setenv("SKILLEVALUATOR_PROFILE", "registry")
+    code, lines = run_precommit("schema", [str(skill / "SKILL.md")], cwd=tmp_path)
+    assert code == 1
+    assert lines[0].startswith("FAIL  profile-skill  schema  ")
+
+
+def test_precommit_fail_line_stays_on_one_line_for_yaml_errors(tmp_path: Path) -> None:
+    body = "---\nname: bad-yaml\ndescription: [unclosed\nversion: 1.0.0\n---\n\n# Bad\n"
+    skill = _write_skill(tmp_path, "bad-yaml", body=body)
+
+    code, lines = run_precommit("schema", [str(skill / "SKILL.md")], cwd=tmp_path)
+    assert code == 1
+    assert len(lines) == 1
+    assert "\n" not in lines[0]
+    assert lines[0].startswith("FAIL  bad-yaml  schema  ")

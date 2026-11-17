@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.constants import QUALITY_DEFAULT_MIN_SCORE, SCAN_EXCLUDED_DIRS, SKILL_MANIFEST_VARIANTS
 from skillevaluator.tier1.commands import run_lint_scripts, run_quality_check
+from skillevaluator.validators.policy import resolve_policy
 from skillevaluator.validators.schema import SchemaValidator
 
 if TYPE_CHECKING:
@@ -147,7 +148,13 @@ def _quality_score(results: Sequence[ValidationResult]) -> float | None:
 
 
 def _strip_location(message: str) -> str:
-    return message.split(" in /", 1)[0]
+    """Return the first line of *message* without its absolute-path location.
+
+    YAML parse errors carry context lines (a copy of the offending source), so
+    only the first line is kept to hold the one-line-per-skill format.
+    """
+    first_line = message.splitlines()[0] if message else ""
+    return first_line.split(" in /", 1)[0]
 
 
 def _first_error(results: Sequence[ValidationResult]) -> str:
@@ -211,7 +218,8 @@ def run_check(
     if check == CHECK_QUALITY:
         return run_quality_check(skill_root, min_score=min_score, quality_config=quality_config)
     if check == CHECK_SCHEMA:
-        return [SchemaValidator().validate(skill_root)]
+        # Same policy as ``validate``: ``SKILLEVALUATOR_PROFILE`` picks the profile.
+        return [SchemaValidator(policy=resolve_policy()).validate(skill_root)]
     if check == CHECK_LINT_SCRIPTS:
         return run_lint_scripts(skill_root)
     raise ValueError(f"Unknown check: {check}")

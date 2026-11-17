@@ -363,6 +363,14 @@ All notable changes to SkillEvaluator are documented in this file.
   been installed with the base package since it moved out of the `security`
   extra, but the notice still sat in the Security row, which now lists
   pip-audit only.
+- New **Harness Check** docs page: what `skillevaluator harness-check` reports
+  and how to read its panel, with real output, the detailed view and how to fix
+  findings, what the rules check, the harnesses it covers, and how to run it on
+  its own or inside `validate`, the JSON block, and when the check helps. The
+  Tier 1 guide and the CLI reference link to it.
+  Clarify description rejection versus truncation, invocation-specific argument
+  substitution, folder-symlink target limits, and validation report/gate defaults.
+  Qualify the CI policy behavior and static loader predictions in the new FAQ.
 - The README opens with a three-column **Get started** section: run the CLI
   directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
   in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
@@ -370,6 +378,11 @@ All notable changes to SkillEvaluator are documented in this file.
   agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
   its guide on docs.nvidia.com. The CI column starts by saying what the template
   does: it checks every skill change, with no evaluation code to maintain.
+  Under the table, a harness check highlight gives the
+  `skillevaluator harness-check ./my-skill` command, an example result with one
+  line per harness, and links to the Harness Check page and to live evaluation.
+  The intro now mentions plugins. The README word limit in the packaging test
+  goes from 1,100 to 1,200 to fit the example.
 - The README badge row adds GitHub **Stars** and **Forks** badges that show the
   live counts.
 
@@ -423,6 +436,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Documentation-only CI follows imports through collected test modules and
+  package initializers, so dependent documentation assertions are included.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
   30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be

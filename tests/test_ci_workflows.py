@@ -38,6 +38,9 @@ NOT_DOCS_ONLY_IF = "${{ needs.classify-changes.outputs.docs_only != 'true' }}"
 PULL_REQUEST_TESTS_IF = (
     "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only != 'true' }}"
 )
+DOCS_ONLY_TESTS_IF = (
+    "${{ github.event_name == 'pull_request' && needs.classify-changes.outputs.docs_only == 'true' }}"
+)
 MAIN_COVERAGE_IF = "${{ github.event_name != 'pull_request' }}"
 PR_CONCURRENCY = {
     "group": "${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}",
@@ -137,11 +140,21 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert job["runs-on"] == "ubuntu-latest"
     assert job["steps"][0]["with"]["persist-credentials"] == "false"
 
-    full_lane_step_names = {
+    # The docs lane runs the documentation tests, so it needs the project
+    # installed. It also scans for private integration names, because the scan
+    # reads the documentation a docs-only pull request changes.
+    both_lane_step_names = {
         "Set up Python",
         "Set up uv",
         "Install dependencies",
         "Scan OSS source boundary",
+    }
+    both_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in both_lane_step_names}
+    assert set(both_lane_steps) == both_lane_step_names
+    assert all("if" not in step for step in both_lane_steps.values())
+
+    full_lane_step_names = {
+        "Lint committed BENCHMARK.md fixtures for leak patterns",
         "Lint",
     }
     full_lane_steps = {step.get("name"): step for step in job["steps"] if step.get("name") in full_lane_step_names}
@@ -149,6 +162,19 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
     assert all(step["if"] == NOT_DOCS_ONLY_IF for step in full_lane_steps.values())
 
     step_names = [step.get("name") for step in job["steps"]]
+    # A docs-only pull request skips every other job, so this step is the only
+    # place its documentation tests run.
+    docs_tests = job["steps"][step_names.index("Run documentation tests")]
+    assert docs_tests["if"] == DOCS_ONLY_TESTS_IF
+    assert docs_tests["shell"] == "bash"
+    docs_tests_run = docs_tests["run"].splitlines()
+    assert docs_tests_run[0] == "set -euo pipefail"
+    # The selection is captured with a plain assignment so that a failing
+    # selector stops the step. pytest with no paths would run the whole suite.
+    assert 'docs_tests="$(python -m scripts.select_docs_tests)"' in docs_tests_run
+    assert 'mapfile -t docs_test_files <<< "$docs_tests"' in docs_tests_run
+    assert 'uv run pytest -q -n auto "${docs_test_files[@]}"' in docs_tests_run
+    assert "<(" not in docs_tests["run"], "a process substitution would hide a failing selector"
     pull_request_tests = job["steps"][step_names.index("Run tests")]
     main_tests = job["steps"][step_names.index("Run tests with coverage")]
     # Pull requests wait on this required job, so they run it like the 3.13 and
@@ -168,12 +194,17 @@ def test_ci_validates_fern_on_the_required_python_312_context() -> None:
         "--cov-report=xml:coverage.xml",
     ]
     pytest_steps = [step.get("name") for step in job["steps"] if "pytest" in step.get("run", "")]
-    assert pytest_steps == ["Run tests", "Run tests with coverage"], "exactly one pytest step runs per event"
+    assert pytest_steps == [
+        "Run documentation tests",
+        "Run tests",
+        "Run tests with coverage",
+    ], "exactly one pytest step runs per event"
 
     node_step = next(step for step in job["steps"] if step.get("name") == "Set up Node.js for docs")
     docs_step = next(step for step in job["steps"] if step.get("name") == "Validate Fern documentation")
     # A failing suite must not hide a docs break, and the docs verdict should
     # not wait for the suite.
+    assert step_names.index("Validate Fern documentation") < step_names.index("Run documentation tests")
     assert step_names.index("Validate Fern documentation") < step_names.index("Run tests")
     assert "if" not in node_step, "Fern validation must run for mixed and Fern dependency PRs"
     assert len(node_step["uses"].split("@", 1)[1]) == 40

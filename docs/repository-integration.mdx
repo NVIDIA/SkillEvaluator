@@ -90,8 +90,8 @@ Reports are not written into the repository.
 Add a `.pre-commit-config.yaml` at the root of the skill repository and pin
 `rev` to a released tag that includes
 [`.pre-commit-hooks.yaml`](https://github.com/NVIDIA/SkillEvaluator/blob/main/.pre-commit-hooks.yaml).
-The example uses `v0.10.0` as the first release expected to ship the hooks;
-replace it with the tag you actually install.
+Replace `<release tag>` in the example with that tag; `v0.9.0` and earlier
+releases do not include the hooks.
 
 The hooks use `language: python`, so pre-commit builds their environment with
 the Python it runs under unless told otherwise. SkillEvaluator needs Python
@@ -106,7 +106,7 @@ default_language_version:
   python: python3.13
 repos:
   - repo: https://github.com/NVIDIA/SkillEvaluator
-    rev: v0.10.0
+    rev: <release tag>
     hooks:
       - id: skillevaluator-quality
         args: ["--min-score", "70"]

@@ -98,13 +98,26 @@ def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
 
         for method, details in methods.items():
             if method in ["get", "post", "put", "delete", "patch"]:
+                parameters = details.get("parameters", [])
+                path_parameters = methods.get("parameters", [])
+                if path_parameters and all(
+                    isinstance(parameter, dict)
+                    and "$ref" not in parameter
+                    and isinstance(parameter.get("name"), str)
+                    and isinstance(parameter.get("in"), str)
+                    for parameter in [*path_parameters, *parameters]
+                ):
+                    merged = {(parameter["name"], parameter["in"]): parameter for parameter in path_parameters}
+                    merged.update({(parameter["name"], parameter["in"]): parameter for parameter in parameters})
+                    parameters = list(merged.values())
+
                 op = {
                     "method": method.upper(),
                     "path": path,
                     "full_url": f"{base_url}{path}" if base_url else path,
                     "operation_id": details.get("operationId", ""),
                     "summary": details.get("summary", "")[:100],
-                    "parameters": parse_parameters(details.get("parameters", [])),
+                    "parameters": parse_parameters(parameters),
                 }
 
                 # Parse request body for POST/PUT/PATCH

@@ -14,6 +14,7 @@ from html import unescape
 from pathlib import Path
 
 import pytest
+from report_markup_assertions import without_scripts
 from scripts.ci import check_public_benchmarks as benchmark_gate
 
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, advisory_skip_result
@@ -21,6 +22,7 @@ from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting import BenchmarkReporter, CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
 from skillevaluator.reporting.base import agent_eval_publication_evidence_complete, get_skip_reason
 from skillevaluator.reporting.html import _sanitize_tier3_display_payload
+from skillevaluator.tier3.dataset_sufficiency import assess_dataset_sufficiency
 
 
 def _plain_cli(output: str) -> str:
@@ -192,6 +194,46 @@ def _complete_tier3_result(
     payload["dimensions"] = payload["agents"]["codex"]["dimensions"]
     result.metadata["publication_target"] = dict(publication_target)
     return result
+
+
+@pytest.mark.parametrize(
+    ("distinct_cases", "negative_cases", "pass_rate_interval", "paired_cases", "status"),
+    [
+        (4, 0, {"lower": 0.1, "upper": 0.9}, 4, "provisional"),
+        (12, 2, {"lower": 0.45, "upper": 0.55}, 12, "sufficient"),
+    ],
+)
+def test_html_overview_renders_dataset_size_status(
+    distinct_cases, negative_cases, pass_rate_interval, paired_cases, status
+) -> None:
+    result = _complete_tier3_result("DATASET-SUFFICIENCY", score=0.9, runtime_seconds=1.0)
+    sufficiency = assess_dataset_sufficiency(
+        distinct_cases=distinct_cases,
+        negative_cases=negative_cases,
+        pass_rate_interval=pass_rate_interval,
+        paired_cases=paired_cases,
+    )
+    payload = result.metadata["agent_eval"]
+    payload["dataset_summary"] = {"total_tasks": distinct_cases, "negative_tasks": negative_cases}
+    payload["dataset_sufficiency"] = sufficiency
+    payload["summary"]["dataset_summary"] = payload["dataset_summary"]
+    payload["summary"]["dataset_sufficiency"] = sufficiency
+    payload["agents"]["codex"]["dataset_sufficiency"] = sufficiency
+
+    html = HTMLReporter(include_timestamp=False).render_all([result])
+
+    expected = (
+        "Dataset size: provisional — 4 cases (policy needs 10), "
+        "0 negative cases (needs 1); pass-rate interval ±0.40 is wider than ±0.20 "
+        "(policy dataset-sufficiency-v1)"
+        if status == "provisional"
+        else "Dataset size: sufficient — 12 cases (policy needs 10), "
+        "2 negative cases (needs 1) (policy dataset-sufficiency-v1)"
+    )
+    assert sufficiency["coverage_summary"] == expected
+    assert expected in html
+    if status == "provisional":
+        assert "t3-dataset-sufficiency warning" in html
 
 
 def _publication_ready_results(marker: str) -> list[ValidationResult]:
@@ -1174,13 +1216,18 @@ def test_html_displays_effective_dimension_verdict(
     assert f"| Tier 3 | Live agent evaluation | **{expected_upper}** |" in benchmark
     assert f'data-publication-status="{expected_status}"' in html_output
     assert re.search(rf'tier-card-verdict">\s*{expected_words}\s*</span>', html_output)
-    assert f"Verdict at a glance:</strong>\n                {expected_words}" in html_output
+    assert f"<strong>Live quality: {expected_words}.</strong>" in html_output
     if with_skill_effect:
-        assert f"{expected_words} · {effect_message}" in html_output
+        assert effect_message in html_output
+        assert (
+            effect_message
+            not in html_output.split('id="tier3-page-overview"', 1)[1].split('id="tier3-page-trials"', 1)[0]
+        )
         overview = html_output.split('class="t3-overview-lead"', 1)[1].split("</div>", 1)[0]
         assert "with an overall score of" not in overview
     else:
-        assert f"{expected_words} with an overall score of" in html_output
+        assert 'data-primary-metric="score"' in html_output
+        assert f">{dimension_score:.2f}<" in html_output
     assert json_payload["publication_status"] == expected_status
     assert f"**Verdict:** {expected_upper}" in markdown
 
@@ -3576,12 +3623,15 @@ def test_html_partial_tier3_payload_removes_unsafe_only_harbor_links() -> None:
         },
     }
 
+    original = deepcopy(partial_tier3.metadata["agent_eval"])
     reporter = HTMLReporter(include_timestamp=False)
     html = reporter.render_all([partial_tier3])
     fallback = reporter._tier3_report_data([partial_tier3])
 
-    assert "javascript:alert" not in html
-    assert "file:///tmp" not in html
+    visible = without_scripts(html)
+    assert "javascript:alert" not in visible
+    assert "file:///tmp" not in visible
+    assert _html_tier3_payload(html) == original
     assert fallback is not None
     assert "harbor_viewer" not in fallback
     assert "harbor_viewer" not in fallback["summary"]
@@ -3624,6 +3674,7 @@ def test_html_result_failure_scrubs_untrusted_pass_shaped_scores() -> None:
     assert failed_tier3 is not None
     failed_tier3.add_error("Engine forced failure")
 
+    original = deepcopy(failed_tier3.metadata["agent_eval"])
     reporter = HTMLReporter(include_timestamp=False)
     html = reporter.render_all([failed_tier3])
     payload = reporter._tier3_report_data([failed_tier3])
@@ -3634,7 +3685,9 @@ def test_html_result_failure_scrubs_untrusted_pass_shaped_scores() -> None:
     assert payload["overall_score"] is None
     assert payload["agents"]["codex"]["with_skill"] is None
     assert payload["execution_errors"] == ["Engine forced failure"]
-    assert "0.99" not in html
+    visible = without_scripts(html)
+    assert "0.99" not in visible
+    assert _html_tier3_payload(html) == original
     assert "Engine forced failure" in html
 
 

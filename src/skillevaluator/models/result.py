@@ -20,6 +20,8 @@ import hashlib
 from dataclasses import dataclass, field
 from enum import StrEnum
 
+from skillevaluator.skillspector_diagnostics import merge_completeness
+
 
 class Severity(StrEnum):
     """Standardized severity levels for validation findings.
@@ -201,7 +203,7 @@ class Finding:
                 self._normalize_identity_text(self.suggestion),
             )
         )
-        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        digest = hashlib.sha256(identity.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:20]
         return f"SEF-{digest}"
 
     def location_occurrence_id(self, file_path: object, line_number: object, line_content: object = None) -> str:
@@ -220,7 +222,7 @@ class Finding:
                 self._normalize_identity_text(line_content),
             )
         )
-        digest = hashlib.sha256(identity.encode("utf-8"), usedforsecurity=False).hexdigest()[:20]
+        digest = hashlib.sha256(identity.encode("utf-8", "surrogatepass"), usedforsecurity=False).hexdigest()[:20]
         return f"SEO-{digest}"
 
     @property
@@ -343,6 +345,48 @@ class ValidationSummary:
             "low_count": self.low_count,
         }
 
+
+
+
+def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = None) -> Finding:
+    """Copy *finding* with *prefix* applied to every location it names.
+
+    Used when a sub-result is folded into a parent result (a skill inside a
+    collection, a rule inside a rules file) so a reader can still tell which
+    member each finding came from. *extra_metadata* is merged on top, for a
+    caller that can also name the member in a machine-readable field.
+    """
+    metadata = finding.metadata
+    for key in ("occurrences", "skillspector_occurrences"):
+        listed = metadata.get(key) if isinstance(metadata, dict) else None
+        if not isinstance(listed, list):
+            continue
+        # A check that folds repeats (the PII scan) lists each location
+        # in metadata, and a SkillSpector AE1 finding lists the lines
+        # that name its file; prefix those like file_path so the
+        # finding's own location still matches its first listed one.
+        metadata = {
+            **metadata,
+            key: [
+                {**item, "file": f"[{prefix}] {item['file']}"}
+                if isinstance(item, dict) and isinstance(item.get("file"), str)
+                else item
+                for item in listed
+            ],
+        }
+    if extra_metadata:
+        metadata = {**metadata, **extra_metadata} if isinstance(metadata, dict) else dict(extra_metadata)
+    return Finding(
+        category=finding.category,
+        severity=finding.severity,
+        check_name=finding.check_name,
+        message=finding.message,
+        file_path=f"[{prefix}] {finding.file_path}",
+        line_number=finding.line_number,
+        line_content=finding.line_content,
+        suggestion=finding.suggestion,
+        metadata=metadata,
+    )
 
 @dataclass
 class ValidationResult:
@@ -525,6 +569,8 @@ class ValidationResult:
         Call after mutating finding severities (e.g. LLM verification downgrade)
         so that result state is consistent with the actual finding objects.
         Independent gate failures remain errors regardless of those severities.
+        HIGH and CRITICAL findings are errors, and so is a MEDIUM finding whose
+        metadata sets ``fail_on_medium`` (a dependency audit with that option).
         """
         self.errors.clear()
         self.warnings.clear()
@@ -540,7 +586,8 @@ class ValidationResult:
             )
             self.summary.tally_severity(sev)
 
-            is_error = sev in (Severity.CRITICAL, Severity.HIGH)
+            fail_on_medium = isinstance(finding.metadata, dict) and finding.metadata.get("fail_on_medium") is True
+            is_error = sev.is_error(fail_on_medium=fail_on_medium)
             legacy_msg = finding.to_legacy_string()
             if is_error:
                 self.errors.append(legacy_msg)
@@ -549,6 +596,68 @@ class ValidationResult:
             else:
                 self.warnings.append(legacy_msg)
                 self.summary.warnings += 1
+
+    def recalculate_keeping_independent(
+        self,
+        errors: list[str],
+        warnings: list[str],
+        *,
+        keep_all_errors: bool = False,
+        keep_repeated_warnings: bool = False,
+    ) -> None:
+        """Rebuild from findings, then put back the errors and warnings that no finding repeats.
+
+        :meth:`recalculate_from_findings` drops every error and warning that no
+        finding repeats. Pass what :meth:`independent_errors` and
+        :meth:`independent_warnings` returned *before* the finding severities
+        changed, because a line that a finding repeats names its old severity.
+
+        Warnings that no finding repeats, such as why a scanner did not
+        complete, always go back, each once. Errors that no finding repeats go
+        back only for an incomplete scan, which fails anyway and whose errors
+        say why. Any other such error, such as the note on a stale SkillSpector
+        baseline, may explain a blocker that the change has just lowered.
+
+        Args:
+            errors: Independent errors read before the change.
+            warnings: Independent warnings read before the change.
+            keep_all_errors: Put every error back, for a change that lowers
+                nothing, such as dropping a repeated finding.
+            keep_repeated_warnings: Put a warning back as often as it was
+                recorded, not once.
+        """
+        self.recalculate_from_findings()
+        if keep_all_errors or self.is_incomplete:
+            for error in errors:
+                if error not in self.errors:
+                    self.add_error(error)
+        for warning in warnings:
+            if keep_repeated_warnings or warning not in self.warnings:
+                self.add_warning(warning)
+
+    def _finding_legacy_lines(self) -> set[str]:
+        """Return the legacy error and warning lines that only repeat a structured finding."""
+        represented = {finding.to_legacy_string() for finding in self.findings}
+        for finding in self.findings:
+            # merge_with_prefix puts skill labels before legacy messages but inside
+            # structured finding paths. Recognize both forms, including nested merges.
+            location = finding.location
+            prefix = ""
+            while location.startswith("[") and "] " in location:
+                label, _, location = location.partition("] ")
+                prefix += label + "] "
+                represented.add(f"{prefix}{finding.tag} {finding.message} in {location}")
+        return represented
+
+    def independent_errors(self) -> list[str]:
+        """Return errors no structured finding repeats, such as execution diagnostics."""
+        represented = self._finding_legacy_lines()
+        return [error for error in self.errors if error not in represented]
+
+    def independent_warnings(self) -> list[str]:
+        """Return warnings no structured finding repeats, such as why a scanner did not complete."""
+        represented = self._finding_legacy_lines()
+        return [warning for warning in self.warnings if warning not in represented]
 
     def add_error(self, message: str) -> None:
         """Add a legacy error string and mark validation as failed.
@@ -620,7 +729,12 @@ class ValidationResult:
         incomplete = list(dict.fromkeys([*self.incomplete_scans, *other.incomplete_scans]))
         gate_failures = [*self.gate_failures, *other.gate_failures]
         scanners = {**self.scanners, **other.scanners}
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"), other.metadata.get("skillspector_completeness")
+        )
         self.metadata.update(other.metadata)
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if incomplete:
             self.metadata["incomplete_scans"] = incomplete
         if scanners:
@@ -640,6 +754,13 @@ class ValidationResult:
 
     def merge_with_prefix(self, other: ValidationResult, prefix: str) -> None:
         """Merge another result, prefixing all errors/warnings with skill name."""
+        completeness = merge_completeness(
+            self.metadata.get("skillspector_completeness"),
+            other.metadata.get("skillspector_completeness"),
+            prefix=prefix,
+        )
+        if completeness:
+            self.metadata["skillspector_completeness"] = completeness
         if not other.passed:
             self.passed = False
 
@@ -650,33 +771,7 @@ class ValidationResult:
 
         # Prefix findings with skill name in file_path
         for finding in other.findings:
-            metadata = finding.metadata
-            listed = metadata.get("occurrences") if isinstance(metadata, dict) else None
-            if isinstance(listed, list):
-                # A check that folds repeats (the PII scan) lists each location
-                # in metadata; prefix those like file_path so the finding's own
-                # location still matches its first listed one.
-                metadata = {
-                    **metadata,
-                    "occurrences": [
-                        {**item, "file": f"[{prefix}] {item['file']}"}
-                        if isinstance(item, dict) and isinstance(item.get("file"), str)
-                        else item
-                        for item in listed
-                    ],
-                }
-            prefixed_finding = Finding(
-                category=finding.category,
-                severity=finding.severity,
-                check_name=finding.check_name,
-                message=finding.message,
-                file_path=f"[{prefix}] {finding.file_path}",
-                line_number=finding.line_number,
-                line_content=finding.line_content,
-                suggestion=finding.suggestion,
-                metadata=metadata,
-            )
-            self.findings.append(prefixed_finding)
+            self.findings.append(prefix_finding(finding, prefix))
 
         # Carry over success_details (prefixed) so contributor info is preserved
         for detail in other.success_details:
@@ -693,11 +788,51 @@ class ValidationResult:
         gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
+        # A member's confirmed failure outranks an incomplete scan in the
+        # merged result's reported status, as it does in the member's own.
+        if other.metadata.get("confirmed_failure") is True:
+            self.metadata["confirmed_failure"] = True
         if scanners := {**self.scanners, **other.scanners}:
             self.metadata["scanners"] = scanners
+        # Keep each skill's unparsed files, prefixed like errors and findings so
+        # skills stay distinguishable when a folder holds several.
+        unparsed = other.metadata.get("semgrep_unparsed_files")
+        if isinstance(unparsed, list) and unparsed:
+            carried = self.metadata.get("semgrep_unparsed_files")
+            self.metadata["semgrep_unparsed_files"] = [
+                *(carried if isinstance(carried, list) else []),
+                *(f"[{prefix}] {path}" for path in unparsed if isinstance(path, str)),
+            ]
+        omitted = other.metadata.get("semgrep_unparsed_files_omitted")
+        if type(omitted) is int and omitted > 0:
+            carried_omitted = self.metadata.get("semgrep_unparsed_files_omitted")
+            self.metadata["semgrep_unparsed_files_omitted"] = omitted + (
+                carried_omitted if type(carried_omitted) is int else 0
+            )
 
         # Merge summary
         self.summary.errors += other.summary.errors
+        self.summary.warnings += other.summary.warnings
+
+    def merge_advisories_with_prefix(self, other: ValidationResult, prefix: str) -> None:
+        """Carry a *passing* sub-result's nonblocking findings into this one.
+
+        ``merge_with_prefix`` is for a sub-result that failed. A member can
+        pass and still report advisories (INFO/LOW/MEDIUM findings such as
+        ``author_without_email`` or ``metadata_id_format``), and those are
+        exactly what a collection run is expected to surface.
+
+        This never touches ``passed``: an advisory from a passing member stays
+        advisory and cannot fail the collection. The member is named both in
+        the finding's location and in ``metadata.collection_skill``, so a
+        consumer does not have to parse the ``[prefix]`` location to tell
+        where the finding came from.
+        """
+        for finding in other.findings:
+            self.findings.append(prefix_finding(finding, prefix, {"collection_skill": prefix}))
+            self.summary.tally_severity(finding.severity)
+        for warning in other.warnings:
+            self.warnings.append(f"[{prefix}] {warning}")
         self.summary.warnings += other.summary.warnings
 
     def to_dict(self) -> dict:

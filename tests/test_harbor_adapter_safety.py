@@ -14,6 +14,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.tier3.harbor.adapter import (
+    _VERIFIER_IMPORT_SMOKE,
     _copy_custom_grader,
     _rebase_custom_dockerfile_content,
     _stage_repo_context,
@@ -143,9 +144,11 @@ def test_copy_repo_excludes_tracked_sensitive_files(tmp_path: Path) -> None:
     _assert_sensitive_repo_files_are_excluded(repo, skill, tmp_path / "tracked-task" / "environment")
 
 
-def test_copy_repo_excludes_sensitive_files_without_git(tmp_path: Path) -> None:
+def test_copy_repo_excludes_sensitive_files_without_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = tmp_path / "plain-repo"
     skill = _write_repo_context_fixture(repo)
+    # Keep this no-Git fixture independent of any checkout containing pytest's temp directory.
+    monkeypatch.setattr("skillevaluator.utils.path_security.find_git_repo_root", lambda _path: None)
 
     _assert_sensitive_repo_files_are_excluded(repo, skill, tmp_path / "plain-task" / "environment")
 
@@ -309,7 +312,8 @@ def test_generated_task_rebases_custom_dockerfile_content(tmp_path: Path) -> Non
     )
 
 
-def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
+@pytest.mark.parametrize("grading_mode", ["custom_only", "default"])
+def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path, grading_mode: str) -> None:
     skill = _write_native_skill(tmp_path)
     native_task = skill / "evals" / "harbor" / "case-001"
     environment = native_task / "environment"
@@ -321,11 +325,17 @@ def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
     tests_dir = native_task / "tests"
     tests_dir.mkdir()
     (tests_dir / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    if grading_mode == "default":
+        # Default grading reads its case metadata from evals.json.
+        (skill / "evals" / "evals.json").write_text(
+            json.dumps([{"id": "case-001", "question": "Run case", "expected_skill": skill.name}]),
+            encoding="utf-8",
+        )
 
     task = stage_native_harbor_tasks(
         skill,
         tmp_path / "native-tasks",
-        grading_mode="custom_only",
+        grading_mode=grading_mode,
         base_image="registry.example/eval-base:verified",
     )[0]
 
@@ -334,6 +344,9 @@ def test_native_task_rebases_custom_dockerfile_content(tmp_path: Path) -> None:
     assert dockerfile.index("RUN echo native-custom-layer\n") < dockerfile.index(
         "# SkillEvaluator: original base was FROM ubuntu:24.04\n"
     )
+    assert dockerfile.count('"pip", "install"') == 1
+    # Only eval.py needs the verifier imports; custom_only never runs it.
+    assert (_VERIFIER_IMPORT_SMOKE in dockerfile) is (grading_mode != "custom_only")
 
 
 def test_rebase_custom_dockerfile_content_without_from_fails_closed() -> None:

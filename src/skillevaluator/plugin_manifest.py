@@ -40,6 +40,7 @@ from skillevaluator.constants import (
     PLUGIN_MANIFEST_FILES,
     PLUGIN_MANIFEST_PRECEDENCE,
     PLUGIN_NATIVE_MANIFEST_DIRS,
+    PLUGIN_OPENCLAW_MANIFEST_FILE,
 )
 from skillevaluator.plugin_formats import (
     AGENT_PLUGINS_SCHEMA_PREFIX,
@@ -378,8 +379,8 @@ def _wrap_security_error(exc: SecurePathError) -> PluginManifestPathError:
 def manifest_relative_path(path: Path) -> Path | None:
     """Return the root-relative manifest path that *path* names, if it names one.
 
-    ``agent_plugin.yaml``/``.yml`` and a root ``plugin.json`` (Agent Plugins v1)
-    sit at the plugin root; ``plugin.json`` inside ``.claude-plugin/``,
+    ``agent_plugin.yaml``/``.yml``, a root ``plugin.json`` (Agent Plugins v1)
+    and a native OpenClaw ``openclaw.plugin.json`` sit at the plugin root; ``plugin.json`` inside ``.claude-plugin/``,
     ``.codex-plugin/``, or ``.cursor-plugin/`` roots the plugin at the vendor
     directory's parent. This is a lexical check only. Client manifest names
     match without regard to case; the returned path keeps the given spelling.
@@ -389,7 +390,7 @@ def manifest_relative_path(path: Path) -> Path | None:
     name = path.name.casefold()
     if name == PLUGIN_CONTAINED_MANIFEST_FILE and path.parent.name.casefold() in NATIVE_MANIFEST_DIRS_FOLDED:
         return Path(path.parent.name) / path.name
-    if name == PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE:
+    if name in {PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_FILE}:
         return Path(path.name)
     return None
 

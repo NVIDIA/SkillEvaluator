@@ -539,7 +539,9 @@ def test_explicit_adverse_row_has_no_invented_baseline_delta() -> None:
     assert len(comparison_rows(data.rows)) == 1
 
 
-@pytest.mark.parametrize("omitted", ["evidence_entries", "raw_trial_rewards", "non_best_agent_details"])
+@pytest.mark.parametrize(
+    "omitted", ["evidence_entries", "raw_trial_rewards", "non_best_agent_details", "declarative_check_rows"]
+)
 def test_diagnostic_truncation_preserves_complete_trial_comparisons(omitted: str) -> None:
     report = _report()
     report["report_truncation"] = {"truncated": True, "omitted": {omitted: 50}}
@@ -854,7 +856,9 @@ def test_retained_run_keeps_non_best_agent_trials_beyond_embedded_budget(tmp_pat
         summary["agent"] = "codex"
         summary_path.write_text(json.dumps(summary), encoding="utf-8")
     # A budget just below the full payload prunes only the non-best agent's details.
-    budget = tier3_report._serialized_payload_size(_canonical_export(run)) - 200
+    # Token usage joins after the budget and drops its own rows first, so it is not measured.
+    export = {key: value for key, value in _canonical_export(run).items() if key != "token_usage"}
+    budget = tier3_report._serialized_payload_size(export) - 200
     monkeypatch.setattr(tier3_report, "_MAX_EMBEDDED_REPORT_BYTES", budget)
     canonical = _canonical_export(run)
     assert canonical["report_truncation"]["omitted"]["non_best_agent_details"]

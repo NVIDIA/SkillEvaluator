@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 
+from skillevaluator.models.result import Severity, ValidationResult
 from skillevaluator.validators.script_lint import ScriptLintValidator
 
 
@@ -22,6 +23,34 @@ def skill_with_scripts(tmp_path: Path) -> Path:
 
 
 class TestScriptLintValidator:
+    @pytest.mark.parametrize("prefix", [b"", b"\xef\xbb\xbf"], ids=["plain", "utf8-bom"])
+    def test_utf8_bom_scripts_receive_ast_lint_findings(self, skill_with_scripts, prefix):
+        script = skill_with_scripts / "scripts" / "example.py"
+        script.write_bytes(prefix + b"import sys\nprint(sys.argv)\n")
+
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        assert {finding.check_name for finding in result.findings} == {
+            "flat_script",
+            "missing_shebang",
+            "no_input_validation",
+        }
+        assert result.passed
+        assert not any("passed lint checks" in detail.message for detail in result.success_details)
+
+    def test_utf8_bom_keeps_raw_shebang_check(self, skill_with_scripts):
+        script = skill_with_scripts / "scripts" / "example.py"
+        script.write_bytes(b"\xef\xbb\xbf#!/usr/bin/env python3\nprint('hello')\n")
+
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        checks = {finding.check_name for finding in result.findings}
+        assert "flat_script" in checks
+        assert "missing_shebang" in checks
+        shebang_finding = next(finding for finding in result.findings if finding.check_name == "missing_shebang")
+        assert shebang_finding.message == "example.py shebang is preceded by a UTF-8 BOM and will be ignored"
+        assert shebang_finding.suggestion == "Save the file as UTF-8 without a BOM"
+
     def test_no_scripts_dir(self, tmp_path):
         skill_dir = tmp_path / "no-scripts"
         skill_dir.mkdir()
@@ -30,6 +59,70 @@ class TestScriptLintValidator:
         result = v.validate(skill_dir)
         assert result.passed
         assert not result.findings
+
+    def test_node_scripts_reported_as_not_linted(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "a.mjs").write_text("console.log('a')\n")
+        (scripts / "b.js").write_text("console.log('b')\n")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+        assert result.passed
+        assert not result.findings
+        messages = [d.message for d in result.success_details]
+        assert any("2 Node script(s) not linted" in m for m in messages), messages
+
+    def test_node_scripts_reported_alongside_python_lint_findings(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        (scripts / "a.js").write_text("console.log('a')\n")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+        checks = [f.check_name for f in result.findings]
+        assert "flat_script" in checks
+        (note,) = [f for f in result.findings if f.check_name == "node_scripts_not_linted"]
+        assert note.severity == Severity.INFO
+        assert "1 Node script(s) not linted" in note.message
+
+    def test_node_note_survives_folder_aggregation(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "flat.py").write_text("#!/usr/bin/env python3\nimport sys\nprint(sys.argv)\n")
+        (scripts / "a.js").write_text("console.log('a')\n")
+        single = ScriptLintValidator().validate(skill_with_scripts)
+        folder = ValidationResult()
+        folder.merge_with_prefix(single, "skill-a")
+        assert any(
+            f.check_name == "node_scripts_not_linted" and f.file_path.startswith("[skill-a]") for f in folder.findings
+        )
+
+    def test_node_scripts_do_not_add_a_second_completed_check(self, skill_with_scripts):
+        scripts = skill_with_scripts / "scripts"
+        (scripts / "a.mjs").write_text("console.log('a')\n")
+        with_node = ScriptLintValidator().validate(skill_with_scripts)
+        (scripts / "a.mjs").unlink()
+        without_node = ScriptLintValidator().validate(skill_with_scripts)
+        assert with_node.summary.checks_performed == without_node.summary.checks_performed
+        assert len(with_node.success_details) == len(without_node.success_details)
+
+    def test_node_scripts_in_tools_dir_and_clean_python_are_both_reported(self, tmp_path):
+        skill_dir = tmp_path / "tools-skill"
+        tools = skill_dir / "tools"
+        tools.mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: tools-skill\ndescription: test\n---\n\n# Test\n")
+        (tools / "ok.py").write_text(
+            "#!/usr/bin/env python3\n"
+            "import argparse\n\n"
+            "def main():\n"
+            "    parser = argparse.ArgumentParser()\n"
+            "    parser.add_argument('input')\n"
+            "    args = parser.parse_args()\n"
+            "    print(args.input)\n\n"
+            "if __name__ == '__main__':\n"
+            "    main()\n"
+        )
+        (tools / "a.mjs").write_text("export {}\n")
+        (tools / "b.cjs").write_text("module.exports = {}\n")
+        result = ScriptLintValidator().validate(skill_dir)
+        messages = [d.message for d in result.success_details]
+        assert any("passed lint checks" in m for m in messages), messages
+        assert any("2 Node script(s) not linted" in m for m in messages), messages
 
     def test_flat_script_finding(self, skill_with_scripts):
         scripts = skill_with_scripts / "scripts"
@@ -116,13 +209,22 @@ class TestScriptLintValidator:
         result = v.validate(skill_with_scripts)
         assert not result.findings
 
-    def test_syntax_error_skipped(self, skill_with_scripts):
+    @pytest.mark.parametrize(
+        "source",
+        [
+            "def broken(:\n    pass\n",
+            "\ufeff\ufeffprint(1)\n",
+            "\n\ufeffprint(1)\n",
+        ],
+        ids=["syntax-error", "double-leading-bom", "non-leading-bom"],
+    )
+    def test_syntax_error_skipped(self, skill_with_scripts, source):
         scripts = skill_with_scripts / "scripts"
-        (scripts / "broken.py").write_text("def broken(:\n    pass\n")
-        v = ScriptLintValidator()
-        result = v.validate(skill_with_scripts)
-        # Syntax errors should be silently skipped
-        assert "read_error" not in [f.check_name for f in result.findings]
+        (scripts / "broken.py").write_text(source, encoding="utf-8")
+        result = ScriptLintValidator().validate(skill_with_scripts)
+
+        assert result.findings == []
+        assert result.passed
 
     def test_validator_name(self):
         v = ScriptLintValidator()

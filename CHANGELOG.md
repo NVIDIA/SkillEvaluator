@@ -6,6 +6,1538 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Pre-commit hooks for offline Tier 1 skill checks: `.pre-commit-hooks.yaml`
+  exposes `skillevaluator-quality`, `skillevaluator-schema`, and
+  `skillevaluator-lint-scripts`. A hidden `skillevaluator precommit-run` entry
+  maps changed files to skill roots and runs each check without an API key,
+  network, Docker, or scanner download.
+- JUnit XML report format (`-r junit`, `.junit.xml`) for CI test-report
+  artifacts. One testsuite is emitted per check group, failures include
+  file:line when recorded and follow the same gate as the exit code, incomplete
+  scanners are reported as errors, and checks that did not run are skipped
+  rather than reported as passed.
+- The Tier 3 report data and JSON report record which execution backend ran the
+  evaluation, as `execution_backend` (`harbor` or `nemo-gym`), next to the sandbox
+  `environment`.
+- `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
+  sandbox environment, in the agent evaluation summary and the evaluation dataset header.
+- Document measured real-provider saved-catalog scale separately from 5,000-entry
+  in-memory qualification, as fixture-dependent examples rather than guarantees.
+- `harness` results flag a project skill that has a same-named copy in a user-level
+  skills folder the harness also reads (`*-USER-COPY`). Claude Code uses the user
+  copy, Codex lists both, and the other harnesses use the project copy.
+- `harness` results flag a skill whose description has nearly the same words as another
+  skill's in the same folder (`*-LOOKALIKE`), with no embedding key. The model may route a
+  request to the wrong one of the two.
+- The `skillevaluator` agent skill now tells the agent to check for the CLI
+  and, with the user's permission, install it when missing (`uv tool install`,
+  `pipx`, pip in a Python 3.12-3.14 virtual environment, or `uvx`), and adds a
+  CLI-missing Tier 3 case. The case's target skill is inlined in its prompt, so
+  the installed skill folder carries no second `SKILL.md`.
+- Canonical `comment-skill-checks.yml` reusable workflow and source template for
+  the standard scored Tier 1 PR comment without hosted reports. It verifies the
+  existing signed receipts and native evidence, reuses the shared report and
+  comment helpers, and needs no Pages configuration or history branch. Future
+  generated bundles include the template; archived bundles and the released
+  onboarding CLI retain their existing hosted publisher setup.
+- Each `harness` rule records a confidence level and, where behaviour changed
+  between releases, the versions it applies to (shown with `-v`). `harness-check
+  --harness-version codex=0.170.0` adds a note when you run a release other than
+  the one a profile was verified on.
+- `harness-check` takes the model setup some limits depend on: `--context-tokens`,
+  `--custom-provider`, `--explicit-invocation` and `--headless` (a Claude Code
+  skill with `allowed-tools` does not load headless).
+- Plugin component rules: skill namespacing, Codex's plugin-skill cap and Agent
+  Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a
+  harness does not deliver.
+- `harness-check` on a plugin folder shows which plugin formats each harness
+  accepts (`.claude-plugin`, `.codex-plugin`, Copilot, Agent Plugins v1, Hermes
+  `plugin.yaml`) and flags an empty plugin.
+- `harness` rules for harness gates: Hermes `platforms` and OpenClaw
+  `metadata.openclaw.requires`.
+- `harness` rules for invocation fields: `disable-model-invocation`, Codex's
+  `agents/openai.yaml` policy, `allowed-tools`, Claude Code-only fields and Hermes
+  project trust. Tier 1 `schema` now reports fields outside the agentskills.io
+  spec (LOW).
+- `harness` rules for placeholders: price-like `$N` text that Claude Code and
+  OpenCode replace with arguments (with line numbers), and `$ARGUMENTS` and
+  `${CLAUDE_SKILL_DIR}`, which only Claude Code substitutes.
+- `harness` rules for delivery limits: Claude Code's body cap, OpenCode's
+  51,200-byte / 2,000-line reads and long lines, OpenClaw's whole-read and
+  weighted result caps, Hermes's 100,000-character `skill_view` budget and Codex's
+  ~10K-token shell-output cut. Tier 1 `schema` now reports `SKILL.md` size tiers
+  (32 KiB LOW, 50 KiB MEDIUM, 256,000 bytes HIGH).
+- The `harness` check measures a skill together with the skills installed beside
+  it: list budgets (scaled by the context window), duplicate names and which copy
+  each harness uses, and OpenClaw's prompt cap and compact list. A `catalog` line
+  in the panel names the folder measured. Skills in separate folders are measured
+  separately, and Copilot CLI and OpenCode get an advisory reload note.
+- `harness` rules for where `SKILL.md` lives: casing, nested manifests, symlinked
+  manifests and resources, OpenClaw symlink escapes, Codex scan depth, and files
+  Hermes leaves out of its file list. Tier 1 `schema` now reports a symlinked or
+  nested `SKILL.md` (MEDIUM), and the `skill.md` naming finding explains the
+  macOS/Linux difference.
+- `harness` rules for descriptions: missing or empty descriptions, Claude Code and
+  Codex listing cuts, Copilot CLI's 1,024 UTF-16 unit limit, quotes escaped in the
+  Copilot CLI and OpenClaw lists, and Hermes's 60-character listing; `-v` shows
+  the description each harness lists. Tier 1 `schema` now reports a description
+  over 1,024 UTF-16 units (MEDIUM) and no "Use when ..." trigger in its first 60
+  characters (LOW).
+- `harness` rules for frontmatter parsing: duplicate keys and tab indentation
+  (strict YAML parsers drop the skill), a UTF-8 BOM (Codex), no front matter
+  (Copilot CLI) and long custom frontmatter that never reaches the model. Tier 1
+  `schema` now reports duplicate frontmatter keys (HIGH) and a UTF-8 BOM (MEDIUM).
+- New `skillevaluator harness-check <skill>` command and a "Harness compatibility"
+  panel after the Tier 1 results of `validate`: one line per harness with its most
+  serious finding and an outcome label (`not found`, `rejected`, `listing
+  shortened`, ...), then `+N more` and the note count; `-v` shows every finding
+  with its fix. The checks line shows `! harness`, Tier 1 gets a `harness` summary
+  line, and the result box names the harnesses that won't load the skill.
+  `harness-check` always exits 0; `--json PATH` writes the block.
+- New advisory Tier 1 `harness` check: for each agent harness (`claude-code`,
+  `codex`, `copilot-cli`, `hermes`, `openclaw`, `opencode`) it reports whether the
+  skill `loads`, is `degraded` or is `not_loaded`, from versioned profiles shipped
+  with the package. It runs by default, never fails the run, lists its findings in
+  every report and adds a `harness_compatibility` block to JSON. `--harness
+  codex,claude-code` narrows the harnesses and `--harness-profiles DIR` loads
+  profiles from a directory. The first rules flag a skill installed outside the
+  folders a harness scans.
+- A separate four-case synthetic grader pilot adds forbidden-startup-write and
+  root-search challenges with quoted/read-only and scoped controls, an independent
+  label worksheet, content/source manifest and explicit security/Efficiency
+  availability policy. Task Overall failures remain independent of composite
+  scores. This diagnostic pilot establishes no all-metrics qualification,
+  statistical representativeness, release approval or Jira acceptance;
+  independent automated review is pending.
+- Experimental `tier3 evaluate --backend nemo-gym` targets a native Gym task-folder
+  interface. Public `nemo-gym==0.7.0` is incompatible; public source candidate
+  `NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf` exposes the required
+  `TARGET` help interface but still needs independent native runtime qualification.
+  CLI compatibility is checked before dataset generation or task staging, with bounded combined help output and process-group cleanup on timeout,
+  interruption or overflow. Doctor no longer treats an installed version as runtime readiness.
+  Live Codex, Claude Code and OpenCode support remains unverified. The adapter's
+  intended contract runs the Tier 3 cases on NeMo Gym instead
+  of Harbor (`--backend harbor`, the default, is unchanged). The same
+  `evals.json` cases are generated as task folders, and NeMo Gym's own
+  orchestrator, agent harness (Codex, Claude Code, OpenCode) and Docker sandbox
+  run them with the SkillEvaluator verifier. Its rollouts are written back as
+  the usual trial results, so scores, lift, reports and `result.json` are
+  shared; `result.json` records `execution_backend` with the NeMo Gym version.
+  Gym runs as a separate pinned process (`SKILL_EVAL_NEMO_GYM_BIN`) because it
+  needs Python 3.13.14 or later. Options the backend cannot honor (other
+  environment modes, `--harbor-keep-jobs`, `--stop-on-pass`, ...)
+  are rejected before anything runs, with no fallback to Harbor.
+  `--timeout-multiplier`, `--copy-repo`, `harbor.agent_workdir` and
+  `harbor.pre_agent_setup`, `skill_workspace.decoy_manifest` and
+  `--custom-dockerfile-mode preserve`, `harbor.base_image_mode` and native
+  `evals/harbor/` tasks work as on Harbor, and
+  `tier3 doctor --backend nemo-gym` checks Gym readiness. When a Gym process group
+  cannot be confirmed stopped after a timeout or interruption, no further arm starts
+  beside it and the failure is reported. After a timeout, the failed run still keeps
+  the scores of the arms that finished.
+
+- Tier 1 **Incomplete referenced artifact analysis (AE1)** findings from
+  SkillSpector now say why SkillSpector stopped inspecting the file that a skill
+  names. The suggestion names the file, its disposition and each reason
+  SkillSpector gives, such as
+  `static_parse_limit (static_patterns_tool_misuse)`, with any line and limits,
+  and the finding's metadata records them under `skillspector_evidence` and
+  `skillspector_occurrences`. The suggestion leaves out the run time and the
+  time budget (`observed_seconds`, `limit_seconds`), which differ from run to
+  run, so a finding keeps its `finding_id` from run to run; because the
+  suggestion text is new, each AE1 `finding_id` changes once with this release.
+  Before, the finding said only
+  `Referenced artifact was not completely inspected`, and its reason had to be
+  matched by hand against the incomplete-analysis error, which lists at most
+  three rows. With SkillSpector before v2.12.0 the finding was
+  titled `Unknown (AE1)` and told the user to make the file available although
+  SkillSpector had read part of it. It now carries the rule's name and the
+  reasons from the report's ledger rows for the file. Its check name, and so its
+  SARIF rule ID, changes: a `severity_overrides` entry keyed on
+  `SECURITY.Unknown (AE1)` must now use
+  `SECURITY.Incomplete referenced artifact analysis (AE1)`. The JSON field
+  `skillspector_reference_summary` counts the files and the lines that name them
+  for every result, and a failed check shows the counts in one line of the
+  terminal, Markdown and HTML reports. Severities and scan completeness are
+  unchanged; a gate changes only where an override of `SECURITY.Unknown (AE1)`
+  was what let the check pass.
+
+- Tier 3 `validate-grader --qualification-policy FILE` supports explicit,
+  assessment-only metric/class/category coverage and risk limits, provider-free
+  preflight checks, retained not-run receipts for insufficient labels, final
+  policy decisions and tracked verifier-source Git provenance. Correct expected
+  abstentions demonstrate category coverage without supplying binary scored
+  cases; evaluated report scope must match its selected assessment cases. The
+  experimental example is opt-in and fails bundled-suite class coverage; it establishes no
+  live reliability or release approval. Resource comparison metadata and HTML
+  also explain that observed consumption includes task failures, lower usage
+  alone does not establish better Efficiency or quality, pairing does not certify
+  equal concurrency/budget or judge-model agreement, and reused telemetry is
+  historical. Scoring, raw deltas and reuse eligibility are unchanged.
+
+### Changed
+
+- The `skillevaluator` agent skill now asks the user before installing the
+  CLI, an extra or a missing scanner, using a provider key, spending on a Tier 3
+  run or using `--env-mode local` (trusted skills only; it does not reuse the
+  user's agent logins). It also asks for real tasks, outcomes and input files
+  before writing eval cases, explains that Tier 3 needs its own provider key,
+  and reports no verdict for a tier that could not run. Its own
+  `evals/evals.json` gains nine cases (010-018) covering these prompts,
+  including consent before cold scanner provisioning and writing a dataset from
+  the user's requests; the implicit dataset case now expects clarification and
+  accepts a labeled draft.
+- The CI guide's recipe installs SkillSpector from the commit behind its release
+  tag and checks the Gitleaks archive against the published SHA-256 before
+  unpacking it, matching the repository's own workflows.
+- The bundled `text-analyzer` example skill's description now says when to use it and
+  lists sentence count and average word length, so Codex reads the skill before using it.
+  The example's quality score is now 88.8/100 with 5 findings (was 86.2 with 6).
+- The `nv_build` default model moves from `nvidia/nemotron-3-super-120b-a12b` to
+  `nvidia/nemotron-3.5-lightning-30b-a3b`. NVIDIA Build retired the hosted endpoint
+  for the Super model, so a run with no `llm-model` set answered HTTP 404 and the
+  rubric and LLM security verification did not run. The same default applies to
+  SkillSpector, the Tier 3 judge and NVIDIA Build local agents.
+- The `skillevaluator` agent skill now tells the agent that a gateway key works
+  through the `openai-compatible` provider, that a failed Tier 1 gate and a high
+  quality grade are two separate results, and that `Publication eligibility:
+  Incomplete` after a passing keyless run is expected.
+- SkillSpector's default model on Anthropic and Bedrock moves from Claude Opus 5
+  to Claude Opus 5.5 (`claude-opus-5-5`, `us.anthropic.claude-opus-5-5`), matching
+  the chat default. SkillSpector 2.13.4 returns structured output for Claude 5.5;
+  a scan on the native Anthropic API completed at full coverage.
+- The HTTP 404 message for an unavailable LLM model now says the provider's default
+  may not be callable with the key and points to `SKILL_EVAL_LLM_MODEL` (`llm-model`
+  in the reusable workflow); `ci/README.md` notes the same.
+- Update the managed SkillSpector scanner and Tier 1 CI image from 2.13.3 to
+  the latest release, 2.13.4, with matching verified wheel and source hashes.
+  This fixes false LP1 findings for scoped `allowed-tools` grants and improves
+  recovery of malformed LLM responses. SkillSpector 2.13.4 can still report
+  JSON files containing a `timeout` key as partial analysis; those scans
+  remain incomplete rather than being treated as successful.
+
+- The rubric judge's reference supplement budget is configurable through
+  `SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES` and defaults to one mebibyte instead
+  of 30,000 bytes, which a real linked guide graph outgrows. Required linked
+  Markdown is bounded only by that budget, so a guide larger than an optional
+  preview is collected whole; optional script and reference previews keep their
+  own small per-file bound. The budget decides how many bytes of the skill's own
+  guidance are collected, never which paths may be read: every reference is still
+  confined to the skill's declared root by the same secure reader, and guidance
+  that does not fit still stops the evaluation with an explicit unsafe-input
+  finding rather than being dropped from the judge's prompt.
+
+- The `default` policy no longer blocks a skill for its author attribution,
+  because the Agent Skills baseline requires only `name` and `description`
+  (#43). A missing `metadata.author` is now a LOW advisory, and a person, team,
+  or organization name without an email (such as `NVIDIA cuOpt Team` or
+  `Jane Doe (@jdoe)`) passes as an INFO `SCHEMA.author_without_email` finding.
+  A malformed or unsafe value still fails `SCHEMA.author_format` at HIGH: a bare
+  email or an email outside `Name <email@host>`, stray angle brackets, control
+  or invisible formatting characters, no letters or digits, or more than 256
+  characters. A policy with an `author_email_regex` still needs an email in
+  that domain. Overlays on `default` that relied on the old HIGH author
+  severities should set `SCHEMA.author_missing: high` and
+  `SCHEMA.author_without_email: high`, or use `--profile registry`. The policy
+  digest changes for every profile because it now includes
+  `metadata_id_requirement`.
+- Add the bundled `registry` profile (`--profile registry`) for registries with
+  a publication contract. It requires `metadata.author` in
+  `Name <email@host>` form and a valid `metadata.id`.
+- Validate an optional `metadata.id` as an exact 1-64 character lowercase
+  ASCII slug. A policy sets `identity.metadata_id_requirement` to `ignore`
+  (the default), `recommend`, or `require`; an unknown value is an error. A
+  collection run reports an ID declared by more than one skill, and `validate`
+  on a catalog lists these in `catalog-summary.json` under
+  `metadata_id_conflicts` (each sharing skill fails under `require`). Invalid and
+  duplicate IDs are MEDIUM advisories unless the requirement is `require`, and
+  the ID does not change local catalog identity. JSON reports include the
+  active requirement under `policy.metadata_id_requirement`.
+- Install Bandit with the base package, so `pip install skillevaluator` or
+  `uv tool install skillevaluator` runs every default Tier 1 check without an
+  extra. pip-audit, used only by the opt-in dependency audit
+  (`--check dependency`), stays in the `security` extra. The Bandit install hint
+  now says to reinstall SkillEvaluator.
+- Install uv with the base package, so a plain `pip install skillevaluator` on
+  a machine without uv can run the Tier 1 security check. Before, that run
+  ended `INCOMPLETE` with "skillspector not installed", because the pinned,
+  checksum-verified SkillSpector wheel is only run through `uv tool run`. A uv
+  on `PATH` or an installed `skillspector` matching the pinned release is still
+  used first, and SkillSpector stays out of SkillEvaluator's own dependencies. The public
+  Docker image gains the same behavior: with network access its Tier 1 run now
+  completes instead of ending `INCOMPLETE`.
+- Root help shows the SkillEvaluator wordmark in more terminals: the
+  one-line wordmark still needs 115 columns, 76-114 columns now get the same
+  letters stacked (SKILL over EVALUATOR), and 60-75 columns get a two-row
+  wordmark. Narrower terminals keep the plain title. A wordmark that the
+  terminal's output encoding cannot print is skipped: gbk and big5hkscs lack
+  the half blocks of the two-row one, so they get the plain title at 60-75
+  columns.
+
+- Standalone HTML reports use one NVIDIA presentation across all three tiers,
+  with consistent typography, a green header, numbered Insights cards, and
+  plugin evidence inside the relevant tier. Clickable tier cards replace the
+  left sidebar and sticky mobile tier bar. Reports containing Tier 3 default
+  to dark and other reports to light, instead of following the device theme;
+  saved Light, Dark and System choices still take precedence. The renderer
+  gives saved incomplete runs concise coverage and actions, with full errors
+  in Diagnostics. Newly saved failed-run conclusions and recommendations
+  keep their existing raw error text.
+  Agents with diagnostic-only trial evidence are excluded from lift panels;
+  their trial rows and canonical exports remain available.
+  Overview links to complete Insights instead of repeating its cards; passive
+  evidence and routine run provenance stay folded. Recorded native token and
+  latency breakdowns are available under Trials without rerunning evaluations.
+  The native header scale and visible tool versions, consolidated baseline
+  comparison with Overall and partial-comparison details, clickable agent
+  scorecards, and Harbor results/analysis actions are retained. Empty primary
+  viewer metadata no longer hides usable recorded summary links.
+  Full Tier 3 downloads preserve the recorded canonical payload; HTML JSON
+  snapshots add supplied plugin evidence. CLI JSON validator rows now include
+  a recorded boolean `optional_skip`, which the retained JSON reader
+  round-trips without changing gate policy. Shared plugin composition supplies
+  static and retained runtime evidence before the HTML template renders.
+  Recorded Harbor upload links survive saved-run regeneration. The renderer
+  version sits beside SkillEvaluator, scanner versions appear in Tier 1, and
+  the aligned desktop report is slightly wider. Long scanner versions wrap
+  within mobile tiles. Tier verdict chips and status badges keep at least 4.5:1
+  text contrast in the light and dark themes.
+- HTML Overview combines execution status, scored/unscored coverage and the
+  recorded next action. The baseline comparison stays open with its scores,
+  lift and Overall visible; signals and reasoning use adjacent disclosures.
+  Compact Definition disclosures beneath each dimension name explain the metric,
+  including unavailable scores and no-JavaScript viewing, without repeating its
+  definition in a separate guide or the Reasoning column.
+  Native agent cards, versions and typography remain. Dataset diagnostics
+  share exact structured explanations within an attempt and status while
+  retaining every assertion, requirement and evidence association. Missing
+  pass@k case outcomes show N/A alongside retained attempt counts; measured
+  zero success remains 0%. Harbor actions use concise recorded labels and
+  retain exact job identities in Diagnostics.
+- HTML can display optional retained native dependency completeness,
+  composition/ablation, Harbor delivery status, provider refusal/mixed-model
+  comparison basis, and recovery notes. Active warnings stay visible; routine
+  evidence is folded in the relevant view with local omission and shortening
+  notices. These are passive display fields, not new backend coverage;
+  hook/canary runtime summaries still need separate producer integration.
+  Public recovery, MCP and comparison projections remain. No scoring, gate,
+  CLI, canonical payload or newly produced insight behavior changes.
+- Embedded HTML JSON uses compact whitespace and charts receive only their
+  consumed data. Charts initialize for visible views after applying the theme,
+  reuse instances, and prepare closed views synchronously for print. Print
+  includes retained Dataset cases hidden by screen filters and restores the
+  screen's disclosure and filter state afterward. Downloads preserve the
+  retained snapshot and existing safety bounds.
+
+### Documentation
+
+- The Tier 1 validation guide now says that a PowerShell backtick before a
+  space does not count as a quoted or escaped space for the SkillSpector
+  missing-reference line check, so a labelled line such as
+  ``**Note:** run setup` h*.ps1`` passes when `setup helper.ps1` is left out.
+- The agent skill guide explicitly installs the CLI before the first check,
+  so its setup flow also works with skill versions that do not bootstrap it.
+
+- The CI guide's `jq` quality gate fails when a report has no quality score
+  (it passed before) and checks every skill's report in a folder run.
+- The CI guide's GitHub Actions recipe pins each action to a commit SHA, as the
+  repository's own workflows do.
+- The CI guide's troubleshooting note for an `incomplete` status no longer
+  says SkillEvaluator never installs the scanners. The first Tier 1 run
+  downloads pinned SkillSpector and Gitleaks releases when they are missing, so
+  the note now points to network access, and it says a missing Semgrep counts
+  only when `SKILLEVALUATOR_REQUIRE_SEMGREP=1` is set.
+
+- "Evaluate Skills from Your Agent" is shorter and visual: a how-it-works diagram,
+  install steps that start with `npx skills add NVIDIA/SkillEvaluator` (with Claude
+  Code and Codex examples), the two ways to call the skill (just ask, or by name)
+  and an example session. Installing the CLI yourself, provider keys, live
+  evaluation and sandbox notes moved into collapsed sections.
+- The starter walkthrough identifies the PASS message as the success summary;
+  the runner's final line gives the report and editable-starter directory.
+
+- The README's Tier 1 row now covers harness compatibility and links to the
+  `harness` check.
+- The `nv_build` documentation names `nvidia/nemotron-3.5-lightning-30b-a3b`
+  (Nemotron 3.5 Lightning) as the default model in the configuration guide,
+  environment variables reference, CLI reference, agents and sandboxes guide
+  and Tier 3 live evaluation guide, and the runnable `--agent-model` examples
+  use it. This entry covers the documentation only; the runtime default change
+  ships separately.
+- `THIRD_PARTY_NOTICES.md` lists Bandit under the base dependencies. It has
+  been installed with the base package since it moved out of the `security`
+  extra, but the notice still sat in the Security row, which now lists
+  pip-audit only.
+- New **Harness Check** docs page: what `skillevaluator harness-check` reports
+  and how to read its panel, with real output, the detailed view and how to fix
+  findings, what the rules check, the harnesses it covers, and how to run it on
+  its own or inside `validate`, the JSON block, and when the check helps. The
+  Tier 1 guide and the CLI reference link to it.
+  Clarify description rejection versus truncation, invocation-specific argument
+  substitution, folder-symlink target limits, and validation report/gate defaults.
+  Qualify the CI policy behavior and static loader predictions in the new FAQ.
+- The README opens with a three-column **Get started** section: run the CLI
+  directly (`pip install skillevaluator`, with `uv tool install skillevaluator`
+  in a collapsed section, then `skillevaluator validate ./my-skill --tiers 1`),
+  add checks to your repository with `skillevaluator ci init`, or install the
+  agent skill with `npx skills add NVIDIA/SkillEvaluator`. Each column links to
+  its guide on docs.nvidia.com. The CI column starts by saying what the template
+  does: it checks every skill change, with no evaluation code to maintain.
+  Under the table, a harness check highlight gives the
+  `skillevaluator harness-check ./my-skill` command, an example result with one
+  line per harness, and links to the Harness Check page and to live evaluation.
+  The intro now mentions plugins. The README word limit in the packaging test
+  goes from 1,100 to 1,200 to fit the example.
+- The README header is centred: the wordmark is the page title, followed by a
+  one-line tagline and the badge row. The separate text title is gone.
+- The README badge row adds GitHub **Stars** and **Forks** badges that show the
+  live counts.
+- The README's **Get started** section now installs first
+  (`pip install skillevaluator`, with `uv tool install` and a clone-and-`uv run`
+  path in a collapsed section) and then shows three ways to use it, each under a
+  header card: the CLI, the CI template, or the agent skill. The CLI column gives
+  the `--tiers 1` check that needs no LLM key and the all-tiers run with a free
+  NVIDIA Build key. The harness check heading is shorter, with its three points
+  (no LLM, no key, no agent run) on their own line. **Quickstart** is now two
+  steps: `skillevaluator quality-check ./my-skill` without a key, then
+  `skillevaluator validate ./my-skill` with a free NVIDIA Build key for all
+  three tiers.
+
+- A new Metrics Reference page defines every number the CLI, HTML report, JSON
+  report and `BENCHMARK.md` show: the six Tier 3 evaluator signals, the five
+  dimensions, the Overall Score, Skill Lift, pass@k and the Tier 1 Quality
+  Score. Each entry gives what the number measures, its formula as the source
+  implements it, its range and units, the deterministic checks or LLM judges
+  that produce its input data, and the JSON keys needed to recompute it. It
+  marks which values carry LLM judge variance, describes the pass-rate Wilson
+  intervals, `validate-grader`, the dataset-sufficiency label and the opt-in
+  judge character facts, and states that no inter-rater agreement study against
+  human-labeled trajectories has been published. Tier 1 validation, Tier 3 live
+  evaluation and the reports page link to it. A regression test parses the
+  constants, thresholds, weights and deduction sizes out of the page and
+  asserts them against the live values in `constants.py`,
+  `tier3/dataset_sufficiency.py`, the default quality config and the bundled
+  grader suite, so retuning any of them fails CI instead of rotting the page.
+
+- The eval dataset docs now say that a template prompt calls every bare
+  `SKILL.md` in the skill's description `my SKILL.md` only when the
+  description reads, opens, loads, consults or follows `SKILL.md`, or
+  otherwise points at the skill's own `SKILL.md` as a prompt `tier3 validate`
+  warns about would. Once one `SKILL.md` counts, every bare `SKILL.md` in the
+  description is renamed, even one after "a" or "the following", one before
+  a format noun or one before `in ./pdf-tools`. Reading does not count when
+  `in`, `of`, `from`, `under` or `inside` comes right after `SKILL.md`,
+  unless the skill itself follows (`the skill`, `the installed skill`,
+  `its own skill` or the skill's name), as in `in ./pdf-tools` or `in full`.
+  Other place words, such as `at` or `within`, do not count. The docs said
+  any `SKILL.md` in the description was renamed, but "Validates `SKILL.md`
+  frontmatter fields" and "Reads `SKILL.md` files" keep their `SKILL.md`, and
+  "Keeps `<name>/SKILL.md` in sync" gets the generic task "handle a typical
+  request".
+
+- The Tier 3 live evaluation guide said that `skillevaluator tier3 ./my-skill`
+  and `tier3 init-harbor-task` reject an empty `expected_output`. They reject
+  it only in a `{"skill_name", "evals"}` dataset. A flat dataset (a JSON or
+  YAML list, `{"cases": [...]}`, or any `evals.jsonl`) is legacy: there an
+  empty or whitespace-only `expected_output` or `ground_truth` is accepted and
+  makes `accuracy` and `goal_accuracy` N/A.
+
+- Reports & Results now covers a failed Tier 3 run whose budget left planned
+  attempts not run. Its JSON `tier3` object and full Tier 3 download record
+  `incomplete` and leave `summary.overall_lift` null, even when the best agent
+  has a lift. Its **Tier 3 quality** status reads **Incomplete**, while its
+  Tier 3 tile reads **Changes required**, or **Failed (advisory)** when Tier 3
+  is advisory. The page said that HTML displays a failed run as
+  **Changes required**, or **Failed (advisory)** when Tier 3 is advisory, and
+  that both payloads keep the best agent's lift.
+
+### Fixed
+
+- API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
+- Direct Tier 1 validates the target, selected checks and LLM configuration before
+  preparing scanners, so configuration errors do not trigger downloads or stdout noise.
+- Documentation-only CI follows imports through collected test modules and
+  package initializers, so dependent documentation assertions are included.
+- The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
+  30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
+- On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be
+  confirmed` when `taskkill` needs more than 5 seconds. It now gets up to 30 seconds, so the tree is stopped
+  and the run's own timeout or output-limit error is reported. A second Ctrl+C still ends that wait early,
+  and the cleanup is then reported as unconfirmed.
+- Keep Steps per Eval Case chart labels readable for long case IDs while preserving full IDs in hover tooltips.
+- Negative controls with complete, confirmed skill non-use report wrong answers as task outcomes instead of recommending skill edits; truncated or recovered attempt evidence cannot establish complete non-use.
+- Repeated negative-case task outcomes share one advice item, retain task-failure wording and avoid describing passing attempts as lost, keeping distinct skill fixes visible.
+- Partial Tier 3 evidence is retained only for valid reward identities and attempt
+  coverage. Corrupt rewards or duplicate attempts still suppress arm scores;
+  incomplete cases are reported as unresolved instead of failed.
+
+- Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
+- Script lint now runs advisory AST checks on Python files with one leading UTF-8 BOM.
+- Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
+- Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
+- HTML reports retain budget context for fully budget-denied runs without
+  restoring untrusted score evidence.
+- A trial where the agent runs the skill's own name as a shell command (for example
+  `text-analyzer input.txt`, `command not found`) is now scored as the agent's tool
+  choice instead of an undeclared environment dependency, unless the skill declares a
+  tool by that name.
+- Fully budget-denied runs exit successfully and finish progress without an
+  execution error, while retaining skipped arms and an incomplete quality verdict.
+- `--backend nemo-gym` no longer rejects a malformed `evals/environment/mcp_servers.toml`
+  as "not supported". As on Harbor, the parse error is logged and the run continues
+  without MCP servers; a file that declares servers is still rejected.
+- The Tier 3 execution backends table and the NeMo Gym section below it state the live
+  status of `--backend nemo-gym`: Codex and Claude Code have completed live runs on the
+  pinned Gym, and OpenCode currently fails in Gym's agent setup. The section also
+  names the policy endpoint settings Claude Code reads.
+- `--backend nemo-gym` now hides only credentials in progress lines, `gym.log`
+  and errors. Provider, model and base-URL names stay readable, as on Harbor.
+- `--backend nemo-gym` no longer writes a second `[verifier.env]` table into a
+  native task's `task.toml` when its header has a trailing comment, extra spaces
+  or no final newline. The duplicate table made the file fail to parse.
+- Benchmark methodology describes the Overall row's shared comparison basis
+  rather than the headline with-skill score, in Tier 3 and publication cards.
+- BENCHMARK cards explain the required with-skill goal and security case checks
+- HTML reports explain the required with-skill goal and security case checks
+  that can fail quality even when all dimensions pass.
+- `--backend nemo-gym` with `SKILL_EVAL_NEMO_GYM_MODEL_URL` set now requires a
+  model (`--model`, `--agent-model` or `harbor.agents.<agent>.model`) before the
+  run starts. It no longer sends the evaluator provider's default model name to
+  that endpoint.
+- Make the directory-snapshot mutation test independent of filesystem timestamp
+  granularity while preserving the late-entry race.
+- Make the MCP-staging restored-mtime race regression independent of filesystem
+  clock granularity by modeling an advanced ctime.
+- HTML reports preserve successful execution when Tier 3 quality fails, avoiding
+  spurious notices that other execution failures need attention.
+- Make the same-inode read-race regression use an observable mtime change without
+  depending on filesystem clock granularity.
+- Make the onboarding URL-rewrite test use its temporary global Git config even
+  when the caller sets `GIT_CONFIG_GLOBAL`.
+- Model a changed ctime explicitly in the restored-mtime summary regression so
+  it does not depend on two writes crossing a filesystem clock tick.
+- Terminal quality headlines and check-count comparisons exclude execution-failed arms.
+  Multi-agent summaries also withhold a failed agent's quality headline, and the
+  `RUN QUALITY VERDICT` line no longer reads that agent: an agent that failed
+  cannot make the run PASS, and a run where no agent can be read reads
+  INCOMPLETE with a reason that names the arm that failed (with-skill, baseline
+  or both). A baseline-only multi-agent run (`--skip-with-skill`) prints no run
+  verdict instead of PASS.
+- The Tier 2 scale guide names the fixed 8 MiB selected-manifest input budget
+  and 1 MiB per-manifest limit, including in description-only embedding mode.
+- Saved Tier 2 catalogs use compact JSON so indentation no longer rejects dense
+  indexes that fit the unchanged 32 MiB file limit. Vector values and catalog
+  compatibility are unchanged.
+- `doctor` and `health-check` on a base install (without the `tier3` extra) now
+  say to install `skillevaluator[tier3]` for the live evaluation check instead
+  of failing with a `ModuleNotFoundError` traceback. `--tier all` still reports
+  Tiers 1 and 2 first.
+- `evaluate` and `tier3 evaluate` on a base install (without the `tier3` extra)
+  now say to install `skillevaluator[tier3]` instead of printing only
+  `Error: No module named 'harbor'`.
+- Tier 3 benchmark headlines use the completed agent's quality verdict, matching
+  the Tier 3 status row even when another agent fails execution.
+- Tier 3 benchmark cards say **No complete agent result** instead of claiming a
+  completed-agent verdict when no agent has complete evidence.
+- Arms fully denied by a run budget are reported as not run instead of failed
+  empty Harbor jobs. Budget-partial runs remain incomplete without an execution
+  error when all admitted attempts succeed, including stop-on-pass runs. Reused
+  baselines are not promoted to overall scores when with-skill attempts are
+  budget-denied. Explicit non-budget omissions still fail attempt coverage checks.
+- Hermes `harness` results no longer say Hermes uses one of two same-named
+  skills (`HM-DUP-NAME`): Hermes lists both, and the model sees both bodies.
+- Claude Code `harness` results count `when_to_use` toward the 1,536-character
+  listing cut (`CC-DESC-CUT`): Claude Code lists `<description> - <when_to_use>`
+  and cuts that whole text, so a long `when_to_use` loses its end.
+- Claude Code `harness` results note skill fields whose value Claude Code ignores
+  (`CC-FIELD-VALUE`): an `effort` other than low, medium, high, xhigh, max or a number,
+  a `shell` other than bash or powershell, `background` without `context: fork`, and
+  `maxTurns`. The skill still loads.
+- `validate`'s Tier 1 "what to fix" lists each critical or high finding of a failed
+  check, not only the first: a security scan with several SkillSpector findings
+  shows them one per line, up to three, then "+N more in detailed reports".
+- `validate` on a folder of skills no longer says "security didn't run: skillspector not
+  installed" when SkillSpector ran but a file reference in the skill didn't resolve, which
+  a folder run counts as an incomplete scan. The scanners row now shows
+  "SkillSpector <version>, scan incomplete", and "what to fix" names the unresolved
+  reference and says to fix it or validate the skill on its own.
+- Copilot CLI `harness` results flag an empty or whitespace-only `description`
+  (`CP-DESC-EMPTY`): Copilot lists the skill with a blank description, so the
+  model sees only its name.
+- NeMo Gym runs refresh the policy model key between arms when
+  `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` is set to the same Vertex AI ADC token as
+  `OPENAI_API_KEY`, so later arms no longer start with an expired token.
+- NeMo Gym detached cleanup defers termination signals until teardown finishes,
+  preserves cancellation over cleanup errors, and reaps adopted run-owned servers.
+- The NeMo Gym section of the Tier 3 docs now shows how to install the pinned
+  Gym commit in its own Python 3.13.14+ environment.
+- Native NeMo Gym project skill projections run after authored image instructions
+  and final workspace resets, even when an earlier layer already copied skills.
+- The NeMo Gym example in the Tier 3 docs points the policy model at an OpenAI
+  Responses endpoint instead of NVIDIA Build, which cannot serve Codex.
+- Native NeMo Gym OpenCode evaluations project staged skills into the task workdir
+  so skill discovery works with Gym's isolated home and configuration directories.
+  Baseline tasks use the same layout without the target skill.
+- NeMo Gym doctor isolates its anonymous endpoint probe, honors proxy settings
+  without forwarding credentials, and reports proxy authentication and gateway failures.
+- Native NeMo Gym doctor now checks policy endpoint reachability with a bounded,
+  unauthenticated HTTP probe and actionable connection-failure guidance.
+- Native NeMo Gym teardown now completes its cleanup progress stage after a
+  successful stop, instead of reporting an interrupted cleanup on cancellation.
+- Native NeMo Gym cleanup now also stops run-owned detached server processes
+  after startup timeouts, interruptions and early exits, without targeting other runs.
+- Published documentation links use page routes so readers can navigate between
+  setup, report interpretation, recovery and the reference pages.
+
+- NeMo Gym results reject verifier rewards that identify a different staged
+  case and retain custom grader explanations in collected results.
+- The Copilot CLI `CP-NO-FRONTMATTER` finding and the plugin component findings
+  of `harness-check` no longer show internal test notes in their messages.
+- No-baseline Tier 3 reports no longer describe an intentionally skipped
+  baseline as incomplete execution or mismatched score contracts. Completed
+  with-skill attempts retain their results, with lift explicitly not measured
+  because no baseline was run.
+- Success-detail metadata keeps the terminal's default text color. Values such
+  as `grade=B` stay visible in the default blue Windows PowerShell console.
+- The behavior judge's FILE CHANGES evidence now covers Codex `apply_patch`
+  calls. Codex passes its patch as a single `input` argument, which the write
+  evidence helpers did not read, so a Codex patch contributed no FILE CHANGES
+  entry and its contents survived only in the compact tool history -- the
+  section budgeted last, and so the first dropped when the bundle is trimmed.
+  The helpers now take the changed paths from the patch's `Add File`,
+  `Update File` and `Delete File` headers, naming every file a multi-file patch
+  touches rather than letting the first stand for the rest, and keep the patch
+  text itself as the write body. A headerless or malformed `input` is left
+  alone, so a shell source string is not reported as a file change.
+- The NVIDIA Build bridge preserves reported input, output and cached token
+  usage in Anthropic Messages and Responses API replies. Anthropic replies use
+  schema-required zero defaults for missing input/output fields and clamp
+  uncached input counts at zero; Responses usage remains absent when unreported.
+- Automatic SkillSpector selection now verifies the pinned release on first use
+  and falls back to the verified managed wheel for a different or unverifiable
+  version. Discovery stays free of subprocesses, version probes omit provider
+  credentials and respect the caller timeout, and explicit executable overrides
+  remain available. Doctor reports the path and source selected by the probe.
+- `health-check --tier 1` (and `doctor --tier 1`) labels a scanner that
+  SkillEvaluator provisions itself: `(uv tool run)` for SkillSpector and
+  `(managed)` for the downloaded Gitleaks binary. Before, the Gitleaks row
+  ended in `(from None)` and the SkillSpector row named
+  `SKILLEVALUATOR_SKILLSPECTOR_PATH` although no override was set.
+- Tier 3 case recommendations treat required judge failures as unscored
+  evaluation problems, with advice to check judge configuration and provider
+  availability. Failed judging is no longer counted twice or blamed on the
+  skill, including for negative controls; genuine scored failures retain their
+  existing advice.
+- The comments-only consumer template now grants its required read and PR-comment
+  permissions only to the comment job, with no workflow-wide token permissions.
+- Ctrl-C during a reusable Tier 1 workflow run is no longer missed when it
+  arrives while a scan is starting. The runner waited for scan results with no
+  time limit, and on Linux the interrupt could be handled on a scan thread,
+  which did not wake that wait; the run then went on until a scan ended. The
+  runner now checks for the interrupt every 0.1 seconds.
+- In local mode, the offered OpenCode install now pins OpenCode 1.19.5, the
+  release Harbor and CI install, instead of whatever npm resolves as latest.
+  Claude Code and Codex installs were already pinned.
+- The behavior evidence gate no longer keeps a score for an expectation that
+  names an observed artifact but also asks for something only the final answer
+  could show. "Writes `report.py` and explains why each column was dropped" was
+  treated as settled by the artifact alone, so a case kept a score whose second
+  half was never checked. Every clause of an expectation must now name a
+  checkable artifact of its own; one that does not keeps the gate, as a wholly
+  prose expectation already did.
+- Tier 3 recommendations preserve the configured pass threshold when an
+  incomplete condition has no pass-rate summary, so scored attempts below that
+  threshold still receive failure advice.
+- SARIF `artifactLocation.uri` values percent-encode a `%` in a file name as
+  `%25`. A file such as `a%20b.md` no longer shares the URI of `a b.md`, and
+  `100%.md` no longer produces an invalid URI.
+- Reports no longer fail on Linux when a skill file name is not valid UTF-8
+  (#525). Finding IDs, HTML issue keys, the written HTML, JSON, Markdown and
+  SARIF reports, the CI workflow scripts that re-render retained reports, and
+  generated `evals/evals.json` datasets accept the surrogate-escaped name
+  Python gives such a file. The SARIF `artifactLocation.uri` percent-encodes
+  the name's original bytes (`caf%E9.md`).
+- Native NeMo Gym Claude Code runs now bind the selected policy model server,
+  supply its placeholder credential, pin the sandbox runtime and enable project
+  skill discovery in both arms, including when Gym uses a private Claude
+  configuration directory.
+- SARIF `artifactLocation.uri` values stay valid for more paths. A
+  repository-relative path whose first segment contains a colon, such as
+  `notes:v2.md`, gets a `./` prefix so it no longer reads as a URI scheme. A
+  path outside the workspace is written as an absolute `file:` URI instead of
+  a bare file system path, and a symlink in the workspace that points outside
+  it keeps the link's repository-relative path.
+- Accuracy and Behavior judge prompts clarify that explicit final-answer formats
+  apply to the entire final response, independently of correct values in tool
+  output or references. Scoring and thresholds are unchanged; an Accuracy format
+  failure alone can still score 0.8 and pass the default threshold.
+
+- Allow grader-validation suites to use validated dataset `checks`, including
+  anchored `output_matches` rules, instead of rejecting the entry field before
+  running the verifier. Document exact-format declarations and the measured
+  limitations of natural-language format judging.
+- An author value is no longer rejected for containing a Unicode joiner. The
+  character guard matched all of category `C`, so ZWNJ (U+200C) and ZWJ
+  (U+200D), which Persian, Arabic and Devanagari names need to render, plus a
+  soft hyphen and any code point unassigned in the running interpreter's
+  Unicode data, all failed `SCHEMA.author_format` at HIGH under both bundled
+  profiles. The guard now rejects controls, surrogates and private-use code
+  points plus the bidirectional marks, embeddings, overrides, isolates and the
+  byte-order mark, and its message says so. An unassigned code point no longer
+  makes the verdict depend on the interpreter's Unicode version.
+- A bare email address whose domain has no dot, such as `root@buildhost`, is
+  reported as a malformed author rather than as "Author has no email address".
+  The bare-email pattern required a dotted domain, so an intranet address took
+  the plain-attribution path. The discriminator is now a word character on each
+  side of the `@`, which still leaves a social handle such as
+  `Jane Doe (@jdoe)`, a bare `@jdoe` or `Platform Team @ Example` alone, and
+  now also catches a non-ASCII local part.
+- Hermes Docker runs with NVIDIA Build now validate `NVIDIA_API_KEY` during
+  Harbor preflight, matching the credential used by the runtime instead of
+  inheriting an OpenAI key requirement. Unrelated provider keys do not satisfy
+  the check.
+- An advisory carried from a passing skill into a collection result now names
+  the skill it came from, in its location and in `metadata.collection_skill`.
+  The findings were preserved but attributed to nothing, so a collection run
+  could not say which member produced one. The per-skill roll-up also stops
+  reporting "All schema and structure checks passed" next to a list of that
+  skill's advisories.
+- A `catalog-summary.json` entry lists the catalog-wide findings behind its
+  verdict under `catalog_findings`. The duplicate `metadata.id` check already
+  failed the member and bumped its `severity_counts`, but a catalog validates
+  each skill on its own, so nothing in that skill's output said what caused
+  either.
+- Native Codex plugin loading now recognizes Harbor launches prefixed with
+  empty credential assignments, preserving credential isolation while running
+  plugin setup before the agent. These launches previously failed after the
+  task with a missing native-launch error.
+- Folder validation preserves author and metadata ID advisories from passing
+  skills. Catalog summaries include duplicate ID severity counts and consistent
+  member verdicts, while explicitly labeling linked reports as single-skill
+  results and retaining their independent verdicts.
+- Behavior checks no longer score a final answer that the evidence limits
+  shortened. The final-response allowance rises from 800 to 8,000 characters
+  and the default behavior evidence budget from 8,000 to 12,000, so an ordinary
+  answer reaches the judge whole instead of losing its middle; the user request
+  keeps a reserved section of up to 2,000 characters ahead of the optional
+  exploration output in the compact tool history, which also repeats the
+  request at its head. The `behavior_check` evidence record now reports whether
+  the required evidence is complete, and which sections are incomplete, not
+  only whether something was dropped. When the final answer still cannot fit
+  and the deterministic verified facts do not already settle every expected
+  behavior, the judge returns an explicit evaluation error and no behavior
+  score, rather than grading the evidence loss as a behavior failure.
+  **That case then has no overall score at all**: an unscored metric that is
+  not "not applicable" leaves `overall_score` null, so such cases drop out of
+  any gate or comparison keyed on it until the limits are raised or the case is
+  shortened. A case whose expected behaviors are all confirmed by the verified
+  facts keeps its score, because the missing text cannot change the outcome.
+  `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT` and
+  `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` are both honoured exactly as set, in
+  either direction. Note that the final-response limit also caps the reserved
+  user-request section when it is set below 2,000, and that a check budget too
+  small to hold the final response beside some tool history is logged as a
+  warning rather than quietly raised — lower the final-response limit with it.
+- OpenCode bash tool observations retain recorded shell exit codes in Harbor
+  trajectories. Declarative `command_succeeded` checks can now distinguish
+  successful commands from nonzero exits; missing exit codes remain not checked.
+- `judge_attempts.json` now masks `Cookie` header values, credential flag values
+  (`--token`, `--password`, `-u user:password`, `--cookie`) and keys such as
+  `sk-proj-...` that start a line in JSON-escaped text, as in RAGAS prompts and
+  replies. A line break there is the two characters `\n`, and these values were
+  saved in clear after it or after an escaped tab (`\t`). That includes the
+  value on a line whose flag or header name was masked together with an unquoted
+  credential value that ends the line before and reads on through the escape
+  (`--password ...\n--token ...`). Only that value is masked; other copies of it
+  in the text stay as they were. Judge and security finding evidence also masks
+  a double-quoted `-u user:password`, MySQL `-p` or `.netrc` password value, and
+  the value in an argv list such as `["tool", "--password", "..."]`, when JSON
+  escapes the quotes (`\"...\"`), as in the tool-call arguments every judge
+  prompt holds; these were saved in clear.
+  A RAGAS `replied` entry for a reply with no text and no tool call, such as a
+  refusal or a content-filter stop, now saves the whole reply body instead of an
+  empty reply.
+- Judge evidence (`judge_attempts.json`) and security finding evidence now mask
+  credentials whose quotes are escaped twice or three times, as when a RAGAS
+  request repeats a tool call's JSON arguments as JSON, and single-quoted values
+  whose quotes are escaped once or twice, as in Python source, JSON or not.
+  - Newly masked: an argv element after a credential flag, `-u`, `-b`, or a
+    `login` or `sshpass` `-p`
+    (`[\\\"tool\\\", \\\"--password\\\", \\\"...\\\"]`, or
+    `[\'tool\', \'--password\', \'...\']` in a quoted Python list), which was
+    saved in clear. An attached `-p...` after a `login` or MySQL client element,
+    which was saved in clear when escaped twice or in a JSON-escaped quoted
+    Python list (a quoted Python list that is not JSON-escaped already masked
+    it). A double- or single-quoted value after a credential flag, `-u`, `-p`,
+    `.netrc` `password`, `aws configure set`, `git config`, `npm config set` or
+    `curl -b` (`--password \\\"two words\\\"`, `--password \'two words\'`,
+    `curl -u \'user:...\'`) and a JSON member such as
+    `\\\"password\\\": \\\"...\\\"`, which were saved in clear or with only
+    their first word masked.
+  - How: the text is also read with one, then two levels of string escapes
+    removed (`\\`, `\"`, `\'`, `\/`, `\n`, `\r`, `\t`, `\uXXXX`, inside a quoted
+    string or not). What the same patterns mask in a reading is masked in the
+    saved text too, where the text kept around it places it for certain, so a
+    value escaped again is masked as it is when escaped once, also where the
+    patterns mask more than a credential (`"total_tokens": self.total_tokens,`
+    in a Write call a RAGAS request repeats). Markers are only added: the text
+    as written is masked exactly as before. A value in a reading ends at a quote
+    that ends a string of the text it was read from, and `\\"` ends a string, as
+    in JSON, so JSON inside a Python `repr`, where `\\"` is an escaped quote, is
+    masked as before.
+  - Still kept: values in text escaped more than three times; single-quoted
+    values whose quotes are escaped three times; values in text that holds a NUL
+    character, which is not read again (an escaped `\u0000` is read as written);
+    the part of a value that once-escaped text keeps, such as the words after
+    the first in `"password: \"two words\""` at the start of a JSON string; and
+    the words after an escaped quote in a quoted Python argv value
+    (`[\'--token\', \'a\\\'b two\']`).
+  - Known over-masks: `{"command": "mysql -u root -p", "timeout": 30}` is saved
+    as `-p<redacted>timeout": 30}`, as before, and now also when escaped twice
+    or three times. The judge's line pass can still mask the JSON after a value
+    on a piece that starts inside a string
+    (`{"command": "run(['C:\\\\tmp\\\\']); password: ...", "note": "keep me"}`
+    loses `"note"`). And as escapes are decoded outside strings too, in text
+    that was never escaped, an escape that leaves a quote unmatched in a reading
+    can mask the rest of its line after a later credential assignment
+    (`export GITHUB_TOKEN=$(...)`, `password: ...`): a `\n`, `\r` or `\u000a`
+    inside a quoted string (`printf '%s\n'`, `tr -d '\n'`, `echo "a\nb"`,
+    `cd "C:\repo\x"`), or an odd number of `\"` in a double-quoted string
+    (`echo "it\"s"`). Finding evidence can then lose the `curl` or `rm` the
+    finding is about. Judge evidence already lost the rest of
+    such a line after a `\n`, `\r` or `\t` escape, and now also loses it after
+    an odd `\"` or a `\u000a`.
+  - Cost: text with a backslash is masked up to three times, in time and memory
+    linear in its length. Judge evidence takes two to four times as long to mask
+    (about 0.2 s instead of 0.06 s for a 70 KB RAGAS prompt of Bash calls), and
+    up to about eight times as long on adversarial text. Peak memory can grow by
+    about 250 MB per MB of input for one long quoted value escaped twice, as the
+    patterns then read that value decoded.
+- Tier 3 tasks with Compose sidecars no longer fail with `Docker Compose
+  interpolation variable ... requires protected execution state` because the
+  shell exports a short flag with a sensitive-looking name. A host variable such
+  as `XDG_SESSION_ID=3` or `MY_AUTH=1` made the sidecar check refuse every
+  Compose value containing that character, for example `python:3.13-slim` or
+  `127.0.0.1`. Host values shorter than eight characters now match a Compose
+  value only when the two are identical, as the trusted Compose client check
+  already does. Host values of eight characters or more, and sensitive-named
+  values a task declares for its main container, are still refused anywhere
+  inside a Compose value.
+- Code Risk Analysis reports Semgrep file-level parse errors as one partial-scan
+  error that names up to 20 unparsed files, relative to the skill and with the
+  line of the first error, instead of the first three truncated messages. The
+  check stays `incomplete` because Semgrep skips the code it cannot parse. The
+  JSON report lists the files in `semgrep_unparsed_files` (up to 1,000, with
+  `semgrep_unparsed_files_omitted` counting the rest); other Semgrep errors are
+  reported as before.
+- Failed native skill lookups no longer count as activation when the tool reports
+  that the skill was not found or unavailable without explicit error metadata.
+- Tier 3 terminal, JSON, HTML, and benchmark reports now retain declarative-check
+  coverage per agent and arm, including passed/failed counts, judgments,
+  not-checked reasons, and the behavior-score denominators.
+- The supporting Tier 3 Pass@k table displays an unavailable or skipped
+  baseline rate as `N/A`, preserving an observed baseline rate of `0%`.
+- Tier 3 budget summaries disclose measured usage above configured limits,
+  including after the final admitted attempt, and identify incomplete usage.
+  Additive `budget.observed_overruns` metadata is separate from admission
+  `status`; limits are checked between logical admission units, so a completed
+  run can exceed a cap without becoming partial or failed.
+- Tier 3 suggestion prompts qualify evidence by its owning case or trial, so
+  citations resolve to that case's excerpts regardless of trial order. Metric
+  findings cite only evidence from cases contributing to the reported outcome;
+  references with missing or ambiguous ownership are rejected.
+- Grader qualification reports null behavior-step results with a matching
+  `not_checked` expectation as insufficient evidence instead of errors. Raw
+  scores and unjudgeable rates are unchanged.
+- Tier 3 cost budgets now retain user price-file provenance, actually applied
+  rates, and attempt counts by cost derivation. Budget summaries distinguish
+  agent inference accounting from billed spend and document excluded charges;
+  cost limits remain admission boundaries, not hard currency ceilings.
+- Tier 3 token usage rows are now validated against the evaluation dataset's own
+  case IDs. Every case row uses one of those IDs at most once, and an attempt
+  whose only name is Harbor's 32-character cut of a case name is attributed to
+  that case, so missing telemetry stays with the canonical case instead of
+  splitting into a row of its own. A row that still cannot be matched is marked
+  as an unverified case ID in every report and recorded under
+  `token_usage.case_id_validation`, rather than being shown as coverage of a
+  dataset case; a table that shows no such row, because it renders no case rows
+  or its row caps dropped them, names the unmatched case IDs instead. Hidden
+  case names receive the same Markdown escaping, publication-label masking and
+  terminal secret redaction as visible rows, before their displayed length is
+  bounded.
+- Tier 3 case actions preserve dataset expectations and assertions, rejecting
+  requirement-weakening model advice in favor of deterministic remedies.
+  Recommendations identify model-written actions and record when generation
+  failed or unsafe advice was replaced by a fallback.
+- Tier 3 token usage per case, per agent and over all agents now counts each
+  attempt in the case it belongs to. An unscored attempt of a native task whose
+  `[metadata] entry_id` differs from its directory joins that case's row
+  instead of a row of its own; the collector records the case in the attempt's
+  `failure.json`. A scored attempt whose trajectory recorded an invalid cache
+  counter is no longer counted with 0 cached tokens: it adds no tokens, and
+  the trial names the counter in `invalid_token_counters`. A case that a run
+  budget cut short expects only the attempts the budget admitted, so its row
+  is no longer partial with missing attempts. `tier3 evaluate` prints the
+  agent token sums for a run whose arms all failed, and once the report
+  payload left the case rows out, the terminal tables say that no report has
+  them instead of naming the report files. `tier3 evaluate` names only the
+  reports the run wrote, so a NeMo Gym run no longer points at a
+  `tier3-benchmark.md` it never writes.
+- The Tier 3 security scan no longer scores an agent clearing its own output
+  directory as a destructive command. One literal, recursive and forced `rm` of
+  a path inside `/workspace/output` or an output directory established by the
+  trusted staged runtime configuration is cleanup. A tool call's first or
+  later `cwd`/`workdir` and shell directory changes cannot establish another
+  owned root. The directory itself, sensitive or protected paths, compound,
+  globbed, parent-escaping or dynamic forms retain conservative scoring.
+  After observed symlink creation, only an unadorned direct leaf can qualify;
+  unknown command directories cannot qualify. Literal quoting is inert
+  because expansions and escapes are rejected before operands are parsed.
+- Tier 3 reports now use final run-budget accounting, including when rebuilding
+  saved runs with stale configuration snapshots. Terminal, HTML, and benchmark
+  reports show budget exhaustion, not-run attempts, overruns, and unverified
+  usage. Budget-stopped runs have an incomplete summary verdict; admitted
+  scores remain visible and their lift is not a complete-run skill-effect claim.
+- Tier 3 security grading no longer reads a shell startup file as written
+  when a command only sources it, or names a longer path that contains its
+  name without a redirection, `tee` or `sed -i` into that path:
+  `source ~/.bashrc; npm test 2>&1 | tail -20` and
+  `source /opt/conda/etc/profile.d/conda.sh && python train.py 2>&1` scored
+  Security 0.0 and now score 1.0, in both the host checker and the bundled
+  Harbor verifier, while `echo x > /opt/conda/etc/profile.d/x.sh` and
+  `cp -t$ROOT/etc/sudoers.d /tmp/agent 2>&1` still score 0.0. This amends the
+  0.9.0 note that every command that scored 0.0 in 0.8.0 still does; most
+  other commands the 0.8.0 rule flags, such as `cat ~/.bashrc 2>/dev/null`,
+  still score 0.0.
+- The Tier 3 security scan no longer reads the license URL in a source file's
+  copyright header as data exfiltration. A `http://` or `https://` URL on a
+  comment line of a license or copyright notice is prose within recognized
+  shell comments and bounded, simple literal file-write actions (`cat`, `tee`
+  or `apply_patch` heredocs). Expanding shell strings and heredocs cannot claim
+  an inert notice context. Other URLs, including docstring links, and mixed or
+  uncertain shell actions retain conservative oversized-action handling. A
+  curl, wget or httpie word keeps its meaning wherever it appears, including
+  inside a notice; executable shell leaders cannot borrow a notice either.
+- A failed Tier 3 execution (for example a backend launch failure) now marks the
+  report payload, its summary and the affected agents as failed with their
+  errors, instead of only the top-level `result.json`. A report re-rendered by
+  `tier3 view` reads the status from the run's `result.json`. Scores from the
+  completed trials are kept.
+- Concurrent Tier 3 budget admission now serializes one calibration unit,
+  reserves in-flight work using the largest measured per-attempt usage, and
+  waits for fresh accounting before admitting more work. Units whose estimates
+  exceed remaining capacity are denied even below the measured cap; budget
+  summaries and metadata distinguish estimate-based exhaustion. An attempt can
+  still exceed its estimate, so caps are not hard ceilings.
+- Skill activation now credits a SKILL.md read wrapped in a shell, such as
+  `/bin/bash -lc 'cat skills/x/SKILL.md'`, which some agent harnesses record
+  instead of the bare command. Searches inside a wrapper (`bash -c 'grep SKILL
+  config.json'`) are still not counted.
+- The Tier 1 Gitleaks secret scan now reads authored eval files, including
+  `evals/evals.json`, graders such as `evals/grader.py`, and `evals/files`
+  inputs, so a credential committed there is reported. Generated Tier 3 output
+  in `evals/results` is still skipped, and so is every file under a `tests/`,
+  `examples/`, `fixtures/`, or `mocks/` folder, or the singular form, such as
+  a Harbor task grader in `evals/harbor/<case>/tests/`. To keep an intentional test token, add a
+  `gitleaks:allow` comment on its line or list the finding in a
+  `.gitleaksignore` file at the skill root.
+- Tier 3 reads the native Codex wrapper that runs a literal command array
+  through `.map`, so a skill read batched that way is graded instead of scoring
+  as an unsupported wrapper. The decoder stays a bounded static one: every array
+  element is still a literal, the callback may only hand that element to one
+  named tool, and a reused or shadowed binding, a changed index or payload, a
+  computed key or tool name, or a duplicate, missing, extra, reordered or
+  truncated result record leaves the whole wrapper unsupported. Each command is
+  matched to the settled result at its own position and carries that result's
+  own exit code or rejection. The form that prints inside the callback settles
+  out of array order, so it is read only for a single command and otherwise
+  stops grading rather than guessing which result belongs to which command.
+  That inline form is graded only on evidence it actually produced: the callback
+  must `await` the call, because an un-awaited one prints a pending promise
+  rather than the tool's result, and it must print something, because
+  `Promise.allSettled` swallows a rejection and would otherwise let a call that
+  never ran exit cleanly and read as a successful command.
+
+- A Tier 1 security scan keeps a SkillSpector `partial` report `INCOMPLETE` when
+  its only ledger row is a referenced image but its `references` list records a
+  `missing` reference on a line without a ledger row, an `ambiguous` reference,
+  or a list flagged as truncated with a key that ends in `_truncated`, such as
+  `ledger_exceptions_truncated`. Such a report no longer passes with the image
+  warning alone, because nothing reads the line of that reference for a file
+  left out of the scanned copy.
+
+- `validate` Tier 1 output: when only the `--llm` / `--llm-verify` stage
+  can't run, `what to fix` gives the exact `export` lines for the missing
+  provider or key instead of a scanner install or `--skip security`, and the
+  scanners row keeps the scanner version (`SkillSpector 2.12.0, LLM didn't
+  run`). A missing SkillSpector or a rejected baseline under `--llm` still
+  gets the scanner fix, and a `SKILLSPECTOR_PROVIDER` adapter set directly
+  gets advice for its own key instead of the public provider's. The summary
+  row now also gives the sub-check count (`9/10 checks passed (22
+  sub-checks)`). It counts validators, as the `Tier 1: 9 of 10 checks passed`
+  verdict line under it does, so the two agree, including with `--skip` and
+  `--fail-fast`.
+
+- A Tier 1 security scan with SkillSpector v2.12.0 or later no longer stops as
+  `INCOMPLETE` ("Security Scan didn't run") with
+  `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`
+  when the scanned skill, folder or hooks-only plugin has an ordinary command
+  or HTTP hook, one SkillSpector does not report as sending hook content to a
+  remote host (BH2). SkillSpector cannot model what such a hook does with its
+  input, so it reports the analysis as `partial` although the scan finished,
+  and its findings cannot show that the hook is safe: a hook script that sends
+  its input over a socket, `nc` or `/dev/tcp` gets no blocking finding. The
+  scan now fails with the Critical `skillspector_hook_payload_unverified`,
+  which names the manifest, such as `hooks/hooks.json` or
+  `.claude/settings.json`, and a gate failure that neither a `--policy`
+  severity override nor `--llm-verify` clears. Only removing the hooks passes
+  the check. The other findings and the `--llm` stage are reported as for any
+  complete scan, and a folder scan goes on to the next skill. This applies
+  only to SkillSpector's nonfatal, whole-file row on a manifest whose BH1
+  finding says its hook payload is `unmodeled`, also under a baseline, and
+  only when the report accounts for the row exactly. This covers only
+  manifests and hook evidence the scanner reports, without claiming coverage
+  for inline plugin-manifest hooks or other unreported hook locations.
+  SkillSpector records the same row for a manifest it read only in part:
+  with v2.13.4, whose row counts
+  the records it read, a manifest with a record that is not a parsed hook
+  declaration, such as a skipped handler or a permission rule, stays
+  `INCOMPLETE`; with v2.13.3, only a BH1 with 2,048 or more declarations does,
+  and a partly parsed manifest gets the Critical. The rest of the report is
+  judged as before: missing references and referenced images are still
+  accepted with their warnings under the rules above; the v2.13.3 missing-path
+  reference caveat that is accepted from the report alone does not apply
+  beside the hooks, because it reads the whole report. Any gap those rules do
+  not accept, such as a missing reference in a scan without a known target or
+  in a skill that `validate` or `security-scan` checks on its own inside a
+  folder or plugin, still records the SkillSpector scan as incomplete
+  (`incomplete_scans` in the JSON report, and publication eligibility
+  `Incomplete`), with an error that names only that gap. The check itself is
+  reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate
+  failure are a confirmed failure, also when a `--policy` override lowers the
+  Critical. With SkillSpector v2.13.4, a hook with a `"timeout"` key also gets
+  a `static_parse_limit` row on the manifest, so that scan is recorded as
+  incomplete in the same way. In the terminal Tier 1 summary, "what to fix"
+  for a check that failed beside an incomplete scan also lists its other gate
+  failures, after its first one and any unresolved file reference, so it
+  shows the hook gate failure, not only the error for the gap.
+
+- `validate` no longer repeats its header box in short terminal windows or
+  when a log warning prints mid-run. Only the tier that is still running is
+  redrawn; the header and finished tiers print once, and log records print
+  through the live view's console. The progress line now prints once, above
+  the final verdict.
+- Tier 3 security grading now handles more cases, on top of the 0.9.0
+  home-directory spellings fix. A home path in the default word of a
+  `${VAR:-word}` or `${VAR-word}` that starts a path word now matches, so
+  `cat "${SSH_KEY:-$HOME/.ssh/id_rsa}"` and
+  `echo x >> "${GIT_CONFIG:-$HOME/.gitconfig}"` score Security 0.0 (1.0 in
+  0.9.0), while `cat backup-$HOME/.netrc` and
+  `cat backup-${X:-$HOME/.netrc}` keep 1.0. The quoted strings that
+  bound a redirection, `tee`, or `sed -i` target are found as the shell finds
+  them: an escaped `\'` opens none, a quote in a `#` comment pairs only
+  within its line, and one in a here-document body never pairs past the
+  body. So after `# Show what's in the profile`, the read
+  `echo '--> zprofile'; cat ~/.zprofile; echo '--> done'` now scores 1.0
+  (0.0 in 0.9.0), and `sed -i '/old-path/d' $HOME/.zprofile` scores 0.0
+  (1.0 in 0.9.0). A redirection, `tee`, or `sed` inside a quoted string or a
+  comment no longer hides the writes after it, so
+  `echo "Step 1 -> check"; echo x >> "$HOME/.zprofile"` scores 0.0. The
+  `view` command of `str_replace_editor` or `str_replace_based_edit_tool` is
+  checked as a read, like a `Read`: a view of `/root/.gitconfig`,
+  `/root/.bashrc`, or `/etc/sudoers` scored 0.0 in 0.9.0 and now scores 1.0,
+  and a view of a credential store such as `~/.netrc` still scores 0.0. Both
+  the host checker and the bundled Harbor verifier apply the fix.
+- `BENCHMARK.md` now shows the evidence and the policy that decided its overall
+  verdict. The card used to print `Overall verdict: PASS — Recommended for
+  publication` with nothing behind it, so a reader who saw an agent with no
+  dimension scores and another agent below the documented 40% FAIL boundary had
+  no way to tell why the gate still passed. A "Why This Verdict" block under the
+  callout now names the rule that fired, the Tier 3 evidence state with its
+  publication policy, each blocking reason, and, per agent, what the dimension
+  gate read: which agent passed every dimension, which dimension fell below the
+  FAIL or PASS boundary, and which agent the gate did not count, naming the
+  excluded arm when the run recorded one. A PASS that rests on one agent while
+  another fails a dimension now says so. The block is rendered from the same
+  publication assessment the printed verdict is projected from, and from the
+  per-agent breakdown the Tier 3 dimension verdict folds, so it cannot describe
+  a different decision. Optional or skipped Tier 3 runs are explained using
+  their recorded policy, and threshold-adjacent scores retain enough precision
+  to stay in their actual verdict band. No verdict changes.
+- `--tolerate-baseline-timeouts` (added in 0.9.0) now follows its own rules
+  in the printed run verdict, in the notes of both reports and during result
+  collection. The `RUN QUALITY VERDICT` line that `tier3 evaluate` prints
+  reads the same agents as the run verdict, so a tolerated agent that passes
+  no longer prints PASS beside a complete agent that fails or never
+  activated the skill; the line now reads FAIL or INCONCLUSIVE, as the
+  reports do. `BENCHMARK.md` and `report.html` now keep the "Needs
+  attention" note and the `Baseline incomplete` line for each tolerated
+  agent also when a cost limit leaves the best agent's attempts short; both
+  reports used to leave them out in that case. `report.html` also keeps the
+  note when its overview reads Inconclusive because the complete agent never
+  activated the skill. An output-token count past the JSON-safe integer
+  range (above 2^53 - 1) in a timed-out attempt is no longer progress
+  evidence; with no other in-range count for that attempt the agent is
+  refused as `no_progress_evidence`, where result collection used to stop
+  with `browser-unsafe JSON integer` and write no `result.json` or report.
+- The PII scan no longer reports link-local `169.254.x.x` addresses, such as the
+  cloud instance metadata endpoint `169.254.169.254` and the ECS credentials
+  endpoint `169.254.170.2`, as non-RFC1918 IP addresses; its advice to use a
+  private IP cannot apply to them. Other addresses outside the excluded ranges,
+  including `169.25.x.x` and `169.255.x.x`, are still reported. A
+  `--pii-waivers` entry that accepted such an address now matches no finding,
+  so it is reported as a LOW `stale-pii-waiver` instead of an INFO
+  `applied-pii-waiver` and can be removed.
+- A Tier 3 trial that fails because Docker has no free network address pools
+  now names that cause, and how to clean up, right after the exception type in
+  its failure reason, which used to cut Docker's error off after the long
+  Compose command. The documented cleanup for interrupted or killed runs now
+  also lists and removes the trials' leftover Compose networks, which are what
+  use up the pools.
+
+- A native Codex `exec` wrapper that calls the freeform `apply_patch` tool with
+  the patch as a bare string is decoded instead of being discarded. The bounded
+  statement grammar read every argument as an object literal, so
+  `const r1 = await tools.apply_patch("*** Begin Patch\n...");` followed by
+  another call made the whole wrapper
+  `unsupported_native_codex_exec_wrapper`: the patch and its sibling calls went
+  ungraded, although the same wrapper written as
+  `tools.apply_patch({input: "..."})` decoded. A single- or double-quoted
+  string is now read as that tool's `input`. Nothing is interpreted: a template
+  literal, a concatenation, an extra argument, an unterminated string and a
+  bare string passed to any other tool are still rejected, and the object path
+  keeps its character gates unchanged.
+- A tool call the harness reports as exiting 0 is no longer recorded as failed
+  because its output holds error words. An agent that read a document *about*
+  errors, such as a `SKILL.md` headed `# Troubleshooting: command not found`,
+  lost that call's component activation in the plugin component signals. An
+  explicit zero exit status in every correlated result's header now passes the
+  call, as a harness success flag already did. Only the harness's own header
+  lines are read, so a body that spells `exit_code=0` still reports nothing,
+  and a result with no exit status, or a non-zero one, is judged by its text
+  exactly as before.
+- Add `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` to set the model that Claude 5.5
+  or later requests name as the server-side refusal fallback, or to turn it off
+  with `none`, `off`, `disabled`, `false` or `0`. The Claude API answers HTTP
+  400 (`'claude-opus-4-8' is not a valid fallback target for
+  'claude-sonnet-5-5'`) when the fixed `claude-opus-4-8` target does not suit
+  the request model, which made such a model unusable for LLM checks and as a
+  Tier 3 judge. A fallback equal to the request model is no longer sent. The
+  default is unchanged. The Harbor verifier receives the variable like
+  `LLM_JUDGE_FALLBACK_MODELS`; its Bedrock refusal retry uses it too, adding
+  the judge model's geography prefix to a bare name and using a full Bedrock
+  ID as given. The reusable CI workflows do not take the variable.
+
+- When the default report directory cannot be claimed, the error now gives
+  the reason and the way out: `Cannot safely reserve default report output
+  directory: <dir> (<reason>). Choose a report directory with
+  -o/--output-dir.` Before, it named only the directory. This happens when
+  both `reports/` and `<skill>-reports/` hold files written under another
+  ownership key, for example from containers that each start with a fresh
+  home directory. The refusal itself is unchanged, and `docs/reports.mdx`
+  explains it.
+- When the terminal refuses one of the plan lines printed before the
+  interactive Tier 3 progress view's table first appears, such as a write that
+  would block, a line now says that the run continues, as when drawing the
+  table fails. When the terminal still refuses writes then, the line saying
+  that the run went on is printed instead, when the run ends, so only one of
+  the two appears. When the terminal takes the writes before that line and
+  refuses only the line itself, a stream that keeps what the terminal refused,
+  as standard error does, sends that line when the run ends in place of the
+  later one. Before, progress turned off with no notice, and the refused line
+  was printed again with the next run's plan. After a refused table update,
+  standard error printed both lines when the terminal then refused the line
+  saying that the run continues. The view also no longer keeps its own copy of
+  output the terminal still refuses when the run ends, such as the final
+  table, and sends it with the next run on the same reporter, where it could
+  erase the lines printed between the runs. A stream that keeps what the
+  terminal refused, as standard error does, can still send it later, and a
+  final table sent then can still erase those lines. A running stage's spinner
+  in that view now moves on one frame with each redraw, at least once a second
+  by default, instead of staying on its first frame. These follow the 0.9.0
+  Fixed entry that starts "The interactive Tier 3 progress view
+  (`--progress rich`, or `auto` in a terminal) now keeps one height".
+- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison
+  catalog, and names every such skill. When the configured skill roots hold
+  more than one skill, CI builds the catalog from all of them, including skills
+  that did not change. One `SKILL.md` among them whose frontmatter is not a
+  valid YAML mapping with a non-empty string `name` and `description` stops it
+  before any embedding request, and Tier 2 then checks no skill and is
+  incomplete. This includes a value that is not a string, such as
+  `name: 2048`, `name: yes`, or `description: [Draft]`, which Tier 2 commands
+  such as `similarity-check` converted to text before 0.9.0. With one skill
+  there is no catalog, and such frontmatter does not stop Tier 2. The Tier 2
+  reason pointed at provider and embedding configuration; it now says that a
+  skill's frontmatter is the cause, and the retained catalog log under
+  `tier2/catalog/diagnostics/` names every such skill by its path in the
+  repository. Quote such a value, as in `name: "2048"`. A `SKILL.md` that is
+  not valid UTF-8, such as one saved as UTF-16 or as Windows-1252 with an
+  accented letter, stops the catalog with the same reason and is named the same
+  way; save it as UTF-8. Frontmatter over a structure or length limit in any
+  skill still gets the reason that points at provider and embedding
+  configuration, and the log then names no skill, not even one whose
+  frontmatter is invalid.
+
+- Template cases from `create-eval-dataset` no longer quote a skill
+  description that names one of the skill's scripts without running it, such
+  as "Checks release manifests with review.py and reports blockers", in the
+  expected output and the assertion about the outcome. The no-skill baseline
+  does not have the script. The graded text is now the generic outcome; the
+  prompt still quotes the description. The autopilot starter case uses this
+  outcome text when it has no LLM reply, or when it replaces LLM-written
+  graded text that uses the skill; other LLM-written text that names a script
+  is kept.
+- When a template prompt would call a `SKILL.md` in the skill's description
+  `my SKILL.md` and the skill's name, "the `<name>` skill's" or "the
+  installed skill's" comes right before any `SKILL.md` in it, template cases
+  now get the generic task "handle a typical request" and generic graded
+  text, as for a description that names `<name>/SKILL.md`. This covers
+  "Reads release-review's `SKILL.md`", "Follows the release-review skill's
+  `SKILL.md`" and "Reads `SKILL.md`, then validates release-review's
+  `SKILL.md` frontmatter". Before, the prompt and the graded text quoted a
+  garbled task such as "reads release-review's my `SKILL.md`". A description
+  whose `SKILL.md` is not renamed, such as "Validates release-review's
+  `SKILL.md` frontmatter", is quoted as before. Generic wording comes first,
+  as in `tier3 validate`: for a skill named read or own, "read `SKILL.md`"
+  and "its own `SKILL.md`" are renamed as for any other skill.
+
+- Tier 1 quality no longer deducts 5 Correctness points, or reports
+  `SKILL_SPEC recommended field missing: 'version'`, when a skill has no root
+  `version` field. The version check reads only the optional
+  `metadata.version`, so a skill with that field or with no version scores
+  1.75 points higher; the bundled `text-analyzer` example now scores 86.2
+  instead of 84.5.
+
+- Tier 3 `evals/config.yml` loading rejects a repeated key (also inside a YAML
+  merge source) or a cyclic merge instead of keeping the last value, applies
+  the shared YAML size and nesting limits, and reports a non-string key such
+  as `yes:` or a non-UTF-8 file as a config error instead of crashing
+  `validate`. Checks before the Harbor run now read the file as the run does,
+  rejecting a symlink (even a broken one), a hard link, a FIFO, a file over
+  4 MiB or a symlinked `evals/` directory, and a YAML error no longer repeats
+  the source line.
+- `validate path/to/SKILL.md` and `validate path/to/workflow-rules.mdc` now
+  validate the folder that holds the file, as passing the folder does, so a
+  file inside a symlinked folder is now refused unless `--no-dedup` is passed,
+  as that folder is. Before, Tier 1 and Tier 2 received the file itself:
+  `schema`, `version` and `quality` failed with `No skills found` for a skill,
+  and `schema` with `No workflow directories found` for a workflow; a run
+  narrowed with `--checks` could pass without scanning the skill's other files;
+  and a run from inside the skill wrote its reports into it. Tier 3 also
+  received a `workflow-rules.mdc` file itself; it now receives the workflow
+  folder, as it already did for a `SKILL.md`. With `--no-dedup`, this also holds
+  when the file is a symlink to a file with another name.
+- The Tier 1 SkillSpector missing-reference check no longer reads a bold or
+  italic label such as `**Note:**`, `*Tip:*` or `**Step 1:**`, or a `$` shell
+  prompt such as `$ python run.py`, as a wildcard for every file left out of
+  the scan, which kept such a line `INCOMPLETE` whenever anything, even `.git`,
+  was left out. A wildcard elsewhere in the line, or a label inside code, still
+  counts. So do such a label and `$` on a line with a space or shell delimiter
+  between two of the same quote or after a backslash, as written or decoded,
+  such as `setup' 'helper.sh` or `setup\ h*.sh`, where a shell may join words
+  that the check reads apart. With `validate --workers` above 1, a skill of a
+  folder that is also a plugin is judged against the folder, as with one
+  worker, so a line naming a file elsewhere in the folder keeps it
+  `INCOMPLETE`. An `--llm-verify` downgrade no longer drops the accepted
+  missing-reference warning, or the error that says why a scan is
+  `INCOMPLETE`. A severity override from `--policy` or `--profile` no longer
+  drops that error either.
+
+- With `--progress rich` when standard error is not a terminal, such as when
+  it is redirected to a file or piped to another program, the Tier 3 progress
+  table now ends its last line. Before, the next output, such as a log line,
+  the shell prompt, or the line saying that progress stopped after a drawing
+  error, was printed on the same line as the table's bottom border. Output to
+  a terminal is unchanged.
+
+- The Tier 3 "How to improve" list now finds the failed attempts of a case
+  whose trial directory names do not start with its case ID: a native or NeMo
+  Gym task whose `[metadata] entry_id` differs from its directory, or a case
+  ID longer than the 32 characters Harbor keeps in a trial name. Before, such a
+  case's run error said only "1 attempt(s) never produced a score", with no
+  cause and no evidence file, and a failed judge got the generic run error
+  advice instead of the judge remedy. Each attempt's case is now the
+  `entry_id` the collector recorded in its `failure.json` or `reward.json`,
+  as for token usage. The case rows rebuilt for a failed arm use the same
+  case instead of the task directory, and the live case grid during a run
+  counts a long-named case's attempts in its own row instead of a second row
+  with the cut name.
+
+- With `--progress rich` and `TTY_INTERACTIVE=1` when standard error is not a
+  terminal, the Tier 3 progress table is now drawn once, when the run ends, as
+  it is without `TTY_INTERACTIVE`. Before, a copy of the table was also
+  printed under each plan line that changed during the run, and the next plan
+  line or table started on the same line as that copy's bottom border. Output
+  to a terminal is unchanged.
+- Tier 3 security finding evidence and saved judge evidence mask the
+  credential in more command forms (`auth=` call values, `sed` replacements,
+  `_` long flags, quoted or `--` config keys, values in escaped single quotes
+  or quoted with the `'"'"'` idiom, a name after an escaped line break), also
+  in text escaped twice; a value-less credential flag no longer hides the next
+  command's password, and shell `apply_patch` evidence is masked before its
+  400-character cut. The Tier 3 live evaluation guide lists the exact forms.
+
+## 0.9.0 - 2026-11-13
+
+### Fixed
+
+- Tier 3 dataset fairness validation checks the skill's own identities and
+  nested judge expectations, recognizes required reads after negated actions,
+  and bounds diagnostics and repeated-negation work. Template prompts avoid
+  requiring bundled scripts; upgrade guidance explains strict CI preflight
+  failures for older datasets that grade skill use.
+
+### Added
+
+- Dataset fairness validation checks the evaluated skill's own names and nested
+  graded text, distinguishes negated reads from required reads, and bounds
+  warning excerpts and repeated-match scanning. Common Unicode, Markdown and
+  script references are checked too; generated prompts avoid skill scripts.
+  Older datasets may need outcome-only wording to pass strict CI preflight.
+
+- Classify explicit `SKILL.md` ownership contacts (`metadata.pic` and
+  `metadata.email`) as `PII.ownership_emails`, still HIGH by default. Add
+  `--policy` to `tier1` and `tier1 validate` so operators can permit reviewed
+  ownership metadata without allowing ordinary email occurrences.
+- Retain bounded SkillSpector completeness diagnostics in JSON reports and
+  show file/line, phase, and reason in incomplete-scan errors. Preserve details
+  across scan stages, folder aggregation, and policy application.
+
+- Add an `error_handling` section to the `--quality-config` file for
+  Reliability's three error-handling rules: the `SKILL.md` mention check and
+  the `scripts` and `lib` code checks. Each sets `points`, `message`,
+  `suggestion`, and its `terms` or `markers`; `points: 0` turns a rule off.
+  The section is optional and merges with the packaged values. A custom file
+  may now also omit `expected_headers`, which then falls back to the packaged
+  heading list; a list you set still replaces it and `[]` still turns heading
+  checks off. Without a
+  custom file, scores and findings are unchanged. The packaged
+  `quality_config` digest changes once, because `quality-default.yaml` gained
+  the section. A custom file's digest covers only the rules that file sets, so
+  existing custom files keep their digests and a digest changes only when the
+  file's rules change.
+- Tier 3 reports show token usage per case, per agent and over all agents, as
+  a measurement that is not scored. The JSON payload gains `token_usage`;
+  `BENCHMARK.md` gains a **Token Usage** section; the Markdown report, the HTML
+  report (under Measured Agent Resources), `validate --verbose` and
+  `tier3 evaluate --verbose` show the same numbers. Cached tokens are part of
+  the prompt and are not added again. Attempts that failed before scoring count
+  as usage. Missing counters leave a partial total and are never estimated.
+  The with-skill change needs complete counts for the same attempts in both
+  arms, and both arms must have succeeded. Token usage never displaces score
+  evidence: it joins the report payload last, and its case rows, then its sums,
+  are left out, with a note, when the payload would pass its size or node
+  limits, also after the run's next steps, `tier3 evaluate`'s case findings and
+  `validate`'s applicability fields join it. A baseline that did not run is
+  shown as not run, and a reused baseline's tokens are marked as used in the
+  run it came from.
+
+- Capability-gated CI onboarding for protected Tier 1 `--llm`/SkillSpector
+  checks, independent Tier 3 gateway/judge settings and native agent models.
+  Combined reports retain source-bound `BENCHMARK.md` cards for every outcome;
+  GitHub can optionally propose eligible cards through a separate trusted
+  benchmark-update PR. Tier 2/3 remain advisory for CI. Retained JSON preserves
+  Tier 1 required-check and unscanned-content scope for publication decisions.
+  The repository's own candidate CI selects Build for Tier 1/2 and separate
+  gateway-backed Claude Code/Codex models for Tier 3, without changing upstream
+  provider defaults. With the default `scan-mode: auto`, a merge request or
+  same-repository pull request that changes no file under a configured skill
+  root skips the paid jobs (LLM-enriched Tier 1, Tier 2 and Tier 3): the keyless
+  scan remains the Tier 1 gate and reports list Tier 2 and Tier 3 as skipped.
+  GitHub fork PRs never run the paid tiers and keep their existing Tier 2/3
+  reason. Setup guidance explains when provider configuration is exercised and
+  how to request an eligible all-skill check before merging.
+  When tiers run, GitLab keyless and native selectors both include changed
+  setup gitlinks despite committed submodule ignore settings.
+
+- HTML, Markdown, and terminal findings show recorded LLM verification verdicts,
+  confidence, and reasoning, with an explanation of retained or downgraded severity.
+  Medium-confidence false positives and uncertain verdicts retain existing gates.
+  Repeated occurrences with the same verification decision remain grouped in HTML.
+
+- A reproducible public terminal starter runs the released CLI against the
+  bundled text-analyzer skill, checks real script/report output and a seeded
+  quality regression, and retains an editable task, fixture and run receipt.
+  The walkthrough connects setup, interpretation, live-evaluation prerequisites,
+  troubleshooting and adaptation; contributor guidance clarifies environment
+  setup, example verification and the existing DCO policy.
+
+- Tier 3 datasets can declare deterministic behavior checks for script invocation and success, workspace files, and final-response text.
+
+- Tier 3 `evaluate --compare-to RUN` and read-only `compare-versions` compare
+  compatible retained skill versions, report paired per-agent deltas and
+  regressions, and keep version comparisons separate from no-skill Skill Lift.
+
+- Add opt-in `tier3 interact` experiments for two or more skills. The command
+  uses one reviewed task suite and a fixed attempt budget to compare baseline,
+  individual, and combined performance. It reports the departure from additive
+  gains and retains source identities and trial evidence. Invalid inputs exit
+  with code 2. Incomplete or incomparable experiments and output I/O failures
+  exit with code 1. Configuration failures identify their arm, trial progress
+  uses stderr, and output roots honor `SKILLEVALUATOR_RESULTS_DIR` with canonical
+  paths. Documentation describes trial noise and sequential configuration order.
+
+- Read-only Tier 3 `history` lists retained Skill Lift runs chronologically,
+  separates incompatible configurations into segments, preserves unavailable
+  lift as missing, and exports JSON, CSV, or Markdown summaries.
+
+- Tier 3 `evaluate --reuse-baseline RUN` reuses compatible retained fresh
+  without-skill evidence, preserving lift calculations and baseline provenance.
+  `latest` searches completed runs and falls back to a fresh baseline when needed.
+
+- `tier3 validate-grader` qualifies the shipped verifier against independent
+  versioned labels, with offline suite checks, repeated-grading statistics,
+  provenance, optional rate gates and a bundled public reference suite.
+
+- JSON reports record the SkillEvaluator `version` that wrote them, the
+  `target_path` (the absolute path or Git remote URL from `validate`, the path
+  as given from `tier1` and `tier2`, and `null` from single-check commands such
+  as `security-scan`), and `top_issues`, the grouped issue rows across every
+  tier that the HTML report data carries, without their page anchors. Each
+  `gating.tiers` entry adds `validator_policies`, which says for each check
+  whether it gates the exit code; the tier's `blocking` is `true` when any one
+  of them does. The keys are additive, and existing keys keep their shape.
+  Local skill aliases such as `.` retain the folder name in `skills`, and
+  native Tier 3 CI reports retain their single skill identity. Published CI
+  JSON omits absolute host `target_path` values.
+
+- Import production trace exports into redacted review candidates with
+  `tier3 import-traces`, then promote only explicitly human-reviewed expectations
+  and replay fixtures with `tier3 accept-traces`.
+
+- Tier 3 evaluations support token, judge-call, attempt, and priced-cost budgets.
+
+- `--tolerate-baseline-timeouts` (and `harbor.tolerate_baseline_timeouts` in
+  `evals/config.yml`) keeps a Tier 3 agent scored on its clean with-skill arm
+  when its only baseline failures are attempts that hit the agent execution
+  timeout while the agent was still producing output. By default one such
+  attempt still fails the agent and the whole run. The option needs both arms
+  run in the same run (not a `--reuse-baseline` baseline), standard dimension
+  grading, every other agent completed (at least one with both arms) and no
+  other launch errors; attempts a cost limit left `not_run` are not counted as
+  missing. It refuses a timeout whose logs show a known provider overload,
+  rate limit, quota or authentication error, and it does not cover native
+  multi-step tasks. The baseline condition stays
+  `failed`, baseline scores and Skill Lift are not reported for that agent, the
+  run's best agent, overall score and verdict come from the agents with a
+  complete baseline, reports name the tolerated agent in a "Baseline
+  incomplete" note, the run lists a warning, and the run is still not complete
+  publication evidence.
+
+- Tier 3 reports list up to three run-level **Next steps** under the per-case
+  fixes in the terminal, `report.html` and the Markdown report: re-run an
+  incomplete run, add attempts for inconsistent cases, add cases or negative
+  controls, or compare agents and models. Each step names its target
+  (evaluation, dataset or agent), the observed problem and evidence, the action,
+  and the check that would show improvement. Steps about agents or models are
+  marked as hypotheses to test, steps from incomplete runs as limited, and none
+  suggest removing cases or loosening expectations. The rules need no LLM; the
+  Tier 3 payload carries them as `next_steps`.
+
+- Document per-agent Tier 3 `findings.json` artifacts and distinguish advisory
+  metric severity from dimension verdicts; include severity thresholds in the
+  artifact and a muted CLI legend without changing scores or thresholds.
+
+- `tier3 import-metrics` accepts versioned, normalized per-case custom scores
+  from external evaluations and writes clearly labeled JSON/Markdown reports.
+  Imports validate identities, metric metadata and values, retain declared
+  provenance and source hashes, and compute custom lift only on matched
+  case/attempt pairs, without assigning standard scores or claiming execution.
+
+- Tier 2 context deduplication and `--llm-verify` name the model that
+  answered. On the native Claude API, a server-side fallback model can answer
+  in place of a configured Claude 5.5 or later model. A duplicate finding
+  records the model that gave its verdict as `llm_model_used`, with
+  `llm_provider`, in its metadata, and the Tier 2 `llm_analysis` object adds
+  `models_used`, every model that gave a cluster's verdict.
+  `llm_analysis.model` stays the configured model, and an `llm_refused`
+  finding still names the configured model as `llm_model`. Each finding that
+  gets an `--llm-verify` verdict records `llm_provider` and `llm_model_used`
+  as well, including a verdict kept from a reply cut off at the output-token
+  limit. A model name that is not a plain identifier, such as a URL or a key,
+  reads `unresolved`.
+
+- Show per-agent evidence volume next to Tier 3 scores: distinct cases, planned
+  and scored attempts, execution and judge failures, and per-arm counts when a
+  baseline ran. Flag limited case coverage or incomplete attempt coverage;
+  distinguish uniform from early-stopped attempts, and retain case counts from
+  legacy summaries where available.
+
+- Report dataset sufficiency as sufficient or provisional using distinct-case,
+  negative-case, Wilson interval, and paired-case coverage requirements. Show
+  the dataset-size status in evaluation, validation, HTML, and BENCHMARK output;
+  validation coverage notes remain informational.
+- Experimental `hermes` Tier 3 agent for Docker and native NVIDIA Build routing,
+  pinned to Hermes v2026.9.24. Includes isolated skill staging, ATIF trajectories,
+  activation evidence, token accounting and retained execution diagnostics.
+  Other providers/environments fail early; existing agent defaults are unchanged.
+- Tier 3 generation provenance distinguishes LLM, requested-template, and
+  template-fallback datasets, marks trace refinement and autopilot generation,
+  and displays the source and review state in terminal, HTML, and BENCHMARK
+  reports. Run payloads retain the generation record with shortened input hashes.
+
+- `create-eval-dataset --grounding` selects skill, author-intent, or trace
+  grounding. Generated datasets record relative input provenance and review
+  flags for observed answers that differ from authored expectations and
+  authored behavior steps omitted by refinement output.
+
+- `tier3 validate` reports informational dataset coverage counts and concrete
+  gaps in text and JSON. Generated one-case starters now explain their limits
+  and point authors to full dataset generation and coverage validation.
+
+- Collection similarity reports selected, indexed and skipped manifests with bounded
+  exclusion reasons. Malformed selected manifests now make the scan incomplete and
+  block catalog writes. A standalone synthetic scale benchmark records limits and
+  stage measurements without provider requests. Reused Python registries now
+  replace the complete selection on successful builds and preserve committed
+  entries, vector dimensions and coverage together on failure; callers that
+  relied on undocumented merging must pass their complete intended selection.
+
+- Document an additive qualitative assessment review worksheet with bounded
+  evidence from real successful, failed-setup and invalid-judge runs. Preserve
+  numeric grading and identify the separate decisions needed for scoreless support.
+  Pin the public calculator input to the historical repository revision used by
+  the run, preserving its original hash and evidence pointers after migration.
+
+- `skillevaluator tier3 migrate-dataset` previews lossless legacy conversions and
+  writes only to an explicit new JSON/YAML destination. Authored routing, case
+  IDs, fixture selectors, and extension metadata are preserved. The five bundled
+  reference datasets now use the preferred object format; legacy reading remains
+  supported.
+
+- Tier 3 reports show per-case expectation inventories with explicit met,
+  unmet, unchecked, unscored and inapplicable judgments, evidence and next
+  diagnostic steps for executed conditions. Behavior judges can abstain when
+  evidence is missing; partial results preserve every original requirement
+  without presenting missing judgments as verified skill defects. Unexpected
+  judge errors retain that inventory; intentionally skipped arms add no attempts.
+- Repeatable Tier 3 activation-validation recipe and offline acceptance suite.
+  Canonical trials separate expected target-skill use, trusted observed use or
+  unknown traces, task correctness, workflow diagnostics, resources and retained
+  evidence links. Fallback multi-step rows retain scoped observations without
+  claiming complete logical-trial activation or changing numeric grading.
+  Explicit `should_trigger` precedence is preserved, and standard baselines
+  retain trusted trajectory observations independently of null/N/A skill scores.
+  Primary skill identities match case-insensitively; accepted alternate use remains
+  optional, including the legacy alternate field, without changing numeric grades.
+  Unrendered activation diagnostics remain in canonical exports without consuming
+  HTML overview or failure-reason preview budgets.
+- The Tier 1 reusable workflow accepts `enforcement-mode: strict|advisory`
+  (default `strict`). Opt-in `advisory` keeps complete policy/score failures
+  non-blocking while retaining failed verdicts and reports and emitting a
+  workflow warning.
+  Configuration, scanner completeness, evidence, and runtime failures still
+  block. Advisory mode requires supporting workflow and scanner image pins;
+  the released 0.8.0 bundle does not accept this input.
+
+- Run SkillEvaluator's own `skills/` through the pinned three-tier GitHub
+  callers, retaining Tier 1 as required and Tier 2/3 as advisory. A separate
+  consumer feedback listener preserves the reusable publisher's public path;
+  onboarding and status recognize this filename collision without replacing
+  reusable workflow definitions. Automatic comments activate after the
+  listener reaches the default branch.
+  Document independent chat, judge and agent model settings and model-availability
+  troubleshooting for provider-backed CI.
 - `skills/skillevaluator/` is an agent skill for operating SkillEvaluator: it
   routes requests to the right tier, readiness check, dataset, report, or CI
   command, and ships Tier 3 evaluation cases for itself. A test keeps every
@@ -13,8 +1545,131 @@ All notable changes to SkillEvaluator are documented in this file.
   Your Agent" docs page shows how to install it in Codex, Claude Code, OpenCode,
   OpenClaw, and other skill-aware agents.
 
+- Opt-in three-tier GitHub and GitLab CI entrypoints with required Tier 1,
+  advisory Tier 2 and paired Tier 3, Docker and native local execution, pinned
+  local agent bootstrap, retained aggregate/native reports, and trusted default-branch
+  feedback. Candidate templates require a capability-bearing release descriptor;
+  released Tier 1 bundles and workflows remain unchanged. Incomplete runs retain
+  redacted startup diagnostics. Interrupted Tier 1 selections cannot pass on
+  partial results; advisory tiers preserve their failed or incomplete status.
+  GitLab callers quote variable values, use literal job timeouts
+  compatible with GitLab 17.8, and safely select changes in runner-owned checkouts.
+  GitLab before 18.4 uses a separate read-only admission credential; feedback
+  initiation is advisory so first-install reporting does not change the tier gate.
+  Same-project feedback uses the short-lived job-token trigger API and verifies
+  the server-bound upstream pipeline and source job, preserving protected-branch
+  and deployment permissions. Its persisted GraphQL MR association supports
+  GitLab 17.x without requiring the newer pipeline/MR REST endpoint. Publisher
+  failures include a trusted check location and finite diagnostic category.
+
+- Private plugin helpers recognize native OpenClaw manifests
+  (`openclaw.plugin.json`) after the existing manifest formats. `id` is the
+  plugin identity and `configSchema` must be an object. Only the `skills` roots
+  the manifest declares are members, searched recursively without implicit
+  `skills/` or hidden and `node_modules` children. `package.json#openclaw`
+  entrypoints are boundary-checked without being imported or run. Every native
+  manifest keeps an unsupported OpenClaw runtime row, so portable skill
+  results never certify tools, hooks, channels, providers or services. Inline
+  `mcpServers` follow OpenClaw's transport, SSE default and verbatim-URL rules;
+  disabled TLS verification and literal enterprise secrets are blocking.
+  Runtime preparation never copies the plugin root as a member, never starts
+  stdio servers whose plugin-root working directory cannot be kept, records
+  unapplied host options as incomplete, and keeps host metadata out of staged
+  manifests. Native Claude Code staging copies only the declared member
+  skills, never the plugin tree, so Claude Code's default skill, command,
+  agent, hook and `bin/` locations stay unloaded.
+  `scripts/ci/smoke_openclaw_plugins.py` repeats these checks against real
+  plugin sources without executing plugin code.
+
+- Simplify repository CI onboarding around quality and security checks with
+  no model key required,
+  keeping optional LLM checks and hosted feedback separate. Preserve opt-in
+  all-tier setup and report contracts in an Advanced CI reference.
+
+- When the RAGAS goal scorer judges `goal_accuracy`, `judge_attempts.json`
+  now saves each request it sends and the judge's reply, so a RAGAS score can
+  be audited like the prompt judges' scores. Each request is a `ragas` entry
+  with status `replied`, or `error` with the HTTP status and body or the
+  reason the reply was not received, before the entry that holds the score or
+  the problem. The prompts and replies are redacted and shortened like the
+  other judge evidence. A failure while saving this evidence is only logged
+  and never changes a score. The request entries do not count toward
+  `--max-judge-calls`; the entry with the score or the problem is the one
+  counted RAGAS call, as before.
+
 ### Changed
 
+- A `PII.emails` severity override in `--policy` no longer applies to the
+  `metadata.pic` and `metadata.email` contacts in a skill's own `SKILL.md`. They
+  now report as `PII.ownership_emails`, HIGH by default, so a run that passed
+  through that override fails until the policy also sets `PII.ownership_emails`.
+
+- Remove `skillevaluator.quality_config.quality_config_provenance(path, config)`.
+  Use `load_quality_config_with_provenance(path)` instead: it loads the config
+  and returns `(config, provenance)`, and its digest covers only the rules a
+  custom file sets. The report's `quality_config` field keeps its shape.
+- Upgrade the Tier 3 backend to Harbor 0.25.0. Align supported sandbox
+  constructor options with the release while reserving automatic mounts and
+  host Compose environment forwarding for evaluator policy. Preserve local
+  agent, verifier, and artifact evidence under Harbor's new mount checks, and
+  retain explicit Codex gateway URLs, credential aliases, and full model identifiers.
+
+- Tier 1 labels the `SKILL.md` token count as an estimate (characters / 4) in
+  the Large skill finding, the HTML report and the docs, and adds
+  `metrics.estimated_tokens` and `metrics.estimate_method` to the quality JSON.
+  `metrics.total_tokens` keeps the same value and scoring is unchanged.
+
+- Tier 1 skill-type detection and the script-based checks recognise Node scripts
+  (`.mjs`, `.cjs`, `.js`) under `scripts/` and `tools/`, so a Node-script skill
+  is no longer typed guide-only. A skill whose scripts are all Node scripts is not
+  asked for a `run_script` call; one that also bundles Python or shell scripts
+  keeps the check. Script lint still parses Python only and reports how many Node
+  scripts it did not lint. The rubric judge also receives Node scripts and files
+  from `tools/`. Scores of Node-script skills can change because they now get the
+  script-based checks.
+
+- Name Skill Lift as the headline comparison and label pass@k differences as
+  supporting reliability across reports and terminal output.
+
+- A scored Tier 3 attempt now fails when `goal_accuracy` or security is below
+  1.0, even if its Overall score meets the pass threshold. N/A or unscored
+  metrics preserve the existing verdict behavior; missed behavior-check steps
+  are warnings. A with-skill required-check failure fails the quality verdict,
+  while no-skill failures do not. Reports show required-check, goals-met,
+  and security-clean counts for both arms, plus failed-case reasons.
+
+- HTML and `BENCHMARK.md` reports explain each Tier 3 dimension in plain
+  language with its evidence source and whether the run has a no-skill baseline
+  for it. Dimensions that could not be scored or do not apply stay listed with
+  the reason instead of disappearing or reading `Not available`, and baseline-only
+  cards show the baseline score. A short key in both reports separates the
+  verdict, dimension and overall scores, BENCHMARK Uplift, published Skill Lift,
+  pass@k, the Tier 1
+  Quality Score, and publication eligibility.
+
+- Write Tier 3 accuracy deductions as plain-language reasons, identify findings
+  without trajectory evidence, and include expected/observed text only when
+  both values are recorded.
+
+- Tier 3 LLM suggestions and insight recommendations now keep only evidence
+  references the run recorded (cited references that don't resolve are
+  dropped rather than shown as evidence) and keep one copy of a repeated
+  suggestion. Insight recommendations that restate a deterministic one, or
+  that loosen, relax, or lower an expectation, assertion, ground truth, or
+  pass threshold, are dropped. Both prompts ask for distinct actions and
+  label untested causes, such as switching to a different model, as
+  hypotheses or experiments.
+- Tier 3 reports missing skill runtime dependencies as environment problems,
+  with declaration and custom Dockerfile guidance. Unrecovered environment
+  failures leave the trial UNSCORED instead of reducing the skill's score;
+  recovered environment failures carry no deduction.
+
+- Document per-arm Tier 3 dimension applicability and test how N/A baseline
+  metrics are handled in Overall scores and Skill Lift comparisons.
+- Run GitLab Tier 2 without Docker-in-Docker while keeping TLS-protected Docker
+  for Tier 3. Both native tiers retain shared caller timeout and runner-tag
+  overrides, advisory outcomes, and aggregate artifacts; local mode still
+  disables the Tier 3 Docker service.
 - Align terminal grade and lift colors across compact, full, and direct Tier 3
   reports; displayed zero lift is neutral. Narrow terminals stack complete
   condition score/bar groups. Full-report Details retain successful quality and
@@ -34,6 +1689,110 @@ All notable changes to SkillEvaluator are documented in this file.
   reports so charts work offline without CDN or source-map requests. Charts
   include accessible descriptions, links to data tables and visible fallbacks
   when canvas initialization is unavailable; Tier 1 reports omit chart assets.
+
+- Separate HTML Tier 2 evidence into within-skill and across-skill comparisons,
+  with recorded completion, duplicate, affected-path, and catalog counts. Keep
+  skipped or unavailable comparisons distinct from completed zero-match scans.
+  Link every recorded Harbor job in HTML, terminal, and Markdown reports and
+  disclose recorded scanner, evaluator, model, dataset, and source provenance.
+
+- Give HTML summaries, tier tiles, KPI labels and values, findings, evidence
+  tables and all six Tier 3 views more reading room. Use relaxed body line
+  spacing and wrap Tier 3 navigation on narrow screens in both themes.
+
+- Keep HTML tier navigation synchronized across sidebar, tiles and a mobile
+  sticky bar, including absent tiers in comprehensive reports. Add accessible
+  keyboard navigation for Tier 3 and agent tabs, a System/Light/Dark preference,
+  complete expanded evidence, and readable no-JavaScript/print views. Keep
+  required and advisory summary reasons distinct within mixed tiers and focus
+  direct agent links on their named panels.
+
+- Compact all-tier CI PR and MR feedback into one summary table with a row per
+  skill, one-line tier statuses and issue counts, and one combined **Report**
+  link per skill. Incomplete or missing evidence keeps issue counts unknown;
+  detailed aggregate and native reports remain in the authenticated artifact.
+
+- Make Tier 1 the only gate in opt-in all-tier GitHub and GitLab CI. Tier 2 and
+  Tier 3 retain failed and incomplete advisory outcomes and native reports.
+  Deprecate and ignore onboarding's `--tier3-required`, GitHub's
+  `tier3-required` input and GitLab's `SKILL_EVAL_TIER3_REQUIRED` variable;
+  none can make Tier 3 block CI. Standalone validation and benchmark
+  publication policies are unchanged.
+
+- Standalone `create-eval-dataset` and `DatasetOptions` now default to `auto`
+  grounding: substantive author guidance beyond headings first, then usable
+  matching retained trajectories from completed skill-scoped runs. Missing input
+  fails before provider access, collection, or writes; existing skill-only scripts must pass
+  `--grounding skill`, even with `--no-llm`. Auto trace selection preserves
+  authored cases and flags unmatched coverage and observed answers for review;
+  retained identity and trace files are checked before reading, and legacy
+  `cases` wrappers retain root metadata when converted to `evals`.
+  Provenance records the effective grounding and retained source hashes; auto
+  trace refinement records template fallback and a safe reason when its LLM
+  operation is unavailable or fails, preserving authored expectations and review
+  state.
+  Auto leaves existing datasets unchanged without `--force` or `--refine`,
+  including when matching traces exist; explicit trace grounding still opts into
+  in-place refinement. When auto selects traces, answer proposals that describe
+  skill use leave the inferred expected outcome empty for independent authoring
+  and review;
+  existing authored expectations are retained. Recovery guidance and examples name
+  usable author inputs, retained-results refinement, and explicit skill-only opt-in. Explicit grounding
+  modes remain available. Unattended autopilot keeps its skill-grounded one-case
+  starter behavior.
+
+- Give staged Tier 3 main images a fixed liveness healthcheck so Docker Compose
+  2 can wait for readiness while authored image healthchecks remain suppressed.
+  Keep custom service healthchecks and their readiness dependencies intact.
+
+- Generated eval datasets no longer grade skill use. Template cases from
+  `create-eval-dataset`, and the one starter case that `validate`, `tier3` and
+  `tier3 evaluate --autopilot` write when no dataset exists, asserted that the
+  agent read `SKILL.md`, ran the skill's script, or used or identified the
+  skill. The no-skill baseline is graded on the same expected output and
+  assertions and could not meet them, so its `behavior_check`, `accuracy` and
+  `goal_accuracy` scores dropped and lift was inflated. Template cases now
+  describe only the task outcome, and do not quote a skill description that
+  names the skill or its script; a template prompt calls a `SKILL.md` named in
+  the description `my SKILL.md`. The LLM generation and `--refine` prompts ask
+  for outcome checks, and template `--refine` no longer turns reads or runs of
+  `SKILL.md`, the skill directory or the skill's scripts into behaviors. The
+  autopilot starter case leaves out LLM or `EVAL.md` text that grades skill
+  use, and `create-eval-dataset` prints a warning for each generated case that
+  still grades it. The starter case from `init-custom-grader` and `init-harbor-task`
+  asserts the task outcome instead of "using the relevant skill workflow". The
+  negative template case is unchanged. `tier3 validate` now warns when a
+  prompt points at the skill's files or an expected output or assertion grades
+  skill use, including runs of the skill's own scripts. The warning fails
+  `--strict` and the strict dataset check that all-tier CI runs before its
+  advisory Tier 3 step; it never blocks a local run or autopilot. On newly
+  generated datasets, baseline scores rise and lift falls; existing datasets
+  are not rewritten.
+
+- Tier 3 tool efficiency counts writing, editing and patching files, scoped
+  native searches and listings (`Grep`, `Glob`, `LS`, OpenCode `list`, Codex
+  `list_dir` and `grep_files`) and MCP tools named `mcp__server__tool` (Claude
+  Code) as productive. An MCP filesystem search or listing whose `path` or
+  `dir_path` is `/` is a root search and counts as waste. Most of these
+  counted as wasted before, so a with-skill trial that read the skill, edited
+  four files and ran the tests scored tool efficiency 0.33. Codex and OpenCode
+  MCP calls, which are recorded under the bare tool name or as `server_tool`,
+  are not recognized as MCP calls yet. Codex names with a namespace, such as
+  `functions.apply_patch`, are classified by the bare name. Planning and
+  bookkeeping calls (`TodoWrite`, `update_plan`, `TaskCreate` and
+  `TaskUpdate`, background-shell polling such as `BashOutput`, and sub-agent
+  calls) are left out of the score, and the reason says how many were not
+  counted. A trial with only such calls scores 0.0, so a trial whose only
+  calls were `BashOutput` or `KillShell` drops from 1.0 to 0.0. Polling a
+  background shell no longer counts as running a command, while a command
+  typed into a Codex `write_stdin` session or run by `Monitor` is classified
+  like any other command. Help, version and install words are matched in
+  commands only, so a file path or patch text that mentions `pip install` is
+  not waste. Efficiency scores rise for write-, edit-, patch-, search- and
+  MCP-heavy runs. Root searches in commands recorded as an argument list, such
+  as Codex `["bash", "-lc", "find / -name x"]`, now count as waste, and so do
+  help, version and install commands recorded that way, like the same command
+  written as text.
 
 ### Documentation
 
@@ -60,13 +1819,457 @@ All notable changes to SkillEvaluator are documented in this file.
   `HTTP` word in any cell, because `|` reads as a pipe; and `HTTP PUT` right
   after a `;`, which starts a new command.
 
+- Reports & Results now explains the completed-agent result in Tier 3 reports.
+  When one of several agents fails, the HTML report and `tier3-benchmark.md`
+  show the best agent's score when that agent's evidence is complete and mark
+  it as needing attention, while the run stays failed and has no whole-run
+  score. The new section says when an agent qualifies, how recovered timeout
+  attempts are shown, and that the HTML lift card still shows the best agent's
+  lift. The results tree now lists `tier3-benchmark.md`, which every Tier 3
+  run, from `tier3 evaluate` or a `validate` run that includes Tier 3, writes
+  as a pair with `report.html`, and the live evaluation guide says when its
+  verdict table applies and links to the new section.
+
 ### Fixed
+
+- Harbor local mode keeps exclusion and filtered download archives inside the
+  allowed run directory, so pinned Harbor 0.25 transfers copy selected file
+  contents without granting host `/tmp` access. Filters retain exact protected
+  paths, and failed scans or unsafe destinations leave outputs untouched.
+
+- Configure CLI stdout to replace characters that its encoding cannot
+  represent, so reports and root help complete on legacy Windows code pages.
+  JSON dataset previews and validation output preserve Unicode values, using
+  readable characters when the output encoding supports them and escapes otherwise.
+
+- Required Tier 3 judges recheck their wall-time deadline before accepting a
+  result, including when a dependency or logging handler swallowed the timeout
+  exception. Expired calls remain scoreless errors and restore their caller's
+  deadline context.
+
+- `skillevaluator view` no longer asks the LLM again when it regenerates a
+  missing `report.html` for a Tier 3 run that saved its report feedback in
+  `result.json`. The regenerated report shows the conclusions,
+  recommendations, and suggestions that run produced, makes no LLM call, and
+  reuses the run's `what_to_fix.json` when it has one. It also takes the run's
+  duration and any Harbor log links recorded in `result.json`, which the 0.8.0
+  rebuild left out. In 0.8.0 the Insights judge and the what-to-fix writer ran
+  again: with a provider configured that cost tokens and could change the
+  advice, without one the run's saved LLM advice was dropped, and either way
+  `what_to_fix.json` was overwritten. Feedback saved by 0.6.0 or earlier has
+  no per-case verdict, so the regenerated report adds the verdict and lists
+  the case fixes as its recommendations and suggestions, without the LLM, as a
+  new report does. A run that saved no feedback still has its feedback
+  rebuilt, with the LLM when a provider is configured, and its
+  `what_to_fix.json` rewritten.
+
+- Generated Tier 3 images now build when any staged skill declares packages
+  in `apt-packages.txt`. The generated `apt-get install` line ended the base
+  package list with `\ \`, so the shell passed apt-get a package named " "
+  and the build failed with `Unable to locate package`. This affected the
+  shared eval base image, generated task Dockerfiles and the default
+  Dockerfile for native Harbor tasks.
+
+- Public MCP URL probes handle modern SDK client and stream APIs while retaining
+  checked-address connections, header grants, response limits, and bounded
+  cleanup. Redirect responses are refused before SDK-level redirect handling.
+  Isolated wheel tests cover SDK 1.28.1 and 2.3.0; the supported Tier 3 dependency
+  range remains unchanged.
+
+- Apply the existing MCP declaration policy to native Harbor task environments
+  before staging. Preserve approved `$VAR` header references by converting them
+  to Harbor 0.25's `${VAR}` form in generated task TOML, without changing source
+  declarations or agent JSON configuration.
+
+- Validate native verifier and step-verifier MCP references against their
+  verifier environment grants, retaining agent grants for agent servers and
+  the legacy default when no separate verifier grants are supplied. Invalid
+  declarations provide field/type and `${VAR}` hints without echoing values.
+
+- Keep local `/logs/artifacts`, `HARBOR_LOGS_DIR/artifacts`, and
+  `HARBOR_ARTIFACTS_DIR` on the same private staging tree. Artifact collection
+  preserves source files and retained role logs; local whole-log-tree transfers
+  fail before modifying their destination.
+
+- With default or default-plus-custom grading, a Tier 3 task image now fails
+  to build when `python3 -I` cannot import the verifier's packages: idna,
+  openai, ragas or boto3. This happens, for example, when a custom Dockerfile
+  sets `ENV PIP_USER=1`, or when the packages are reachable only through
+  `PYTHONPATH`. The build-time import check ran plain `python`, which sees
+  those locations. `test.sh` runs the verifier as `python3 -I`, which does not.
+  Such images built, and then every trial's verifier failed on `import idna`,
+  or the goal-accuracy judge fell back from RAGAS to the custom judge when only
+  ragas was hidden. The check now runs as `python3 -I`. `custom_only` grading
+  never runs that verifier, so its images no longer run the check.
+
+- Repository CI can opt in to reviewed, per-skill SkillSpector baselines from
+  the PR or merge request's target revision. Policy files from the proposed
+  changes cannot approve their own exceptions.
+
+- The `ci/gitlab/skill-evaluation.yml` template honors `TMPDIR` for temporary
+  scan reports and defaults to `/tmp`.
+
+- `skillevaluator validate` on a target with no skill, rules, workflows, or
+  plugin, such as an ordinary source repository, no longer fails Tier 1 with
+  three `No skills found` errors and exit 1 when every content scan passes.
+  When `--type auto` detects the type as `unknown`, the `schema`, `version`,
+  and `quality` checks are now recorded as not applicable, never as passes:
+  the terminal summary and the HTML report count them as N/A, and the JSON
+  and Markdown reports list them as skipped with a `not applicable` reason.
+  The JSON report of every such run adds a root `tier1_applicability` object.
+  The content scans still run with their unrestricted scope, so a real
+  finding still fails the run; such a run is never eligible for publication.
+  A target folder whose own `SKILL.md`, `workflow-rules.mdc`,
+  `agent_plugin.yaml`/`.yml`, or `.claude-plugin/plugin.json` is mis-cased
+  (such as `Skill.md`) or a dangling symlink still fails its manifest checks,
+  and `--type skill` still validates the target as a skill.
+
+- The unknown-artifact CLI guidance links to the published content-types documentation route.
+
+- Security checks preserve authored evaluation files and their findings while
+  excluding generated outputs. Fully inspected skills with only missing-path
+  reference caveats retain visible warnings instead of an incomplete-scan
+  failure; actual coverage gaps and analyzer failures still block.
+
+- PII findings clarify that required author attribution is accepted while
+  duplicate contact addresses need removal, replacement, or a reviewed waiver.
+
+- Docker OpenCode containers no longer get the distribution `nodejs` and
+  `npm` packages from agent setup, except on Alpine images, and generated
+  images now include `procps`. Before, OpenCode, the default agent with NVIDIA
+  Build, installed Debian's Node.js and npm with `apt-get` in every trial and
+  then its own Node.js with nvm, and Claude Code installed `procps` (for
+  `pgrep`) in every trial. Both took time from the 360-second agent setup
+  timeout, and a package mirror error failed the trial. Like Claude Code and
+  Codex containers since 0.6.0, OpenCode containers on Debian-based images now
+  have no `gcc`, `g++`, or `make`, and OpenCode's Node.js is on `PATH` only for
+  the OpenCode process and the commands it runs, including its stdio MCP
+  servers. Skills whose scripts, tasks, or verifier need these tools, or whose
+  stdio MCP servers need `gcc`, `g++`, or `make`, must install them through
+  `scripts/apt-packages.txt` or a custom `evals/environment/Dockerfile`.
+  Generated images rebuild once for the new package list: the per-task images,
+  or the shared base image when `harbor.base_image_mode` is `reuse`.
+
+- A `tier3 evaluate --skip-with-skill` run with two or more agents now records
+  the dataset-size status in `result.json` and the `tier3 evaluate` summary. It
+  is taken from the agent with the best baseline score, as in the reports.
+
+- `rubric-eval` now asks the judge once more, naming the problem, when its
+  reply is not valid JSON or its criterion evidence cannot be scored: a
+  criterion is missing, repeated or unknown, or has a score outside 0 to 10 or
+  a pass flag that is not a boolean. In 0.8.0 the first such reply failed
+  Tier 1 with a HIGH `llm_invalid_response` or `llm_unavailable` finding; now
+  only a second one does. The LLM client still retries transient provider
+  errors as set by `SKILL_EVAL_LLM_MAX_RETRIES`; a request that still fails
+  after those retries, a refusal or a truncated reply is not asked again. The
+  JSON report records `judge_attempts`, the number of times the judge was
+  asked (1, or 2 after a rejected reply, not counting the client's retries),
+  in the skill's `rubric_eval` success detail or `llm_*` finding and, for a
+  single skill, also in the `rubric_eval` object. It is left out when the
+  first request fails, for example with no provider configured. Rejection
+  diagnostics redact judge-supplied credentials before shortening the reason,
+  and collapse whitespace and controls to printable single-line text in logs,
+  retry notes and final invalid-response findings and summaries.
+
+- A default Tier 3 run with a baseline can reach a PASS or NEUTRAL publication
+  verdict in BENCHMARK.md again. The baseline arm has no skill under test, so
+  it records `skill_execution` and `skill_efficiency` as not applicable and has
+  no Discoverability or Efficiency baseline. The publication check treated
+  those two dimensions as missing evidence and compared Skill Lift with the
+  five-dimension score, so those cards said INCOMPLETE instead. Discoverability
+  and Efficiency now count as not applicable for the baseline when it recorded
+  their skill metrics that way, and Skill Lift is checked over the dimensions
+  both arms scored. On the card those two rows say `baseline N/A` instead of
+  `baseline not run`. Any other missing or inconsistent baseline still makes
+  the card INCOMPLETE.
+
+- `BENCHMARK.md` no longer publishes an Overall uplift that disagrees with
+  `lift.json` and the JSON, HTML, Markdown and terminal reports when a metric is
+  N/A in only one arm. The Overall row now shows the two scores the published
+  Skill Lift subtracts, which the canonical report records per agent as
+  `lift_overall`, and notes when they differ from the arm overall scores. A
+  cross-format test reconciles Overall and lift across every output of one run.
+
+- The `dependency` check now reports each pip-audit and Safety advisory as a
+  `DEPENDENCY` finding named by its advisory ID, at the requirements file and
+  line, or the `pyproject.toml`, that pins the package. In 0.8.0 an advisory
+  was only an error string such as `[CVE-HIGH] pyyaml==5.3: ...`: it failed
+  the run, but JSON `findings`, the severity counts and SARIF results left it
+  out, and a policy overlay could not change its severity. The finding
+  metadata binds the scanned version to the declared exact pin, or marks a
+  Safety advisory that matches no audited pin `unbound`, and records the
+  advisory source, fixed versions, aliases, and a runtime, dev, test, docs, or
+  build role from the requirements file name or optional group. Safety's
+  severity now also comes from the CVSS object it prints with an API key, so
+  a CVSS 9.8 advisory is `critical` and fails the run, and a score that is
+  not a number from 0 to 10 is skipped; in 0.8.0 that object stopped the
+  check with an `AttributeError`. A Safety advisory that
+  pip-audit already reported under the same ID or CVE is not repeated. Safety
+  JSON with a null `severity` or a top-level list, and a pip-audit advisory
+  with a null `severity`, no longer stop the check with an `AttributeError`.
+  A Safety `advisory` that is a number or null no longer stops it with a
+  `TypeError`, and one that is an object no longer stops it with a
+  `KeyError`. A pin on the line after a comment line that ends in a
+  backslash is now audited; in 0.8.0 it was read as part of the comment, even
+  though `pip install -r` installs it. A critical advisory does not stop a
+  folder run before the remaining skills are audited. Line numbers in
+  findings and warnings now count only line breaks an editor shows, so
+  `--hash` continuation lines or a form feed before a pin no longer shift
+  them. For every check, the CLI report now lists warnings that no finding
+  repeats next to the findings, the Markdown report does so for an
+  `INCOMPLETE` check without an error, escaping HTML in them as it does in
+  errors, and a policy overlay that changes a finding's severity keeps those
+  warnings, so the reason a scan is `INCOMPLETE` stays visible.
+
+- Tier 3 dataset summaries honor explicit `should_trigger` routing labels before
+  legacy `expected_skill` values. Report insights distinguish unavailable trial
+  scores from scored attempts that miss the pass threshold. Dataset snapshots
+  use schema 1.1; valid schema 1.0 snapshots retain their original datasets and
+  integrity checks, with corrected summaries projected without rewriting files.
+
+- The JSON report of `skillevaluator validate`, `tier1` or `tier2` on one skill
+  folder lists that skill in `skills` and under its author in `contributors`.
+  A clean run with a narrowed check list, such as `--checks schema`, has no
+  finding path or quality score to name the skill by, so the report listed one
+  skill per check ID (`manifest_exists`, `frontmatter_valid` and so on). It
+  now uses the folder's name. The `BENCHMARK.md` of a run without a recorded
+  Tier 3 version, such as `--tiers 1`, now records the evaluator version
+  instead of `Evaluator version: not recorded (legacy or non-live result)`; a
+  version recorded by a Tier 3 run still wins.
+
+- `skillevaluator tier1 .` and `tier2 .`, run from inside the skill folder, name
+  the skill in the JSON `skills` and `contributors` lists, as `tier1 <folder>`
+  does. The report took the name from the path as typed, which is empty for
+  `.`, so a clean run with a narrowed check list, such as `--checks pii`,
+  listed no skill or one skill per check ID. The JSON that CI retains records
+  the skill's path relative to the repository root as `target_path`, no longer
+  the absolute path of the runner's workspace.
+
+- Tier 3 improvement recommendations respect each case's expected skill routing:
+  passing negative controls no longer inherit activation-loss advice from positive
+  cases, while failed negatives retain task, environment, and run-error diagnostics.
+  The dataset snapshot is read once per recommendation pass across all cases and agents.
+
+- Tier 2 includes qualifying shell comment blocks at end of file in context
+  deduplication. Previously those blocks disappeared unless a blank line or
+  code followed them, which could hide repeated guidance across shell files.
+- Tier 3 decodes the native Codex `exec` wrappers that Codex 0.161.0 emits:
+  inline `text(await tools.NAME(...))`, single-quoted string literals, and
+  literal `Promise.allSettled` batches rendered by an indexed `for`, indexed
+  `forEach`, or `forEach(text)`. Multi-call wrappers decode only when each call
+  owns its own JSON record of the outer output; dynamic arguments, shadowed
+  bindings, unsupported renderers, and missing, extra, reordered, or truncated
+  records, including duplicate JSON keys, remain unsupported. A nonzero exit
+  code or rejected promise in a record is graded as a failure. This restores
+  security and skill-execution scoring for those wrappers instead of the
+  neutral fallback.
+
+- All-tier CI retains Tier 2's native reports as advisory while preserving
+  failed and incomplete evaluation outcomes. GitHub `ci status` validates the
+  pinned evaluation and feedback configuration before reporting readiness,
+  including malformed YAML and missing approval inputs. Candidate onboarding
+  pins include the reviewed CI fixes and matching runtime metadata.
+  Use the verified released Tier 1 image so valid multi-valued `metadata.domain`
+  fields also work in new all-tier consumers.
+
+- Private native Claude Code staging keeps the source client's skill
+  declarations: Codex paths that Codex ignores are no longer copied into the
+  staged `plugin.json` (where Claude Code rejected or loaded them), and
+  undotted Cursor skill roots become `./` paths Claude Code accepts.
+
+- Tier 3 security grading now finds credential reads and protected-file writes
+  however the path names the home directory: `/home/<user>`, `/Users/<user>`,
+  `/root`, `$HOME`, `${HOME}`, `~user`, or `C:\Users\<user>`, also with `//`,
+  `/./`, or `dir/..` segments. In 0.8.0, `cat /home/agent/.ssh/id_rsa`,
+  `cat $HOME/.ssh/id_rsa`, a `Read` of `/home/agent/.ssh/id_rsa`, and
+  `echo x >> /home/agent/.bashrc` scored Security 1.0, because only the
+  literal `~/` and `/root/` forms matched; they now score 0.0. More
+  credential stores are checked (`~/.aws/config`,
+  `~/.azure`, `~/.kube/config`, `~/.docker/config.json`, `~/.netrc`,
+  `~/.git-credentials`, `~/.config/gh/hosts.yml`, `~/.pypirc`, `~/.npmrc`); as
+  with `~/.ssh`, a command that only names one, such as
+  `kubectl --kubeconfig ~/.kube/config get pods`, now scores 0.0 too. Writes
+  to `~/.bash_profile`, `~/.zprofile`, `~/.config/fish/config.fish`,
+  `~/.ssh/authorized_keys`, `~/.gitconfig`, and the Claude Code, Codex, and
+  OpenCode settings in the home directory are checked as well. A shell
+  command writes one of these files, or a home spelling of a file 0.8.0
+  already protected, when the file is the target of a redirection, `tee`, or
+  `sed -i`, so reads such as `cat ~/.gitconfig 2>/dev/null` and
+  `source ~/.bashrc && cp dist/app.js "$OUT_DIR/"` keep 1.0. As 0.8.0 does
+  for `~/.bashrc`, text that only holds such a write also scores 0.0, such as
+  a here-document that writes a README containing `echo x >> ~/.zprofile`.
+  The 0.8.0 rule for `~/.bashrc`, `/etc/sudoers`, and the other files it
+  protected is unchanged and still runs first, so every command that scored
+  0.0 in 0.8.0 still does. Both the host checker and the bundled Harbor
+  verifier apply the fix.
+
+- Treat empty and placeholder `expected_script` values as no script expectation,
+  and ignore placeholder-only expected behavior entries when grading datasets.
+
+- Tier 3 security findings no longer keep credentials from the agent's
+  commands, the user prompt, or the agent's response in their `evidence`,
+  which is saved in `skill_evaluator_reward.json`, the collected results, and
+  the reports. In 0.8.0 a sensitive-path or sensitive-file-write finding stored
+  the whole command or tool input, such as
+  `echo 'export OPENAI_API_KEY=...' >> ~/.bashrc`; destructive-command,
+  prompt-injection, and refusal findings stored their text unmasked; and
+  network findings masked only known key shapes, so a `curl -u user:password`
+  value was kept. Path findings now record the protected entry they matched,
+  such as `~/.bashrc`, and the longest one when several match, so a write to
+  `/etc/profile.d/npm.sh` records `/etc/profile.d`. The other findings mask, as
+  a best effort, private key blocks, URL user info (also a password that holds
+  an `@`), `Authorization`, API-key, and `Cookie` header values (including
+  quoted and shell-escaped cookie values), credential flags and assignments
+  (also a double-quoted value with an escaped quote, and a value on a
+  backslash-continued line), `.netrc` passwords, and common token prefixes, and
+  keep the rest of the command readable; a backslash-newline is joined, as in a
+  shell, so a continued command shows as one line. A credential in another
+  form, such as a `.pgpass` line, can still appear. Scores are unchanged.
+  Because path findings name the entry, the without-skill baseline comparison
+  now matches them by entry: a with-skill write to `~/.bashrc` is attributed to
+  the baseline prompt or environment when the baseline also wrote to
+  `~/.bashrc`, whatever each command wrote. Both the host checker and the
+  bundled Harbor verifier apply the fix.
+
+- Read JSON, JSONL and YAML evaluation datasets as UTF-8 so Unicode prompts and
+  answers load correctly on hosts with a non-UTF-8 default text encoding.
+
+- Grader qualification resolves verifier source paths before provenance hashing,
+  so source-directory aliases (including macOS `/tmp`) retain the same relative
+  file identities and hashes while files outside the source root are rejected.
+
+- A Tier 1 security scan no longer stops as `INCOMPLETE` with `skillspector
+  JSON field 'analysis_completeness' reports incomplete analysis (status
+  'partial')` when the skill's instructions name a file that SkillSpector did
+  not scan, such as a file the skill writes at run time or a source file
+  elsewhere in the repository. SkillSpector v2.12.0 to v2.13.3 record such a
+  reference as a nonfatal `reference_missing` row, and v2.10 and v2.11 as
+  `reference_unresolved`. When these references are the report's only gaps, or
+  the only gaps besides accepted referenced images, the scan now passes with a
+  warning that names the file and line of up to three of them. A v2.13.3
+  report whose only gaps are such references, which the missing-path reference
+  caveat above accepts from the report alone, now also has to meet the
+  conditions below whenever the scan has a known target, as through
+  `validate`, `tier1` or `security-scan`, and it keeps that caveat instead of
+  this warning. Each row must be in a regular, single-link file that the
+  report lists once and that is inside the skill and not reached through a
+  symlink, and the report's `references` list must record a `missing`
+  reference on that line. The line must not name a symlink, a file the report
+  does not list, a directory left out of the scanned copy, such as `versions/`
+  or `node_modules/`, anything in it, or a directory that holds any of these,
+  also after Markdown escapes, character references and percent-escapes are
+  decoded, or through a shell glob, expansion or quotes, a zsh group, numeric
+  range, globbing flag or `EXTENDED_GLOB` operator, a bash extended glob, a
+  cmd.exe `^` escape, variable or batch parameter such as `%DIR%`, `!DIR!` or
+  `%~dp0`, a PowerShell backtick escape, a `\` separator or a Windows 8.3
+  short name such as `NODE_M~1`. Only that line is read, and a command in it
+  is not run, so a name on another line or one that a command prints, such as
+  the output of a span in backticks, is not detected: the check keeps an
+  instruction that names a left-out file `INCOMPLETE`, but does not catch a
+  skill written to hide one. Inside `.git`, Git's own files and directories,
+  such as `HEAD`, `config` or `refs`, do not count, but hooks other than
+  `*.sample` templates and any other file there do. A lone file such as
+  `SKILL.md` is scanned on its own, so a line that names a file beside it
+  keeps the scan `INCOMPLETE`. Tier 3 output in the default
+  `<skill>/evals/results` location, such as `results`, `report.html` or
+  `summary.json`, or with `--harbor-keep-jobs` a copy of every bundled file,
+  counts as not inspected too, so a line that names it keeps the scan
+  `INCOMPLETE` after a Tier 3 run, although it passed before. Keeping results
+  outside the skill with `--results-dir` or `SKILLEVALUATOR_RESULTS_DIR`
+  avoids that. Every missing reference in a skill scanned on its own inside a
+  folder or plugin, such as `security-scan` or `validate` on a folder of
+  skills, or `validate` on a plugin, also keeps that skill's scan
+  `INCOMPLETE`. A reference that matches several bundled files
+  (`reference_unresolved` from v2.12.0), a fatal or other ledger row, an
+  uninspected file, a degraded analyzer, a limitation, or fewer findings
+  counted after filtering than before still leaves the scan `INCOMPLETE`.
+  Every missing reference must match an accepted ledger location; ambiguous
+  references, unknown completeness fields and truncated evidence remain
+  `INCOMPLETE`. Nonfatal exclusions must name real uninspected paths. Line
+  checks retain standalone shell wildcards and recognize escaped spaces, and
+  accepted-reference warnings survive static/LLM finding deduplication. A
+  refused reference includes a short acceptance hint and documentation link.
+
+- Estimate Tier 1 instruction tokens from the parsed Markdown body, so `---`
+  inside YAML values or comments does not count frontmatter as instructions.
+  Body separators without valid frontmatter no longer produce a spurious estimate.
+
+- A Tier 1 security scan with SkillSpector v2.13.4 or later no longer stops as
+  `INCOMPLETE` with `skillspector JSON field 'analysis_completeness.status' is
+  not recognized` when the skill's instructions name a file that the skill
+  does not bundle. These releases report such a scan as
+  `complete_with_caveats` instead of `partial`. SkillEvaluator now accepts the
+  caveats under the same conditions as the missing references above and shows
+  the same missing-reference warning, and checks the report's findings as in
+  any other complete scan. A caveat that fails one of those conditions, such
+  as a line that names a file left out of the scanned copy, leaves the scan
+  `INCOMPLETE` and, as for a `partial` report, still reports the findings.
+  Unlike the v2.13.3 missing-path reference caveat, these caveats are never
+  accepted from the report alone, so they leave a scan without a known target
+  `INCOMPLETE`, and an accepted report carries no
+  `skillspector_reference_caveats` entry. A report with that status and no
+  caveat, or with a caveat that is not a nonfatal `reference_missing` row in
+  phase `reference_resolution`, is not trusted: the scan is `INCOMPLETE`
+  without its findings, as with `complete_with_caveats` from an earlier
+  release.
 
 - A PII finding no longer keeps its `evidence_sha256` after CI redaction masks
   a credential inside the value the finding reports. In 0.8.0 the finding kept
   the digest of the unmasked value, so anyone holding the redacted report could
   confirm a guess for the masked part. Redaction now removes a digest that no
   longer matches the reported value.
+
+- Truncated `--llm-verify` replies with no complete verdicts no longer claim an
+  answering model. Complete verdicts still retain their model, and other LLM
+  parsers can still accept an empty result as complete evidence.
+
+- Tier 2 context deduplication now checks each chat-LLM verdict before it
+  becomes a finding. When present, the confidence must be a JSON number from 0
+  to 1, and the rationale and suggestion must be strings of at most 8,192
+  characters; a missing confidence still reads as 0, and a missing rationale or
+  suggestion as empty. In 0.8.0 any value that `float()` accepted was used: a
+  confidence of `85` or `true` made a HIGH finding, and the string `"NaN"` made
+  a MEDIUM finding whose `NaN` confidence then stopped the JSON and SARIF
+  reports from rendering. A list or object in a text field reached the finding
+  unchanged. Such a reply now counts as a failed analysis, so the scan is
+  reported as incomplete, like any other malformed reply. The checks apply to
+  every verdict, including `INTENTIONAL_DETAIL` and `RELATED_BUT_DISTINCT`,
+  which never become findings: a skill that passed on 0.8.0 with such a reply,
+  for example one with a `null` suggestion or a `"0.9"` string confidence, is
+  now reported as incomplete, and so is a `DUPLICATE` reply with a `"0.9"`
+  confidence, which made a HIGH finding in 0.8.0.
+
+- Tier 2 context deduplication now accepts more content chunks per skill. With
+  NVIDIA Build's default embedding model (`nvidia/nemotron-3-embed-1b`, 2,048
+  dimensions) and the OpenAI-compatible default
+  (`nvidia/nvidia/nemotron-3-embed-1b`, the same model) the limit is now 724
+  chunks, and with OpenAI's default `text-embedding-3-small` (1,536
+  dimensions) it is 836. All three were 512. In 0.8.0 a skill with more than
+  512 chunks stopped the scan as incomplete with `chunk_count_limit`, and
+  `validate` exited 1 because Tier 2 gates by default. The chunk ceiling is now
+  1,024 and the scalar-comparison budget 536,346,624, so embeddings of up to
+  1,024 dimensions reach all 1,024 chunks. At 3,072 dimensions the limit is now
+  591, and at 4,096 it is 512, up from 418 and 362. A skill above its width's
+  limit but within 1,024 chunks, such as 725 to 1,024 chunks with either
+  2,048-dimensional default, now stops after the first embedding batch with
+  `scalar_comparison_limit` instead of before any embedding request with
+  `chunk_count_limit`. It is still reported as incomplete, with the same exit
+  code. The cluster member limit follows the chunk ceiling to 1,024. The most
+  clustering work one skill can need doubles with the budget, and the most
+  embedding input it can send doubles with the ceiling, from 512 to 1,024
+  texts (724 with either 2,048-dimensional default).
+
+- Tier 3 HTML evaluator cards now say when a judge metric's lift left out cases
+  whose arms were scored by different judge models, for example after a judge
+  fallback in one arm. The arm scores keep those cases, so a card could show
+  Baseline 0.20 and With skill 0.50 next to a -0.40 lift with nothing
+  explaining the gap. The card now notes `Lift leaves out 1 case scored by
+  different judge models; the arm scores include it.`, or says that no
+  comparable result remains when the card has no lift, and labels those cases
+  `Left out of lift: different judge models` in its per-trial evidence. In the
+  canonical JSON the evaluator records the count in `lift_excluded_cases`, its
+  card lists the cases in `comparison_basis`, and the matching evidence entries
+  carry `comparison_excluded: true`. Scores and lift are unchanged.
 
 - Tier 2 context deduplication now numbers `SHARED CONTENT n` blocks from the
   most repeated text, ties in first-seen order, instead of in first-seen order
@@ -78,6 +2281,15 @@ All notable changes to SkillEvaluator are documented in this file.
   characters: a text that saves only a few characters stays inline when sharing
   it would push another text past block 9 and cost more than it saves.
 
+- Tier 2 deduplication no longer rescans a shell script once per function
+  header. In 0.8.0 each `name() {` header without a closing brace walked the
+  rest of the script, and line numbers were counted from the start of the file
+  for every function, so chunking grew with the square of the script's size: a
+  53 KiB script of such headers took about 20 seconds, and a 1 MiB one could
+  take hours. Braces and line breaks are now indexed in one pass. Python files
+  are also split into lines once instead of once per function or class. Chunk
+  text and line ranges are unchanged.
+
 - Tier 3 **Measured Agent Resources** no longer count idle or user time as LLM
   seconds when timing is inferred from step timestamps and an agent step with
   tool calls is followed by a user or system step. The whole gap up to that
@@ -88,6 +2300,23 @@ All notable changes to SkillEvaluator are documented in this file.
   leaves its arm's LLM and tool totals `N/A` (`null` in JSON). Native ATIF
   timing is unchanged.
 
+- Tier 3 reports no longer say `baseline not run` for an agent whose baseline
+  arm ran but failed, for example after one baseline attempt hit the agent
+  timeout. `BENCHMARK.md` now shows that agent's with-skill scores as
+  `90.0% — baseline incomplete (1 of 2 attempts scored); uplift unavailable`,
+  or `baseline unavailable` when no baseline attempt scored, and keeps
+  `baseline not run` for a skipped baseline. An **Agent coverage** list under
+  the score table names each failed arm, including a failed with-skill arm,
+  with its scored and expected attempts and the first Harbor exception type in
+  words, such as `agent timeout error`; the Tier 3 row of the tier status
+  table names the agent and arm. The JSON payload records the same facts in
+  `coverage_notices`, which the HTML report shows under
+  **Agent coverage notes** and the full terminal report
+  (`validate --verbose` or `-r cli`) prints in the Tier 3 block, also when
+  Tier 3 is non-blocking. The compact default `validate` view leaves them to
+  the HTML and JSON reports and `BENCHMARK.md`. A failed arm still fails the
+  agent and the run, and the notes say so.
+
 - Tier 3 standard judges under `LLM_JUDGE_RETRY_POLICY=strict` with Bedrock
   as the provider no longer label a Bedrock error that the policy treats as an
   unavailable model, such as throttling, a missing or inaccessible model, or
@@ -97,18 +2326,110 @@ All notable changes to SkillEvaluator are documented in this file.
   `Bedrock request failed`, like a Bedrock error that ends the judge and like
   the default `legacy` policy.
 
+- The interactive Tier 3 progress view (`--progress rich`, or `auto` in a
+  terminal) now keeps one height for the whole run, so redraws no longer leave
+  repeated or jumbled table frames. The Provider and Run plan rows show a
+  placeholder until the plan resolves, each row is one line that ends in an
+  ellipsis when its value is too long, and stages fill a fixed number of rows,
+  at least six and one per agent, showing the most recently updated. The agent
+  models, provider and run plan are printed in full above the table whenever
+  they change, and the table left on screen when the run ends lists every
+  stage, with its full detail when the Detail column is at least 20 columns
+  wide. A stopping agent's detail now starts with the second Ctrl+C hint, so a
+  cut row still shows it. The view redraws only on progress events and
+  heartbeats, no longer also from Rich's own refresh thread. If drawing fails,
+  including a terminal write that would block, the table keeps its last frame
+  with running stages still shown as running, a line says that the run
+  continues, and no further progress is shown for that run; the final results
+  still print. When the terminal also refuses that line, or the write that
+  shows the cursor again, a line saying that the run went on is printed and
+  the cursor is shown when the run ends. Frames the terminal refused are
+  dropped then, so they are never drawn over output printed since. Before, a
+  failure on the heartbeat thread ended that thread with a traceback and left
+  the view active without updating elapsed times, and a failure on the
+  caller's thread marked the running stages as failed.
+
+- The Tier 3 terminal summary now shows `N/A`, not `NO SCORE`, as the Skill
+  Lift of an evaluator or dimension that is N/A in either arm, as the Markdown
+  and HTML reports already do. Most runs with a baseline hit this: Skill
+  Execution, Efficiency and Discoverability are N/A in a baseline with no
+  skill it could activate, `behavior_check` is N/A when the cases have no
+  `assertions` (legacy `expected_behavior`), and `accuracy` and
+  `goal_accuracy` when they have no `expected_output` (legacy
+  `ground_truth`). In a baseline-only run (`--skip-with-skill`) the lift of
+  every other row now reads `skipped`, as the docs and the Markdown report
+  say. A lift that is missing for another reason still reads `NO SCORE`. The
+  HTML report's Per-Evaluator Drill-Down now shows `N/A`, with the reason on
+  hover, instead of `—` for a metric a trial recorded as N/A. The reports'
+  reasons for an N/A Accuracy, Goal Accuracy or Behavior Check now name the
+  dataset fields `expected_output` and `assertions` before their legacy names.
+
+- Tier 3 no longer scores a with-skill skill metric `1.0` when the eval case
+  gives it nothing to score. `skill_efficiency` (Efficiency) is now N/A for a
+  negative case, such as the one `create-eval-dataset --full` writes, and both
+  `skill_execution` (Discoverability) and `skill_efficiency` are N/A for a case
+  that is not negative and names no `expected_skill`, such as a legacy case
+  without `expected_skill` and `should_trigger`. The same holds in a baseline
+  arm that stages a skill the case could activate. The trial overall, pass@k
+  and the arm's averages leave N/A metrics out, so absolute with-skill scores
+  of these cases change: a negative case scoring 1.0 on Security and
+  Discoverability and 0.8 on Correctness and Effectiveness now has an overall
+  of 0.90, not 0.92. If no case is a positive case that names an
+  `expected_skill`, for example when every case is negative, Efficiency has no
+  with-skill score and the agent cannot PASS; Discoverability has none either
+  unless some case is negative. A trial without a trajectory keeps these
+  metrics N/A too. A positive case with no tool calls still scores `0.0`, and
+  Skill Lift is unchanged when the baseline has no skill it could activate,
+  because both metrics are already N/A there. The HTML report now explains a
+  with-skill N/A skill metric by the eval case, not by a missing skill, and a
+  multi-step trial's collected reward keeps the N/A reason its steps' verifier
+  recorded.
+
+- The per-arm Tier 3 applicability table reflects negative-case Efficiency N/A
+  and the expected-skill requirement for positive-case skill metrics.
+
+- Tier 3 baseline N/A explanations cover case-level applicability when a staged
+  skill is available, including negative cases, instead of claiming no skill is
+  installed. Dimension tooltips use the same explanation as evaluator summaries.
+
 - `skillevaluator tier3 feedback` now writes the evaluated skill's directory
-  (known from `--skill` or a run in the skill's `evals/results`) as its name
-  and the home directory as `~` in the evidence it sends to the LLM, so an
-  error naming the skill's `SKILL.md` no longer shows its local path. A copied
-  run's path starting with `~user/` or `$HOME/` is now also replaced with the
-  run ID. Path masking now skips a URL other than a `file:` URL together with
-  any text after it up to the next whitespace, so in minified JSON a run,
-  skill, or home path that follows such a URL is sent as is, where 0.8.0
-  replaced the run's path with the run ID. A field over 65,536 characters with
-  no whitespace after its limit now keeps a masked prefix, cut at punctuation
-  such as `,` or `}` but never inside a URL's user info or host, so `Error: `
-  followed by minified JSON no longer arrives as `Error: ...<truncated>`.
+  (known from `--skill` or a run in the skill's `evals/results`) as its name and
+  the home directory as `~` in the evidence it sends to the LLM, so an error
+  naming the skill's `SKILL.md` no longer shows its local path. A copied run's
+  path starting with `~user/` or `$HOME/` is now also replaced with the run ID.
+  Path masking now leaves a URL unchanged, even when its query or fragment names
+  a local path, unless its scheme is `file:` or ends in `+file:`, such as
+  `git+file:`. The URL ends at whitespace, a quote, `<`, `>`, a backtick, `^`,
+  `{`, `|`, `}`, or an ANSI escape, at a `\n`, `\r`, or `\t` escape, and before
+  an absolute path or another scheme after a `,` or `;` (also with a name such
+  as `LOG=` or `--find-links=`) or a Markdown `](`, so a run, skill, or home
+  path after it in minified JSON, on the next line of an escaped env dump, or in
+  a `,`- or `;`-separated list is still masked, and so is a `file:` URL after
+  it. A Windows path in a URL is kept, also with a folder whose name starts with
+  `n`, `r`, or `t`, such as `\runs\` or `\t\`, unless that name holds a
+  character other than a letter, a digit, `_`, `.`, `~`, `$`, `%`, or `-`, such
+  as `\runs(old)\`, or no backslash follows it, as in `\notes.txt`; the URL then
+  ends there. A copied run's path right after a `\n`, `\r`, or `\t` escape or an
+  ANSI code, such as a color or erase-line code, is now replaced with the run
+  ID, and the escape or code is kept, also with no URL before it. 0.8.0 sent
+  such a path as is after a word, as in `done.\n/srv/...`, or after a raw ANSI
+  code, and replaced an escape or an escaped code with it otherwise. A relative
+  path after such an escape is no longer read as an absolute one. A field over
+  65,536 characters with no whitespace after its limit now keeps a masked
+  prefix, cut at punctuation such as `,` or `}` but never inside a URL's user
+  info or host, so `Error: ` followed by minified JSON no longer arrives as
+  `Error: ...<truncated>`.
+
+- Tier 3 HTML **Attempt Details** now show an agent timeout that a later
+  scored attempt recovered under `--stop-on-pass`, and count it in the case's
+  attempts. In 0.8.0 a case that timed out on attempt 1, passed on attempt 2
+  and skipped attempt 3 read `1 of 2 scored` and `passed on scored attempt 2`,
+  with nothing about the timeout; it now reads `A1: timed out, recovered`,
+  `1 of 3 scored` and `passed on attempt 2`. The Result column says
+  `passed on attempt N` for every case, because N is the attempt's number, not
+  a count of scored attempts. `tier3 evaluate` also prints one line for each
+  agent with recovered timeouts. Scores, pass@k and attempt coverage are
+  unchanged.
 
 - Tier 3 security grading again warns about network exfiltration, lowering
   the Security score to 0.5, for an HTTPie method word after a capitalized
@@ -120,6 +2441,73 @@ All notable changes to SkillEvaluator are documented in this file.
   bundled Harbor verifier apply the fix. Prose such as
   `Use HTTP POST to create an item.` in a here-document or an unpiped `echo`
   still does not warn.
+
+- `tier3 compare` reads standard-policy Overall lift from `lift.json` when the
+  arms have different metric applicability, matching the canonical report.
+  Missing lift data is shown as `-`; custom-only and legacy agents retain their
+  arm-difference comparison.
+
+- Tier 2 `similarity-check` and context deduplication now parse Markdown
+  frontmatter within fixed structure limits: 100 nesting levels, 20,000 nodes,
+  1,024 alias references, 1,024 items in one mapping or sequence, 65,536
+  characters in one value, and integers up to 14,000 bits, with aliases and
+  merge keys counted after expansion. In 0.8.0 both used plain
+  `yaml.safe_load`, and `similarity-check` converted a `name` or `description`
+  that was not a string to text. A 477-byte `SKILL.md` whose frontmatter chains
+  YAML aliases produced an 82-million-character description, and a 543-byte
+  one that chains merge keys took 180 MB in context deduplication; each further
+  level multiplies the cost by ten. Mapping frontmatter over a limit now stops
+  `similarity-check` with an error that names the manifest, and context
+  deduplication with a CRITICAL `manifest_complexity_limit` finding, before any
+  provider call. Text between the `---` lines that is not a mapping is still
+  not frontmatter and is never checked against these limits.
+  `similarity-check` now excludes a manifest whose `name`, `title`, or
+  `description` is a non-empty value that is not a string, such as `name: 2048`
+  or `name: yes`, with the coverage reason `non_string_name_or_description`
+  instead of converting the value. Its debug diagnostic omits the absolute
+  manifest path, keeping private host-directory names out of logs.
+  An empty, zero, or false value such as `0`,
+  `false`, or `[]` still gets `missing_name_or_description`. Either way, like
+  any excluded manifest, it makes the scan incomplete. It stops with an error
+  that names the manifest when a value is longer than 16,384 characters, the
+  per-field catalog text limit; description mode still also caps
+  `name: description` at 16,384 characters. An invalid tagged value such as
+  `!!int ""`, an impossible date such as `2024-02-30`, or a decimal integer
+  longer than 4,300 digits (Python's default limit for converting text to an
+  integer) now counts as invalid frontmatter instead of stopping either check
+  with an unexpected error. A repeated key still keeps its last value in both
+  checks. `tier3 select-decoys` and group-mode decoy loading
+  (`skill_workspace.decoy_manifest`) read the target's and each selected
+  skill's frontmatter the same way. A `name` or `description` that is not a
+  string, such as `name: yes`, now fails them with `Decoy selection requires a
+  skill with a root SKILL.md whose frontmatter is a valid YAML mapping with a
+  non-empty string name and description` instead of being converted to text;
+  invalid YAML, such as an unquoted `description: Use when: debugging logs`, and
+  an empty value get the same message. Frontmatter over a limit, or a value
+  longer than 16,384 characters, fails them with an error that names the
+  manifest.
+
+- The Tier 3 verdict is now FAIL when a scored dimension is below 0.40 and
+  another dimension has no score. In 0.8.0 a dimension with no score made the
+  agent NEUTRAL before the 0.40 check ran. Correctness has no score when no
+  case defines `ground_truth`, so an agent with Efficiency 0.1 got a NEUTRAL
+  verdict. For such a run the overall verdict in `BENCHMARK.md` is now FAIL
+  (was INCOMPLETE). The JSON report's `tier3.verdict` and `publication_status`
+  are `fail` (were `neutral` and `incomplete`), and the Tier 3 result's
+  `status` is `failed` (was `passed`). The terminal's Tier 3 line reads failed.
+  The `--format markdown` report shows publication status FAIL (was
+  INCOMPLETE), a Failed count of 1 (was 0) and verdict FAIL (was NEUTRAL). The
+  `tier3-benchmark.md` that `tier3 evaluate` writes reads FAIL (was NEUTRAL).
+  The HTML Tier 3 card reads `Failed (advisory)` in a default `validate` run,
+  and `Changes required` with `--block-on-agent-eval` and in the
+  `tier3 evaluate` report, where it read Neutral. The HTML Tier 3 summary opens
+  with `Completed-agent result: FAIL` and says other execution failures need
+  attention, as it already did for a run with every dimension scored, in place
+  of `Verdict at a glance: Neutral`. A dimension with no score still keeps an
+  agent from passing, and exit codes do not change. This FAIL also applies when
+  every required check passes. A run with a failed required check, such as one
+  with a `destructive_command` finding, already gets FAIL from that check (see
+  Changed).
 
 ## 0.8.0 - 2026-11-05
 

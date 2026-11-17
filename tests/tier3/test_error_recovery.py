@@ -10,9 +10,10 @@ command must NOT be scored as first-attempt clean.
 from __future__ import annotations
 
 import pytest
+import yaml
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_error_recovery
+from skillevaluator.tier3.eval_core.checks import check_error_recovery, score_skill_execution
 from skillevaluator.tier3.harbor.report import _collect_fail_reasons
 from skillevaluator.tier3.harbor.templates import eval as eval_template
 
@@ -40,6 +41,392 @@ def _codex_output(exit_code: int, output: str = "") -> str:
         f"Original token count: {len(output.split())}\n"
         f"Output:\n{output}"
     )
+
+
+@pytest.mark.parametrize(
+    "diagnostic,missing,kind",
+    [
+        ("bash: jq: command not found", "jq", "executable"),
+        ("bash: line 1: jq: command not found", "jq", "executable"),
+        ("sh: 1: jq: not found", "jq", "executable"),
+        ("/bin/sh: jq: not found", "jq", "executable"),
+        ("zsh: command not found: jq", "jq", "executable"),
+        ("env: 'jq': No such file or directory", "jq", "executable"),
+        ('exec: "jq": executable file not found in $PATH', "jq", "executable"),
+        ("ModuleNotFoundError: No module named 'Some_Package.sub'", "Some_Package", "python_module"),
+        ("ImportError: No module named Some_Package", "Some_Package", "python_module"),
+    ],
+)
+@pytest.mark.parametrize("source", ["declared", "skill_text", "script", "agent"])
+@pytest.mark.parametrize("recovered", [True, False])
+def test_dependency_attribution(checker, diagnostic, missing, kind, source, recovered):
+    context = {"apt": ["JQ=1.0"], "pip": ["some-package[extra]>=1"]} if source == "declared" else {}
+    if source == "skill_text":
+        context["skill_text"] = f"Run {missing} to finish"
+    calls = [_call("python scripts/task.py", diagnostic)]
+    if recovered:
+        calls.append(_call("python scripts/task.py", "exit code 0"))
+    result = checker(
+        calls, expected_script="scripts/task.py" if source == "script" else None, dependency_context=context
+    )
+    failure = result["failures"][0]
+    assert failure["missing"] == missing
+    assert failure["missing_kind"] == kind
+    assert failure["recovered"] is recovered
+    if source == "agent":
+        assert failure["fault_kind"] == "agent_tool_choice"
+        assert result["agent_faults"] == 1
+        assert result["score"] == (0.9 if recovered else 0.0)
+    else:
+        assert failure["fault"] == "environment"
+        assert failure["fault_kind"] == (
+            "declared_dependency_unavailable" if source == "declared" else "undeclared_dependency"
+        )
+        assert result["environment_faults"] == 1
+        assert result["skill_faults"] == result["agent_faults"] == 0
+        assert result["score"] == 1.0
+        assert result["passed"] is (True if recovered else None)
+        assert (result.get("status") == "environment_invalid") is not recovered
+        assert "evals/environment/Dockerfile" in failure["guidance"]
+
+
+def test_skill_path_and_non_skill_file(checker):
+    context = {"skill_dirs": ["/workspace/skills/demo"]}
+    for path, fault in [("/workspace/skills/demo/scripts/run.py", "skill"), ("/input/missing.csv", "agent")]:
+        result = checker(
+            [_call("python run.py", f"FileNotFoundError: [Errno 2] No such file or directory: '{path}'")],
+            dependency_context=context,
+        )
+        assert result["failures"][0]["fault"] == fault
+        assert result["failures"][0]["fault_kind"] == ("missing_skill_file" if fault == "skill" else "command_error")
+        assert result["score"] == 0.0
+
+
+def test_environment_does_not_hide_real_failure(checker):
+    result = checker(
+        [_call("jq", "bash: jq: command not found"), _call("python task.py", "ValueError: invalid input")],
+        dependency_context={"apt": ["jq"]},
+    )
+    assert result["status"] == "environment_invalid"
+    assert result["score"] == 0.0
+    assert result["agent_faults"] == 1
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "scripts/extract.sh: line 3: pdftotext: command not found",
+        "/root/.claude/skills/demo/scripts/extract.sh: 3: pdftotext: not found",
+    ],
+)
+def test_skill_script_missing_executable_is_environment_failure(checker, diagnostic):
+    result = checker(
+        [_call("bash scripts/extract.sh", diagnostic)],
+        expected_script="scripts/extract.sh",
+        dependency_context={"skill_text": "Use pdftotext", "skill_dirs": ["/workspace/skills/demo"]},
+    )
+    assert result["environment_faults"] == 1
+    assert result["failures"][0]["missing"] == "pdftotext"
+
+
+def test_subprocess_file_not_found_is_missing_executable_but_open_is_not(checker):
+    context = {"skill_text": "Use pdftotext", "skill_dirs": ["/workspace/skills/demo"]}
+    result = checker(
+        [
+            _call(
+                "python scripts/extract.py",
+                'Traceback: File ".../subprocess.py", line 1950, in _execute_child\n'
+                "FileNotFoundError: [Errno 2] No such file or directory: 'pdftotext'",
+            )
+        ],
+        expected_script="scripts/extract.py",
+        dependency_context=context,
+    )
+    assert result["failures"][0]["missing"] == "pdftotext"
+    assert result["failures"][0]["missing_kind"] == "executable"
+    open_result = checker([_call("python scripts/extract.py", "FileNotFoundError: 'input.json'")])
+    assert open_result["failures"][0]["fault_kind"] == "command_error"
+
+
+def test_skill_path_as_tool_argument_does_not_mean_skill_uses_tool(checker):
+    result = checker(
+        [_call("tree /workspace/skills/demo/", "bash: line 1: tree: command not found")],
+        dependency_context={"skill_dirs": ["/workspace/skills/demo"], "skill_text": "Run scripts/run.py"},
+    )
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+
+
+def test_skill_modules_and_package_aliases_are_classified(checker):
+    module = checker(
+        [
+            _call(
+                "python /workspace/skills/demo/scripts/run.py", "ModuleNotFoundError: No module named 'scripts.helpers'"
+            )
+        ],
+        expected_script="scripts/run.py",
+        dependency_context={"skill_modules": ["scripts", "helpers"]},
+    )
+    assert module["failures"][0]["fault_kind"] == "missing_skill_file"
+    alias = checker(
+        [_call("python scripts/run.py", "ModuleNotFoundError: No module named 'yaml'")],
+        dependency_context={"pip": ["PyYAML>=6"]},
+    )
+    assert alias["failures"][0]["fault_kind"] == "declared_dependency_unavailable"
+    imported = checker(
+        [_call("python scripts/run.py", "ModuleNotFoundError: No module named 'rasterio'")],
+        dependency_context={"script_imports": ["rasterio"]},
+    )
+    assert "Install the package that provides rasterio" in imported["failures"][0]["guidance"]
+
+
+def test_dependency_context_records_modules_provided_by_skill(tmp_path):
+    skill = tmp_path / "demo"
+    scripts = skill / "scripts"
+    scripts.mkdir(parents=True)
+    (scripts / "__init__.py").write_text("")
+    (scripts / "helpers.py").write_text("def summarize(): pass\n")
+    (scripts / "run.py").write_text("from rasterio import open\n")
+    context = eval_template._dependency_context("demo", skills_root=tmp_path)
+    assert {"scripts", "helpers"} <= set(context["skill_modules"])
+    assert "rasterio" in context["script_imports"]
+
+
+def _skill_named_text_analyzer(tmp_path, apt: str | None = None, frontmatter: str | None = None) -> dict:
+    skill = tmp_path / "text-analyzer"
+    (skill / "scripts").mkdir(parents=True)
+    if frontmatter is None:
+        frontmatter = "name: text-analyzer\ndescription: Count words. Use when a request names text-analyzer.\n"
+    (skill / "SKILL.md").write_bytes(
+        f"---\n{frontmatter}---\nRun scripts/analyze_text.py; pipe the result to jq if needed.\n".encode()
+    )
+    if apt is not None:
+        (skill / "scripts" / "apt-packages.txt").write_text(apt)
+    context = eval_template._dependency_context("text-analyzer", skills_root=tmp_path)
+    assert context["skill_name"] == "text-analyzer"
+    return context
+
+
+def test_missing_command_named_after_the_skill_is_agent_tool_choice(checker, tmp_path):
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path),
+    )
+    assert result["failures"][0]["fault"] == "agent"
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+    assert result["environment_faults"] == 0
+
+
+# Every spelling below is the same skill name to yaml.safe_load, which the schema validator uses.
+_DESCRIPTION = "description: Count words. Use when a request names text-analyzer.\n"
+_QUOTED_DESCRIPTION = 'description: Counts "words" in a file.\n'
+# A nested `name` must not be read as the skill name, whether it comes before or after the root `name`.
+# Anchors, tags and aliases belong to the node after them, so a quote right after one still opens a string.
+_NESTED_NAME_FRAGMENTS = {
+    "anchored-quoted-flow-value": 'metadata: {k: &value "closing } inside",\nname: other\n}\n',
+    "anchor-before-quoted-flow-value": 'meta: {k: &a "x}",\nname: other\n}\n',
+    "tag-before-quoted-flow-value": 'meta: {k: !!str "x}",\nname: other\n}\n',
+    "tag-then-anchor-before-quoted-value": 'meta: {k: !!str &a "x}",\nname: other\n}\n',
+    "anchor-then-tag-before-quoted-value": 'meta: {k: &a !!str "x}",\nname: other\n}\n',
+    "verbatim-tag-before-quoted-value": 'meta: {k: !<tag:yaml.org,2002:str> "x}",\nname: other\n}\n',
+    "single-quoted-value-with-tag-and-anchor": "meta: {k: !!str &a 'x}',\nname: other\n}\n",
+    "properties-before-quoted-sequence-items": 'tags: [&a "x]", !!str "y]",\nname: other]\n',
+    "anchored-quoted-flow-key": 'meta: {&a "k}": v,\nname: other\n}\n',
+    "tagged-quoted-flow-key": 'meta: {!!str "k}": v,\nname: other\n}\n',
+    "explicit-anchored-quoted-flow-key": 'meta: {? &a "k}": v,\nname: other\n}\n',
+    "explicit-quoted-key-in-flow-sequence": 'tags: [? "k]": v,\nname: other]\n',
+    "anchor-before-flow-mapping-with-quoted-brace": 'meta: {k: &a {x: "}"},\nname: other\n}\n',
+    "tag-before-flow-sequence-with-quoted-bracket": 'tags: [!!seq ["]"],\nname: other]\n',
+    "properties-before-top-level-flow-mapping": 'meta: &m !!map {k: "}",\nname: other\n}\n',
+    "anchored-empty-flow-value": "meta: {k: &x ,\nname: other\n}\n",
+    "anchor-then-newline-then-quoted-flow-value": 'meta: {k: &a\n"x}",\nname: other\n}\n',
+    "properties-before-block-literal": 'description: !!str |\n  {[" name: nope\n',
+    "properties-before-block-folded": "description: &d !!str >-\n  text {\n",
+    "properties-before-block-sequence-literal": "tags:\n- !!str |\n  { unclosed\n- b\n",
+    "anchored-multiline-double-quoted": 'description: &a "multi\nname: nope"\n',
+    "tagged-multiline-single-quoted": "description: !!str 'multi\nname: nope'\n",
+    "anchored-multiline-quoted-sequence-item": 'tags:\n- &a "x\nname: nope"\n',
+    "anchored-key-with-flow-value": '&a "k": {x: 1,\nname: other}\n',
+    "tagged-key-with-quoted-flow-value": "!!str k: {x: '}',\nname: other}\n",
+    "explicit-key-with-flow-value": "? meta\n: {x: 1,\nname: other}\n",
+}
+_TEXT_ANALYZER_FRONTMATTERS = {
+    "double-quoted-value": f'name: "text-analyzer"\n{_DESCRIPTION}',
+    "single-quoted-value": f"name: 'text-analyzer'\n{_DESCRIPTION}",
+    "double-quoted-key": f'"name": text-analyzer\n{_DESCRIPTION}',
+    "single-quoted-key-and-value": f"'name': 'text-analyzer'\n{_DESCRIPTION}",
+    "space-before-colon": f"name : text-analyzer\n{_DESCRIPTION}",
+    "folded-block-scalar": f"name: >-\n  text-analyzer\n{_DESCRIPTION}",
+    "literal-block-scalar": f"name: |\n  text-analyzer\n{_DESCRIPTION}",
+    "value-on-next-line": f"name:\n  text-analyzer\n{_DESCRIPTION}",
+    "plain-trailing-comment": f"name: text-analyzer # shown in listings\n{_DESCRIPTION}",
+    "quoted-trailing-comment": f'name: "text-analyzer" # shown in listings\n{_DESCRIPTION}',
+    "name-after-block-description": "description: |\n  Count words.\n  name: not-this-one\nname: text-analyzer\n",
+    "nested-name-is-ignored": f"metadata:\n  name: not-this-one\nname: text-analyzer\n{_DESCRIPTION}",
+    "name-inside-multiline-quoted-text": 'description: "Count words.\nname: not-this-one"\nname: text-analyzer\n',
+    # Keys named `name` below the top level never replace the skill name, wherever they sit.
+    "nested-block-mapping-after-name": f"name: text-analyzer\nmetadata:\n  name: other\n{_DESCRIPTION}",
+    "nested-block-mapping-last": f"{_DESCRIPTION}name: text-analyzer\nmetadata:\n  version: 1\n  name: other\n",
+    "single-line-flow-mapping-after-name": f"name: text-analyzer\nmetadata: {{name: other}}\n{_DESCRIPTION}",
+    "single-line-flow-mapping-before-name": f"metadata: {{name: other}}\nname: text-analyzer\n{_DESCRIPTION}",
+    "multiline-flow-mapping-after-name": f"name: text-analyzer\n{_DESCRIPTION}metadata: {{\nname: other\n}}\n",
+    "multiline-flow-mapping-before-name": f"metadata: {{\nname: other\n}}\nname: text-analyzer\n{_DESCRIPTION}",
+    "multiline-flow-sequence-with-name-entry": "name: text-analyzer\ntags: [x,\nname: other\n]\n",
+    "multiline-flow-mapping-in-block-mapping": "name: text-analyzer\nmeta:\n  k: {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-in-block-sequence": "name: text-analyzer\ntags:\n- {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-on-next-line": "name: text-analyzer\nmeta:\n  {x: 1,\nname: other}\n",
+    "multiline-flow-mapping-with-anchor": "name: text-analyzer\nbase: &base {\nname: other\n}\n",
+    "nested-flow-collections": "name: text-analyzer\nmeta: {a: [1, 2],\nname: other,\nb: {c: d}\n}\n",
+    "flow-with-quoted-bracket-and-comment": 'name: text-analyzer\nmeta: {"}": 1, # }\nname: other\n}\n',
+    "flow-with-apostrophe-in-plain-value": "name: text-analyzer\nmeta: {x: it's,\nname: other\n}\n",
+    "multiline-quoted-in-block-sequence": 'name: text-analyzer\ntags:\n- "x\nname: other"\n',
+    "block-sequence-of-mappings": "name: text-analyzer\nitems:\n- name: other\n- name: another\n",
+    "name-after-multiline-flow-mapping": f"metadata: {{a: 1,\nb: 2}}\nname: text-analyzer\n{_DESCRIPTION}",
+    # A quote starts a string only where a node starts, never inside a plain scalar.
+    "inch-mark-in-flow-mapping": f'metadata: {{size: 5 "}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "adjacent-inch-mark-in-flow-mapping": f'metadata: {{size: 5"}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "quote-inside-flow-sequence-item": f'tags: [a "b]\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "apostrophe-in-flow-mapping-value": f"meta: {{k: it's}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}",
+    "spaced-apostrophe-in-flow-mapping": "meta: {k: rock 'n roll}\nname: text-analyzer\nnote: 'quoted'\n",
+    "inch-mark-in-multiline-flow-mapping": f'meta: {{size: 5 ",\nname: other\n}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "inch-mark-before-multiline-flow-close": f'meta: {{a: 1 "\n,\nname: other\n}}\nname: text-analyzer\n{_QUOTED_DESCRIPTION}',
+    "quoted-string-hides-brace-in-flow-mapping": "meta: {k: \"closing } inside\",\nname: other,\nj: 'it''s ]'\n}\nname: text-analyzer\n",
+    "quoted-strings-in-multiline-flow-sequence": "tags: [\"a, b\",\n'c' ,\nname: other]\nname: text-analyzer\n",
+    "json-style-flow-mapping": 'meta: {"a":"b",\n"name":"other"\n}\nname: text-analyzer\n',
+    "quoted-key-and-value-in-flow-mapping": "meta: {\"name\": \"other\",\n'k': 'v'}\nname: text-analyzer\n",
+    "quote-in-block-plain-text": "description: 5\" pipe and 'it' fine\nname: text-analyzer\n",
+    # Anchors, tags and aliases belong to the node that follows them, so a quote right after
+    # them still opens a string and its brackets stay inside it.
+    "anchored-name-key": "&a name: text-analyzer\n",
+    "tagged-name-key": "!!str name: text-analyzer\n",
+    "tagged-and-anchored-quoted-name-key": "!!str &a 'name': text-analyzer\n",
+    "tagged-name-value": 'name: !!str "text-analyzer"\n',
+    "anchored-name-value": "name: &n text-analyzer\n",
+    "tagged-name-on-next-line": "name: !!str\n  text-analyzer\n",
+    "tag-and-anchor-quoted-name-value": "name: !!str &n 'text-analyzer'\n",
+    "anchored-block-scalar-name": "name: &n >-\n  text-analyzer\n",
+    # Brackets and quotes inside plain text or block scalars do not open anything.
+    "unbalanced-brackets-in-plain-text": "description: Edits {file or [path, it's # not a comment\nname: text-analyzer\n",
+    "brackets-in-block-scalar": "description: |\n  {[\"' # x\nname: text-analyzer\n",
+    "plain-continuation-starting-with-bracket": 'description: Count words.\n  [optional] "Use when" asked.\nname: text-analyzer\n',
+}
+_TEXT_ANALYZER_FRONTMATTERS |= {
+    f"{case}-before-name": f"{fragment}name: text-analyzer\n" for case, fragment in _NESTED_NAME_FRAGMENTS.items()
+} | {f"{case}-after-name": f"name: text-analyzer\n{fragment}" for case, fragment in _NESTED_NAME_FRAGMENTS.items()}
+# The whole frontmatter can be one flow mapping.
+_TEXT_ANALYZER_FRONTMATTERS |= {
+    "root-flow-mapping": "{name: text-analyzer, description: Count words.}\n",
+    "root-flow-mapping-quoted": '{"name": \'text-analyzer\', description: "x}"}\n',
+    "root-flow-mapping-multiline": '{description: Count "words",\nname: text-analyzer,\nmetadata: {name: other}\n}\n',
+    "root-flow-mapping-nested-name-last": "{name: text-analyzer,\nmetadata: {name: other},\nlist: [name]}\n",
+    "root-flow-mapping-with-properties": "!!map &m {name: !!str &n 'text-analyzer', k: &a \"}\"}\n",
+}
+_TEXT_ANALYZER_FRONTMATTERS["alias-in-flow-mapping"] = (
+    'name: text-analyzer\nbase: &a "x}"\nmeta: {k: *a,\nname: other\n}\n'
+)
+
+
+@pytest.mark.parametrize("frontmatter", _TEXT_ANALYZER_FRONTMATTERS.values(), ids=_TEXT_ANALYZER_FRONTMATTERS.keys())
+def test_skill_name_is_read_from_any_yaml_spelling_of_the_name(checker, tmp_path, frontmatter):
+    """A missing command named after the skill is the agent's choice however the manifest spells the name."""
+    context = _skill_named_text_analyzer(tmp_path, frontmatter=frontmatter)
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=context,
+    )
+    assert result["failures"][0]["fault_kind"] == "agent_tool_choice"
+    assert result["environment_faults"] == 0
+    other = checker([_call("jq . out.json", "bash: line 1: jq: command not found")], dependency_context=context)
+    assert other["failures"][0]["fault_kind"] == "undeclared_dependency"
+
+
+@pytest.mark.parametrize("frontmatter", _TEXT_ANALYZER_FRONTMATTERS.values(), ids=_TEXT_ANALYZER_FRONTMATTERS.keys())
+def test_skill_name_matches_yaml_safe_load(frontmatter):
+    """The verifier's reader agrees with the parser the schema validator uses."""
+    expected = yaml.safe_load(frontmatter)["name"].strip()
+    assert expected == "text-analyzer"
+    assert eval_template._frontmatter_skill_name(f"---\n{frontmatter}---\nBody\n") == expected
+
+
+def test_crlf_frontmatter_name_is_read(tmp_path):
+    skill = tmp_path / "text-analyzer"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(
+        b"---\r\nname: 'text-analyzer'\r\ndescription: Count words.\r\n---\r\nRun scripts/run.py\r\n"
+    )
+    context = eval_template._dependency_context("text-analyzer", skills_root=tmp_path)
+    assert context["skill_name"] == "text-analyzer"
+
+
+def test_bom_prefixed_frontmatter_name_is_read(tmp_path):
+    skill = tmp_path / "text-analyzer"
+    skill.mkdir()
+    (skill / "SKILL.md").write_bytes(b"\xef\xbb\xbf---\nname: text-analyzer\ndescription: Count words.\n---\nBody\n")
+    assert eval_template._dependency_context("text-analyzer", skills_root=tmp_path)["skill_name"] == "text-analyzer"
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["description: Count words.\n", "name:\ndescription: x\n", "name: ''\n"],
+    ids=["missing", "empty-value", "empty-string"],
+)
+def test_skill_without_a_readable_name_records_no_name(tmp_path, frontmatter):
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(f"---\n{frontmatter}---\nBody\n")
+    assert eval_template._dependency_context("demo", skills_root=tmp_path)["skill_name"] == ""
+
+
+def test_declared_tool_named_after_the_skill_stays_environment_fault(checker, tmp_path):
+    result = checker(
+        [_call("text-analyzer input.txt", "bash: line 1: text-analyzer: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path, apt="text-analyzer\n"),
+    )
+    assert result["failures"][0]["fault_kind"] == "declared_dependency_unavailable"
+    assert result["environment_faults"] == 1
+
+
+def test_other_command_mentioned_by_the_skill_stays_undeclared_dependency(checker, tmp_path):
+    result = checker(
+        [_call("jq . out.json", "bash: line 1: jq: command not found")],
+        dependency_context=_skill_named_text_analyzer(tmp_path),
+    )
+    assert result["failures"][0]["fault_kind"] == "undeclared_dependency"
+    assert result["environment_faults"] == 1
+
+
+def test_environment_failure_reason_retains_agent_failure(checker):
+    result = checker(
+        [
+            _call("jq --version", "bash: jq: command not found"),
+            _call("python task.py", "ValueError: invalid input"),
+        ],
+        dependency_context={"apt": ["jq"]},
+    )
+    assert result["status"] == "environment_invalid"
+    assert "python task.py" in result["reason"]
+
+
+def test_skill_fault_overrides_environment_in_score(checker):
+    calls = [
+        _call("jq --version", "bash: jq: command not found"),
+        _call(
+            "python /workspace/skills/demo/scripts/run.py",
+            "FileNotFoundError: can't open file '/workspace/skills/demo/scripts/run.py'",
+        ),
+    ]
+    recovery = checker(
+        calls, expected_script="/workspace/skills/demo/scripts/run.py", dependency_context={"apt": ["jq"]}
+    )
+    scored = score_skill_execution(
+        calls,
+        "demo",
+        expected_script="/workspace/skills/demo/scripts/run.py",
+        skill_tool_names=["demo"],
+        dependency_context={"apt": ["jq"], "skill_dirs": ["/workspace/skills/demo"]},
+    )
+    assert recovery["skill_faults"] == 1
+    assert recovery.get("status") != "environment_invalid"
+    assert scored["score"] is not None
 
 
 def test_failure_with_no_retry_is_not_first_attempt_clean(checker):
@@ -99,7 +486,7 @@ def test_unrecovered_failure_after_earlier_success(checker):
     assert result["score"] == 0.0
     assert len(result["failures"]) == 1
     assert len(result["unrecovered_failures"]) == 1
-    assert result["unrecovered_failures"][0]["fault"] == "skill"
+    assert result["unrecovered_failures"][0]["fault"] == "agent"
     assert "make build" in result["reason"]
 
 
@@ -116,8 +503,8 @@ def test_unrecovered_failure_after_earlier_recovery(checker):
     assert [f["failed_cmd"] for f in result["unrecovered_failures"]] == ["make build"]
     assert result["score"] == 0.0
     assert result["passed"] is False
-    assert result["skill_faults"] == 1
-    assert result["agent_faults"] == 1
+    assert result["skill_faults"] == 0
+    assert result["agent_faults"] == 2
 
 
 @pytest.mark.parametrize(
@@ -169,7 +556,9 @@ def test_failure_detection_agrees(checker, observation):
 
 
 def test_unrecovered_skill_fault_report_reason(checker):
-    result = checker([_call("make build", "gcc: error: missing.c: No such file or directory")])
+    result = checker(
+        [_call("make build", "gcc: error: missing.c: No such file or directory")], expected_script="missing.c"
+    )
     assert result["passed"] is False
     assert result["skill_faults"] == 1
     assert result["agent_faults"] == 0
@@ -181,9 +570,10 @@ def test_unrecovered_skill_fault_report_reason(checker):
 def test_recovered_skill_fault_counted_once(checker):
     result = checker(
         [
-            _call("make build", "No such file or directory"),
+            _call("make build", "missing.c: No such file or directory"),
             _call("make build", "done"),
-        ]
+        ],
+        expected_script="missing.c",
     )
     assert result["skill_faults"] == 1
     assert result["score"] == 0.75

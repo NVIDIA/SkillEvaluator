@@ -87,6 +87,21 @@ def test_invalid_case_id_is_rejected_before_any_output_mutation(tmp_path: Path, 
     assert outside_sentinel.read_text(encoding="utf-8") == "outside"
 
 
+def test_dataset_coverage_note_skips_yaml_date_entry_without_id(tmp_path: Path) -> None:
+    skill_path = tmp_path / "sample-skill"
+    evals_dir = skill_path / "evals"
+    evals_dir.mkdir(parents=True)
+    (evals_dir / "evals.yaml").write_text(
+        "skill_name: sample-skill\nevals:\n  - question: 2026-03-14\n",
+        encoding="utf-8",
+    )
+
+    results = validate_skillevaluators(skill_path)
+
+    assert not any(result.path == "Dataset size" for result in results)
+    assert any(result.status == "error" for result in results)
+
+
 @pytest.mark.parametrize(
     "case_ids",
     [

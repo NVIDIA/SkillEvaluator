@@ -137,3 +137,36 @@ class TestBuildClusters:
             for index in range(chunk_count)
         ]
         assert build_clusters(chunks) == []
+
+    def test_accepts_the_1024_chunk_ceiling(self, make_chunk) -> None:
+        # One-dimensional vectors keep the 523,776 pair comparisons cheap.
+        chunks = [
+            make_chunk(source_file=f"chunk-{index}.md", heading=f"## Chunk {index}", embedding=[1.0])
+            for index in range(1024)
+        ]
+
+        [cluster] = build_clusters(chunks)
+
+        assert len(cluster.members) == 1024
+        assert cluster.max_similarity == 1.0
+
+    def test_rejects_one_chunk_over_the_ceiling(self, make_chunk) -> None:
+        chunks = [make_chunk(heading=f"## Chunk {index}", embedding=[1.0]) for index in range(1025)]
+
+        with pytest.raises(ValueError, match="Content chunk count exceeds the configured limit"):
+            build_clusters(chunks)
+
+    @pytest.mark.parametrize(("dimension", "chunk_limit"), [(2048, 724), (4096, 512)])
+    def test_rejects_scalar_work_one_chunk_past_the_width_limit(
+        self, make_chunk, dimension: int, chunk_limit: int
+    ) -> None:
+        # The guard reads the width from the first vector and raises before any
+        # comparison, so one shared vector is enough.
+        embedding = [1.0] + [0.0] * (dimension - 1)
+        chunk_count = chunk_limit + 1
+        assert chunk_limit * (chunk_limit - 1) // 2 * dimension <= constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+        assert chunk_count * chunk_limit // 2 * dimension > constants.CONTENT_DEDUP_MAX_SCALAR_COMPARISONS
+        chunks = [make_chunk(heading=f"## Chunk {index}", embedding=embedding) for index in range(chunk_count)]
+
+        with pytest.raises(ValueError, match="Content scalar comparison work exceeds the configured limit"):
+            build_clusters(chunks)

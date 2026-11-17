@@ -12,6 +12,7 @@ many skills are scanned at once; rows, logs and annotations keep skill order.
 from __future__ import annotations
 
 import argparse
+import contextlib
 import functools
 import json
 import os
@@ -27,6 +28,11 @@ from pathlib import Path
 
 from skillevaluator.reporting.html import _validated_ci_context
 from skillevaluator.utils.secret_redaction import Redactor
+
+try:
+    from security_baselines import BaselineConfigurationError, load_security_baselines
+except ModuleNotFoundError:
+    from ci.security_baselines import BaselineConfigurationError, load_security_baselines
 
 try:
     from secret_redaction import collect_sensitive_values, sanitized_outputs
@@ -280,7 +286,14 @@ def annotation_text(value: str, *, property_value: bool = False) -> str:
     return escaped.replace(":", "%3A").replace(",", "%2C") if property_value else escaped
 
 
-def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[str, int]) -> None:
+def log_result(
+    row: dict,
+    data: dict | None,
+    *,
+    annotations: bool,
+    budget: dict[str, int],
+    enforcement_mode: str = "strict",
+) -> None:
     """Explain verdicts promptly without replaying arbitrary subprocess logs."""
     print(f"Skill result: {json.dumps(row['path'])} — {row['overall_status'].upper()}", flush=True)
     if not data:
@@ -297,7 +310,8 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
         if result.get("incomplete_scans"):
             print(f"    Incomplete scanners: {json.dumps(result['incomplete_scans'])}", flush=True)
         for finding in result.get("findings", []):
-            if finding.get("severity") not in {"critical", "high"} or shown >= 20:
+            severity = str(finding.get("severity", "")).lower()
+            if severity not in {"critical", "high"} or shown >= 20:
                 continue
             shown += 1
             message = str(finding.get("message", "Finding details unavailable."))[:4000]
@@ -308,6 +322,7 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
             print(f"    Suggested fix: {json.dumps(suggestion)}", flush=True)
             if annotations and result.get("passed") is False and budget["errors"] < 10:
                 budget["errors"] += 1
+                annotation_level = "warning" if enforcement_mode == "advisory" else "error"
                 properties = "title=" + annotation_text(str(result.get("validator", "Tier 1")), property_value=True)
                 relative = finding_repository_path(row["path"], finding.get("file_path"))
                 if relative:
@@ -315,7 +330,10 @@ def log_result(row: dict, data: dict | None, *, annotations: bool, budget: dict[
                     line = finding.get("line_number")
                     if type(line) is int and line > 0:
                         properties += f",line={line}"
-                print(f"::error {properties}::{annotation_text(message + ' Suggested fix: ' + suggestion)}", flush=True)
+                print(
+                    f"::{annotation_level} {properties}::{annotation_text(message + ' Suggested fix: ' + suggestion)}",
+                    flush=True,
+                )
         if result.get("status") in {"incomplete", "failed"}:
             for message in result.get("legacy", {}).get("errors", [])[:3]:
                 print(f"    Scanner error: {json.dumps(str(message)[:4000])}", flush=True)
@@ -400,6 +418,7 @@ def evaluate_skill(
     timeout: float,
     execute,
     tokens: set[str],
+    baseline: dict | None = None,
 ) -> tuple[dict, dict | None, bool]:
     """Run one evaluator process; return row fields, its report and whether time ran out.
 
@@ -415,9 +434,14 @@ def evaluate_skill(
         # directory, never in the upload directory. Docker mounts /audit-tmp
         # as tmpfs, so cancellation cannot upload half-written secrets. The
         # name carries the report directory so concurrent scans are traceable.
-        with tempfile.TemporaryDirectory(
-            prefix=f"skillevaluator-private-{output.name}-", dir=env.get("TMPDIR")
-        ) as temporary:
+        with (
+            tempfile.TemporaryDirectory(
+                prefix=f"skillevaluator-private-{output.name}-", dir=env.get("TMPDIR")
+            ) as temporary,
+            tempfile.TemporaryDirectory(prefix="skillevaluator-policy-", dir=env.get("TMPDIR"))
+            if baseline is not None
+            else contextlib.nullcontext() as policy_directory,
+        ):
             raw = Path(temporary).resolve(strict=True)
             if raw.is_relative_to(workspace) or raw.is_relative_to(output.parent):
                 raise ValueError("A private scanner directory must be outside the workspace and reports.")
@@ -437,11 +461,16 @@ def evaluate_skill(
                 "-o",
                 str(raw),
             ]
+            if baseline is not None:
+                policy_path = Path(policy_directory) / Path(baseline["file"]).name
+                policy_path.write_bytes(baseline["content"])
+                policy_path.chmod(0o400)
+                argv.extend(["--skillspector-baseline", str(policy_path)])
             with (raw / "stdout.log").open("xb") as stdout, (raw / "stderr.log").open("xb") as stderr:
                 process = execute(
                     argv, cwd=workspace, env=env, stdout=stdout, stderr=stderr, check=False, timeout=timeout
                 )
-            safe = sanitized_outputs(raw, tokens)
+            safe = sanitized_outputs(raw, tokens, target_path=target.relative_to(workspace).as_posix())
         for name, content in safe.items():
             (output / name).write_bytes(content)
         fields["exit_code"] = process.returncode
@@ -489,12 +518,26 @@ def evaluate_skill(
     return fields, data, False
 
 
-def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None, clock=time.monotonic) -> int:
-    """Run all selected skills; return nonzero on every incomplete or failed run.
+def _set_enforcement(summary: dict, *, mode: str, downgraded: bool) -> None:
+    summary["enforcement"] = {"mode": mode, "downgraded": downgraded}
+
+
+def run(
+    workspace: Path,
+    reports: Path,
+    environ: dict[str, str],
+    *,
+    execute=None,
+    clock=time.monotonic,
+    enforcement_mode: str = "strict",
+) -> int:
+    """Run selected skills; advisory mode only relaxes complete policy verdicts.
 
     ``execute`` is called like subprocess.run. The default, run_scan, also
     ends running scans when the run stops early on an interrupt or error.
     """
+    if enforcement_mode not in {"strict", "advisory"}:
+        raise ConfigurationError("enforcement-mode must be strict or advisory.")
     if reports.is_symlink():
         raise ConfigurationError("The report directory must not be a symlink.")
     reports.mkdir(parents=True, exist_ok=True)
@@ -521,6 +564,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         if reports.is_relative_to(workspace):
             raise ConfigurationError("The report directory must be outside the read-only workspace.")
         env, llm = child_environment(environ)
+        baselines, baseline_context, policy_tokens = load_security_baselines(workspace, environ)
+        tokens.update(policy_tokens)
+        if baseline_context is not None:
+            context["security_baselines"] = baseline_context
         score = environ.get("MIN_SCORE", "70")
         if not score.isascii() or not score.isdigit() or len(score) > 3 or int(score) > 100:
             raise ConfigurationError("MIN_SCORE must be an integer between 0 and 100.")
@@ -561,7 +608,14 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                 if clock() >= deadline:
                     raise ValueError("Credential preflight exceeded the scan time limit.")
             redactor = Redactor(tokens)
-            metadata = json.dumps({"selection": selection, "execution": context}, ensure_ascii=True)
+            metadata = json.dumps(
+                {
+                    "selection": selection,
+                    "execution": context,
+                    "baseline_files": [baseline["file"] for baseline in baselines.values()],
+                },
+                ensure_ascii=True,
+            )
             if redactor.text(metadata) != metadata:
                 raise ValueError("A credential is present in report context.")
         except (OSError, ValueError, UnicodeError, RecursionError) as exc:
@@ -572,10 +626,10 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                 "Credential preflight could not safely prepare the scan; no results were published."
             ) from exc
         environments = [worker_environment(env, slot) for slot in range(1, min(workers, len(selected)) + 1)]
-    except (ConfigurationError, SelectionError, OSError) as exc:
+    except (ConfigurationError, SelectionError, BaselineConfigurationError, OSError) as exc:
         message = (
             str(exc)
-            if isinstance(exc, (ConfigurationError, SelectionError))
+            if isinstance(exc, (ConfigurationError, SelectionError, BaselineConfigurationError))
             else "The workspace or runtime configuration could not be read."
         )
         summary = _summary([], error=message)
@@ -584,6 +638,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         if selection is not None:
             summary["selection"] = selection
         summary["execution"] = context
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_summary(reports, summary)
         print(f"SkillEvaluator configuration failed: {json.dumps(message)}", flush=True)
         return 1
@@ -592,6 +647,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
     if not selected:
         summary = _summary([])
         summary.update(overall_status="skipped", overall_passed=False, selection=selection, execution=context)
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_summary(reports, summary)
         print("NO SKILLS CHANGED: no skill was evaluated between the selected Git commits.", flush=True)
         return 0
@@ -607,10 +663,14 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
         }
         for index, target in enumerate(selected, 1)
     ]
+    for row in rows:
+        if baseline := baselines.get(row["path"]):
+            row["security_baseline"] = {key: baseline[key] for key in ("file", "digest")}
 
     def checkpoint() -> None:
         summary = _summary(rows)
         summary.update(selection=selection, execution=context)
+        _set_enforcement(summary, mode=enforcement_mode, downgraded=False)
         _write_json(reports / "summary.json", summary)
         render_reports(reports, summary, context)
 
@@ -653,6 +713,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                         timeout=remaining,
                         execute=execute,
                         tokens=tokens,
+                        baseline=baselines.get(rows[index]["path"]),
                     )
                 except Exception:
                     outcome = ({"error": "Evaluator execution failed unexpectedly; no result is claimed."}, None, False)
@@ -701,6 +762,7 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
                     results.pop(logged),
                     annotations=environ.get("GITHUB_ACTIONS") == "true",
                     budget=annotation_budget,
+                    enforcement_mode=enforcement_mode,
                 )
             elif not final:
                 return
@@ -715,7 +777,12 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
             live.append(thread)
             running += 1
         while running:
-            batch = [events.get()]
+            try:
+                batch = [events.get(timeout=POLL_SECONDS)]
+            except queue.Empty:
+                # Ctrl-C is acted on in this thread, but its signal handler can run on a
+                # scan thread, and that does not interrupt a wait without a time limit.
+                continue
             while True:
                 try:
                     batch.append(events.get_nowait())
@@ -773,8 +840,29 @@ def run(workspace: Path, reports: Path, environ: dict[str, str], *, execute=None
     summary = _summary(rows)
     summary["selection"] = selection
     summary["execution"] = context
+    downgraded = (
+        enforcement_mode == "advisory"
+        and summary["overall_status"] == "failed"
+        and all(
+            row["overall_status"] in {"passed", "failed"}
+            and not row["incomplete_scans"]
+            and row["exit_code"] in {0, 1}
+            and not row.get("error")
+            for row in rows
+        )
+    )
+    _set_enforcement(summary, mode=enforcement_mode, downgraded=downgraded)
     _write_summary(reports, summary)
     print(f"SkillEvaluator finished: {summary['passed']} of {summary['total']} skills passed.", flush=True)
+    # Reports have been validated and rendered. A failed headline can coexist
+    # with runtime errors or incomplete scanners, so inspect every skill too.
+    if downgraded:
+        print(
+            "::warning title=Tier 1 (advisory)::Tier 1 did not pass; enforcement-mode=advisory "
+            "keeps policy findings non-blocking. See the uploaded report.",
+            flush=True,
+        )
+        return 0
     return 0 if summary["overall_passed"] else 1
 
 
@@ -782,9 +870,10 @@ def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, default=Path("/workspace"))
     parser.add_argument("--reports", type=Path, default=Path("/reports"))
+    parser.add_argument("--enforcement-mode", choices=("strict", "advisory"), default="strict")
     args = parser.parse_args()
     try:
-        return run(args.workspace, args.reports, dict(os.environ))
+        return run(args.workspace, args.reports, dict(os.environ), enforcement_mode=args.enforcement_mode)
     except (ConfigurationError, OSError):
         print("SkillEvaluator could not safely initialize the report directory.", flush=True)
         return 1

@@ -5,6 +5,7 @@
 
 import json
 import re
+import xml.etree.ElementTree as ET
 
 from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import (
@@ -12,6 +13,7 @@ from skillevaluator.reporting import (
     CLIReporter,
     HTMLReporter,
     JSONReporter,
+    JUnitReporter,
     MarkdownReporter,
 )
 
@@ -24,12 +26,11 @@ def _plain(output: str) -> str:
 
 
 def _assert_html_verdict_is_incomplete(output: str) -> None:
-    """The header verdict and the summary verdict both say Incomplete, and nothing says Passed."""
-    header = output.split('<header class="main-header">', 1)[1].split("</header>", 1)[0]
+    """The primary result and the evidence summary say Incomplete, without a passing claim."""
+    hero = output.split('<section class="agent-hero"', 1)[1].split("</section>", 1)[0]
     summary = output.split('<section class="exec-summary', 1)[1].split("</section>", 1)[0]
 
-    assert 'data-verdict="incomplete"' in header
-    assert '<span class="sr-only">Verdict: </span>Incomplete</span>' in header
+    assert 'hero-command-status verdict-chip warn">Incomplete</p>' in hero
     assert '<span class="verdict-chip warn">Incomplete</span>' in summary
     assert 'data-verdict="pass"' not in output
     assert "verdict-chip pass" not in output
@@ -123,6 +124,18 @@ class TestIncompleteScanReporting:
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
 
+    def test_junit_marks_incomplete_as_error_not_passed(self):
+        root = ET.fromstring(JUnitReporter().render_all([_incomplete_result()]))
+        cases = list(root.iter("testcase"))
+        assert cases
+        assert all(case.find("skipped") is None for case in cases)
+        errors = [case.find("error") for case in cases if case.find("error") is not None]
+        assert len(errors) == 1
+        assert errors[0].attrib["type"] == "incomplete"
+        assert errors[0].attrib["message"] == "skillspector timed out after 300 seconds"
+        assert int(root.attrib["errors"]) == 1
+        assert int(root.attrib["skipped"]) == 0
+
 
 def test_status_handles_sanitized_finding_without_location():
     from skillevaluator.models import Finding, Severity
@@ -131,3 +144,70 @@ def test_status_handles_sanitized_finding_without_location():
     result = ValidationResult(validator_name="Security Scan")
     result.add_finding(Finding(category="X", severity=Severity.LOW, check_name="c", message="m", file_path=None))
     assert result_status(result).value == "passed"
+
+
+def test_json_report_lists_every_unparsed_semgrep_file_and_round_trips() -> None:
+    """The error text names at most 20 files; the saved JSON keeps the full list."""
+    from skillevaluator.reporting.retained import retained_results
+
+    paths = [f"scripts/f{i}.sh" for i in range(25)]
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = paths
+    result.mark_scan_incomplete("semgrep")
+    result.add_error("Semgrep partial scan: 25 file(s) could not be fully parsed")
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["results"][0]["semgrep_unparsed_files"] == paths
+    (restored,) = retained_results(payload)
+    assert restored.metadata["semgrep_unparsed_files"] == paths
+
+
+def test_json_report_omits_malformed_unparsed_semgrep_files() -> None:
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = ["scripts/a.sh", 3, "", None]
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+
+    assert payload["results"][0]["semgrep_unparsed_files"] == ["scripts/a.sh"]
+    result.metadata["semgrep_unparsed_files"] = "scripts/a.sh"
+    rendered = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert "semgrep_unparsed_files" not in rendered["results"][0]
+
+
+def test_json_report_counts_unparsed_semgrep_files_beyond_its_cap() -> None:
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = [f"scripts/f{i}.sh" for i in range(1005)]
+
+    row = json.loads(JSONReporter(include_timestamp=False).render_all([result]))["results"][0]
+
+    assert len(row["semgrep_unparsed_files"]) == 1000
+    assert row["semgrep_unparsed_files_omitted"] == 5
+    result.metadata["semgrep_unparsed_files"] = result.metadata["semgrep_unparsed_files"][:1000]
+    row = json.loads(JSONReporter(include_timestamp=False).render_all([result]))["results"][0]
+    assert "semgrep_unparsed_files_omitted" not in row
+
+
+def test_omitted_unparsed_semgrep_count_survives_a_retained_round_trip() -> None:
+    from skillevaluator.reporting.retained import retained_results
+
+    result = ValidationResult(validator_name="Code Risk Analysis", validator_description="Static code analysis")
+    result.metadata["semgrep_unparsed_files"] = [f"scripts/f{i}.sh" for i in range(1005)]
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    assert payload["results"][0]["semgrep_unparsed_files_omitted"] == 5
+
+    (restored,) = retained_results(payload)
+    again = json.loads(JSONReporter(include_timestamp=False).render_all([restored]))
+
+    assert len(again["results"][0]["semgrep_unparsed_files"]) == 1000
+    assert again["results"][0]["semgrep_unparsed_files_omitted"] == 5
+
+
+def test_folder_merge_adds_up_omitted_unparsed_semgrep_counts() -> None:
+    merged = ValidationResult()
+    for prefix, count in (("a", 3), ("b", 4)):
+        part = ValidationResult()
+        part.metadata["semgrep_unparsed_files_omitted"] = count
+        merged.merge_with_prefix(part, prefix)
+
+    assert merged.metadata["semgrep_unparsed_files_omitted"] == 7

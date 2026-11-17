@@ -1,0 +1,9 @@
+# SPDX-License-Identifier: Apache-2.0
+# Save as .gitlab/skill-feedback.yml. Only trusted downstream pipelines include it.
+include:
+  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/RELEASE_WORKFLOW_SHA/ci/gitlab/feedback.yml
+    inputs:
+      tools-ref: RELEASE_WORKFLOW_SHA
+      tools-repository: NVIDIA/SkillEvaluator
+      api-url: https://GITLAB_HOST/api/v4
+      project-id: GITLAB_PROJECT_NAMESPACE/PROJECT

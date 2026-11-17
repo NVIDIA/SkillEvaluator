@@ -1,8 +1,9 @@
 # Reusable repository CI
 
-This directory supplies the shared Tier 1 CI runtime and consumer onboarding
-templates. Start with [repository integration](../docs/repository-integration.mdx)
-for GitHub Actions or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
+This directory supplies the shared CI runtime for quality and security checks,
+plus consumer onboarding templates. Start with
+[repository integration](../docs/repository-integration.mdx) for GitHub Actions
+or GitLab CI/CD. The GitLab adapter is in `ci/gitlab/`;
 the image and report generation are shared by both platforms.
 The upstream workflow release and public package must be reviewed and published
 before consumers can use this path. Source templates are not runnable while
@@ -32,10 +33,12 @@ policy label. Profile names do not control network access or report visibility.
 | --- | --- |
 | `paths` | `skills`; up to 100 newline-separated repository-relative skill directories or roots |
 | `scan-mode` | `auto`: affected skills on PRs, all configured skills on pushes/manual runs; `all` overrides selection |
-| `llm` | `false`; static Tier 1 requires no model key |
-| `artifact-name` | Keep `skill-evaluator-tier1` for the optional publisher |
+| `llm` | `false`; static checks require no model key |
+| `artifact-name` | Keep `skill-evaluator-tier1` for PR comments or the optional hosted publisher |
 | `report-base-url` | Optional own Pages URL, only after hosted publication is configured |
 | `scan-workers` | `4`; skills scanned at once, from 1 to 16. `1` scans one skill at a time |
+| `enforcement-mode` | `strict` (default) blocks on failed verdicts; `advisory` keeps complete policy/score failures non-blocking but still blocks runtime/evidence/incomplete failures |
+| `security-baselines` | `false`; explicitly apply reviewed per-skill SkillSpector baselines as described below |
 
 The runtime discovers exact-case `SKILL.md` files, rejects unsafe paths and
 symlinks, deduplicates overlapping roots and bounds each invocation to 100
@@ -56,6 +59,8 @@ shared files outside the configured roots are not inferred as dependencies.
 Use `scan-mode: all` when changes to those shared resources require evaluation.
 Changed-skill selection checks out full history without old file contents (a
 blobless clone); full scans fetch only the scanned commit.
+Enabling reviewed security baselines fetches full, unfiltered history so target
+policy files are available without network access inside the scanner image.
 Static scanning is network connected: vulnerability databases may receive
 package metadata. Dependency auditing never installs packages or runs build
 scripts: requirements must provide exact package/version pins. Unpinned, URL,
@@ -70,8 +75,8 @@ The short `summary.md` is the Actions landing view. `details.md`, original
 per-skill JSON, native HTML, SARIF and scanner logs retain detailed evidence in
 the scan artifact, named `skill-evaluator-tier1-attempt-N` for attempt `N`.
 A second, small artifact, `skill-evaluator-tier1-evidence-attempt-N`, holds
-only `summary.json` and each skill's `skillevaluator-tier1.json`. The optional
-publisher downloads only that one. Artifacts expire after the configured retention period;
+only `summary.json` and each skill's `skillevaluator-tier1.json`. The comment and
+hosted publishing workflows download only that one. Artifacts expire after the configured retention period;
 hosted history is an optional separate surface. Quality scores are not scanner
 pass percentages or proof of useful live-agent behavior.
 
@@ -89,11 +94,111 @@ detailed scan output. This is not a guarantee that every credential or
 transformed value is detected. Remove and rotate exposed credentials; reports
 and Git history from previous runs are not rewritten automatically.
 
+## Reviewed security baselines
+
+This source capability requires a supporting workflow and image release; it is
+not added retroactively to already published onboarding bundles. Enable
+`security-baselines: true` on the GitHub reusable workflow, or set GitLab's
+`SKILL_EVAL_SECURITY_BASELINES: "true"`. Both default to false. This option
+applies SkillSpector exceptions only; it does not disable PII or security checks,
+change the quality gate, or forward the separate CLI `--pii-waivers` option.
+
+If a central component wraps the GitHub workflow, update its approved workflow
+and image pins together and forward the `security-baselines` boolean to the
+scan job. Each consumer keeps its own reviewed mapping and baseline files.
+
+Commit the fixed manifest `.skillevaluator/skillspector-baselines.yaml`:
+
+```yaml
+version: 1
+baselines:
+  legacy/sample-expert: config/security-baselines/sample-expert.json
+```
+
+Keys are exact repository-relative skill directories, and values are
+repository-relative native SkillSpector YAML or JSON baseline files. There are
+no globs. Unmapped skills receive no baseline. Paths must be canonical, without
+absolute paths, parent traversal, control characters, or links; the manifest
+rejects duplicate keys, YAML anchors and aliases, and unknown top-level keys.
+The manifest is limited to 64 KiB and 1,000 mappings, each baseline to 2 MiB,
+and the combined policy files to 16 MiB. The credential preflight also applies
+its existing line and redaction limits to the policy files.
+
+Both the mapping and baseline bytes come from the same approved Git commit:
+the pull request's target commit on GitHub, or GitLab's target-branch commit.
+For detached same-project GitLab merge requests without a target SHA, the job
+fetches the actual target branch before scanning; it never substitutes the
+merge base or candidate head. Fork GitLab merge requests require an exact
+platform-provided target SHA already available in the checkout and fail closed
+otherwise. Push/manual runs use their current commit. A pull request proposing
+the first manifest must merge through review before this option can use it;
+the candidate's new or edited approvals never apply to that same pull request.
+
+Missing policy commits, manifests, files, or invalid mappings fail configuration.
+Selected baseline bytes are materialized read-only in private temporary storage
+outside the skill tree and passed with `--skillspector-baseline` only to the
+mapped skill. The scanner retains its normal validation of the baseline format.
+Exact fingerprints still bind the source content and scanner version; regenerate
+and review them after either changes, or use deliberate narrow reviewed rules.
+Baselines cannot clear incomplete analysis.
+
+The retained `summary.json` records the policy commit, manifest path, digest, and
+`mapped_skill_count` in `execution.security_baselines`, and each mapped skill's baseline file and
+digest in `skills[].security_baseline`. The skill's native report records whether
+the baseline applied and what it suppressed. Policy files receive the same
+credential preflight and report redaction as skill content.
+
+## PR comments without hosted reports
+
+Use the canonical
+[`comment-skill-checks.yml`](../.github/workflows/comment-skill-checks.yml) reusable
+workflow to update the existing scored Tier 1 PR comment without deploying a
+report site. It uses the same signed execution receipt, caller and evaluator
+approvals, artifact validation, report renderer and bot comment updater as the
+hosted publisher. The comment shows counts, status, quality score and grade, and
+the first action for each affected skill. The workflow run links to downloadable
+reports. No Pages settings, site history branch or report URL are needed.
+
+This is a source capability for a future release bundle. Existing archived
+bundles and the released `skillevaluator ci init` still configure hosted
+publication. Use a reviewed immutable revision containing the new workflow and
+helpers; do not add its filename to an older release pin.
+
+1. Keep `.github/workflows/skill-checks.yml` named **Skill checks**, with one
+   reusable scan job and the default **skill-evaluator-tier1** artifact name.
+   Enable `id-token: write` alongside `contents: read` for signed execution
+   receipts. Keep the reviewed evaluator workflow and image pins.
+2. Copy [`comment-skill-checks.yml`](templates/comment-skill-checks.yml) into
+   `.github/workflows/`. Pin its `uses:` and `tools-ref` to the reviewed comment
+   workflow revision. Set `trusted-evaluator-shas` to the approved scanner
+   revision; this may differ from the comment tools revision.
+3. After all scan-file edits, run
+   `git hash-object .github/workflows/skill-checks.yml` and set
+   `trusted-caller-blobs` to that exact value. Review and refresh the blob after
+   every later scan-file edit. For shared wrappers, keep the
+   [same wrapper approvals and delegation](#calling-through-a-shared-workflow).
+4. Merge both files into the default branch and open a PR changing a skill.
+   The comment workflow grants only `contents: read`, `actions: read` and
+   `pull-requests: write`. Organization policy must allow these permissions and
+   the referenced actions. Choose this workflow or the hosted publisher for PR
+   feedback; both update the same bot comment.
+
+The second workflow runs after **Skill checks** completes, including failed
+scans. Its manual trigger requires the completed `run-id` and `run-attempt`.
+It comments only on an open, current-head PR from the same repository. Failed
+scans with valid retained native evidence receive the standard failure comment;
+failures before evidence upload do not produce a synthetic result. No affected
+skills uses the existing **No skills changed** result. Fork PRs, superseded
+results, stale PR heads, expired artifacts and unverifiable evidence do not
+receive a comment. The signed token's expiry alone does not invalidate a
+historical receipt; its signing key and the attempt's artifacts must still be
+available.
+
 ## Optional hosted reports and PR feedback
 
 This is additional setup, not a `comment: true` switch in the basic scan file.
-The current implementation couples comments to successful hosted deployment;
-Pages is not an inherent requirement for GitHub PR comments.
+This publisher couples comments to successful hosted deployment. To use the
+same comment without hosting, follow the [comments-only setup](#pr-comments-without-hosted-reports).
 
 1. Decide where reports can live. **Pages sites are public unless explicitly
    configured as private, even when the repository is private.** Private Pages
@@ -143,7 +248,7 @@ Pages is not an inherent requirement for GitHub PR comments.
 7. The publisher caller must grant `contents: write`, `actions: read`,
    `pages: write`, `id-token: write` and `pull-requests: write`. Reusable jobs
    narrow these to history preparation, Pages deployment and PR feedback. The
-   scan uses `contents: read`, plus `id-token: write` only when hosting is enabled.
+   scan uses `contents: read`, plus `id-token: write` when PR comments or hosting are enabled.
    The automatic GitHub token is sufficient;
    no personal access token or model credential is required for publication.
 
@@ -169,10 +274,15 @@ failed deploy still publishes and comments.
 A publication skipped because its PR closed or moved after the scan neither
 deploys nor comments.
 Fork PR scans can run without provider secrets; fork PR bot comments and current
-PR aliases are not enabled. Comment-only operation and hosting alongside an
-arbitrary existing Pages deployment need further integration work.
+PR aliases are not enabled. Hosting alongside an arbitrary existing Pages
+deployment needs further integration work.
 
 ### Calling through a shared workflow
+
+The comments-only workflow accepts the same `trusted-wrapper-workflows` and
+`delegated-evaluator-wrapper` inputs below, with the same signed receipts and
+caller blob approvals. Its wrapper continues to forward scan settings and pins;
+the standard comment renderer stays in SkillEvaluator.
 
 Direct consumers need no wrapper configuration. If the scan calls a shared
 workflow that then calls SkillEvaluator, use a reviewed publisher revision that
@@ -263,11 +373,17 @@ workflow and GitHub artifact metadata also remain required.
 The generated `skill-checks-llm.yml` is a separate trusted manual run. Set
 `paths`, choose `llm-provider` (`openai`, `anthropic` or `nv_build`), optionally
 set `llm-model`, and explicitly map the repository secret `LLM_API_KEY`. Missing
-credentials fail explicitly. Avoid passing secrets to untrusted PR content;
+credentials fail explicitly. When `llm-model` is empty the provider's default model
+is used, and that model may not be callable with every key (for example, an NVIDIA
+Build key can list a model that still answers HTTP 404). If the LLM checks report
+"Model or endpoint unavailable", set `llm-model` to a model your key can call. Avoid passing secrets to untrusted PR content;
 the basic PR workflow remains keyless. Provider billing and content transmission
 apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 
 ## Maintainer release procedure
+
+Start with the [product release checklist](../RELEASING.md), which covers when
+to rebuild the image, refresh templates and CLI pins, and publish through Kitmaker.
 
 Release publication is deliberate and manual. Consumer files become usable
 after the official image is published and verified; source templates contain
@@ -288,7 +404,7 @@ placeholders until then.
    runs read that cache but never write it. Release builds do not reuse cached
    layers, so `git` and `ca-certificates` come from the Debian packages current
    at release time.
-   Build the complete Tier 1 runtime with required external scanners. The base
+   Build the shared CI runtime with its required external scanners. The base
    image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
    build dependencies are pinned; scanner installs require package hashes.
    Confirm the resulting digest's source revision and the installed scanner

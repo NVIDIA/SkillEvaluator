@@ -32,6 +32,9 @@ navigation:
       - page: Quickstart
         path: ../docs/quickstart.mdx
         slug: quickstart
+      - page: Reproducible Terminal Demo
+        path: ../docs/starter-demo.mdx
+        slug: starter-demo
       - page: Installation
         path: ../docs/installation.mdx
         slug: installation
@@ -47,15 +50,24 @@ navigation:
       - page: "Tier 1: Validation"
         path: ../docs/tier1-validation.mdx
         slug: tier1-validation
+      - page: Harness Check
+        path: ../docs/harness-check.mdx
+        slug: harness-check
       - page: "Tier 2: Deduplication"
         path: ../docs/tier2-deduplication.mdx
         slug: tier2-deduplication
       - page: "Tier 3: Live Evaluation"
         path: ../docs/tier3-live-evaluation.mdx
         slug: tier3-live-evaluation
+      - page: Grader Validation
+        path: ../docs/grader-validation.mdx
+        slug: grader-validation
       - page: Eval Datasets
         path: ../docs/eval-datasets.mdx
         slug: eval-datasets
+      - page: Trace Datasets
+        path: ../docs/trace-datasets.mdx
+        slug: trace-datasets
       - page: Agents & Sandboxes
         path: ../docs/agents-and-sandboxes.mdx
         slug: agents-and-sandboxes
@@ -68,6 +80,9 @@ navigation:
       - page: Reports & Results
         path: ../docs/reports.mdx
         slug: reports
+      - page: Metrics Reference
+        path: ../docs/metrics-reference.mdx
+        slug: metrics-reference
       - page: Performance Dashboard
         path: ../docs/performance-dashboard.mdx
         slug: performance-dashboard
@@ -98,6 +113,9 @@ navigation:
       - page: Environment Variables
         path: ../docs/environment-variables.mdx
         slug: environment-variables
+      - page: Advanced CI
+        path: ../docs/advanced-ci.mdx
+        slug: advanced-ci
       - page: Contributing
         path: ../docs/developer-guide.mdx
         slug: developer-guide

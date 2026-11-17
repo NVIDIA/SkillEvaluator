@@ -18,8 +18,27 @@ console = Console()
 _LOG_MARKUP = False
 
 
+# While a live view owns the terminal, log records print through its console.
+# Rich writes every other console past Live's stdout proxy, which leaves stale
+# frame lines (a duplicated header) on screen.
+_live_console: list[Console] = []
+
+
+def route_logs_to(target: Console | None) -> None:
+    """Print log records through *target* (a live view's console) until called with ``None``."""
+    _live_console[:] = [target] if target is not None else []
+
+
 class _LiteralRichHandler(RichHandler):
     """Rich handler that also drops terminal escape sequences from log messages."""
+
+    def emit(self, record: logging.LogRecord) -> None:
+        own = self.console
+        self.console = _live_console[0] if _live_console else own
+        try:
+            super().emit(record)
+        finally:
+            self.console = own
 
     def render_message(self, record: logging.LogRecord, message: str) -> ConsoleRenderable:
         # Imported here: skillevaluator.utils imports this module.

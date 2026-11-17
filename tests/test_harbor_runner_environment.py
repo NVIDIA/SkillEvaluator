@@ -289,6 +289,7 @@ def test_skill_config_cannot_control_evaluator_or_judge_routing(name: str) -> No
         "SKILL_EVAL_JUDGE_CHARACTER_FACTS",
         "LLM_JUDGE_FALLBACK_POLICY",
         "LLM_JUDGE_RETRY_POLICY",
+        "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL",
     ],
 )
 @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
@@ -627,7 +628,7 @@ def test_mixed_agents_receive_disjoint_credentials(monkeypatch: pytest.MonkeyPat
         agents=["opencode", "claude-code", "codex"],
         models={
             "opencode": "nvidia/nvidia/nemotron-3-nano-30b-a3b",
-            "claude-code": "nvidia/nemotron-3-super-120b-a12b",
+            "claude-code": "nvidia/nemotron-3.5-lightning-30b-a3b",
             "codex": "nvidia/nemotron-3-nano-30b-a3b",
         },
         configured_runtime_env={},
@@ -1246,7 +1247,7 @@ def test_run_harbor_eval_stages_per_agent_credential_trees(
         ["opencode", "claude-code"],
         agent_models={
             "opencode": "nvidia/nvidia/nemotron-3-nano-30b-a3b",
-            "claude-code": "nvidia/nemotron-3-super-120b-a12b",
+            "claude-code": "nvidia/nemotron-3.5-lightning-30b-a3b",
         },
         output_dir=tmp_path / "results",
         env_mode="docker",

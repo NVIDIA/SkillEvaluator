@@ -48,7 +48,9 @@ from skillevaluator.embedding.client import (
 from skillevaluator.embedding.extractor import (
     MAX_MANIFEST_BYTES,
     ContentEntry,
-    discover_and_extract,
+    ExtractionResult,
+    ManifestEncodingError,
+    discover_and_extract_detailed,
     extract_from_skill,
 )
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
@@ -102,6 +104,16 @@ _CATALOG_ENTRY_FIELDS = frozenset(
         "embedding",
     }
 )
+
+
+class InvalidExplicitSkillError(ValueError):
+    """Explicit skills have no root UTF-8 ``SKILL.md`` with valid name and description frontmatter.
+
+    :meth:`EmbeddingRegistry.build_from_paths` raises it before any embedding
+    request. The message names every such skill, in sorted order, only by its
+    path under the checkout root, so callers can show it without exposing host
+    directories.
+    """
 
 
 @dataclass
@@ -198,10 +210,22 @@ class EmbeddingRegistry:
         self._max_scalar_comparisons = max_scalar_comparisons
         self._entries: dict[str, RegistryEntry] = {}
         self._vector_dimension: int | None = None
+        self._coverage: ExtractionResult | None = None
+        self._latest_attempt_coverage: ExtractionResult | None = None
 
     @property
     def size(self) -> int:
         return len(self._entries)
+
+    @property
+    def coverage(self) -> ExtractionResult | None:
+        """Coverage committed with the current index, if built from a directory."""
+        return self._coverage
+
+    @property
+    def latest_attempt_coverage(self) -> ExtractionResult | None:
+        """Last directory selection for diagnostics, including a failed build."""
+        return self._latest_attempt_coverage
 
     def build_from_directory(
         self,
@@ -211,7 +235,10 @@ class EmbeddingRegistry:
         minimum_entries: int = 1,
         for_pairwise_scan: bool = False,
     ) -> int:
-        """Discover content items, embed them, and populate the index.
+        """Discover and embed a complete replacement selection.
+
+        Successful builds replace prior entries, dimensions and coverage, even
+        for an empty selection. Failures retain the previously committed index.
 
         Set ``for_pairwise_scan`` when the caller will compare all entries.
         The first validated response then checks the pairwise work budget
@@ -221,8 +248,68 @@ class EmbeddingRegistry:
         Returns:
             Number of entries successfully indexed.
         """
-        content_entries = discover_and_extract(root, content_type, max_entries=self._max_entries)
+        self._latest_attempt_coverage = None
+        coverage = discover_and_extract_detailed(root, content_type, max_entries=self._max_entries)
+        self._latest_attempt_coverage = coverage
+        return self._build_entries(root, coverage.entries, minimum_entries, for_pairwise_scan, coverage=coverage)
+
+    def build_from_paths(self, root: Path, skills: list[Path]) -> int:
+        """Replace the index with explicit skills under one trusted checkout.
+
+        Paths retain their checkout-relative identity, avoiding collisions when
+        separate skill roots contain folders with the same name. Validate every
+        input before the first credential-bearing embedding call.
+        """
+        self._latest_attempt_coverage = None
+        root = root.resolve(strict=True)
+        unique = sorted(set(skills))
+        if not unique or len(unique) > self._max_entries:
+            raise ValueError("Explicit skill collection exceeds its supported entry count")
+        entries = []
+        # Every skill is checked, so one error names all skills whose frontmatter
+        # needs fixing, including a SKILL.md that is not UTF-8. Limit and link
+        # errors still stop at their own skill.
+        invalid = []
+        for path in unique:
+            try:
+                relative = path.absolute().relative_to(root)
+            except ValueError as exc:
+                raise ValueError("An explicit skill is outside the checkout root") from exc
+            current = root
+            for part in relative.parts:
+                current /= part
+                if part == ".." or is_link_or_reparse(current):
+                    raise ValueError("Explicit skill paths must not contain links or parent traversal")
+            if not current.resolve(strict=True).is_relative_to(root):
+                raise ValueError("An explicit skill is outside the checkout root")
+            try:
+                entry = extract_from_skill(current)
+            except ManifestEncodingError:
+                entry = None
+            if entry is None:
+                invalid.append(relative.as_posix())
+            else:
+                entries.append(entry)
+        if invalid:
+            raise InvalidExplicitSkillError(
+                "Each explicit skill requires a root SKILL.md, saved as UTF-8, whose frontmatter is a valid YAML "
+                f"mapping with a non-empty string name and description: {', '.join(invalid)}"
+            )
+        return self._build_entries(root, entries, 1, False)
+
+    def _build_entries(
+        self,
+        root: Path,
+        content_entries: list[ContentEntry],
+        minimum_entries: int,
+        for_pairwise_scan: bool,
+        *,
+        coverage: ExtractionResult | None = None,
+    ) -> int:
         if not content_entries:
+            self._entries = {}
+            self._vector_dimension = None
+            self._coverage = coverage
             logger.debug("No content entries found in %s", safe_path_label(root))
             return 0
         if len(content_entries) < minimum_entries:
@@ -255,9 +342,9 @@ class EmbeddingRegistry:
                 )
             )
 
-        entry_count = len(self._entries.keys() | {entry.entry_id for entry in pending_entries})
+        entry_count = len({entry.entry_id for entry in pending_entries})
         comparison_count = entry_count * (entry_count - 1) // 2
-        vector_dimension = self._vector_dimension
+        vector_dimension: int | None = None
         validated_vectors: list[list[float]] = []
         batch_size = 1 if self._full_body else EMBEDDING_BATCH_SIZE
         for start in range(0, len(texts), batch_size):
@@ -275,8 +362,9 @@ class EmbeddingRegistry:
 
         for entry, vector in zip(pending_entries, validated_vectors, strict=True):
             entry.embedding = vector
-        self._entries.update((entry.entry_id, entry) for entry in pending_entries)
+        self._entries = {entry.entry_id: entry for entry in pending_entries}
         self._vector_dimension = vector_dimension
+        self._coverage = coverage
 
         logger.debug("Indexed %d entries from %s", len(self._entries), safe_path_label(root))
         return len(self._entries)
@@ -475,6 +563,10 @@ class EmbeddingRegistry:
 
     def save_catalog(self, catalog_path: Path) -> None:
         """Persist a validated, versioned local embedding catalog."""
+        if self._coverage is not None and self._coverage.skipped_count:
+            raise ValueError(
+                "Cannot save a catalog with incomplete collection coverage; fix excluded manifests and rebuild"
+            )
         if not self._entries:
             raise ValueError("Cannot save an empty catalog")
         if len(self._entries) > MAX_CATALOG_ENTRIES:
@@ -514,7 +606,7 @@ class EmbeddingRegistry:
             "created_at": datetime.now(tz=UTC).isoformat(),
             "entries": entries,
         }
-        serialized = json.dumps(data, indent=2, allow_nan=False) + "\n"
+        serialized = json.dumps(data, separators=(",", ":"), allow_nan=False) + "\n"
         if len(serialized.encode("utf-8")) > MAX_CATALOG_BYTES:
             raise ValueError(f"Catalog size limit exceeded ({MAX_CATALOG_BYTES} bytes)")
         _write_catalog_atomically(catalog_path, serialized.encode("utf-8"))
@@ -610,6 +702,8 @@ class EmbeddingRegistry:
 
         self._entries = loaded
         self._vector_dimension = vector_dimension
+        self._coverage = None
+        self._latest_attempt_coverage = None
         logger.debug("Loaded %d entries from local catalog %s", len(self._entries), safe_path_label(catalog_path))
 
     def save_cache(self, cache_path: Path) -> None:

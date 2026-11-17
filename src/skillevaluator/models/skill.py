@@ -43,10 +43,11 @@ class SkillMetadata(BaseModel):
 
     model_config = ConfigDict(extra="allow", str_strip_whitespace=True)
 
-    # Author field uses the portable Name <email@example.com> shape.
+    # Optional attribution: 'Name <email@example.com>' or a person, team, or
+    # organization name. The active validation policy decides whether it is required.
     author: str | None = Field(
         default=None,
-        description="Author name and email (e.g., 'Your Name <your-email@example.com>')",
+        description="Author attribution (e.g., 'Your Name <your-email@example.com>' or 'Example Team')",
     )
 
     # Categorization fields

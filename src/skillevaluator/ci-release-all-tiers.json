@@ -1,0 +1,19 @@
+{
+  "repository": "NVIDIA/SkillEvaluator",
+  "workflow_ref": "ba7779ad617c6444c98b6241a75bce92067e9d56",
+  "publisher_ref": "ba7779ad617c6444c98b6241a75bce92067e9d56",
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:e96e3aaad89bf78c4f3f8c621e88005d18bd7c485b29c0d7945864700e5944e6",
+  "schema_version": 2,
+  "capabilities": [
+    "all-tiers-github",
+    "all-tiers-gitlab",
+    "ci-model-routing-v1",
+    "ci-benchmark-pr-v1"
+  ],
+  "feedback_ref": "ba7779ad617c6444c98b6241a75bce92067e9d56",
+  "gitlab_ref": "ba7779ad617c6444c98b6241a75bce92067e9d56",
+  "tools_ref": "ba7779ad617c6444c98b6241a75bce92067e9d56",
+  "report_contract": "skillevaluator-ci-v1",
+  "evaluator_version": "0.9.0",
+  "runtime_lock_sha256": "8100391b4ab27f66f7f8b087acf445ae884af38580b5e68efc38833beddf262c"
+}

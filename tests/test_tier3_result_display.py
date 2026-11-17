@@ -12,6 +12,7 @@ import pytest
 from rich.console import Console
 from rich.panel import Panel
 
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -36,15 +37,581 @@ def test_overall_lift_headline_preserves_signed_persisted_value_and_original_tab
         },
     }
     original = deepcopy(result)
-    output = render_result(result)
+    output = " ".join(render_result(result).splitlines())
 
     assert re.search(rf"OVERALL SKILL LIFT\s+{re.escape(f'{delta:+.2f}')}", output)
     assert output.index("OVERALL SKILL LIFT") < output.index("With Skill")
     assert output.count("Results by Evaluator") == 1
     assert output.count("Results by Dimension") == 1
     assert "Skill Lift" in output
+    assert SKILL_LIFT_DEFINITION in output
     assert "█" in output
     assert result == original
+
+
+def test_case_summary_names_pass_at_k_difference_and_threshold() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.75,
+                        "cases": {"case": {"attempts": [{"passed": True, "score": 0.8}]}},
+                    },
+                    "without_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.25},
+                },
+            }
+        },
+    }
+
+    output = " ".join(render_result(result).splitlines())
+
+    assert (
+        "Pass@2 (supporting reliability: share of cases with a passing attempt, "
+        "attempt passes at Overall ≥ 0.60)" in output
+    )
+    assert "Pass-rate difference +25.0 percentage points" in output
+
+
+def test_case_summary_does_not_show_zero_difference_without_baseline() -> None:
+    result = {
+        "attempt_policy": {"max_attempts": 2, "pass_threshold": 0.6},
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "pass_at_k": {
+                    "with_skill": {
+                        "k": 2,
+                        "pass_threshold": 0.6,
+                        "rate": 0.5,
+                        "cases": {"case": {"attempts": [{"passed": False, "score": 0.4}]}},
+                    },
+                    "lift": {"delta": 0.0},
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "Pass-rate difference N/A" in output
+    assert "Pass-rate difference +0.0" not in output
+
+
+def test_required_check_verdict_precedes_counts_and_positive_lift_is_reference() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "codex": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 0,
+                                "reason": "goal not met (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+
+    output = render_result(result)
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in output
+    assert "OVERALL SKILL LIFT (for reference)" in output
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in output
+    assert "GOALS MET   1/2 | 2/2 | -1" in output
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in output
+    assert "FAIL: goal not met (goal accuracy 0.00)" in output
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in output
+    assert "0.82" in output
+    assert output.index("QUALITY VERDICT") < output.index("REQUIRED CHECKS PASSED")
+    assert output.index("SECURITY CLEAN") < output.index("With Skill")
+
+
+@pytest.mark.parametrize("failed_arm", [None, "with_skill", "without_skill", "empty"])
+def test_check_headlines_require_usable_arms(failed_arm: str | None) -> None:
+    data = {
+        "execution_status": "failed" if failed_arm in {"with_skill", "without_skill"} else "succeeded",
+        "conditions": {
+            arm: {"execution_status": "failed" if arm == failed_arm else "succeeded"}
+            for arm in ("with_skill", "without_skill")
+        },
+        "pass_at_k": {
+            "with_skill": {
+                "required_checks": {"passed": 0, "scored": 1, "wrong_answer": 1, "security": 0},
+                "correct_answers": {"correct": 0, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+            "without_skill": {
+                "required_checks": {"passed": 1, "scored": 1, "wrong_answer": 0, "security": 0},
+                "correct_answers": {"correct": 1, "scored": 1},
+                "security_clean": {"clean": 1, "scored": 1},
+            },
+        },
+    }
+    if failed_arm == "empty":
+        data["pass_at_k"] = {}
+    result = {"agents": {"codex": data}}
+    original = deepcopy(result)
+
+    output = render_result(result)
+
+    if failed_arm in {"with_skill", "empty"}:
+        assert "QUALITY VERDICT" not in output
+        expected = ("N/A", "N/A", "N/A")
+    else:
+        assert "QUALITY VERDICT: FAIL — 1 of 1 cases failed: 1 goal not met" in output
+        expected = (
+            ("0/1 | N/A | N/A", "0/1 | N/A | N/A", "1/1 | N/A | N/A")
+            if failed_arm == "without_skill"
+            else ("0/1 | 1/1 | -1", "0/1 | 1/1 | -1", "1/1 | 1/1 | +0")
+        )
+    for label, counts in zip(("REQUIRED CHECKS PASSED", "GOALS MET", "SECURITY CLEAN"), expected, strict=True):
+        [line] = [line.strip(" │") for line in output.splitlines() if label in line]
+        assert line == f"{label}   {counts}"
+    assert result == original
+
+
+@pytest.mark.parametrize("failed_agent", ["codex", "opencode"])
+def test_failed_agent_has_no_quality_headline_in_multi_agent_summary(failed_agent):
+    agents = {
+        name: {
+            "execution_status": "failed" if name == failed_agent else "succeeded",
+            "conditions": {
+                "with_skill": {"execution_status": "failed" if name == failed_agent else "succeeded"},
+                "without_skill": {"execution_status": "succeeded"},
+            },
+            "pass_at_k": {
+                "with_skill": {
+                    "required_checks": {"passed": 0, "scored": 1, "wrong_answer": 1, "security": 0},
+                },
+            },
+        }
+        for name in ("codex", "opencode")
+    }
+    result = {"agents": agents}
+    original = deepcopy(result)
+    output = render_result(result)
+    usable_agent = "opencode" if failed_agent == "codex" else "codex"
+    assert f"QUALITY VERDICT ({failed_agent}):" not in output
+    assert f"QUALITY VERDICT ({usable_agent}): FAIL" in output
+    assert result == original
+
+
+def _checks(passed: int) -> dict:
+    return {
+        "with_skill": {
+            "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+        },
+    }
+
+
+def _failed_with_skill_agent(shape: str) -> dict:
+    """An agent whose with-skill arm failed to run, so none of its checks were scored."""
+    agent: dict = {
+        "execution_status": "failed",
+        "conditions": {
+            "with_skill": {"execution_status": "failed"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+    }
+    if shape == "empty_pass_at_k":
+        agent["pass_at_k"] = {}
+    elif shape == "passing_checks":
+        agent["pass_at_k"] = _checks(1)
+    elif shape == "explicit_pass":
+        agent["verdict"] = "pass"
+    return agent
+
+
+def _succeeded_agent(*, passed: int) -> dict:
+    return {
+        "execution_status": "succeeded",
+        "conditions": {
+            "with_skill": {"execution_status": "succeeded"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+        "pass_at_k": _checks(passed),
+    }
+
+
+def _run_verdict_lines(result: dict) -> list[str]:
+    original = deepcopy(result)
+    lines = [line for line in render_result(result).splitlines() if line.startswith("RUN QUALITY VERDICT:")]
+    assert result == original
+    return lines
+
+
+FAILED_ARM_SHAPES = ["missing_pass_at_k", "empty_pass_at_k", "passing_checks", "explicit_pass"]
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_ignores_an_agent_whose_with_skill_arm_failed(shape: str) -> None:
+    # The per-agent headline of the failed agent is withheld, so the run verdict
+    # must not read it either: only the agent that ran decides, and it fails.
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "opencode": _succeeded_agent(passed=0)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: FAIL"]
+    assert "QUALITY VERDICT (codex):" not in render_result(result)
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_is_pass_when_the_agent_that_ran_passes(shape: str) -> None:
+    # Mixed run: the canonical report (`_overall_verdict_from_agents`) sets
+    # execution-failed agents aside and passes when any remaining agent passes.
+    # The terminal line follows it, as it does when one agent fails its checks
+    # and another passes.
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "opencode": _succeeded_agent(passed=1)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: PASS"]
+    assert "QUALITY VERDICT (codex):" not in render_result(result)
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_run_verdict_is_incomplete_when_no_agent_ran_its_with_skill_arm(shape: str) -> None:
+    result = {"agents": {"codex": _failed_with_skill_agent(shape), "claude": _failed_with_skill_agent(shape)}}
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == WITH_SKILL_FAILED_REASON
+    assert "QUALITY VERDICT (" not in output
+
+
+def _arm_failures(*, with_skill: bool, baseline: bool) -> dict:
+    """An agent that failed the named arms; a failed baseline alone leaves the with-skill arm scored."""
+    agent = _succeeded_agent(passed=1)
+    agent["conditions"] = {
+        "with_skill": {"execution_status": "failed" if with_skill else "succeeded"},
+        "without_skill": {"execution_status": "failed" if baseline else "succeeded"},
+    }
+    if with_skill or baseline:
+        agent["execution_status"] = "failed"
+    if with_skill:
+        agent["pass_at_k"] = {}
+    return agent
+
+
+def _incomplete_reason(output: str) -> str:
+    """Return the line that explains an INCOMPLETE run verdict."""
+    lines = output.splitlines()
+    return lines[lines.index("RUN QUALITY VERDICT: INCOMPLETE") + 1]
+
+
+NEITHER_ARM_REASON = "no agent completed either arm; there is no quality verdict to report"
+WITH_SKILL_FAILED_REASON = "no agent completed its with-skill arm; there is no quality verdict to report"
+BASELINE_FAILED_REASON = (
+    "no agent completed its baseline arm, so the run has no complete agent result; "
+    "per-agent verdicts cover the with-skill arm only"
+)
+MIXED_REASON = (
+    "no agent completed both arms (with-skill arm failed for some, baseline arm for the rest); "
+    "there is no quality verdict to report"
+)
+
+
+@pytest.mark.parametrize(
+    ("codex", "opencode", "reason"),
+    [
+        ((True, True), (True, True), NEITHER_ARM_REASON),
+        ((True, False), (True, False), WITH_SKILL_FAILED_REASON),
+        ((True, True), (True, False), WITH_SKILL_FAILED_REASON),
+        ((False, True), (False, True), BASELINE_FAILED_REASON),
+        ((True, False), (False, True), MIXED_REASON),
+        ((True, True), (False, True), MIXED_REASON),
+    ],
+    ids=["neither-arm", "with-skill-arms", "neither-and-with-skill", "baseline-only", "mixed", "neither-and-baseline"],
+)
+def test_incomplete_run_verdict_names_the_arm_that_failed(codex, opencode, reason) -> None:
+    result = {
+        "agents": {
+            "codex": _arm_failures(with_skill=codex[0], baseline=codex[1]),
+            "opencode": _arm_failures(with_skill=opencode[0], baseline=opencode[1]),
+        }
+    }
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == reason
+
+
+def test_baseline_only_failures_keep_the_with_skill_headlines() -> None:
+    # The with-skill arms ran, so each agent's own headline reads them; only the
+    # run verdict is withheld, and its reason says the baseline arm is what failed.
+    result = {
+        "agents": {
+            name: {
+                **_arm_failures(with_skill=False, baseline=True),
+                "pass_at_k": {
+                    "with_skill": {
+                        **_checks(1)["with_skill"],
+                        "cases": {"case": {"passed": True, "attempts_used": 1, "best_score": 1.0, "attempts": []}},
+                    }
+                },
+            }
+            for name in ("codex", "opencode")
+        }
+    }
+
+    output = render_result(result)
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: INCOMPLETE"]
+    assert _incomplete_reason(output) == BASELINE_FAILED_REASON
+    assert "its with-skill arm" not in _incomplete_reason(output)
+    assert "QUALITY VERDICT (codex): PASS" in output
+    assert "QUALITY VERDICT (opencode): PASS" in output
+
+
+def test_run_verdict_ignores_an_agent_that_failed_only_its_baseline() -> None:
+    # Without --tolerate-baseline-timeouts a failed baseline fails the agent, although its
+    # with-skill arm ran. The canonical report sets that agent aside, so it cannot set the
+    # run PASS beside an agent that fails; its own per-agent headline still shows.
+    baseline_failed = {
+        **_succeeded_agent(passed=1),
+        "execution_status": "failed",
+        "conditions": {
+            "with_skill": {"execution_status": "succeeded"},
+            "without_skill": {"execution_status": "failed"},
+        },
+    }
+    result = {"agents": {"opencode": baseline_failed, "codex": _succeeded_agent(passed=0)}}
+
+    assert _run_verdict_lines(result) == ["RUN QUALITY VERDICT: FAIL"]
+    assert "QUALITY VERDICT (opencode): PASS" in render_result(result)
+
+
+def test_baseline_only_multi_agent_run_gives_no_skill_verdict() -> None:
+    skipped = {
+        "execution_status": "succeeded",
+        "conditions": {
+            "with_skill": {"execution_status": "skipped"},
+            "without_skill": {"execution_status": "succeeded"},
+        },
+    }
+    result = {"agents": {"codex": skipped, "opencode": deepcopy(skipped)}}
+
+    assert _run_verdict_lines(result) == []
+
+
+@pytest.mark.parametrize("shape", FAILED_ARM_SHAPES)
+def test_single_failed_agent_never_reads_as_a_passing_run(shape: str) -> None:
+    result = {"agents": {"codex": _failed_with_skill_agent(shape)}}
+
+    assert _run_verdict_lines(result) == []
+    assert "QUALITY VERDICT" not in render_result(result)
+
+
+def test_multi_agent_headlines_label_agents_and_render_with_skill_counts_alone() -> None:
+    def agent(passed: int, *, case_id: str) -> dict:
+        return {
+            "execution_status": "succeeded",
+            "pass_at_k": {
+                "with_skill": {
+                    "required_checks": {"passed": passed, "scored": 1, "wrong_answer": 1 - passed, "security": 0},
+                    "correct_answers": {"correct": passed, "scored": 1},
+                    "security_clean": {"clean": 1, "scored": 1},
+                    "cases": {case_id: {"passed": bool(passed), "attempts_used": 1, "best_score": 0.8, "attempts": []}},
+                },
+                "without_skill": {},
+            },
+        }
+
+    result = {
+        "execution_status": "succeeded",
+        "agents": {"codex": agent(0, case_id="codex-case"), "claude": agent(1, case_id="claude-case")},
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=160, color_system=None), verbose=False)
+
+    rendered = output.getvalue()
+    assert rendered.count("RUN QUALITY VERDICT:") == 1
+    assert "RUN QUALITY VERDICT: PASS" in rendered
+    assert "QUALITY VERDICT (codex): FAIL" in rendered
+    assert "QUALITY VERDICT (claude): PASS" in rendered
+    assert "REQUIRED CHECKS PASSED (codex)   0/1 | N/A | N/A" in rendered
+    assert "GOALS MET (claude)   1/1 | N/A | N/A" in rendered
+
+
+def test_default_case_first_display_includes_verdict_and_counts_before_cases() -> None:
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.8, "without_skill": 0.6, "delta": 0.2}},
+                "pass_at_k": {
+                    "with_skill": {
+                        "required_checks": {"passed": 1, "scored": 2, "wrong_answer": 1, "security": 0},
+                        "correct_answers": {"correct": 1, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {
+                            "wrong-case": {
+                                "passed": False,
+                                "attempts_used": 1,
+                                "best_score": 0.82,
+                                "attempt_details_total": 1,
+                                "attempt_details_shown": 1,
+                                "reason": "goal not met (goal accuracy 0.00)",
+                                "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                "attempts": [
+                                    {
+                                        "attempt": 1,
+                                        "score": 0.82,
+                                        "passed": False,
+                                        "reason": "goal not met (goal accuracy 0.00)",
+                                        "warnings": ["missed expected step 1 of 1 (behavior 0.00)"],
+                                    }
+                                ],
+                            }
+                        },
+                    },
+                    "without_skill": {
+                        "required_checks": {"passed": 2, "scored": 2, "wrong_answer": 0, "security": 0},
+                        "correct_answers": {"correct": 2, "scored": 2},
+                        "security_clean": {"clean": 2, "scored": 2},
+                        "cases": {},
+                    },
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+    render_evaluation_result(
+        result,
+        console=Console(file=output, width=180, color_system=None),
+        verbose=False,
+    )
+    rendered = output.getvalue()
+
+    assert "QUALITY VERDICT: FAIL — 1 of 2 cases failed: 1 goal not met" in rendered
+    assert "OVERALL SKILL LIFT (for reference)" in rendered
+    assert "REQUIRED CHECKS PASSED   1/2 | 2/2 | -1" in rendered
+    assert "GOALS MET   1/2 | 2/2 | -1" in rendered
+    assert "SECURITY CLEAN   2/2 | 2/2 | +0" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
+    assert "WARNING: missed expected step 1 of 1 (behavior 0.00)" in rendered
+    assert "0.82" in rendered
+    assert rendered.index("QUALITY VERDICT") < rendered.index("REQUIRED CHECKS PASSED") < rendered.index("wrong-case")
+
+
+def test_case_first_display_keeps_case_matrix_columns_and_ids_at_width_80() -> None:
+    def case(score: float, passed: bool, *, reason: str | None = None, warnings: list[str] | None = None) -> dict:
+        attempt = {"score": score, "passed": passed, "warnings": warnings or []}
+        summary = {
+            "passed": passed,
+            "attempts_used": 1,
+            "best_score": score,
+            "attempt_details_total": 1,
+            "attempt_details_shown": 1,
+            "warnings": warnings or [],
+            "attempts": [attempt],
+        }
+        if reason:
+            summary["reason"] = reason
+            attempt["reason"] = reason
+        return summary
+
+    case_ids = ("correct-answer", "missed-step", "security-warning", "wrong-ground-truth")
+    with_skill = {
+        "correct-answer": case(0.95, True),
+        "missed-step": case(0.95, True, warnings=["missed expected step 1 of 2 (behavior 0.50)"]),
+        "security-warning": case(0.60, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.82, False, reason="goal not met (goal accuracy 0.00)"),
+    }
+    without_skill = {
+        "correct-answer": case(1.00, True),
+        "missed-step": case(0.92, True),
+        "security-warning": case(0.83, False, reason="security issue (security 0.50): network command"),
+        "wrong-ground-truth": case(0.70, False, reason="goal not met (goal accuracy 0.00)"),
+    }
+    result = {
+        "execution_status": "succeeded",
+        "agents": {
+            "opencode": {
+                "execution_status": "succeeded",
+                "lift": {"overall": {"with_skill": 0.83, "without_skill": 0.86, "delta": -0.03}},
+                "dimensions_with_skill": {"security": {"score": 0.75}, "accuracy": {"score": 0.90}},
+                "dimensions_without_skill": {"security": {"score": 0.83}, "accuracy": {"score": 0.90}},
+                "pass_at_k": {
+                    "with_skill": {"k": 1, "pass_threshold": 0.5, "cases": with_skill},
+                    "without_skill": {"k": 1, "pass_threshold": 0.5, "cases": without_skill},
+                },
+            }
+        },
+    }
+    output = io.StringIO()
+
+    render_evaluation_result(result, console=Console(file=output, width=80, color_system=None), verbose=False)
+
+    rendered = " ".join(output.getvalue().split())
+    assert "test case (k=1)" in rendered
+    assert "with skill" in rendered
+    assert "without skill" in rendered
+    assert "effect" in rendered
+    assert all(case_id in rendered for case_id in case_ids)
+    assert "security" in rendered
+    assert "accuracy" in rendered
+    assert "FAIL: goal not met (goal accuracy 0.00)" in rendered
+
+
+@pytest.mark.parametrize(
+    ("baseline", "expected"),
+    [
+        (
+            {"mode": "reused", "source_run_id": "source", "source_evaluated_at": "time"},
+            "Baseline: reused from run source (time)",
+        ),
+        ({"mode": "fresh", "reuse_reason": "no compatible completed baseline"}, "Baseline: fresh (reuse not possible"),
+    ],
+)
+def test_evaluation_summary_reports_reused_or_fallback_baseline(baseline, expected: str) -> None:
+    stream = io.StringIO()
+    render_evaluation_result(
+        {"execution_status": "succeeded", "baseline": baseline, "agents": {}},
+        console=Console(file=stream, force_terminal=False, width=180),
+    )
+    assert expected in stream.getvalue()
+
+
+def test_evaluation_summary_omits_unremarkable_fresh_baseline() -> None:
+    stream = io.StringIO()
+    render_evaluation_result(
+        {"execution_status": "succeeded", "baseline": {"mode": "fresh"}, "agents": {}},
+        console=Console(file=stream, force_terminal=False, width=180),
+    )
+    assert "Baseline:" not in stream.getvalue()
 
 
 @pytest.mark.parametrize(
@@ -110,8 +677,11 @@ def test_overall_lift_headline_is_per_agent_and_highlighted_without_a_background
     console = Console()
     for panel, (name, delta) in zip(evaluator_panels, (("codex", 0.3), ("opencode", -0.2)), strict=True):
         assert isinstance(panel.renderable, Group)
-        headline = panel.renderable.renderables[0]
-        assert isinstance(headline, Text)
+        headline = next(
+            item
+            for item in panel.renderable.renderables
+            if isinstance(item, Text) and item.plain.startswith("OVERALL SKILL LIFT")
+        )
         assert headline.plain == f"OVERALL SKILL LIFT   {delta:+.2f} · {name}"
         style = headline.get_style_at_offset(console, headline.plain.index(f"{delta:+.2f}"))
         assert style.bold
@@ -1206,3 +1776,22 @@ def test_result_panel_title_cannot_inject_rich_markup_or_links() -> None:
 
     assert "evil.example" in stream.getvalue()
     assert "\x1b]8;" not in stream.getvalue()
+
+
+def test_standalone_result_displays_all_normalized_harbor_links():
+    result = {
+        "execution_status": "succeeded",
+        "harbor_viewer": {
+            "jobs": [
+                {"url": "https://example.test/a", "analysis_url": "https://example.test/analysis", "name": "[bad]"},
+                {"url": "https://example.test/b"},
+            ]
+        },
+    }
+    original = deepcopy(result)
+    output = render_result(result)
+    assert "https://example.test/a" in output
+    assert "https://example.test/b" in output
+    assert "https://example.test/analysis" in output
+    assert "Job 2" in output
+    assert result == original

@@ -73,9 +73,12 @@ def test_report_surfaces_share_failure_precedence():
     terminal = re.sub(r"\x1b\[[0-9;]*m", "", CLIReporter().render_all([result]))
     assert "[FAIL]" in terminal
     assert "**Status:** ❌ FAILED" in MarkdownReporter().render_all([result])
-    assert '"status": "failed"' in HTMLReporter().render_all([result]) or "FAILED" in HTMLReporter().render_all(
-        [result]
-    )
+    html = HTMLReporter().render_all([result])
+    embedded = re.search(r'<script id="report-data" type="application/json">(.*?)</script>', html, re.DOTALL)
+    assert embedded is not None
+    html_data = json.loads(embedded.group(1))
+    assert html_data["summary"]["status"] == "failed"
+    assert html_data["results"][0]["status"] == "failed"
     sarif = json.loads(SARIFReporter().render_all([result]))
     assert sarif["runs"][0]["properties"]["status"] == "failed"
 
@@ -98,6 +101,26 @@ def test_confirmed_legacy_failure_survives_separate_missing_evidence():
     status = resolve_run_status([result])
     assert status.headline == Status.FAILED
     assert status.of(result) == Status.FAILED
+
+
+def test_confirmed_failure_survives_a_folder_merge():
+    """A folder keeps a member's confirmed failure; a member's gate failure alone stays missing evidence."""
+    confirmed = ValidationResult(validator_name="Security Scan")
+    confirmed.fail_gate("hooks/hooks.json: these hooks cannot pass this check")
+    confirmed.metadata["confirmed_failure"] = True
+    confirmed.mark_scan_incomplete("scanner")
+    incomplete = ValidationResult(validator_name="Security Scan")
+    incomplete.fail_gate("scanner reports incomplete analysis")
+    incomplete.mark_scan_incomplete("scanner")
+
+    for members, expected in (((confirmed, incomplete), Status.FAILED), ((incomplete,), Status.INCOMPLETE)):
+        folder = ValidationResult(validator_name="Security Scan")
+        for index, member in enumerate(members):
+            folder.merge_with_prefix(member, f"skill-{index}")
+        status = resolve_run_status([folder])
+        assert status.of(folder) == expected
+        assert status.headline == expected
+        assert status.missing == ("scanner",)
 
 
 def test_missing_scanner_process_error_alone_remains_incomplete():

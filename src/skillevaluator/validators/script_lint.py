@@ -20,7 +20,13 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
-from skillevaluator.constants import EXECUTABLE_SKILL_DIRS, SCRIPT_LINT_MAX_NESTING, SCRIPT_LINT_SAFE_CONSTANTS
+from skillevaluator.constants import (
+    EXECUTABLE_SKILL_DIRS,
+    NODE_SCRIPT_PATTERNS,
+    PYTHON_SCRIPT_PATTERNS,
+    SCRIPT_LINT_MAX_NESTING,
+    SCRIPT_LINT_SAFE_CONSTANTS,
+)
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.validators.base import ValidatorBase
@@ -129,24 +135,40 @@ class ScriptLintValidator(ValidatorBase):
             validator_description=self.description,
         )
         py_files: list[Path] = []
+        node_files: list[Path] = []
         for dirname in EXECUTABLE_SKILL_DIRS:
             directory = skill_path / dirname
             if directory.is_dir():
-                py_files.extend(sorted(directory.glob("*.py")))
+                for pattern in PYTHON_SCRIPT_PATTERNS:
+                    py_files.extend(sorted(directory.glob(pattern)))
+                for pattern in NODE_SCRIPT_PATTERNS:
+                    node_files.extend(sorted(directory.glob(pattern)))
+        not_linted = f"{len(node_files)} Node script(s) not linted (script lint parses Python only)"
+        suffix = f"; {not_linted}" if node_files else ""
         if not py_files:
             if not any((skill_path / dirname).is_dir() for dirname in EXECUTABLE_SKILL_DIRS):
                 result.add_success(check_name="lint", message="No scripts/ or tools/ directory found")
             else:
-                result.add_success(check_name="lint", message="No Python scripts found in scripts/ or tools/")
+                result.add_success(check_name="lint", message=f"No Python scripts found in scripts/ or tools/{suffix}")
             return result
 
         for script in py_files:
             self._lint_script(script, result)
 
         if not result.findings:
-            result.add_success(
-                check_name="lint",
-                message=f"All {len(py_files)} script(s) passed lint checks",
+            result.add_success(check_name="lint", message=f"All {len(py_files)} script(s) passed lint checks{suffix}")
+        elif node_files:
+            # The findings carry the verdict. Keep the Node note as an informational finding:
+            # unlike a message it survives folder aggregation and the JSON report, and it does
+            # not count as another completed check.
+            result.add_finding(
+                Finding(
+                    category="SCRIPT_LINT",
+                    severity=Severity.INFO,
+                    check_name="node_scripts_not_linted",
+                    message=not_linted,
+                    file_path=node_files[0].parent.name,
+                )
             )
         return result
 
@@ -167,7 +189,7 @@ class ScriptLintValidator(ValidatorBase):
             return
 
         try:
-            tree = ast.parse(content, filename=script.name)
+            tree = ast.parse(content.removeprefix("\ufeff"), filename=script.name)
         except SyntaxError:
             return
 
@@ -210,15 +232,24 @@ class ScriptLintValidator(ValidatorBase):
                 )
             )
 
-        if not content.startswith("#!"):
+        shebang_warning = None
+        if content.startswith("\ufeff#!"):
+            shebang_warning = (
+                f"{fname} shebang is preceded by a UTF-8 BOM and will be ignored",
+                "Save the file as UTF-8 without a BOM",
+            )
+        elif not content.startswith("#!"):
+            shebang_warning = (f"{fname} missing shebang line", "Add: #!/usr/bin/env python3")
+
+        if shebang_warning:
             result.add_finding(
                 Finding(
                     category="SCRIPT_LINT",
                     severity=Severity.LOW,
                     check_name="missing_shebang",
-                    message=f"{fname} missing shebang line",
+                    message=shebang_warning[0],
                     file_path=str(script),
-                    suggestion="Add: #!/usr/bin/env python3",
+                    suggestion=shebang_warning[1],
                 )
             )
 

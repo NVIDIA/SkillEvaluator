@@ -6,14 +6,26 @@
 from __future__ import annotations
 
 import json
+import random
+import string
 from pathlib import Path
 from types import ModuleType
 from typing import Any
 
 import pytest
 from tests.conftest import load_harbor_eval_template
+from tests.tier3.test_security_finding_evidence import (
+    _CONFIGURED_CREDENTIAL,
+    _JWT,
+    _KEY_BLOCK,
+    _READINGS_THAT_START_THE_TEXT,
+    _generated_texts,
+    _grows_linearly,
+    _masking_seconds,
+    _only_adds_markers,
+)
 
-from skillevaluator.tier3.eval_core import llm_judge
+from skillevaluator.tier3.eval_core import atif_helpers, llm_judge
 from skillevaluator.tier3.harbor.metrics import RESERVED_METRIC_NAMES
 
 eval_template = load_harbor_eval_template("harbor_template_eval_judge_contracts")
@@ -107,6 +119,18 @@ def test_every_judge_prompt_example_passes_its_own_validator(judge_module, monke
         assert "score" not in example
 
 
+def test_placeholder_only_expected_behavior_is_not_applicable(judge_module, monkeypatch) -> None:
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("the judge should not run without expected behaviors")
+
+    monkeypatch.setattr(judge_module, "call_public_llm", fail_if_called)
+    result = judge_module.judge_behavior_check("conversation", ["None", "  ", "n/A", None])
+
+    assert result["score"] is None
+    assert result["reason"] == "N/A: no expected_behavior defined for this eval case"
+    assert result["results"] == []
+
+
 @pytest.mark.parametrize("behavior_count", [1, 2, 3, 5, 12])
 def test_behavior_prompt_example_is_a_valid_reply_for_any_number_of_behaviors(
     judge_module, monkeypatch, behavior_count: int
@@ -136,6 +160,131 @@ def test_accuracy_prompt_gives_no_free_criterion_to_a_response_without_an_answer
     assert "every criterion is false" in prompt
     # A correct refusal still scores when the expected answer is a refusal.
     assert "unless the expected answer is itself a refusal" in prompt
+
+
+@pytest.mark.parametrize(
+    ("requirement", "final_response"),
+    [
+        ("Return only a number.", "83"),
+        ("Return only a number.", "82"),
+        ("Return only a number.", "83\nFinished processing."),
+        ("Return only a number.", "The computed quantity is 83.\nCalculation finished."),
+        ("Return only a number.", "Quantity: 83"),
+        ("Return only a number.", "```text\n83\n```"),
+        ("Explain the quantity.", "The computed quantity is 83."),
+        ("Use the prefix COUNT= before the quantity.", "COUNT=83"),
+        ("Return the quantity with units and a short explanation.", "83 items remain after counting."),
+    ],
+    ids=[
+        "bare-number",
+        "wrong-value-valid-format",
+        "valid-first-line-extra-line",
+        "prose",
+        "label",
+        "fence",
+        "no-format",
+        "required-prefix",
+        "required-units-prose",
+    ],
+)
+def test_format_judges_receive_complete_final_response_separate_from_tool_and_reference(
+    monkeypatch, requirement: str, final_response: str
+) -> None:
+    # Catch response extraction, evidence misframing, or drift between deployed
+    # prompts. The provider is stopped at its boundary; no semantic verdict is faked.
+    question = f"Count the available items. {requirement}"
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": question},
+            {
+                "source": "agent",
+                "tool_calls": [{"tool_call_id": "count-1", "function_name": "count_items", "arguments": {}}],
+                "observation": {"results": [{"source_call_id": "count-1", "content": "83"}]},
+            },
+            {"source": "agent", "message": final_response},
+        ]
+    }
+    captured = []
+    for module, builder in (
+        (llm_judge, atif_helpers.build_metric_evidence_bundles),
+        (eval_template, eval_template.build_metric_evidence_bundles),
+    ):
+        bundles = builder(trajectory, question, ground_truth="83", expected_behavior=[requirement])
+        prompts = _capture_prompts(module, monkeypatch)
+        module.judge_accuracy(question, "83", bundles["accuracy"]["prompt_evidence"])
+        module.judge_behavior_check(bundles["behavior_check"]["prompt_evidence"], [requirement])
+        assert len(prompts) == 2
+        accuracy, behavior = prompts
+        assert "EXPECTED ANSWER:\n83\n" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nKEY OBSERVATIONS\n83" in accuracy
+        assert f"FINAL RESPONSE\n{final_response}\n\nUSER REQUEST\n{question}" in behavior
+        assert "COMPACT TOOL HISTORY\n" in behavior
+        assert "count_items" in behavior
+        assert "83" in behavior.split("COMPACT TOOL HISTORY\n", 1)[1]
+        assert f"EXPECTED BEHAVIORS:\n1. {requirement}" in behavior
+        for prompt in prompts:
+            assert "judge the entire final response literally" in prompt
+            assert "independently of factual correctness" in prompt
+            assert "Do not extract a compliant answer" in prompt
+            assert "extra prose, a label, or a code fence violates that requirement" in prompt
+            assert "Required prefixes, units, or prose are valid when they match the stated format" in prompt
+            assert "Inspect every line of the final response, including text after an initially valid answer" in prompt
+            assert "Line breaks do not end the final response" in prompt
+            assert "Do not mentally remove labels or Markdown fence characters" in prompt
+        assert "Wording leniency does not relax explicit format constraints" in accuracy
+        assert "When the complete final response establishes a format violation, mark that behavior false" in behavior
+        assert "keep null when missing or incomplete evidence prevents checking it" in behavior
+        captured.append(prompts)
+    assert captured[0] == captured[1]
+
+
+def test_format_only_behavior_is_separate_from_a_stated_correctness_behavior(monkeypatch) -> None:
+    # The same wrong value can satisfy structure but violate a separate factual
+    # requirement. Capture the actual evidence/prompt, without faking a verdict.
+    question = "Count the stored entries. Return only a number."
+    behaviors = ["Return only a number.", "Return the correct count."]
+    trajectory = {
+        "steps": [
+            {"source": "user", "message": question},
+            {"source": "agent", "message": "82"},
+        ]
+    }
+    captured = []
+    for module, builder in (
+        (llm_judge, atif_helpers.build_metric_evidence_bundles),
+        (eval_template, eval_template.build_metric_evidence_bundles),
+    ):
+        bundles = builder(trajectory, question, ground_truth="83", expected_behavior=behaviors)
+        prompts = _capture_prompts(module, monkeypatch)
+        module.judge_behavior_check(bundles["behavior_check"]["prompt_evidence"], behaviors)
+        prompt = prompts[0]
+        assert f"FINAL RESPONSE\n82\n\nUSER REQUEST\n{question}" in prompt
+        assert "EXPECTED BEHAVIORS:\n1. Return only a number.\n2. Return the correct count." in prompt
+        assert "For each numbered behavior, check only what that behavior requires" in prompt
+        assert "A format-only behavior does not require the answer's value to be factually correct" in prompt
+        assert "If a behavior also requires factual correctness, evaluate that requirement too" in prompt
+        assert "ensure each passed value agrees with its reason" in prompt
+        assert "a reason establishing a violation requires false, not true" in prompt
+        assert "an evidence gap that prevents checking requires null" in prompt
+        captured.append(prompts)
+    assert captured[0] == captured[1]
+
+
+def test_format_judges_keep_direct_unsectioned_inputs_compatible(judge_module, monkeypatch) -> None:
+    prompts = _capture_prompts(judge_module, monkeypatch)
+    direct_response = "COUNT=83"
+
+    judge_module.judge_accuracy("Use the prefix COUNT=.", "83", direct_response)
+    judge_module.judge_behavior_check(direct_response, ["Use the prefix COUNT=."])
+
+    assert prompts[0].endswith(
+        "SELECTED EVIDENCE (final response + produced artifacts; low-relevance steps may be omitted):\nCOUNT=83"
+    )
+    assert "CONVERSATION:\nCOUNT=83\n\nEXPECTED BEHAVIORS:" in prompts[1]
+    for prompt in prompts:
+        assert "When a FINAL RESPONSE section is supplied" in prompt
+        assert "its contents are the final answer" in prompt
+        assert "context, not part of that answer" in prompt
 
 
 def test_goal_prompt_omits_empty_tool_section_and_keeps_real_one(judge_module, monkeypatch) -> None:
@@ -232,6 +381,247 @@ def test_behavior_salvage_rejects_repeated_steps(judge_module, monkeypatch) -> N
 
     assert result["score"] is None
     assert result["status"] == "error"
+
+
+# ── Incomplete evidence gate (issue #234) ────────────────────────────────────
+
+
+def _never_called(*args: Any, **kwargs: Any):
+    raise AssertionError("the judge must not call a model on incomplete evidence")
+
+
+def _behavior_bundle(
+    module: ModuleType,
+    traj: dict[str, Any],
+    expected_behavior: list[str] | None = None,
+) -> dict[str, Any]:
+    """Build the behavior_check bundle with the module the judge belongs to."""
+    builder = atif_helpers if module is llm_judge else module
+    return builder.build_metric_evidence_bundles(
+        traj, "Explain the migration.", expected_behavior=expected_behavior
+    )["behavior_check"]
+
+
+_VERIFIED_PATH = "/workspace/output/report.md"
+_VERIFIED_BEHAVIOR = f"writes the file `{_VERIFIED_PATH}`"
+
+
+def _traj_with_verified_write_and_long_answer(answer_chars: int = 9000) -> dict[str, Any]:
+    """A run whose one expected behavior is provable from the write alone.
+
+    The final answer is long enough that the final-response limit cuts its
+    middle, which is the condition the evidence gate fires on.
+    """
+    return {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": _VERIFIED_PATH, "content": "# Report\nAll good.\n"},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "File written"}]},
+            },
+            {"source": "agent", "message": _distinct_answer(answer_chars)},
+        ]
+    }
+
+
+def _distinct_answer(length: int) -> str:
+    """Build non-repetitive text, so a cut middle cannot be matched elsewhere."""
+    rng = random.Random(20234)
+    words: list[str] = []
+    while sum(len(word) + 1 for word in words) < length:
+        words.append("".join(rng.choice(string.ascii_lowercase) for _ in range(rng.randint(3, 9))))
+    return " ".join(words)[:length]
+
+
+def test_incomplete_required_behavior_evidence_errors_without_a_model_call(judge_module, monkeypatch) -> None:
+    # A behavior score read off a shortened final answer grades the evidence
+    # loss, not the agent, so the judge returns an evaluation error instead.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {
+        "count": 1,
+        "truncated": True,
+        "reason": "final response shortened to fit SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT",
+        "required_complete": False,
+        "required_missing": ["final response"],
+        "incomplete_sections": ["final response"],
+    }
+
+    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"], evidence_omitted=omitted)
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert "final response" in result["reason"]
+    assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in result["reason"]
+    assert result["results"] == []
+    assert [item["status"] for item in result["expectations"]] == ["not_checked", "not_checked"]
+
+
+def test_complete_required_behavior_evidence_is_judged_normally(judge_module, monkeypatch) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(judge_module, "call_public_llm", _script([(_BEHAVIOR_RESPONSE, None)], calls))
+    omitted = {
+        "count": 1,
+        "truncated": True,
+        "reason": "behavior evidence shortened to fit SKILL_EVAL_BEHAVIOR_CHECK_BUDGET",
+        "required_complete": True,
+        "required_missing": [],
+        "incomplete_sections": ["compact tool history"],
+    }
+
+    result = judge_module.judge_behavior_check("conversation", ["b1", "b2"], evidence_omitted=omitted)
+
+    # Optional exploration output dropped to fit the budget is ordinary; only
+    # missing required evidence withholds the score.
+    assert result["score"] == 0.5
+    assert len(calls) == 1
+
+
+def test_behavior_judge_refuses_to_cut_accounted_evidence_a_second_time(judge_module, monkeypatch) -> None:
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    oversized = "A" * (judge_module._behavior_check_budget() + 5000)
+    omitted = {"count": 0, "truncated": False, "reason": "", "required_complete": True, "required_missing": []}
+
+    result = judge_module.judge_behavior_check(oversized, ["b1"], evidence_omitted=omitted)
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+    assert "shortened again inside the judge" in result["reason"]
+
+
+def test_oversized_final_answer_reaches_the_judge_gate_as_an_error(judge_module, monkeypatch) -> None:
+    # End to end over the seam the verifier uses: bundle -> judge. No model is
+    # called and no behavior score is produced.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    marker = "MIGRATE_UNIQUE_COVERAGE_FIRST"
+    answer = "A" * 8000 + marker + "B" * 8000
+    bundle = _behavior_bundle(judge_module, {"steps": [{"source": "agent", "message": answer}]})
+
+    assert marker not in bundle["prompt_evidence"]
+    assert bundle["omitted"]["required_complete"] is False
+
+    result = judge_module.judge_behavior_check(
+        bundle["prompt_evidence"], ["explains the migration"], evidence_omitted=bundle["omitted"]
+    )
+
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+def test_cut_answer_still_scores_when_verified_facts_settle_every_behavior(judge_module, monkeypatch) -> None:
+    # The gate exists to stop a score being read off evidence the limits cut.
+    # It must not discard a score the surviving evidence supports: here the one
+    # expected behavior is a path the deterministic fact list already marks
+    # OBSERVED, so the missing middle of the answer cannot change the answer.
+    calls: list[dict[str, Any]] = []
+    response = json.dumps({"results": [{"step": 1, "passed": True, "reason": "wrote the report"}]})
+    monkeypatch.setattr(judge_module, "call_public_llm", _script([(response, None)], calls))
+
+    bundle = _behavior_bundle(judge_module, _traj_with_verified_write_and_long_answer(), [_VERIFIED_BEHAVIOR])
+
+    # The evidence really is incomplete — the gate's own precondition holds.
+    assert bundle["omitted"]["required_complete"] is False
+    assert bundle["omitted"]["required_missing"] == ["final response"]
+    # And the deterministic facts settle the expectation regardless.
+    assert bundle["omitted"]["expected_behaviors_verified"] is True
+    assert f"[OBSERVED step 0] {_VERIFIED_PATH}" in bundle["prompt_evidence"]
+
+    result = judge_module.judge_behavior_check(
+        bundle["prompt_evidence"], [_VERIFIED_BEHAVIOR], evidence_omitted=bundle["omitted"]
+    )
+
+    assert len(calls) == 1
+    assert result.get("status") != "error"
+    assert result["score"] == 1.0
+
+    # And the case keeps an overall score, instead of dropping out of every
+    # gate and comparison keyed on one.
+    from skillevaluator.tier3.harbor.metrics import overall_score_from_metrics
+
+    scores = {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 1.0,
+        "behavior_check": result["score"],
+    }
+    assert overall_score_from_metrics(scores) == 1.0
+
+
+def test_cut_answer_is_still_gated_when_any_behavior_needs_the_answer(judge_module, monkeypatch) -> None:
+    # A prose expectation names nothing checkable, so it can only be judged
+    # from the text the limits cut. One such expectation keeps the gate, even
+    # beside a behavior the facts do settle.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    traj = _traj_with_verified_write_and_long_answer()
+
+    for expectations in (
+        ["explains the migration trade-offs"],
+        [_VERIFIED_BEHAVIOR, "explains the migration trade-offs"],
+    ):
+        bundle = _behavior_bundle(judge_module, traj, expectations)
+        assert bundle["omitted"]["required_complete"] is False
+        assert bundle["omitted"]["expected_behaviors_verified"] is False
+
+        result = judge_module.judge_behavior_check(
+            bundle["prompt_evidence"], expectations, evidence_omitted=bundle["omitted"]
+        )
+
+        assert result["score"] is None
+        assert result["status"] == "error"
+
+
+def test_behavior_evidence_gap_treats_an_absent_verified_flag_as_unknown(judge_module, monkeypatch) -> None:
+    # Records written before the flag existed, and records assembled by hand,
+    # must keep the gate rather than skip it by default.
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {"required_complete": False, "required_missing": ["final response"], "reason": "cut"}
+
+    assert judge_module.behavior_evidence_gap(omitted)
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": False})
+    assert judge_module.behavior_evidence_gap({**omitted, "expected_behaviors_verified": True}) == ""
+
+    result = judge_module.judge_behavior_check("conversation", ["b1"], evidence_omitted=omitted)
+    assert result["score"] is None
+    assert result["status"] == "error"
+
+
+def test_gated_behavior_result_never_becomes_a_zero_downstream(judge_module, monkeypatch) -> None:
+    from skillevaluator.tier3.eval_core.declarative_checks import combine_behavior_check
+    from skillevaluator.tier3.harbor.metrics import overall_score_from_metrics
+
+    monkeypatch.setattr(judge_module, "call_public_llm", _never_called)
+    omitted = {"required_complete": False, "required_missing": ["final response"], "reason": "cut"}
+    gated = judge_module.judge_behavior_check("conversation", ["b1"], evidence_omitted=omitted)
+
+    # The verifier's own normalization keeps it scoreless, even where an N/A
+    # result would be accepted.
+    normalized = eval_template._normalize_required_judge_result("behavior_check", gated, allow_not_applicable=True)
+    assert normalized["score"] is None
+    assert normalized["status"] == "error"
+
+    # Direct declarative checks beside the judge must not fill the gap either.
+    combined = combine_behavior_check(gated, [{"step": 1, "passed": True}], 1)
+    assert combined["score"] is None
+    assert combined["status"] == "error"
+
+    # And a missing behavior score leaves the overall score undefined rather
+    # than averaging a zero into the dimension mean (see PR #240).
+    scores = {
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": 1.0,
+        "goal_accuracy": 1.0,
+        "behavior_check": None,
+    }
+    assert overall_score_from_metrics(scores) is None
 
 
 # ── Specific retries ─────────────────────────────────────────────────────────
@@ -371,6 +761,32 @@ def _attempts(verifier_dir: Path) -> list[dict[str, Any]]:
     return payload["attempts"]
 
 
+def test_checks_only_behavior_does_not_call_the_judge(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {
+            "id": "case-1",
+            "has_skill": False,
+            "question": "Complete the task",
+            "ground_truth": "",
+            "expected_behavior": [],
+            "checks": [{"type": "output_contains", "text": "completed"}],
+        },
+    )
+
+    def fail_if_called(*args, **kwargs):
+        raise AssertionError("checks-only behavior must not invoke the judge")
+
+    verifier.judge_behavior_check = fail_if_called
+    verifier.call_public_llm = fail_if_called
+    verifier.main()
+
+    reward = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text(encoding="utf-8"))
+    behavior = reward["details"]["behavior_check"]
+    assert reward["behavior_check"] == 1.0
+    assert behavior["declarative_checks"]["summary"] == "Checked directly: 1, judged: 0, not checked: 0"
+
+
 def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []
@@ -400,6 +816,19 @@ def test_scored_trial_records_judge_contract_and_every_attempt(tmp_path: Path) -
     assert attempts[0]["reply"] == _ACCURACY_RESPONSE
     assert len(attempts[0]["prompt_sha256"]) == 64
     assert "Complete the task" in attempts[0]["prompt"]
+
+
+def test_trial_without_judge_references_writes_empty_attempt_artifact(tmp_path: Path) -> None:
+    verifier = _stage_verifier(
+        tmp_path,
+        {"id": "case-1", "question": "Inspect the output.", "ground_truth": "", "expected_behavior": []},
+    )
+    verifier.call_public_llm = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+    verifier._call_public_llm_with_provenance = lambda *_args, **_kwargs: pytest.fail("no judge reference")
+
+    verifier.main()
+
+    assert _attempts(verifier.VERIFIER_DIR) == []
 
 
 def test_failed_judge_keeps_its_rejected_attempts_without_a_score(tmp_path: Path) -> None:
@@ -688,6 +1117,285 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
     assert "<redacted>" in redacted
 
 
+# RAGAS writes the agent's messages into its prompt as JSON, and tool-call
+# arguments are JSON, so a line that starts with a credential follows an
+# escaped "\n" (or "\r\n", or "\n\t") there, once or twice escaped.
+@pytest.mark.parametrize(
+    ("line", "secret", "kept"),
+    [
+        pytest.param(
+            "Authorization: Bearer bbbbbbbbbbbb", "bbbbbbbbbbbb", "Authorization: Bearer <redacted>", id="authorization"
+        ),
+        pytest.param(
+            'Authorization: Digest username="u", response="dddddddddddd"',
+            "dddddddddddd",
+            "Authorization: Digest <redacted>",
+            id="authorization-digest",
+        ),
+        pytest.param("Cookie: session=cccccccccccc", "cccccccccccc", "Cookie: <redacted>", id="cookie"),
+        pytest.param("Api-Key: kkkkkkkkkkkk", "kkkkkkkkkkkk", "Api-Key: <redacted>", id="api-key"),
+        pytest.param("--token tttttttttttt", "tttttttttttt", "--token <redacted>", id="token-flag"),
+        pytest.param("--password pppppppppppp", "pppppppppppp", "--password <redacted>", id="password-flag"),
+        pytest.param("-token tttttttttttt", "tttttttttttt", "-token <redacted>", id="short-token-flag"),
+        pytest.param("-u uuuu:pppppppppppp", "pppppppppppp", "-u <redacted>", id="user-flag"),
+        pytest.param("--cookie session=cccccccccccc", "cccccccccccc", "--cookie <redacted>", id="cookie-flag"),
+        pytest.param("sk-proj-" + "a" * 24, "a" * 24, "sk-<redacted>", id="openai-key"),
+        pytest.param("ghp_" + "g" * 36, "g" * 36, "ghp_<redacted>", id="github-token"),
+    ],
+)
+@pytest.mark.parametrize("line_break", ["\n", "\r\n", "\n\t"], ids=["lf", "crlf", "lf-tab"])
+def test_judge_evidence_masks_credentials_after_json_escaped_line_breaks(
+    line: str, secret: str, kept: str, line_break: str
+) -> None:
+    text = f"HTTP/1.1 200 OK{line_break}{line}{line_break}done"
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert kept in redacted
+
+
+# json.dumps writes a tab as "\t", so in JSON a credential can follow the letter t.
+@pytest.mark.parametrize(
+    ("text", "secret"),
+    [
+        pytest.param("ok\tCookie: session=cccccccccccc", "cccccccccccc", id="tab-cookie"),
+        pytest.param("ok\t--token tttttttttttt", "tttttttttttt", id="tab-token-flag"),
+        pytest.param("ok\t-u uuuu:pppppppppppp", "pppppppppppp", id="tab-user-flag"),
+    ],
+)
+def test_judge_evidence_masks_credentials_after_json_escaped_tabs(text: str, secret: str) -> None:
+    assert secret not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"reply": text}), json.dumps(json.dumps({"reply": text}))):
+        assert "\\t" in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert secret not in redacted
+        assert "<redacted>" in redacted
+
+
+# Split so that no private key header appears in this file as one literal.
+_PRIVATE_KEY = "PRIVATE " + "KEY"
+_KEY_BODY_LINES = ("MIIEbodyLineOne", "MIIEbodyLineTwo")
+
+
+# A private key block spans lines, which JSON writes as "\n" escapes. The block
+# is masked whole, never only its BEGIN line.
+@pytest.mark.parametrize(
+    "label",
+    [
+        pytest.param(f"RSA {_PRIVATE_KEY}", id="rsa"),
+        pytest.param(f"EC {_PRIVATE_KEY}", id="ec"),
+        pytest.param(f"OPENSSH {_PRIVATE_KEY}", id="openssh"),
+        pytest.param(f"PGP {_PRIVATE_KEY} BLOCK", id="pgp"),
+        pytest.param(f"ENCRYPTED {_PRIVATE_KEY}", id="encrypted"),
+        pytest.param(_PRIVATE_KEY, id="pkcs8"),
+    ],
+)
+def test_judge_evidence_masks_private_key_blocks_in_json_escaped_text(label: str) -> None:
+    block = "\n".join((f"-----BEGIN {label}-----", *_KEY_BODY_LINES, f"-----END {label}-----"))
+    prompt = json.dumps({"user_input": [{"content": f"see\n{block}\nok", "type": "ai"}]}, indent=4)
+
+    for escaped in (json.dumps({"content": block}), json.dumps(json.dumps({"content": block})), prompt):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "<redacted private key>" in redacted
+        assert "-----END" not in redacted
+        for line in _KEY_BODY_LINES:
+            assert line not in redacted
+
+
+# A value may hold an escape: a quoted value a line break or tab, a password a
+# non-ASCII character (written "\u00e4" by json.dumps), or a path a backslash.
+# The whole value is masked in JSON escaped once or twice, and in plain text
+# too, where only a real line break ends a quoted value.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param('tool --password "a\n' + "Tail" * 3 + '" -x', id="quoted-line-break"),
+        pytest.param('tool --password "a\t' + "Tail" * 3 + '" -x', id="quoted-tab"),
+        pytest.param("mysql --password p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-password"),
+        pytest.param("tool --token tok\u00e9n" + "Tail" * 3 + " -x", id="non-ascii-token"),
+        pytest.param("tool -u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="non-ascii-user"),
+        pytest.param('tool --token "t\u00f6ken' + "Tail" * 3 + '" -x', id="non-ascii-quoted-token"),
+        pytest.param("tool --password ab\\n" + "Tail" * 3 + " -x", id="backslash-n-password"),
+        pytest.param("tool --token C:\\new\\" + "Tail" * 3 + " -x", id="windows-path-token"),
+    ],
+)
+def test_judge_evidence_masks_values_that_hold_escapes(text: str) -> None:
+    forms = [json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))]
+    if "\n" not in text:
+        forms.append(text)
+    for form in forms:
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "Tail" not in redacted
+        assert "<redacted> -x" in redacted
+
+
+# A credential flag that starts a JSON-escaped line keeps its whole value
+# masked, also when the value holds a non-ASCII character.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("--password p\u00e4ss" + "Tail" * 3 + " -h db", id="password"),
+        pytest.param("--token tok\u00e9n" + "Tail" * 3 + " -x", id="token"),
+        pytest.param("-u admin:p\u00e4ss" + "Tail" * 3 + " -x", id="user"),
+        pytest.param('--token "t\u00f6ken' + "Tail" * 3 + '" -x', id="quoted-token"),
+    ],
+)
+def test_judge_evidence_masks_non_ascii_values_at_json_escaped_line_starts(text: str) -> None:
+    for escaped in (json.dumps({"reply": f"ok\n{text}"}), json.dumps(json.dumps({"reply": f"ok\n{text}"}))):
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert "Tail" not in redacted
+        assert "<redacted>" in redacted
+
+
+# Tool-call arguments reach the behavior and goal prompts as json.dumps text,
+# where the line breaks of a written key file and of a continued command are
+# "\n" escapes.
+def test_judge_evidence_masks_multi_line_tool_call_arguments() -> None:
+    block = "\n".join(
+        (f"-----BEGIN OPENSSH {_PRIVATE_KEY}-----", *_KEY_BODY_LINES, f"-----END OPENSSH {_PRIVATE_KEY}-----")
+    )
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"function_name": "Write", "arguments": {"file_path": "id_ed25519", "content": block}},
+                    {"function_name": "Bash", "arguments": {"command": "sshpass -p \\\n" + "Tail" * 3 + " ssh host"}},
+                ],
+            },
+        ]
+    }
+    summary = eval_template.build_conversation_summary(trajectory, "Set up the deploy key.")
+    assert _KEY_BODY_LINES[0] in summary
+    assert "Tail" in summary
+
+    redacted = eval_template._redact_judge_evidence(summary)
+
+    assert "<redacted private key>" in redacted
+    assert "sshpass -p <redacted> ssh host" in redacted
+    assert "Tail" not in redacted
+    for line in _KEY_BODY_LINES:
+        assert line not in redacted
+
+
+_QUOTED_SECRET = "Qx7Quoted" + "Secret9"
+
+
+# Tool-call arguments reach judge prompts as JSON, so a double-quoted shell
+# value or argv element arrives with escaped quotes (\"VALUE\"). Each is masked
+# there as in plain text, mid-line and at a JSON-escaped line start.
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', id="user-flag"),
+        pytest.param(f'curl --user="admin:{_QUOTED_SECRET}" https://x', id="user-flag-equals"),
+        pytest.param(f'curl --proxy-user "admin:{_QUOTED_SECRET}" https://x', id="proxy-user-flag"),
+        pytest.param(f'mysql -uroot -p"{_QUOTED_SECRET}" app', id="mysql-attached-password"),
+        pytest.param(f'machine db login bot password "{_QUOTED_SECRET}"', id="netrc-password"),
+        pytest.param(f'subprocess.run(["tool", "--password", "{_QUOTED_SECRET}"])', id="argv-password"),
+        pytest.param(f'subprocess.run(["curl", "-u", "admin:{_QUOTED_SECRET}", url])', id="argv-user"),
+        pytest.param(f'subprocess.run(["docker", "login", "-u", "bot", "-p", "{_QUOTED_SECRET}"])', id="argv-login"),
+        pytest.param(f'subprocess.run(["sshpass", "-p", "{_QUOTED_SECRET}", "ssh", "host"])', id="argv-sshpass"),
+        pytest.param(f'subprocess.run(["curl", "-b", "sid={_QUOTED_SECRET}", url])', id="argv-cookie"),
+        pytest.param(f'subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])', id="argv-mysql-attached"),
+        pytest.param(f'subprocess.run([\n    "tool",\n    "--token",\n    "{_QUOTED_SECRET}",\n])', id="argv-per-line"),
+    ],
+)
+def test_judge_evidence_masks_json_escaped_quoted_values(text: str) -> None:
+    assert _QUOTED_SECRET not in eval_template._redact_judge_evidence(text)
+
+    for escaped in (json.dumps({"command": text}), json.dumps({"reply": f"ok\n{text}"})):
+        assert '\\"' in escaped
+        redacted = eval_template._redact_judge_evidence(escaped)
+
+        assert _QUOTED_SECRET not in redacted
+        assert "<redacted>" in redacted
+
+
+# An unquoted value that ends a line reads on through a JSON-escaped line
+# break, so masking the whole text masks the flag or header name that starts
+# the next line with it. That line's value is masked too, as in plain text,
+# however short it is.
+@pytest.mark.parametrize(
+    ("text", "second"),
+    [
+        pytest.param("--password aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="password-then-token"),
+        pytest.param(
+            "-u uuuu:aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb", "session=bbbbbbbbbbbb", id="user-then-cookie"
+        ),
+        pytest.param(
+            "deploy --token aaaaaaaaaaaa\nAuthorization: Bearer bbbbbbbbbbbb",
+            "bbbbbbbbbbbb",
+            id="token-then-authorization",
+        ),
+        pytest.param("sshpass -p aaaaaaaaaaaa\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="sshpass-then-token"),
+        pytest.param(
+            "docker login -u bot -p aaaaaaaaaaaa\nCookie: session=bbbbbbbbbbbb",
+            "session=bbbbbbbbbbbb",
+            id="login-then-cookie",
+        ),
+        pytest.param("run --password aaaaaaaaaaaa\nls\n--token bbbbbbbbbbbb", "bbbbbbbbbbbb", id="over-two-lines"),
+        pytest.param("--password aaaaaaaaaaaa\n--token bQ7", "bQ7", id="short-token"),
+        pytest.param("-u uuuu:aaaaaaaaaaaa\nCookie: s=bQ7", "s=bQ7", id="short-cookie"),
+    ],
+)
+def test_judge_evidence_masks_consecutive_credential_lines_in_json_escaped_text(text: str, second: str) -> None:
+    text += "\ndone"
+    for form in (text, json.dumps({"command": text}), json.dumps(json.dumps({"command": text}))):
+        redacted = eval_template._redact_judge_evidence(form)
+
+        assert "aaaaaaaaaaaa" not in redacted
+        assert second not in redacted
+        # Only the value is masked; the rest of the text stays as it was.
+        assert redacted.endswith("<redacted>" + form.split(second)[-1])
+
+
+# A value masked on one line is masked only there and where the whole text
+# pass took its name. Other copies of it are text, such as a model name after
+# a "tokenizer_name:" key, which the shared masker reads as a credential name.
+@pytest.mark.parametrize(
+    ("text", "kept"),
+    [
+        pytest.param(
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\ntokenizer_name: meta-llama/Llama-3.1-8B-Instruct\n"
+            "model_name: meta-llama/Llama-3.1-8B-Instruct\nTask: fine-tune meta-llama/Llama-3.1-8B-Instruct",
+            ["model_name: meta-llama/Llama-3.1-8B-Instruct", "Task: fine-tune meta-llama/Llama-3.1-8B-Instruct"],
+            id="model-name",
+        ),
+        pytest.param(
+            "class Settings:\n    api_key: Optional[str] = None\n    name: Optional[str] = None",
+            ["name: Optional[str] = None"],
+            id="annotation",
+        ),
+        pytest.param(
+            "fields:\n  password: required\n  email: required\nAll required fields are validated.",
+            ["email: required", "All required fields"],
+            id="yaml-word",
+        ),
+        pytest.param(
+            "run --token $GITHUB_TOKEN\necho $GITHUB_TOKEN_FILE\ncat $GITHUB_TOKEN_FILE",
+            ["cat $GITHUB_TOKEN_FILE"],
+            id="variable-name",
+        ),
+        pytest.param("docker run -u 1000:1000 img\nchown 1000:1000 /data", ["chown 1000:1000 /data"], id="user-id"),
+    ],
+)
+def test_judge_evidence_keeps_copies_of_line_values_elsewhere(text: str, kept: list[str]) -> None:
+    redacted = eval_template._redact_judge_evidence(json.dumps({"content": text}))
+
+    assert "<redacted>" in redacted
+    for part in kept:
+        assert part in redacted
+
+
 @pytest.mark.parametrize(
     "text",
     [
@@ -696,10 +1404,376 @@ def test_judge_evidence_masks_json_escaped_tool_call_headers(command: str, secre
         "see https://example.com/docs?a=b@c and mailto:user@example.com",
         "Authorization is required for this endpoint.",
         "curl --cookie-jar cookies.txt https://x; see the api-key rotation docs",
+        # JSON-escaped lines, as in RAGAS prompts and tool-call arguments.
+        json.dumps(
+            "Authorization is required.\npython -u script.py\n--token-limit 5\n\tcookie-jar ready\r\nC:\\new\\temp"
+        ),
+        json.dumps("caf\u00e9 --token-limit 5\t\u201cAuthorization is required\u201d\tpython -u script.py"),
+        # JSON-escaped quotes around a URL, a remote path, a date format and ordinary argv flags.
+        json.dumps('pip install -U "git+https://github.com/org/repo" && rsync -u "host:/data" . && date -u "+%H:%M"'),
+        json.dumps(
+            'subprocess.run(["mkdir", "-p", "out"]); ["ssh", "-p", "2222", "host"]; ["find", ".", "-path", "x"]'
+        ),
+        json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]'),
+        # A bare "-p" element after a MySQL client or login element, with JSON-escaped quotes.
+        json.dumps('subprocess.run(["mysql", "-e", "CREATE DATABASE app"]); subprocess.run(["mkdir", "-p", "data"])'),
+        json.dumps('subprocess.run(["mysql", "-u", "root", "-p", "appdb"])'),
+        json.dumps('run(["docker", "login", "--password-stdin", "-u", "bot"]); run(["git", "log", "-p"])'),
+        # The same with the quotes escaped twice, after a plain MySQL client element.
+        'run(["mysql", "-e", "x"]); '
+        + json.dumps(json.dumps('run(["mkdir", "-p", "data"]); run(["mysql", "-u", "root", "-p", "appdb"])')),
+        # Ordinary argv flags with the quotes escaped twice, also one element
+        # per line, and in a quoted Python string, plain and JSON-escaped.
+        json.dumps(json.dumps('["date", "-u", "+%H:%M"]; ["pip", "install", "-U", "git+https://github.com/org/repo"]')),
+        json.dumps(json.dumps('["rsync", "-u", "host:/data", "."]; ["ssh", "-p", "2222", "host"]')),
+        json.dumps(json.dumps('["find", ".", "-path", "x"]; ["tool", "--token", "--verbose"]')),
+        json.dumps(json.dumps('["tool", "--password-file", "pw.txt"]; ["curl", "-b", "jar.txt"]')),
+        json.dumps(json.dumps('subprocess.run([\n    "date",\n    "-u",\n    "+%H:%M",\n])')),
+        "code = '[\\'date\\', \\'-u\\', \\'+%H:%M\\'] + [\\'mkdir\\', \\'-p\\', \\'out\\']'",
+        json.dumps("code = '[\\'date\\', \\'-u\\', \\'+%H:%M\\'] + [\\'ssh\\', \\'-p\\', \\'2222\\']'"),
+        # Quoted flag values escaped twice that hold no credential: a URL, a
+        # remote path and a date format after -u, -u values with no colon, and
+        # a flag that names no credential.
+        json.dumps(
+            json.dumps(
+                'pip install -U "git+https://github.com/org/repo" && rsync -u "host:/data" . && date -u "+%H:%M"'
+            )
+        ),
+        json.dumps(json.dumps('curl -u "bot" https://x && git push -u "origin" main && judge --token-limit "5 10"')),
+        # An escaped backslash before a closing quote, in JSON escaped once and twice.
+        json.dumps({"path": "C:\\tmp\\", "cmd": "tool --password-file C:\\tmp\\pw.txt", "note": "keep me"}),
+        json.dumps(json.dumps({"path": "C:\\tmp\\", "cmd": 'echo "C:\\new\\" && ls', "note": "keep me"})),
     ],
 )
 def test_judge_evidence_keeps_ordinary_text(text: str) -> None:
     assert eval_template._redact_judge_evidence(text) == text
+
+
+_PASSPHRASE_WORD = "Zq9" + "Leak"
+
+
+# A bare \"-p\" element keeps its escaped closing quote, so a multi-word
+# credential later in the same JSON string is still masked to its end.
+@pytest.mark.parametrize(
+    "argv",
+    [
+        pytest.param('["mysql", "-p"]', id="mysql-prompt"),
+        pytest.param('["docker", "login", "-u", "bot"]); run(["git", "log", "-p"]', id="git-log-after-login"),
+    ],
+)
+def test_judge_evidence_masks_passphrase_after_bare_p_element(argv: str) -> None:
+    text = json.dumps({"command": f"run({argv}); password: correct horse {_PASSPHRASE_WORD} staple"})
+
+    assert eval_template._redact_judge_evidence(text) == json.dumps({"command": f"run({argv}); password: <redacted>"})
+
+
+_MYSQL_ARGUMENTS = json.dumps(
+    {"command": f'python -c \'import subprocess; subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"])\''}
+)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an attached "-pVALUE" element there is escaped twice
+# (\\\"-pVALUE\\\"). After a MySQL client element it is masked with its escapes
+# intact.
+@pytest.mark.parametrize(
+    "context",
+    [
+        pytest.param(f'Task: run subprocess.run(["mysql", "-uroot", "-p{_QUOTED_SECRET}"]).', id="plain"),
+        pytest.param(f"Task: run subprocess.run(['mysql', '-uroot', '-p{_QUOTED_SECRET}']).", id="single-quoted"),
+        pytest.param(f"Earlier call: {_MYSQL_ARGUMENTS}", id="json-escaped"),
+    ],
+)
+def test_judge_evidence_masks_twice_escaped_attached_password(context: str) -> None:
+    text = f"{context}\nRepeated: {json.dumps(_MYSQL_ARGUMENTS)}"
+
+    assert eval_template._redact_judge_evidence(text) == text.replace(_QUOTED_SECRET, "<redacted>")
+
+
+def _escaped_twice(text: str) -> str:
+    return json.dumps(json.dumps({"command": text}))
+
+
+def _in_quoted_python_string(text: str) -> str:
+    """Write *text*, a list with double-quoted elements, as a single-quoted list inside a single-quoted string."""
+    source = text.replace('"', "'")
+    return "code = '" + source.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so an argv list there has three backslashes before each quote
+# ([\\\"tool\\\", \\\"--password\\\", \\\"VALUE\\\"]). A list inside a quoted
+# Python string has one before each quote ([\'tool\', \'--password\',
+# \'VALUE\']), two once that string is JSON. Each list is masked as in plain
+# text, with its other elements and escapes intact, also when the value holds
+# an escaped quote or ends in a backslash.
+@pytest.mark.parametrize(
+    ("argv", "masked"),
+    [
+        pytest.param(
+            f'["tool", "--password", "{_QUOTED_SECRET}"]', '["tool", "--password", <redacted>]', id="password"
+        ),
+        pytest.param(f'["curl", "-u", "admin:{_QUOTED_SECRET}", url]', '["curl", "-u", <redacted>, url]', id="user"),
+        pytest.param(
+            f'["docker", "login", "-u", "bot", "-p", "{_QUOTED_SECRET}"]',
+            '["docker", "login", "-u", "bot", "-p", <redacted>]',
+            id="login",
+        ),
+        pytest.param(
+            f'["sshpass", "-p", "{_QUOTED_SECRET}", "ssh", "host"]',
+            '["sshpass", "-p", <redacted>, "ssh", "host"]',
+            id="sshpass",
+        ),
+        pytest.param(f'["curl", "-b", "sid={_QUOTED_SECRET}", url]', '["curl", "-b", <redacted>, url]', id="cookie"),
+        pytest.param(
+            f'["mysql", "-uroot", "-p{_QUOTED_SECRET}"]', '["mysql", "-uroot", "-p<redacted>"]', id="mysql-attached"
+        ),
+        pytest.param(
+            f'["docker", "login", "-p{_QUOTED_SECRET}"]', '["docker", "login", "-p<redacted>"]', id="login-attached"
+        ),
+        pytest.param(
+            f'["tool", "--token", "{_QUOTED_SECRET}\\\\", "next"]',
+            '["tool", "--token", <redacted>, "next"]',
+            id="value-ends-in-backslash",
+        ),
+    ],
+)
+def test_judge_evidence_masks_argv_lists_escaped_again(argv: str, masked: str) -> None:
+    for form in (_escaped_twice, _in_quoted_python_string, lambda text: json.dumps(_in_quoted_python_string(text))):
+        text = form(f"subprocess.run({argv})")
+
+        assert eval_template._redact_judge_evidence(text) == form(f"subprocess.run({masked})")
+
+
+# A double-quoted element that holds an escaped quote is masked whole in an
+# argv list escaped twice, where that quote follows seven backslashes.
+def test_judge_evidence_masks_an_argv_value_with_an_escaped_quote_escaped_twice() -> None:
+    text = _escaped_twice(f'subprocess.run(["tool", "--token", "a\\"b {_QUOTED_SECRET}", "next"])')
+
+    assert eval_template._redact_judge_evidence(text) == _escaped_twice(
+        'subprocess.run(["tool", "--token", <redacted>, "next"])'
+    )
+
+
+# An argv list escaped twice may hold one element per line, where a line
+# break is the three characters "\\n".
+def test_judge_evidence_masks_argv_lines_escaped_twice() -> None:
+    argv = f'[\n    "tool",\n    "--token",\n    "{_QUOTED_SECRET}",\n]'
+    masked = '[\n    "tool",\n    "--token",\n    <redacted>,\n]'
+
+    assert eval_template._redact_judge_evidence(_escaped_twice(f"subprocess.run({argv})")) == _escaped_twice(
+        f"subprocess.run({masked})"
+    )
+
+
+# A RAGAS request that repeats a Write call writes the file's JSON content as
+# JSON twice. The value of a member named for a credential is masked as in JSON
+# escaped once: with its quotes, or between them after a scheme word for a
+# header. The other members are kept.
+def test_judge_evidence_masks_credentials_in_json_content_escaped_twice() -> None:
+    def prompt(content: str) -> str:
+        arguments = json.dumps({"file_path": "config.json", "content": content})
+        return "input: " + json.dumps(
+            {"user_input": [{"content": f"Agent called: Write({arguments})", "type": "ai"}]}, indent=4
+        )
+
+    content = json.dumps(
+        {"token": _QUOTED_SECRET, "token_type": "bearer", "headers": {"Authorization": f"Bearer {_PASSPHRASE_WORD}"}}
+    )
+    masked = content.replace(f'"{_QUOTED_SECRET}"', "<redacted>").replace(_PASSPHRASE_WORD, "<redacted>")
+
+    assert eval_template._redact_judge_evidence(prompt(content)) == prompt(masked)
+
+
+# A RAGAS request that repeats a tool call writes the call's JSON arguments as
+# JSON again, so a double-quoted shell value there opens and closes with a run
+# of three backslashes and a quote (\\\"VALUE\\\"), or seven when the command
+# is itself a quoted shell string or the request is quoted once more. The whole
+# value is masked, also past a space, and the text around it is kept.
+@pytest.mark.parametrize(
+    ("text", "value", "times"),
+    [
+        pytest.param(f'tool --password "{_QUOTED_SECRET} two" -x', f'"{_QUOTED_SECRET} two"', 2, id="password-flag"),
+        pytest.param(f'tool --password "{_QUOTED_SECRET} two" -x', f'"{_QUOTED_SECRET} two"', 3, id="password-flag-3"),
+        pytest.param(f'deploy --token "a {_QUOTED_SECRET}" -x', f'"a {_QUOTED_SECRET}"', 2, id="token-flag"),
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 2, id="user-flag"),
+        pytest.param(f'curl -u "admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 3, id="user-flag-3"),
+        pytest.param(
+            f'curl --user="admin:{_QUOTED_SECRET}" https://x', f'"admin:{_QUOTED_SECRET}"', 2, id="user-flag-equals"
+        ),
+        pytest.param(
+            f'curl --proxy-user "admin:{_QUOTED_SECRET} two" https://x',
+            f'"admin:{_QUOTED_SECRET} two"',
+            2,
+            id="proxy-user-flag",
+        ),
+        pytest.param(f'sshpass -p "{_QUOTED_SECRET} two" ssh host', f'"{_QUOTED_SECRET} two"', 2, id="sshpass"),
+        pytest.param(
+            f'docker login -u bot -p "{_QUOTED_SECRET} two" registry.example.com',
+            f'"{_QUOTED_SECRET} two"',
+            2,
+            id="login-password",
+        ),
+        pytest.param(f'mysql -uroot -p"{_QUOTED_SECRET} two" app', f'"{_QUOTED_SECRET} two"', 2, id="mysql-password"),
+        pytest.param(
+            f'machine db login bot password "{_QUOTED_SECRET} two"', f'"{_QUOTED_SECRET} two"', 2, id="netrc-password"
+        ),
+        pytest.param(
+            f'bash -c "tool --password \\"{_QUOTED_SECRET} two\\" -x"',
+            f'\\"{_QUOTED_SECRET} two\\"',
+            2,
+            id="shell-string-2",
+        ),
+    ],
+)
+def test_judge_evidence_masks_quoted_values_escaped_again(text: str, value: str, times: int) -> None:
+    escaped = json.dumps({"command": text})
+    expected = json.dumps({"command": text.replace(value, "<redacted>")})
+    for _ in range(times - 1):
+        escaped, expected = json.dumps(escaped), json.dumps(expected)
+
+    assert eval_template._redact_judge_evidence(escaped) == expected
+    assert eval_template._redact_judge_evidence(f"ok\n{escaped}\ndone") == f"ok\n{expected}\ndone"
+
+
+# An argv value escaped twice that the passes mask only in part, at a token
+# that ends it, is masked whole: the marker of its reading and the token's
+# marker are one marker, and none of the token is kept.
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param("{token}", id="token"),
+        pytest.param("word {token}", id="word-and-token"),
+        pytest.param("user:{token}", id="user-and-token"),
+    ],
+)
+def test_judge_evidence_masks_a_partly_masked_value_escaped_twice_as_one_value(value: str) -> None:
+    token = "gh" + "p_" + "Ab3" * 12
+    text = _escaped_twice(f'subprocess.run(["tool", "--token", "{value.format(token=token)}"], check=True)')
+
+    assert eval_template._redact_judge_evidence_as_written(text) != text
+    assert eval_template._redact_judge_evidence(text) == _escaped_twice(
+        'subprocess.run(["tool", "--token", <redacted>], check=True)'
+    )
+
+
+# A value of a reading ends at the quote that ends the string it was read
+# from. A double-quoted value that does not close before the end of its JSON
+# string is masked to that end, and the quote and the members after it stay.
+@pytest.mark.parametrize("times", [1, 2])
+def test_judge_evidence_masks_an_unclosed_quoted_value_to_the_end_of_its_string(times: int) -> None:
+    escaped = json.dumps({"command": f'tool --password "{_QUOTED_SECRET} two && echo done', "note": "keep me"})
+    masked = json.dumps({"command": "tool --password <redacted>", "note": "keep me"})
+    for _ in range(times - 1):
+        escaped, masked = json.dumps(escaped), json.dumps(masked)
+
+    assert eval_template._redact_judge_evidence(escaped) == masked
+
+
+# A double quote after an escaped backslash ends a JSON string, also in the
+# readings: a line continuation that ends a string after a credential flag is
+# masked, and the string's closing quote and the members after it stay.
+def test_judge_evidence_keeps_the_quote_after_a_continuation_that_ends_a_string() -> None:
+    text = json.dumps({"lines": ["tool --token \\", "  --verbose"], "note": "keep me"})
+
+    assert eval_template._redact_judge_evidence(text) == json.dumps(
+        {"lines": ["tool --token <redacted>", "  --verbose"], "note": "keep me"}
+    )
+
+
+# Tool output with a NUL byte reaches a RAGAS prompt as \u0000, which the
+# readings keep as written, so a tool call elsewhere in the prompt is still
+# read with its escapes removed.
+def test_judge_evidence_reads_a_prompt_with_an_escaped_nul_again() -> None:
+    def prompt(command: str) -> str:
+        call = json.dumps({"command": command})
+        return "input: " + json.dumps(
+            {
+                "user_input": [
+                    {"content": f"Agent called: Bash({call})", "type": "ai"},
+                    {"content": "tool output: bin\x00ary", "type": "tool"},
+                ]
+            }
+        )
+
+    text = prompt(f'tool --password "{_QUOTED_SECRET} two" && echo done')
+
+    assert "\\u0000" in text
+    assert eval_template._redact_judge_evidence(text) == prompt("tool --password <redacted> && echo done")
+
+
+# The readings place what they mask by the text kept between markers, so a
+# JWT's jwt-<redacted>, a private key's marker and the [REDACTED] written for a
+# configured credential are read as markers too: a value escaped again in the
+# same prompt is still masked.
+@pytest.mark.parametrize(
+    ("output", "masked_output"),
+    [
+        pytest.param(f"session {_JWT} saved", "session jwt-<redacted> saved", id="jwt"),
+        pytest.param(f"key:\n{_KEY_BLOCK}\ndone", "key:\n<redacted private key>\ndone", id="private-key"),
+        pytest.param(
+            f"auth failed for {_CONFIGURED_CREDENTIAL}", "auth failed for [REDACTED]", id="configured-credential"
+        ),
+    ],
+)
+def test_judge_evidence_masks_a_value_escaped_again_next_to_a_marker_of_another_kind(
+    output: str, masked_output: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _CONFIGURED_CREDENTIAL)
+
+    def prompt(value: str, output: str) -> str:
+        call = json.dumps({"command": f'subprocess.run(["tool", "--password", {value}])'})
+        return json.dumps({"call": call, "output": output})
+
+    text = prompt(f'"{_QUOTED_SECRET}"', output)
+
+    assert _QUOTED_SECRET in eval_template._redact_judge_evidence_as_written(text)
+    assert eval_template._redact_judge_evidence(text) == prompt("<redacted>", masked_output)
+
+
+# The text that a reading keeps before its first marker is placed at the
+# start of the reading, also when it is found again inside the masked value
+# or is empty (see test_security_finding_evidence.py).
+@pytest.mark.parametrize(("text", "expected"), _READINGS_THAT_START_THE_TEXT)
+def test_judge_evidence_places_the_text_a_reading_keeps_before_its_first_marker(text: str, expected: str) -> None:
+    assert eval_template._redact_judge_evidence_as_written(text) != expected
+    assert eval_template._redact_judge_evidence(text) == expected
+
+
+# Reading the text with its escapes removed only adds markers to what the
+# judge evidence passes write for the text as written, also next to the
+# [REDACTED] written for a configured credential.
+def test_judge_evidence_masking_escaped_again_only_adds_markers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("ANTHROPIC_API_KEY", _CONFIGURED_CREDENTIAL)
+    changed = 0
+    for text in _generated_texts(400):
+        as_written = eval_template._redact_judge_evidence_as_written(text)
+        masked = eval_template._redact_judge_evidence(text)
+
+        assert _only_adds_markers(as_written, masked), (text, as_written, masked)
+        changed += masked != as_written
+    assert changed > 50
+
+
+# The judge passes read whole prompts and replies, with no scan window, so
+# their readings also take time in proportion to the text's length on long
+# adversarial input.
+@pytest.mark.parametrize(
+    "unit",
+    [
+        pytest.param('\\\\\\"', id="escaped-quotes"),
+        pytest.param("\\n\\t\\u00e4\\/\\'", id="escape-runs"),
+        pytest.param('password=\\\\\\"', id="credential-names-before-escaped-quotes"),
+        pytest.param('--password \\\\\\"a b\\\\\\" ', id="values-escaped-twice"),
+        pytest.param('<redacted>\\\\\\"', id="markers-and-escaped-quotes"),
+    ],
+)
+def test_judge_evidence_masking_escaped_again_stays_linear_on_adversarial_input(unit: str) -> None:
+    in_pieces, whole = _masking_seconds(eval_template._redact_judge_evidence, unit, 20_000, 200_000)
+    # The text masked whole takes about as long as in ten pieces, with the
+    # same margin for a slow CI runner as the finding evidence tests. Masking
+    # that grows with the square of the text takes ten times as long whole.
+    assert _grows_linearly(in_pieces, whole), (in_pieces, whole)
 
 
 def test_salvaged_behavior_score_is_saved_as_a_salvage_attempt(tmp_path: Path) -> None:
@@ -897,3 +1971,82 @@ def test_binary_ragas_score_is_saved_as_an_accepted_attempt(tmp_path: Path) -> N
 
 def test_judge_contract_is_reserved_reward_metadata() -> None:
     assert "judge_contract" in RESERVED_METRIC_NAMES
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        '{"headers": {"Authorization": "Bearer pa\\"CANARY_JUDGE_SUFFIX"}}',
+        'headers["Authorization"] = "Bearer pa\\"CANARY_JUDGE_SUFFIX"',
+        'headers["Authorization"] = f"Bearer pa\\"CANARY_JUDGE_SUFFIX"',
+        '{"headers": {"X-API-Key": "pa\\"CANARY_JUDGE_SUFFIX"}}',
+        'headers["X-API-Key"] = "pa\\"CANARY_JUDGE_SUFFIX"',
+        'curl -H \'Authorization: Bearer "pa\\"CANARY_JUDGE_SUFFIX"\' https://x',
+    ],
+)
+def test_judge_header_format_preservation_masks_escaped_secret_suffixes(text: str) -> None:
+    evidence = eval_template._redact_judge_evidence(text)
+    assert "CANARY_JUDGE_SUFFIX" not in evidence
+    assert "<redacted>" in evidence
+
+
+_GATE_FACTS = [
+    {"claim": "report.py", "observed": True},
+    {"claim": "summary.md", "observed": True},
+]
+
+
+@pytest.mark.parametrize(
+    ("expected_behavior", "verified", "why"),
+    [
+        (["writes `report.py`"], True, "a single observed artifact settles the expectation"),
+        (
+            ["writes `report.py`, `summary.md`"],
+            True,
+            "several observed artifacts in one clause still settle it",
+        ),
+        (["explains the trade-offs"], False, "plain prose names nothing checkable"),
+        (["writes `missing.py`"], False, "an unobserved artifact settles nothing"),
+        (
+            ["writes `report.py` and explains why each column was dropped"],
+            False,
+            "the prose half needs the final response the limits cut",
+        ),
+        (["writes `report.py` then explains the result"], False, "clause joined by 'then'"),
+        (["writes `report.py`; explains why"], False, "clause joined by a semicolon"),
+        (["writes `report.py`. Explains why."], False, "a second sentence"),
+        (["writes `report.py`", "explains why"], False, "a prose expectation beside an artifact one"),
+    ],
+)
+def test_expected_behaviors_verified_requires_every_clause_to_be_checkable(
+    expected_behavior: list[str], verified: bool, why: str
+) -> None:
+    # The gate exists to stop a score being withheld when the deterministic
+    # facts already settle the expectation. Naming an observed artifact is not
+    # enough on its own: an expectation that also asks for prose is settled
+    # only in its artifact half, and the other half is exactly what the cut
+    # final response would have answered. Keeping the gate withholds a score;
+    # lifting it wrongly keeps a score the evidence does not support, so an
+    # unrecognized clause shape must fall on the withholding side.
+    assert atif_helpers._expected_behaviors_verified(expected_behavior, _GATE_FACTS) is verified, why
+
+
+def test_expected_behaviors_verified_mixed_clause_does_not_lift_the_evidence_gate() -> None:
+    # End-to-end through behavior_evidence_gap: the mixed expectation must
+    # leave the gap in place, so behavior_check still withholds its score.
+    omitted = {
+        "required_complete": False,
+        "required_missing": ["final response"],
+        "reason": "final response truncated",
+        "expected_behaviors_verified": atif_helpers._expected_behaviors_verified(
+            ["writes `report.py` and explains why each column was dropped"], _GATE_FACTS
+        ),
+    }
+    assert omitted["expected_behaviors_verified"] is False
+    assert atif_helpers.behavior_evidence_gap(omitted) != ""
+
+    omitted["expected_behaviors_verified"] = atif_helpers._expected_behaviors_verified(
+        ["writes `report.py`"], _GATE_FACTS
+    )
+    assert omitted["expected_behaviors_verified"] is True
+    assert atif_helpers.behavior_evidence_gap(omitted) == ""

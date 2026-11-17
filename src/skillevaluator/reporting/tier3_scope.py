@@ -112,14 +112,15 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
         require_baseline=False,
     ):
         return None
-    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict
+    from skillevaluator.evaluation.tier3_report import _agent_quality_verdict, _agent_quality_verdict_reason
 
-    return {
+    result: dict[str, Any] = {
         "name": name,
         "score": score,
         "baseline": baseline,
         "lift": lift,
         "verdict": _agent_quality_verdict(agent),
+        "reason": _agent_quality_verdict_reason(agent),
         "needs_attention": payload.get("execution_status") != "succeeded",
         "recovered_attempts": sum(
             c.get("recovered_attempts_total", 0)
@@ -127,3 +128,23 @@ def completed_agent_result(payload: dict[str, Any] | None) -> dict[str, Any] | N
             if type(c.get("recovered_attempts_total", 0)) is int and c.get("recovered_attempts_total", 0) >= 0
         ),
     }
+    # Agents kept by --tolerate-baseline-timeouts leave the run succeeded, but
+    # their failed baselines still need attention; reports name them through
+    # tolerated_baseline_agents().
+    result["needs_attention"] = result["needs_attention"] or bool(tolerated_baseline_agents(payload))
+    return result
+
+
+def tolerated_baseline_agents(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Describe each agent kept by --tolerate-baseline-timeouts in ``payload``.
+
+    Reports name these agents whether or not a completed-agent result exists,
+    for example when a cost limit left the best agent's coverage short.
+    """
+    agents = payload.get("agents") if isinstance(payload, dict) else None
+    if not isinstance(agents, dict) or not agents:
+        # Reports without Tier 3 agents never load Tier 3 modules.
+        return []
+    from skillevaluator.tier3.harbor.baseline_timeouts import tolerated_baselines
+
+    return tolerated_baselines(agents)

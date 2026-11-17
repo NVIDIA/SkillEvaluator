@@ -130,7 +130,9 @@ def _validate_existing_output(output: Path) -> None:
         return
     try:
         data = _object(
-            json.loads(_read_catalog_text(output), object_pairs_hook=_catalog_object, parse_constant=_reject_json_constant),
+            json.loads(
+                _read_catalog_text(output), object_pairs_hook=_catalog_object, parse_constant=_reject_json_constant
+            ),
             _MANIFEST_FIELDS,
             "root",
         )

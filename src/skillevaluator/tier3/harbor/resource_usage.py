@@ -152,7 +152,15 @@ def resource_comparison(
     timing_sources = {"with_skill": sources(with_trials), "baseline": sources(baseline_trials)}
     mixed = len({*timing_sources["with_skill"], *timing_sources["baseline"]}) > 1
     return {
-        "scope": "observed agent-only trial totals; prompt + completion tokens (cache included), excluding judge/setup time",
+        "scope": (
+            "observed agent-only trial totals, including failed task outcomes; "
+            "prompt + completion tokens (cache included), excluding judge/setup time"
+        ),
+        "interpretation": (
+            "Observed consumption only. Lower use alone does not establish improved task quality or Efficiency. "
+            "Pairing does not certify matched concurrency or budget, or judge-model agreement. "
+            "Reused baseline measurements are historical, not fresh or independent evidence."
+        ),
         "pairing": "matching case counts" if paired else "unavailable",
         "delta_definition": "with skill minus baseline; negative means less observed resource use",
         "timing_definition": (

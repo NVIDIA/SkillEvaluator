@@ -503,7 +503,7 @@ def test_template_last_resort_judge_follows_the_selected_provider(judge_env, pro
         "claude-3-5-sonnet-20241022",
         "claude-mythos-preview",
         "anthropic/claude-mythos-preview",
-        "nvidia/nemotron-3-super-120b-a12b",
+        "nvidia/nemotron-3.5-lightning-30b-a3b",
     ],
 )
 def test_template_model_capabilities_match_provider_config(model):
@@ -525,6 +525,32 @@ def test_template_budget_effort_and_fallback_constants_match_package():
     assert eval_template.JUDGE_REASONING_EFFORT == llm_judge.JUDGE_REASONING_EFFORT
     assert eval_template.ANTHROPIC_REFUSAL_FALLBACK_MODEL == provider_config.ANTHROPIC_REFUSAL_FALLBACK_MODEL
     assert eval_template.ANTHROPIC_SERVER_SIDE_FALLBACK_BETA == provider_config.ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
+    assert eval_template.ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV == provider_config.ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV
+    assert eval_template._REFUSAL_FALLBACK_DISABLED_VALUES == provider_config._REFUSAL_FALLBACK_DISABLED_VALUES
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        None,
+        "",
+        "   ",
+        *sorted(provider_config._REFUSAL_FALLBACK_DISABLED_VALUES),
+        *(value.upper() for value in sorted(provider_config._REFUSAL_FALLBACK_DISABLED_VALUES)),
+        *(value.title() for value in sorted(provider_config._REFUSAL_FALLBACK_DISABLED_VALUES)),
+        "claude-opus-5-5",
+        " claude-opus-5-5 ",
+        "claude-opus-5",
+        "us.anthropic.claude-opus-4-8",
+    ],
+)
+def test_template_refusal_fallback_target_matches_package(monkeypatch, value):
+    model = "claude-opus-5-5"
+    monkeypatch.delenv(provider_config.ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, raising=False)
+    if value is not None:
+        monkeypatch.setenv(provider_config.ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, value)
+
+    assert eval_template._refusal_fallback_target(model) == provider_config.anthropic_refusal_fallback_model(model)
 
 
 @pytest.mark.parametrize(

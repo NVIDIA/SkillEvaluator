@@ -21,11 +21,13 @@ import posixpath
 import re
 import stat
 from collections import Counter, deque
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
 from skillevaluator.constants import (
+    EXECUTABLE_SCRIPT_PATTERNS,
     RUBRIC_CRITERIA,
     RUBRIC_MAX_TOKENS,
     RUBRIC_MIN_SCORE,
@@ -35,9 +37,11 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
 )
 from skillevaluator.inference.client import LLMClient
-from skillevaluator.inference.diagnostics import safe_llm_labels
+from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.utils.redaction import redact_sensitive_text
+from skillevaluator.utils.rich_markup import strip_terminal_controls
 from skillevaluator.utils.secure_fs import SecureRoot
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
@@ -47,9 +51,21 @@ logger = get_logger(__name__)
 _IMPORTANCE_WEIGHTS = {"high": 3, "medium": 2, "low": 1}
 _CRITERION_PASS_SCORE = 7
 _MAX_SKILL_CONTENT_BYTES = 1024 * 1024
+# Optional previews are summaries, so each one stays small and may be truncated. Required linked
+# guidance is not a preview: it is bounded only by the whole supplement budget below, and a
+# document that does not fit stops the evaluation instead of reaching the judge in part.
 _MAX_SUPPLEMENTARY_FILE_BYTES = 3000
-_MAX_SUPPLEMENTARY_TOTAL_BYTES = 30000
+# A real linked guide graph runs to tens of kilobytes, so the stock budget matches the mebibyte
+# already allowed for the manifest itself. The budget bounds how many bytes are collected, never
+# which paths may be read: every reference is still confined to the skill's own declared root by
+# the secure reader below.
+_DEFAULT_SUPPLEMENTARY_TOTAL_BYTES = 1024 * 1024
+_MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES = 8 * 1024 * 1024
+_SUPPLEMENTARY_TOTAL_BYTES_ENV = "SKILLEVALUATOR_RUBRIC_SUPPLEMENT_BYTES"
 _MAX_LINKED_MARKDOWN_FILES = 256
+# A rejected judge reply's problem text kept in the log line and retry note.
+# 500 characters hold every missing and some unexpected criterion ids.
+_MAX_RETRY_PROBLEM_CHARS = 500
 
 
 class _UnsafeRubricInputError(ValueError):
@@ -107,20 +123,21 @@ def _read_bounded_rubric_file(
     return text, len(bounded)
 
 
-def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
+def _normalize_rubric_checks(checks: Any, criteria: list[dict] | None = None) -> tuple[list[dict], str | None]:
     """Validate criterion evidence and return it in rubric-schema order.
 
     The judge is authoritative only for each criterion's bounded score, pass
     flag, and notes. Criterion identity/order and description come from the
     local rubric schema so duplicate, missing, or invented criteria cannot
-    influence the aggregate.
+    influence the aggregate. ``criteria`` defaults to ``RUBRIC_CRITERIA``.
     """
+    criteria = RUBRIC_CRITERIA if criteria is None else criteria
     if not isinstance(checks, list):
         return [], "LLM judge returned invalid rubric evidence: checks must be a list"
     if not checks:
         return (
             [],
-            f"LLM judge returned incomplete rubric evidence: expected {len(RUBRIC_CRITERIA)} criteria, received 0",
+            f"LLM judge returned incomplete rubric evidence: expected {len(criteria)} criteria, received 0",
         )
 
     returned_ids: list[str] = []
@@ -132,7 +149,7 @@ def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
             return [], f"LLM judge returned invalid rubric evidence: criterion at index {index} must have a string id"
         returned_ids.append(criterion_id)
 
-    expected_ids = [criterion["id"] for criterion in RUBRIC_CRITERIA]
+    expected_ids = [criterion["id"] for criterion in criteria]
     expected_id_set = set(expected_ids)
     id_counts = Counter(returned_ids)
     duplicates = sorted(criterion_id for criterion_id, count in id_counts.items() if count > 1)
@@ -150,7 +167,7 @@ def _normalize_rubric_checks(checks: Any) -> tuple[list[dict], str | None]:
 
     checks_by_id = {check["id"]: check for check in checks}
     normalized: list[dict] = []
-    for criterion in RUBRIC_CRITERIA:
+    for criterion in criteria:
         criterion_id = criterion["id"]
         check = checks_by_id[criterion_id]
         score = check.get("score")
@@ -198,6 +215,27 @@ def _aggregate_rubric_score(checks: list[dict]) -> float:
     return round(weighted_score / total_weight * 10, 1)
 
 
+def _rubric_report_problem(report: Any, criteria: list[dict]) -> str | None:
+    """Return why a parsed judge reply cannot be scored against ``criteria``, or ``None`` when it can."""
+    if not isinstance(report, dict):
+        return "LLM judge returned invalid rubric evidence: response must be an object"
+    _checks, problem = _normalize_rubric_checks(report.get("checks"), criteria)
+    return problem
+
+
+def _bounded_problem(problem: str) -> str:
+    """Make a rejection reason safe for logs, retry notes and failure reports.
+
+    The reason quotes the judge's own text, such as an invented criterion id,
+    which has no length limit.
+    """
+    problem = strip_terminal_controls(redact_sensitive_text(problem))
+    problem = " ".join("".join(char if char.isprintable() else " " for char in problem).split())
+    if len(problem) <= _MAX_RETRY_PROBLEM_CHARS:
+        return problem
+    return f"{problem[:_MAX_RETRY_PROBLEM_CHARS]} ... [truncated]"
+
+
 class _UnavailableRubricReport(dict):
     """Internal marker distinguishing transport fallback from model evidence."""
 
@@ -240,6 +278,9 @@ class RubricJudge(LLMClient):
     default_reasoning_effort: str | None = RUBRIC_REASONING_EFFORT
     response_schema: dict[str, Any] | None = RUBRIC_JSON_SCHEMA
     schema_name: str = "rubric_evaluation"
+    # Times the last process() call asked the judge: 1, or 2 after a rejected
+    # reply; 0 when the first request failed, so no reply came back.
+    last_attempts: int = 0
 
     _SYSTEM_PROMPT = (
         "You are evaluating an AI Agent Skill documentation file (SKILL.md).\n"
@@ -289,7 +330,7 @@ class RubricJudge(LLMClient):
                     for name, content in linked_markdown.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if scripts:
-                    extra += "\nScripts (from scripts/ directory):\n"
+                    extra += "\nScripts (from scripts/ and tools/ directories):\n"
                     for name, content in scripts.items():
                         extra += f"--- {name} ---\n{content}\n\n"
                 if references:
@@ -309,6 +350,65 @@ class RubricJudge(LLMClient):
 
     def parse_response(self, response_text: str, **_kwargs: Any) -> dict:
         return _extract_json(response_text)
+
+    def process(self, **kwargs: Any) -> Any:
+        """Ask the judge, and ask once more, naming the problem, if its reply cannot be scored.
+
+        A reply that ``json`` cannot parse (any ``ValueError`` or
+        ``RecursionError`` from :func:`_extract_json`), or whose ``checks``
+        miss, repeat or invent a criterion of ``criteria``
+        (``RUBRIC_CRITERIA`` unless given) or break a criterion's score or
+        pass flag, gets one more request: the same
+        prompts plus the problem, cut to ``_MAX_RETRY_PROBLEM_CHARS``. The
+        second reply is returned as parsed, so the validator still fails
+        closed when it is invalid too. A provider error that the client's own
+        transient-error retries do not clear (a failed request, a refusal or
+        a truncated reply) is not asked again: as in :meth:`LLMClient.process`,
+        ``last_failure`` records it and the fallback is returned. A truncated
+        reply is never salvaged. ``last_attempts`` counts the times the judge
+        was asked, not the client's retries, and stays 0 when the first
+        request fails.
+        """
+        self.last_failure = None
+        self.last_attempts = 0
+        try:
+            system_prompt = self.get_system_prompt()
+            user_prompt = self.create_user_prompt(**kwargs)
+            raw = self._request_rubric(system_prompt, user_prompt)
+            self.last_attempts = 1
+            try:
+                report = self.parse_response(raw, **kwargs)
+            except (ValueError, RecursionError) as exc:
+                # json.JSONDecodeError is a ValueError. json.loads also raises a
+                # plain ValueError (an integer past the digit limit) or a
+                # RecursionError (nesting too deep) for a reply it cannot parse.
+                problem = exc.msg if isinstance(exc, json.JSONDecodeError) else str(exc) or type(exc).__name__
+            else:
+                problem = _rubric_report_problem(report, kwargs.get("criteria", RUBRIC_CRITERIA))
+                if problem is None:
+                    return report
+            problem = _bounded_problem(problem)
+            logger.warning("Rubric judge reply rejected (%s) - asking once more", problem)
+            retry_prompt = (
+                f"{user_prompt}\nYOUR PREVIOUS REPLY WAS REJECTED: {problem}. "
+                "Reply again with ONLY one JSON object in the shape described above.\n"
+            )
+            self.last_attempts = 2
+            return self.parse_response(self._request_rubric(system_prompt, retry_prompt), **kwargs)
+        except NotImplementedError:
+            raise
+        except Exception as exc:
+            self.last_failure = llm_failure_diagnostic(exc)
+            logger.warning("LLM call failed (%s) - using fallback response", self.last_failure)
+            return self.get_fallback_response(**kwargs)
+
+    def _request_rubric(self, system_prompt: str, user_prompt: str) -> str:
+        return self.completions(
+            system_prompt,
+            user_prompt,
+            response_schema=self.response_schema,
+            schema_name=self.schema_name,
+        )
 
     def get_fallback_response(self, **_kwargs: Any) -> dict:
         return _UnavailableRubricReport(
@@ -347,16 +447,52 @@ def _extract_json(content: str) -> dict:
     raise json.JSONDecodeError(msg, content[:200], 0)
 
 
+def supplementary_total_bytes(environ: Mapping[str, str] | None = None) -> int:
+    """Return the configured supplement budget, which never widens the declared root.
+
+    The operator may raise or lower how many bytes of skill-owned guidance are collected. A
+    reference is still read only from the skill's own root, so a larger budget never reaches a
+    path a smaller one could not.
+    """
+    source = os.environ if environ is None else environ
+    raw = source.get(_SUPPLEMENTARY_TOTAL_BYTES_ENV, "").strip()
+    if not raw:
+        return _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+    try:
+        budget: int | None = int(raw)
+    except ValueError:
+        budget = None
+    if budget is None or budget <= 0:
+        logger.warning(
+            "Ignoring %s=%r: expected a positive integer number of bytes; using %s",
+            _SUPPLEMENTARY_TOTAL_BYTES_ENV,
+            raw,
+            _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES,
+        )
+        return _DEFAULT_SUPPLEMENTARY_TOTAL_BYTES
+    if budget > _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES:
+        logger.warning(
+            "Capping %s=%r at %s bytes",
+            _SUPPLEMENTARY_TOTAL_BYTES_ENV,
+            raw,
+            _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES,
+        )
+        return _MAX_CONFIGURED_SUPPLEMENTARY_TOTAL_BYTES
+    return budget
+
+
 def _collect_supplementary_content(
     skill_path: Path,
     max_bytes_per_file: int = _MAX_SUPPLEMENTARY_FILE_BYTES,
-    max_total_bytes: int = _MAX_SUPPLEMENTARY_TOTAL_BYTES,
+    max_total_bytes: int | None = None,
     *,
     manifest: Path | None = None,
     skill_content: str | None = None,
 ) -> dict[str, dict[str, str]]:
     """Collect complete linked Markdown before optional bounded previews."""
     result: dict[str, dict[str, str]] = {"scripts": {}, "references": {}}
+    if max_total_bytes is None:
+        max_total_bytes = supplementary_total_bytes()
     total = 0
     try:
         resolved_root = skill_path.resolve(strict=True)
@@ -410,9 +546,9 @@ def _collect_supplementary_content(
                         metadata = (resolved_root / relative).lstat()
                         identity = (metadata.st_dev, metadata.st_ino)
                         cached = seen_payloads.get(identity) if metadata.st_ino else None
-                        read_limit = (
-                            len(cached) if cached is not None else min(max_bytes_per_file, max_total_bytes - total)
-                        )
+                        # Required guidance is never truncated, so the only bound is what is left of
+                        # the supplement budget: a document that does not fit stops the collection.
+                        read_limit = len(cached) if cached is not None else max_total_bytes - total
                         payload, _ = reader.read_bytes(Path(relative), read_limit, expected=metadata)
                         seen.add(relative)
                         if cached is not None:
@@ -432,7 +568,13 @@ def _collect_supplementary_content(
         if linked:
             result["linked_markdown"] = linked
 
-    for subdir, exts in [("scripts", ("*.py", "*.sh")), ("references", ("*.md",))]:
+    # ``tools/`` is the agentskills.io name for ``scripts/``; its files are listed
+    # under their directory so they cannot collide with a script of the same name.
+    for subdir, bucket, exts in [
+        ("scripts", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("tools", "scripts", EXECUTABLE_SCRIPT_PATTERNS),
+        ("references", "references", ("*.md",)),
+    ]:
         d = skill_path / subdir
         if not os.path.lexists(d):
             continue
@@ -460,7 +602,7 @@ def _collect_supplementary_content(
                     max_bytes=read_limit,
                     truncate=True,
                 )
-                result[subdir][f.name] = text
+                result[bucket][f.name if subdir != "tools" else f"tools/{f.name}"] = text
                 total += bytes_read
 
     return result
@@ -570,6 +712,11 @@ class RubricEvalValidator(ValidatorBase):
         provider, model = safe_llm_labels(self._judge.provider, self._judge.model_used)
         return {"llm_provider": provider, "llm_model_used": model}
 
+    def _judge_attempts(self) -> dict[str, int]:
+        """Count the times the judge was asked for this skill, once a first reply came back."""
+        attempts = self._judge.last_attempts
+        return {"judge_attempts": attempts} if attempts else {}
+
     @staticmethod
     def _record_judge_failure(
         result: ValidationResult,
@@ -580,6 +727,7 @@ class RubricEvalValidator(ValidatorBase):
         message: str,
         check_name: str,
         suggestion: str,
+        judge_attempts: dict[str, int] | None = None,
     ) -> ValidationResult:
         judge_report = report if isinstance(report, dict) else {}
         result.metadata["rubric_eval"] = {
@@ -592,6 +740,7 @@ class RubricEvalValidator(ValidatorBase):
             "judge_overall_pass": judge_report.get("overall_pass"),
             "skill_name": skill_path.name,
             "checks": [],
+            **(judge_attempts or {}),
         }
         result.add_finding(
             Finding(
@@ -601,6 +750,7 @@ class RubricEvalValidator(ValidatorBase):
                 message=message,
                 file_path=str(manifest),
                 suggestion=suggestion,
+                metadata=dict(judge_attempts or {}),
             )
         )
         return result
@@ -667,6 +817,7 @@ class RubricEvalValidator(ValidatorBase):
                 skill_content=content,
                 supplementary_content=supplementary,
             )
+        judge_attempts = self._judge_attempts()
 
         if not isinstance(report, dict):
             return self._record_judge_failure(
@@ -677,6 +828,7 @@ class RubricEvalValidator(ValidatorBase):
                 message="LLM judge returned invalid rubric evidence: response must be an object",
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response was malformed",
+                judge_attempts=judge_attempts,
             )
 
         if isinstance(report, _UnavailableRubricReport):
@@ -689,6 +841,7 @@ class RubricEvalValidator(ValidatorBase):
                 message=f"LLM judge unavailable; rubric evaluation did not run{cause}",
                 check_name="llm_unavailable",
                 suggestion="Configure a public LLM provider to enable LLM rubric evaluation",
+                judge_attempts=judge_attempts,
             )
 
         checks, validation_error = _normalize_rubric_checks(report.get("checks"))
@@ -698,9 +851,10 @@ class RubricEvalValidator(ValidatorBase):
                 report=report,
                 skill_path=skill_path,
                 manifest=manifest,
-                message=validation_error,
+                message=_bounded_problem(validation_error),
                 check_name="llm_invalid_response",
                 suggestion="Retry rubric evaluation; the judge response did not contain valid complete criterion evidence",
+                judge_attempts=judge_attempts,
             )
 
         overall_score = _aggregate_rubric_score(checks)
@@ -769,16 +923,18 @@ class RubricEvalValidator(ValidatorBase):
                 "requires_all_criteria_pass": True,
             },
             **judge_labels,
+            **judge_attempts,
         }
 
-        # The success detail also names the model, so each skill of a folder
-        # run keeps its own.
+        # The success detail also names the model and counts the times the
+        # judge was asked, so each skill of a folder run keeps its own.
         result.add_success(
             check_name="rubric_eval",
             message=f"LLM Rubric Score: {overall_score}/100",
             overall_score=overall_score,
             overall_pass=overall_pass,
             **judge_labels,
+            **judge_attempts,
         )
 
         return result

@@ -103,6 +103,143 @@ def test_selection_deduplicates_overlapping_roots(tmp_path):
     assert runner.discover_skills(tmp_path, "skills\nskills/a\nskills") == [first, second]
 
 
+@pytest.mark.parametrize("mode", ["strict", "advisory"])
+@pytest.mark.parametrize(
+    "case",
+    ["passed", "failed", "incomplete", "mixed", "mixed-error", "missing", "malformed", "crash", "config"],
+)
+def test_enforcement_only_downgrades_complete_policy_verdicts(tmp_path, capsys, mode, case):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    responses = [(0, payload())]
+    if case in {"failed", "mixed", "mixed-error"}:
+        responses = [(1, payload(False, "failed"))]
+    if case in {"incomplete", "mixed"}:
+        incomplete = (1, payload(False, "incomplete", ["semgrep"], findings=0))
+        if case == "mixed":
+            skill(workspace, "skills/b")
+            responses.append(incomplete)
+        else:
+            responses = [incomplete]
+    if case == "missing":
+        responses = [(1, None)]
+    if case == "mixed-error":
+        skill(workspace, "skills/b")
+        responses.append((1, None))
+    if case == "malformed":
+        responses = [(1, {"overall_passed": False})]
+    if case == "crash":
+        responses = [(137, payload(False, "failed"))]
+    reports = tmp_path / "reports"
+    result = runner.run(
+        workspace,
+        reports,
+        {
+            "SKILL_PATHS": "missing" if case == "config" else "skills",
+            "LLM_ENABLED": "false",
+            "GITHUB_ACTIONS": "true",
+        },
+        execute=fake_cli(responses, []),
+        enforcement_mode=mode,
+    )
+    expected = 0 if case == "passed" or (mode == "advisory" and case == "failed") else 1
+    assert result == expected
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["overall_passed"] is (case == "passed")
+    assert summary["enforcement"]["mode"] == mode
+    assert summary["enforcement"]["downgraded"] is (mode == "advisory" and case == "failed")
+    if case == "failed":
+        assert summary["overall_status"] == "failed"
+        assert (reports / "skill-001/skillevaluator-tier1.json").is_file()
+        assert (reports / "index.html").is_file()
+    output = capsys.readouterr().out
+    assert ("::warning title=Tier 1 (advisory)::" in output) is (mode == "advisory" and case == "failed")
+
+
+@pytest.mark.parametrize("mode,marker", [("strict", "::error "), ("advisory", "::warning ")])
+def test_annotation_level_follows_enforcement_mode(capsys, mode, marker):
+    row = {"path": "skills/a", "overall_status": "failed"}
+    data = {
+        "results": [
+            {
+                "validator": "Tier 1 fixture validator 1",
+                "status": "failed",
+                "passed": False,
+                "incomplete_scans": [],
+                "legacy": {"errors": []},
+                "findings": [
+                    {
+                        "severity": "HIGH",
+                        "message": "Fixture validation failed",
+                        "suggestion": "Fix the fixture",
+                        "file_path": "SKILL.md",
+                        "line_number": 1,
+                    }
+                ],
+            }
+        ]
+    }
+    runner.log_result(row, data, annotations=True, budget={"errors": 0}, enforcement_mode=mode)
+    output = capsys.readouterr().out
+    assert marker in output
+
+
+def test_advisory_render_failure_still_fails(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+
+    def failed_render(*_args):
+        raise OSError("Report disk is full")
+
+    monkeypatch.setattr(runner, "_write_summary", failed_render)
+    with pytest.raises(OSError, match="disk is full"):
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "LLM_ENABLED": "false"},
+            execute=fake_cli([(1, payload(False, "failed"))], []),
+            enforcement_mode="advisory",
+        )
+
+
+@pytest.mark.parametrize("mode,expected", [("strict", 1), ("advisory", 0)])
+def test_cli_enforcement_flag_preserves_failed_evidence(tmp_path, mode, expected):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    binary = tmp_path / "skillevaluator"
+    binary.write_text(
+        f"#!{sys.executable}\nimport pathlib,sys\n"
+        "output=pathlib.Path(sys.argv[sys.argv.index('-o')+1])\n"
+        f"(output/'skillevaluator-tier1.json').write_text({json.dumps(payload(False, 'failed'))!r})\n"
+        "raise SystemExit(1)\n"
+    )
+    binary.chmod(0o755)
+    reports = tmp_path / "reports"
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(MODULE_PATH),
+            "--workspace",
+            str(workspace),
+            "--reports",
+            str(reports),
+            "--enforcement-mode",
+            mode,
+        ],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "SKILL_PATHS": "skills",
+            "LLM_ENABLED": "false",
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == expected, result.stderr
+    assert json.loads((reports / "summary.json").read_text())["overall_status"] == "failed"
+    assert ("::warning title=Tier 1 (advisory)::" in result.stdout) is (mode == "advisory")
+
+
 def test_contradictory_passing_report_with_incomplete_scanners_has_publishable_error_row(tmp_path):
     import ci.publish_reports as publisher
 
@@ -402,6 +539,29 @@ def test_successful_rollup_preserves_all_counts(tmp_path):
     assert summary["skills"][0]["path"] == "skills/a"
 
 
+@pytest.mark.parametrize("recorded", [True, False])
+def test_retained_report_records_the_repository_relative_target_not_the_runner_path(tmp_path, recorded):
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    reports = tmp_path / "reports"
+
+    def invoke(argv, **_kwargs):
+        # The evaluator records the target as the CI passed it: an absolute
+        # path in the runner's workspace. An older evaluator image records none.
+        report = {**payload(), "target_path": argv[argv.index("tier1") + 1]}
+        if not recorded:
+            report.pop("target_path")
+        output = Path(argv[argv.index("-o") + 1])
+        (output / "skillevaluator-tier1.json").write_text(json.dumps(report), encoding="utf-8")
+        return CompletedProcess(argv, 0)
+
+    assert runner.run(workspace, reports, {"SKILL_PATHS": "skills"}, execute=invoke) == 0
+
+    retained = json.loads((reports / "skill-001" / "skillevaluator-tier1.json").read_text())
+    assert retained.get("target_path") == ("skills/a" if recorded else None)
+    assert str(workspace) not in json.dumps(retained)
+
+
 def test_invalid_json_is_reported_and_later_skills_still_run(tmp_path):
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")
@@ -582,6 +742,267 @@ def selection_checkout(tmp_path):
     skill(workspace, "skills/a")
     skill(workspace, "skills/b")
     return workspace, repository_commit(workspace)
+
+
+def baseline_checkout(tmp_path, manifest=None):
+    workspace, _ = selection_checkout(tmp_path)
+    policy = workspace / ".skillevaluator/skillspector-baselines.yaml"
+    policy.parent.mkdir()
+    policy.write_text(manifest or "version: 1\nbaselines:\n  skills/a: policies/a.json\n")
+    baseline = workspace / "policies/a.json"
+    baseline.parent.mkdir()
+    baseline.write_text(json.dumps({"version": 2, "rules": [{"id": "PE5", "reason": "Reviewed exact policy"}]}))
+    return workspace, repository_commit(workspace), baseline.read_bytes()
+
+
+def test_security_baselines_use_reviewed_mapping_and_bytes_not_pr_head(tmp_path):
+    workspace, approved, approved_bytes = baseline_checkout(tmp_path)
+    (workspace / ".skillevaluator/skillspector-baselines.yaml").write_text(
+        "version: 1\nbaselines:\n  skills/b: policies/a.json\n"
+    )
+    (workspace / "policies/a.json").write_text('{"version":2,"rules":[]}')
+    head = repository_commit(workspace)
+    calls, observed = [], []
+    fixture = fake_cli([(0, payload()), (0, payload())], calls)
+
+    def execute(argv, **kwargs):
+        if "--skillspector-baseline" in argv:
+            path = Path(argv[argv.index("--skillspector-baseline") + 1])
+            observed.append((argv[2], path.read_bytes(), path.is_relative_to(workspace)))
+        return fixture(argv, **kwargs)
+
+    reports = tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+                "REPORT_COMMIT": head,
+            },
+            execute=execute,
+        )
+        == 0
+    )
+    assert observed == [(str(workspace / "skills/a"), approved_bytes, False)]
+    summary = json.loads((reports / "summary.json").read_text())
+    evidence = summary["execution"]["security_baselines"]
+    assert evidence["source_commit"] == approved
+    assert evidence["manifest"] == ".skillevaluator/skillspector-baselines.yaml"
+    assert re.fullmatch(r"sha256:[0-9a-f]{64}", evidence["manifest_digest"])
+    assert summary["skills"][0]["security_baseline"]["file"] == "policies/a.json"
+    assert "security_baseline" not in summary["skills"][1]
+
+
+def test_security_baselines_can_use_current_push_commit(tmp_path):
+    workspace, head, expected = baseline_checkout(tmp_path)
+    calls, observed = [], []
+    fixture = fake_cli([(0, payload()), (0, payload())], calls)
+
+    def execute(argv, **kwargs):
+        if "--skillspector-baseline" in argv:
+            observed.append(Path(argv[argv.index("--skillspector-baseline") + 1]).read_bytes())
+        return fixture(argv, **kwargs)
+
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=execute,
+        )
+        == 0
+    )
+    assert observed == [expected]
+
+
+def test_security_baseline_audit_field_does_not_collide_with_configured_secret_fragment(tmp_path):
+    workspace, approved, _ = baseline_checkout(tmp_path)
+    (workspace / "skills/a/example.txt").write_text('secret="configuredSuperSecret987654321"\n')
+    calls, reports = [], tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {"SKILL_PATHS": "skills/a", "SECURITY_BASELINES": "true", "POLICY_SOURCE_SHA": approved},
+            execute=fake_cli([(0, payload())], calls),
+        )
+        == 0
+    )
+    assert len(calls) == 1
+    summary = json.loads((reports / "summary.json").read_text())
+    assert summary["execution"]["security_baselines"]["mapped_skill_count"] == 1
+    assert "configured_skills" not in summary["execution"]["security_baselines"]
+    assert "withheld" in (reports / "skill-001/stdout.log").read_text()
+
+
+def test_security_baselines_require_explicit_opt_in(tmp_path):
+    workspace, head, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 0
+    )
+    assert all("--skillspector-baseline" not in argv for argv, _ in calls)
+
+
+@pytest.mark.parametrize("enabled", ["TRUE", " true ", "False", "yes"])
+def test_security_baselines_reject_noncanonical_boolean_input(tmp_path, enabled):
+    workspace, head, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": enabled,
+                "POLICY_SOURCE_SHA": head,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("source", ["", "HEAD", "0" * 40])
+def test_security_baselines_fail_closed_without_exact_available_policy_commit(tmp_path, source):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": source,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize(
+    "manifest",
+    [
+        "version: 1\nbaselines:\n  skills/a: policies/a.json\n  skills/a: policies/b.json\n",
+        "version: 1\nbaselines:\n  skills/a: ../a.json\n",
+        "version: 1\nbaselines:\n  ../skills/a: policies/a.json\n",
+        "version: 2\nbaselines: {}\n",
+        "version: 1\nbaselines:\n  skills/a: policies/missing.json\n",
+        "version: 1\nbaselines:\n  skills/a: &approved policies/a.json\n  skills/b: *approved\n",
+        'version: 1\nbaselines:\n  "skills/\\uD800": policies/a.json\n',
+        'version: 1\nbaselines:\n  skills/a: "policies/\\uD800.json"\n',
+    ],
+)
+def test_security_baselines_reject_invalid_reviewed_manifest_before_scanning(tmp_path, manifest):
+    workspace, approved, _ = baseline_checkout(tmp_path, manifest)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+def test_security_baselines_reject_symlink_blob_from_approved_commit(tmp_path):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    (workspace / "policies/a.json").unlink()
+    (workspace / "policies/a.json").symlink_to("../secret")
+    approved = repository_commit(workspace)
+    calls = []
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {
+                "SKILL_PATHS": "skills",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+
+
+@pytest.mark.parametrize("escaped", [False, True])
+def test_security_baselines_redact_credentials_only_in_approved_policy_bytes(tmp_path, escaped):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    token = "nvapi-" + "A1" * 25
+    approved_content = json.dumps({"version": 2, "scanner_version": token, "rules": []})
+    if escaped:
+        approved_content = approved_content.replace(token, "\\u006e" + token[1:])
+    (workspace / "policies/a.json").write_text(approved_content)
+    approved = repository_commit(workspace)
+    (workspace / "policies/a.json").write_text('{"version":2,"rules":[]}')
+    repository_commit(workspace)
+    report = payload(passed=False)
+    report["results"][0]["findings"][0]["message"] = "Baseline scanner version mismatch: " + token
+    reports = tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {
+                "SKILL_PATHS": "skills/a",
+                "SECURITY_BASELINES": "true",
+                "POLICY_SOURCE_SHA": approved,
+            },
+            execute=fake_cli([(1, report)], []),
+        )
+        == 1
+    )
+    assert all(token.encode() not in path.read_bytes() for path in reports.rglob("*") if path.is_file())
+    assert "withheld" in (reports / "skill-001/stdout.log").read_text()
+
+
+@pytest.mark.parametrize("content", ['!!int ""', '!!timestamp ""', '!!bool ""'])
+def test_security_baselines_reject_malformed_scalar_before_scanning(tmp_path, content):
+    workspace, _, _ = baseline_checkout(tmp_path)
+    (workspace / "policies/a.json").write_text(content)
+    approved = repository_commit(workspace)
+    calls, reports = [], tmp_path / "reports"
+    assert (
+        runner.run(
+            workspace,
+            reports,
+            {"SKILL_PATHS": "skills", "SECURITY_BASELINES": "true", "POLICY_SOURCE_SHA": approved},
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 1
+    )
+    assert not calls
+    summary = json.loads((reports / "summary.json").read_text())
+    assert "Credential preflight" in summary["error"]
 
 
 def test_changed_mode_runs_only_changed_skill_from_real_git_history(tmp_path):
@@ -796,12 +1217,15 @@ def test_quality_threshold_is_forwarded_to_evaluator(tmp_path, score, workers):
     skill(workspace, "skills/a")
     skill(workspace, "skills/b")
     calls = []
-    assert runner.run(
-        workspace,
-        tmp_path / "reports",
-        {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
-        execute=fake_cli([(0, payload()), (0, payload())], calls),
-    ) == 0
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "MIN_SCORE": score, "SCAN_WORKERS": workers},
+            execute=fake_cli([(0, payload()), (0, payload())], calls),
+        )
+        == 0
+    )
     assert len(calls) == 2
     for argv, _env in calls:
         assert argv[argv.index("--min-score") + 1] == score
@@ -812,12 +1236,15 @@ def test_invalid_quality_threshold_fails_without_running_scanner(tmp_path, score
     workspace = tmp_path / "workspace"
     skill(workspace, "skills/a")
     calls = []
-    assert runner.run(
-        workspace,
-        tmp_path / "reports",
-        {"SKILL_PATHS": "skills", "MIN_SCORE": score},
-        execute=fake_cli([(0, payload())], calls),
-    ) == 1
+    assert (
+        runner.run(
+            workspace,
+            tmp_path / "reports",
+            {"SKILL_PATHS": "skills", "MIN_SCORE": score},
+            execute=fake_cli([(0, payload())], calls),
+        )
+        == 1
+    )
     assert not calls
     summary = json.loads((tmp_path / "reports/summary.json").read_text())
     assert summary["overall_status"] == "error"
@@ -1119,8 +1546,14 @@ def test_scan_timeout_also_ends_the_scanner_tools(tmp_path, monkeypatch):
     path = scan_shim(tmp_path)
     output = tmp_path / "out"
     output.mkdir()
-    clock = types.SimpleNamespace(offset=0.0)
-    clock.monotonic = lambda: time.monotonic() + clock.offset
+    clock = types.SimpleNamespace(offset=0.0, read=threading.Event())
+
+    def monotonic():
+        now = time.monotonic() + clock.offset
+        clock.read.set()
+        return now
+
+    clock.monotonic = monotonic
     monkeypatch.setattr(runner, "time", clock)
     outcome = {}
 
@@ -1141,6 +1574,10 @@ def test_scan_timeout_also_ends_the_scanner_tools(tmp_path, monkeypatch):
     thread.start()
     pids = survivors = scan_pids(output, time.monotonic() + WAIT)
     try:
+        # The scan sets its time limit after it starts the evaluator, which can write its
+        # PIDs first. Move the clock only once the scan has read it, or the limit moves too.
+        clock.read.clear()
+        assert clock.read.wait(WAIT), "the scan did not read the clock"
         clock.offset = WAIT
         thread.join(WAIT)
         assert not thread.is_alive() and "error" in outcome
@@ -1290,6 +1727,37 @@ def test_second_ctrl_c_does_not_leave_the_runner_waiting(tmp_path):
             process.kill()
             process.wait()
         kill_quietly(survivors)
+
+
+@pytest.mark.skipif(not hasattr(signal, "pthread_kill"), reason="sends a signal to one thread")
+def test_ctrl_c_handled_on_a_scan_thread_still_ends_the_run(tmp_path, monkeypatch):
+    # Python acts on Ctrl-C in the main thread, but the system can run the signal handler on
+    # another one. Linux hands a waiting SIGINT to a thread that unblocks signals, as a scan
+    # thread does when it starts an evaluator. That does not wake a main thread that waits
+    # for scan events without a time limit, so the run would go on until a scan ended.
+    workspace = tmp_path / "workspace"
+    skill(workspace, "skills/a")
+    waits, aborted = threading.Semaphore(0), []
+
+    class Events(runner.queue.SimpleQueue):
+        def get(self, *args, **kwargs):
+            waits.release()
+            return super().get(*args, **kwargs)
+
+    def run_scan(argv, *, abort, **options):
+        # A busy main thread acts on any signal, and this scan's start event ends its first
+        # wait when that wait has no time limit. Signal once it has started a second wait.
+        for _ in range(2):
+            waits.acquire(timeout=WAIT)
+        signal.pthread_kill(threading.get_ident(), signal.SIGINT)
+        aborted.append(abort.wait(WAIT))
+        return CompletedProcess(argv, 1)
+
+    monkeypatch.setattr(runner, "queue", types.SimpleNamespace(SimpleQueue=Events, Empty=runner.queue.Empty))
+    monkeypatch.setattr(runner, "run_scan", run_scan)
+    with pytest.raises(KeyboardInterrupt):
+        runner.run(workspace, tmp_path / "reports", {})
+    assert aborted == [True]
 
 
 def test_each_report_is_released_once_its_result_is_logged(tmp_path, monkeypatch):

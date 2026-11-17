@@ -10,12 +10,14 @@ import math
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import tomllib
 import webbrowser
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 import yaml
 from rich.box import SIMPLE
@@ -29,6 +31,7 @@ from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGen
 from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
 from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
 from skillevaluator.tier3.case_ids import safe_child, validate_case_id, validate_case_ids
+from skillevaluator.tier3.dataset_coverage import dataset_coverage_result
 from skillevaluator.tier3.dataset_utils import DATASET_EXTENSIONS, load_dataset_entries_with_format
 from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, _validate_config, load_evals_config
 from skillevaluator.tier3.evals_spec import validate_harbor_contract, validate_skillevaluators
@@ -48,6 +51,7 @@ from skillevaluator.tier3.harbor.metrics import (
     LEGACY_METRICS,
     LEGACY_SCORE_POLICY,
     PARTIAL_SCORE_POLICY,
+    not_applicable_list,
     overall_score_from_metrics,
 )
 from skillevaluator.tier3.harbor.progress import (
@@ -78,6 +82,7 @@ from skillevaluator.tier3.results_location import (
     resolve_results_root,
 )
 from skillevaluator.tier3.toml_utils import toml_quote
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
 # emoji=False: ":name:" codes in untrusted text must print literally.
@@ -104,7 +109,9 @@ def _starter_evals_entry(skill_path: Path, case_id: str) -> dict[str, Any]:
         "expected_output": "Replace this with the expected outcome.",
         "expected_skill": skill_path.name,
         "assertions": [
-            "The agent addresses the task using the relevant skill workflow.",
+            # The no-skill baseline is graded on the same assertions, so grade the
+            # outcome, not skill use (skill_execution scores that).
+            "The agent's final response completes the task in the prompt.",
         ],
     }
 
@@ -429,6 +436,7 @@ def create_dataset(
     dry_run: bool = False,
     force: bool = False,
     prompt: Path | None = None,
+    grounding: str = "auto",
     refine: bool = False,
     from_results: Path | None = None,
     results_dir: Path | None = None,
@@ -447,6 +455,8 @@ def create_dataset(
         argv.append("--force")
     if prompt:
         argv.extend(["--prompt", str(prompt.resolve())])
+    if grounding != "auto":
+        argv.extend(["--grounding", grounding])
     if refine:
         argv.append("--refine")
     if from_results:
@@ -619,7 +629,7 @@ skills_dir = {toml_quote("/workspace/skills")}
             """FROM python:3.12-slim
 
 RUN apt-get -o Acquire::Retries=3 update && \\
-    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq ripgrep && \\
+    apt-get -o Acquire::Retries=3 install -y --no-install-recommends bash curl git jq procps ripgrep && \\
     rm -rf /var/lib/apt/lists/*
 
 RUN mkdir -p /workspace/skills /logs/agent /logs/verifier
@@ -660,10 +670,18 @@ def evaluate(
     *,
     agents: str | None,
     env_mode: str,
+    backend: str = "harbor",
     environment_kwarg: tuple[str, ...] = (),
     skip_baseline: bool,
     skip_with_skill: bool = False,
+    reuse_baseline: str | None = None,
+    compare_to: str | None = None,
     n_attempts: int | None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None,
     stop_on_pass: bool | None = None,
     n_concurrent: int | None,
@@ -679,6 +697,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -688,8 +707,11 @@ def evaluate(
     progress_reporter: ProgressReporter | None = None,
     environment_kwargs: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
-    """Run Harbor live-agent evaluation for a skill."""
+    """Run a live-agent evaluation for a skill on the selected execution backend."""
+    from skillevaluator.tier3.nemo_gym.backend import NEMO_GYM_BACKEND, nemo_gym_capability_errors, normalize_backend
+
     env_mode = _engine_env_mode(env_mode)
+    execution_backend = normalize_backend(backend)
 
     if agents is None:
         try:
@@ -721,6 +743,10 @@ def evaluate(
         reporter.emit(ProgressEvent(stage="configuration", state="running"))
         if skip_baseline and skip_with_skill:
             raise ValueError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+        if reuse_baseline and (skip_baseline or skip_with_skill):
+            raise ValueError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+        if compare_to and skip_with_skill:
+            raise ValueError("--compare-to is mutually exclusive with --skip-with-skill")
         unknown = validate_agents(agent_list)
         if unknown:
             supported = ", ".join(sorted(HARBOR_AGENTS_SUPPORTED))
@@ -744,13 +770,83 @@ def evaluate(
             )
 
         output_dir = resolve_results_root(skill_path, results_dir)
+        if execution_backend == NEMO_GYM_BACKEND:
+            from skillevaluator.tier3.nemo_gym.runner import run_nemo_gym_eval
+
+            capability_errors = nemo_gym_capability_errors(
+                agents=agent_list,
+                env_mode=env_mode,
+                grading_mode=grading_mode,
+                harbor_keep_jobs=harbor_keep_jobs,
+                stop_on_pass=bool(stop_on_pass),
+                custom_dockerfile_mode=custom_dockerfile_mode,
+                copy_repo=copy_repo,
+                environment_kwargs=merged_environment_kwargs,
+                override_storage_mb=override_storage_mb,
+                agent_runtime_preflight=bool(agent_runtime_preflight),
+                run_options={
+                    "reuse_baseline": reuse_baseline,
+                    "compare_to": compare_to,
+                    "max_agent_tokens": max_agent_tokens,
+                    "max_judge_calls": max_judge_calls,
+                    "max_attempts_total": max_attempts_total,
+                    "max_cost_usd": max_cost_usd,
+                    "price_file": price_file,
+                    "tolerate_baseline_timeouts": tolerate_baseline_timeouts,
+                },
+            )
+            multi_model_agents = sorted(agent for agent, models in agent_models.items() if len(models) != 1)
+            if multi_model_agents:
+                capability_errors.append(
+                    "--backend nemo-gym runs one --agent-model per agent; got several for "
+                    + ", ".join(multi_model_agents)
+                )
+            if capability_errors:
+                raise ValueError("; ".join(capability_errors))
+            engine_started = True
+            return run_nemo_gym_eval(
+                skill_path=skill_path.resolve(),
+                agents=agent_list,
+                skip_baseline=skip_baseline,
+                skip_with_skill=skip_with_skill,
+                n_attempts=n_attempts,
+                pass_threshold=pass_threshold,
+                stop_on_pass=stop_on_pass,
+                n_concurrent=n_concurrent,
+                max_cases=max_cases,
+                max_agents=max_agents,
+                model=model,
+                agent_models={agent: models[0] for agent, models in agent_models.items()} or None,
+                custom_dockerfile_mode=custom_dockerfile_mode,
+                agent_runtime_preflight=agent_runtime_preflight,
+                skill_workspace_mode=skill_workspace_mode,
+                include_skills=[p.resolve() for p in include_skills] or None,
+                grading_mode=grading_mode,
+                output_dir=output_dir,
+                env_mode=env_mode,
+                timeout_multiplier=timeout_multiplier,
+                evaluated_source=evaluated_source,
+                override_cpus=override_cpus,
+                override_memory_mb=override_memory_mb,
+                repo_context_exclude_paths=repo_context_exclude_paths,
+                copy_repo=copy_repo,
+                tolerate_baseline_timeouts=tolerate_baseline_timeouts,
+                progress_reporter=reporter,
+            )
         engine_started = True
         return run_harbor_eval(
             skill_path=skill_path.resolve(),
             agents=agent_list,
             skip_baseline=skip_baseline,
             skip_with_skill=skip_with_skill,
+            reuse_baseline=reuse_baseline,
+            compare_to=compare_to,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             n_concurrent=n_concurrent,
@@ -766,6 +862,7 @@ def evaluate(
             output_dir=output_dir,
             keep_harbor_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             env_mode=env_mode,
             env_mode_source="CLI",
             environment_kwargs=merged_environment_kwargs,
@@ -793,9 +890,13 @@ def doctor(
     verify_models: bool = False,
     agent_model: tuple[str, ...] = (),
     environment_kwargs: Mapping[str, Any] | None = None,
+    backend: str | None = None,
 ) -> int:
     """Check whether live evaluation dependencies are available."""
     from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
+    from skillevaluator.tier3.nemo_gym.backend import NEMO_GYM_BACKEND, normalize_backend
+
+    gym_backend = normalize_backend(backend) == NEMO_GYM_BACKEND
 
     env_mode = _engine_env_mode(env_mode)
     agent_list = parse_agents(agents) if agents is not None else []
@@ -850,7 +951,7 @@ def doctor(
             for agent in agent_list
         }
         plan_error: str | None = None
-        if not unknown_model_agents and not validate_agents(agent_list):
+        if not gym_backend and not unknown_model_agents and not validate_agents(agent_list):
             try:
                 runtime_plans = _resolve_agent_runtime_plan(
                     provider=provider,
@@ -889,6 +990,9 @@ def doctor(
 
     if kwarg_parse_error is not None:
         prereq_errors = [kwarg_parse_error]
+    elif gym_backend:
+        rows.extend(_nemo_gym_doctor_rows(agent_list, env_mode, merged_cli_kwargs, agent_model=agent_model))
+        prereq_errors = None
     else:
         prerequisite_subprocess_env = dict(next(iter(runtime_plans.values())).subprocess_env) if runtime_plans else None
         prereq_errors = _check_prerequisites(
@@ -901,10 +1005,12 @@ def doctor(
     if prereq_errors:
         for error in prereq_errors:
             rows.append((f"{env_mode} prerequisite", "fail", error))
-    else:
+    elif prereq_errors is not None:
         rows.append((f"{env_mode} prerequisite", "pass", "ready"))
 
-    if verify_models:
+    if verify_models and gym_backend:
+        rows.append(("provider model", "warn", "--verify-models is not checked for --backend nemo-gym yet"))
+    elif verify_models:
         if provider is None or not runtime_plans:
             rows.append(("provider model", "fail", "provider model resolution was unavailable"))
         else:
@@ -950,6 +1056,192 @@ def doctor(
     return 1 if any(row[1] == "fail" for row in rows) else 0
 
 
+def _docker_daemon_error(env: Mapping[str, str]) -> str | None:
+    """Return why the Docker daemon Gym would use is unreachable, or None when it answers."""
+    docker = shutil.which("docker")
+    if docker is None:
+        return "NeMo Gym's docker sandbox needs the docker CLI on PATH"
+    try:
+        probe = subprocess.run(
+            [docker, "info", "--format", "{{.ServerVersion}}"],
+            env=dict(env),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            timeout=_DOCKER_PROBE_TIMEOUT_S,
+            check=False,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return f"NeMo Gym's docker sandbox could not reach the Docker daemon: {type(exc).__name__}"
+    if probe.returncode != 0:
+        reason = (probe.stderr or probe.stdout).strip().splitlines()
+        detail = reason[-1][:200] if reason else f"docker info exited {probe.returncode}"
+        return f"NeMo Gym's docker sandbox could not reach the Docker daemon: {detail}"
+    return None
+
+
+_DOCKER_PROBE_TIMEOUT_S = 15.0
+
+
+_POLICY_ENDPOINT_PROBE_TIMEOUT_S = 3.0
+_POLICY_ENDPOINT_PROBE = """
+import sys
+from urllib.parse import urlsplit, urlunsplit
+from urllib.error import HTTPError, URLError
+from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener, getproxies_environment, proxy_bypass
+
+class NoRedirect(HTTPRedirectHandler):
+    def redirect_request(self, req, fp, code, msg, headers, newurl):
+        return None
+
+try:
+    url = urlsplit(sys.stdin.read())
+    if url.scheme not in ("http", "https") or not url.hostname or url.username or url.password:
+        sys.exit(1)
+    proxies = getproxies_environment()
+    using_proxy = bool(proxies.get(url.scheme)) and not proxy_bypass(url.netloc)
+    try:
+        response = build_opener(ProxyHandler(proxies), NoRedirect()).open(
+            Request(urlunsplit(url), method="HEAD"), timeout=2
+        )
+    except HTTPError as response:
+        response.close()
+        if using_proxy and (response.code == 407 or url.scheme == "http" and response.code in (502, 504)):
+            sys.exit(2 if response.code == 407 else 3)
+    except URLError as error:
+        if using_proxy:
+            sys.exit(2 if "Tunnel connection failed: 407" in str(error.reason) else 3)
+        sys.exit(1)
+    else:
+        response.close()
+except Exception:
+    sys.exit(1)
+"""
+
+
+def _nemo_gym_policy_endpoint_error(url: str) -> str | None:
+    """Probe anonymously in a bounded child so DNS resolution cannot hang doctor."""
+    from skillevaluator.tier3.nemo_gym.backend import MODEL_URL_ENV
+
+    probe_env = {
+        name: os.environ[name] for name in ("SYSTEMROOT", "SSL_CERT_FILE", "SSL_CERT_DIR") if name in os.environ
+    }
+    for name in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "no_proxy", "NO_PROXY"):
+        if value := os.environ.get(name):
+            if name.lower() != "no_proxy":
+                try:
+                    parsed = urlsplit(value if "://" in value else "//" + value, scheme="http")
+                    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+                        continue
+                    value = parsed._replace(netloc=parsed.netloc.rsplit("@", 1)[-1]).geturl()
+                except ValueError:
+                    continue
+            probe_env[name] = value
+    detail = "could not reach the policy endpoint"
+    try:
+        probe = subprocess.run(
+            [sys.executable, "-I", "-c", _POLICY_ENDPOINT_PROBE],
+            env=probe_env,
+            input=url,
+            text=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            timeout=_POLICY_ENDPOINT_PROBE_TIMEOUT_S,
+            check=False,
+        )
+        if probe.returncode == 0:
+            return None
+        if probe.returncode == 2:
+            detail = (
+                "policy endpoint proxy authentication is needed; this anonymous probe does not send proxy credentials"
+            )
+        elif probe.returncode == 3:
+            detail = "policy endpoint proxy could not reach the service; check HTTP_PROXY/HTTPS_PROXY/NO_PROXY and proxy access"
+    except subprocess.TimeoutExpired:
+        detail = f"policy endpoint probe timed out after {_POLICY_ENDPOINT_PROBE_TIMEOUT_S:g}s"
+    except OSError:
+        detail = "could not start the policy endpoint probe"
+    return (
+        f"NeMo Gym {detail}; check {MODEL_URL_ENV} or the selected provider's base URL, "
+        "start the inference service, and check network access. A policy endpoint HTTP response is sufficient; "
+        "this check does not validate credentials or model compatibility."
+    )
+
+
+def _nemo_gym_doctor_rows(
+    agents: list[str],
+    env_mode: str,
+    environment_kwargs: Mapping[str, Any],
+    *,
+    agent_model: tuple[str, ...] = (),
+) -> list[tuple[str, str, str]]:
+    """Readiness rows for ``--backend nemo-gym``: the Gym CLI, its sandbox, the policy endpoint and options."""
+    from skillevaluator.provider_config import ProviderConfigurationError
+    from skillevaluator.tier3.nemo_gym.backend import (
+        MODEL_URL_ENV,
+        NEMO_GYM_BIN_ENV,
+        model_url_credential_error,
+        nemo_gym_bin,
+        nemo_gym_capability_errors,
+        nemo_gym_cli_error,
+        nemo_gym_settings_errors,
+        nemo_gym_version,
+    )
+    from skillevaluator.tier3.nemo_gym.runner import _model_endpoint, gym_launch_environment
+
+    rows: list[tuple[str, str, str]] = []
+    gym = nemo_gym_bin()
+    if gym is None:
+        rows.append(
+            (
+                "NeMo Gym CLI",
+                "fail",
+                f"not found: set {NEMO_GYM_BIN_ENV} to a verified, pinned Gym task-folder CLI; "
+                "public nemo-gym 0.7.0 is incompatible and the candidate source still needs runtime qualification",
+            )
+        )
+    elif cli_error := nemo_gym_cli_error(gym):
+        rows.append(("NeMo Gym CLI", "fail", cli_error))
+    elif version := nemo_gym_version(gym):
+        rows.append(("NeMo Gym CLI", "pass", f"{gym} (nemo-gym {version})"))
+    else:
+        rows.append(("NeMo Gym CLI", "warn", f"{gym} (could not read the nemo-gym version)"))
+    errors = nemo_gym_capability_errors(
+        agents=agents, env_mode=env_mode, grading_mode=None, environment_kwargs=dict(environment_kwargs)
+    )
+    errors += nemo_gym_settings_errors()
+    if gym is None or rows[0][1] == "fail":
+        errors.append("NeMo Gym execution is unavailable until its CLI compatibility check passes")
+    url = os.environ.get(MODEL_URL_ENV, "").strip()
+    if url and (url_error := model_url_credential_error(url)):
+        errors.append(url_error)
+    if not errors:
+        # The same policy endpoint resolution the run uses, per agent and its --agent-model.
+        try:
+            overrides = parse_agent_model_overrides(agent_model)
+        except ValueError:
+            overrides = {}
+        checked_endpoints: set[str] = set()
+        for agent in agents:
+            try:
+                _model, endpoint_url, _key = _model_endpoint((overrides.get(agent) or [None])[0], require_model=False)
+            except (ValueError, ProviderConfigurationError) as exc:
+                errors.append(f"{agent}: {exc}")
+                continue
+            if (url_error := model_url_credential_error(endpoint_url)) and url_error not in errors:
+                errors.append(url_error)
+            elif not url_error and endpoint_url not in checked_endpoints:
+                checked_endpoints.add(endpoint_url)
+                if endpoint_error := _nemo_gym_policy_endpoint_error(endpoint_url):
+                    errors.append(f"{agent}: {endpoint_error}")
+    if env_mode == "docker" and (docker_error := _docker_daemon_error(gym_launch_environment({}))):
+        errors.append(docker_error)
+    rows += [("NeMo Gym backend", "fail", error) for error in errors] or [
+        ("NeMo Gym backend", "pass", f"{env_mode} sandbox ready")
+    ]
+    return rows
+
+
 def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_contract: bool) -> int:
     """Validate the Tier 3 evals/ directory and optional Harbor contract."""
     results = validate_skillevaluators(skill_path)
@@ -966,15 +1258,18 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
                 )
             ]
 
+    coverage = dataset_coverage_result(skill_path)
     if as_json:
+        data = [{"path": r.path, "status": r.status, "message": r.message} for r in results]
+        data += [coverage] if coverage is not None else []
         console.print_json(
-            json.dumps(
-                [{"path": r.path, "status": r.status, "message": r.message} for r in results],
-                indent=2,
-            )
+            data=data,
+            ensure_ascii=json_needs_ascii(data, getattr(console.file, "encoding", None)),
         )
     else:
         _print_validate_results(skill_path, results)
+        if coverage is not None:
+            console.print(Text(coverage["message"]))
 
     has_errors = any(r.status == "error" for r in results)
     has_warnings = any(r.status == "warning" for r in results)
@@ -1056,7 +1351,25 @@ def view_results(skill_path: Path, *, results_dir: Path | None = None) -> Path:
     target = latest.resolve() if latest.is_symlink() else latest
     report_path = target / "report.html"
     if not report_path.exists():
-        report_path = render_agent_eval_html_report(skill_path, target)
+        from skillevaluator.evaluation.tier3_feedback_chat import _read_result_json, saved_feedback_for_run
+        from skillevaluator.evaluation.tier3_report import _TIER3_FEEDBACK_FIELDS
+
+        saved_result = _read_result_json(target)
+        saved_feedback = saved_feedback_for_run(saved_result, target)
+        # A run saves every feedback field; anything less is rebuilt as before.
+        if saved_feedback and saved_feedback.keys() == set(_TIER3_FEEDBACK_FIELDS):
+            # Rebuild with the feedback this run saved. Asking the judge again
+            # costs tokens and can change the advice; with no provider it
+            # silently drops the advice the run saved.
+            report_path = render_agent_eval_html_report(
+                skill_path,
+                target,
+                engine_result=saved_result,
+                use_llm_judge=False,
+                saved_feedback=saved_feedback,
+            )
+        else:
+            report_path = render_agent_eval_html_report(skill_path, target)
     console.print(f"Opening: [cyan]{escape_markup(str(report_path))}[/cyan]")
     webbrowser.open(report_path.as_uri())
     return report_path
@@ -1206,6 +1519,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                         "score_policy_with_skill": _summary_score_policy(data),
                         "standard_metrics": _summary_standard_metrics(data),
                         "custom_only": _summaries_are_custom_only([data]),
+                        "not_applicable_with_skill": not_applicable_list(data.get("not_applicable_metrics")),
                     }
                     wo_summary = agent_dir / "without-skill" / "summary.json"
                     if wo_summary.exists():
@@ -1233,6 +1547,9 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                                     {
                                         "overall_without_skill": wo_overall,
                                         "score_policy_without_skill": _summary_score_policy(wo_data),
+                                        "not_applicable_without_skill": not_applicable_list(
+                                            wo_data.get("not_applicable_metrics")
+                                        ),
                                     }
                                 )
                         except (ValueError, OSError):
@@ -1299,6 +1616,7 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
 
     table.add_row(*[""] * (1 + sum(2 if agent in agent_without else 1 for agent in agents)))
     overall_row: list[str | Text] = [Text("Overall", style="bold")]
+    lift_json_agents: list[str] = []
     for agent in agents:
         meta = agent_meta[agent]
         with_avg = _overall_score_for_display(
@@ -1319,7 +1637,13 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
                 persisted_overall=meta.get("overall_without_skill"),
                 score_policy=meta.get("score_policy_without_skill"),
             )
-            if with_avg is None or without_avg is None:
+            uses_lift_json, shared_lift = _shared_dimension_overall_lift(
+                agent_with[agent], agent_without[agent], overall_metrics, meta
+            )
+            if uses_lift_json and shared_lift is not None:
+                lift_json_agents.append(agent)
+                overall_row.append(_lift_text(shared_lift))
+            elif uses_lift_json or with_avg is None or without_avg is None:
                 overall_row.append(Text("-", style="dim"))
             else:
                 delta = with_avg - without_avg
@@ -1343,8 +1667,48 @@ def compare_results(skill_path: Path, *, results_dir: Path | None = None) -> int
         # Pad before escaping so escape backslashes do not count toward the column width.
         run_line = f"{agent:<16s} {meta['timestamp']} (Harbor, {meta.get('num_trials', '?')} trials)"
         console.print(f"  [dim]{escape_markup(run_line)}[/dim]")
+    if lift_json_agents:
+        console.print(
+            f"  [dim]Overall lift for {escape_markup(', '.join(lift_json_agents))} compares only the "
+            "dimensions both arms scored, as in lift.json and the reports.[/dim]"
+        )
     console.print()
     return 0
+
+
+def _shared_dimension_overall_lift(
+    with_scores: dict[str, float],
+    without_scores: dict[str, float],
+    metrics: tuple[str, ...],
+    meta: dict[str, Any],
+) -> tuple[bool, float | None]:
+    """Return the canonical standard-policy Overall lift when shared metrics differ."""
+    shared_not_applicable = sorted(
+        {*meta.get("not_applicable_with_skill", ()), *meta.get("not_applicable_without_skill", ())}
+    )
+    if (
+        not shared_not_applicable
+        or metrics != DEFAULT_METRICS
+        or meta.get("score_policy_with_skill") != DEFAULT_SCORE_POLICY
+        or meta.get("score_policy_without_skill") != DEFAULT_SCORE_POLICY
+    ):
+        return False, None
+    agent_path = meta.get("path")
+    if not isinstance(agent_path, str) or not agent_path:
+        return True, None
+    try:
+        lift_data = json.loads((Path(agent_path) / "lift.json").read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return True, None
+    if not isinstance(lift_data, dict) or not isinstance(lift_data.get("overall"), dict):
+        return True, None
+    return True, _finite_numeric(lift_data["overall"].get("delta"))
+
+
+def _lift_text(delta: float) -> Text:
+    delta_text = f"+{delta:.2f}" if delta > 0 else f"{delta:.2f}"
+    delta_style = "bold green" if delta > 0 else ("bold red" if delta < 0 else "bold dim")
+    return Text(delta_text, style=delta_style)
 
 
 def _summary_scores(data: dict[str, Any], *, allow_missing_status: bool = False) -> dict[str, float]:

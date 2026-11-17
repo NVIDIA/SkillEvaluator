@@ -9,12 +9,28 @@ the dataset format `tier3 evaluate` reads, and how to generate and refine
 cases.
 You can generate a starter dataset with no API key; LLM-backed generation and
 refinement need a configured provider (see
-[Providers & Credentials](configuration.mdx)).
+[Providers & Credentials](/skills/skillevaluator/configuration)).
+
+Tier 3 reports also assess dataset sufficiency under the
+`dataset-sufficiency-v1` policy: at least 10 distinct cases, at least 1
+negative case, a 95% Wilson pass-rate interval half-width no greater than
+0.20, and at least 10 paired cases for lift comparison. Runs that do not meet
+every requirement are labeled provisional, as are runs where a requirement
+cannot be assessed (for example, a skipped baseline or a missing pass-rate
+interval). This is a reporting policy, not a verdict or statistical-significance
+claim.
 
 Tier 3 executes these cases through
 [Harbor](https://github.com/harbor-framework/harbor), the open-source agent
 evaluation framework. Native Harbor task bundles are the bring-your-own-task
 alternative to the `evals.json` dataset described below.
+
+## Candidates from production trace exports
+
+Use `tier3 import-traces` to create a redacted review bundle outside the skill,
+then `tier3 accept-traces` to promote only explicitly reviewed expectations.
+Observed production behavior never automatically becomes an expected answer.
+See [Trace Datasets](/skills/skillevaluator/trace-datasets) for the export contract and review decisions.
 
 ## The evals/ directory
 
@@ -49,8 +65,8 @@ Only the dataset is required. Everything else is optional and additive:
 | `evals/EVAL.md` | Developer guidance that steers dataset generation. | Yes |
 | `evals/files/` | Input fixtures, staged into `/workspace/input/` in the container. | Yes |
 | `evals/environment/` | Custom container environment: Dockerfile, sidecars, MCP servers. | Yes |
-| `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
-| `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](custom-graders.mdx). | Yes |
+| `evals/harbor/` | Bring-your-own-task native Harbor tasks — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). | Yes |
+| `evals/grader.py` or `evals/grader.sh` | Bring-your-own-grader script — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). | Yes |
 | `evals/results/` | Run output, written by `tier3 evaluate`. Never author it by hand. | No — output only |
 
 Unrecognized files in `evals/` are ignored, and the validator warns about them
@@ -67,16 +83,75 @@ top-level object with `skill_name` and an `evals` array.
   "evals": [
     {
       "id": "my-skill-001",
-      "prompt": "Use my-skill to do the thing",
-      "expected_output": "Expected outcome description",
+      "prompt": "Summarize the failing checks in build.log",
+      "expected_output": "The three failing checks, each with its error line",
       "assertions": [
-        "Read my-skill/SKILL.md",
-        "Returned correct result"
+        "Lists every failing check from build.log",
+        "Quotes the error line for each failing check"
       ]
     }
   ]
 }
 ```
+
+Both arms get the same `prompt` and are graded on the same `expected_output`
+and `assertions`; the no-skill baseline runs without the skill installed. Write
+them about the task outcome. A prompt that points at the skill's files, or an
+expected output or assertion that the agent read `SKILL.md`, ran the skill's
+script, or used the skill, cannot be met by the baseline and inflates lift.
+`skill_execution` scores skill use separately (see
+[How standard grading judges a trial](/skills/skillevaluator/tier3-live-evaluation#how-standard-grading-judges-a-trial)).
+Template cases from `create-eval-dataset` are outcome-only. When the skill's
+description reads, opens, loads, consults or follows `SKILL.md` with no path
+before it, or otherwise points at the skill's own `SKILL.md` as a prompt
+`tier3 validate` warns about would (such as `cat SKILL.md` or "uses the
+skill's `SKILL.md`"), the template prompt calls every bare `SKILL.md` in the
+description `my SKILL.md`. Reading `SKILL.md` does not count when the wording
+means another `SKILL.md` or the file format: "a `SKILL.md`", "the following
+`SKILL.md`", or a format noun such as `files`, `format`, `spec` or `template`
+right after it or after one other word, as in "reads `SKILL.md` files" or
+"follows the `SKILL.md` frontmatter format". That other word cannot be `and`,
+`or`, `then`, `but`, `before`, `after`, `to`, `for` or `with`, so "reads
+`SKILL.md` for format errors" is still renamed but "reads `SKILL.md` on
+format errors" is not. Reading also does not count when `in`, `of`, `from`,
+`under` or `inside` comes right after `SKILL.md`, unless the skill itself
+follows (`the skill`, `the installed skill`, `its own skill` or the skill's
+name), as in `in ./pdf-tools` or `in full`. Other place words, such as `at`
+or `within`, do not count: "reads `SKILL.md` at ./pdf-tools" is still
+renamed. A description that only names `SKILL.md` without reading it, such
+as "validates `SKILL.md` frontmatter", keeps it too. Once one `SKILL.md`
+counts, every bare `SKILL.md` in the description is renamed, even one that
+would not count by itself, such as one after "a" or "the following", one
+before a format noun or one before `in ./pdf-tools`. When the description
+still points at the skill's files after the rename, such as
+`<name>/SKILL.md`, `skills/<name>` or "uses the installed skill", or when one
+`SKILL.md` counts and the skill's name, "the `<name>` skill's" or "the
+installed skill's" comes right before any `SKILL.md` in the description, as
+in "reads `<name>`'s `SKILL.md`" or "reads `SKILL.md`, then validates
+`<name>`'s `SKILL.md` frontmatter", the template prompt asks for the generic
+task "handle a typical request" and the graded text is generic. When no
+`SKILL.md` counts, the description keeps such a `SKILL.md`, as in "validates
+`<name>`'s `SKILL.md` frontmatter". Generic wording comes first, as in `tier3 validate`:
+for a skill named read or own, "read `SKILL.md`" and "its own `SKILL.md`" are
+renamed as for any other skill. `create-eval-dataset`'s LLM prompts ask for
+outcome checks. It
+prints a warning for each generated case that still grades skill use, and
+the autopilot starter case leaves such text out. `tier3 validate` warns when a prompt points at `skills/<name>`,
+`<name>/SKILL.md`, reading or following `SKILL.md`, the named skill, or one of
+its scripts. It also checks strings in nested prompts, expected outputs and
+assertions for skill use, using the skill's directory and frontmatter names
+as well as the dataset's declared alias. Fields with more than 1,000 values
+or cyclic references warn that checking is incomplete. It is a wording heuristic: it skips
+immediately negated checks such as "did not read `SKILL.md`", normalizes
+compatibility spellings and invisible format characters, and can miss other
+wording or lookalike letters from another alphabet. The warnings fail
+`tier3 validate --strict` and the strict dataset check that all-tier CI runs
+before its advisory Tier 3 step; they never block a local run or autopilot.
+When upgrading, review datasets generated by earlier versions: skill-use
+expectations now fail CI's strict dataset preflight and leave Tier 3
+incomplete until the dataset describes outcomes the baseline can also meet.
+Run `skillevaluator tier3 validate PATH --strict` after updating outcomes and
+before rerunning CI.
 
 | Field | Required | Meaning |
 | --- | --- | --- |
@@ -90,8 +165,72 @@ top-level object with `skill_name` and an `evals` array.
 | `expected_script` | No | Script the agent should run; `null` if none applies. |
 | `acceptable_skills` | No | Closely related skills that earn partial routing credit (legacy alias: `acceptable_alternates`). |
 
+Use JSON `null` when no script is expected. Case-insensitive whole-value
+placeholders such as `"None"`, `"null"`, `"N/A"`, `"-"`, empty strings, and
+whitespace-only values are treated as `null`; exact matching keeps real script
+names such as `none.sh` intact.
+
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four.
+
+### Deterministic checks
+
+Use the optional `checks` list for requirements that can be evaluated without
+a custom grader or language-model judge. Each check contributes one item to
+`behavior_check`; checks without the required evidence are reported as not
+checked and are excluded from its mean.
+
+```json
+{
+  "checks": [
+    {"type": "script_invoked", "script": "scripts/build.py"},
+    {"type": "command_succeeded", "script": "scripts/build.py"},
+    {"type": "file_exists", "path": "out/report.md"},
+    {"type": "output_matches", "pattern": "Report [0-9]+"},
+    {"type": "output_contains", "text": "Build complete"}
+  ]
+}
+```
+
+`script_invoked` checks command evidence in the trajectory. `command_succeeded`
+also requires recorded success; an invocation without an exit result is not
+checked. `file_exists` inspects the post-run workspace, not a path merely
+mentioned in the response. `output_matches` uses a regular expression and
+`output_contains` uses a literal substring; both inspect the final response.
+Unknown check types and invalid fields are dataset-validation errors. On a
+without-skill baseline, checks for scripts inside the evaluated skill are not
+checked because that skill is not installed.
+
+For an exact final-response format, use an anchored `output_matches` check
+and keep semantic requirements in `expected_behavior` (or `assertions`). For
+example, this legacy entry checks numeric-only output without judging it:
+
+```json
+{
+  "id": "numeric-only",
+  "question": "Calculate 6 * 7. Return only the numeric answer.",
+  "ground_truth": "42",
+  "expected_behavior": [],
+  "checks": [
+    {"type": "output_matches", "pattern": "\\A[+-]?\\d+(?:\\.\\d+)?\\Z"}
+  ]
+}
+```
+
+`output_matches` uses Python `re.search`: without anchors, a matching substring
+is sufficient. Use `\A` and `\Z` to require the whole literal response;
+`$` also permits a match before a final newline. Leading/trailing whitespace,
+labels and Markdown fences fail the example above. To require a literal prefix,
+use a pattern such as `\ATOTAL=[+-]?\d+(?:\.\d+)?\Z`, escaping any regular-expression
+metacharacters in the prefix. Double backslashes in JSON strings, as shown.
+Choose the numeric syntax your dataset actually requires (for example, add an
+exponent explicitly if allowed). A wrong value such as `43` still passes this
+format check; factual correctness remains separate. Avoid duplicating the
+same rule in both checks and judged assertions.
+
+Natural-language format judgments can accept malformed output or reject a
+well-formatted wrong value. See the [measured diagnostic and its limitations](/skills/skillevaluator/grader-validation#reading-the-report),
+including sample sizes and the lack of independent human labels.
 
 <AccordionGroup>
   <Accordion title="Legacy flat format">
@@ -106,17 +245,87 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
     | `expected_behavior` (recommended) | `assertions` |
     | `expected_skill` (recommended) | `expected_skill` (unchanged) |
     | `acceptable_alternates` | `acceptable_skills` |
+
+    A legacy entry without `expected_skill` and `should_trigger` has no skill
+    to discover or measure, so its Discoverability and Efficiency are N/A. If
+    no entry is a positive case that names an `expected_skill`, the agent
+    cannot PASS. See
+    [Reading results](/skills/skillevaluator/tier3-live-evaluation#reading-results).
   </Accordion>
 </AccordionGroup>
 
+## Migrate a legacy dataset
+
+Preview a conversion without writing files:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json --skill-name my-skill
+```
+
+Review the JSON object printed to stdout, then explicitly choose a **new**
+destination. The command preserves the source and refuses existing destinations,
+including symlinks and the source itself:
+
+```bash
+skillevaluator tier3 migrate-dataset ./my-skill/evals/evals.json \
+  --skill-name my-skill --output ./my-skill/evals/converted.json
+```
+
+Input may be JSON, case-per-line JSONL, YAML, or YML. Output is one canonical
+object in JSON (`.json`) or YAML (`.yaml` or `.yml`). JSONL input must therefore
+convert to JSON or YAML; the command never writes an object-shaped `.jsonl` file.
+After review, place the converted file at the dataset path your skill uses and
+retain the original in version control or a separate backup location. Avoid
+leaving multiple recognized `evals.*` files: JSON takes discovery precedence.
+Fixture selectors retain their authored relative paths, so keep the promoted
+dataset in the same skill's `evals/` directory.
+
+The converter copies every authored field, including IDs (with their numeric or
+string type), explicit `expected_skill: null`, `should_trigger: false`, scripts,
+alternate skills, `files` selectors, extension fields, and generation/check
+metadata. It renames only the aliases in the table above. Re-converting a preferred
+object preserves its content. Conflicting aliases, duplicate keys, invalid or
+colliding IDs, malformed cases, and ambiguous target identities stop conversion
+before writing. `--skill-name` may be omitted when the object declares its identity
+or legacy cases identify exactly one expected skill. A conflicting object identity
+must be resolved in the source.
+
+Legacy cases with neither `expected_skill` nor `should_trigger` have unknown
+routing, whereas preferred objects default to the top-level skill. To prevent a
+silent grading change, label those cases explicitly before migration. Cases
+without `ground_truth` or `expected_output` must also have their expected outcome
+authored first. Explicit null and false routing labels are preserved. Legacy
+readers remain available and their deprecation warning includes the migration
+command.
+
+The five bundled reference datasets have been converted (15 cases). External
+catalog rollout remains separate: record the catalog owner, read-only preview
+results, agreed rollout date, and deprecation milestone before retiring legacy
+reading. No external catalog or retirement date is implied by this repository
+conversion.
+
 ## Generate a dataset
 
-`create-eval-dataset` writes `evals/evals.json` for you, grounded in your
-`SKILL.md` name, description, body, and script filenames:
+`create-eval-dataset` writes `evals/evals.json` using substantive author guidance
+first, then usable matching retained agent traces. Guidance needs real content
+beyond headings. Write task requests and observable outcomes in `evals/EVAL.md`
+(see below), or create a file to pass with `--prompt`:
 
-```bash title="Generate the full bucket dataset"
-skillevaluator create-eval-dataset ./my-skill --full
+```bash title="Author guidance and generate the full bucket dataset"
+cat > eval-guidance.md <<'EOF'
+## Questions
+- Summarize the failing checks in build.log.
+
+## Behaviors
+- Lists every failing check and quotes its error line.
+EOF
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
 ```
+
+Auto leaves an existing dataset unchanged unless you explicitly pass `--force`
+or `--refine`, even when matching retained traces exist. After an autopilot run,
+add `--force` to the command above to replace its starter, or use `--refine` with
+matching retained results to refine existing cases.
 
 | Flag | Effect |
 | --- | --- |
@@ -125,14 +334,17 @@ skillevaluator create-eval-dataset ./my-skill --full
 | `--dry-run` | Preview without writing. |
 | `--force` | Overwrite existing `evals/evals.json`. |
 | `--prompt PATH` | Use a developer guidance file instead of auto-detected `evals/EVAL.md`. |
-| `--refine` | Refine cases using existing or collected trajectories. |
-| `--from-results PATH` | With `--refine`: read trajectories from a specific results directory. |
-| `--results-dir DIRECTORY` | With `--refine`: external results root to search first. |
+| `--grounding auto\|skill\|intent\|trace` | Default `auto`: prefer author intent, then matching retained traces. Skill-only generation requires explicit `skill`. |
+| `--refine` | Refine cases using existing or collected trajectories after selecting a grounding source. |
+| `--from-results PATH` | With `auto`, `trace`, or `--refine`: read trajectories from a specific completed results directory. |
+| `--results-dir DIRECTORY` | With `auto`, `trace`, or `--refine`: external results root to search first. |
 
-Without an LLM provider configured, generation automatically falls back to the
-same templates `--no-llm` uses, so the command always succeeds. Exact defaults
-for every flag are in the
-[CLI Reference](cli-reference.mdx#create-eval-dataset).
+After grounding selection, an unavailable LLM provider falls back to local
+templates. `--no-llm` selects templates directly; it still requires author
+guidance, matching retained traces, or explicit `--grounding skill`. Missing
+automatic grounding fails before provider access, trajectory collection, or
+writing a dataset. Exact defaults are in the
+[CLI Reference](/skills/skillevaluator/cli-reference#create-eval-dataset).
 
 You don't have to generate a dataset up front at all: `validate PATH`,
 `tier3 PATH`, or `tier3 evaluate PATH --autopilot` creates exactly
@@ -145,9 +357,86 @@ requirements for the live evaluation. Use `validate PATH --no-autopilot` to
 require an existing source instead of generating one.
 
 <Warning>
-  `--force` overwrites `evals/evals.json` without a backup. `--refine` implies
-  overwrite too — it produces the final version of the dataset.
+  `--force` overwrites `evals/evals.json` without a backup. Plain `--refine`
+  regenerates the dataset when the effective grounding is `intent` or `skill`.
+  With `auto`, modifying an existing dataset requires `--force` or `--refine`.
+  When auto selects traces, refinement preserves authored cases and IDs.
+  Explicit `--grounding trace` continues to opt into in-place refinement
+  without either flag.
 </Warning>
+
+### Choose a grounding source
+
+`--grounding auto` is the standalone command and `DatasetOptions` default:
+
+1. Prefer author guidance with content beyond headings from `--prompt`, then
+   `evals/EVAL.md`, with `SKILL.md` as supporting context. The effective grounding is `intent`.
+2. Otherwise use meaningful matching agent steps from retained, completed
+   results scoped to this skill. Discovery uses `--from-results`, the external
+   `--results-dir` / `SKILLEVALUATOR_RESULTS_DIR` root, and the legacy in-skill
+   results location. Explicit exports outside those roots must identify the
+   skill in `result.json`. Empty traces, media-only placeholders, foreign runs,
+   and case IDs with no match do not qualify.
+3. If neither source is available, add guidance or matching retained results,
+   or explicitly opt in to `--grounding skill`. `--force`, `--no-llm`, and
+   `--refine` do not bypass this requirement.
+
+When `auto` selects traces and you pass `--refine` or `--force`, it preserves
+existing cases and authored expectations, prompts, fixture/check metadata, and
+review history. The prior dataset hash is retained as a provenance input.
+Without a dataset, it prepares deterministic template seeds so case IDs can be
+matched before any LLM work; `--full` controls that seed set.
+The LLM may refine those seeds after selection. Existing cases are retained
+regardless of `--full`. Cases without a matching retained trajectory are marked
+`needs_review`; observed answers are proposals requiring human review, not
+accepted ground truth. When auto selects traces, an answer proposal that describes
+skill use leaves its inferred `expected_output` empty and flagged for an independently
+authored outcome. Existing authored expectations are preserved. An existing
+dataset without `--force` or `--refine` is left unchanged whether or not matching
+retained traces exist.
+
+Explicit modes remain available: `intent` requires author guidance; `trace`
+refines an existing dataset or generates cases first and may collect a new
+trajectory when none exists; `skill` permits generation from `SKILL.md` alone.
+The existing `--refine` flag adds trajectory refinement to the selected source.
+For `auto --refine`, selection must first find author intent or retained trace
+evidence. Once intent is selected, `--refine` may collect trajectories as before.
+
+Newly inferred outcomes are checked across nested values and dictionary keys.
+If they describe skill use or are too large to check fully, the outcome is left
+empty with a review reason so the author can supply an independent expectation.
+Authored outcomes remain intact.
+
+### Compatibility with skill-only generation
+
+Scripts that previously depended on generation with only `SKILL.md` must add
+`--grounding skill`, including template-only invocations:
+
+```bash title="Explicit skill-only compatibility mode"
+skillevaluator create-eval-dataset ./my-skill --full --no-llm --grounding skill
+```
+
+This default change applies to standalone generation and its service API.
+Unattended `validate` / `evaluate --autopilot` still generate a skill-grounded
+one-case starter when no source exists and never overwrite an existing source.
+
+Generated datasets include a `generation` record with the mode, grounding
+source, relative input paths and SHA-256 digests, generation time, and review
+state. The mode is `llm`, `template_requested`, or `template_fallback`. After
+reviewing the generated cases, authors can set
+`generation.review_state: reviewed`.
+Fallback records include a safe reason. Automatic trace refinement records
+`template_fallback` when its planned LLM refinement is unavailable or fails,
+and `llm` when that refinement succeeds. Retained authored expectations and
+review history are preserved in either case. Trace-refined datasets keep their
+effective grounding (`intent` or `trace` for automatic selection), rather than
+`auto`, and set `refined: true`. Autopilot records `llm` or
+`template_fallback` with `skill` grounding. Cases whose authored expectations conflict with an observed answer, or
+whose authored behavior steps are dropped by the refinement output, include
+`review.status: needs_review` and reasons. The trace itself does not determine
+whether every authored step occurred. A proposed ground truth based on an
+observed answer is also flagged for review; inspect these cases before relying
+on them as authored expectations.
 
 ### The four case buckets
 
@@ -166,7 +455,8 @@ supported negative heading (see below).
 ### Guide generation with EVAL.md
 
 Place an `EVAL.md` in `evals/` and the generator picks it up automatically.
-Four headings are parsed as structured hints; everything else is general
+It must contain substantive guidance; an empty file or headings alone does not
+qualify. Four headings are parsed as structured hints; everything else is general
 context:
 
 ```markdown title="evals/EVAL.md"
@@ -185,18 +475,33 @@ context:
 
 Author guidance is the highest-priority input: behaviors you list here are
 preserved in the generated cases even when a trial agent skipped them — that
-is exactly the regression the eval should catch.
+is exactly the regression the eval should catch. They become assertions, so the
+no-skill baseline is graded on them too: describe the task outcome, not reading
+`SKILL.md` or running the skill's scripts. `create-eval-dataset` keeps such
+lines and warns about them; the autopilot starter case leaves them out.
 
 ### Refine from real runs
 
-`--refine` grounds the dataset in real agent behavior. It looks for existing
+To refine an existing dataset from completed matching skill-scoped results:
+
+```bash title="Refine from retained results"
+skillevaluator create-eval-dataset ./my-skill --refine --from-results ./saved-run
+```
+
+The run must contain usable matching trajectories. Auto still selects author
+guidance first if it exists. Explicit `--grounding trace --from-results ./saved-run`
+opts into trace refinement directly, preserving the prior implicit-refinement
+behavior of that explicit mode.
+
+After selecting author intent or explicitly choosing `--grounding skill`,
+`--refine` adds evidence from real agent behavior. It looks for existing
 trajectories from a previous evaluation (checking `--from-results` or the
 latest resolved results first); if none exist, it runs the `claude-code` agent
 via Harbor to collect one, then rewrites `expected_output` and assertions from
 what the agent actually did:
 
 ```bash title="Agent-refined generation"
-skillevaluator create-eval-dataset ./my-skill --full --refine
+skillevaluator create-eval-dataset ./my-skill --full --refine --prompt eval-guidance.md
 ```
 
 Collecting a fresh trajectory needs Docker, the `tier3` extra, and a configured
@@ -205,7 +510,9 @@ IDs are read from each trial's `reward.json` or Harbor `result.json`, and
 multimodal trajectory messages are read as text, with image and audio parts
 shown as `[image]` and `[audio]` markers. With `--no-llm`, refinement still
 works — it applies template-based updates from the trajectory instead of an LLM
-rewrite.
+rewrite. Template refinement skips trajectory steps that read `SKILL.md` or the
+skill directory or run the skill's scripts, so they never become assertions;
+the LLM rewrite is asked not to add them.
 
 ## Run policy: evals/config.yml
 
@@ -254,17 +561,23 @@ grading:
 | `harbor.n_concurrent` | integer ≥ 1 | Concurrent trials. |
 | `harbor.max_agents` | integer ≥ 1 | Cap on agents evaluated in one run. |
 | `harbor.max_cases` | integer ≥ 1 | Run only the first N cases in staged order (eval dataset order, or task-directory name order for native Harbor tasks). Unset runs every case. A run that skips cases is not publication evidence. The `--max-cases` CLI flag overrides this value. |
+| `harbor.max_agent_tokens` | integer ≥ 0 | Maximum observed agent-model tokens across the run. |
+| `harbor.max_judge_calls` | integer ≥ 0 | Maximum recorded non-salvage judge attempts; excludes transport retries and RAGAS-internal requests. |
+| `harbor.max_attempts_total` | integer ≥ 0 | Maximum logical Harbor attempts admitted across agents and arms, including private comparison arms. |
+| `harbor.max_cost_usd` | finite number ≥ 0 | Agent inference accounting admission limit, not a hard currency ceiling or billed spend; requires `harbor.price_file`. Judge, setup, container, backend, and infrastructure charges are excluded. |
+| `harbor.price_file` | path | User-supplied JSON rates per million tokens, keyed by exact resolved model identifier, not verified billing prices. Relative paths resolve from the source skill directory. Each model requires `input_per_mtok` and `output_per_mtok`; optional `cached_input_per_mtok` defaults to the input rate. File name/hash and actually applied rates are retained in `budget.pricing`; see [cost limits](/skills/skillevaluator/tier3-live-evaluation#cost-limits). |
 | `harbor.timeout_multiplier` | finite number > 0 | Scales task timeouts. Values that would overflow Harbor's mandatory lifecycle timeouts are rejected before execution. |
 | `harbor.agent_runtime_preflight` | boolean | Opt-in extra agent-only execution of the first staged task before the measured evaluation. Default: `false`; the CLI flag overrides this value. |
+| `harbor.tolerate_baseline_timeouts` | boolean | Keep an agent scored on its with-skill arm when only baseline attempts hit the agent execution timeout; its baseline and Skill Lift are not reported (see [Baseline timeouts](/skills/skillevaluator/tier3-live-evaluation#baseline-timeouts)). Default: `false`; the CLI flag overrides this value. |
 | `harbor.agent_workdir` | string | Working directory for the agent inside the container. |
 | `harbor.resources` | `cpus`, `memory_mb`, `storage_mb` | Per-container resource requests. |
 | `harbor.runtime_env` | list or mapping | Non-credential task values passed into the container. Prefer a list of plain names — each expands to `${NAME}` from your shell; a mapping sets explicit templates. Entries that name or reference operator-owned credentials (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, `NVIDIA_API_KEY`, base-URL variables, AWS credential variables) fail with a hard error. Alias: `passthrough_env`. |
 | `harbor.pre_agent_setup` | string or list | Shell commands run in the container before the agent starts. This skill-owned code is allowed only for with-skill-only runs (`--skip-baseline`); paired runs reject it so setup cannot distinguish or alter the baseline arm. Alias: `setup_commands`. Both spellings normalize to the same policy. |
 | `harbor.agents.<name>.model` | string | Per-agent model override; whitespace is trimmed. `claude` is accepted as an alias of `claude-code`, but configuring both spellings in one config is an error. |
-| `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](agents-and-sandboxes.mdx). |
+| `skill_workspace.mode` | `isolated`, `group` | Whether sibling skills are visible — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes). |
 | `skill_workspace.include` | list of paths | Extra skills staged into a `group` workspace. |
-| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](agents-and-sandboxes.mdx#select-a-reproducible-decoy-set). |
-| `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](custom-graders.mdx). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
+| `skill_workspace.decoy_manifest` | path | Optional frozen selection from `tier3 select-decoys`; requires `group` mode. Relative paths resolve against the target skill's parent directory, as with `include`. Selected runtime-content hashes are checked before evaluation; evaluator-only files do not affect them. See [Workspace modes](/skills/skillevaluator/agents-and-sandboxes#select-a-reproducible-decoy-set). |
+| `grading.mode` | `default`, `default_plus_custom`, `custom_only` | Grading pipeline — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). Legacy spellings `aces_default` and `aces_plus_custom` are accepted and normalized to `default` and `default_plus_custom`. |
 
 Environment constructor kwargs are deliberately not accepted in this
 skill-owned file. Operators can pass non-secret kwargs for Harbor-native
@@ -278,8 +591,29 @@ reserved.
   config load instead of silently running with defaults. Use only one of each
   alias pair. Agent and provider credentials never go through `runtime_env` —
   they come only from your host environment; see the two-credential-roles
-  section in [Providers & Credentials](configuration.mdx).
+  section in [Providers & Credentials](/skills/skillevaluator/configuration).
 </Note>
+
+Validation and evaluation load the config file strictly:
+
+- A repeated key is an error, including inside a YAML merge (`<<`) source. A
+  mapping's own keys still override the keys it merges. A cyclic merge is an
+  error.
+- Keys must be strings. An unquoted `1:`, `yes:`, `on:` or `~:` key is
+  rejected with the name of the block that holds it.
+- The file must be a regular UTF-8 file of at most 4 MiB in a real `evals/`
+  directory. A symlink (even a broken one), a hard link, a FIFO or a symlinked
+  `evals/` directory is rejected instead of being followed or skipped.
+- The document may have at most 100 nesting levels, 20,000 nodes, 1,024 alias
+  references, 1,024 entries in any list or mapping, 65,536 characters in any
+  value and 14,000 bits in any integer.
+- A YAML error never includes the text of the line. Most syntax errors, and
+  every repeated key, give the line, column and problem. When PyYAML also
+  reports a context, such as `found duplicate anchor 'a'; first occurrence`,
+  the context comes first, with its own line and column when they differ from
+  the problem's. An error for a cyclic merge
+  or for one of the limits above names it without a position. A value that
+  cannot be parsed, such as `!!int abc`, gives `cannot parse a value`.
 
 ## Fixtures and custom environments
 
@@ -312,16 +646,28 @@ transport = "stdio"
 ```
 
 <Note>
-  In Docker mode, Claude Code and Codex setup no longer installs the
+  In Docker mode, Claude Code, Codex, and OpenCode setup no longer installs the
   distribution `nodejs` and `npm` packages, except on Alpine images. On
   Debian-based images, including the default `python:3.12-slim` image, those
   packages also brought `npx` and a C/C++ toolchain (`gcc`, `g++`, `make`).
   Claude Code containers now have no Node.js unless the image provides it.
-  Codex installs its own Node.js, which is on `PATH` only for the Codex process
-  and the commands it runs. If your skill's scripts, its tasks, or a stdio MCP
-  server (for example `command = "npx ..."`) need these tools, install them in
-  the image: list the packages in `scripts/apt-packages.txt`, one per line, for
-  the auto-generated image, or install them in `evals/environment/Dockerfile`.
+  Codex and OpenCode install their own Node.js with nvm. Its `node`, `npm`, and
+  `npx` are on `PATH` only for the agent process and the commands it runs,
+  including stdio MCP servers, not for the verifier (`test.sh`) or task
+  healthchecks. If your skill's scripts, its tasks, or the verifier need these
+  tools, or a stdio MCP server does (Node.js with Claude Code, for example
+  `command = "npx ..."`, or `gcc`, `g++`, or `make` with any agent), install
+  them in the image: list the packages in `scripts/apt-packages.txt`, one per
+  line, for the auto-generated image, or install them in
+  `evals/environment/Dockerfile`.
+
+  The auto-generated image and the `init-harbor-task` starter Dockerfile also
+  include `procps`, so Claude Code setup no longer installs it (for `pgrep`)
+  with `apt-get` in every trial. A custom `evals/environment/Dockerfile` keeps
+  its own base image, so it should install `procps` too, unless
+  `harbor.base_image_mode` is `reuse` or `rebuild` and
+  `harbor.custom_dockerfile_mode` is `rebase`. Then it is rebased onto the
+  shared base image, which has `procps`.
 </Note>
 
 ```text title="my-skill/scripts/apt-packages.txt"
@@ -343,10 +689,32 @@ skillevaluator tier3 validate ./my-skill
 | --- | --- |
 | `--json` | Emit JSON output. |
 | `--strict` | Treat warnings as failures. |
-| `--harbor-contract` | Validate the Harbor task and reward contract for BYOT/BYOG setups — see [Custom Graders & Tasks](custom-graders.mdx). |
+| `--harbor-contract` | Validate the Harbor task and reward contract for BYOT/BYOG setups — see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders). |
 
 Run it in CI or before a long evaluation: it catches an empty dataset, missing
 required fields, duplicate case IDs, and invalid config in seconds.
+
+The informational **Dataset coverage** block also shows case count, positive
+(should-trigger), negative/non-trigger and unlabeled-trigger counts, plus cases
+with an expected output and assertions/expected behaviors. These use the same
+field normalization and trigger resolution as evaluation. Gaps name missing
+negative or positive examples and missing judge references: without an expected
+output, accuracy and goal_accuracy are N/A; without assertions or expected
+behaviors, behavior_check is N/A.
+
+A single-case dataset is labelled **a starting point, not a representative
+evaluation**. Larger datasets show their counts and concrete gaps without any
+claim of sufficiency. Counts alone do not establish representative coverage;
+review task diversity, failure modes and outcomes independently.
+
+Coverage is informational and does not add warnings or change `--strict` exit
+codes. `--json` remains a list of check objects. It adds an entry with path
+`evals/evals.json#coverage` (or the actual dataset filename), status `ok`, a
+human-readable `message` and a structured `coverage` object containing
+`case_count`, `starter`, `positive_cases`, `negative_cases`,
+`unlabeled_trigger_cases`, `cases_with_expected_outcome`,
+`cases_with_expected_behaviors` and `gaps`. Native Harbor task sources do not
+receive this eval-dataset summary.
 
 `validate PATH` also checks the selected Tier 3 source (dataset entries and
 case IDs, `config.yml`, or the native Harbor task layout) before any live run.
@@ -369,11 +737,11 @@ Passing checks and warnings are not listed as source errors.
 ## Next steps
 
 <CardGroup cols={2}>
-  <Card title="Run a live evaluation" icon="rocket" href="tier3-live-evaluation.mdx">
+  <Card title="Run a live evaluation" icon="rocket" href="/skills/skillevaluator/tier3-live-evaluation">
     Point `tier3 evaluate` at your skill and measure Skill Lift with the
     dataset you just authored.
   </Card>
-  <Card title="Custom graders and tasks" icon="flask" href="custom-graders.mdx">
+  <Card title="Custom graders and tasks" icon="flask" href="/skills/skillevaluator/custom-graders">
     When assertions aren't enough, bring your own grader or a complete Harbor
     task.
   </Card>

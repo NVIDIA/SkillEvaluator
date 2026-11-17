@@ -1,12 +1,13 @@
 ---
 title: "Set Up CI with the CLI"
-description: "Install SkillEvaluator, answer a few questions and bring automatic skill checks to your GitHub repository."
+description: "Set up quality and security checks for GitHub, with optional hosted reports and PR feedback."
 ---
 
-Bring skill evaluation to your GitHub repository in one guided setup.
-SkillEvaluator finds your skills, prepares the workflows and opens a setup PR.
-If your repository already has skill checks, it can add reporting to that setup.
-Your CI gets **Tier 1 checks, including SkillSpector security scanning**.
+Bring quality and security checks to your repository. No model key required.
+Optional LLM checks are available. SkillEvaluator finds your skills, prepares
+the GitHub workflows and opens a setup PR. The shared runtime includes
+SkillSpector security scanning. Choose checks only or add optional hosted
+reports and PR feedback; an existing recognized scan can keep its settings.
 
 ```bash title="Run inside your checked-out GitHub repository"
 pip install --upgrade skillevaluator
@@ -42,7 +43,7 @@ locally. The shared container supplies the runtime; you control the configuratio
   public and private repositories. Hosted feedback supports public Pages and
   verified private Pages sites in eligible organization repositories. See
   [private report hosting](#private-report-hosting) for the one-time prerequisite.
-  This wizard supports GitHub. For GitLab, use the
+  The released setup wizard supports GitHub. For GitLab, use the
   [GitLab template](/skills/skillevaluator/gitlab-ci).
 </Accordion>
 
@@ -72,7 +73,11 @@ Folders [1]: 1,2
 </Frame>
 
 The score threshold does not override required security or schema checks.
-Default Tier 1 checks use no model key. Tier 2 and Tier 3 are not part of this setup.
+The wizard sets up quality and security checks without a model key;
+deduplication and live agent evaluation require separate setup. Optional
+model-backed checks use the
+[separate manual workflow](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/skill-checks-llm.yml)
+and a provider key.
 
 <Note>
   Already have `.github/workflows/skill-checks.yml`? The CLI recognizes a
@@ -241,3 +246,12 @@ extract it and open `index.html`. Failed scans retain their available reports to
     Add the shared scanner to your GitLab pipeline.
   </Card>
 </CardGroup>
+
+<div id="opt-in-to-three-tier-ci">
+<div id="upgrade-a-tier-1-only-consumer">
+
+For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The [setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#opt-in-to-three-tier-ci) and [migration](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#upgrade-a-tier-1-only-consumer) references preserve the detailed contracts.
+
+</div>
+</div>

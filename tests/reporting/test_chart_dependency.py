@@ -106,7 +106,8 @@ def test_chart_canvases_explain_data_and_keep_visible_failure_fallback(agent_cou
     html = _tier3_html(agent_count=agent_count)
     report = _parse(html)
     canvases = {key: attrs for key, (tag, attrs) in report.elements.items() if tag == "canvas"}
-    assert canvases.keys() == {"tier3-radar", "tier3-metric-bar", "tier3-token-chart", "tier3-steps-chart"}
+    token_chart = "tier3-recorded-token-chart" if "tier3-recorded-token-chart" in canvases else "tier3-token-chart"
+    assert canvases.keys() == {"tier3-radar", "tier3-metric-bar", token_chart, "tier3-steps-chart"}
     for chart_id, attrs in canvases.items():
         assert attrs["role"] == "img"
         assert attrs["aria-label"]
@@ -117,7 +118,14 @@ def test_chart_canvases_explain_data_and_keep_visible_failure_fallback(agent_cou
         assert "hidden" not in fallback
     references = re.findall(r'class="chart-description"[^>]*>[^<]*<a href="#([^"]+)"', html)
     assert len(references) == 4
-    assert all(report.elements[reference][0] == "table" for reference in references)
+    for reference in references:
+        if reference == "tier3-multi-agent-dimension-table":
+            assert re.search(
+                r'id="tier3-multi-agent-dimension-table"[^>]*>\s*<table[^>]*id="tier3-dimension-table"',
+                html,
+            )
+        else:
+            assert report.elements[reference][0] == "table"
     assert references[:2] == ["tier3-dimension-table" if agent_count == 1 else "tier3-multi-agent-dimension-table"] * 2
 
 
@@ -155,10 +163,15 @@ def test_chart_initialization_failure_keeps_fallback_and_recovers() -> None:
     script = r"""
 const vm = require('node:vm');
 const controller = JSON.parse(require('node:fs').readFileSync(0, 'utf8'));
-const ids = ['tier3-radar', 'tier3-metric-bar', 'tier3-token-chart', 'tier3-steps-chart'];
+const ids = ['tier3-radar', 'tier3-metric-bar', 'tier3-recorded-token-chart', 'tier3-steps-chart'];
 const elements = {};
+let visible = true;
 ids.forEach(id => {
-    elements[id] = {id, hidden: true};
+    elements[id] = {
+        id, hidden: true,
+        closest: () => null,
+        parentElement: {getClientRects: () => visible ? [{}] : []}
+    };
     elements[id + '-fallback'] = {hidden: false};
 });
 const listeners = {};
@@ -174,7 +187,8 @@ const context = {
 };
 vm.createContext(context);
 vm.runInContext(controller, context);
-listeners.DOMContentLoaded();
+// Theme initialization invokes the controller after selecting the report palette.
+context.window.rebuildTier3Charts();
 const missing = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
 context.Chart = class {constructor() {throw new Error('Canvas unavailable');}};
 context.window.rebuildTier3Charts();
@@ -189,23 +203,39 @@ context.Chart = class {
 };
 context.window.rebuildTier3Charts();
 const missingContext = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
-let built = 0, destroyed = 0;
-const printAnimations = [];
-const colors = [];
+let built = 0, destroyed = 0, resized = 0;
+const constructions = [];
+const updates = [];
 context.Chart = class {
     constructor(canvas, config) {
         this.ctx = {};
+        this.id = canvas.id;
+        this.data = config.data;
+        this.options = config.options;
         built++;
-        printAnimations.push(config.options.animation);
-        colors.push(config.options.plugins.legend.labels.color);
+        constructions.push({id:canvas.id, type:config.type, color:config.options.plugins.legend.labels.color});
+    }
+    resize() {resized++;}
+    update(mode) {
+        updates.push({
+            id:this.id, mode:mode || null,
+            animation:this.options.animation === false ? false : null,
+            color:this.options.plugins.legend.labels.color
+        });
     }
     destroy() {destroyed++;}
 };
+visible = false;
+context.window.rebuildTier3Charts();
+const hiddenBuilt = built;
+visible = true;
 context.window.rebuildTier3Charts();
 const recovered = ids.map(id => [elements[id].hidden, elements[id + '-fallback'].hidden]);
 listeners.beforeprint();
+// The shared report handler redraws after exposing print containers/disclosures.
+context.window.rebuildTier3Charts();
 listeners.afterprint();
-process.stdout.write(JSON.stringify({missing, failed, missingContext, released, recovered, built, destroyed, printAnimations, colors, theme}));
+process.stdout.write(JSON.stringify({missing, failed, missingContext, released, recovered, hiddenBuilt, built, destroyed, resized, constructions, updates, theme}));
 """
     result = subprocess.run(
         [node, "-e", script], input=json.dumps(controller.group()), capture_output=True, text=True, check=False
@@ -217,14 +247,24 @@ process.stdout.write(JSON.stringify({missing, failed, missingContext, released, 
     assert states["missingContext"] == [[True, False]] * 4
     assert states["released"] == 4
     assert states["recovered"] == [[False, True]] * 4
-    assert states["built"] == 12
-    assert states["destroyed"] == 8
-    assert states["printAnimations"][4:8] == [False] * 4
-    assert states["colors"] == ["#e2e8f0"] * 4 + ["#0f172a"] * 4 + ["#e2e8f0"] * 4
+    assert states["hiddenBuilt"] == 0
+    assert states["built"] == 4
+    assert states["destroyed"] == 0
+    assert states["resized"] == 8
+    assert [(row["id"], row["type"]) for row in states["constructions"]] == [
+        ("tier3-radar", "radar"),
+        ("tier3-metric-bar", "bar"),
+        ("tier3-recorded-token-chart", "bar"),
+        ("tier3-steps-chart", "bar"),
+    ]
+    assert [row["color"] for row in states["constructions"]] == ["#e2e8f0"] * 4
+    assert [row["animation"] for row in states["updates"][:4]] == [False] * 4
+    assert [row["mode"] for row in states["updates"][:4]] == ["none"] * 4
+    assert [row["color"] for row in states["updates"]] == ["#0f172a"] * 4 + ["#e2e8f0"] * 4
     assert states["theme"] == "dark"
 
 
-def test_charts_without_dimension_scores_link_to_an_openable_download_section() -> None:
+def test_missing_dimension_scores_keep_agent_cards_and_openable_downloads() -> None:
     result = ValidationResult(validator_name="AGENT_EVAL")
     result.metadata["agent_eval"] = build_agent_eval_payload(
         "example",
@@ -233,12 +273,10 @@ def test_charts_without_dimension_scores_link_to_an_openable_download_section() 
     )
     html = HTMLReporter(include_timestamp=False).render_all([result])
     report = _parse(html)
-    links = re.findall(r'class="chart-description"[^>]*>[^<]*<a href="#([^"]+)" onclick="([^"]+)"', html)
-    dimension_links = [link for link in links if link[0] != "t3-trials-table"][:2]
-    assert [target for target, _ in dimension_links] == ["tier3-json-downloads"] * 2
+    assert "tier3-radar" not in report.elements and "tier3-metric-bar" not in report.elements
+    assert 'class="t3-agent-score" style="color:var(--text-secondary);">N/A</div>' in html
     assert report.elements["tier3-json-downloads"][0] == "details"
     # The section sits in the hidden Diagnostics sub-tab; the static handler reveals it.
-    assert all("openTier3Reference" in handler for _, handler in dimension_links)
     assert "function openTier3Reference(id)" in html
 
 

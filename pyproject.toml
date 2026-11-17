@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "0.8.0"
+version = "0.9.0"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -38,6 +38,8 @@ license-files = [
 # Base install is static-validation capable (Tier 1) and must NOT pull Harbor
 # or LLM clients. Those live behind the extras below.
 dependencies = [
+    # Tier 1 Code Risk Analysis scanner, which validate runs by default.
+    "bandit>=1.9.4",
     "click>=8.3.3,<9",
     "idna>=3.10,<4",
     "jinja2>=3.1",
@@ -48,6 +50,9 @@ dependencies = [
     # Dataset-authored signal patterns require a per-match timeout.
     "regex>=2024.11.6",
     "rich>=13.5.0",
+    # Runs the pinned SkillSpector wheel in its own environment (uv tool run),
+    # so a plain pip install can complete the Tier 1 security check.
+    "uv>=0.11.27",
 ]
 
 [project.optional-dependencies]
@@ -65,7 +70,7 @@ tier2 = [
 # Tier 3 live agent evaluation through Harbor's native environments.
 tier3 = [
     "skillevaluator[llm]",
-    "harbor[gke]==0.24.0",
+    "harbor[gke]==0.25.0",
     # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
@@ -75,9 +80,8 @@ tier3 = [
     # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
     "python-dotenv>=1.2.0",
 ]
-# Static security scanners (floors raised to the established release baseline).
+# Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
-    "bandit>=1.9.4",
     "pip-audit>=2.10.0",
 ]
 # Verify GitHub-signed execution receipts for the optional CI report publisher.
@@ -102,6 +106,8 @@ dev = [
     "pytest-cov>=6.2.0",
     # pytest-xdist carried over for parallel test execution (-n auto).
     "pytest-xdist>=3.6.0",
+    # Dedicated offline HTML browser checks; never needed by the installed reporter.
+    "playwright==1.65.2",
     # Ruff 0.16 enables new rules that require a dedicated repository-wide cleanup.
     "ruff>=0.15.4,<0.16",
 ]
@@ -122,8 +128,10 @@ where = ["src"]
 include = ["skillevaluator*"]
 
 [tool.setuptools.package-data]
-"skillevaluator" = ["ci-release.json"]
+"skillevaluator.tier3" = ["grader_reference/*.json", "grader_reference/trajectories/*.json"]
+"skillevaluator" = ["ci-release.json", "ci-release-all-tiers.json"]
 "skillevaluator.config" = ["*.yaml", "profiles/*.yaml"]
+"skillevaluator.harness" = ["profiles/*.yaml"]
 "skillevaluator.reporting" = ["templates/*.j2", "assets/*.js", "assets/*.md"]
 "skillevaluator.tier3.harbor" = [
     "templates/*.py",

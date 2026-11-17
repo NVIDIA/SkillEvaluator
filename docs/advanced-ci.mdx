@@ -1,0 +1,52 @@
+---
+title: "Advanced CI"
+description: "Prerequisites and reference for explicitly enabled all-tier CI."
+---
+
+Standard repository onboarding runs quality and security checks without
+a model key. The all-tier integration is a separate, **explicit opt-in and
+unreleased capability**. Released Tier 1 bundles and plain `ci init` run only the
+quality and security checks; all-tier setup requires a reviewed candidate CLI
+and its bundled schema-version 2 descriptor with the platform's all-tier
+capability and immutable pins.
+
+## Before you opt in
+
+- **Tier 2:** configure a model provider, embeddings provider and their keys.
+  Anthropic chat defaults to OpenAI embeddings and needs that key too. See
+  [providers and credentials](/skills/skillevaluator/configuration) and
+  [deduplication](/skills/skillevaluator/tier2-deduplication).
+- **Tier 3:** configure a supported provider, agent and Docker or native local
+  runtime, and commit native datasets under each skill's `evals/` directory.
+  CI consumes those cases with paired positive and negative coverage; it does
+  not generate them. See [datasets](/skills/skillevaluator/eval-datasets) and
+  [agents and runtimes](/skills/skillevaluator/agents-and-sandboxes).
+- **Platform setup:** provide compatible runners and trusted execution/feedback
+  environments. Merge the trusted feedback entrypoint onto the default branch
+  before expecting automatic PR or MR comments. GitLab additionally needs its
+  protected-branch, environment, token and existing-pipeline setup.
+
+## Setup and retained evidence
+
+Follow the [complete setup and maintainer reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md)
+for GitHub and GitLab commands, migration, admission, feedback, runner and
+timeout requirements, descriptor maintenance and retained report contracts.
+It also documents SkillEvaluator's own callers and alternative feedback filename.
+
+Only quality and security checks gate this CI integration. Tier 2 and Tier 3
+remain advisory even when failed or incomplete; deprecated Tier 3 required settings are ignored.
+When a tier is selected, missing credentials, runtime or datasets remain visible
+as incomplete or needs-action evidence. A passing scan does not mean all
+evaluation stages passed.
+With `scan-mode: auto`, a pull request that changes no skill, such as a setup,
+pin, model or secret change, skips the provider-backed jobs. Their prerequisites
+are first checked by the push to the default branch after it merges, a manual
+run there, or the next skill change. To check them before merging, set
+`scan-mode: all` (GitLab: `SKILL_EVAL_SCAN_MODE: all`) on that pull request and
+restore `auto` before merging. `skillevaluator ci demo` works only after the setup
+has merged.
+
+Reports retain native evidence and an aggregate artifact for 14 days. Feedback
+links to the authenticated artifact for that run; download and extract it,
+then open `index.html`. Hosted HTML is a separate option. Local setup, status
+and demo commands do not prove provider-backed evaluation succeeded.

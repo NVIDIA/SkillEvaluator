@@ -413,7 +413,7 @@ def test_legacy_direct_negative_uses_expected_skill_compatibly() -> None:
     assert shared["details"]["negative_check"]["score"] == 1.0
 
 
-def test_legacy_unlabeled_case_retains_skip_pass_behavior() -> None:
+def test_legacy_unlabeled_case_is_not_applicable() -> None:
     kwargs = {
         "tool_calls": TARGET_READ,
         "expected_skill": "",
@@ -425,8 +425,8 @@ def test_legacy_unlabeled_case_retains_skip_pass_behavior() -> None:
     template = TEMPLATE.score_skill_execution(**kwargs)
 
     assert shared == template
-    assert shared["score"] == 1.0
-    assert "skipped" in shared["details"]["message"].lower()
+    assert shared["score"] is None
+    assert shared["details"]["status"] == "not_applicable"
 
 
 def test_positive_scoring_ignores_evaluated_skill_and_remains_unchanged() -> None:
@@ -498,9 +498,12 @@ def test_template_main_scores_standard_negative_fail_closed(tmp_path, monkeypatc
 
     result = json.loads(rich_reward_json.read_text(encoding="utf-8"))
     harbor_reward = json.loads(reward_json.read_text(encoding="utf-8"))
-    expected_reward_keys = {*TEMPLATE.DISPLAY_METRICS, "overall"}
+    # A negative case gives skill_efficiency nothing to measure, so Harbor's numeric reward leaves it out.
+    expected_reward_keys = {*TEMPLATE.DISPLAY_METRICS, "overall"} - {"skill_efficiency"}
     expected_overall = overall_score(result)
 
+    assert result["skill_efficiency"] is None
+    assert result["details"]["skill_efficiency"]["status"] == "not_applicable"
     assert result["skill_execution"] == 0.0
     if include_trusted_identity:
         assert result["details"]["skill_execution"]["negative_check"]["score"] == 0.0

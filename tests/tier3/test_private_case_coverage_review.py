@@ -16,6 +16,8 @@ def _reward(case: str, attempt: int = 1, value: float = 0.8) -> dict:
         "_attempt_ordinal": attempt,
         "metric_set": DEFAULT_METRIC_SET,
         **dict.fromkeys(DEFAULT_METRICS, value),
+        "goal_accuracy": 1.0,
+        "security": 1.0,
     }
 
 

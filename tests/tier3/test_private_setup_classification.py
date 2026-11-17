@@ -15,12 +15,15 @@ from types import SimpleNamespace
 
 import pytest
 from harbor.agents.installed.base import BaseInstalledAgent, NetworkConnectionError
+from harbor.agents.installed.opencode import OpenCode
 from harbor.utils.import_path import import_symbol
 
+from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, DOCKER_AGENT_IMPORT_PATHS, runner
 from skillevaluator.tier3.harbor.local_agents import AgentSetupNetworkError, SetupNetworkErrorAgent
 from skillevaluator.tier3.plugin_native import (
     NATIVE_AGENT_IMPORT_PATHS,
     PRIVATE_AGENT_IMPORT_PATHS,
+    native_agent_import_path,
     private_agent_import_path,
 )
 
@@ -47,6 +50,47 @@ def test_private_wrapper_retains_base_methods_and_has_no_native_launcher(key: tu
 def test_native_wrapper_is_not_wrapped_twice(key: tuple, path: str) -> None:
     assert private_agent_import_path(key[0], path) == path
     assert issubclass(import_symbol(path), SetupNetworkErrorAgent)
+
+
+class _NativeHooks:
+    """The private runtime's agent routing, with every agent loading the plugin natively."""
+
+    def with_agent_import_path(self, agent: str, base_import_path: str | None) -> str:
+        return native_agent_import_path(agent, base_import_path)
+
+    def baseline_agent_import_path(self, agent: str, base_import_path: str | None) -> str | None:
+        return private_agent_import_path(agent, base_import_path)
+
+
+@pytest.mark.parametrize(
+    ("env_mode", "default_paths", "baseline", "with_arm"),
+    [
+        ("docker", DOCKER_AGENT_IMPORT_PATHS, "PrivateInstalledOpenCode", "NativeInstalledOpenCode"),
+        ("gke", CONTAINER_AGENT_IMPORT_PATHS, "PrivateOpenCode", "NativeOpenCode"),
+    ],
+)
+def test_opencode_plugin_arms_share_the_environment_default_agent(
+    monkeypatch: pytest.MonkeyPatch,
+    env_mode: str,
+    default_paths: dict[str, str],
+    baseline: str,
+    with_arm: str,
+) -> None:
+    # Both plugin arms must set OpenCode up as an ordinary run in that
+    # environment does: through its default import path, else Harbor's stock agent.
+    monkeypatch.setattr(runner, "_private_runtime_hooks", _NativeHooks)
+    default_path = default_paths.get("opencode")
+    default_agent = import_symbol(default_path) if default_path is not None else OpenCode
+
+    baseline_path, with_path = runner._private_agent_paths(["opencode"], {}, env_mode)["opencode"]
+
+    assert baseline_path == f"skillevaluator.tier3.harbor.native_agents:{baseline}"
+    assert with_path == f"skillevaluator.tier3.harbor.native_agents:{with_arm}"
+    for path in (baseline_path, with_path):
+        cls = import_symbol(path)
+        assert issubclass(cls, default_agent)
+        assert cls.install is default_agent.install
+        assert cls.ensure_system_dependencies is default_agent.ensure_system_dependencies
 
 
 def test_unknown_private_wrapper_does_not_silently_replace_custom_routing() -> None:

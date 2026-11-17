@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
 from datetime import UTC, datetime
@@ -21,13 +22,16 @@ from skillevaluator import __version__
 from skillevaluator.cli_help import GroupedOption, RichGroup
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.constants import (
+    QUALITY_DEFAULT_MIN_SCORE,
     SIMILARITY_DEFAULT_MAX_ENTRIES,
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
 from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
+from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
 from skillevaluator.logging_config import setup_logging
 from skillevaluator.models.result import ValidationResult
+from skillevaluator.precommit import CHECKS
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
 from skillevaluator.reporting.console_ui import (
     TierRow,
@@ -60,9 +64,12 @@ from skillevaluator.tier1.commands import (
     run_rubric_eval,
     run_security_scan,
     run_validation,
+    runs_schema_check,
 )
 from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
+from skillevaluator.utils.helpers import resolve_git_root
+from skillevaluator.utils.json_output import json_needs_ascii
 from skillevaluator.utils.path_security import resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
@@ -78,7 +85,10 @@ from skillevaluator.validators.pii_waivers import (
 )
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from skillevaluator.reporting.presentation import FinalRenderContext
+    from skillevaluator.validators.policy import ValidationPolicy
 
 
 CONTEXT_SETTINGS = {"help_option_names": ["-h", "--help"]}
@@ -247,7 +257,7 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
     ("Repository CI", ("ci",)),
     (
         "Tier 1 · Static and security",
-        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts"),
+        ("quality-check", "rubric-eval", "security-scan", "pii-scan", "lint-scripts", "harness-check"),
     ),
     (
         "Tier 2 · Deduplication",
@@ -260,8 +270,17 @@ _TOP_LEVEL_COMMAND_HELP_GROUPS = (
 )
 
 
+class _EncodingSafeGroup(RichGroup):
+    """Configure output before Click parses eager options such as --help."""
+
+    def parse_args(self, ctx: click.Context, args: list[str]) -> list[str]:
+        if hasattr(sys.stdout, "reconfigure"):
+            sys.stdout.reconfigure(errors="replace")
+        return super().parse_args(ctx, args)
+
+
 @click.group(
-    cls=RichGroup,
+    cls=_EncodingSafeGroup,
     context_settings=CONTEXT_SETTINGS,
     help_command_groups=_TOP_LEVEL_COMMAND_HELP_GROUPS,
     show_banner=True,
@@ -304,6 +323,63 @@ def tier3() -> None:
     """
 
 
+@tier3.command("import-traces")
+@click.argument("skill_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("export", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--output",
+    "-o",
+    type=click.Path(file_okay=False, path_type=Path),
+    help="Review bundle directory outside the skill (default: ./<skill-dir-name>-trace-review).",
+)
+@click.option("--force", is_flag=True, help="Overwrite an existing candidates file.")
+@click.option("--dry-run", is_flag=True, help="Print the summary without writing files.")
+def tier3_import_traces(skill_path: Path, export: Path, output: Path | None, force: bool, dry_run: bool) -> None:
+    """Import a production trace export into redacted review candidates."""
+    from skillevaluator.tier3.trace_import import import_traces
+
+    output = output or Path.cwd() / f"{skill_path.resolve().name}-trace-review"
+    try:
+        document = import_traces(skill_path, export, output, force=force, dry_run=dry_run)
+    except (ValueError, OSError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo(f"candidate: {len(document['candidates'])}")
+    for reason in ("duplicate", "incomplete", "unsupported", "other skill"):
+        click.echo(f"{reason}: {sum(s['reason'] == reason for s in document['skipped'])}")
+    for item in document["skipped"]:
+        click.echo(json.dumps(item, ensure_ascii=False))
+    for candidate in document["candidates"]:
+        click.echo(f"{candidate['id']}: redactions={candidate['redactions']} warnings={candidate['warnings']}")
+    click.echo(
+        f"Next: review {output / 'candidates.json'}, then run skillevaluator tier3 accept-traces {skill_path} {output}"
+    )
+
+
+@tier3.command("accept-traces")
+@click.argument("skill_path", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.argument("review_dir", type=click.Path(exists=True, file_okay=False, path_type=Path))
+@click.option("--dry-run", is_flag=True, help="Report additions without writing files.")
+@click.option(
+    "--allow-native-harbor",
+    is_flag=True,
+    help="Explicitly accept traces when native Harbor tasks are selected.",
+)
+def tier3_accept_traces(skill_path: Path, review_dir: Path, dry_run: bool, allow_native_harbor: bool) -> None:
+    """Promote only human-reviewed trace candidates into evals/evals.json."""
+    from skillevaluator.tier3.trace_import import accept_traces
+
+    try:
+        result = accept_traces(skill_path, review_dir, dry_run=dry_run, allow_native_harbor=allow_native_harbor)
+    except (ValueError, OSError, KeyError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    for key in ("added", "already present", "skipped"):
+        click.echo(f"{'would add' if dry_run and key == 'added' else key}: {len(result[key])} {', '.join(result[key])}")
+    for check in result["validation"]:
+        click.echo(str(check))
+    if any(check.status == "error" for check in result["validation"]):
+        raise click.ClickException("Dataset validation failed after writing")
+
+
 def _target_argument(func):
     return click.argument("target_path", type=click.Path(exists=True, resolve_path=True, path_type=Path))(func)
 
@@ -332,6 +408,7 @@ _FILE_REPORT_EXTENSIONS = {
     "html": ".html",
     "markdown": ".md",
     "sarif": ".sarif.json",
+    "junit": ".junit.xml",
 }
 
 
@@ -423,7 +500,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown", "sarif"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -468,6 +545,15 @@ def _path_is_within(candidate: Path, root: Path) -> bool:
         if parent == current:
             return False
         current = parent
+
+
+def _default_report_output_error(directory: Path, cause: BaseException) -> click.ClickException:
+    """Say why the default report directory was refused and how to choose another."""
+    reason = str(cause).removesuffix(f": {directory}").strip() or type(cause).__name__
+    return click.ClickException(
+        f"Cannot safely reserve default report output directory: {directory} ({reason}). "
+        "Choose a report directory with -o/--output-dir."
+    )
 
 
 def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path:
@@ -518,7 +604,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
             if output_is_real_directory and is_generated_output_root(output_dir):
                 return output_dir
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {output_dir}") from exc
+            raise _default_report_output_error(output_dir, exc) from exc
 
     if output_is_default:
         relocated = target_path.with_name(f"{target_path.name}-reports")
@@ -529,10 +615,23 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
                 mark_generated_output_root(relocated)
                 return relocated
         except (OSError, RuntimeError, ValueError) as exc:
-            raise click.ClickException(f"Cannot safely reserve default report output directory: {relocated}") from exc
+            raise _default_report_output_error(relocated, exc) from exc
     raise click.ClickException(
         f"Report output must be outside the publication target; use an external --output-dir: {output_dir}"
     )
+
+
+def _report_roots(target_path: Path) -> dict[str, Path]:
+    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+
+    The repository root is the Git root containing *target_path*, so a finding
+    reads the same repository-relative ``file`` from every command; outside Git
+    it falls back to the target folder.
+    """
+    repository_root = resolve_git_root(target_path)
+    if repository_root is None:
+        repository_root = target_path if target_path.is_dir() else target_path.parent
+    return {"scan_root": target_path, "repository_root": repository_root}
 
 
 def _resolve_file_report_output_location(
@@ -893,6 +992,11 @@ def _run_agent_eval_or_skip(
     max_agents: int | None,
     max_cases: int | None = None,
     n_attempts: int | None = None,
+    max_agent_tokens: int | None = None,
+    max_judge_calls: int | None = None,
+    max_attempts_total: int | None = None,
+    max_cost_usd: float | None = None,
+    price_file: Path | None = None,
     pass_threshold: float | None = None,
     stop_on_pass: bool | None = None,
     model: str | None = None,
@@ -904,6 +1008,7 @@ def _run_agent_eval_or_skip(
     timeout_multiplier: float | None = None,
     harbor_keep_jobs: bool = False,
     agent_runtime_preflight: bool | None = None,
+    tolerate_baseline_timeouts: bool | None = None,
     block_on_agent_eval: bool = False,
     validate_source: bool = True,
     repo_context_exclude_paths: tuple[Path, ...] = (),
@@ -953,6 +1058,11 @@ def _run_agent_eval_or_skip(
         max_agents=max_agents,
         max_cases=max_cases,
         n_attempts=n_attempts,
+        max_agent_tokens=max_agent_tokens,
+        max_judge_calls=max_judge_calls,
+        max_attempts_total=max_attempts_total,
+        max_cost_usd=max_cost_usd,
+        price_file=price_file,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         model=model,
@@ -964,6 +1074,7 @@ def _run_agent_eval_or_skip(
         timeout_multiplier=timeout_multiplier,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         evaluated_source=evaluated_source,
         repo_context_exclude_paths=repo_context_exclude_paths,
     )
@@ -1064,7 +1175,14 @@ def _offer_local_runtime_install(raw_agents: str | None) -> None:
             console.print(f"  [green]✓ {agent} installed[/green]")
 
 
-def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress: str = "auto") -> str | None:
+def _ensure_autopilot_dataset(
+    skill_path: Path,
+    *,
+    quiet: bool = False,
+    progress: str = "auto",
+    evaluation_params: dict[str, Any] | None = None,
+    prepare_environment: Callable[[], None] | None = None,
+) -> str | None:
     """Ensure an evaluation source exists, generating one when missing.
 
     Mirrors the standalone ``evaluate --autopilot`` behavior: reuse an existing
@@ -1077,6 +1195,7 @@ def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress
     from skillevaluator.evaluation.results import DatasetGenerationError
     from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_llm_labels
     from skillevaluator.provider_config import ProviderConfigurationError, resolve_llm_provider
+    from skillevaluator.tier3.dataset_coverage import starter_guidance
     from skillevaluator.tier3.dataset_progress import dataset_generation_progress
     from skillevaluator.tier3.harbor.adapter import find_evals_file
 
@@ -1096,18 +1215,56 @@ def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress
             provider = resolve_llm_provider()
         except ProviderConfigurationError:
             no_llm = True
+            if evaluation_params is not None and evaluation_params.get("backend") == "nemo-gym":
+                from skillevaluator.tier3.workflow import _source_snapshot, nemo_gym_preflight_errors
+
+                params = {**evaluation_params, "skill_path": skill_path}
+                with _source_snapshot(skill_path) as source_path:
+                    errors = nemo_gym_preflight_errors(source_path, params)
+                if errors:
+                    raise click.UsageError("; ".join(errors)) from None
             echo("Autopilot: no public provider key is configured; generating one deterministic case.")
         else:
             no_llm = False
+            if evaluation_params is not None:
+                from skillevaluator.tier3.workflow import (
+                    _preflight_environment,
+                    _preflight_nemo_gym,
+                    _preflight_options,
+                    _source_snapshot,
+                )
+
+                # Match the direct Tier 3 workflow before spending a generation
+                # request. Keep keyless deterministic starters available, and
+                # leave existing authored sources untouched above.
+                params = {**evaluation_params, "skill_path": skill_path}
+                with _source_snapshot(skill_path) as source_path:
+                    if params.get("backend") == "nemo-gym":
+                        _preflight_nemo_gym(source_path, params)
+                    else:
+                        environment_kwargs = _preflight_options(source_path, params)
+                if params.get("backend") != "nemo-gym":
+                    if prepare_environment is not None:
+                        prepare_environment()
+                    _preflight_environment(params, environment_kwargs=environment_kwargs)
             provider_name, model_name = safe_llm_labels(provider.provider, provider.model)
             echo(f"Autopilot: generating one case with {provider_name} / {model_name}.")
 
         dataset_note = "auto-generated by autopilot — review evals/"
+        generated = False
         with dataset_generation_progress(
             enabled=not quiet and progress != "off", stream=click.get_text_stream("stderr")
         ):
             try:
-                service.create_autopilot_dataset(skill_path, use_llm=not no_llm)
+                if no_llm:
+                    service.create_autopilot_dataset(
+                        skill_path,
+                        use_llm=False,
+                        fallback_reason="public LLM provider is not configured",
+                    )
+                else:
+                    service.create_autopilot_dataset(skill_path, use_llm=True)
+                generated = True
             except FileExistsError:
                 echo("Autopilot: an evaluation source appeared concurrently; reusing it unchanged.")
             except Exception as exc:
@@ -1119,12 +1276,25 @@ def _ensure_autopilot_dataset(skill_path: Path, *, quiet: bool = False, progress
                 echo("  Falling back to one deterministic starter case; review evals/ before using it as a benchmark.")
                 dataset_note = f"deterministic starter — LLM generation failed: {diagnostic} Review evals/."
                 if not eval_source_exists():
-                    service.create_autopilot_dataset(skill_path, use_llm=False)
+                    service.create_autopilot_dataset(skill_path, use_llm=False, fallback_reason=diagnostic)
+                    generated = True
             if not eval_source_exists():
                 raise click.ClickException("Autopilot dataset generation did not produce an evaluation source.")
+        if generated:
+            guidance = starter_guidance(skill_path)
+            if guidance is not None:
+                echo(strip_terminal_controls(guidance))
         return dataset_note
     except click.ClickException:
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if is_missing_tier3_extra(exc):
+            raise click.ClickException(
+                "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+            ) from exc
+        raise click.ClickException(str(exc)) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -1245,6 +1415,10 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--skip", str(params["skip"])])
     if params.get("previous_version"):
         argv.extend(["--previous-version", str(params["previous_version"])])
+    if params.get("harness"):
+        argv.extend(["--harness", str(params["harness"])])
+    if params.get("harness_profiles"):
+        argv.extend(["--harness-profiles", str(params["harness_profiles"])])
     if params.get("fail_fast"):
         argv.append("--fail-fast")
     if params.get("continue_on_failure"):
@@ -1264,8 +1438,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--block-on-dedup")
     elif block_on_dedup is False:
         argv.append("--no-block-on-dedup")
-    min_score = params.get("min_score", 70)
-    if min_score != 70:
+    min_score = params.get("min_score", QUALITY_DEFAULT_MIN_SCORE)
+    if min_score != QUALITY_DEFAULT_MIN_SCORE:
         argv.extend(["--min-score", str(min_score)])
     if params.get("quality_config"):
         argv.extend(["--quality-config", str(Path(params["quality_config"]).resolve())])
@@ -1310,6 +1484,16 @@ def _catalog_child_argv_from_ctx(
         argv.extend(["--max-cases", str(params["max_cases"])])
     if params.get("n_attempts") is not None:
         argv.extend(["--n-attempts", str(params["n_attempts"])])
+    if params.get("max_agent_tokens") is not None:
+        argv.extend(["--max-agent-tokens", str(params["max_agent_tokens"])])
+    if params.get("max_judge_calls") is not None:
+        argv.extend(["--max-judge-calls", str(params["max_judge_calls"])])
+    if params.get("max_attempts_total") is not None:
+        argv.extend(["--max-attempts-total", str(params["max_attempts_total"])])
+    if params.get("max_cost_usd") is not None:
+        argv.extend(["--max-cost-usd", str(params["max_cost_usd"])])
+    if params.get("price_file") is not None:
+        argv.extend(["--price-file", str(Path(params["price_file"]).resolve())])
     if params.get("pass_threshold") is not None:
         argv.extend(["--pass-threshold", str(params["pass_threshold"])])
     stop_on_pass = params.get("stop_on_pass")
@@ -1339,6 +1523,11 @@ def _catalog_child_argv_from_ctx(
         argv.append("--agent-runtime-preflight")
     elif agent_runtime_preflight is False:
         argv.append("--no-agent-runtime-preflight")
+    tolerate_baseline_timeouts = params.get("tolerate_baseline_timeouts")
+    if tolerate_baseline_timeouts is True:
+        argv.append("--tolerate-baseline-timeouts")
+    elif tolerate_baseline_timeouts is False:
+        argv.append("--no-tolerate-baseline-timeouts")
     # Every child renders its own BENCHMARK.md, so the identity has to reach
     # each one: dropping it here would publish a catalog of cards that all say
     # the evaluated source was never recorded.
@@ -1351,6 +1540,8 @@ def _catalog_child_argv_from_ctx(
     if _report_formats_explicit():
         for fmt in params.get("report_formats") or ():
             argv.extend(["-r", fmt])
+    if catalog_root is not None:
+        argv.extend(["--catalog-root", str(catalog_root)])
     argv.extend(["-o", str(output_dir)])
     return argv
 
@@ -1405,6 +1596,7 @@ def _catalog_skill_entry(
         return entry
 
     entry["json_report"] = json_report.name
+    entry["report_scope"] = "single_skill"
     try:
         payload = json.loads(json_report.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
@@ -1415,13 +1607,63 @@ def _catalog_skill_entry(
     for key in ("overall_passed", "overall_status", "incomplete_scans", "severity_counts"):
         if key in payload:
             entry[key] = payload[key]
+    entry["report_verdict"] = {key: payload[key] for key in ("overall_passed", "overall_status") if key in payload}
     return entry
 
 
-def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) -> Path:
-    """Write a machine-readable fleet rollup for catalog validation."""
+def _catalog_entry_with_metadata_id_conflicts(
+    skill: dict[str, object], conflicts: list[dict[str, object]]
+) -> dict[str, object]:
+    """Project catalog findings onto a member, retaining its independent report verdict.
+
+    The findings themselves are listed under ``catalog_findings`` so the
+    verdict and the severity bump above can be traced back to what caused
+    them: a catalog validates each skill on its own, so these findings exist
+    nowhere else in that skill's output.
+    """
+    entry = dict(skill)
+    recorded: list[dict[str, object]] = []
+    for conflict in conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list) or entry.get("name") not in members:
+            continue
+        names = [str(member) for member in members]
+        others = ", ".join(name for name in names if name != entry.get("name"))
+        recorded.append(
+            {
+                "category": "SCHEMA",
+                "check_name": "metadata_id_duplicate",
+                "severity": conflict.get("severity"),
+                "blocking": bool(conflict.get("blocking")),
+                "message": f"metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+            }
+        )
+        severity = conflict.get("severity")
+        if severity in ("critical", "high", "medium", "low"):
+            raw_counts = entry.get("severity_counts")
+            counts = dict(raw_counts) if isinstance(raw_counts, dict) else {}
+            previous = counts.get(severity, 0)
+            counts[severity] = (previous if isinstance(previous, int) else 0) + 1
+            entry["severity_counts"] = counts
+        if conflict.get("blocking"):
+            entry["passed"] = False
+            entry["overall_passed"] = False
+            entry["overall_status"] = "failed"
+    if recorded:
+        entry["catalog_findings"] = recorded
+    return entry
+
+
+def _write_catalog_summary(
+    output_dir: Path,
+    skills: list[dict[str, object]],
+    *,
+    metadata_id_conflicts: list[dict[str, object]] | None = None,
+) -> Path:
+    """Write catalog-context verdicts and counts; linked leaf reports retain single-skill scope."""
     from skillevaluator.reporting.base import _write_report_atomically
 
+    skills = [_catalog_entry_with_metadata_id_conflicts(skill, metadata_id_conflicts or []) for skill in skills]
     total = len(skills)
     passed = sum(1 for skill in skills if skill.get("passed"))
     failed = total - passed
@@ -1449,12 +1691,89 @@ def _write_catalog_summary(output_dir: Path, skills: list[dict[str, object]]) ->
         "summary_path": CATALOG_SUMMARY_FILENAME,
         "severity_totals": severity_totals,
         "skills": skills,
+        "metadata_id_conflicts": metadata_id_conflicts or [],
         "generated_at": datetime.now(tz=UTC).isoformat(),
     }
     output_path = output_dir / CATALOG_SUMMARY_FILENAME
     payload = json.dumps(summary, indent=2, default=str, allow_nan=False).encode("utf-8")
     _write_report_atomically(output_path, payload)
     return output_path
+
+
+def _catalog_metadata_id_conflicts(
+    policy: ValidationPolicy | None,
+    skill_dirs: list[Path],
+    catalog_root: Path,
+    discovery_problems: dict[Path, str],
+    *,
+    schema_enabled: bool = True,
+) -> tuple[list[dict[str, object]], list[tuple[str, str]]]:
+    """Find ``metadata.id`` values shared by catalog skills.
+
+    Catalog runs validate each skill on its own, so uniqueness across the
+    catalog is checked here. Returns the conflicts for the catalog summary and,
+    when the policy makes a duplicate blocking, one failure per affected skill.
+
+    This is part of the schema check, so it runs only when that check is
+    selected: ``--checks`` and ``--skip`` run exactly the checks they name.
+    """
+    from skillevaluator.validators.policy import default_policy
+
+    if not schema_enabled:
+        return [], []
+    from skillevaluator.validators.schema import (
+        declared_metadata_id,
+        duplicate_metadata_ids,
+        metadata_id_duplicate_severity,
+    )
+
+    policy = policy or default_policy()
+    declared: dict[str, list[Path]] = {}
+    for skill_dir in skill_dirs:
+        if skill_dir in discovery_problems:
+            continue
+        metadata_id = declared_metadata_id(skill_dir)
+        if metadata_id is not None:
+            declared.setdefault(metadata_id, []).append(skill_dir)
+    duplicates = duplicate_metadata_ids(declared, catalog_root)
+    if not duplicates:
+        return [], []
+    severity = metadata_id_duplicate_severity(policy)
+    blocking = severity.is_error()
+    conflicts: list[dict[str, object]] = [
+        {"metadata_id": value, "skills": skills, "severity": severity.value, "blocking": blocking}
+        for value, skills in duplicates.items()
+    ]
+    failures: list[tuple[str, str]] = []
+    if blocking:
+        for value, skills in duplicates.items():
+            for skill in skills:
+                others = ", ".join(other for other in skills if other != skill)
+                failures.append((skill, f"metadata.id '{value}' is also declared by {others}"))
+    return conflicts, failures
+
+
+def _print_metadata_id_conflicts(conflicts: list[dict[str, object]]) -> None:
+    """Show advisory (non-blocking) catalog ID conflicts under the scoreboard."""
+    from rich.text import Text
+
+    from skillevaluator.reporting.console_ui import MUTED, make_view_console
+
+    console_ = make_view_console()
+    for conflict in conflicts:
+        skills = conflict.get("skills")
+        if conflict.get("blocking") or not isinstance(skills, list):
+            continue
+        line = f"metadata.id '{conflict['metadata_id']}' is declared by {', '.join(map(str, skills))} (advisory)"
+        console_.print(Text.assemble(("      warning     ", MUTED), (strip_terminal_controls(line), MUTED)))
+
+
+def _record_metadata_id_failures(
+    failures: list[tuple[str, str]], id_failures: list[tuple[str, str]]
+) -> list[tuple[str, str]]:
+    """Add blocking ID conflicts to *failures*, keeping a skill's own failure reason first."""
+    failed = {name for name, _reason in failures}
+    return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
 def _validate_catalog(
@@ -1465,6 +1784,7 @@ def _validate_catalog(
     output_dir: Path,
     workers: int = 1,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Run the full validate pipeline once per skill in the catalog.
 
@@ -1488,6 +1808,7 @@ def _validate_catalog(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -1509,6 +1830,7 @@ def _validate_catalog(
                 "content_type": "skill",
                 "output_dir": skill_output,
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
+                "catalog_root": resolved_target,
             }
             reason = ""
             try:
@@ -1525,6 +1847,14 @@ def _validate_catalog(
             ctx.meta.pop(meta_key, None)
         else:
             ctx.meta[meta_key] = previous_catalog_root
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        resolved_target,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failure_map = dict(failures)
     skill_entries = [
         _catalog_skill_entry(
@@ -1536,8 +1866,9 @@ def _validate_catalog(
         )
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -1553,6 +1884,7 @@ def _validate_catalog_parallel(
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
+    policy: ValidationPolicy | None = None,
 ) -> None:
     """Validate catalog skills concurrently in isolated child processes."""
     from skillevaluator.reporting.console_ui import make_view_console
@@ -1590,6 +1922,14 @@ def _validate_catalog_parallel(
             if not passed:
                 failures.append((skill_name, reason))
 
+    id_conflicts, id_failures = _catalog_metadata_id_conflicts(
+        policy,
+        skill_dirs,
+        catalog_root,
+        discovery_problems,
+        schema_enabled=runs_schema_check(ctx.params.get("checks"), ctx.params.get("skip")),
+    )
+    failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
     skill_entries = [
@@ -1602,8 +1942,9 @@ def _validate_catalog_parallel(
         )
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
-    _write_catalog_summary(output_dir, skill_entries)
+    _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
+    _print_metadata_id_conflicts(id_conflicts)
     if failures:
         raise click.ClickException(
             f"{len(failures)}/{len(skill_dirs)} skills failed validation: "
@@ -1643,6 +1984,7 @@ def _finish_pipeline_view(
 ) -> None:
     """Render the quiet-mode verdict panel and report footer."""
     from skillevaluator.reporting.console_ui import MUTED, Verdict, _is_skipped, first_fix
+    from skillevaluator.reporting.harbor_viewer import harbor_job_links
     from skillevaluator.reporting.presentation import build_final_render_context
     from skillevaluator.reporting.run_status import Status
 
@@ -1657,7 +1999,7 @@ def _finish_pipeline_view(
         details += (context.coverage.text, *context.coverage.details)
     details += (f"Publication eligibility: {context.publication_label}",)
 
-    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json"}
+    ext = {"html": ".html", "json": ".json", "markdown": ".md", "sarif": ".sarif.json", "junit": ".junit.xml"}
     links: list[tuple[str, str]] = [
         ("report" if fmt == "html" else fmt, str(output_dir / f"{basename}{ext[fmt]}"))
         for fmt in report_formats
@@ -1665,6 +2007,10 @@ def _finish_pipeline_view(
     ]
     payload = ((tier3_result.metadata or {}).get("agent_eval") or {}) if tier3_result is not None else {}
     summary = payload.get("summary") or payload
+    for job in harbor_job_links(payload):
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                links.append((f"{job['name']} {label}", job[key]))
 
     if not gate_failed:
         advisory_failed = any(block.status == "fail" and block.number in {2, 3} for block in view.blocks)
@@ -1680,7 +2026,8 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        state = "didn't run" if only.is_incomplete else "failed"
+        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
+        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -1776,9 +2123,26 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
     help="Comma-separated subset of Tier 1 checks to run (default: all applicable). "
-    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint; "
+    "Choices: schema, version, security, pii, license, code-integrity, unicode, quality, lint, harness; "
     "opt-in (not run by default): dependency. "
     "quality/lint/version are skill-only and skipped for rules/workflows.",
+)
+@click.option(
+    "--harness",
+    "harness",
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Harnesses for the advisory harness check (default: all), e.g. --harness codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    "harness_profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    cls=GroupedOption,
+    help_group=_RUN_GROUP,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
 )
 @click.option(
     "--skip",
@@ -1845,7 +2209,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
 @click.option(
     "--min-score",
     type=int,
-    default=70,
+    default=QUALITY_DEFAULT_MIN_SCORE,
     show_default=True,
     cls=GroupedOption,
     help_group=_TIER1_GROUP,
@@ -1872,7 +2236,10 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     default=None,
     cls=GroupedOption,
     help_group=_RUN_GROUP,
-    help="Validation policy: default (external is a compatibility alias). Default: $SKILLEVALUATOR_PROFILE, then default.",
+    help=(
+        "Validation policy: default or registry (external is a compatibility alias for default). "
+        "Default: $SKILLEVALUATOR_PROFILE, then default."
+    ),
 )
 @click.option(
     "--external",
@@ -1900,6 +2267,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Concurrent catalog skill jobs when validating a folder of skills. "
     "Values above 1 run skills in parallel processes and disable the per-skill pipeline view.",
 )
+# Set by a catalog run on each per-skill job: the folder of skills that the job's
+# skill belongs to, which the security check judges missing references against.
+@click.option("--catalog-root", type=click.Path(file_okay=False, path_type=Path), default=None, hidden=True)
 @click.option(
     "--dedup/--no-dedup",
     "--tier2/--no-tier2",
@@ -1949,7 +2319,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help=(
-        "Comma-separated Harbor agents. Default follows the provider: "
+        "Comma-separated Harbor agents (hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
@@ -2008,6 +2378,34 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help="Attempts per eval case (pass@k).",
+)
+@click.option("--max-agent-tokens", type=click.IntRange(min=0), default=None, help="Maximum observed agent tokens.")
+@click.option(
+    "--max-judge-calls",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum recorded non-salvage judge attempts; transport retries and RAGAS-internal requests are not counted "
+        "separately."
+    ),
+)
+@click.option(
+    "--max-attempts-total",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum logical Harbor attempts across agents and arms, including private comparison arms.",
+)
+@click.option(
+    "--max-cost-usd",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="Maximum agent model spend; requires --price-file and excludes judge spend, setup, and container time.",
+)
+@click.option(
+    "--price-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Model price JSON with input_per_mtok/output_per_mtok rates and optional cached_input_per_mtok.",
 )
 @click.option(
     "--pass-threshold",
@@ -2092,6 +2490,16 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help="Run an extra agent-only execution of the first staged task before measured Tier 3 [default: disabled].",
 )
 @click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    cls=GroupedOption,
+    help_group=_TIER3_GROUP,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
+)
+@click.option(
     "--evaluated-source-repository",
     default=None,
     cls=GroupedOption,
@@ -2146,6 +2554,11 @@ def validate(
     max_agents: int | None,
     max_cases: int | None,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     model: str | None,
@@ -2157,12 +2570,16 @@ def validate(
     timeout_multiplier: float | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     workers: int,
+    catalog_root: Path | None,
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
+    harness: str | None = None,
+    harness_profiles: Path | None = None,
 ) -> None:
     """Validate a skill through all three tiers, with automatic dataset preparation.
 
@@ -2181,6 +2598,14 @@ def validate(
     skill-only and skipped for plugins.
     """
     _record_validate_json_report(None)
+    requested_path = target_path
+    if harness:
+        from skillevaluator.harness import load_profiles
+
+        try:
+            load_profiles(harness, harness_profiles)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
     target_path = target_path.resolve()
@@ -2202,10 +2627,12 @@ def validate(
         CONTENT_TYPE_RULES,
         CONTENT_TYPE_SKILL,
         CONTENT_TYPE_WORKFLOWS,
+        SKILL_MANIFEST_FILE,
+        WORKFLOWS_MANIFEST_FILE,
     )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
-    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url, resolve_git_root
+    from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
     from skillevaluator.validators.policy import apply_policy, resolve_policy
 
     if external and profile and profile not in {"default", "external"}:
@@ -2219,10 +2646,29 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    resolved_type = content_type if content_type != "auto" else detect_content_type(target_path)
+    # A file passed as SKILL.md or workflow-rules.mdc is a manifest by the name it was passed
+    # under. Auto-detection must not read the file a link points to: SKILL.md may be a link
+    # to shared/guide.md, which names no content type.
+    manifest_type = None
+    if target_path.is_file():
+        if requested_path.name.upper() == SKILL_MANIFEST_FILE.upper():
+            manifest_type = CONTENT_TYPE_SKILL
+        elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
+            manifest_type = CONTENT_TYPE_WORKFLOWS
+    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
+    # A SKILL.md or workflow-rules.mdc argument stands for its folder, as a SKILL.md already
+    # does for Tier 3, so every tier, the report names, and the default report location
+    # match the directory form. Take the folder from the path as given: resolving first
+    # would move a linked manifest to the folder its link points into. That folder is
+    # now the Tier 2 root, so refuse a linked one as the directory form does.
+    if manifest_type is not None and resolved_type == manifest_type:
+        if dedup:
+            _reject_linked_tier2_root(requested_path.absolute().parent)
+        target_path = requested_path.absolute().parent.resolve()
+        publication_name = publication_target_name(target_path) or target_path.name
 
     # Skill validation is the complete workflow. Keep the old flags as aliases,
     # while explicit disable flags and the authoritative --tiers selector still
@@ -2287,6 +2733,7 @@ def validate(
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
+            policy=policy,
         )
         return
 
@@ -2334,14 +2781,16 @@ def validate(
         view.tier_start(0)
         view.tier_progress(0, [stage_hint_row("status", "preparing evaluation dataset…")])
         try:
-            autopilot_dataset_note = _ensure_autopilot_dataset(tier3_path, quiet=quiet)
+            autopilot_dataset_note = _ensure_autopilot_dataset(
+                tier3_path, quiet=quiet, evaluation_params=click.get_current_context().params
+            )
         except (Exception, SystemExit) as exc:
             try:
-                error_detail = sanitize_tier3_console_text(str(exc), limit=72)
+                error_detail = sanitize_tier3_console_text(str(exc), limit=1024)
             except Exception:
                 error_detail = type(exc).__name__
             autopilot_error = sanitize_tier3_console_text(
-                f"autopilot dataset generation failed: {error_detail or type(exc).__name__}"
+                f"autopilot dataset generation failed: {error_detail or type(exc).__name__}", limit=1200
             )
             if not quiet:
                 click.echo(f"Warning: {autopilot_error}", err=True)
@@ -2366,9 +2815,12 @@ def validate(
         previous_version=previous_version,
         policy=policy,
         content_type=resolved_type,
+        target_root=catalog_root.resolve() if catalog_root is not None else None,
         fail_fast=fail_fast,
         continue_on_failure=continue_on_failure,
         on_check=_on_check if quiet else None,
+        harness=harness,
+        harness_profiles=harness_profiles,
         skip=skip,
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
@@ -2379,6 +2831,9 @@ def validate(
     if quiet:
         apply_policy(results, policy)
     tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    harness_rows = harness_block(results)
+    if harness_rows:
+        view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
     view.tier_done(0, failed=not tier1_ok, rows=tier1_rows)
     tier1_gate_results = list(results)
     tier2_gate_results: list[ValidationResult] = []
@@ -2489,6 +2944,11 @@ def validate(
             max_agents=max_agents,
             max_cases=max_cases,
             n_attempts=n_attempts,
+            max_agent_tokens=max_agent_tokens,
+            max_judge_calls=max_judge_calls,
+            max_attempts_total=max_attempts_total,
+            max_cost_usd=max_cost_usd,
+            price_file=price_file,
             pass_threshold=pass_threshold,
             stop_on_pass=stop_on_pass,
             model=model,
@@ -2500,6 +2960,7 @@ def validate(
             timeout_multiplier=timeout_multiplier,
             harbor_keep_jobs=harbor_keep_jobs,
             agent_runtime_preflight=agent_runtime_preflight,
+            tolerate_baseline_timeouts=tolerate_baseline_timeouts,
             block_on_agent_eval=block_on_agent_eval_effective,
             validate_source=preflight_tier3_source,
             evaluated_source=evaluated_source,
@@ -2507,6 +2968,12 @@ def validate(
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
         )
         results.append(tier3_result)
+        if autopilot_error:
+            # Invalid/missing sources may be reported as a failed Tier 3 check,
+            # rather than a skip. Preserve the preparation diagnostic in both
+            # cases so users can recover from the reason generation stopped.
+            tier3_result.metadata["autopilot_error"] = autopilot_error
+            tier3_result.add_warning(autopilot_error)
         # The panel follows the formats this run emits: with cli the full report
         # lists the source errors under the Tier 3 finding, so the panel keeps
         # the count; it shortens its own list only when an HTML or JSON report
@@ -2555,6 +3022,10 @@ def validate(
             agent_eval_payload.setdefault("applicability", "required")
             agent_eval_payload.setdefault("reason_code", "tier3_source_present")
             agent_eval_payload.setdefault("source_kind", source_kind)
+            from skillevaluator.evaluation.tier3_report import fit_token_usage
+
+            # Measured token usage makes room for these keys when the payload is at its limits.
+            fit_token_usage(agent_eval_payload)
         tier3_result.metadata["gating"] = {"tier": 3, "blocking": block_on_agent_eval_effective}
 
     # Reporters and the exit gate consume the same finalized result objects.
@@ -2568,9 +3039,6 @@ def validate(
         CONTENT_TYPE_PLUGIN: "Plugin",
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
-    sarif_repository_root = resolve_git_root(target_path)
-    if sarif_repository_root is None:
-        sarif_repository_root = target_path if target_path.is_dir() else target_path.parent
 
     # Quiet mode defaults the reports to html+json (the terminal shows only
     # the summary; the files carry the findings) and points at them from the
@@ -2595,12 +3063,17 @@ def validate(
         policy=policy,
         target_path=target_display,
         expected_skill_name=publication_name,
+        # A Git remote URL in ``target_display`` cannot be probed for SKILL.md,
+        # and a clean run has no finding path to infer the skill from.
+        explicit_skill_name=publication_name if resolved_type == CONTENT_TYPE_SKILL and target_path.is_dir() else None,
         content_label=content_label,
         announce_paths=not quiet,
-        sarif_scan_root=target_path,
-        sarif_repository_root=sarif_repository_root,
+        **_report_roots(target_path),
+        catalog_root=catalog_root,
     )
     _record_validate_json_report(f"{report_basename_value}.json" if "json" in effective_formats else None)
+    if harness_rows and "json" in effective_formats:
+        write_json_block(output_dir / f"{report_basename_value}.json", harness_rows)
 
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
@@ -2616,7 +3089,9 @@ def validate(
         # stays as the last line of defence: the renderer re-validates the
         # carriers it is handed, and a producer can record one after the fact.
         try:
-            BenchmarkReporter(skill_name=publication_name).save(results, output_dir / BENCHMARK_FILENAME)
+            BenchmarkReporter(skill_name=publication_name, evaluator_version=__version__).save(
+                results, output_dir / BENCHMARK_FILENAME
+            )
         except EvaluatedSourceConflict as exc:
             # Publication fails closed on a contradictory identity, so report which
             # values disagreed rather than letting the card write a guess.
@@ -2647,6 +3122,8 @@ def validate(
             agent_eval=agent_eval,
             presentation_context=presentation_context,
         )
+    if harness_rows and not quiet:
+        console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
         raise click.ClickException("validation failed")
 
@@ -2660,9 +3137,118 @@ validate.help_group_descriptions = {
 }
 
 
+@cli.command("harness-check")
+@_target_argument
+@click.option(
+    "--harness",
+    default="all",
+    show_default=True,
+    help="Comma-separated harnesses to check, e.g. codex,claude-code.",
+)
+@click.option(
+    "--harness-profiles",
+    type=click.Path(path_type=Path, exists=True, file_okay=False),
+    default=None,
+    help="Directory of harness profile YAMLs to use instead of the packaged ones.",
+)
+@click.option("-v", "--verbose", is_flag=True, help="List every harness with its verified version and date.")
+@click.option(
+    "--json",
+    "json_path",
+    type=click.Path(path_type=Path, dir_okay=False),
+    default=None,
+    help="Also write the harness_compatibility block to this JSON file.",
+)
+@click.option(
+    "--context-tokens",
+    type=click.IntRange(min=0),
+    default=0,
+    help="Context window of your model in tokens; some loader limits depend on it (0 = unknown, assume the smallest).",
+)
+@click.option(
+    "--custom-provider",
+    is_flag=True,
+    help="Your model is served through a custom or OpenAI-compatible provider, or is a model the harness ships no metadata for.",
+)
+@click.option(
+    "--explicit-invocation",
+    is_flag=True,
+    help="Skills are activated by an explicit mention (e.g. Codex $skill), not opened by the model.",
+)
+@click.option(
+    "--headless",
+    is_flag=True,
+    help="The harness runs non-interactively (e.g. claude -p in CI) with default permissions.",
+)
+@click.option(
+    "--harness-version",
+    "harness_versions",
+    multiple=True,
+    metavar="HARNESS=VERSION",
+    help="The release you run, e.g. codex=0.170.0; a release other than the profile's verified one is flagged.",
+)
+def harness_check(
+    target_path: Path,
+    harness: str,
+    harness_profiles: Path | None,
+    verbose: bool,
+    json_path: Path | None,
+    context_tokens: int,
+    custom_provider: bool,
+    explicit_invocation: bool,
+    headless: bool,
+    harness_versions: tuple[str, ...],
+) -> None:
+    """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
+    from skillevaluator.harness.overlay import profile_names
+    from skillevaluator.harness.report import run_harness_check
+    from skillevaluator.reporting.console_ui import make_view_console
+
+    try:
+        config = {
+            "context_tokens": context_tokens,
+            "custom_provider": custom_provider,
+            "explicit_invocation": explicit_invocation,
+            "headless": headless,
+            "harness_versions": dict(_split_harness_version(v) for v in harness_versions),
+        }
+        # A version may be given for any harness by its ``harness:`` name; a profile that won't parse can't fail this.
+        known = set(profile_names(harness_profiles))
+        if unknown := sorted(set(config["harness_versions"]) - known):
+            raise click.BadParameter(
+                f"unknown harness {', '.join(unknown)}; choose from {', '.join(sorted(known))}",
+                param_hint="--harness-version",
+            )
+        block = run_harness_check(
+            target_path, harness, harness_profiles, console=make_view_console(), verbose=verbose, config=config
+        )
+    except ValueError as exc:
+        raise click.BadParameter(str(exc), param_hint="--harness") from exc
+    if not block:
+        raise click.ClickException(f"No skills found in {target_path}")
+    from skillevaluator.validators.schema import SchemaValidator
+
+    for skill in block:
+        schema = SchemaValidator().validate(Path(skill))
+        if not schema.passed and schema.errors:
+            click.echo(
+                f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "
+                "Run `skillevaluator validate --tiers 1` for details."
+            )
+    if json_path is not None:
+        json_path.write_text(json.dumps({"harness_compatibility": block}, indent=2), encoding="utf-8")
+
+
+def _split_harness_version(value: str) -> tuple[str, str]:
+    name, sep, version = value.partition("=")
+    if not sep or not name.strip() or not version.strip():
+        raise click.BadParameter(f"expected HARNESS=VERSION, got {value!r}", param_hint="--harness-version")
+    return name.strip(), version.strip()
+
+
 @cli.command("quality-check")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2684,13 +3270,14 @@ def quality_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("quality"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("quality check failed")
 
 
 @cli.command("rubric-eval")
 @_target_argument
-@click.option("--min-score", type=int, default=70, show_default=True)
+@click.option("--min-score", type=int, default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @_report_options
 def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ...], output_dir: Path) -> None:
     """Run LLM-as-judge rubric evaluation for a skill."""
@@ -2700,6 +3287,7 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("rubric"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("rubric evaluation failed")
 
@@ -2727,6 +3315,7 @@ def security_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("security scan failed")
 
@@ -2750,6 +3339,7 @@ def pii_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("pii"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("PII scan failed")
 
@@ -2765,8 +3355,35 @@ def lint_scripts(target_path: Path, report_formats: tuple[str, ...], output_dir:
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("script-lint"),
+        **_report_roots(target_path),
     ):
         raise click.ClickException("script lint failed")
+
+
+@cli.command("precommit-run", hidden=True)
+@click.option(
+    "--min-score",
+    type=int,
+    default=QUALITY_DEFAULT_MIN_SCORE,
+    show_default=True,
+    help="Minimum quality score (0-100) when the quality check runs.",
+)
+@click.option(
+    "--quality-config",
+    type=QUALITY_CONFIG_PATH,
+    default=None,
+    help="Override the packaged quality-default.yaml when the quality check runs.",
+)
+@click.argument("check", type=click.Choice(list(CHECKS)))
+@click.argument("paths", nargs=-1, type=str)
+def precommit_run(min_score: int, quality_config: Path | None, check: str, paths: tuple[str, ...]) -> None:
+    """Map changed files to skill roots and run one offline Tier 1 check per skill."""
+    from skillevaluator.precommit import run_precommit
+
+    code, lines = run_precommit(check, paths, min_score=min_score, quality_config=quality_config)
+    for line in lines:
+        click.echo(line)
+    raise SystemExit(code)
 
 
 @cli.command("similarity-check")
@@ -2865,6 +3482,7 @@ def similarity_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=similarity_basename,
+        **_report_roots(content_path),
     ):
         raise click.ClickException("similarity check failed")
 
@@ -2895,6 +3513,7 @@ def context_optimization_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("context optimization check failed")
 
@@ -2930,6 +3549,7 @@ def dedup_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("dedup"),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("dedup scan failed")
 
@@ -2970,7 +3590,7 @@ def _workflow_report_options(func):
 @click.option(
     "--llm/--no-llm", default=None, help="Include rubric, LLM security, and verification [default: when configured]."
 )
-@click.option("--min-score", type=click.IntRange(0, 100), default=70, show_default=True)
+@click.option("--min-score", type=click.IntRange(0, 100), default=QUALITY_DEFAULT_MIN_SCORE, show_default=True)
 @click.option(
     "--quality-config",
     type=QUALITY_CONFIG_PATH,
@@ -2979,7 +3599,16 @@ def _workflow_report_options(func):
 )
 @click.option("--pii-waivers", type=PII_WAIVERS_PATH, default=None, help=_PII_WAIVERS_HELP)
 @click.option(
-    "--profile", default=None, help="Validation policy [default: default; external is a compatibility alias]."
+    "--profile",
+    default=None,
+    help="Validation policy: default or registry [default: default; external is a compatibility alias].",
+)
+@click.option(
+    "--policy",
+    "policy_path",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Custom policy YAML overlaid on top of --profile.",
 )
 @click.option("--previous-version", default=None, help="Previous version for version checks.")
 @click.option(
@@ -2995,6 +3624,7 @@ def _tier1_workflow(
     quality_config: Path | None,
     pii_waivers: Path | None,
     profile: str | None,
+    policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
     report_formats: tuple[str, ...],
@@ -3005,10 +3635,14 @@ def _tier1_workflow(
     from skillevaluator.validators.policy import resolve_policy
 
     try:
-        policy = resolve_policy(profile=profile)
+        policy = resolve_policy(profile=profile, policy_path=policy_path)
     except (FileNotFoundError, ValueError) as exc:
         raise click.ClickException(str(exc)) from exc
-    _offer_scanner_install(checks, skip)
+    # Validators build finding paths from this root, so it is made absolute, as
+    # validate does: a relative root leaves finding paths relative to the working
+    # directory, and the report roots would then prefix the skill folder twice.
+    target_label = str(skill_path)
+    skill_path = skill_path.resolve()
     results = run_tier1_workflow(
         skill_path,
         checks=checks,
@@ -3020,16 +3654,18 @@ def _tier1_workflow(
         profile=policy,
         previous_version=previous_version,
         skillspector_baseline=skillspector_baseline,
+        prepare_scanners=lambda: _offer_scanner_install(checks, skip),
     )
     # Resolved after the run so configuration errors still leave no output.
-    output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    output_dir = _resolve_file_report_output_location(skill_path, output_dir, report_formats)
     if not emit_reports(
         results,
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("tier1"),
         policy=policy,
-        target_path=str(skill_path),
+        target_path=target_label,
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 1 checks failed or were incomplete")
 
@@ -3099,6 +3735,7 @@ def _tier2_workflow(
         output_dir=resolved_output_dir,
         basename=basename,
         target_path=str(skill_path),
+        **_report_roots(skill_path),
     ):
         raise click.ClickException("Tier 2 checks failed or were incomplete")
 
@@ -3112,11 +3749,18 @@ def _tier2_workflow(
     "--agents",
     default=None,
     help=(
-        "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
+        "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
+@click.option(
+    "--backend",
+    default="harbor",
+    show_default=True,
+    type=click.Choice(["harbor", "nemo-gym"]),
+    help="Tier 3 execution backend: Harbor, or NeMo Gym's orchestrator, agent harness and sandbox.",
+)
 @click.option(
     "--environment-kwarg",
     "--ek",
@@ -3130,11 +3774,53 @@ def _tier2_workflow(
 )
 @click.option("--skip-baseline", is_flag=True, help="Skip without-skill baseline.")
 @click.option(
+    "--reuse-baseline", metavar="RUN", default=None, help="Reuse a compatible retained baseline run id or latest."
+)
+@click.option(
+    "--compare-to",
+    metavar="RUN",
+    default=None,
+    help="Compare with-skill scores to a retained skill version or latest.",
+)
+@click.option(
     "--skip-with-skill",
     is_flag=True,
     help="Skip the with-skill arm and run only the without-skill baseline (no lift analysis).",
 )
 @click.option("--n-attempts", type=int, default=None)
+@click.option(
+    "--max-agent-tokens",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum measured agent-model tokens.",
+)
+@click.option(
+    "--max-judge-calls",
+    type=click.IntRange(min=0),
+    default=None,
+    help=(
+        "Maximum recorded non-salvage judge attempts; transport retries and RAGAS-internal requests are not counted "
+        "separately."
+    ),
+)
+@click.option(
+    "--max-attempts-total",
+    type=click.IntRange(min=0),
+    default=None,
+    help="Maximum logical Harbor attempts across agents and arms, including private comparison arms.",
+)
+@click.option(
+    "--max-cost-usd",
+    type=click.FloatRange(min=0),
+    default=None,
+    help="Maximum agent model spend; requires --price-file and excludes judge spend, setup, and container time.",
+)
+@click.option(
+    "--price-file",
+    type=click.Path(exists=True, dir_okay=False, path_type=Path),
+    default=None,
+    help="Model price JSON with input_per_mtok/output_per_mtok rates and optional cached_input_per_mtok.",
+)
 @click.option("--pass-threshold", type=float, default=None)
 @click.option(
     "--stop-on-pass/--no-stop-on-pass",
@@ -3162,6 +3848,14 @@ def _tier2_workflow(
     "--agent-runtime-preflight/--no-agent-runtime-preflight",
     default=None,
     help="Run an extra agent-only execution of the first staged task before the full matrix [default: disabled].",
+)
+@click.option(
+    "--tolerate-baseline-timeouts/--no-tolerate-baseline-timeouts",
+    default=None,
+    help=(
+        "Keep an agent scored on its clean with-skill arm when only baseline attempts hit the agent "
+        "execution timeout; its baseline and uplift are not reported [default: disabled]."
+    ),
 )
 @click.option("--timeout-multiplier", type=float, default=None)
 @click.option("--override-cpus", type=int, default=None)
@@ -3208,11 +3902,19 @@ def evaluate(
     skill_path: Path,
     agents: str | None,
     env_mode: str,
+    backend: str,
     environment_kwarg: tuple[str, ...],
     autopilot: bool,
     skip_baseline: bool,
     skip_with_skill: bool,
+    reuse_baseline: str | None,
+    compare_to: str | None,
     n_attempts: int | None,
+    max_agent_tokens: int | None,
+    max_judge_calls: int | None,
+    max_attempts_total: int | None,
+    max_cost_usd: float | None,
+    price_file: Path | None,
     pass_threshold: float | None,
     stop_on_pass: bool | None,
     n_concurrent: int | None,
@@ -3228,6 +3930,7 @@ def evaluate(
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     agent_runtime_preflight: bool | None,
+    tolerate_baseline_timeouts: bool | None,
     timeout_multiplier: float | None,
     override_cpus: int | None,
     override_memory_mb: int | None,
@@ -3246,6 +3949,21 @@ def evaluate(
     if skip_baseline and skip_with_skill:
         # Reject before --autopilot can spend a generation call on a run that cannot start.
         raise click.UsageError("--skip-baseline and --skip-with-skill are mutually exclusive (no arm would run)")
+    if reuse_baseline and (skip_baseline or skip_with_skill):
+        raise click.UsageError("--reuse-baseline is mutually exclusive with --skip-baseline and --skip-with-skill")
+    if compare_to and skip_with_skill:
+        raise click.UsageError("--compare-to is mutually exclusive with --skip-with-skill")
+    from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
+
+    try:
+        merged_config, _ = load_evals_config(skill_path)
+    except EvalsConfigError as exc:
+        raise click.UsageError(str(exc)) from exc
+    harbor_config = merged_config.get("harbor", {})
+    effective_max_cost = max_cost_usd if max_cost_usd is not None else harbor_config.get("max_cost_usd")
+    effective_price_file = price_file or harbor_config.get("price_file")
+    if effective_max_cost is not None and effective_price_file is None:
+        raise click.UsageError("--max-cost-usd requires --price-file")
     service = EvaluationService()
     # Resolved before the service is built so a non-canonical value is refused
     # at the boundary rather than after a long live run has already started.
@@ -3254,8 +3972,20 @@ def evaluate(
         evaluated_source_revision,
         evaluator_container_revision,
     )
+    local_runtime_offered = False
+
+    def prepare_local_runtime() -> None:
+        nonlocal local_runtime_offered
+        _offer_local_runtime_install(agents)
+        local_runtime_offered = True
+
     if autopilot:
-        _ensure_autopilot_dataset(skill_path, progress=progress)
+        _ensure_autopilot_dataset(
+            skill_path,
+            progress=progress,
+            evaluation_params=click.get_current_context().params,
+            prepare_environment=prepare_local_runtime if backend == "harbor" and env_mode == "local" else None,
+        )
 
     parsed_environment_kwargs = _parse_environment_kwargs_cli(environment_kwarg, env_mode=env_mode)
 
@@ -3263,10 +3993,18 @@ def evaluate(
         skill_path=skill_path,
         agents=agents,
         env_mode=env_mode,
+        backend=backend,
         environment_kwarg=environment_kwarg,
         skip_baseline=skip_baseline,
         skip_with_skill=skip_with_skill,
+        reuse_baseline=reuse_baseline,
+        compare_to=compare_to,
         n_attempts=n_attempts,
+        max_agent_tokens=max_agent_tokens,
+        max_judge_calls=max_judge_calls,
+        max_attempts_total=max_attempts_total,
+        max_cost_usd=max_cost_usd,
+        price_file=price_file,
         pass_threshold=pass_threshold,
         stop_on_pass=stop_on_pass,
         n_concurrent=n_concurrent,
@@ -3282,6 +4020,7 @@ def evaluate(
         results_dir=results_dir,
         harbor_keep_jobs=harbor_keep_jobs,
         agent_runtime_preflight=agent_runtime_preflight,
+        tolerate_baseline_timeouts=tolerate_baseline_timeouts,
         timeout_multiplier=timeout_multiplier,
         override_cpus=override_cpus,
         override_memory_mb=override_memory_mb,
@@ -3290,8 +4029,9 @@ def evaluate(
         environment_kwargs=parsed_environment_kwargs,
     )
     try:
-        if env_mode == "local":
-            _offer_local_runtime_install(agents)
+        if backend == "harbor" and env_mode == "local":
+            if not local_runtime_offered:
+                prepare_local_runtime()
             from rich.panel import Panel
             from rich.text import Text
 
@@ -3307,7 +4047,7 @@ def evaluate(
                     padding=(0, 1),
                 )
             )
-        elif env_mode == "gke":
+        elif backend == "harbor" and env_mode == "gke":
             from skillevaluator.tier3.commands import parse_agents
             from skillevaluator.tier3.harbor.runner import (
                 is_gke_vertex_workload_identity_active,
@@ -3323,7 +4063,7 @@ def evaluate(
                 console.print(
                     Panel(
                         Text(
-                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.24.0 single-pod "
+                            "Intended for trusted skills and least-privilege service accounts. Harbor 0.25.0 single-pod "
                             "GKE execution shares the pod service account and metadata server with evaluated skill commands.",
                             style="yellow",
                         ),
@@ -3357,6 +4097,14 @@ def evaluate(
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
         raise
+    except ImportError as exc:
+        from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+        if not is_missing_tier3_extra(exc):
+            raise click.ClickException(str(exc)) from exc
+        raise click.ClickException(
+            "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+        ) from exc
     except Exception as exc:
         raise click.ClickException(str(exc)) from exc
 
@@ -3371,8 +4119,26 @@ def evaluate(
 @click.option("--no-llm", is_flag=True, help="Use local templates only.")
 @click.option("--dry-run", is_flag=True, help="Preview without writing.")
 @click.option("--force", is_flag=True, help="Overwrite existing evals/evals.json.")
-@click.option("--prompt", type=click.Path(exists=True, path_type=Path), default=None)
-@click.option("--refine", is_flag=True, help="Refine cases using existing or collected trajectories.")
+@click.option(
+    "--prompt",
+    type=click.Path(exists=True, path_type=Path),
+    default=None,
+    help="Author guidance with content beyond headings (default: evals/EVAL.md).",
+)
+@click.option(
+    "--grounding",
+    type=click.Choice(["auto", "skill", "intent", "trace"]),
+    default="auto",
+    show_default=True,
+    help="Auto requires substantive author guidance or usable matching retained traces; "
+    "existing datasets need --force or --refine. Explicit trace opts into refinement; "
+    "use skill for skill-only starters.",
+)
+@click.option(
+    "--refine",
+    is_flag=True,
+    help="Opt into refinement using retained or collected trajectories after grounding selection.",
+)
 @click.option("--from-results", type=click.Path(exists=True, path_type=Path), default=None)
 @click.option("--results-dir", type=click.Path(file_okay=False, dir_okay=True, path_type=Path), default=None)
 def create_dataset(
@@ -3382,11 +4148,12 @@ def create_dataset(
     dry_run: bool,
     force: bool,
     prompt: Path | None,
+    grounding: str,
     refine: bool,
     from_results: Path | None,
     results_dir: Path | None,
 ) -> None:
-    """Create synthetic eval datasets for agent skill evaluation."""
+    """Create eval datasets from author guidance, retained traces, or explicit skill grounding."""
     from skillevaluator.evaluation import DatasetGenerationError, DatasetOptions, EvaluationService
 
     try:
@@ -3398,6 +4165,7 @@ def create_dataset(
                 dry_run=dry_run,
                 force=force,
                 prompt=prompt,
+                grounding=grounding,
                 refine=refine,
                 from_results=from_results,
                 results_dir=results_dir,
@@ -3529,6 +4297,7 @@ _DOCTOR_OPTION_TIERS = {
     "env_mode": frozenset({"3"}),
     "environment_kwarg": frozenset({"3"}),
     "agent_model": frozenset({"3"}),
+    "backend": frozenset({"3"}),
 }
 
 
@@ -3561,6 +4330,13 @@ def _doctor_tier_options(*, timeout_help: str):
 
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
+    func = click.option(
+        "--backend",
+        default="harbor",
+        show_default=True,
+        type=click.Choice(["harbor", "nemo-gym"]),
+        help="Tier 3 execution backend to check: Harbor, or NeMo Gym.",
+    )(func)
     func = click.option("--agent-model", multiple=True, help="Per-agent model override, AGENT=MODEL.")(func)
     func = click.option(
         "--environment-kwarg",
@@ -3574,7 +4350,7 @@ def _tier3_doctor_options(func):
         "--agents",
         default=None,
         help=(
-            "Comma-separated Harbor agents (claude aliases claude-code). Default follows the provider: "
+            "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
             "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
         ),
     )(func)
@@ -3591,6 +4367,7 @@ def _run_doctor(
     timeout: float = DEFAULT_PROBE_TIMEOUT_SEC,
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
+    backend: str = "harbor",
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -3618,7 +4395,18 @@ def _run_doctor(
     exit_codes = []
     for selected in selected_tiers:
         if selected == "3":
-            from skillevaluator.tier3.commands import doctor as tier3_doctor
+            try:
+                from skillevaluator.tier3.commands import doctor as tier3_doctor
+            except ImportError as exc:
+                from skillevaluator.tier3.extras import is_missing_tier3_extra
+
+                if not is_missing_tier3_extra(exc):
+                    raise
+                click.echo(
+                    "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
+                )
+                exit_codes.append(1)
+                continue
 
             exit_codes.append(
                 tier3_doctor(
@@ -3628,6 +4416,7 @@ def _run_doctor(
                     verify_models=verify_models,
                     agent_model=agent_model,
                     environment_kwargs=parsed_environment_kwargs,
+                    backend=backend,
                 )
             )
         else:
@@ -3692,6 +4481,54 @@ def health_check(ctx: click.Context, **options: Any) -> None:
     raise SystemExit(_run_doctor(ctx, **options))
 
 
+@tier3.command("import-metrics")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "-o",
+    "--output-dir",
+    type=click.Path(file_okay=False, path_type=Path),
+    required=True,
+    help="New directory for external-only JSON and Markdown reports; must not exist.",
+)
+def tier3_import_metrics(source: Path, output_dir: Path) -> None:
+    """Report precomputed custom scores without executing tests or assigning standard scores."""
+    from skillevaluator.reporting.external_metrics import import_external_metrics
+
+    try:
+        import_external_metrics(source, output_dir)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    click.echo("Imported external observations; SkillEvaluator did not execute these tests.")
+    click.echo(f"Reports: {output_dir / 'external_metrics.json'}, {output_dir / 'external_metrics.md'}")
+
+
+@tier3.command("migrate-dataset")
+@click.argument("source", type=click.Path(exists=True, dir_okay=False, path_type=Path))
+@click.option(
+    "--skill-name", default=None, help="Target skill identity; required when it cannot be inferred unambiguously."
+)
+@click.option(
+    "--output",
+    "destination",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Write to a new JSON/YAML path. Omit to preview without writing.",
+)
+def tier3_migrate_dataset(source: Path, skill_name: str | None, destination: Path | None) -> None:
+    """Preview a lossless dataset conversion, or write an explicit new destination."""
+    from skillevaluator.tier3.dataset_migration import migrate_dataset
+
+    try:
+        result = migrate_dataset(source, skill_name=skill_name, destination=destination)
+    except (OSError, ValueError, TypeError) as exc:
+        raise click.ClickException(str(exc)) from exc
+    if destination is None:
+        ensure_ascii = json_needs_ascii(result.dataset, getattr(sys.stdout, "encoding", None))
+        click.echo(json.dumps(result.dataset, indent=2, ensure_ascii=ensure_ascii))
+    else:
+        click.echo(f"Wrote {len(result.dataset['evals'])} cases to {destination}; source preserved.")
+
+
 @tier3.command("validate")
 @_skill_argument
 @click.option("--json", "as_json", is_flag=True, help="Emit JSON output.")
@@ -3702,6 +4539,81 @@ def tier3_validate(skill_path: Path, as_json: bool, strict: bool, harbor_contrac
     from skillevaluator.tier3.commands import validate_evals as tier3_validate_evals
 
     raise SystemExit(tier3_validate_evals(skill_path, as_json=as_json, strict=strict, harbor_contract=harbor_contract))
+
+
+@tier3.command("compare-versions")
+@_skill_argument
+@click.option("--current", required=True, metavar="RUN", help="Current retained run id or latest.")
+@click.option("--prior", required=True, metavar="RUN", help="Prior retained run id or latest different revision.")
+@click.option("--results-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+@click.option("--json", "as_json", is_flag=True, help="Print the comparison as JSON.")
+def compare_versions_command(
+    skill_path: Path, current: str, prior: str, results_dir: Path | None, as_json: bool
+) -> None:
+    """Compare two retained skill versions without execution or writes."""
+    from skillevaluator.tier3.results_location import resolve_results_root
+    from skillevaluator.tier3.version_comparison import compare_retained_runs, version_comparison_lines
+
+    comparison = compare_retained_runs(resolve_results_root(skill_path, results_dir), current, prior)
+    if as_json:
+        click.echo(json.dumps(comparison, indent=2))
+    else:
+        from rich.table import Table
+        from rich.text import Text
+
+        for line in version_comparison_lines(comparison):
+            console.print(Text(line))
+        if comparison.get("status") == "available":
+            table = Table("Agent", "Prior", "Current", "Delta", "Regression")
+            for agent, values in comparison["agents"].items():
+                table.add_row(
+                    Text(agent),
+                    f"{values['prior_overall']:.4f}",
+                    f"{values['current_overall']:.4f}",
+                    f"{values['delta']:+.4f}",
+                    str(values["regression"]),
+                )
+            console.print(table)
+    if comparison.get("status") != "available":
+        raise click.exceptions.Exit(1)
+
+
+@tier3.command("history")
+@_skill_argument
+@click.option("--results-dir", type=click.Path(file_okay=False, path_type=Path), default=None)
+@click.option("--agent", default=None, help="Include only this agent's history.")
+@click.option("--json", "as_json", is_flag=True, help="Print history as JSON.")
+@click.option(
+    "--output",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Export to .json, .csv or .md outside the results root.",
+)
+def tier3_history(
+    skill_path: Path, results_dir: Path | None, agent: str | None, as_json: bool, output: Path | None
+) -> None:
+    """List retained Skill Lift runs chronologically without execution."""
+    from skillevaluator.tier3.history import collect_history, export_history, print_history
+    from skillevaluator.tier3.results_location import iter_candidate_results_roots
+
+    try:
+        if output is not None:
+            if output.suffix.lower() not in {".json", ".csv", ".md"}:
+                raise click.UsageError("--output must end in .json, .csv or .md")
+            if any(
+                output.resolve().is_relative_to(root.resolve())
+                for root in iter_candidate_results_roots(skill_path, results_dir)
+            ):
+                raise click.UsageError("--output must be outside the results roots (history is read-only)")
+        history = collect_history(skill_path, results_dir, agent)
+        if output is not None:
+            output.write_text(export_history(history, output.suffix.lower()), encoding="utf-8", newline="")
+        if as_json:
+            click.echo(export_history(history, ".json"), nl=False)
+        else:
+            print_history(history, console)
+    except (OSError, ValueError) as exc:
+        raise click.ClickException(str(exc)) from exc
 
 
 @tier3.command("feedback")
@@ -3759,8 +4671,14 @@ tier3.add_command(view, "view")
 tier3.add_command(tier3_doctor_command, "doctor")
 
 from skillevaluator.tier3.decoy_commands import select_decoys_command
+from skillevaluator.tier3.grader_validation import validate_grader
 
 tier3.add_command(select_decoys_command, "select-decoys")
+tier3.add_command(validate_grader, "validate-grader")
+
+from skillevaluator.tier3.interaction_commands import interact_command
+
+tier3.add_command(interact_command, "interact")
 
 from skillevaluator.tier3.workflow import build_tier3_workflow
 

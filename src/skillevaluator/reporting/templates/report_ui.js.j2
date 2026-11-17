@@ -3,6 +3,7 @@
 let reportSkillStatus = 'all';
 let reportAffectedSkills = null;
 let reportValidatorStatus = 'all';
+let reportSearchOpenedDetails = new Set();
 function reportPressedButtons() {
     document.querySelectorAll('.tier-card[data-target-tab]').forEach(card => card.setAttribute('aria-pressed', card.classList.contains('active') ? 'true' : 'false'));
     document.querySelectorAll('.filter-btn,.severity-filter-btn,.view-toggle-btn').forEach(button => button.setAttribute('aria-pressed', button.classList.contains('active') ? 'true' : 'false'));
@@ -29,12 +30,31 @@ function applyReportSearch() {
             if (section.classList.contains('active')) { total++; if (shown) visible++; }
         });
     });
-    document.querySelectorAll('.summary-table tbody tr[data-status]').forEach(row => {
+    document.querySelectorAll('#tab-tier1 .summary-table tbody tr[data-status]').forEach(row => {
         row.style.display = (reportValidatorStatus === 'all' || row.dataset.status === reportValidatorStatus) && (!query || row.textContent.toLocaleLowerCase().includes(query)) ? '' : 'none';
     });
+    // Folded evidence remains searchable. Restore only disclosures search opened.
+    reportSearchOpenedDetails.forEach(detail => { detail.open = false; });
+    reportSearchOpenedDetails.clear();
+    let evidenceMatches = 0;
+    let firstEvidenceMatch = null;
+    if (query) {
+        document.querySelectorAll('details[id^="plugin-"],.t3-eval-evidence,.t3-ds-card,.t3-ds-card details').forEach(detail => {
+            if (!detail.textContent.toLocaleLowerCase().includes(query)) return;
+            evidenceMatches++;
+            if (!firstEvidenceMatch) firstEvidenceMatch = detail;
+            for (let node = detail; node; node = node.parentElement) {
+                if (node.tagName === 'DETAILS' && !node.open) {
+                    reportSearchOpenedDetails.add(node);
+                    node.open = true;
+                }
+            }
+        });
+    }
+    if (query && visible === 0 && firstEvidenceMatch) reportRevealTier(firstEvidenceMatch);
     const counter = document.getElementById('report-search-count');
-    counter.textContent = visible + ' of ' + total + ' shown';
-    document.getElementById('report-no-matches').hidden = visible !== 0;
+    counter.textContent = visible + ' of ' + total + ' shown' + (evidenceMatches ? ' · ' + evidenceMatches + ' evidence sections matched' : '');
+    document.getElementById('report-no-matches').hidden = visible !== 0 || evidenceMatches !== 0;
     ['skill-empty-msg','validator-empty-msg'].forEach(id => { const el = document.getElementById(id); if (el) el.style.display = 'none'; });
     reportPressedButtons();
 }
@@ -67,6 +87,7 @@ document.addEventListener('DOMContentLoaded', function() {
 // Evidence links intentionally reveal their destination even if a previous search hid it.
 const originalOpenSkillCard = _openSkillCard;
 _openSkillCard = function(name) {
+    activateReportTier('tier1', {scroll:false, focus:false});
     reportAffectedSkills = null;
     document.getElementById('skill-filter-banner')?.classList.remove('visible');
     const query = document.getElementById('report-search');
@@ -97,33 +118,279 @@ filterToAffectedSkills = function(row) {
 // Raw scanner output stays collapsed: it only repeats finding cards, which print.
 let reportPrintClosedDetails = [];
 window.addEventListener('beforeprint', function() {
+    document.documentElement.setAttribute('data-report-printing', '');
     reportPrintClosedDetails = Array.from(document.querySelectorAll('details:not([open]):not(.raw-output)'));
     reportPrintClosedDetails.forEach(detail => { detail.open = true; });
+    // Disclosure opening must precede the synchronous print chart resize.
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
 });
 window.addEventListener('afterprint', function() {
+    document.documentElement.removeAttribute('data-report-printing');
     reportPrintClosedDetails.forEach(detail => { detail.open = false; });
     reportPrintClosedDetails = [];
+    reportMeasureNavigation();
 });
 // "Fix first" links open their check or finding: skill view, card expanded,
 // filters cleared. The id goes in the address so the link can be shared.
 function openFinding(id) {
     const target = document.getElementById(id);
     if (!target) return true;
+    reportRevealTier(target);
     const card = target.closest('.skill-card');
     if (card) _openSkillCard(card.dataset.skillName);
     for (let node = target; node; node = node.parentElement) {
         if (node.tagName === 'DETAILS') node.open = true;
     }
     try { history.replaceState(null, '', '#' + id); } catch (err) { /* A file:// page may refuse; the jump still works. */ }
-    const reduceMotion = window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    target.scrollIntoView({ behavior: reduceMotion ? 'auto' : 'smooth', block: 'center' });
+    reportScrollTo(target, 'center');
     target.setAttribute('tabindex', '-1');
     target.focus({ preventScroll: true });
     target.classList.add('finding-flash');
     setTimeout(function() { target.classList.remove('finding-flash'); }, 2000);
     return false;
 }
+// Sidebar sections and the skip link open at their top and take focus, like a native anchor.
+function openReportSection(target) {
+    if (target.tagName === 'DETAILS') target.open = true;
+    target.tabIndex = -1;
+    reportScrollTo(target);
+    target.focus({preventScroll:true});
+    reportCurrentSection(target.id);
+}
+// Share destination routing for initial URLs and clicks, including the alternate validator view.
+function openReportDestination(id) {
+    const target = document.getElementById(id);
+    if (!target) return true;
+    if (target.classList.contains('t3-agent-anchor') && typeof jumpToTier3Agent === 'function') {
+        jumpToTier3Agent(id);
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
+    // Whole tiers and sections are not evidence: never centre a container taller than the viewport.
+    if (/^tab-tier\d$/.test(id) && target.classList.contains('tab-content')) {
+        activateReportTier(id.slice(4));
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
+    if (Array.from(document.querySelectorAll('[data-report-section]')).some(link => link.dataset.reportSection === id)) {
+        openReportSection(target);
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        return false;
+    }
+    if (target.classList.contains('validator-card') && /^validator-\d+$/.test(id)) {
+        scrollToValidator(id.slice('validator-'.length));
+        try { history.replaceState(null, '', '#' + id); } catch (err) { /* file:// history is optional. */ }
+        reportPressedButtons();
+        return false;
+    }
+    return openFinding(id);
+}
 // Run after load so the browser's own jump to the fragment does not override it.
 window.addEventListener('load', function() {
-    if (/^#[fc]-/.test(location.hash)) setTimeout(function() { openFinding(decodeURIComponent(location.hash.slice(1))); }, 0);
+    if (location.hash.length > 1) setTimeout(function() {
+        try { openReportDestination(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
+    }, 0);
+});
+
+// Navigating to a fragment on the same standalone file does not fire load again.
+window.addEventListener('hashchange', function() {
+    if (location.hash.length > 1) {
+        try { openReportDestination(decodeURIComponent(location.hash.slice(1))); } catch (err) { /* Ignore malformed fragments. */ }
+    }
+});
+
+// All entry points (sidebar, tiles, mobile links and evidence) use this tier state.
+function reportScrollBehavior() {
+    return window.matchMedia && window.matchMedia('(prefers-reduced-motion: reduce)').matches ? 'auto' : 'smooth';
+}
+function reportMeasureNavigation() {
+    [['.main-header', '--report-header-height'], ['.mobile-tier-nav', '--mobile-nav-height'], ['.t3-subtabs', '--tier3-nav-height']].forEach(([selector, property]) => {
+        const nav = document.querySelector(selector);
+        const pinned = nav && ['sticky', 'fixed'].includes(getComputedStyle(nav).position);
+        const height = pinned && nav.getClientRects().length ? nav.getBoundingClientRect().height : 0;
+        document.documentElement.style.setProperty(property, height + 'px');
+    });
+}
+function reportScrollTo(target, block = 'start') {
+    // Tier activation and font/layout changes must be measured before scrolling,
+    // without waiting for the next ResizeObserver delivery.
+    reportMeasureNavigation();
+    target.scrollIntoView({behavior: reportScrollBehavior(), block});
+}
+function reportCurrentSection(id) {
+    document.querySelectorAll('.report-sidebar [data-report-section],.report-sidebar [data-report-tier]').forEach(link => {
+        const current = (link.dataset.reportSection || 'tab-' + link.dataset.reportTier) === id;
+        link.classList.toggle('sidebar-current', current);
+        if (current) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+    });
+}
+function activateReportTier(tierId, options = {}) {
+    const panel = document.getElementById('tab-' + tierId);
+    if (!panel) return false;
+    document.querySelectorAll('.tab-content').forEach(item => item.classList.toggle('active', item === panel));
+    document.querySelectorAll('.tier-card[data-target-tab]').forEach(tile => {
+        const selected = tile.dataset.targetTab === tierId;
+        tile.classList.toggle('active', selected);
+        tile.setAttribute('aria-pressed', String(selected));
+    });
+    document.querySelectorAll('.nav-tabs [data-report-tier]').forEach(link => {
+        const selected = link.dataset.reportTier === tierId;
+        link.classList.toggle('active', selected);
+        if (selected) link.setAttribute('aria-current', 'location');
+        else link.removeAttribute('aria-current');
+    });
+    reportMeasureNavigation();
+    reportCurrentSection(panel.id);
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
+    if (options.scroll !== false) reportScrollTo(panel);
+    if (options.focus !== false) panel.focus({preventScroll:true});
+    return true;
+}
+function activateReportTabs(tabSelector, panelSelector, panelId, button) {
+    const panel = document.getElementById(panelId);
+    if (!panel) return;
+    document.querySelectorAll(panelSelector).forEach(item => item.classList.toggle('active', item === panel));
+    document.querySelectorAll(tabSelector).forEach(tab => {
+        const selected = tab.getAttribute('aria-controls') === panelId;
+        tab.classList.toggle('active', selected);
+        tab.setAttribute('aria-selected', String(selected));
+        tab.tabIndex = selected ? 0 : -1;
+    });
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
+    if (button) button.focus({preventScroll:true});
+}
+function reportTabKeyboard(event) {
+    const tabs = Array.from(event.currentTarget.querySelectorAll('[role="tab"]'));
+    const index = tabs.indexOf(event.target);
+    if (index < 0) return;
+    let next;
+    if (event.key === 'ArrowRight') next = (index + 1) % tabs.length;
+    if (event.key === 'ArrowLeft') next = (index + tabs.length - 1) % tabs.length;
+    if (event.key === 'Home') next = 0;
+    if (event.key === 'End') next = tabs.length - 1;
+    if (next !== undefined) {
+        event.preventDefault();
+        tabs.forEach((tab, i) => { tab.tabIndex = i === next ? 0 : -1; });
+        tabs[next].focus();
+    } else if (event.key === 'Enter' || event.key === ' ') {
+        event.preventDefault();
+        event.target.click();
+    }
+}
+let reportThemePreference = document.documentElement.dataset.defaultTheme || 'light';
+const reportColorScheme = window.matchMedia ? window.matchMedia('(prefers-color-scheme: dark)') : null;
+function applyReportTheme() {
+    const theme = reportThemePreference === 'system' ? (reportColorScheme?.matches ? 'dark' : 'light') : reportThemePreference;
+    document.documentElement.setAttribute('data-theme', theme);
+    const control = document.getElementById('report-theme');
+    if (control) control.value = reportThemePreference;
+    const icon = document.getElementById('theme-icon');
+    const text = document.getElementById('theme-text');
+    if (icon) icon.textContent = theme === 'dark' ? '☀' : '☾';
+    if (text) text.textContent = theme === 'dark' ? 'Light' : 'Dark';
+    if (window.rebuildTier3Charts) window.rebuildTier3Charts();
+}
+function setReportTheme(preference) {
+    reportThemePreference = ['light','dark'].includes(preference) ? preference : 'system';
+    try {
+        localStorage.setItem('skillevaluator-theme', reportThemePreference);
+    } catch (err) { /* Standalone reports work without storage. */ }
+    applyReportTheme();
+}
+function toggleTheme() {
+    setReportTheme(document.documentElement.getAttribute('data-theme') === 'dark' ? 'light' : 'dark');
+}
+function initReportTheme() {
+    try {
+        const saved = localStorage.getItem('skillevaluator-theme');
+        reportThemePreference = ['light','dark','system'].includes(saved) ? saved : (document.documentElement.dataset.defaultTheme || 'light');
+    } catch (err) { /* Follow system when storage is unavailable. */ }
+    applyReportTheme();
+    if (reportColorScheme?.addEventListener) reportColorScheme.addEventListener('change', function() {
+        if (reportThemePreference === 'system') applyReportTheme();
+    });
+}
+function showDedupTab(which) {
+    const panel = document.getElementById('dedup-' + which);
+    if (!panel) return;
+    document.querySelectorAll('.dedup-subtab').forEach(el => el.style.display = el === panel ? 'block' : 'none');
+    document.querySelectorAll('.tier2-subtabs .nav-tab').forEach(button => {
+        const selected = button.getAttribute('aria-controls') === panel.id;
+        button.classList.toggle('active', selected);
+        button.setAttribute('aria-selected', String(selected));
+        button.tabIndex = selected ? 0 : -1;
+    });
+}
+function reportRevealTier(target) {
+    const panel = target.closest('.tab-content');
+    if (panel) activateReportTier(panel.id.slice(4), {scroll:false, focus:false});
+    const dedup = target.closest('.dedup-subtab');
+    if (dedup) showDedupTab(dedup.id.slice('dedup-'.length));
+    const local = target.closest('.t3-page');
+    if (local) activateReportTabs('.t3-subtab', '.t3-page', local.id);
+    const agent = target.closest('.t3-agent-panel');
+    if (agent) activateReportTabs('.t3-agent-tab-btn', '.t3-agent-panel', agent.id);
+}
+document.addEventListener('DOMContentLoaded', function() {
+    document.querySelectorAll('[data-report-tier]').forEach(link => link.addEventListener('click', function(event) {
+        event.preventDefault();
+        activateReportTier(link.dataset.reportTier);
+    }));
+    document.querySelectorAll('[data-report-tier-tile]').forEach(tile => {
+        tile.addEventListener('click', function() { activateReportTier(tile.dataset.targetTab); });
+        tile.addEventListener('keydown', function(event) {
+            if ((event.key === 'Enter' || event.key === ' ') && event.target === tile) {
+                event.preventDefault();
+                tile.click();
+            }
+        });
+    });
+    document.querySelectorAll('.t3-subtabs,.t3-agent-tabs,.tier2-subtabs').forEach(list => list.addEventListener('keydown', reportTabKeyboard));
+    const initial = document.querySelector('.tab-content.active') || document.querySelector('.tab-content');
+    if (initial) activateReportTier(initial.id.slice(4), {scroll:false, focus:false});
+    reportCurrentSection('report-workspace');
+    document.querySelectorAll('[data-report-section]').forEach(link => link.addEventListener('click', function(event) {
+        event.preventDefault();
+        const target = document.getElementById(link.dataset.reportSection);
+        if (target) openReportSection(target);
+    }));
+    reportMeasureNavigation();
+    if (window.ResizeObserver) {
+        const observer = new ResizeObserver(reportMeasureNavigation);
+        document.querySelectorAll('.main-header,.mobile-tier-nav,.t3-subtabs').forEach(nav => observer.observe(nav));
+    }
+    window.addEventListener('resize', reportMeasureNavigation);
+    let navigationFrame = null;
+    window.addEventListener('scroll', function() {
+        if (navigationFrame !== null) return;
+        navigationFrame = requestAnimationFrame(function() {
+            navigationFrame = null;
+            const details = document.getElementById('run-metadata');
+            const evidence = document.getElementById('report-evidence');
+            const panel = document.querySelector('.tab-content.active');
+            const offset = parseFloat(getComputedStyle(document.documentElement).getPropertyValue('--mobile-nav-height')) || 0;
+            const atEnd = scrollY > 0 && scrollY + innerHeight >= document.documentElement.scrollHeight - 2;
+            if (details && (details.getBoundingClientRect().top <= offset + 100 || (atEnd && document.activeElement === details))) reportCurrentSection('run-metadata');
+            else if (evidence && panel && (evidence.getBoundingClientRect().top <= offset + 100 || atEnd)) reportCurrentSection(panel.id);
+            else reportCurrentSection('report-workspace');
+        });
+    }, {passive:true});
+    // Native fragment links also reveal their parent tier, with no name-based CSS selectors.
+    document.addEventListener('click', function(event) {
+        const link = event.target.closest('a[href^="#"]');
+        if (!link || link.hasAttribute('onclick') || link.dataset.reportSection || link.dataset.reportTier) return;
+        let id;
+        try { id = decodeURIComponent(link.getAttribute('href').slice(1)); } catch (err) { return; }
+        const target = document.getElementById(id);
+        if (!target) return;
+        event.preventDefault();
+        openReportDestination(id);
+    });
+});
+
+// The copied native insight cards use inert data attributes for copy actions.
+document.addEventListener('click', function(event) {
+    const button = event.target.closest('[data-report-action="copy"]');
+    if (button && typeof tier3CopyText === 'function') tier3CopyText(button, button.dataset.copyText || '');
 });

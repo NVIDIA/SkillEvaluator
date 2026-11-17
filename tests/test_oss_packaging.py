@@ -155,7 +155,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     assert base_names.isdisjoint({"harbor", "litellm"})
     assert len(harbor_requirements) == 1
     assert harbor_requirements[0].extras == {"gke"}
-    assert HARBOR_VERSION == "0.24.0"
+    assert HARBOR_VERSION == "0.25.0"
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier
@@ -399,6 +399,7 @@ def test_security_extra_uses_pip_audit_without_bundling_safety() -> None:
 
     assert any(requirement.startswith("pip-audit") for requirement in security)
     assert not any(requirement.startswith("safety") for requirement in security)
+    assert any(requirement.startswith("bandit") for requirement in project["project"]["dependencies"])
     assert "safety" not in lock_names
     assert "safety-schemas" not in lock_names
     assert "nltk" not in lock_names
@@ -427,6 +428,25 @@ def test_third_party_notices_do_not_list_removed_safety_dependency() -> None:
     assert "Safety (MIT)" not in notices
 
 
+def test_third_party_notices_list_each_group_with_its_direct_dependencies() -> None:
+    project = _project()["project"]
+    extras = project["optional-dependencies"]
+    groups = {
+        "Base": project["dependencies"],
+        "LLM": extras["llm"],
+        "Tier 3": extras["tier3"],
+        "Security": extras["security"],
+        "Dashboard": extras["dashboard"],
+    }
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    rows = dict(re.findall(r"^\| ([^|]+?) \| ([^|]+?) \|$", notices, flags=re.MULTILINE))
+
+    for group, raw_requirements in groups.items():
+        declared = {canonicalize_name(Requirement(raw).name) for raw in raw_requirements} - {"skillevaluator"}
+        listed = {canonicalize_name(name) for name in re.findall(r"([A-Za-z0-9._-]+) \(", rows[group])}
+        assert listed == declared, f"{group} row does not match pyproject.toml"
+
+
 def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     dependencies = [Requirement(raw) for raw in _project()["project"]["dependencies"]]
     idna_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "idna"]
@@ -435,6 +455,27 @@ def test_idna_is_a_bounded_direct_dependency_with_a_license_notice() -> None:
     assert len(idna_requirements) == 1
     assert str(idna_requirements[0].specifier) == "<4,>=3.10"
     assert "IDNA (BSD-3-Clause)" in notices
+
+
+def test_uv_is_a_base_dependency_so_plain_pip_can_provision_skillspector() -> None:
+    project = _project()
+    dependencies = [Requirement(raw) for raw in project["project"]["dependencies"]]
+    extras = [Requirement(raw) for values in project["project"]["optional-dependencies"].values() for raw in values]
+    uv_requirements = [requirement for requirement in dependencies if canonicalize_name(requirement.name) == "uv"]
+    lock_names = {package["name"] for package in _lock()["package"]}
+    notices = (REPO_ROOT / "THIRD_PARTY_NOTICES.md").read_text(encoding="utf-8")
+    installation = (REPO_ROOT / "docs" / "installation.mdx").read_text(encoding="utf-8")
+
+    assert len(uv_requirements) == 1
+    assert str(uv_requirements[0].specifier) == ">=0.11.27"
+    assert uv_requirements[0].marker is None
+    assert "uv" in lock_names
+    assert "uv (Apache-2.0 or MIT)" in notices
+    # uv runs SkillSpector in its own environment; SkillSpector itself stays out of the dependency set.
+    assert not any(canonicalize_name(requirement.name) == "skillspector" for requirement in [*dependencies, *extras])
+    assert "skillspector" not in lock_names
+    assert "uv is installed with SkillEvaluator" in installation
+    assert "The first run needs uv" not in installation
 
 
 def test_tier3_direct_dependencies_have_complete_license_notices() -> None:
@@ -541,7 +582,7 @@ def test_public_readme_is_a_concise_docs_landing_page() -> None:
     assert "\n## Tier 1:" not in readme
     assert "Skill Evaluator" not in readme
     assert "Skillevaluator" not in readme
-    assert len(readme.split()) <= 1100
+    assert len(readme.split()) <= 1200
 
 
 def test_release_metadata_is_public_facing_and_version_consistent() -> None:
@@ -774,6 +815,29 @@ def test_public_docs_show_tier_two_collection_and_catalog_workflows() -> None:
     assert "sends each discovered `SKILL.md` in full" in public_docs
     assert "Only candidate clusters found by the embedding stage are" in public_docs
     assert "sent to the configured chat LLM for classification" in public_docs
+    # One unchanged skill with invalid frontmatter stops the CI comparison catalog.
+    ci_catalog = "`name: 2048`, `name: yes`, or `description: [Draft]`, stops that catalog"
+    assert ci_catalog in " ".join(guide.split())
+    # CI builds that catalog only from more than one skill; the release note says so too.
+    condition = "When the configured skill roots hold more than one skill, CI"
+    assert condition in " ".join(guide.split())
+    changelog = (REPO_ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    lead = "- All-tier CI now says when a skill's frontmatter stops the Tier 2 comparison catalog"
+    entries = [" ".join(entry.split()) for entry in re.split(r"\n(?=- )|\n\s*\n", changelog)]
+    catalog_entries = [entry for entry in entries if entry.startswith(lead)]
+    assert len(catalog_entries) == 1
+    assert f"{condition} builds the catalog from all of them" in catalog_entries[0]
+    assert "With one skill there is no catalog, and such frontmatter does not stop Tier 2." in catalog_entries[0]
+    # The edge-case table states the same condition.
+    assert "In [automatic CI](#tier-2-in-automatic-ci) with more than one skill, stops the comparison catalog" in guide
+    # A limit error stops at its own skill, so CI then names no invalid skill.
+    unnamed = "no skill, not even one whose frontmatter is invalid"
+    assert f"the diagnostics then name {unnamed}" in " ".join(guide.split())
+    assert f"the log then names {unnamed}." in catalog_entries[0]
+    # A SKILL.md that is not UTF-8 is named with them, under the same reason.
+    encoding = "that is not valid UTF-8, such as one saved as UTF-16 or as Windows-1252 with an accented letter"
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in " ".join(guide.split())
+    assert f"{encoding}, stops the catalog with the same reason and is named the same way" in catalog_entries[0]
     assert "NVI" + "DIA" + "_INFERENCE_KEY" not in public_docs  # oss-boundary-anchor: docs-retired-credential
 
 
@@ -786,13 +850,13 @@ def test_public_docs_show_external_nvidia_build_harness_paths_only() -> None:
     assert f"`{CHAT_DEFAULT_OPENAI}`" in public_docs
     assert "gpt-5.4-mini" in public_docs
     assert f"`{CHAT_DEFAULT_ANTHROPIC}`" in public_docs
-    assert "nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "Nemotron Super" in public_docs
+    assert "nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "Nemotron 3.5 Lightning" in public_docs
     assert "meta/llama-3.1-8b-instruct" in public_docs
-    assert "--agent-model opencode=nvidia/nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model codex=nvidia/nemotron-3-super-120b-a12b" in public_docs
-    assert "--agent-model claude-code=nvidia/nemotron-3-super-120b-a12b" in public_docs
+    assert "--agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
+    assert "--agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b" in public_docs
     assert "--agent-model opencode=nvidia/meta/llama-3.1-8b-instruct" in public_docs
     assert "skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker\n" in tier3
     assert "skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker\n" in tier3
@@ -885,13 +949,17 @@ def test_launch_docs_address_scanner_and_naming_ambiguities() -> None:
     assert "are not interchangeable" in environment
 
 
-SKILLSPECTOR_RELEASE = "v2.13.3"
+SKILLSPECTOR_RELEASE = "v2.13.4"
 # Tag commit of SKILLSPECTOR_RELEASE. The Tier 1 CI image installs this commit's
 # source archive, so it must move together with the install instructions.
-SKILLSPECTOR_RELEASE_COMMIT = "38a1dfe93325d2f8bfcd4f8d0241eed706334915"
+SKILLSPECTOR_RELEASE_COMMIT = "54824463814a0be01360792523ec7245a69190fc"
 
 
 def test_skillspector_install_instructions_pin_one_release() -> None:
+    from skillevaluator.utils.scanner_install import SKILLSPECTOR_VERSION
+
+    assert f"v{SKILLSPECTOR_VERSION}" == SKILLSPECTOR_RELEASE
+
     sources = [
         REPO_ROOT / "README.md",
         *(REPO_ROOT / "docs").rglob("*.mdx"),
@@ -919,7 +987,18 @@ def test_skillspector_install_instructions_pin_one_release() -> None:
         flags=re.MULTILINE,
     )
 
-    assert install_specs == {f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE}"}
+    tag_spec = f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE}"
+    commit_spec = f"git+https://github.com/NVIDIA/SkillSpector.git@{SKILLSPECTOR_RELEASE_COMMIT}"
+    ci_recipe_specs = set(
+        re.findall(
+            r"git\+https://github\.com/NVIDIA/SkillSpector\.git[^\s`\"]*",
+            (REPO_ROOT / "docs" / "ci-integration.mdx").read_text(encoding="utf-8"),
+        )
+    )
+    # The copy-paste CI recipe pins the release commit so a moved tag cannot change what a job installs;
+    # everything else pins the release tag. Both name the same release.
+    assert ci_recipe_specs == {commit_spec}
+    assert install_specs == {tag_spec, commit_spec}
     assert archive_refs == {SKILLSPECTOR_RELEASE_COMMIT}
     assert notice_rows == [(SKILLSPECTOR_RELEASE_COMMIT[:7], SKILLSPECTOR_RELEASE_COMMIT)]
 

@@ -156,6 +156,19 @@ def test_no_expected_script_is_unchanged(check) -> None:
     assert result["passed"] is True
 
 
+@pytest.mark.parametrize("placeholder", ["None", " NONE ", "null", "N/A", "-", " \t"])
+@pytest.mark.parametrize("check", IMPLEMENTATIONS)
+def test_placeholder_expected_script_matches_no_expectation(check, placeholder) -> None:
+    calls = _bash("python other.py")
+    expected = check(calls, None)
+    actual = check(calls, placeholder)
+
+    assert actual["score"] == expected["score"]
+    assert actual["passed"] == expected["passed"]
+    assert actual["reason"] == expected["reason"]
+    assert "Execute called but not with None" not in actual["reason"]
+
+
 @pytest.mark.parametrize("check", IMPLEMENTATIONS)
 def test_unrelated_execution_still_reports_the_expected_script(check) -> None:
     result = check(_bash("ls -la"), EXPECTED_SCRIPT)

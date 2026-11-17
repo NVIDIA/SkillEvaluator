@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
@@ -39,6 +40,13 @@ def skill(tmp_path):
         "# Summarize text\n\nRead the supplied file and return a concise summary.\n",
     )
     return path
+
+
+@pytest.fixture(autouse=True)
+def isolate_scanner_preparation(monkeypatch):
+    # Workflow composition tests do not install tools. Ordering tests below
+    # replace this stub with explicit spies for both rejected and valid inputs.
+    monkeypatch.setattr("skillevaluator.cli._offer_scanner_install", lambda *_args: None)
 
 
 def _result(name):
@@ -149,7 +157,9 @@ def test_keyless_tier1_reports_unrun_llm_scope(skill, tmp_path):
 
 
 @pytest.mark.parametrize("tier,options", [("tier1", ["--llm"]), ("tier2", [])])
-def test_required_provider_failure_is_a_configuration_error(tier, options, skill, tmp_path):
+def test_required_provider_failure_is_a_configuration_error(tier, options, skill, tmp_path, monkeypatch):
+    preparations = []
+    monkeypatch.setattr("skillevaluator.cli._offer_scanner_install", lambda *_args: preparations.append("prepare"))
     result = CliRunner().invoke(cli, [tier, str(skill), *options, "-o", str(tmp_path / "reports")])
     assert result.exit_code == 1
     assert result.stdout == ""
@@ -158,6 +168,98 @@ def test_required_provider_failure_is_a_configuration_error(tier, options, skill
     assert ("--no-llm" in result.stderr) is (tier == "tier1")
     assert "No such command" not in result.output
     assert not (tmp_path / "reports").exists()
+    assert preparations == []
+
+
+@pytest.mark.parametrize("case", ["unknown_checks", "empty_checks", "missing_manifest"])
+def test_tier1_rejects_local_configuration_before_scanner_preparation(case, skill, tmp_path, monkeypatch):
+    preparations = []
+    monkeypatch.setattr("skillevaluator.cli._offer_scanner_install", lambda *_args: preparations.append("prepare"))
+    options = ["--no-llm"]
+    if case == "unknown_checks":
+        options += ["--checks", "schema,unknown"]
+    elif case == "empty_checks":
+        options += ["--checks", " , "]
+    else:
+        (skill / "SKILL.md").unlink()
+
+    result = CliRunner().invoke(cli, ["tier1", str(skill), *options, "-o", str(tmp_path / "reports")])
+
+    assert result.exit_code == 2, result.output
+    assert preparations == []
+    assert not (tmp_path / "reports").exists()
+
+
+def test_tier1_rejects_missing_llm_extra_before_scanner_preparation(skill, tmp_path, monkeypatch):
+    import sys
+
+    preparations = []
+    monkeypatch.setattr("skillevaluator.cli._offer_scanner_install", lambda *_args: preparations.append("prepare"))
+    monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+    monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+    monkeypatch.setitem(sys.modules, "openai", None)
+
+    result = CliRunner().invoke(cli, ["tier1", str(skill), "--llm", "-o", str(tmp_path / "reports")])
+
+    assert result.exit_code == 1, result.output
+    assert "Install skillevaluator[llm]" in result.stderr
+    assert result.stdout == ""
+    assert preparations == []
+    assert not (tmp_path / "reports").exists()
+
+
+@pytest.mark.parametrize("mode", ["keyless", "no_llm", "configured_llm"])
+def test_tier1_prepares_scanners_once_after_preflight_and_before_checks(mode, skill, tmp_path, monkeypatch):
+    from skillevaluator.tier1 import commands
+
+    stages = []
+    monkeypatch.setattr(
+        "skillevaluator.cli._offer_scanner_install",
+        lambda checks, skip: stages.append(("prepare", checks, skip)),
+    )
+
+    def validation(_path, **kwargs):
+        stages.append(("validation", kwargs["checks"], kwargs["skip"]))
+        return _result("Schema Validation")
+
+    def rubric(_path, **_kwargs):
+        stages.append(("rubric", None, None))
+        return _result("Rubric Evaluation")
+
+    monkeypatch.setattr(commands, "run_validation", validation)
+    monkeypatch.setattr(commands, "run_rubric_eval", rubric)
+    options = []
+    if mode == "no_llm":
+        options = ["--no-llm"]
+    elif mode == "configured_llm":
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+        options = ["--llm"]
+    reports = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier1",
+            str(skill),
+            "--checks",
+            "schema,security",
+            "--skip",
+            "security",
+            *options,
+            "-r",
+            "json",
+            "-o",
+            str(reports),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    expected = [("prepare", "schema,security", "security"), ("validation", "schema,security", "security")]
+    if mode == "configured_llm":
+        expected.append(("rubric", None, None))
+    assert stages == expected
+    assert _report(reports)["results"][0]["workflow"]["tier"] == 1
 
 
 def test_tier2_combines_intra_and_catalog_comparison_once(skill, tmp_path, monkeypatch):
@@ -238,6 +340,50 @@ def test_tier2_without_catalog_does_not_manufacture_a_similarity_pass(skill, tmp
     assert len(payload["results"]) == 1
     assert payload["results"][0]["workflow"]["stages"]["catalog_comparison"]["status"] == "skipped"
     assert "--catalog" in result.output
+
+
+@pytest.mark.parametrize(
+    ("tier", "validator"),
+    [("tier1", "Schema Validation"), ("tier2", "Context Deduplication")],
+)
+@pytest.mark.parametrize(
+    ("directory", "target"),
+    [("parent", "sample"), ("parent", "sample/"), ("skill", ".")],
+)
+def test_direct_tier_json_names_the_clean_skill_and_records_the_target_as_given(
+    tier, validator, directory, target, skill, tmp_path, monkeypatch
+):
+    """A clean result names no file and has no quality score, so the JSON
+    names the skill from the target path, which records the path as typed.
+    ``.`` has no folder name of its own, so the folder it opens names the skill."""
+    from skillevaluator.tier1 import commands as tier1_commands
+    from skillevaluator.tier2 import commands as tier2_commands
+
+    options = []
+    if tier == "tier1":
+        monkeypatch.setattr(tier1_commands, "run_validation", lambda *_a, **_kw: _result(validator))
+        options = ["--no-llm"]
+    else:
+        monkeypatch.setattr(tier2_commands, "run_context_optimization_check", lambda *_a, **_kw: _result(validator))
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-credential")
+    monkeypatch.chdir({"parent": skill.parent, "skill": skill}[directory])
+
+    result = CliRunner().invoke(cli, [tier, target, *options, "-r", "json", "-o", str(tmp_path / "reports")])
+
+    assert result.exit_code == 0, result.output
+    payload = _report(tmp_path / "reports")
+    assert payload["skills"] == [{"name": "sample", "passed": True, "issue_count": 0}]
+    assert [item["name"] for contributor in payload["contributors"] for item in contributor["items"]] == ["sample"]
+    assert payload["target_path"] == str(Path(target))
+    number = tier.removeprefix("tier")
+    assert payload["gating"]["tiers"] == {
+        number: {
+            "blocking": True,
+            "validators": [validator],
+            "validator_policies": [{"validator": validator, "blocking": True}],
+        }
+    }
 
 
 def test_tier_name_collision_requires_explicit_path(tmp_path, monkeypatch):

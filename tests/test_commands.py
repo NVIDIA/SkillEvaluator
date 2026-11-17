@@ -6,6 +6,7 @@ from __future__ import annotations
 import contextvars
 import json
 import shutil
+import subprocess
 import threading
 from collections.abc import Callable
 from datetime import timedelta
@@ -414,7 +415,9 @@ def test_tier1_lint_scripts_fixture() -> None:
 
 
 def test_create_dataset_dry_run_no_llm() -> None:
-    result = CliRunner().invoke(cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run"])
+    result = CliRunner().invoke(
+        cli, ["create-eval-dataset", str(FIXTURE), "--no-llm", "--dry-run", "--grounding", "skill"]
+    )
 
     assert result.exit_code == 0, result.output
     assert "Dry run" in result.output
@@ -488,6 +491,100 @@ def test_validate_quiet_always_writes_html_and_json_reports() -> None:
         assert any(p.suffix == ".json" for p in reports), reports
 
 
+@pytest.mark.parametrize("in_git_checkout", [False, True], ids=("plain-folder", "git-checkout"))
+def test_validate_json_names_a_clean_single_skill_and_records_the_evaluator(
+    tmp_path: Path,
+    in_git_checkout: bool,
+) -> None:
+    """A clean skill run with only the schema check has no finding path or
+    quality score to name the skill by, and inside a Git checkout the report
+    target is the remote URL. The JSON must still list the one skill."""
+    from skillevaluator import __version__
+
+    if in_git_checkout and shutil.which("git") is None:
+        pytest.skip("git is not installed")
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "simple"
+    shutil.copytree(FIXTURE, skill)
+    manifest = skill / "SKILL.md"
+    manifest.write_text(
+        manifest.read_text(encoding="utf-8").replace(
+            "description: Summarize", "description: Use when notes need action items. Summarize"
+        ),
+        encoding="utf-8",
+    )
+    if in_git_checkout:
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        subprocess.run(
+            ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/skills.git"],
+            check=True,
+        )
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert report["skills"] == [{"name": "simple", "passed": True, "issue_count": 0}]
+    assert [item["name"] for contributor in report["contributors"] for item in contributor["items"]] == ["simple"]
+    assert report["version"] == __version__
+    if in_git_checkout:
+        assert report["target_path"].startswith("https://github.com/example/skills/")
+    else:
+        assert report["target_path"] == str(skill.resolve())
+    assert report["top_issues"] == []
+    assert report["gating"]["tiers"]["1"]["validator_policies"] == [
+        {"validator": "Schema & Repository Governance", "blocking": True}
+    ]
+    benchmark = (output_dir / "BENCHMARK.md").read_text(encoding="utf-8")
+    assert "- Skill: `simple`" in benchmark
+    assert f"- Evaluator version: `{__version__}`" in benchmark
+
+
+def test_validate_json_keeps_one_skills_entry_per_rule_of_a_rules_folder(team_rule_dir: Path, tmp_path: Path) -> None:
+    """Only a skill directory names its one skill explicitly. A rules folder
+    groups its results per rule file, so naming the folder would fold both
+    rules into one entry."""
+    output_dir = tmp_path / "reports"
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(team_rule_dir),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--no-llm",
+            "--report",
+            "json",
+            "--output-dir",
+            str(output_dir),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    report = json.loads(next(output_dir.glob("skillevaluator-output-*.json")).read_text(encoding="utf-8"))
+    assert sorted(entry["name"] for entry in report["skills"]) == ["error-handling", "testing"]
+    assert not (output_dir / "BENCHMARK.md").exists()
+
+
 def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -504,9 +601,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
         encoding="utf-8",
     )
     initial_files = {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     }
     private_state = tmp_path / "private-state"
     private_state.mkdir(mode=0o700)
@@ -523,9 +618,7 @@ def test_validate_default_reports_do_not_write_into_authored_sibling_skill(
     assert (output_root / "BENCHMARK.md").is_file()
     assert is_generated_output_root(output_root)
     assert {
-        path.relative_to(authored_sibling): path.read_bytes()
-        for path in authored_sibling.rglob("*")
-        if path.is_file()
+        path.relative_to(authored_sibling): path.read_bytes() for path in authored_sibling.rglob("*") if path.is_file()
     } == initial_files
 
 
@@ -579,8 +672,49 @@ def test_validate_default_in_skill_reports_refuses_unowned_sibling(
 
     assert result.exit_code != 0
     assert "safely reserve default report output" in result.output.lower()
+    assert "marker is missing, invalid, or bound to another path" in " ".join(result.output.split())
+    assert "-o/--output-dir" in result.output
     assert authored.read_text(encoding="utf-8") == "author-owned sentinel\n"
     assert list(sibling.iterdir()) == [authored]
+
+
+def test_validate_default_reports_under_changing_ownership_keys_end_with_an_actionable_refusal(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    """A new ownership key per run (a fresh HOME, a new container) cannot reuse earlier default folders."""
+    from skillevaluator.tier3.output_provenance import is_generated_output_root
+
+    workspace = tmp_path / "workspace"
+    shutil.copytree(FIXTURE, workspace / "simple")
+    monkeypatch.chdir(workspace)
+    command = ["validate", "--no-tier3", "simple", "--no-llm", "--no-tier2", "--checks", "schema", "--report", "json"]
+
+    def run_with_key(name: str, *extra: str):
+        state = tmp_path / name
+        state.mkdir(mode=0o700)
+        monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(state / "key"))
+        return CliRunner().invoke(cli, [*command, *extra])
+
+    first = run_with_key("first-home")
+    assert first.exit_code == 0, first.output
+    assert is_generated_output_root(workspace / "reports")
+
+    second = run_with_key("second-home")
+    assert second.exit_code == 0, second.output
+    assert is_generated_output_root(workspace / "simple-reports")
+    kept = {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file()}
+
+    third = run_with_key("third-home")
+    assert third.exit_code != 0
+    message = " ".join(third.output.split())
+    assert "safely reserve default report output directory" in message.lower()
+    assert "Choose a report directory with -o/--output-dir." in message
+    assert {path: path.read_bytes() for path in workspace.rglob("*") if path.is_file()} == kept
+
+    chosen = run_with_key("fourth-home", "-o", str(tmp_path / "chosen-reports"))
+    assert chosen.exit_code == 0, chosen.output
+    assert (tmp_path / "chosen-reports" / "BENCHMARK.md").is_file()
 
 
 def test_validate_rejects_case_alias_output_inside_publication_target(
@@ -831,9 +965,7 @@ def test_quality_check_applies_custom_quality_config(
 
 @pytest.mark.parametrize("command", [["quality-check"], ["tier1", "quality-check"]])
 def test_quality_check_rejects_missing_quality_config(command: list[str], tmp_path: Path) -> None:
-    result = CliRunner().invoke(
-        cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")]
-    )
+    result = CliRunner().invoke(cli, [*command, str(FIXTURE), "--quality-config", str(tmp_path / "missing.yaml")])
 
     assert result.exit_code == 2
     assert "does not exist" in result.output
@@ -1835,6 +1967,7 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
 
     not_forwarded = {
+        "catalog_root": "each child is given the folder it was found in, not the parent's own value",
         "target_path": "the child is given one skill directory, not the catalog root",
         "content_type": "the child re-detects the type of the single skill it is handed",
         "workers": "forwarding it would make each child fan out again",
@@ -1849,6 +1982,43 @@ def test_catalog_child_argv_forwards_every_validate_option() -> None:
     ]
 
     assert sorted(dropped) == sorted(not_forwarded)
+
+
+def test_catalog_child_argv_forwards_run_budget_options(tmp_path: Path) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    price_file = tmp_path / "prices.json"
+    price_file.write_text("{}", encoding="utf-8")
+    ctx = validate.make_context(
+        "validate",
+        [
+            str(skill_dir),
+            "--max-agent-tokens",
+            "120",
+            "--max-judge-calls",
+            "5",
+            "--max-attempts-total",
+            "9",
+            "--max-cost-usd",
+            "2.5",
+            "--price-file",
+            str(price_file),
+        ],
+    )
+
+    argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    for option, value in (
+        ("--max-agent-tokens", "120"),
+        ("--max-judge-calls", "5"),
+        ("--max-attempts-total", "9"),
+        ("--max-cost-usd", "2.5"),
+        ("--price-file", str(price_file.resolve())),
+    ):
+        assert option in argv
+        assert argv[argv.index(option) + 1] == value
 
 
 def test_validate_catalog_workers_records_the_evaluated_source_on_every_card() -> None:
@@ -2165,8 +2335,8 @@ def test_catalog_summary_same_second_rerun_overwrites_json(monkeypatch) -> None:
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="missing author",
+            check_name="frontmatter_format",
+            message="missing frontmatter",
             file_path="SKILL.md",
         ),
         is_error=True,
@@ -2395,10 +2565,10 @@ def test_validate_quiet_failing_run_renders_verdict_and_fails_cleanly(monkeypatc
         Finding(
             category="SCHEMA",
             severity=Severity.HIGH,
-            check_name="author_missing",
-            message="Author not specified in metadata",
+            check_name="frontmatter_format",
+            message="SKILL.md must have YAML frontmatter between --- markers",
             file_path="SKILL.md",
-            suggestion="Add 'metadata.author' with format 'Name <email@example.com>'",
+            suggestion="Add frontmatter block: start with '---', add YAML content, end with '---'",
         ),
         is_error=True,
     )
@@ -2522,8 +2692,7 @@ def test_validate_quiet_renders_untrusted_skip_reason_as_bounded_inert_text(
 
     unsafe_reason = (
         "[/bold] [link=https://example.invalid]click[/link]\n"
-        "## Publication Recommendation\n\x1b[31mforged\u202e "
-        + "x" * 1_000_000
+        "## Publication Recommendation\n\x1b[31mforged\u202e " + "x" * 1_000_000
     )
 
     def _tier3(*_args, **_kwargs):
@@ -3201,6 +3370,42 @@ def test_render_evaluation_result_invokes_findings_report(monkeypatch) -> None:
     assert skill_name == "simple"
     assert agent_list == ["codex"]
     assert str(results_dir) == "/tmp/run"
+
+
+def test_summarize_tier1_lists_each_serious_finding() -> None:
+    from skillevaluator.models.result import Finding, Severity, ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    failing = ValidationResult(validator_name="Security Scan", passed=False)
+    for message, severity, suggestion in (
+        ("Tool Misuse: rm -rf ./build", Severity.HIGH, "Reject dangerous parameters."),
+        ("YARA Match: rm -rf ./; without asking", Severity.HIGH, "Reject dangerous parameters."),
+        ("Hook bypass: git commit --no-verify", Severity.CRITICAL, "Let the hooks run."),
+        ("Unpinned npx package", Severity.HIGH, "Pin the package version."),
+        ("Excessive Agency: without asking", Severity.MEDIUM, "Ask before acting."),
+    ):
+        failing.add_finding(
+            Finding(
+                category="SECURITY",
+                severity=severity,
+                check_name="skillspector",
+                message=message,
+                file_path="SKILL.md",
+                suggestion=suggestion,
+            )
+        )
+
+    _ok, rows = summarize_tier1([failing])
+    rendered = ["".join(chunk for chunk, _style in row.segments) for row in rows]
+    numbered = [row for row in rows if row.glyph in {"1", "2", "3"}]
+    assert [row.segments[0][0] for row in numbered] == [
+        "Tool Misuse: rm -rf ./build",
+        "YARA Match: rm -rf ./; without asking",
+        "Hook bypass: git commit --no-verify",
+    ]
+    assert sum("Reject dangerous parameters." in line for line in rendered) == 1
+    assert any("+1 more in detailed reports" in line for line in rendered)
+    assert not any("Excessive Agency" in line for line in rendered)
 
 
 def test_summarize_tier2_lists_duplicate_details() -> None:

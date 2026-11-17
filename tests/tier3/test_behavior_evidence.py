@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import logging
 from pathlib import Path
 
 import pytest
@@ -13,6 +14,14 @@ from skillevaluator.tier3.eval_core import atif_helpers
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_conversation_summary,
+)
+
+# build_behavior_evidence called without max_chars reconciles its own budget
+# with the final-response allowance, so the standalone default tracks that
+# limit instead of staying at _BEHAVIOR_EVIDENCE_MAX_CHARS.
+_STANDALONE_DEFAULT_BUDGET = max(
+    atif_helpers._BEHAVIOR_EVIDENCE_MAX_CHARS,
+    atif_helpers._DEFAULT_BEHAVIOR_FINAL_RESPONSE_LIMIT + atif_helpers._MIN_BEHAVIOR_HISTORY_HEADROOM,
 )
 
 
@@ -94,7 +103,7 @@ def test_behavior_evidence_prioritizes_late_write_tool_calls() -> None:
 
     evidence = build_behavior_evidence(traj, "question")
 
-    assert len(evidence) <= 4000
+    assert len(evidence) <= _STANDALONE_DEFAULT_BUDGET
     assert "FILE CHANGES" in evidence
     assert "Agent called: Write" in evidence
     assert evidence.find("Agent called: Read") == -1 or (
@@ -119,7 +128,7 @@ def test_harbor_template_behavior_evidence_matches_shared_helper() -> None:
 
     evidence = module.build_behavior_evidence(_trajectory_with_late_write(), "question")
 
-    assert len(evidence) <= 4000
+    assert len(evidence) <= _STANDALONE_DEFAULT_BUDGET
     assert "FILE CHANGES" in evidence
     assert "Agent called: Write" in evidence
     assert "pl.GPUEngine(raise_on_fail=True)" in evidence
@@ -548,10 +557,83 @@ def test_behavior_evidence_keeps_write_when_prompt_is_long() -> None:
 
     evidence = build_behavior_evidence(traj, long_question)
 
-    assert len(evidence) <= 4000
+    assert len(evidence) <= _STANDALONE_DEFAULT_BUDGET
     assert evidence.startswith("FILE CHANGES")
     assert "Agent called: Write" in evidence
     assert "/workspace/output/test_gpu_engine_selection.py" in evidence
+
+
+def _evidence_section(evidence: str, title: str) -> str:
+    """Return the body of *title*'s section, or ``""`` when it is absent."""
+    start = evidence.find(f"{title}\n")
+    if start == -1:
+        return ""
+    body_start = start + len(title) + 1
+    ends = [
+        evidence.find(f"\n\n{other}\n", body_start)
+        for other in ("FILE CHANGES", "FINAL RESPONSE", "USER REQUEST", "COMPACT TOOL HISTORY")
+        if other != title
+    ]
+    ends = [end for end in ends if end != -1]
+    return evidence[body_start : min(ends)] if ends else evidence[body_start:]
+
+
+def test_behavior_evidence_user_request_allowance_is_capped_above_the_old_800() -> None:
+    # The USER REQUEST section gets its own allowance of
+    # _DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT characters: enough for an ordinary
+    # Tier 3 task prompt, which the old fixed 800 cut, but not the whole
+    # final-response allowance, which would spend up to 8,000 of the budget on
+    # a second copy of a question the compact tool history already repeats and
+    # leave no room for the tool calls.
+    question = "QSTART_" + ("q" * 1000) + "_QMID_" + ("q" * 1800) + "_QEND"
+    assert len(question) == 2818
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": f"run-{idx}", "function_name": "Bash", "arguments": {"command": f"pytest -k t{idx}"}}
+                ],
+                "observation": {"results": [{"source_call_id": f"run-{idx}", "content": f"{idx} passed"}]},
+            }
+            for idx in range(12)
+        ]
+        + [{"source": "agent", "message": "FINAL_ANSWER_BODY all tests pass."}]
+    }
+
+    evidence = build_behavior_evidence(traj, question, max_chars=12000)
+    user_section = _evidence_section(evidence, "USER REQUEST")
+
+    # Past the old 800-character cap, which dropped everything from offset 511
+    # to the last 256 characters.
+    assert "QSTART_" in user_section
+    assert "_QMID_" in user_section
+    assert "_QEND" in user_section
+    # But still capped: the section is bounded by its own allowance, not by the
+    # 8,000-character final-response allowance, which would carry all 2,818.
+    assert "...[truncated]..." in user_section
+    assert len(user_section) <= atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+
+    # The final answer is untouched, and the tool history still carries tool
+    # calls — the evidence a non-file behavior is judged on.
+    assert "FINAL_ANSWER_BODY all tests pass." in _evidence_section(evidence, "FINAL RESPONSE")
+    assert "Agent called: Bash" in _evidence_section(evidence, "COMPACT TOOL HISTORY")
+
+    # Nothing of the request is actually lost: the compact tool history opens
+    # with the whole question.
+    assert question in evidence
+
+
+def test_behavior_evidence_user_request_limit_never_exceeds_the_final_response_limit(monkeypatch) -> None:
+    # Lowering the final-response limit must still shrink the whole bundle,
+    # so the user-request allowance follows it down.
+    assert atif_helpers._behavior_user_request_limit() == atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "500")
+    assert atif_helpers._behavior_user_request_limit() == 500
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "20000")
+    assert atif_helpers._behavior_user_request_limit() == atif_helpers._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
 
 
 def test_behavior_evidence_does_not_treat_read_like_tool_names_as_writes() -> None:
@@ -690,9 +772,13 @@ def test_behavior_evidence_ignores_non_write_shell_gt() -> None:
     assert "/workspace/output/from_python.txt" in file_changes
 
 
-def _trajectory_with_long_final_response() -> dict:
-    """Build a synthetic trajectory with a long agent response."""
-    body = "START_MARKER_" + ("A" * 1700) + "_LATE_MARKER_" + ("B" * 500) + "_TAIL"
+def _trajectory_with_long_final_response(middle: int = 1700, tail: int = 500) -> dict:
+    """Build a synthetic trajectory with a long agent response.
+
+    ``middle`` places ``_LATE_MARKER_`` far enough into the answer that a cap
+    below it drops the marker with the rest of the answer's middle.
+    """
+    body = "START_MARKER_" + ("A" * middle) + "_LATE_MARKER_" + ("B" * tail) + "_TAIL"
     return {
         "steps": [
             {
@@ -708,79 +794,154 @@ def _trajectory_with_long_final_response() -> dict:
 
 
 def test_behavior_evidence_final_response_default_and_env_override(monkeypatch) -> None:
-    traj = _trajectory_with_long_final_response()
+    # An answer past the 8,000-character default still loses its middle. The
+    # test below covers the other side: an answer under the default survives.
+    traj = _trajectory_with_long_final_response(middle=7000, tail=3000)
 
-    # By default, final response is capped at 800 chars and truncated
     default_evidence = build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in default_evidence
     assert "_LATE_MARKER_" not in default_evidence
     assert "...[truncated]..." in default_evidence
 
     # Overriding via environment variable expands the capture limit
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
-    expanded_evidence = build_behavior_evidence(traj, "question", max_chars=8000)
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "20000")
+    expanded_evidence = build_behavior_evidence(traj, "question", max_chars=24000)
     assert "START_MARKER_" in expanded_evidence
     assert "_LATE_MARKER_" in expanded_evidence
     assert "...[truncated]..." not in expanded_evidence
 
 
+def test_behavior_evidence_default_keeps_a_realistic_final_answer() -> None:
+    # Issue #234: the old 800-character default cut grading-relevant text out
+    # of the middle of an ordinary final answer. The default must now carry
+    # one whole.
+    traj = _trajectory_with_long_final_response(middle=1700, tail=500)
+
+    evidence = build_behavior_evidence(traj, "question")
+
+    assert "START_MARKER_" in evidence
+    assert "_LATE_MARKER_" in evidence
+    assert "...[truncated]..." not in evidence
+
+
 def test_behavior_evidence_final_response_explicit_arg() -> None:
-    traj = _trajectory_with_long_final_response()
+    # The answer is 4,031 characters: under the 8,000-character default it
+    # survives whole, and a per-call limit of 3,000 cuts its middle. Without
+    # that span the explicit argument changes nothing and the test proves
+    # nothing (the defaults produce a 2,231-character answer, which fits
+    # either way).
+    traj = _trajectory_with_long_final_response(middle=2500, tail=1500)
+
+    default_evidence = build_behavior_evidence(traj, "question", max_chars=8000)
+    assert "START_MARKER_" in default_evidence
+    assert "_LATE_MARKER_" in default_evidence
+    assert "...[truncated]..." not in default_evidence
 
     evidence = build_behavior_evidence(traj, "question", max_chars=8000, final_response_limit=3000)
     assert "START_MARKER_" in evidence
-    assert "_LATE_MARKER_" in evidence
-    assert "...[truncated]..." not in evidence
+    assert "_LATE_MARKER_" not in evidence
+    assert "...[truncated]..." in evidence
 
 
 def test_behavior_evidence_standalone_reconciles_max_chars(monkeypatch) -> None:
-    traj = _trajectory_with_long_final_response()
+    traj = _trajectory_with_long_final_response(middle=2500, tail=1500)
 
-    # When final_response_limit is explicitly passed without max_chars, max_chars expands
-    evidence = build_behavior_evidence(traj, "question", final_response_limit=3000)
+    # When final_response_limit is explicitly passed without max_chars, max_chars
+    # expands to hold it: a 6,000-character limit carries the whole 4,031-character
+    # answer even though the standalone floor is only 4,000 characters.
+    evidence = build_behavior_evidence(traj, "question", final_response_limit=6000)
     assert "START_MARKER_" in evidence
     assert "_LATE_MARKER_" in evidence
     assert "...[truncated]..." not in evidence
+    assert len(evidence) > atif_helpers._BEHAVIOR_EVIDENCE_MAX_CHARS
+
+    # And a lower per-call limit still binds, so the expansion follows the
+    # argument rather than ignoring it.
+    tight = build_behavior_evidence(traj, "question", final_response_limit=3000)
+    assert "_LATE_MARKER_" not in tight
+    assert "...[truncated]..." in tight
 
     # When SKILL_EVAL_BEHAVIOR_CHECK_BUDGET is set in env, standalone call uses it
     monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "6000")
     env_evidence = build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in env_evidence
     assert "_LATE_MARKER_" in env_evidence
+    assert "...[truncated]..." not in env_evidence
+
+    # The env limit binds downwards too, on the same budget.
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
+    tight_env = build_behavior_evidence(traj, "question")
+    assert "_LATE_MARKER_" not in tight_env
+    assert "...[truncated]..." in tight_env
 
 
 def test_behavior_check_budget_and_compactor_env_override(monkeypatch) -> None:
     from skillevaluator.tier3.eval_core.llm_judge import _compact_behavior_conversation
 
-    sample_conversation = "A" * 9000
+    sample_conversation = "A" * 13000
 
-    # Default compactor threshold is 8000
+    # Default compactor threshold is the reconciled 12000 budget
     compacted = _compact_behavior_conversation(sample_conversation)
     assert "...[middle truncated for behavior check]..." in compacted
-    assert len(compacted) <= 8000
+    assert len(compacted) <= 12000
 
     # Overriding SKILL_EVAL_BEHAVIOR_CHECK_BUDGET raises compactor threshold
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "12000")
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "16000")
     uncompacted = _compact_behavior_conversation(sample_conversation)
     assert "...[middle truncated for behavior check]..." not in uncompacted
-    assert len(uncompacted) == 9000
+    assert len(uncompacted) == 13000
 
 
 def test_behavior_check_budget_auto_reconciles_tool_history_headroom(monkeypatch) -> None:
     from skillevaluator.tier3.eval_core import atif_helpers
     from skillevaluator.tier3.eval_core.llm_judge import _behavior_check_budget as judge_budget
 
-    # If only final response limit is set to a large value, budget expands with headroom (4000)
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
-    assert atif_helpers._behavior_check_budget() == 12000
-    assert judge_budget() == 12000
+    # If only final response limit is set to a large value, the DEFAULT budget
+    # expands with headroom (4000).
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "16000")
+    assert atif_helpers._behavior_check_budget() == 20000
+    assert judge_budget() == 20000
 
-    # Equal explicit budget (8000) and exceeded explicit budget (6000) both reserve tool-history headroom (4000)
-    for explicit_budget in ("8000", "6000"):
+    # Unparseable and non-positive values are not budgets, so they fall back to
+    # that same reconciled default rather than being honoured.
+    for unusable in ("16k", "1.5", "0", "-100"):
+        monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", unusable)
+        assert atif_helpers._behavior_check_budget() == 20000
+        assert judge_budget() == 20000
+
+
+def test_explicit_behavior_check_budget_is_honoured_below_the_default_floor(monkeypatch, caplog) -> None:
+    # An operator pins this to cap the judge prompt for a small-context model.
+    # Quietly raising it to the final-response limit plus 4,000 would defeat
+    # the only reason to set it, so it is used as set and warned about.
+    from skillevaluator.tier3.eval_core import atif_helpers
+    from skillevaluator.tier3.eval_core.llm_judge import _behavior_check_budget as judge_budget
+
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "8000")
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+
+    for explicit_budget, expected in (("2000", 2000), ("6000", 6000), ("8000", 8000), ("16000", 16000)):
         monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", explicit_budget)
-        assert atif_helpers._behavior_check_budget() == 12000
-        assert judge_budget() == 12000
+        assert atif_helpers._behavior_check_budget() == expected
+        assert judge_budget() == expected
+
+    # A budget too small to hold the final response beside any tool history is
+    # warned about, naming both settings, rather than silently dropped.
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "2000")
+    with caplog.at_level(logging.WARNING, logger=atif_helpers.__name__):
+        assert atif_helpers._behavior_check_budget() == 2000
+    assert "SKILL_EVAL_BEHAVIOR_CHECK_BUDGET=2000" in caplog.text
+    assert "SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT" in caplog.text
+
+    # A budget with room for the answer and some history is not warned about.
+    caplog.clear()
+    monkeypatch.setattr(atif_helpers, "_warned_behavior_budgets", set())
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_CHECK_BUDGET", "9600")
+    with caplog.at_level(logging.WARNING, logger=atif_helpers.__name__):
+        assert atif_helpers._behavior_check_budget() == 9600
+    assert caplog.text == ""
 
 
 def _trajectory_with_failed_verification_and_long_claim(*, include_file_changes: bool = False) -> dict:
@@ -967,17 +1128,17 @@ def test_seam_bundle_to_judge_behavior_check_retains_failed_command_and_claim(mo
 
 def test_harbor_template_behavior_evidence_respects_custom_limits(monkeypatch) -> None:
     module = _load_harbor_template_module()
-    traj = _trajectory_with_long_final_response()
+    traj = _trajectory_with_long_final_response(middle=7000, tail=3000)
 
-    # Template default caps at 800
+    # Template default caps at 8000
     evidence_default = module.build_behavior_evidence(traj, "question")
     assert "START_MARKER_" in evidence_default
     assert "_LATE_MARKER_" not in evidence_default
     assert "...[truncated]..." in evidence_default
 
     # Template override respects SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT
-    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "3000")
-    evidence_custom = module.build_behavior_evidence(traj, "question", max_chars=8000)
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "20000")
+    evidence_custom = module.build_behavior_evidence(traj, "question", max_chars=24000)
     assert "START_MARKER_" in evidence_custom
     assert "_LATE_MARKER_" in evidence_custom
     assert "...[truncated]..." not in evidence_custom
@@ -1251,3 +1412,204 @@ def test_compact_behavior_conversation_section_layout_permutations(
     for substr in expected_substrings:
         assert substr in shared_out, f"{case_name}: missing {substr!r}"
 
+
+
+# --- Codex apply_patch evidence (issue #236, requirement 7: retain patch contents) ---
+#
+# Codex decodes its file-edit tool to ``action_input = {"input": "<patch text>"}``.
+# The write-evidence helpers read only ``file_path``-style and ``content``-style
+# keys, so every Codex patch contributed nothing to FILE CHANGES and the patch
+# text survived only in COMPACT TOOL HISTORY -- which is budgeted last, so it is
+# the first evidence dropped under exactly the truncation pressure #236 is about.
+
+_SINGLE_FILE_PATCH = "*** Begin Patch\n*** Update File: src/app.py\n@@\n-old\n+new\n*** End Patch"
+_MULTI_FILE_PATCH = (
+    "*** Begin Patch\n"
+    "*** Update File: src/app.py\n@@\n-old\n+new\n"
+    "*** Add File: src/new_mod.py\n+print('hi')\n"
+    "*** Update File: docs/readme.md\n@@\n-a\n+b\n"
+    "*** End Patch"
+)
+_DELETE_PATCH = "*** Begin Patch\n*** Delete File: src/dead.py\n*** End Patch"
+
+
+def _codex_patch_trajectory(patch: str) -> dict:
+    return {
+        "steps": [
+            {"source": "user", "message": "Fix the bug."},
+            {
+                "source": "agent",
+                "message": "Executed apply_patch",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "patch-1",
+                        "function_name": "apply_patch",
+                        "arguments": {"input": patch},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "patch-1", "content": "Success."}]},
+            },
+        ]
+    }
+
+
+def _file_changes_section(evidence: str) -> str:
+    return evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+
+
+@pytest.mark.parametrize(
+    ("patch", "expected_paths"),
+    [
+        pytest.param(_SINGLE_FILE_PATCH, ["src/app.py"], id="single_file"),
+        pytest.param(
+            _MULTI_FILE_PATCH,
+            ["src/app.py", "src/new_mod.py", "docs/readme.md"],
+            id="multi_file",
+        ),
+        pytest.param(_DELETE_PATCH, ["src/dead.py"], id="delete"),
+    ],
+)
+def test_codex_apply_patch_input_reaches_file_changes(patch: str, expected_paths: list[str]) -> None:
+    traj = _codex_patch_trajectory(patch)
+
+    assert len(atif_helpers._collect_file_change_evidence(traj)) == 1
+
+    file_changes = _file_changes_section(build_behavior_evidence(traj, "Fix the bug."))
+    assert "FILE CHANGES" in file_changes
+    assert "Agent called: apply_patch" in file_changes
+    # The patch body itself must survive, not just the fact that a patch happened.
+    assert patch in file_changes
+    for path in expected_paths:
+        assert path in file_changes
+
+
+def test_codex_multi_file_patch_names_every_file_not_just_the_first() -> None:
+    """A single-path helper must not let one file stand for a patch that touched three."""
+    path = atif_helpers._tool_file_path({"input": _MULTI_FILE_PATCH})
+
+    assert path == "src/app.py, src/new_mod.py, docs/readme.md"
+
+
+def test_codex_patch_path_list_is_capped_so_it_cannot_crowd_out_the_budget() -> None:
+    body = "".join(f"*** Update File: src/mod_{idx}.py\n@@\n-a\n+b\n" for idx in range(15))
+    path = atif_helpers._tool_file_path({"input": f"*** Begin Patch\n{body}*** End Patch"})
+
+    assert path.startswith("src/mod_0.py, ")
+    assert path.endswith(" (+5 more)")
+    assert "src/mod_9.py" in path
+    assert "src/mod_10.py" not in path
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        pytest.param({"input": "this is not a patch at all, just some prose"}, id="headerless_text"),
+        pytest.param({"input": "*** Begin Patch\n*** Update File:   \n@@\n-a\n+b\n"}, id="blank_header_path"),
+        pytest.param({"input": ""}, id="empty_string"),
+        pytest.param({"input": "   \n  "}, id="whitespace_only"),
+        pytest.param({"input": None}, id="none"),
+        pytest.param({"input": {"nested": 1}}, id="non_string"),
+        pytest.param({"input": ["*** Begin Patch"]}, id="list"),
+        pytest.param({}, id="absent"),
+    ],
+)
+def test_malformed_patch_input_degrades_without_raising_or_fabricating_a_path(args: dict) -> None:
+    assert atif_helpers._tool_file_path(args) == ""
+    # A body may legitimately be empty here; what must not happen is a crash.
+    assert isinstance(atif_helpers._tool_write_body(args), str)
+
+
+def test_shell_source_passed_as_input_is_not_mistaken_for_a_patch() -> None:
+    """Codex also passes shell source as ``input``; that is not a file change."""
+    args = {"input": "rg -n 'def main' src/ && ls -la"}
+
+    assert atif_helpers._tool_file_path(args) == ""
+    assert atif_helpers._tool_write_body(args) == ""
+
+
+@pytest.mark.parametrize(
+    ("args", "expected_path", "expected_body"),
+    [
+        pytest.param({"file_path": "/w/a.py", "content": "a"}, "/w/a.py", "content:\na", id="file_path_content"),
+        pytest.param({"path": "/w/b.py", "content": "b"}, "/w/b.py", "content:\nb", id="path"),
+        pytest.param({"filename": "/w/c.py", "content": "c"}, "/w/c.py", "content:\nc", id="filename"),
+        pytest.param(
+            {"target_file": "/w/d.py", "new_string": "d"}, "/w/d.py", "new_string:\nd", id="target_file_new_string"
+        ),
+        pytest.param({"patch": "--- a\n+++ b\n"}, "", "patch:\n--- a\n+++ b\n", id="patch_key"),
+        pytest.param({"file_path": "/w/e.py", "code": "e"}, "/w/e.py", "code:\ne", id="code_key"),
+        pytest.param(
+            {"file_path": "/w/f.py", "edits": [{"new_string": "f1"}]},
+            "/w/f.py",
+            "edit 1 new_string:\nf1",
+            id="edits_list",
+        ),
+        # Precedence between the existing path keys is unchanged.
+        pytest.param({"file_path": "/w/g.py", "path": "/w/ignored.py"}, "/w/g.py", "", id="file_path_wins"),
+        # An explicit path still wins over a patch body, so no existing shape shifts.
+        pytest.param(
+            {"file_path": "/w/h.py", "input": _SINGLE_FILE_PATCH},
+            "/w/h.py",
+            f"input:\n{_SINGLE_FILE_PATCH}",
+            id="explicit_path_wins_over_patch",
+        ),
+    ],
+)
+def test_existing_write_argument_shapes_are_unchanged(args: dict, expected_path: str, expected_body: str) -> None:
+    assert atif_helpers._tool_file_path(args) == expected_path
+    assert atif_helpers._tool_write_body(args) == expected_body
+
+
+def test_harbor_template_retains_codex_patch_contents() -> None:
+    module = _load_harbor_template_module()
+    traj = _codex_patch_trajectory(_MULTI_FILE_PATCH)
+
+    evidence = module.build_behavior_evidence(traj, "Fix the bug.")
+
+    assert module._tool_file_path({"input": _MULTI_FILE_PATCH}) == atif_helpers._tool_file_path(
+        {"input": _MULTI_FILE_PATCH}
+    )
+    assert evidence == build_behavior_evidence(traj, "Fix the bug.")
+    assert _MULTI_FILE_PATCH in _file_changes_section(evidence)
+
+
+def test_codex_patch_survives_the_truncation_pressure_issue_236_is_about() -> None:
+    """FILE CHANGES is budgeted first, the compact tool history last.
+
+    While the patch reached the judge only through the tool history, a long run
+    on a tight budget dropped it entirely -- the exact case #236 raises.
+    """
+    patch = (
+        "*** Begin Patch\n*** Update File: src/payments/refund.py\n@@\n"
+        "-    return None\n+    return Refund(amount=amount, currency=currency)\n*** End Patch"
+    )
+    steps: list[dict] = [{"source": "user", "message": "Implement the refund path."}]
+    for idx in range(30):
+        call_id = f"read-{idx}"
+        steps.append(
+            {
+                "source": "agent",
+                "message": f"Executed Read {call_id}",
+                "tool_calls": [
+                    {"tool_call_id": call_id, "function_name": "Read", "arguments": {"file_path": f"/w/f{idx}.py"}}
+                ],
+                "observation": {"results": [{"source_call_id": call_id, "content": "noise " * 200}]},
+            }
+        )
+    steps.append(
+        {
+            "source": "agent",
+            "message": "Executed apply_patch",
+            "tool_calls": [
+                {"tool_call_id": "patch-1", "function_name": "apply_patch", "arguments": {"input": patch}}
+            ],
+            "observation": {"results": [{"source_call_id": "patch-1", "content": "Success."}]},
+        }
+    )
+    steps.append({"source": "agent", "message": "I implemented the refund path. " + ("Detail. " * 500)})
+
+    evidence = build_behavior_evidence({"steps": steps}, "Implement the refund path.", max_chars=8000)
+
+    assert len(evidence) <= 8000
+    assert "Refund(amount=amount, currency=currency)" in evidence
+    assert "src/payments/refund.py" in _file_changes_section(evidence)

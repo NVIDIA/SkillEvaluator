@@ -72,12 +72,35 @@ logger = logging.getLogger(__name__)
 
 TEMPLATES_DIR = Path(__file__).parent / "templates"
 _EVAL_CORE_DIR = Path(__file__).resolve().parent.parent / "eval_core"
+_VERIFIER_FILES = (
+    TEMPLATES_DIR / "eval.py",
+    _EVAL_CORE_DIR / "log_converters.py",
+    _EVAL_CORE_DIR / "atif_helpers.py",
+    _EVAL_CORE_DIR / "shell_lexing.py",
+    _EVAL_CORE_DIR / "script_invocation.py",
+    _EVAL_CORE_DIR / "declarative_checks.py",
+    _EVAL_CORE_DIR / "optional_reference.py",
+    _EVAL_CORE_DIR / "checks.py",
+    _EVAL_CORE_DIR / "secret_redaction.py",
+    _EVAL_CORE_DIR / "codex_tool_call_normalizer.py",
+    _EVAL_CORE_DIR / "character_facts.py",
+    _EVAL_CORE_DIR.parent.parent / "evidence.py",
+)
 _EVALUATOR_TESTS_SUBDIR = "skill_evaluator"
+# Harbor's agent setup checks each prerequisite command (curl, bash, pgrep, rg,
+# stdbuf) in every trial and apt-installs the missing ones. Claude Code's setup
+# needs pgrep, so procps in every generated image removes that per-trial apt
+# step and its package mirror dependency. The starter Dockerfile that
+# `tier3 init-harbor-task` writes (tier3/commands.py) lists the same packages.
+_BASE_APT_PACKAGES = "bash curl git jq procps ripgrep"
 _BASE_IMAGE_PREFIX = "skillevaluator-base"
+# Compose 2 treats HEALTHCHECK NONE as a configured check, then fails its
+# readiness wait because Docker supplies no health state. Replace authored
+# checks with this constant exec-form probe; do not run authored healthcheck commands.
+_MAIN_CONTAINER_READINESS_HEALTHCHECK = 'HEALTHCHECK --interval=1s --timeout=5s --retries=3 CMD ["/bin/true"]'
 _MAX_REPO_CONTEXT_FILE_BYTES = 10 * 1024 * 1024
 _MAX_REPO_CONTEXT_TOTAL_BYTES = 200 * 1024 * 1024
 _MAX_EVALUATOR_FILE_BYTES = 64 * 1024 * 1024
-_MAX_EVALS_CONFIG_BYTES = 4 * 1024 * 1024
 _MAX_MCP_CONFIG_BYTES = 1024 * 1024
 _EVALUATOR_DATASET_FILENAMES = (
     "evals.json",
@@ -221,7 +244,12 @@ _COMPOSE_ALLOWED_VOLUME_KEYS = frozenset({"labels"})
 _VERIFIER_JUDGE_MODEL_ENV_VARS = frozenset({"LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"})
 # Fallback models and the opt-in fallback and retry policies of the standard judges.
 _VERIFIER_JUDGE_FALLBACK_ENV_VARS = frozenset(
-    {"LLM_JUDGE_FALLBACK_MODELS", "LLM_JUDGE_FALLBACK_POLICY", "LLM_JUDGE_RETRY_POLICY"}
+    {
+        "LLM_JUDGE_FALLBACK_MODELS",
+        "LLM_JUDGE_FALLBACK_POLICY",
+        "LLM_JUDGE_RETRY_POLICY",
+        "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL",
+    }
 )
 _VERIFIER_JUDGE_CONTROL_ENV_VARS = (
     _VERIFIER_JUDGE_MODEL_ENV_VARS | _VERIFIER_JUDGE_FALLBACK_ENV_VARS | {"SKILL_EVAL_JUDGE_CHARACTER_FACTS"}
@@ -1517,10 +1545,9 @@ def build_eval_base_image(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if extra_apt:
-        lines[-1] += " \\"
         lines.append("    " + " ".join(extra_apt) + " \\")
     lines.append("    && rm -rf /var/lib/apt/lists/*")
 
@@ -2101,6 +2128,17 @@ def validate_mcp_server_declarations(
     return servers
 
 
+def _harbor_mcp_headers(headers: Mapping[str, str]) -> dict[str, str]:
+    """Use Harbor's braced placeholders after validating the original headers."""
+    return {
+        name: _MCP_COMPLETE_PLACEHOLDER_RE.sub(
+            lambda match: f"${{{match.group(3)}}}" if match.group(3) and not match.group(1) else match.group(0),
+            value,
+        )
+        for name, value in headers.items()
+    }
+
+
 def _load_mcp_servers(
     skill_path: Path,
     *,
@@ -2244,6 +2282,8 @@ skills_dir = "/workspace/skills"
             for key, val in srv.items():
                 if not isinstance(key, str):
                     raise TypeError("MCP TOML keys must be strings")
+                if key == "headers":
+                    val = _harbor_mcp_headers(val)
                 content += f"{_toml_quote(key)} = {_toml_value(val)}\n"
         (task_dir / "mcp_servers.json").write_text(json.dumps(mcp_servers, indent=2), encoding="utf-8")
 
@@ -2318,6 +2358,7 @@ def _write_entry_json(
     grading_mode: str = "default",
     custom_grader: bool = False,
     evaluated_skill: str | None = None,
+    agent_workdir: str | None = "/workspace",
 ) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
@@ -2334,6 +2375,9 @@ def _write_entry_json(
         "workspace_skill_names": workspace_skill_names or [],
         "grading_mode": grading_mode,
         "custom_grader": custom_grader,
+        # Runtime configuration, unlike a case-authored field or tool-call cwd,
+        # determines the security check's immutable output-directory scope.
+        "agent_workdir": _validated_agent_workdir(agent_workdir),
     }
     (tests_dir / "entry.json").write_text(json.dumps(entry_with_flag, indent=2, ensure_ascii=False), encoding="utf-8")
 
@@ -2392,23 +2436,11 @@ def _copy_verifier(task_dir: Path) -> None:
     tests_dir = task_dir / "tests"
     tests_dir.mkdir(parents=True, exist_ok=True)
     evaluator_dir = _replace_evaluator_tests_dir(task_dir)
-    sources = (
-        (TEMPLATES_DIR / "eval.py", "Verifier template"),
-        (_EVAL_CORE_DIR / "log_converters.py", "log_converters helper"),
-        (_EVAL_CORE_DIR / "atif_helpers.py", "ATIF evidence helpers"),
-        (_EVAL_CORE_DIR / "shell_lexing.py", "Shell lexical helper"),
-        (_EVAL_CORE_DIR / "script_invocation.py", "Shell invocation helper"),
-        (_EVAL_CORE_DIR / "checks.py", "Deterministic grading checks"),
-        (_EVAL_CORE_DIR / "secret_redaction.py", "Deterministic redaction helper"),
-        (_EVAL_CORE_DIR / "codex_tool_call_normalizer.py", "Codex tool-call normalizer"),
-        (_EVAL_CORE_DIR / "character_facts.py", "Judge character-facts helper"),
-        (_EVAL_CORE_DIR.parent.parent / "evidence.py", "Evidence-reference helper"),
-    )
-    for src, label in sources:
+    for src in _VERIFIER_FILES:
         if src.exists():
             shutil.copy2(src, evaluator_dir / src.name)
         else:
-            logger.warning("%s not found at %s", label, src)
+            logger.warning("Verifier source not found at %s", src)
 
 
 def _has_symlink_component(path: Path, root: Path) -> bool:
@@ -3531,7 +3563,14 @@ def _custom_compose_path(environment_dir: Path) -> Path | None:
 
 
 _VERIFIER_DEPS = "ragas~=0.4.0 langchain-community<0.4.2 openai>=1.0 anthropic>=0.40 boto3>=1.34 idna>=3.10,<4"
+# Run this check with the interpreter and flags test.sh uses for eval.py (see
+# _write_test_sh). `python3 -I` ignores PYTHONPATH and the user site, so
+# packages installed only there fail the image build instead of every trial's
+# verifier. It covers each third-party module the verifier imports: idna at
+# startup, openai and ragas for RAGAS, and boto3 for the Bedrock judge.
 _VERIFIER_IMPORT_SMOKE = (
+    "import boto3, idna; "
+    "from openai import AsyncOpenAI; "
     "from ragas.llms.base import llm_factory; "
     "from ragas.messages import AIMessage, HumanMessage; "
     "from ragas.metrics.collections import AgentGoalAccuracyWithReference"
@@ -3544,13 +3583,17 @@ def _managed_run(command: str, *args: str) -> str:
     return "RUN " + json.dumps(["/bin/sh", "-c", _MANAGED_PATH_SHELL, "skillevaluator", command, *args])
 
 
-def _verifier_install_lines(extra_requirements: Sequence[str] = ()) -> list[str]:
-    """Install verifier and skill requirements in one resolver transaction."""
+def _verifier_install_lines(extra_requirements: Sequence[str] = (), *, import_check: bool = True) -> list[str]:
+    """Install verifier and skill requirements in one resolver transaction.
+
+    ``import_check=False`` skips the eval.py import check for custom_only
+    grading, whose test.sh never runs eval.py.
+    """
     requirements = [*_VERIFIER_DEPS.split(), *extra_requirements]
-    return [
-        _managed_run("python", "-m", "pip", "install", "--no-cache-dir", *requirements),
-        _managed_run("python", "-c", _VERIFIER_IMPORT_SMOKE),
-    ]
+    lines = [_managed_run("python", "-m", "pip", "install", "--no-cache-dir", *requirements)]
+    if import_check:
+        lines.append(_managed_run("python3", "-I", "-c", _VERIFIER_IMPORT_SMOKE))
+    return lines
 
 
 _WORKSPACE_SKILL_PATH = "COPY skills/ /workspace/skills/"
@@ -3560,6 +3603,8 @@ _AGENT_SKILL_PATHS = [
     "COPY skills/ /root/.config/opencode/skills/",
 ]
 _RUNTIME_SKILL_DIRS = (
+    "/tmp/hermes/skills",
+    "/root/.hermes/skills",
     "/etc/codex/skills",
     "/tmp/codex-home/skills",
     "/workspace/skills",
@@ -3588,6 +3633,7 @@ _RUNTIME_SKILL_DIRS = (
     "/tmp/agent-home/sessions/skills",
 )
 _PROJECT_SKILL_RELATIVE_DIRS = (
+    ".hermes/skills",
     ".agents/skills",
     ".claude/commands",
     ".claude/skills",
@@ -3791,9 +3837,11 @@ def _validate_runtime_loader_env(runtime_env: dict[str, str] | None) -> None:
 
 def _runtime_skill_reset_lines(agent_workdir: str | None = None) -> list[str]:
     """Replace fixed, effective-home, and project-ancestor skill roots."""
+    runtime_dirs_to_reset = ["/tmp/hermes" if path == "/tmp/hermes/skills" else path for path in _RUNTIME_SKILL_DIRS]
+    runtime_dirs_to_create = [path for path in _RUNTIME_SKILL_DIRS if path != "/tmp/hermes/skills"]
     lines = [
-        "RUN " + json.dumps(["/bin/rm", "-rf", *_RUNTIME_SKILL_DIRS]),
-        "RUN " + json.dumps(["/bin/mkdir", "-p", *_RUNTIME_SKILL_DIRS]),
+        "RUN " + json.dumps(["/bin/rm", "-rf", *runtime_dirs_to_reset]),
+        "RUN " + json.dumps(["/bin/mkdir", "-p", *runtime_dirs_to_create]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PROJECT_SKILL_ANCESTOR_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _HOME_SKILL_RESET]),
         "RUN " + json.dumps(["/bin/sh", "-c", _PASSWD_HOME_SKILL_RESET]),
@@ -3861,6 +3909,7 @@ def _append_task_input_projection(
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
     if restore_user is not None and restore_user.casefold() != "root":
@@ -3890,6 +3939,7 @@ def _extend_task_input_projection(lines: list[str], *, include_input: bool, agen
             _RUNTIME_POLICY_ENV_RESET,
             "ENTRYPOINT []",
             "HEALTHCHECK NONE",
+            _MAIN_CONTAINER_READINESS_HEALTHCHECK,
         ]
     )
 
@@ -3916,11 +3966,12 @@ def _rebase_custom_dockerfile_content(
     include_repo: bool = False,
     include_repo_linked_root: bool = False,
     agent_workdir: str | None = None,
+    verifier_import_check: bool = True,
 ) -> tuple[str, str]:
     """Return custom Dockerfile content layered on top of the eval base image.
 
-    The base image already contains: python:3.12-slim, system packages
-    (bash/curl/git/jq), verifier dependencies, and the
+    The base image already contains: python:3.12-slim, the system packages in
+    ``_BASE_APT_PACKAGES``, verifier dependencies, and the
     standard directory structure (/workspace/skills, /logs, etc.).
 
     The custom Dockerfile's FROM line is replaced so the skill author's
@@ -3934,7 +3985,7 @@ def _rebase_custom_dockerfile_content(
     rebased_content = _append_evaluator_runtime_lines(
         rebased_source + f"\n# SkillEvaluator: original base was {original_from}\n",
         [
-            *_verifier_install_lines(),
+            *_verifier_install_lines(import_check=verifier_import_check),
             *_runtime_copy_lines(
                 agent_config_lines,
                 include_input,
@@ -3962,12 +4013,13 @@ def _ensure_verifier_deps(
     include_repo: bool = False,
     include_repo_linked_root: bool = False,
     agent_workdir: str | None = None,
+    verifier_import_check: bool = True,
 ) -> None:
     """Append verifier deps and runtime COPY lines to a custom Dockerfile."""
     content = dockerfile_path.read_text(encoding="utf-8")
     restore_user = _dockerfile_final_explicit_user(content)
     user_prefix = "USER root\n" if restore_user is not None else ""
-    additions = f"\n{user_prefix}" + "\n".join(_verifier_install_lines()) + "\n"
+    additions = f"\n{user_prefix}" + "\n".join(_verifier_install_lines(import_check=verifier_import_check)) + "\n"
     updated = _append_evaluator_runtime_lines(
         content + additions,
         _runtime_copy_lines(
@@ -4152,6 +4204,7 @@ def _write_dockerfile(
     repo_context_exclude_paths: Sequence[Path] = (),
     agent_workdir: str | None = None,
     baseline_aliases_prevalidated: bool = False,
+    grading_mode: str = "default",
 ) -> None:
     """Generate a Dockerfile that installs skills into the container.
 
@@ -4163,6 +4216,7 @@ def _write_dockerfile(
     """
     env_dir = task_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
+    verifier_import_check = grading_mode != "custom_only"
 
     if not has_skill and skill_path is not None and not baseline_aliases_prevalidated:
         _check_baseline_skill_candidates_do_not_alias_target(
@@ -4303,6 +4357,7 @@ def _write_dockerfile(
                         include_repo=include_repo,
                         include_repo_linked_root=include_repo_linked_root,
                         agent_workdir=agent_workdir,
+                        verifier_import_check=verifier_import_check,
                     )
                     if rebased is not None:
                         rebased_content, original_from = rebased
@@ -4320,6 +4375,7 @@ def _write_dockerfile(
                         include_repo=include_repo,
                         include_repo_linked_root=include_repo_linked_root,
                         agent_workdir=agent_workdir,
+                        verifier_import_check=verifier_import_check,
                     )
                 return
         finally:
@@ -4354,14 +4410,13 @@ def _write_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
 
-    dockerfile_lines.extend(["", *_verifier_install_lines(pip_reqs)])
+    dockerfile_lines.extend(["", *_verifier_install_lines(pip_reqs, import_check=verifier_import_check)])
 
     dockerfile_lines.extend(
         [
@@ -4490,10 +4545,9 @@ def _write_default_environment_dockerfile(
         "",
         "RUN apt-get -o Acquire::Retries=3 update && \\",
         "    apt-get -o Acquire::Retries=3 install -y --no-install-recommends \\",
-        "    bash curl git jq ripgrep \\",
+        f"    {_BASE_APT_PACKAGES} \\",
     ]
     if apt_pkgs:
-        dockerfile_lines[-1] += " \\"
         dockerfile_lines.append("    " + " ".join(apt_pkgs) + " \\")
     dockerfile_lines.append("    && rm -rf /var/lib/apt/lists/*")
     if include_verifier_deps:
@@ -4599,6 +4653,7 @@ def _prepare_native_environment(
                 include_repo=include_repo,
                 include_repo_linked_root=include_repo_linked_root,
                 agent_workdir=agent_workdir,
+                verifier_import_check=grading_mode != "custom_only",
             )
             if rebased is not None:
                 rebased_content, original_from = rebased
@@ -5124,6 +5179,63 @@ def _validate_native_task_host_env_boundaries(
         validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
 
 
+def _validate_native_task_mcp_policy(
+    task_toml: Path,
+    data: dict[str, Any],
+    *,
+    runtime_env: dict[str, str] | None,
+    verifier_env: dict[str, str] | None = None,
+) -> None:
+    """Check native MCP declarations before Harbor can resolve their headers."""
+    from harbor.models.task.config import MCPServerConfig
+
+    def validate_environment(environment: object, field: str, *, allowed_env: dict[str, str] | None) -> None:
+        # Harbor's task schema diagnoses malformed surrounding tables.
+        if not isinstance(environment, dict) or "mcp_servers" not in environment:
+            return
+        servers = environment["mcp_servers"]
+        source = f"Native Harbor task [{field}.mcp_servers]: {task_toml}"
+        if not isinstance(servers, list) or any(not isinstance(server, dict) for server in servers):
+            raise ValueError(f"{source} must be an array of MCP server tables")
+        invalid_declaration = (
+            f"{source} contains an invalid MCP server declaration; check field types and "
+            "use ${VAR} for environment placeholders"
+        )
+        for server in servers:
+            if server.keys() - MCPServerConfig.model_fields.keys():
+                supported = ", ".join(sorted(MCPServerConfig.model_fields))
+                raise ValueError(
+                    f"{source} contains unsupported MCP server fields; supported MCP field names: {supported}"
+                )
+            try:
+                McpServerDeclaration.model_validate(server)
+            except ValidationError:
+                raise ValueError(invalid_declaration) from None
+        validate_mcp_server_declarations(servers, allowed_runtime_env=allowed_env, source_label=source)
+        for server in servers:
+            try:
+                MCPServerConfig.model_validate(server)
+            except ValidationError:
+                raise ValueError(invalid_declaration) from None
+
+    validate_environment(data.get("environment", {}), "environment", allowed_env=runtime_env)
+
+    def validate_verifier(verifier: object, field: str) -> None:
+        if isinstance(verifier, dict):
+            validate_environment(
+                verifier.get("environment"),
+                f"{field}.environment",
+                allowed_env=verifier_env if verifier_env is not None else runtime_env,
+            )
+
+    validate_verifier(data.get("verifier", {}), "verifier")
+    steps = data.get("steps")
+    if isinstance(steps, list):
+        for index, step in enumerate(steps):
+            if isinstance(step, dict):
+                validate_verifier(step.get("verifier", {}), f"steps[{index}].verifier")
+
+
 def _validate_native_verifier_compose_boundaries(
     task_dir: Path,
     data: dict[str, Any],
@@ -5441,6 +5553,7 @@ def _native_task_workdir(
     environment = data.get("environment", {}) if isinstance(data, dict) else {}
     if not isinstance(environment, dict):
         raise ValueError(f"Native Harbor task [environment] must be a table: {task_dir / 'task.toml'}")
+    _validate_native_task_mcp_policy(task_dir / "task.toml", data, runtime_env=runtime_env, verifier_env=verifier_env)
     _validate_native_task_execution_compatibility(
         task_dir,
         data,
@@ -5841,6 +5954,7 @@ def _stage_native_harbor_tasks_into(
                 grading_mode=grading_mode,
                 custom_grader=custom_grader,
                 evaluated_skill=skill_path.name,
+                agent_workdir=native_agent_workdir,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
         elif custom_grader:
@@ -5858,6 +5972,7 @@ def _stage_native_harbor_tasks_into(
                 workspace_skill_names=workspace_skill_names,
                 grading_mode=grading_mode,
                 custom_grader=True,
+                agent_workdir=native_agent_workdir,
             )
             _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=True)
         elif not authored_custom_tests_complete:
@@ -6214,6 +6329,7 @@ def _generate_harbor_tasks_into(
             grading_mode=grading_mode,
             custom_grader=custom_grader,
             evaluated_skill=(skill_path.name if grading_mode in ("default", "default_plus_custom") else None),
+            agent_workdir=agent_workdir or "/workspace",
         )
         _write_test_sh(task_dir, grading_mode=grading_mode, custom_grader=custom_grader)
 
@@ -6235,6 +6351,7 @@ def _generate_harbor_tasks_into(
             repo_context_exclude_paths=effective_excluded_roots,
             agent_workdir=agent_workdir,
             baseline_aliases_prevalidated=baseline_aliases_prevalidated,
+            grading_mode=grading_mode,
         )
 
         task_dirs.append(case_id)
@@ -6394,7 +6511,7 @@ def _evaluator_projection_selection(
     import yaml
 
     from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
-    from skillevaluator.tier3.evals_config import CONFIG_FILENAMES
+    from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, MAX_EVALS_CONFIG_BYTES
 
     evals_dir = skill_path / "evals"
     config_path = next(
@@ -6408,7 +6525,7 @@ def _evaluator_projection_selection(
         config_payload = _read_regular_evals_file(
             config_path,
             label="Eval configuration",
-            max_bytes=_MAX_EVALS_CONFIG_BYTES,
+            max_bytes=MAX_EVALS_CONFIG_BYTES,
             allowed_root=evals_dir,
         )
         config_digest = hashlib.sha256(config_payload).hexdigest()

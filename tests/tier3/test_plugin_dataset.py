@@ -114,6 +114,26 @@ def test_malformed_and_oversized_datasets_are_refused(tmp_path: Path) -> None:
         stage_wrapper_skill(_package(root), tmp_path / "out2", evals_source=many, max_cases=4)
 
 
+@pytest.mark.parametrize(
+    "checks",
+    [
+        [{"type": "output_matches", "pattern": "["}],
+        [{"type": "made_up", "value": "x"}],
+    ],
+)
+def test_plugin_dataset_rejects_invalid_declarative_checks(tmp_path: Path, checks: list[dict]) -> None:
+    root = _plugin(
+        tmp_path,
+        {
+            "skills/a/SKILL.md": _skill("a"),
+            "skills/a/evals/evals.json": [{"id": "case-1", "prompt": "Run", "checks": checks}],
+        },
+    )
+
+    with pytest.raises(PreparationError, match="invalid declarative checks"):
+        stage_wrapper_skill(_package(root), tmp_path / "out")
+
+
 def test_linked_member_dataset_is_refused(tmp_path: Path) -> None:
     root = _plugin(tmp_path, {"skills/a/SKILL.md": _skill("a")})
     outside = _tree(tmp_path / "outside", {"evals.json": [{"prompt": "x"}]})

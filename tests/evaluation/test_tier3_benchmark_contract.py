@@ -6,11 +6,15 @@
 from __future__ import annotations
 
 import json
+import math
 from pathlib import Path
+
+import pytest
 
 from skillevaluator import __version__
 from skillevaluator.constants import (
     DEFAULT_SCORE_POLICY,
+    DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
     TIER3_LIFT_FAIL_THRESHOLD,
@@ -18,9 +22,12 @@ from skillevaluator.constants import (
 )
 from skillevaluator.evaluation.tier3_report import (
     VERDICT_FAIL,
+    VERDICT_INCONCLUSIVE,
     VERDICT_NEUTRAL,
     VERDICT_PASS,
     _advisory_agent_eval_payload,
+    _agent_quality_verdict,
+    _overall_verdict_from_agents,
     _verdict_from_lift,
     agent_eval_result_from_run,
     build_agent_eval_payload,
@@ -94,12 +101,17 @@ def test_payload_exposes_report_truth_metadata() -> None:
     }
     assert payload["verdict_policy"] == {
         "attempt_pass_threshold": 0.6,
+        "goal_accuracy_pass_threshold": 1.0,
+        "security_pass_threshold": 1.0,
+        "attempt_pass_rule": "overall_threshold_and_goal_accuracy_and_security_threshold_when_scored",
+        "run_fail_policy": "any_with_skill_required_check_failure",
         "dimension_pass_threshold": DIMENSION_VERDICT_PASS_THRESHOLD,
         "dimension_neutral_threshold": DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
         "lift_pass_threshold": TIER3_LIFT_PASS_THRESHOLD,
         "lift_fail_threshold": TIER3_LIFT_FAIL_THRESHOLD,
         "overall_pass_rule": "one_supported_agent_all_dimensions_pass",
     }
+    assert {"required_checks", "correct_answers", "security_clean"} <= payload.keys()
     assert payload["summary"]["dataset_summary"] == payload["dataset_summary"]
     assert payload["summary"]["score_policy"] == payload["score_policy"]
     assert payload["summary"]["verdict_policy"] == payload["verdict_policy"]
@@ -189,10 +201,119 @@ def test_dataset_truth_counts_unique_task_identities() -> None:
     assert len(payload["dataset"]) == 2
 
 
+@pytest.mark.parametrize(
+    ("routing_fields", "positive", "negative", "unclassified"),
+    [
+        pytest.param({"expected_skill": "demo"}, 1, 0, 0, id="legacy-positive"),
+        pytest.param({"expected_skill": "demo", "should_trigger": False}, 0, 1, 0, id="explicit-negative"),
+        pytest.param({"expected_skill": None, "should_trigger": True}, 1, 0, 0, id="explicit-positive"),
+        pytest.param({"should_trigger": True}, 1, 0, 0, id="positive-label-only"),
+        pytest.param({"should_trigger": False}, 0, 1, 0, id="negative-label-only"),
+        pytest.param({"expected_skill": None}, 0, 1, 0, id="legacy-negative"),
+        pytest.param({}, 0, 0, 1, id="unlabeled"),
+    ],
+)
+def test_dataset_truth_respects_explicit_routing_intent(
+    routing_fields: dict, positive: int, negative: int, unclassified: int
+) -> None:
+    dataset = [{"id": "case-1", **routing_fields}]
+    expected_summary = {
+        "total_tasks": 1,
+        "positive_tasks": positive,
+        "negative_tasks": negative,
+        "unclassified_tasks": unclassified,
+        "source": "dataset",
+    }
+
+    snapshot = build_dataset_snapshot(dataset, evaluator_version=__version__)
+    payload = build_agent_eval_payload("demo", _agents(), dataset=dataset, use_llm_judge=False)
+
+    assert snapshot["dataset_summary"] == expected_summary
+    assert payload is not None
+    assert payload["dataset_summary"] == expected_summary
+    assert payload["summary"]["dataset_summary"] == expected_summary
+
+
 def test_dataset_snapshot_rejects_duplicate_or_tampered_dataset(tmp_path: Path) -> None:
     entry = {"id": "case-1", "prompt": "Run the skill", "expected_skill": "demo"}
     snapshot = build_dataset_snapshot([entry], evaluator_version="0.8.2")
     snapshot["dataset"].append(dict(entry))
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_dataset_snapshot(tmp_path) is None
+
+
+def test_dataset_snapshot_migrates_valid_legacy_routing_summary_in_memory(tmp_path: Path) -> None:
+    # This fixture was emitted by the base revision's schema 1.0 builder.
+    original = (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_bytes()
+    persisted = tmp_path / "dataset_snapshot.json"
+    persisted.write_bytes(original)
+    historical = json.loads(original)
+
+    loaded = load_dataset_snapshot(tmp_path)
+
+    assert loaded is not None
+    assert loaded["schema_version"] == "1.1"
+    assert loaded["dataset"] == historical["dataset"]
+    assert loaded["dataset_digest"] == historical["dataset_digest"]
+    assert loaded["evaluator_version"] == "0.8.0"
+    assert loaded["dataset_summary"] == {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    assert persisted.read_bytes() == original
+
+
+@pytest.mark.parametrize("schema_version", ["1.0", "1.1"])
+@pytest.mark.parametrize("tamper", ["summary-rule", "dataset", "digest", "algorithm"])
+def test_dataset_snapshot_rejects_tampered_versioned_truth(tmp_path: Path, schema_version: str, tamper: str) -> None:
+    snapshot = json.loads(
+        (Path(__file__).parents[1] / "fixtures" / "legacy-routing-dataset-snapshot-1.0.json").read_text(
+            encoding="utf-8"
+        )
+    )
+    legacy_summary = dict(snapshot["dataset_summary"])
+    current_summary = {
+        "total_tasks": 3,
+        "positive_tasks": 1,
+        "negative_tasks": 2,
+        "unclassified_tasks": 0,
+        "source": "dataset",
+    }
+    snapshot["schema_version"] = schema_version
+    if schema_version == "1.1":
+        snapshot["dataset_summary"] = current_summary
+    if tamper == "summary-rule":
+        snapshot["dataset_summary"] = current_summary if schema_version == "1.0" else legacy_summary
+    elif tamper == "dataset":
+        snapshot["dataset"][0]["prompt"] = "Changed after evaluation"
+    elif tamper == "digest":
+        snapshot["dataset_digest"] = "sha256:" + "0" * 64
+    else:
+        snapshot["dataset_digest_algorithm"] = "unknown-digest"
+    (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
+
+    assert load_dataset_snapshot(tmp_path) is None
+
+
+def test_new_dataset_snapshot_versions_corrected_routing_summary() -> None:
+    snapshot = build_dataset_snapshot(
+        [{"id": "negative", "expected_skill": "demo", "should_trigger": False}],
+        evaluator_version=__version__,
+    )
+
+    assert snapshot["schema_version"] == "1.1"
+    assert snapshot["dataset_summary"]["positive_tasks"] == 0
+    assert snapshot["dataset_summary"]["negative_tasks"] == 1
+
+
+@pytest.mark.parametrize("schema_version", [[], {}, "9.9"], ids=["array", "object", "unknown"])
+def test_dataset_snapshot_rejects_invalid_schema(tmp_path: Path, schema_version: object) -> None:
+    snapshot = build_dataset_snapshot([{"id": "case-1", "expected_skill": "demo"}], evaluator_version=__version__)
+    snapshot["schema_version"] = schema_version
     (tmp_path / "dataset_snapshot.json").write_text(json.dumps(snapshot), encoding="utf-8")
 
     assert load_dataset_snapshot(tmp_path) is None
@@ -235,6 +356,112 @@ def test_overall_dimension_gate_is_not_overridden_by_neutral_lift() -> None:
     assert payload is not None
     assert payload["overall_lift"] == 0.0
     assert payload["verdict"] == VERDICT_PASS
+
+
+def _dimension_agent(**scores: object) -> dict:
+    """Return a succeeded agent with one with-skill score per named dimension."""
+    return {
+        "execution_status": "succeeded",
+        "dimensions": [{"id": dimension_id, "with_skill": score} for dimension_id, score in scores.items()],
+    }
+
+
+def _passing_dimensions(**overrides: object) -> dict[str, object]:
+    return {**dict.fromkeys(DIMENSION_MAPPING, 0.9), **overrides}
+
+
+def _missing_correctness_agent(*, security: float) -> dict:
+    """Return a succeeded agent with no Correctness dimension, as when no case defines ground_truth."""
+    scores = _passing_dimensions(security=security)
+    del scores["correctness"]
+    return _dimension_agent(**scores)
+
+
+@pytest.mark.parametrize("security", [0.3, 0.0])
+def test_agent_quality_failure_takes_precedence_over_missing_dimension(security: float) -> None:
+    agent = _missing_correctness_agent(security=security)
+
+    assert _agent_quality_verdict(agent) == VERDICT_FAIL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize(
+    ("security", "expected"),
+    [
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD, VERDICT_NEUTRAL, id="at-threshold"),
+        pytest.param(DIMENSION_VERDICT_NEUTRAL_THRESHOLD - 1e-4, VERDICT_FAIL, id="just-below"),
+    ],
+)
+def test_missing_dimension_keeps_the_neutral_threshold_exclusive(security: float, expected: str) -> None:
+    agent = _missing_correctness_agent(security=security)
+
+    assert _agent_quality_verdict(agent) == expected
+    assert _overall_verdict_from_agents({"codex": agent}) == expected
+
+
+@pytest.mark.parametrize(
+    ("peer_scores", "expected"),
+    [
+        pytest.param(_passing_dimensions(security=0.45), VERDICT_NEUTRAL, id="neutral-peer"),
+        pytest.param(_passing_dimensions(security=0.1), VERDICT_FAIL, id="failing-peer"),
+        pytest.param(_passing_dimensions(), VERDICT_PASS, id="passing-peer"),
+    ],
+)
+def test_missing_dimension_failure_combines_with_other_agents(peer_scores: dict[str, object], expected: str) -> None:
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": _dimension_agent(**peer_scores)}
+
+    assert _overall_verdict_from_agents(agents) == expected
+
+
+def test_missing_dimension_failure_beside_a_never_activated_agent_fails_the_run() -> None:
+    never_activated = _dimension_agent(**_passing_dimensions())
+    never_activated["skill_activation"] = {"status": "never_activated"}
+    agents = {"codex": _missing_correctness_agent(security=0.0), "claude-code": never_activated}
+
+    assert _overall_verdict_from_agents(agents) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize("correctness", [None, math.nan, math.inf, True])
+def test_agent_quality_failure_takes_precedence_over_non_finite_dimension(correctness: object) -> None:
+    agent = _dimension_agent(**_passing_dimensions(security=0.0, correctness=correctness))
+
+    assert _agent_quality_verdict(agent) == VERDICT_FAIL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_FAIL
+
+
+@pytest.mark.parametrize("correctness", ["missing", None, math.nan])
+def test_missing_dimension_never_passes(correctness: object) -> None:
+    scores = _passing_dimensions(correctness=correctness)
+    if correctness == "missing":
+        del scores["correctness"]
+    agent = _dimension_agent(**scores)
+
+    assert _agent_quality_verdict(agent) == VERDICT_NEUTRAL
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_NEUTRAL
+
+
+def test_never_activated_agent_stays_inconclusive_beside_a_failing_dimension() -> None:
+    agent = _missing_correctness_agent(security=0.0)
+    agent["skill_activation"] = {"status": "never_activated"}
+
+    assert _agent_quality_verdict(agent) == VERDICT_INCONCLUSIVE
+    assert _overall_verdict_from_agents({"codex": agent}) == VERDICT_INCONCLUSIVE
+
+
+def test_no_ground_truth_payload_fails_when_security_is_below_neutral() -> None:
+    """The agent has no pass@k required-check counts, so only the dimension gate can fail it."""
+    agents = _agents()
+    for arm in ("with_skill", "without_skill"):
+        agents["codex"][arm]["accuracy"] = None
+    agents["codex"]["with_skill"]["security"] = 0.0
+
+    payload = build_agent_eval_payload("demo", agents, use_llm_judge=False)
+
+    assert payload is not None
+    dimension_ids = [dimension["id"] for dimension in payload["agents"]["codex"]["dimensions"]]
+    assert "correctness" not in dimension_ids
+    assert payload["verdict"] == VERDICT_FAIL
+    assert payload["summary"]["verdict"] == VERDICT_FAIL
 
 
 def test_run_wrapper_defers_timestamp_lookup_to_directory_loader(monkeypatch, tmp_path: Path) -> None:

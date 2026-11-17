@@ -29,6 +29,7 @@ from skillevaluator.constants import (
     PLUGIN_CONTAINED_MANIFEST_TYPE,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
     SCAN_ARTIFACT_DIRS,
     SCAN_EXCLUDED_DIRS,
     SKILL_MANIFEST_VARIANTS,
@@ -164,7 +165,27 @@ class _ResolvedPath(NamedTuple):
     """A declared component path that can be loaded (:meth:`_MemberCollector._resolve_component`)."""
 
     rel: PurePosixPath  # contained root-relative path
-    kind: str  # "file" or "dir"
+    kind: str  # "file", "dir", or "missing" when the caller allows an absent path
+
+
+#: The unsupported inventory row every native OpenClaw manifest keeps.
+OPENCLAW_RUNTIME_NAME = "OpenClaw runtime"
+
+
+def _openclaw_built_entries(source: PurePosixPath) -> list[PurePosixPath]:
+    """Bounded built-runtime candidates for one TypeScript entry, in OpenClaw's lookup order."""
+    suffix = source.suffix.lower()
+    if suffix not in {".ts", ".tsx", ".mts", ".cts"}:
+        return []
+    stem = source.with_suffix("").as_posix()
+    dist_stem = f"dist/{stem.removeprefix('src/')}"
+    bases = [dist_stem, *([f"dist/{stem}"] if stem.startswith("src/") else []), stem]
+    suffixes = (
+        (".mjs", ".js", ".cjs")
+        if suffix == ".mts"
+        else ((".cjs", ".js", ".mjs") if suffix == ".cts" else (".js", ".mjs", ".cjs"))
+    )
+    return [PurePosixPath(base + extension) for base in bases for extension in suffixes]
 
 
 def _section_refs(section: Any) -> list[Any]:
@@ -218,6 +239,7 @@ class _MemberCollector:
         self.apps()
         self.extensions()
         self.openai_extension()
+        self.openclaw_runtime()
         return self.inventory
 
     @property
@@ -388,7 +410,7 @@ class _MemberCollector:
             )
             return declared, "invalid"
         kind = self.reader.kind(declared.rel)
-        if kind == "missing":
+        if kind == "missing" and "missing" not in kinds:
             self.inventory.findings.append(
                 _path_problem_finding(self.reader, field_name, declared, self.manifest_rel, "missing")
             )
@@ -599,6 +621,9 @@ class _MemberCollector:
         declared_default = False
         declared_value = self.manifest.get("skills") if self.manifest is not None else None
         default_dir = PurePosixPath(DEFAULT_SKILLS_DIR)
+        if self.profile.explicit_skills_only:
+            self._explicit_skill_roots(declared_value)
+            return
         if self.contained and self.manifest is not None:
             for raw in self._declared_values("skills", declared_value):
                 resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
@@ -649,6 +674,57 @@ class _MemberCollector:
                 )
             )
             self._read_member(component, skill_dir / manifest.relative_path.name)
+
+    def _explicit_skill_roots(self, declared_value: Any) -> None:
+        """Members of a format that loads only its declared skill roots (OpenClaw).
+
+        No implicit ``skills/`` root is added. Declared roots are searched
+        recursively and discovery stops below each skill's own ``SKILL.md``
+        (:func:`~skillevaluator.plugin_skills.discover_openclaw_skill_manifests`).
+        A root ``SKILL.md`` selected through ``.`` is inventoried like any member;
+        Tier 3 never copies the plugin root as a portable member skill.
+        """
+        from skillevaluator.plugin_skills import discover_openclaw_skill_manifests
+
+        if self.manifest is not None and "skills" in self.manifest and not isinstance(declared_value, list):
+            # OpenClaw declares skill roots only as an array; never reinterpret a
+            # scalar or null as a root (schema reports the field as well).
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_path_invalid",
+                    "OpenClaw 'skills' must be an array of declared skill directory paths; no skill root was read",
+                    self.manifest_display,
+                    'Declare skill roots as an array, for example "skills": ["./skills"].',
+                )
+            )
+            self._add(PluginMember("skill", "skills", "declared", None, "evaluated", problem="invalid"))
+            return
+        roots: list[str] = []
+        for raw in self._declared_values("skills", declared_value):
+            resolved = self._resolve_component("skill", "skills", raw, kinds=("dir",))
+            if resolved is not None:
+                roots.append(resolved.rel.as_posix())
+        try:
+            manifests = discover_openclaw_skill_manifests(self.reader.root, {"skills": roots})
+        except (ValueError, SecurePathError) as exc:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_component_path_unsafe",
+                    f"OpenClaw skill discovery failed closed: {exc}",
+                    self.manifest_display,
+                    "Use regular contained skill roots within the discovery bounds.",
+                )
+            )
+            self._add(PluginMember("skill", "skills", "declared", None, "evaluated", problem="unsafe"))
+            return
+        self._check_item_count("OpenClaw member skills", len(manifests))
+        for manifest in manifests[:PLUGIN_COMPONENT_MAX_ITEMS]:
+            folder = PurePosixPath(manifest.relative_path.parent.as_posix())
+            name = folder.name or self.reader.root.name
+            component = self._add(PluginMember("skill", name, "declared", folder.as_posix(), "evaluated"))
+            self._read_member(component, PurePosixPath(manifest.relative_path.as_posix()))
 
     def _root_skill(self) -> None:
         """A root ``SKILL.md`` makes a single-skill plugin (Cursor) when no skills are declared or bundled."""
@@ -1101,6 +1177,101 @@ class _MemberCollector:
                 self._hook(source, profile=CODEX_PROFILE)
         if openai.get("apps") is not None:
             self._add_apps(self._json_sources("app", "apps", openai.get("apps"), None, profile=CODEX_PROFILE))
+
+    def openclaw_runtime(self) -> None:
+        """Inventory native OpenClaw entrypoints without importing them or translating them to MCP.
+
+        A manifest alone cannot enumerate dynamic registrations (tools, hooks,
+        channels, providers, services). An unsupported runtime row is kept even
+        without package entrypoints, so portable skill coverage can never
+        certify the whole OpenClaw plugin.
+        """
+        if self.profile.manifest_type != PLUGIN_OPENCLAW_MANIFEST_TYPE:
+            return
+        self._add(PluginMember("extension", OPENCLAW_RUNTIME_NAME, "declared", self.manifest_rel, "unsupported"))
+        package_path = PurePosixPath("package.json")
+        if self.reader.kind(package_path) == "missing":
+            return
+        package = self._load_json(package_path, "OpenClaw package metadata")
+        metadata = package.get("openclaw") if isinstance(package, dict) else None
+        if metadata is None:
+            return
+
+        def invalid(message: str, suggestion: str) -> None:
+            self.inventory.findings.append(
+                _plugin_finding(
+                    Severity.HIGH,
+                    "plugin_openclaw_package_invalid",
+                    message,
+                    self.reader.display(package_path),
+                    suggestion,
+                )
+            )
+
+        if not isinstance(metadata, dict):
+            invalid(
+                "package.json#openclaw must be an object",
+                "Use an object containing plugin-relative entrypoint paths.",
+            )
+            return
+        pairing = "Declare contained entrypoint paths, with runtime entries paired with their source entries."
+        entries: dict[str, list[Any]] = {}
+        for field_name in ("extensions", "runtimeExtensions", "setupEntry", "runtimeSetupEntry"):
+            if field_name not in metadata:
+                continue
+            value = metadata[field_name]
+            array_field = field_name in {"extensions", "runtimeExtensions"}
+            if (array_field and not isinstance(value, list)) or (not array_field and not isinstance(value, str)):
+                invalid(f"openclaw.{field_name} must be {'an array' if array_field else 'a string'}", pairing)
+                continue
+            entries[field_name] = self._declared_values(field_name, value)
+
+        extensions, runtimes = metadata.get("extensions", []), metadata.get("runtimeExtensions", [])
+        paired_extensions = isinstance(extensions, list) and isinstance(runtimes, list)
+        if paired_extensions and runtimes and len(runtimes) != len(extensions):
+            invalid("openclaw.runtimeExtensions length must match openclaw.extensions length", pairing)
+            paired_extensions = False
+        if "runtimeSetupEntry" in metadata and "setupEntry" not in metadata:
+            invalid("openclaw.runtimeSetupEntry requires openclaw.setupEntry", pairing)
+
+        # An explicit runtime must exist even when source or inferred output also exists.
+        resolved_runtime = {
+            (field_name, index): self._openclaw_entry(field_name, raw)
+            for field_name in ("runtimeExtensions", "runtimeSetupEntry")
+            for index, raw in enumerate(entries.get(field_name, []))
+        }
+        for source_field, runtime_field in (("extensions", "runtimeExtensions"), ("setupEntry", "runtimeSetupEntry")):
+            for index, raw in enumerate(entries.get(source_field, [])):
+                runtime = resolved_runtime.get((runtime_field, index))
+                if source_field == "extensions" and not paired_extensions:
+                    runtime = None
+                # OpenClaw's package entrypoint resolution searches dist/, dist/src/,
+                # then sibling JavaScript, keeping the .mts/.cts output preference.
+                # Never bypass an explicit runtime, nor an unsafe earlier candidate.
+                infer = runtime_field not in metadata or (runtime_field == "runtimeExtensions" and runtimes == [])
+                if infer and isinstance(raw, str):
+                    declared = normalize_declared_path(raw, self.profile.manifest_path_prefixes)
+                    if declared.rel is not None:
+                        for candidate in _openclaw_built_entries(declared.rel):
+                            if self.reader.kind(candidate) == "missing":
+                                continue
+                            runtime = self._openclaw_entry(f"{runtime_field} (inferred)", candidate.as_posix())
+                            break
+                # Published packages may omit sources, but boundary, type, link and
+                # special-file checks still apply. Only a valid runtime excuses absence.
+                self._openclaw_entry(source_field, raw, allow_missing=runtime is not None)
+
+    def _openclaw_entry(self, field_name: str, raw: Any, *, allow_missing: bool = False) -> _ResolvedPath | None:
+        resolved = self._resolve_component(
+            "extension", f"openclaw.{field_name}", raw, kinds=("file", "missing") if allow_missing else ("file",)
+        )
+        if resolved is not None:
+            self._add(
+                PluginMember(
+                    "extension", f"openclaw.{field_name}: {raw}", "declared", resolved.rel.as_posix(), "unsupported"
+                )
+            )
+        return resolved
 
     def _read_member(
         self, component: PluginMember, rel: PurePosixPath, *, lenient: bool = False, strip: bool = False

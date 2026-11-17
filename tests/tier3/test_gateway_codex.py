@@ -110,8 +110,9 @@ def test_selected_codex_launcher_preserves_provider_model_contract(
             self.uploads = {}
 
         async def exec(self, command, **kwargs):
-            self.commands.append((command, kwargs.get("env") or {}))
-            return ExecResult(return_code=0, stdout="", stderr="")
+            self.commands.append((command, kwargs.get("env") or {}, kwargs.get("user")))
+            stdout = "CODEX_RUNTIME_ID 1000 1001\n" if "CODEX_RUNTIME_ID" in command else ""
+            return ExecResult(return_code=0, stdout=stdout, stderr="")
 
         async def upload_file(self, source_path, target_path):
             self.uploads[str(target_path)] = Path(source_path).read_text(encoding="utf-8")
@@ -127,7 +128,20 @@ def test_selected_codex_launcher_preserves_provider_model_contract(
         assert configs[0]["model_provider"] == "openai_compatible"
         assert configs[0]["model_providers"]["openai_compatible"]["base_url"] == base_url
 
-    launchers = [(text, env) for text, env in environment.commands if "codex exec " in text]
+    identities = [(text, user) for text, _env, user in environment.commands if "CODEX_RUNTIME_ID" in text]
+    assert len(identities) == 1
+    assert "$(id -u)" in identities[0][0]
+    assert "$(id -g)" in identities[0][0]
+    assert identities[0][1] is None
+    expected_home = "/logs/agent/codex-home" if mode == "local" else "/installed-agent/codex-home"
+    private_dirs = [(text, user) for text, _env, user in environment.commands if "chown -R" in text]
+    assert len(private_dirs) == 1
+    private_dir_command, private_dir_user = private_dirs[0]
+    assert private_dir_user == "root"
+    assert private_dir_command.endswith(
+        f"mkdir -p {expected_home} && chown -R 1000:1001 {expected_home} && chmod 700 {expected_home}"
+    )
+    launchers = [(text, env) for text, env, _user in environment.commands if "codex exec " in text]
     assert len(launchers) == 1
     launcher, launch_env = launchers[0]
     argv = shlex.split(launcher)

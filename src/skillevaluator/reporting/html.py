@@ -37,16 +37,26 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlparse
 
-from jinja2 import BaseLoader, Environment
+from jinja2 import BaseLoader, Environment, pass_context
 
 from skillevaluator import __version__
-from skillevaluator.constants import QUALITY_GRADE_THRESHOLDS, TIER3_LIFT_FAIL_THRESHOLD, TIER3_LIFT_PASS_THRESHOLD
+from skillevaluator.constants import (
+    DIMENSION_HINTS,
+    DIMENSION_MAPPING,
+    DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
+    DIMENSION_VERDICT_PASS_THRESHOLD,
+    QUALITY_GRADE_THRESHOLDS,
+    SIGNAL_EVIDENCE_SOURCES,
+    TIER3_LIFT_FAIL_THRESHOLD,
+    TIER3_LIFT_PASS_THRESHOLD,
+)
 from skillevaluator.publication_evidence import result_publication_evidence_dict
 from skillevaluator.reporting.base import (
     AGENT_EVAL_EXACT_TEXT_KEYS,
     ReporterBase,
     additional_errors,
     additional_warnings,
+    agent_eval_publication_dataset_provenance,
     agent_eval_publication_evidence_complete,
     agent_eval_report_serialization_issue,
     agent_eval_report_serialization_limits,
@@ -70,6 +80,14 @@ from skillevaluator.reporting.base import (
 from skillevaluator.reporting.base import (
     is_tier2_validator_name as _is_tier2_validator_name,
 )
+from skillevaluator.reporting.declarative_coverage import (
+    DENOMINATOR_NOTE,
+    attempt_denominators,
+    check_status,
+    coverage_summary,
+    declarative_coverage_groups,
+)
+from skillevaluator.reporting.diagnostic_view import build_dataset_diagnostics_view
 from skillevaluator.reporting.finding_summary import (
     describe_issue_counts,
     finding_counts,
@@ -77,7 +95,11 @@ from skillevaluator.reporting.finding_summary import (
     summarize_messages,
     total_issue_count,
 )
-from skillevaluator.reporting.harbor_viewer import normalize_agent_eval_harbor_links
+from skillevaluator.reporting.finding_verification import finding_verification
+from skillevaluator.reporting.harbor_viewer import harbor_job_display_links, normalize_agent_eval_harbor_links
+from skillevaluator.reporting.insights_view import build_insights_view
+from skillevaluator.reporting.native_evidence import build_native_evidence
+from skillevaluator.reporting.plugin_evidence import build_plugin_evidence
 from skillevaluator.reporting.presentation import (
     FinalRenderContext,
     TierPresentation,
@@ -86,9 +108,21 @@ from skillevaluator.reporting.presentation import (
     success_is_not_applicable,
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.telemetry_view import build_telemetry_view
+from skillevaluator.reporting.tier2_views import tier2_scope_views
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
+from skillevaluator.reporting.tier3_token_usage import token_usage_table
 from skillevaluator.reporting.trial_charts import steps_by_case_chart
 from skillevaluator.skillspector_provenance import skillspector_provenance_records
+from skillevaluator.source_identity import recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -108,12 +142,17 @@ _TIER3_HTML_PREVIEW_TRIGGER_BYTES = 256 * 1024
 _TIER3_HTML_PREVIEW_CHARS = 128 * 1024
 _TIER3_HTML_PREVIEW_STRING_CHARS = 4 * 1024
 _TIER3_HTML_PREVIEW_COLLECTION_ITEMS = 64
+_TIER3_HTML_PREVIEW_PRIORITY_KEYS = ("best_agent",)
 _TIER3_PREVIEW_MARKER = "... [HTML preview truncated; download the full Tier 3 payload]"
 _TIER3_JSON_SAFE_PRIORITY_KEYS = (
     "schema_version",
     "verdict",
     "execution_status",
+    # A few hundred bytes that explain a failed agent arm. Walked before the
+    # bulky keys, so the bounded HTML preview keeps every message whole.
+    "coverage_notices",
     "summary",
+    "correct_answers",
     "skill_name",
     "publication_target",
     "run_id",
@@ -482,6 +521,27 @@ def _tier3_score_reasons(value: object) -> dict[str, str]:
     return reasons
 
 
+@pass_context
+def _tier3_not_applicable_reason(_context: Any, metric: object, with_skill: bool = False) -> str:
+    """Describe N/A metrics at render time, keeping Tier 3 imports out of base template compilation."""
+    from skillevaluator.tier3.harbor.metrics import not_applicable_reason
+
+    return not_applicable_reason(str(metric), with_skill=with_skill is True)
+
+
+_TIER3_BACKEND_LABELS = {"harbor": "Harbor", "nemo-gym": "NeMo Gym"}
+
+
+def _tier3_backend_label(value: object) -> str | None:
+    """Return the display name of a recorded execution backend id, or ``None``.
+
+    The payload is untyped metadata, so a dict, list or other non-string value
+    can sit where the id should be; it counts as no backend rather than being
+    used as a lookup key (an unhashable one would raise inside the template).
+    """
+    return _TIER3_BACKEND_LABELS.get(value) if isinstance(value, str) else None
+
+
 def _tier3_text_mapping(value: object) -> dict[str, str]:
     """Normalize public label maps without silently overwriting aliases."""
     if not isinstance(value, dict):
@@ -503,7 +563,75 @@ def _tier3_text_mapping(value: object) -> dict[str, str]:
     return labels
 
 
-def _sanitize_tier3_dimension(value: dict[str, Any]) -> dict[str, Any]:
+def _tier3_comparison_block_reason(value: dict[str, Any]) -> str:
+    """Keep cached comparison evidence from restoring an explicitly unavailable skill arm."""
+    summary = value.get("summary") if isinstance(value.get("summary"), dict) else {}
+    if value.get("mode") == "baseline_only" or summary.get("mode") == "baseline_only":
+        return "baseline_only"
+    conditions = value.get("conditions") if isinstance(value.get("conditions"), dict) else {}
+    with_skill = conditions.get("with_skill")
+    if isinstance(with_skill, dict) and any(
+        isinstance(status := with_skill.get(key), str) and status.strip().casefold() == "skipped"
+        for key in ("execution_status", "status")
+    ):
+        return "with_skill_skipped"
+    activation = value.get("skill_activation")
+    if isinstance(activation, dict) and activation.get("status") == "never_activated":
+        return "never_activated"
+    return ""
+
+
+def _sanitize_tier3_dimension_comparison(
+    value: object, *, allow_lift: bool = True, block_reason: str = ""
+) -> dict[str, Any]:
+    """Project recorded native comparisons without recomputing or trusting shaped values."""
+    if not isinstance(value, dict):
+        return {}
+    raw_status = value.get("status")
+    status = raw_status.strip().casefold() if isinstance(raw_status, str) else ""
+    known_status = status in {"comparable", "partial", "not_applicable", "unavailable", "inconclusive"}
+    comparison: dict[str, Any] = {"status": status if known_status else "unavailable"}
+    for key in ("label", "reason", "reason_code"):
+        text = _json_safe_tier3_text(value[key]) if isinstance(value.get(key), str) else ""
+        comparison[key] = (
+            text[:_TIER3_HTML_PREVIEW_STRING_CHARS] + _TIER3_PREVIEW_MARKER
+            if len(text) > _TIER3_HTML_PREVIEW_STRING_CHARS
+            else text
+        )
+    comparison["sources"] = _tier3_identifier_list(value.get("sources"))
+    for key in ("with_skill", "baseline", "lift"):
+        comparison[key] = (
+            _finite_number(value.get(key), minimum=-1.0 if key == "lift" else 0.0, maximum=1.0)
+            if status in {"comparable", "partial"} and allow_lift and not block_reason
+            else None
+        )
+    raw_measured = value.get("measured") if isinstance(value.get("measured"), dict) else {}
+    comparison["measured"] = {}
+    for arm in ("with_skill", "baseline"):
+        measured = raw_measured.get(arm)
+        if isinstance(measured, dict):
+            comparison["measured"][arm] = {
+                "score": _finite_number(measured.get("score"), minimum=0.0, maximum=1.0) if known_status else None,
+                "sources": _tier3_identifier_list(measured.get("sources")),
+            }
+    if block_reason or not allow_lift:
+        reason_code = block_reason or "never_activated"
+        explanations = {
+            "baseline_only": "Baseline-only run; the with-skill arm was not run, so no skill comparison is available.",
+            "with_skill_skipped": "The with-skill arm was explicitly skipped; no skill comparison is available.",
+            "never_activated": "Skill never activated; scores are diagnostic only and no skill comparison is available.",
+        }
+        comparison.update(
+            status="inconclusive" if reason_code == "never_activated" else "unavailable",
+            reason_code=reason_code,
+            reason=explanations[reason_code],
+        )
+    return comparison
+
+
+def _sanitize_tier3_dimension(
+    value: dict[str, Any], *, allow_comparison_lift: bool = True, comparison_block_reason: str = ""
+) -> dict[str, Any]:
     dimension = dict(value)
     for key in ("baseline", "with_skill", "score"):
         dimension[key] = _finite_number(dimension.get(key), minimum=0.0, maximum=1.0)
@@ -518,6 +646,16 @@ def _sanitize_tier3_dimension(value: dict[str, Any]) -> dict[str, Any]:
         dimension["verdict"] = None if raw_verdict is None else _tier3_display_identifier(raw_verdict)
     dimension["evaluators"] = _tier3_identifier_list(dimension.get("evaluators"))
     dimension["reasoning_bullets"] = _string_list(dimension.get("reasoning_bullets"))
+    if "partial" in dimension:
+        dimension["partial"] = dimension["partial"] is True
+    if "comparison" in dimension:
+        comparison = _sanitize_tier3_dimension_comparison(
+            dimension["comparison"], allow_lift=allow_comparison_lift, block_reason=comparison_block_reason
+        )
+        if comparison:
+            dimension["comparison"] = comparison
+        else:
+            dimension.pop("comparison", None)
     return dimension
 
 
@@ -559,6 +697,8 @@ def _sanitize_tier3_pass_condition(value: object) -> dict[str, Any]:
             case = dict(raw_case)
             for key in ("attempts_used", "attempts_missing", "attempts_skipped"):
                 case[key] = _nonnegative_count(case.get(key))
+            if "attempts_recovered" in case:
+                case["attempts_recovered"] = _nonnegative_count(case.get("attempts_recovered"))
             case["best_score"] = _finite_number(case.get("best_score"), minimum=0.0, maximum=1.0)
             first_pass = case.get("first_pass_attempt")
             case["first_pass_attempt"] = (
@@ -796,8 +936,26 @@ def _sanitize_tier3_pass_at_k(value: object) -> dict[str, Any]:
     return pass_at_k
 
 
-def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | None:
+def _sanitize_tier3_comparison_basis(value: object) -> dict[str, Any] | None:
+    """Keep an evaluator card's judge-model lift exclusions only when they name a case count."""
+    if not isinstance(value, dict) or not (excluded_cases := _nonnegative_count(value.get("excluded_cases"))):
+        return None
+    return {
+        "excluded_cases": excluded_cases,
+        "case_ids": _tier3_identifier_list(value.get("case_ids")),
+        "excluded_attempts": _strict_nonnegative_count(value.get("excluded_attempts")),
+        "contributing_attempts": _strict_nonnegative_count(value.get("contributing_attempts")),
+        "reason": _json_safe_tier3_text(value["reason"]) if isinstance(value.get("reason"), str) else "",
+    }
+
+
+def _sanitize_tier3_evaluator_card(
+    value: dict[str, Any],
+    *,
+    include_evidence_unavailable_default: bool = False,
+) -> dict[str, Any] | None:
     from skillevaluator.evaluation.tier3_findings import FAILURE_REASON_EVIDENCE_KEYS
+    from skillevaluator.tier3.eval_core.atif_helpers import _METRIC_EVIDENCE_REF_METRICS
 
     card = dict(value)
     card["with_skill"] = _finite_number(card.get("with_skill"), minimum=0.0, maximum=1.0)
@@ -820,8 +978,27 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
         for key in FAILURE_REASON_EVIDENCE_KEYS:
             if not (isinstance(entry.get(key), str) and entry[key]):
                 entry.pop(key, None)
+        if entry.pop("comparison_excluded", None) is True:
+            entry["comparison_excluded"] = True
+        if (
+            include_evidence_unavailable_default
+            and card.get("id") in _METRIC_EVIDENCE_REF_METRICS
+            and entry["score"] is not None
+            and entry["score"] < 0.8
+            and not entry["evidence_refs"]
+        ):
+            unavailable_reason = entry.get("evidence_unavailable_reason")
+            if isinstance(unavailable_reason, str) and unavailable_reason:
+                entry["evidence_unavailable_reason"] = unavailable_reason[:512]
+            else:
+                entry["evidence_unavailable_reason"] = "No trajectory evidence was recorded for this metric"
+        else:
+            entry.pop("evidence_unavailable_reason", None)
         evidence.append(entry)
     card["evidence"] = evidence
+    comparison_basis = _sanitize_tier3_comparison_basis(card.pop("comparison_basis", None))
+    if comparison_basis:
+        card["comparison_basis"] = comparison_basis
     sampling = card.get("evidence_sampling") if isinstance(card.get("evidence_sampling"), dict) else {}
     for key in ("represented_cases", "represented_trials", "total_trials", "scanned_trials"):
         if key in sampling:
@@ -831,7 +1008,7 @@ def _sanitize_tier3_evaluator_card(value: dict[str, Any]) -> dict[str, Any] | No
     return card
 
 
-def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
+def _sanitize_tier3_agent(value: dict[str, Any], *, comparison_block_reason: str = "") -> dict[str, Any]:
     agent = dict(value)
     activation = agent.get("skill_activation")
     agent["skill_activation"] = dict(activation) if isinstance(activation, dict) else {}
@@ -854,11 +1031,15 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
     agent["num_trials_baseline"] = _nonnegative_count(agent.get("num_trials_baseline"))
     agent["expected_attempts"] = _nonnegative_count(agent.get("expected_attempts"))
     agent["scored_attempts"] = _nonnegative_count(agent.get("scored_attempts"))
-    agent["dimensions"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("dimensions"))]
+    comparison_block_reason = comparison_block_reason or _tier3_comparison_block_reason(agent)
+    agent["dimensions"] = [
+        _sanitize_tier3_dimension(item, comparison_block_reason=comparison_block_reason)
+        for item in _dict_list(agent.get("dimensions"))
+    ]
     agent["evaluator_cards"] = [
         card
         for item in _dict_list(agent.get("evaluator_cards"))
-        if (card := _sanitize_tier3_evaluator_card(item)) is not None
+        if (card := _sanitize_tier3_evaluator_card(item, include_evidence_unavailable_default=True)) is not None
     ]
     agent["findings"] = [_sanitize_tier3_dimension(item) for item in _dict_list(agent.get("findings"))]
     agent["pass_at_k"] = _sanitize_tier3_pass_at_k(agent.get("pass_at_k"))
@@ -870,6 +1051,152 @@ def _sanitize_tier3_agent(value: dict[str, Any]) -> dict[str, Any]:
             _sanitize_tier3_trial(item, fill_defaults=False) for item in _dict_list(agent.get("trials_baseline"))
         ]
     return agent
+
+
+def _tier3_html_dimensions(payload: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Keep recorded dimensions and configured-but-unmeasured public dimensions visible."""
+    if not isinstance(payload, dict):
+        return []
+    dimensions = [dict(item) for item in _dict_list(payload.get("dimensions"))]
+    dimension_ids = {item.get("id") for item in dimensions}
+    dimension_ids.update(item.get("id") for item in _dict_list(payload.get("not_applicable_dimensions")))
+    agents = payload.get("agents")
+    summary = payload.get("summary")
+    summary = summary if isinstance(summary, dict) else {}
+    best_name = payload.get("best_agent") or summary.get("best_agent")
+    best = agents.get(best_name) if isinstance(agents, dict) and isinstance(best_name, str) else None
+    successful_best = isinstance(best, dict) and best.get("execution_status") == "succeeded"
+    active_metrics = (
+        set(_tier3_identifier_list(best.get("metrics_with_skill")))
+        if successful_best
+        else set(_tier3_configured_metrics(payload))
+    )
+    if payload.get("execution_status") == "skipped":
+        return dimensions
+    for dimension_id, config in DIMENSION_MAPPING.items():
+        if dimension_id in dimension_ids:
+            continue
+        signals = list(dict.fromkeys([*config.get("evaluators", []), *config.get("fallback_evaluators", [])]))
+        active_signals = [signal for signal in signals if signal in active_metrics]
+        if not active_signals:
+            continue
+        dimensions.append(
+            {
+                "id": dimension_id,
+                "score": None,
+                "with_skill": None,
+                "baseline": None,
+                "lift": None,
+                "verdict": None,
+                "evaluators": active_signals,
+                "reasoning_bullets": [
+                    "A signal this dimension needs produced no score."
+                    if successful_best
+                    else "The evaluation did not complete; no authoritative dimension measurement is available."
+                    if payload.get("execution_status") in {"failed", "incomplete"}
+                    else "No authoritative dimension measurement was recorded."
+                ],
+                "measurement_unavailable": True,
+            }
+        )
+        dimension_ids.add(dimension_id)
+    return dimensions
+
+
+def _tier3_configured_metrics(payload: dict[str, Any]) -> list[str]:
+    """Read retained metric identities; never substitute the template's default metric set."""
+    metrics = _tier3_identifier_list(payload.get("metric_ids"))
+    for _name, agent in _tier3_agent_entries(payload.get("agents")):
+        for key in ("metrics_with_skill", "metrics_without_skill"):
+            metrics.extend(_tier3_identifier_list(agent.get(key)))
+    if isinstance(payload.get("evaluators"), dict):
+        metrics.extend(_tier3_identifier_list(list(payload["evaluators"])))
+    return list(dict.fromkeys(metrics))
+
+
+def _tier3_metric_comparison_view(payload: object) -> dict[str, Any]:
+    """Bound a custom-only Overview table to already assessed recorded metric values."""
+    empty: dict[str, Any] = {"rows": [], "omitted": 0}
+    if not isinstance(payload, dict) or payload.get("execution_status") == "skipped":
+        return empty
+    standard_metrics = {
+        metric
+        for config in DIMENSION_MAPPING.values()
+        for key in ("evaluators", "fallback_evaluators")
+        for metric in config.get(key, [])
+    }
+    if any(metric in standard_metrics for metric in _tier3_configured_metrics(payload)) or any(
+        item.get("id") in DIMENSION_MAPPING for item in _dict_list(payload.get("dimensions"))
+    ):
+        return empty
+    labels = _tier3_text_mapping(payload.get("metric_labels"))
+    candidates: dict[str, dict[str, Any]] = {}
+    seen: set[str] = set()
+    evaluators = payload.get("evaluators") if isinstance(payload.get("evaluators"), dict) else {}
+    for raw_id, scores in evaluators.items():
+        identifier = _tier3_display_identifier(raw_id)
+        if not identifier or not isinstance(scores, dict) or identifier.casefold() in seen:
+            return empty
+        seen.add(identifier.casefold())
+        candidates[identifier] = {**scores, "label": labels.get(identifier, identifier)}
+    card_ids: set[str] = set()
+    for card in _dict_list(payload.get("evaluator_cards")):
+        identifier = _tier3_display_identifier(card.get("id") or card.get("evaluator"))
+        identity = identifier.casefold()
+        if not identifier or identity in card_ids:
+            return empty
+        card_ids.add(identity)
+        if identifier not in candidates:
+            if identity in seen:
+                return empty
+            seen.add(identity)
+            candidates[identifier] = card
+    for identifier in _tier3_identifier_list(payload.get("metric_ids")):
+        if identifier not in candidates:
+            if identifier.casefold() in seen:
+                return empty
+            seen.add(identifier.casefold())
+            candidates[identifier] = {}
+    agents = dict(_tier3_agent_entries(payload.get("agents")))
+    summary = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    best_name = _tier3_display_identifier(payload.get("best_agent") or summary.get("best_agent"))
+    best = agents.get(best_name, {})
+    comparison_block_reason = _tier3_comparison_block_reason(payload) or _tier3_comparison_block_reason(best)
+    incomplete = (
+        payload.get("execution_status") in {"failed", "incomplete"} and best.get("execution_status") != "succeeded"
+    )
+    rows = []
+    for identifier, candidate in candidates.items():
+        score = _finite_number(candidate.get("with_skill"), minimum=0.0, maximum=1.0)
+        baseline = _finite_number(candidate.get("baseline"), minimum=0.0, maximum=1.0)
+        lift = _finite_number(candidate.get("lift"), minimum=-1.0, maximum=1.0)
+        reason = ""
+        if incomplete:
+            score = baseline = lift = None
+            reason = "The evaluation did not complete; no authoritative comparison is available."
+        elif comparison_block_reason == "baseline_only":
+            score = lift = None
+            reason = "Baseline-only run; the with-skill arm was not run."
+        elif comparison_block_reason == "with_skill_skipped":
+            score = lift = None
+            reason = "The with-skill arm was explicitly skipped; no skill comparison is available."
+        elif comparison_block_reason == "never_activated":
+            lift = None
+            reason = "Skill never activated; scores are diagnostic only."
+        elif score is None:
+            lift = None
+            reason = "No with-skill measurement was recorded."
+        elif baseline is None:
+            lift = None
+            reason = "No baseline measurement was recorded."
+        elif lift is None:
+            reason = "No comparable lift was recorded."
+        if len(rows) < _TIER3_HTML_PREVIEW_COLLECTION_ITEMS:
+            label = _tier3_display_identifier(candidate.get("label")) or labels.get(identifier) or identifier
+            rows.append(
+                {"id": identifier, "label": label, "score": score, "baseline": baseline, "lift": lift, "reason": reason}
+            )
+    return {"rows": rows, "omitted": max(0, len(candidates) - len(rows))}
 
 
 def _scrub_untrusted_tier3_agents(value: object) -> dict[str, dict[str, Any]]:
@@ -932,6 +1259,11 @@ def _sanitize_tier3_trial(value: dict[str, Any], *, fill_defaults: bool = True) 
     score_reasons = _tier3_score_reasons(trial.pop("score_reasons", None))
     if score_reasons:
         trial["score_reasons"] = score_reasons
+    if "not_applicable_metrics" in trial:
+        from skillevaluator.tier3.harbor.metrics import not_applicable_list
+
+        # Only metrics that can be N/A count, so a malformed payload cannot mark security N/A.
+        trial["not_applicable_metrics"] = not_applicable_list(trial["not_applicable_metrics"])
     # Unavailable telemetry stays absent rather than becoming zero, so the
     # template can omit charts and show "—" instead of reporting no usage.
     raw_tokens = trial.pop("tokens", None)
@@ -982,12 +1314,92 @@ def _sanitize_tier3_dataset_case(value: dict[str, Any]) -> dict[str, Any]:
     return case
 
 
+def _sanitize_tier3_case_diagnostics(value: object) -> list[dict[str, Any]]:
+    cases = _dict_list(value)
+    for case in cases:
+        case["entry_id"] = _tier3_display_identifier(case.get("entry_id"))
+        case["requirements"] = _dict_list(case.get("requirements"))
+        case["attempts"] = _dict_list(case.get("attempts"))
+        for attempt in case["attempts"]:
+            attempt["errors"] = _string_list(attempt.get("errors"))
+            attempt["judgments"] = _dict_list(attempt.get("judgments"))
+            for judgment in attempt["judgments"]:
+                judgment["evidence"] = _string_list(judgment.get("evidence"))
+                judgment["unmet_checks"] = _string_list(judgment.get("unmet_checks"))
+                judgment["inapplicable_checks"] = _string_list(judgment.get("inapplicable_checks"))
+    return cases
+
+
 def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
     """Normalize template-facing types after merging canonical and fallback data."""
     payload = _json_safe_tier3_payload(value)
+    sufficiency = payload.get("dataset_sufficiency")
+    if isinstance(sufficiency, dict) and sufficiency.get("status") in {"sufficient", "provisional"}:
+        coverage_summary = sufficiency.get("coverage_summary")
+        reason = sufficiency.get("reason")
+        payload["dataset_sufficiency"] = {
+            "status": sufficiency["status"],
+            "coverage_summary": coverage_summary[:512] if isinstance(coverage_summary, str) else "",
+            "reason": reason[:512] if isinstance(reason, str) else "",
+        }
+    else:
+        payload.pop("dataset_sufficiency", None)
+    evidence = payload.get("evidence_volume")
+    if isinstance(evidence, dict):
+
+        def counter(value: object) -> int:
+            return value if isinstance(value, int) and not isinstance(value, bool) and 0 <= value <= 2**53 - 1 else 0
+
+        def case_counter(value: object) -> int | None:
+            result = counter(value)
+            return result or None
+
+        safe_evidence: dict[str, Any] = {
+            key: counter(evidence.get(key))
+            for key in (
+                "cases",
+                "attempts_planned",
+                "attempts_scored",
+                "execution_failures",
+                "judge_failures",
+            )
+        }
+        safe_evidence["cases"] = case_counter(evidence.get("cases"))
+        safe_evidence["attempts_per_case"] = case_counter(evidence.get("attempts_per_case"))
+        safe_evidence["uniform_attempts"] = evidence.get("uniform_attempts") is not False
+        safe_evidence["limited"] = evidence.get("limited") is True
+        safe_evidence["by_arm"] = (
+            {
+                arm: {
+                    key: counter(arm_value.get(key))
+                    for key in (
+                        "attempts_planned",
+                        "attempts_scored",
+                        "execution_failures",
+                        "judge_failures",
+                    )
+                }
+                | {"cases": case_counter(arm_value.get("cases"))}
+                for arm, arm_value in evidence.get("by_arm", {}).items()
+                if arm in {"with_skill", "without_skill"} and isinstance(arm_value, dict)
+            }
+            if isinstance(evidence.get("by_arm"), dict)
+            else {}
+        )
+        safe_evidence["display"] = format_evidence_volume(safe_evidence) or ""
+        payload["evidence_volume"] = safe_evidence
+    else:
+        payload.pop("evidence_volume", None)
     payload["summary"] = payload.get("summary") if isinstance(payload.get("summary"), dict) else {}
+    global_comparison_block = _tier3_comparison_block_reason(payload)
     payload["agents"] = {
-        identifier: _sanitize_tier3_agent(agent) for identifier, agent in _tier3_agent_entries(payload.get("agents"))
+        identifier: _sanitize_tier3_agent(
+            agent,
+            comparison_block_reason=global_comparison_block
+            if global_comparison_block in {"baseline_only", "with_skill_skipped"}
+            else "",
+        )
+        for identifier, agent in _tier3_agent_entries(payload.get("agents"))
     }
     for container in (payload, payload["summary"]):
         for key in ("skill_name", "evaluator_version", "environment"):
@@ -1038,7 +1450,8 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         if not isinstance(payload.get(key), dict):
             payload[key] = {}
     payload["metric_labels"] = _tier3_text_mapping(payload.get("metric_labels"))
-    payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints"))
+    payload["dimension_hints"] = _tier3_text_mapping(payload.get("dimension_hints")) or dict(DIMENSION_HINTS)
+    payload["signal_evidence"] = dict(SIGNAL_EVIDENCE_SOURCES)
     evaluator_paths = payload["provenance"].get("evaluator_paths")
     payload["provenance"]["evaluator_paths"] = evaluator_paths if isinstance(evaluator_paths, dict) else {}
     if "source_validation" in payload["provenance"]:
@@ -1078,17 +1491,41 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         if (card := _sanitize_tier3_evaluator_card(item)) is not None
     ]
     payload["cases"] = _dict_list(payload.get("cases"))
+    best_name = _tier3_display_identifier(payload.get("best_agent") or payload["summary"].get("best_agent"))
+    best_agent = payload["agents"].get(best_name, {})
+    comparison_block_reason = global_comparison_block or _tier3_comparison_block_reason(best_agent)
+    # Unscored dimensions stay listed so the report can explain them.
     payload["dimensions"] = [
         dimension
         for item in _dict_list(payload.get("dimensions"))
-        if (
-            (dimension := _sanitize_tier3_dimension(item)).get("score") is not None
-            or dimension.get("with_skill") is not None
+        if any(
+            (dimension := _sanitize_tier3_dimension(item, comparison_block_reason=comparison_block_reason)).get(key)
+            is not None
+            for key in ("score", "with_skill", "baseline")
         )
+    ]
+    scored_dimension_ids = {dimension.get("id") for dimension in payload["dimensions"]}
+    payload["not_applicable_dimensions"] = [
+        {"id": dimension_id, "reason": reason if isinstance(reason := item.get("reason"), str) else ""}
+        for item in _dict_list(payload.get("not_applicable_dimensions"))
+        if (dimension_id := _tier3_display_identifier(item.get("id"))) and dimension_id not in scored_dimension_ids
     ]
     for key in ("conclusions", "recommendations", "suggestions_v2"):
         payload[key] = _sanitize_tier3_insight_items(payload.get(key))
+    payload["next_steps"] = [
+        {
+            key: str(step.get(key) or "")
+            for key in ("kind", "target", "problem", "evidence", "action", "check", "strength")
+        }
+        | {
+            key: _tier3_display_identifier(step[key])
+            for key in ("agent", "case", "case_id", "condition")
+            if isinstance(step.get(key), str)
+        }
+        for step in _dict_list(payload.get("next_steps"))
+    ]
     payload["dataset"] = [_sanitize_tier3_dataset_case(item) for item in _dict_list(payload.get("dataset"))]
+    payload["case_diagnostics"] = _sanitize_tier3_case_diagnostics(payload.get("case_diagnostics"))
     payload["trials"] = [_sanitize_tier3_trial(item) for item in _dict_list(payload.get("trials"))]
     timing: list[dict[str, Any]] = []
     for item in _dict_list(payload.get("timing")):
@@ -1101,6 +1538,16 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
         payload[key] = _tier3_identifier_list(payload.get(key))
     for key in ("execution_errors", "suggestions"):
         payload[key] = _string_list(payload.get(key))
+    # The template lists each notice's message; drop entries without one.
+    coverage_notices = [
+        notice
+        for notice in _dict_list(payload.get("coverage_notices"))
+        if isinstance(notice.get("message"), str) and notice["message"]
+    ]
+    if coverage_notices:
+        payload["coverage_notices"] = coverage_notices
+    else:
+        payload.pop("coverage_notices", None)
     # ``skill_name`` was already validated above as an exact NFC filesystem
     # identity. Do not pass it through compatibility-normalizing display text.
     for key in ("best_agent", "verdict", "execution_status"):
@@ -1124,6 +1571,11 @@ def _sanitize_tier3_display_payload(value: dict[str, Any]) -> dict[str, Any]:
                 maximum=1.0,
             )
     payload["runtime_seconds"] = _finite_number(payload.get("runtime_seconds"), minimum=0.0) or 0.0
+    baseline = payload.get("baseline")
+    if isinstance(baseline, dict) and baseline:
+        payload["baseline_description"] = baseline_description(baseline)
+    if comparison := payload.get("prior_version_comparison"):
+        payload["prior_version_lines"] = version_comparison_lines(comparison)
     payload["summary"]["runtime_seconds"] = (
         _finite_number(payload["summary"].get("runtime_seconds"), minimum=0.0) or 0.0
     )
@@ -1170,6 +1622,31 @@ def _script_safe_json(value: object) -> str:
     )
 
 
+def _unrepresented_insight_steps(view: dict[str, Any], *, failed: bool) -> list[dict[str, Any]]:
+    """Keep next steps unless a failed-run card already displays all their evidence."""
+    steps = [step for step in view.get("next_steps", []) if isinstance(step, dict)]
+    if not failed:
+        return steps
+    actions = [
+        item
+        for item in view.get("recommendations", [])
+        if isinstance(item, dict) and item.get("insight_kind") == "execution_action"
+    ]
+
+    def represented(step: dict[str, Any], card: dict[str, Any]) -> bool:
+        if not step.get("action") or step["action"] != card.get("message"):
+            return False
+        target = step.get("target") or "agent_eval"
+        if target != card.get("metric"):
+            return False
+        for field in ("problem", "check", "strength", "agent", "case", "case_id", "condition"):
+            if (step.get(field) or "") != (card.get(field) or ""):
+                return False
+        return (step.get("evidence") or "") == (card.get("evidence_text") or card.get("evidence") or "")
+
+    return [step for step in steps if not any(represented(step, card) for card in actions)]
+
+
 def _canonical_tier3_embed(payload: dict[str, Any] | None) -> tuple[str, str]:
     """Return one safe canonical Tier 3 copy and its browser decoding mode."""
     if not payload:
@@ -1203,6 +1680,8 @@ def _bounded_tier3_preview_value(value: Any, budget: _Tier3PreviewBudget) -> Any
 
     if isinstance(value, dict):
         items = list(value.items())
+        priority_keys = _TIER3_HTML_PREVIEW_PRIORITY_KEYS
+        items.sort(key=lambda item: item[0] not in priority_keys)
         kept = min(len(items), _TIER3_HTML_PREVIEW_COLLECTION_ITEMS)
         budget.omitted_items += len(items) - kept
         bounded_dict: dict[Any, Any] = {}
@@ -1246,6 +1725,38 @@ def _capped_tier3_trial_rows(payload: dict[str, Any]) -> int:
     return omitted
 
 
+def _tier3_chart_projection(payload: dict[str, Any] | None) -> dict[str, Any]:
+    """Keep only measurements consumed by the native dimension/token charts.
+
+    Derive this from the same bounded display preview as the tables. The full
+    retained evidence is embedded separately for JSON downloads.
+    """
+    data = payload or {}
+    return {
+        "dimensions": [{"id": row.get("id")} for row in (data.get("dimensions") or [])],
+        "agents": {
+            name: {
+                "dimensions": [
+                    {key: row[key] for key in ("id", "score", "with_skill") if key in row}
+                    for row in (agent.get("dimensions") or [])
+                ]
+            }
+            for name, agent in (data.get("agents") or {}).items()
+        },
+        "trials": [
+            {
+                "agent": trial.get("agent"),
+                "tokens": {
+                    key: value
+                    for key, value in (trial.get("tokens") or {}).items()
+                    if key in ("prompt", "completion", "cached")
+                },
+            }
+            for trial in (data.get("trials") or [])
+        ],
+    }
+
+
 def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, Any] | None, dict[str, int]]:
     """Return a presentation-only projection plus visible omission counts.
 
@@ -1257,23 +1768,49 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
     """
     if not payload:
         return payload, {}
-    serialized = _compact_json(payload)
+    # A private copy: the caller embeds ``payload`` itself as the canonical data.
+    # The token usage table reads the full payload, so ``token_usage`` neither
+    # triggers the preview nor spends its budget.
+    slim = json.loads(_compact_json({key: value for key, value in payload.items() if key != "token_usage"}))
+    # Activation diagnostics belong to the canonical export. The template does
+    # not render them, so duplicate per-trial copies must not spend overview or
+    # failure-reason space before the preview budget is applied.
+    agents = slim.get("agents")
+    containers = [slim, *(agents.values() if isinstance(agents, dict) else [])]
+    for container in containers:
+        if not isinstance(container, dict):
+            continue
+        for arm in ("trials", "trials_baseline"):
+            trials = container.get(arm)
+            for trial in trials if isinstance(trials, list) else []:
+                if isinstance(trial, dict):
+                    trial.pop("activation_validation", None)
+    serialized = _compact_json(slim)
     if len(serialized.encode("utf-8")) <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
-        return payload, {}
+        return slim, {}
 
     from skillevaluator.evaluation.tier3_findings import failure_reason_text_slots, strip_failure_reason_text
 
-    # A private copy: the caller embeds ``payload`` itself as the canonical data.
-    slim = json.loads(serialized)
     rendered_slots = list(failure_reason_text_slots(slim, include_top_level_cards=False))
     deferred = [(container, key, container.pop(key)) for container, key in rendered_slots]
     # The page renders each agent's cards, never the top-level card copy, so its
     # reasons are dropped without being restored or counted as left out.
     strip_failure_reason_text(slim)
     slim_size = len(_compact_json(slim).encode("utf-8"))
+    omitted_diagnostics = 0
+    if slim_size > _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
+        omitted_diagnostics = len(slim.pop("case_diagnostics", []))
+        slim_size = len(_compact_json(slim).encode("utf-8"))
     if slim_size <= _TIER3_HTML_PREVIEW_TRIGGER_BYTES:
         omitted_reasons = _restore_failure_reason_text(deferred, _TIER3_HTML_PREVIEW_TRIGGER_BYTES - slim_size)
-        return slim, {"failure_reasons": omitted_reasons} if omitted_reasons else {}
+        return slim, {
+            key: count
+            for key, count in {
+                "failure_reasons": omitted_reasons,
+                "case_diagnostics": omitted_diagnostics,
+            }.items()
+            if count
+        }
 
     budget = _Tier3PreviewBudget()
     preview = _bounded_tier3_preview_value(slim, budget)
@@ -1284,6 +1821,7 @@ def _bounded_tier3_preview(payload: dict[str, Any] | None) -> tuple[dict[str, An
             "items": budget.omitted_items,
             "trial_rows": _capped_tier3_trial_rows(slim),
             "failure_reasons": len(deferred),
+            "case_diagnostics": omitted_diagnostics,
         }.items()
         if value > 0
     }
@@ -1720,15 +2258,21 @@ class HTMLReporter(ReporterBase):
         reporters with different options can share it. Jinja environments are
         safe to share between threads once they are configured.
         """
+        from skillevaluator.skillspector_references import reference_summary_message
+
         loader = PackageLoader("skillevaluator.reporting", "templates")
         environment = Environment(loader=loader, autoescape=True)
+        environment.filters["skillspector_reference_summary"] = reference_summary_message
         environment.filters["cleanly_skipped"] = is_cleanly_skipped
         environment.filters["execution_status"] = _result_display_status
         environment.filters["related_paths"] = _related_paths
+        environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason
+        environment.filters["not_applicable_reason"] = _tier3_not_applicable_reason
+        environment.filters["tier3_backend_label"] = _tier3_backend_label
         return environment
 
     @staticmethod
@@ -1795,7 +2339,9 @@ class HTMLReporter(ReporterBase):
         if self.target_path:
             tp = Path(self.target_path)
             if (tp / "SKILL.md").exists() or (tp / "skill.md").exists():
-                return tp.name
+                # ``.`` and ``..`` (``tier1 .`` from inside the skill folder) have
+                # no folder name of their own; the folder they open does.
+                return (tp.resolve().name if tp.name in {"", ".", ".."} else tp.name) or None
 
         return None
 
@@ -2060,8 +2606,10 @@ class HTMLReporter(ReporterBase):
         (e.g., "Personal macOS user path") fires on many lines in the same file.
         A finding's ``occurrence_id`` becomes an ``occurrence_ids`` list on the
         merged entry, so every merged location keeps its identity. The key
-        also holds ``finding_id`` when present, so two different checks with
-        the same text never merge and an entry's IDs all belong to it.
+        also holds ``finding_id`` and the verification decision when present,
+        so different checks or decisions never merge. The first occurrence's
+        rationale represents the group; individual rationales remain in the
+        validator view and JSON export.
         """
         groups: dict[tuple, dict[str, Any]] = {}
         seen_occurrences: dict[tuple, set[str]] = {}
@@ -2069,11 +2617,16 @@ class HTMLReporter(ReporterBase):
         for finding in findings:
             # Normalize message for deduplication (strip trailing whitespace/newlines)
             norm_msg = HTMLReporter._normalize_message(finding.get("message", ""))
+            verification = finding_verification(finding)
+            decision = (
+                (verification.verdict, verification.confidence, verification.severity_effect) if verification else None
+            )
             key = (
                 norm_msg,
                 finding.get("file_path", ""),
                 finding.get("suggestion", ""),
                 finding.get("finding_id"),
+                decision,
             )
 
             if key in groups:
@@ -2153,7 +2706,7 @@ class HTMLReporter(ReporterBase):
         16 hex chars (~64 bits) is well below collision risk for the few
         dozen unique issue groups a single report ever shows.
         """
-        payload = f"{category}::{group_key}".encode()
+        payload = f"{category}::{group_key}".encode("utf-8", "surrogatepass")
         return hashlib.sha1(payload, usedforsecurity=False).hexdigest()[:16]
 
     @staticmethod
@@ -2677,7 +3230,7 @@ class HTMLReporter(ReporterBase):
         ) -> bool:
             if agent_eval_publication_evidence_complete(candidate):
                 return True
-            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive"}:
+            if payload_verdict(candidate) not in {"pass", "neutral", "fail", "inconclusive", "incomplete"}:
                 return False
             execution_status = payload_execution_status(candidate)
             if execution_status == "succeeded":
@@ -2770,6 +3323,7 @@ class HTMLReporter(ReporterBase):
                     "publication_target_conflict",
                     "run_id",
                     "environment",
+                    "execution_backend",
                     "evaluated_at",
                     "evaluator_version",
                     "benchmark_policy",
@@ -2786,6 +3340,7 @@ class HTMLReporter(ReporterBase):
                     "publication_target_conflict",
                     "run_id",
                     "environment",
+                    "execution_backend",
                     "evaluated_at",
                     "evaluator_version",
                     "benchmark_policy",
@@ -2796,6 +3351,15 @@ class HTMLReporter(ReporterBase):
                     display["summary"]["harbor_viewer"] = preserved["summary"]["harbor_viewer"]
                 if preserved.get("_serialization_truncated") is True:
                     display["_serialization_truncated"] = True
+                from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+                if (
+                    selected_execution_status == "skipped"
+                    and not preserved.get("execution_errors")
+                    and budget_fully_denied(preserved.get("budget"))
+                ):
+                    display["budget"] = preserved["budget"]
+                    display["budget_summary"] = preserved.get("budget_summary")
 
             result_errors = [error for result in results for error in result.errors]
             result_diagnostics = [
@@ -2858,7 +3422,7 @@ class HTMLReporter(ReporterBase):
             if verdict == "fail" or execution_status == "failed":
                 return normalized_payload(
                     forced_verdict="fail",
-                    forced_execution_status="failed",
+                    forced_execution_status=execution_status or "failed",
                     scrub_untrusted_evidence=not (has_trustworthy_payload or has_explicit_failure_payload),
                 )
             if execution_status == "incomplete":
@@ -2884,12 +3448,26 @@ class HTMLReporter(ReporterBase):
     def render(self, result: ValidationResult) -> str:
         return self.render_all([result])
 
-    def render_all(self, results: list[ValidationResult]) -> str:
+    def render_all(
+        self,
+        results: list[ValidationResult],
+        *,
+        plugin_static: object = None,
+        plugin_runtime: object = None,
+    ) -> str:
+        plugin_evidence = build_plugin_evidence(static=plugin_static, runtime=plugin_runtime)
         validate_report_scope(self.report_scope, results)
         tier1_results, tier2_results, tier3_results = self._split_results_by_tier(results)
         selected = select_agent_eval_candidate(tier3_results)
         raw_payload = selected[1] if selected is not None else None
         tier3_data = self._tier3_report_data(tier3_results, selected=selected)
+        # Export valid retained evidence exactly; display shaping below is deliberately
+        # conservative and must never rewrite the downloadable object.
+        canonical_tier3 = (
+            raw_payload
+            if raw_payload is not None and agent_eval_report_serialization_issue(raw_payload) is None
+            else tier3_data
+        )
         completed_agent = completed_agent_result(tier3_data)
         # Preserve the raw policy/provenance assessment, then let the emitted
         # payload make the decision only more conservative. Display shaping
@@ -2991,8 +3569,74 @@ class HTMLReporter(ReporterBase):
         tier1_skillspector_provenance = _skillspector_provenance(tier1_results)
         tier2_summary = self._compute_tier_summary(tier2_results, presentation=context.tiers[2])
         tier3_summary = self._compute_tier_summary(tier3_results, presentation=context.tiers[3])
+        tier3_dataset_sufficiency = tier3_data.get("dataset_sufficiency") if isinstance(tier3_data, dict) else None
+        dataset_summary = tier3_data.get("dataset_summary") if isinstance(tier3_data, dict) else None
+        task_count = dataset_summary.get("total_tasks") if isinstance(dataset_summary, dict) else None
+        dataset_source = dataset_summary.get("source") if isinstance(dataset_summary, dict) else None
+        if (
+            not isinstance(task_count, int)
+            or isinstance(task_count, bool)
+            or task_count <= 0
+            or dataset_source == "unavailable"
+        ):
+            tier3_dataset_sufficiency = None
+        # Runtime-only plugin projections expose passive evidence in the native
+        # tabs without inventing an AGENT_EVAL result or canonical Tier 3 payload.
+        if tier3_data is None and any(plugin_evidence[slot] for slot in ("overview", "agents", "trials", "provenance")):
+            tier3_data = {
+                "skill_name": (plugin_evidence["runtime"] or plugin_evidence["static"] or {}).get(
+                    "name", "Plugin evidence"
+                ),
+                "overall_score": None,
+                "overall_lift": None,
+                "best_agent": None,
+                "verdict": "incomplete",
+                "execution_status": "incomplete",
+                "agents": {},
+                "summary": {},
+            }
+        tier3_telemetry = build_telemetry_view(tier3_data)
+        # Failed-arm trials remain diagnostic evidence, including scored rewards.
+        # Determine comparison eligibility before preview bounds can omit those rows.
+        tier3_diagnostic_comparison_agents = {
+            trial.get("agent") or "(default)"
+            for trial in _dict_list((tier3_data or {}).get("trials"))
+            if trial.get("diagnostic_only") is True
+        }
+        tier3_diagnostic_comparison_agents.update(
+            name
+            for name, agent in ((tier3_data or {}).get("agents") or {}).items()
+            if isinstance(agent, dict)
+            if any(
+                trial.get("diagnostic_only") is True
+                for key in ("trials", "trials_baseline")
+                for trial in _dict_list(agent.get(key))
+            )
+        )
         tier3_preview, tier3_preview_notice = _bounded_tier3_preview(tier3_data)
-        tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(tier3_data)
+        tier3_metric_comparison = _tier3_metric_comparison_view(tier3_preview)
+        insights_view = build_insights_view(tier3_preview or {})
+        insights_case_fix_count = len(insights_view.get("recommendations") or [])
+        # Older retained source checks and healthy runs may only have suggestions.
+        # Give those the same native cards in Overview and Insights.
+        if not insights_view.get("recommendations"):
+            insights_view = {
+                **insights_view,
+                "recommendations": [
+                    {"message": suggestion, "title": "", "category": "Action", "source": "deterministic"}
+                    for suggestion in (tier3_preview or {}).get("suggestions", [])
+                    if isinstance(suggestion, str) and suggestion
+                ],
+            }
+        remaining_insight_steps = _unrepresented_insight_steps(
+            insights_view, failed=(tier3_preview or {}).get("execution_status") == "failed"
+        )
+        if isinstance(tier3_preview, dict) and isinstance(tier3_preview.get("evidence_volume"), dict):
+            tier3_preview["evidence_volume"]["display"] = format_evidence_volume(tier3_preview["evidence_volume"]) or ""
+        tier3_dataset_provenance_line, tier3_dataset_provenance_warning = dataset_provenance_display(
+            tier3_data.get("dataset_provenance") if isinstance(tier3_data, dict) else None
+        )
+        tier3_canonical_data, tier3_canonical_encoding = _canonical_tier3_embed(canonical_tier3)
         tier3_truncation = tier3_data.get("report_truncation", {}) if isinstance(tier3_data, dict) else {}
 
         # Keep the Tier 1 dashboard scoped to Tier 1. Tier 2 and Tier 3 have
@@ -3223,7 +3867,7 @@ class HTMLReporter(ReporterBase):
             # Tier 3 is embedded once in ``#tier3-full``. The export helper
             # resolves this reference at download time, avoiding a second full
             # copy inside ``#report-data``.
-            "tier3": {"$ref": "#tier3-full"} if tier3_data else None,
+            "tier3": {"$ref": "#tier3-full"} if canonical_tier3 else None,
             "gating": gating,
             "publication": {
                 "status": publication.status,
@@ -3238,12 +3882,16 @@ class HTMLReporter(ReporterBase):
             "skillspector_versions": tier1_skillspector_versions,
             "skillspector_provenance": tier1_skillspector_provenance,
         }
+        if plugin_evidence["static"] is not None:
+            report_data["plugin_static"] = plugin_evidence["static"]
+        if plugin_evidence["runtime"] is not None:
+            report_data["plugin_runtime"] = plugin_evidence["runtime"]
         # CI-native pages link Download JSON to the retained canonical file, so
         # nothing on them reads an embedded copy. Only standalone reports embed it.
         report_json = None
         if not self.ci_context.get("canonical_json_url"):
             report_json = (
-                json.dumps(report_data, indent=2, allow_nan=False)
+                json.dumps(report_data, separators=(",", ":"), allow_nan=False)
                 .replace("<", "\\u003c")
                 .replace(">", "\\u003e")
                 .replace("&", "\\u0026")
@@ -3267,12 +3915,20 @@ class HTMLReporter(ReporterBase):
         if agent_eval_only and tier3_data:
             active_tabs = [t for t in active_tabs if t["id"] != "tier1"]
 
+        for tier_number in (1, 2):
+            tier_id = f"tier{tier_number}"
+            if plugin_evidence[tier_id] and not any(tab["id"] == tier_id for tab in active_tabs):
+                active_tabs.append(
+                    {"id": tier_id, "label": f"Tier {tier_number}", "empty": True, "number": tier_number}
+                )
+        active_tabs.sort(key=lambda tab: tab["id"])
         template = self._env.get_template("report.html.j2")
         cl = self.content_label
         return template.render(
             report_scope=self.report_scope,
             presentation=context,
             completed_agent=completed_agent,
+            tolerated_baselines=tolerated_baseline_agents(tier3_data),
             title=self.title,
             ci_context=self.ci_context,
             explicit_skill_name=self.explicit_skill_name,
@@ -3292,8 +3948,8 @@ class HTMLReporter(ReporterBase):
             publication_status=publication.status,
             publication_reasons=publication.reasons,
             tier3_effective_status=(
-                completed_agent["verdict"]
-                if self.report_scope == "tier3" and completed_agent
+                tier3_data.get("verdict")
+                if self.report_scope == "tier3" and isinstance(tier3_data, dict) and tier3_data.get("verdict")
                 else publication.tier3.status
             ),
             total_validators=total_validators,
@@ -3331,11 +3987,38 @@ class HTMLReporter(ReporterBase):
             content_label_plural=cl + "s",
             quality_scores=quality_scores_by_skill,
             tier3=tier3_preview,
+            tier3_diagnostic_comparison_agents=tier3_diagnostic_comparison_agents,
+            tier3_chart_data=_tier3_chart_projection(tier3_preview),
+            insights_view=insights_view,
+            dataset_diagnostics_view=build_dataset_diagnostics_view((tier3_preview or {}).get("case_diagnostics")),
+            native_evidence=build_native_evidence(tier3_data),
+            remaining_insight_steps=remaining_insight_steps,
+            insights_case_fix_count=insights_case_fix_count,
+            plugin_evidence=plugin_evidence,
+            tier3_display_dimensions=_tier3_html_dimensions(tier3_data),
+            tier3_metric_comparison_rows=tier3_metric_comparison["rows"],
+            tier3_metric_comparison_omitted=tier3_metric_comparison["omitted"],
+            tier3_dataset_provenance_line=tier3_dataset_provenance_line,
+            tier3_dataset_provenance_warning=tier3_dataset_provenance_warning,
             chart_assets=_load_chart_assets,
             tier3_canonical_data=tier3_canonical_data,
             tier3_canonical_encoding=tier3_canonical_encoding,
             tier3_truncation=tier3_truncation,
+            tier3_dataset_sufficiency=tier3_dataset_sufficiency,
             tier3_preview_notice=tier3_preview_notice,
+            tier3_telemetry=tier3_telemetry,
+            declarative_coverage_groups=declarative_coverage_groups(
+                tier3_data.get("agents") if isinstance(tier3_data, dict) else {}
+            ),
+            declarative_coverage_summary=coverage_summary,
+            declarative_check_status=check_status,
+            declarative_attempt_denominators=attempt_denominators,
+            declarative_denominator_note=DENOMINATOR_NOTE,
+            # Measured, not scored. From the full display payload, with its own
+            # per-agent cap: the preview walk can blank strings of late keys.
+            tier3_token_usage=token_usage_table(
+                tier3_data.get("token_usage") if isinstance(tier3_data, dict) else None
+            ),
             # From the full display payload: the bounded preview can cap rows
             # unevenly per condition and blank identity fields of late rows.
             steps_by_case_chart=steps_by_case_chart(
@@ -3353,8 +4036,14 @@ class HTMLReporter(ReporterBase):
             tier1_contributors=tier1_contributors,
             tier1_display_summary=tier1_display_summary,
             tier2_results=tier2_results,
+            tier2_scopes=tier2_scope_views(tier2_results),
+            harbor_jobs=harbor_job_display_links(tier3_data or {}),
+            dataset_provenance=agent_eval_publication_dataset_provenance(tier3_data),
+            evaluated_source=recorded_evaluated_source(result.metadata for result in results),
             tier3_lift_pass_threshold=TIER3_LIFT_PASS_THRESHOLD,
             tier3_lift_fail_threshold=TIER3_LIFT_FAIL_THRESHOLD,
+            tier3_dimension_pass_threshold=DIMENSION_VERDICT_PASS_THRESHOLD,
+            tier3_dimension_neutral_threshold=DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
             quality_min_score=quality_min_score,
             quality_grade_legend=QUALITY_GRADE_LEGEND,
             verdict_words=VERDICT_WORDS,

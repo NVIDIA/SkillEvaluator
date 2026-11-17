@@ -5,6 +5,7 @@ import json
 
 import pytest
 
+from skillevaluator.tier3.eval_core.atif_helpers import attach_metric_evidence_refs, build_metric_evidence_refs
 from skillevaluator.tier3.harbor import report
 from skillevaluator.tier3.harbor.metrics import CUSTOM_ONLY_METRIC_SET, DEFAULT_METRIC_SET, DEFAULT_METRICS
 
@@ -34,6 +35,304 @@ def _reward(metric_score=0.1):
             },
         },
     }
+
+
+@pytest.mark.parametrize("same_excerpt", [False, True])
+def test_cross_trial_compact_refs_are_rejected_in_both_orders(same_excerpt):
+    first, second = _reward(), _reward()
+    second["entry_id"] = "different-case"
+    if not same_excerpt:
+        second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "different case evidence"
+    key = "trajectory.json#/steps/14"
+
+    for rewards in ([first, second], [second, first]):
+        lookup = report._build_evidence_ref_lookup(rewards)
+        assert report._recorded_evidence_refs([key], lookup) == []
+
+
+def test_repeated_ref_within_one_trial_remains_available():
+    reward = _reward()
+    reward["details"]["accuracy"] = reward["details"]["goal_accuracy"]
+    lookup = report._build_evidence_ref_lookup([reward])
+
+    [ref] = report._recorded_evidence_refs(["trajectory.json#/steps/14"], lookup)
+
+    assert ref["excerpt"] == "submit ..."
+
+
+def test_multi_trial_refs_are_qualified_from_reward_ownership():
+    first, second = _reward(), _reward()
+    first["trial_id"], second["trial_id"] = "case-a__one", "case-b__one"
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["json_pointer"] = "/steps/99"
+    for rewards in ([first, second], [second, first]):
+        lookup = report._build_evidence_ref_lookup(rewards)
+        assert len(lookup) == 2
+        assert "trials/case-a__one/trajectory.json#/steps/14" in lookup
+        assert "trials/case-b__one/trajectory.json#/steps/99" in lookup
+    for reward in (first, second):
+        reward["details"]["goal_accuracy"]["evidence_refs"][0]["source"] = f"{reward['trial_id']}/trajectory.json"
+    forward = report._build_evidence_ref_lookup([first, second])
+    backward = report._build_evidence_ref_lookup([second, first])
+
+    assert forward == backward
+    assert len(forward) == 2
+    assert report._recorded_evidence_refs(["case-b__one/trajectory.json#/steps/99"], forward)[0]["source"] == (
+        "case-b__one/trajectory.json"
+    )
+
+
+def test_empty_evidence_lookup_rejects_unrecorded_refs():
+    assert report._recorded_evidence_refs(["trajectory.json#/steps/14"], report._build_evidence_ref_lookup([])) == []
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_prompt_exposes_citable_trial_qualified_evidence(monkeypatch, reverse):
+    first, second = _reward(), _reward()
+    first["trial_id"], second["trial_id"] = "case-a__one", "case-b__one"
+    second["entry_id"] = "case-b"
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "case-b failed output"
+    rewards = [second, first] if reverse else [first, second]
+    key = "trials/case-b__one/trajectory.json#/steps/14"
+
+    def fake_hub(prompt, **_kw):
+        assert key in prompt
+        assert "trials/case-a__one/trajectory.json#/steps/14" in prompt
+        return json.dumps([{"suggestion": "Fix case-b", "dimension": "goal_accuracy", "evidence_refs": [key]}]), None
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    findings = report._extract_findings(rewards)
+    [suggestion] = report._generate_suggestions_structured("demo", findings, rewards)
+    [ref] = suggestion["evidence_refs"]
+    assert ref["source"] == "trials/case-b__one/trajectory.json"
+    assert ref["excerpt"] == "case-b failed output"
+
+
+@pytest.mark.parametrize("reverse", [False, True])
+def test_failing_finding_only_cites_failing_cases(reverse):
+    passing, failing = _reward(1.0), _reward(0.0)
+    passing["entry_id"], failing["entry_id"] = "arithmetic-negative", "syllable-positive"
+    passing["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "Answers 56"
+    failing["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "Missing syllable_count"
+    rewards = [failing, passing] if reverse else [passing, failing]
+
+    finding = next(f for f in report._extract_findings(rewards) if f["metric"] == "goal_accuracy")
+
+    assert finding["severity"] != "ok"
+    assert [(ref["source"], ref["excerpt"]) for ref in finding["evidence_refs"]] == [
+        ("trials/syllable-positive/trajectory.json", "Missing syllable_count")
+    ]
+
+
+def test_multi_trial_evidence_without_an_owner_is_rejected():
+    first, second = _reward(), _reward()
+    del first["entry_id"]
+    del second["entry_id"]
+    assert report._build_evidence_ref_lookup([first, second]) == {}
+    assert all(not finding["evidence_refs"] for finding in report._extract_findings([first, second]))
+
+
+def test_conflicting_refs_with_the_same_owner_are_rejected():
+    first, second = _reward(), _reward()
+    second["details"]["goal_accuracy"]["evidence_refs"][0]["excerpt"] = "conflicting evidence"
+    for rewards in ([first, second], [second, first]):
+        assert report._build_evidence_ref_lookup(rewards) == {}
+        assert all(not finding["evidence_refs"] for finding in report._extract_findings(rewards))
+
+
+_ARTIFACT_PATH = "/workspace/output/results.json"
+_GROUND_TRUTH_KEY = "evals.json#/ground_truth"
+_EXPECTED_BEHAVIOR_KEY = "evals.json#/expected_behavior/0"
+_WRITE_CALL_KEY = "trajectory.json#/steps/0/tool_calls/0"
+
+
+def _builder_reward(entry_id, trajectory, *, ground_truth="", expected_behavior=None, score=0.1):
+    """A failing reward whose evidence refs come from the production builder."""
+    refs = build_metric_evidence_refs(
+        trajectory, "question", ground_truth=ground_truth, expected_behavior=expected_behavior
+    )
+    details = {
+        metric: {"reason": f"{metric} not met", "evidence_refs": refs[metric]}
+        for metric in ("accuracy", "goal_accuracy", "behavior_check")
+    }
+    attach_metric_evidence_refs(details, refs)
+    reward = {
+        "entry_id": entry_id,
+        "security": 1.0,
+        "skill_execution": 1.0,
+        "skill_efficiency": 1.0,
+        "accuracy": score,
+        "goal_accuracy": score,
+        "behavior_check": score,
+        "details": details,
+    }
+    return json.loads(json.dumps(reward))  # as read back from reward.json: refs are not shared objects
+
+
+def _artifact_expectation_reward(entry_id="case-a"):
+    return _builder_reward(
+        entry_id,
+        {"steps": []},
+        ground_truth=f"Write {_ARTIFACT_PATH}",
+        expected_behavior=[f"Writes {_ARTIFACT_PATH}"],
+    )
+
+
+def _file_write_reward(entry_id="case-a"):
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": _ARTIFACT_PATH, "content": "{}"},
+                    }
+                ],
+            }
+        ]
+    }
+    return _builder_reward(entry_id, trajectory, ground_truth="Produce the results file")
+
+
+def _capture_prompt(monkeypatch, suggestion_refs):
+    captured = {}
+
+    def fake_hub(prompt, **_kw):
+        captured["prompt"] = prompt
+        return json.dumps(
+            [{"suggestion": "Write the results", "dimension": "goal_accuracy", "evidence_refs": suggestion_refs}]
+        ), None
+
+    monkeypatch.setattr("skillevaluator.tier3.eval_core.llm_judge.call_public_llm", fake_hub)
+    return captured
+
+
+def test_builder_emits_the_variants_the_lookup_must_tolerate():
+    reward = _artifact_expectation_reward()
+    kinds_at = {}
+    for metric_refs in reward["details"].values():
+        for ref in metric_refs["evidence_refs"]:
+            kinds_at.setdefault(ref["json_pointer"], set()).add(ref["kind"])
+
+    assert kinds_at["/ground_truth"] == {"ground_truth", "expected_artifact"}
+    assert kinds_at["/expected_behavior/0"] == {"expected_behavior", "expected_artifact"}
+    file_kinds = {
+        ref["kind"]
+        for metric_refs in _file_write_reward()["details"].values()
+        for ref in metric_refs["evidence_refs"]
+        if ref["json_pointer"] == "/steps/0/tool_calls/0"
+    }
+    assert file_kinds == {"tool_call", "file_change"}
+
+
+def test_artifact_expectations_keep_one_canonical_ref_per_location():
+    reward = _artifact_expectation_reward()
+    forward = report._build_evidence_ref_lookup([reward])
+
+    assert set(forward) == {_GROUND_TRUTH_KEY, _EXPECTED_BEHAVIOR_KEY}
+    assert forward[_GROUND_TRUTH_KEY]["kind"] == "ground_truth"
+    assert forward[_EXPECTED_BEHAVIOR_KEY]["kind"] == "expected_artifact"
+    assert forward[_EXPECTED_BEHAVIOR_KEY]["path"] == _ARTIFACT_PATH
+    assert report._build_evidence_ref_lookup([_artifact_expectation_reward()]) == forward
+
+
+def test_file_write_tool_call_keeps_one_canonical_ref():
+    lookup = report._build_evidence_ref_lookup([_file_write_reward()])
+
+    assert lookup[_WRITE_CALL_KEY]["kind"] == "tool_call"
+    assert lookup[_WRITE_CALL_KEY]["path"] == _ARTIFACT_PATH
+
+
+@pytest.mark.parametrize(
+    ("make_reward", "expected_keys"),
+    [
+        (_artifact_expectation_reward, {_GROUND_TRUTH_KEY, _EXPECTED_BEHAVIOR_KEY}),
+        (_file_write_reward, {_WRITE_CALL_KEY, _GROUND_TRUTH_KEY}),
+    ],
+    ids=["artifact_expectation", "file_write"],
+)
+def test_findings_keep_evidence_for_same_case_role_variants(make_reward, expected_keys):
+    findings = {f["metric"]: f for f in report._extract_findings([make_reward()])}
+
+    for metric in ("goal_accuracy", "behavior_check"):
+        refs = findings[metric]["evidence_refs"]
+        assert refs, metric
+        assert "evidence_unavailable_reason" not in findings[metric]
+        assert {report._compact_evidence_ref(ref) for ref in refs} <= expected_keys
+    assert expected_keys <= {
+        report._compact_evidence_ref(ref) for finding in findings.values() for ref in finding["evidence_refs"]
+    }
+
+
+@pytest.mark.parametrize(
+    ("make_reward", "cited"),
+    [
+        (_artifact_expectation_reward, _EXPECTED_BEHAVIOR_KEY),
+        (_file_write_reward, _WRITE_CALL_KEY),
+    ],
+    ids=["artifact_expectation", "file_write"],
+)
+def test_suggestion_prompt_and_citation_keep_same_case_role_variants(monkeypatch, make_reward, cited):
+    captured = _capture_prompt(monkeypatch, [cited])
+    reward = make_reward()
+    findings = report._extract_findings([reward])
+
+    [suggestion] = report._generate_suggestions_structured("demo", findings, [reward])
+
+    assert cited in captured["prompt"]
+    assert "(no evidence refs)" not in captured["prompt"]
+    [ref] = suggestion["evidence_refs"]
+    assert report._compact_evidence_ref(ref) == cited
+    assert ref["excerpt"]
+
+
+def test_role_variants_stay_scoped_to_their_own_case(monkeypatch):
+    first, second = _artifact_expectation_reward("case-a"), _artifact_expectation_reward("case-b")
+    lookup = report._build_evidence_ref_lookup([first, second])
+    scoped = {
+        f"trials/{case}/{key}" for case in ("case-a", "case-b") for key in (_GROUND_TRUTH_KEY, _EXPECTED_BEHAVIOR_KEY)
+    }
+
+    assert set(lookup) == scoped
+    captured = _capture_prompt(monkeypatch, [f"trials/case-b/{_EXPECTED_BEHAVIOR_KEY}"])
+    findings = report._extract_findings([first, second])
+    [suggestion] = report._generate_suggestions_structured("demo", findings, [first, second])
+
+    assert all(key in captured["prompt"] for key in scoped)
+    assert [ref["source"] for ref in suggestion["evidence_refs"]] == ["trials/case-b/evals.json"]
+
+
+def test_role_variants_claimed_by_different_owners_are_still_rejected():
+    first, second = _artifact_expectation_reward("same-case"), _artifact_expectation_reward("same-case")
+
+    for rewards in ([first, second], [second, first]):
+        assert report._build_evidence_ref_lookup(rewards) == {}
+        assert all(not finding["evidence_refs"] for finding in report._extract_findings(rewards))
+
+
+def test_role_variants_with_different_content_are_still_rejected():
+    reward = _artifact_expectation_reward()
+    clashing = next(
+        ref
+        for ref in reward["details"]["behavior_check"]["evidence_refs"]
+        if ref["kind"] == "expected_artifact" and ref["json_pointer"] == "/ground_truth"
+    )
+    clashing["excerpt"] = "different text at the same location"
+
+    lookup = report._build_evidence_ref_lookup([reward])
+
+    assert _GROUND_TRUTH_KEY not in lookup
+    assert _EXPECTED_BEHAVIOR_KEY in lookup
+
+
+def test_same_kind_conflicts_with_one_owner_are_still_rejected():
+    reward = _artifact_expectation_reward()
+    for ref in reward["details"]["behavior_check"]["evidence_refs"]:
+        if ref["kind"] == "expected_artifact" and ref["json_pointer"] == "/expected_behavior/0":
+            ref["label"] = "Expected artifact: somewhere else"
+
+    assert _EXPECTED_BEHAVIOR_KEY not in report._build_evidence_ref_lookup([reward])
 
 
 def _reward_multi_metric(metric_score=0.1):
@@ -426,25 +725,82 @@ def test_suggestions_evidence_refs_resolved_to_full_dict(monkeypatch):
     assert "excerpt" in refs[0]
 
 
-def test_suggestions_evidence_refs_unresolvable_string_fallback(monkeypatch):
-    """Unresolvable string ref is parsed into a minimal dict with kind='evidence'."""
+def test_suggestions_drop_evidence_refs_the_run_did_not_record(monkeypatch):
+    """A cited ref that the run did not record is dropped instead of rendered as evidence."""
     monkeypatch.setattr(
         "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
         lambda _prompt, **_kw: (
             '[{"suggestion": "Fix something", "dimension": "goal_accuracy",'
-            ' "evidence_refs": ["trajectory.json#/steps/999"]}]',
+            ' "evidence_refs": ["trajectory.json#/steps/999", "trajectory.json#/steps/14",'
+            ' "trajectory.json#/steps/14", {"source": "made-up.json", "json_pointer": "/x"}]}]',
             None,
         ),
     )
     reward = _reward_multi_metric(0.1)
     findings = report._extract_findings([reward])
-    objs = report._generate_suggestions_structured("demo", findings, [reward])
-    assert objs
-    refs = objs[0]["evidence_refs"]
-    assert refs and isinstance(refs[0], dict), f"expected dict fallback, got {refs!r}"
-    assert refs[0]["source"] == "trajectory.json"
-    assert refs[0]["json_pointer"] == "/steps/999"
-    assert refs[0]["kind"] == "evidence"
+    [obj] = report._generate_suggestions_structured("demo", findings, [reward])
+    assert [ref["json_pointer"] for ref in obj["evidence_refs"]] == ["/steps/14"]
+    assert obj["evidence_refs"][0]["kind"] == "tool_call"
+
+
+@pytest.mark.parametrize(
+    "raw_refs",
+    [
+        ["trajectory.json#/steps/14"],
+        {"source": "trajectory.json", "json_pointer": "/steps/14", "kind": "tool_call", "excerpt": "submit ..."},
+        "trajectory.json#/steps/14",
+    ],
+)
+def test_suggestions_resolve_legacy_evidence_ref_shapes(monkeypatch, raw_refs):
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Fix evaluator job", "dimension": "goal_accuracy",'
+            ' "evidence_refs": ["trajectory.json#/steps/14"]}]',
+            None,
+        ),
+    )
+    reward = _reward_multi_metric(0.1)
+    reward["details"]["goal_accuracy"]["evidence_refs"] = raw_refs
+    findings = report._extract_findings([reward])
+    [suggestion] = report._generate_suggestions_structured("demo", findings, [reward])
+    assert suggestion["evidence_refs"][0]["source"] == "trajectory.json"
+    assert suggestion["evidence_refs"][0]["json_pointer"] == "/steps/14"
+    if isinstance(raw_refs, dict):
+        assert suggestion["evidence_refs"][0]["kind"] == "tool_call"
+        assert suggestion["evidence_refs"][0]["excerpt"] == "submit ..."
+
+
+def test_suggestions_keep_one_copy_of_a_repeated_suggestion(monkeypatch):
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda _prompt, **_kw: (
+            '[{"suggestion": "Install jq in evals/environment/Dockerfile.", "dimension": "goal_accuracy"},'
+            ' {"suggestion": "install jq in  evals/environment/Dockerfile.", "dimension": "security"},'
+            ' "Document the output format in SKILL.md."]',
+            None,
+        ),
+    )
+    reward = _reward_multi_metric(0.1)
+    objs = report._generate_suggestions_structured("demo", report._extract_findings([reward]), [reward])
+    assert [obj["suggestion"] for obj in objs] == [
+        "Install jq in evals/environment/Dockerfile.",
+        "Document the output format in SKILL.md.",
+    ]
+
+
+def test_suggestion_prompt_guards_requirements_and_labels_hypotheses(monkeypatch):
+    prompts = []
+    monkeypatch.setattr(
+        "skillevaluator.tier3.eval_core.llm_judge.call_public_llm",
+        lambda prompt, **_kw: (prompts.append(prompt), ("[]", None))[1],
+    )
+    reward = _reward_multi_metric(0.1)
+    report._generate_suggestions_structured("demo", report._extract_findings([reward]), [reward])
+    [prompt] = prompts
+    assert "Do not suggest loosening, removing, or rewriting an eval expectation just so the agent passes" in prompt
+    assert 'start the suggestion with "Hypothesis:"' in prompt
+    assert "Give distinct suggestions" in prompt
 
 
 def test_suggestions_evidence_refs_lookup_uses_all_metrics(monkeypatch):

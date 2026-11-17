@@ -63,11 +63,10 @@ def test_root_search_does_not_gain_productivity_from_expected_name(module, call)
         {"action": "Grep", "action_input": {"path": "/workspace", "pattern": "/"}},
     ],
 )
-def test_scoped_searches_patterns_and_ordinary_calls_keep_existing_classification(module, call):
+def test_scoped_searches_patterns_and_ordinary_calls_stay_productive(module, call):
     result = module.check_tool_efficiency([call], expected_skill="task", expected_script="task.py")
-    # Public native Grep/Glob calls already receive no productivity credit.
-    expected = 0.0 if call["action"] in {"Glob", "Grep"} else 1.0
-    assert result["score"] == expected, result
+    # Scoped native Grep/Glob searches are productive work, like scoped shell searches.
+    assert result["score"] == 1.0, result
 
 
 @pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
@@ -177,3 +176,93 @@ def test_scoped_quoted_heredoc_and_redirect_targets_keep_old_credit(module, comm
         [{"action": "exec_command", "action_input": {"cmd": command}}], expected_script="task.py"
     )
     assert result["score"] == 1.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["bash", "-lc", "find / -name task.py"],
+        ["find", "/", "-name", "task.py"],
+        ["sh", "-c", "grep -r task.py / 2>/dev/null"],
+        ["rg", "--files", "/"],
+    ],
+)
+def test_argv_list_root_searches_are_waste(module, argv):
+    # Codex records shell calls as argv lists. The list is read as the command
+    # it runs, not as its Python repr.
+    for key in ("command", "cmd"):
+        result = module.check_tool_efficiency(
+            [{"action": "shell", "action_input": {key: argv}}], expected_skill="task", expected_script="task.py"
+        )
+        assert result["score"] == 0.0, (key, result)
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["python", "task.py"],
+        ["bash", "-lc", "python task.py"],
+        ["bash", "-lc", "find /workspace -name task.py"],
+        ["find", ".", "-name", "/"],
+        ["python", "task.py", "--root", "/"],
+    ],
+)
+def test_argv_list_scoped_commands_and_script_runs_stay_productive(module, argv):
+    result = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": argv}}], expected_skill="task", expected_script="task.py"
+    )
+    assert result["score"] == 1.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+def test_argv_list_root_search_and_script_run_score_half(module):
+    calls = [
+        {"action": "shell", "action_input": {"command": ["bash", "-lc", "find / -name task.py"]}},
+        {"action": "shell", "action_input": {"command": ["python", "task.py"]}},
+    ]
+    result = module.check_tool_efficiency(calls, expected_skill="task", expected_script="task.py")
+    assert result["score"] == 0.5, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["grep", "-r", "#TODO", "/"],
+        ["find", "/", "-name", "$HOME"],
+        ["rg", "`task`", "/"],
+        ["env", "LC_ALL=C", "grep", "-r", "#TODO", "/"],
+    ],
+)
+def test_argv_list_words_are_literal(module, argv):
+    # An argv list runs without a shell, so "$", backticks and "#" in its
+    # words are literal and do not hide the root operand.
+    result = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": argv}}], expected_skill="task", expected_script="task.py"
+    )
+    assert result["score"] == 0.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize("argv", [["grep", "-r", "#TODO", "src"], ["find", ".", "-name", "$HOME"]])
+def test_scoped_argv_lists_with_shell_characters_stay_productive(module, argv):
+    result = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": argv}}], expected_skill="task", expected_script="task.py"
+    )
+    assert result["score"] == 1.0, result
+
+
+@pytest.mark.parametrize("module", [checks, template], ids=["host", "bundled"])
+@pytest.mark.parametrize("payload", ["find / -name task.py # locate", "echo $(find / -name task.py)"])
+def test_shell_payload_in_an_argv_list_scores_like_the_same_text(module, payload):
+    # The payload of "bash -lc" is shell text, so the expansion and comment
+    # rule applies to it exactly as to the same command written as text.
+    as_text = module.check_tool_efficiency(
+        [{"action": "exec_command", "action_input": {"cmd": payload}}], expected_skill="task"
+    )
+    as_argv = module.check_tool_efficiency(
+        [{"action": "shell", "action_input": {"command": ["bash", "-lc", payload]}}], expected_skill="task"
+    )
+    assert as_argv["score"] == as_text["score"], (as_argv, as_text)

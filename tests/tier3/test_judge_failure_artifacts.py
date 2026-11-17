@@ -12,6 +12,7 @@ import json
 import logging
 import math
 import os
+import selectors
 import shutil
 import signal
 import subprocess
@@ -170,6 +171,64 @@ def test_character_facts_keep_numeric_dataset_answers_scoreable(tmp_path, monkey
     assert overall_score(collected) == numeric["overall"]
 
 
+def test_staged_dependency_context_is_bounded(tmp_path):
+    verifier = _load_verifier(tmp_path)
+    root = tmp_path / "skills" / "demo"
+    scripts = root / "nested" / "scripts"
+    scripts.mkdir(parents=True)
+    (root / "SKILL.md").write_text("Use jq")
+    (scripts / "apt-packages.txt").write_text("# tools\njq=1.7 # JSON\n")
+    (scripts / "requirements.txt").write_text("Some-Package[extra]>=1\n")
+    (scripts / "run.py").write_text("x" * (128 * 1024) + "excluded_tail")
+    (scripts / "outside.py").symlink_to(verifier.ENTRY_PATH)
+    context = verifier._dependency_context("demo", skills_root=root.parent)
+    assert context["apt"] == ["jq=1.7"]
+    assert context["pip"] == ["Some-Package[extra]>=1"]
+    assert "Use jq" in context["skill_text"]
+    assert "excluded_tail" not in context["skill_text"]
+    assert "judge-artifact-case" not in context["skill_text"]
+    assert verifier._dependency_context("../demo", skills_root=root.parent)["skill_text"] == ""
+    assert verifier._dependency_context("absent", skills_root=root.parent)["apt"] == []
+
+
+@pytest.mark.parametrize("declared", [True, False])
+def test_missing_dependency_is_unscored_before_judging(tmp_path, monkeypatch, declared):
+    verifier = _load_verifier(tmp_path)
+    entry = json.loads(verifier.ENTRY_PATH.read_text())
+    entry.update(expected_skill="demo", evaluated_skill="demo", should_trigger=True, expected_script="scripts/run.py")
+    verifier.ENTRY_PATH.write_text(json.dumps(entry))
+    if declared:
+        monkeypatch.setattr(verifier, "_dependency_context", lambda _skill: {"apt": ["jq"]})
+    monkeypatch.setattr(
+        verifier,
+        "extract_tool_calls_as_dicts",
+        lambda _traj: [
+            {
+                "action": "bash",
+                "action_input": {"command": "python scripts/run.py"},
+                "observation": "bash: line 1: jq: command not found\nexit code 127",
+            }
+        ],
+    )
+    monkeypatch.setattr(verifier, "_call_required_judge", lambda *_a, **_kw: pytest.fail("Judge must not run"))
+    with pytest.raises(SystemExit, match="1"):
+        verifier.main()
+    sidecar = json.loads(verifier.SKILL_EVALUATOR_REWARD_JSON.read_text())
+    assert sidecar["evaluation_status"] == "failed"
+    assert "jq" in sidecar["evaluation_errors"]["environment"]
+    assert sidecar["environment_issues"][0]["fault_kind"] == (
+        "declared_dependency_unavailable" if declared else "undeclared_dependency"
+    )
+    collected = json.loads(verifier.REWARD_JSON.read_text())
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) is None
+    reason = collector._unscoreable_reward_reason(collected)
+    assert "[environment]" in reason
+    assert "jq" in reason
+    assert "evals/environment/Dockerfile" in reason
+    assert "judge evaluation failed" not in reason
+
+
 def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -215,10 +274,10 @@ def test_verifier_main_fails_closed_after_collecting_every_required_judge(
     assert set(rich["evaluation_errors"]) == {"accuracy", "goal_accuracy", "behavior_check"}
     assert all(0 < len(reason) <= 512 for reason in rich["evaluation_errors"].values())
 
+    # The case is a negative case, so skill_efficiency is N/A and Harbor's numeric reward leaves it out.
     assert numeric == {
         "security": 1.0,
         "skill_execution": 1.0,
-        "skill_efficiency": 1.0,
         "overall": 0.0,
     }
     assert verifier.REWARD_TXT.read_text(encoding="utf-8") == "0.0"
@@ -571,7 +630,20 @@ def test_ragas_cleanup_does_not_wait_for_cancellation_acknowledgment(
     """Cleanup returns before resistant work finishes, closes the client, and preserves the scorer's outcome."""
     verifier = _load_verifier(tmp_path)
     _use_ragas_eligible_judge(monkeypatch)
-    loop = asyncio.new_event_loop()
+    # Run the loop on a virtual clock that jumps to the next timer instead of waiting for it.
+    # Timers keep their order, so the rescue below fires only if cleanup really waits for the
+    # resistant work, never because a stalled machine took half a second to reach cleanup.
+    clock = [0.0]
+
+    class JumpingSelector(selectors.DefaultSelector):
+        def select(self, timeout=None):
+            if timeout:
+                clock[0] += timeout
+                timeout = 0
+            return super().select(timeout)
+
+    loop = asyncio.SelectorEventLoop(JumpingSelector())
+    monkeypatch.setattr(loop, "time", lambda: clock[0])
     real_close = loop.close
     release = asyncio.Event()
     rescued: list[bool] = []
@@ -714,6 +786,47 @@ def test_ragas_cleanup_consumes_late_task_exceptions(
     assert all(_RAGAS_TEST_KEY not in record.getMessage() for record in caplog.records)
 
 
+def test_ragas_expired_setup_budget_does_not_create_a_scoring_coroutine(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, recwarn: pytest.WarningsRecorder
+) -> None:
+    """An exhausted setup deadline must not leave an unawaited scorer behind."""
+    verifier = _load_verifier(tmp_path)
+    _use_ragas_eligible_judge(monkeypatch)
+    elapsed = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 1.0)
+    created: list[bool] = []
+
+    class Metric:
+        def __init__(self, llm):
+            self.llm = llm
+            elapsed[0] = 2.0
+
+        def ascore(self, **_kwargs):
+            created.append(True)
+            return asyncio.sleep(0)
+
+    client = _install_fake_ragas(monkeypatch, Metric)
+    monkeypatch.setattr(
+        verifier.urllib.request,
+        "urlopen",
+        lambda *_args, **_kwargs: pytest.fail("an exhausted budget must prevent fallback HTTP requests"),
+    )
+
+    result = verifier._call_required_judge(
+        "goal_accuracy", verifier.judge_goal_accuracy, "question", "ground truth", "agent response"
+    )
+
+    assert result["status"] == "error"
+    assert result["score"] is None
+    assert "time budget exhausted" in result["reason"]
+    assert [instance.closed for instance in client.instances] == [1]
+    assert created == []
+    gc.collect()
+    assert not any("was never awaited" in str(warning.message) for warning in recwarn)
+
+
 @pytest.mark.parametrize("cutoff", ["scorer_timeout", "deadline_alarm"])
 def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, cutoff: str
@@ -722,15 +835,21 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
     verifier = _load_verifier(tmp_path)
     _use_ragas_eligible_judge(monkeypatch)
     cancelled: list[bool] = []
+    elapsed = [0.0]
     if cutoff == "scorer_timeout":
         # Without an interval timer only the scorer's own wait_for bounds it.
         monkeypatch.setattr(verifier, "signal", SimpleNamespace())
         monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.01)
+        # Setup expiry is covered separately; keep this case in the active-scorer phase.
+        monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
         scorer_sleep = 0.05
     else:
         if not hasattr(signal, "setitimer") or signal.getitimer(signal.ITIMER_REAL)[0] > 0:
             pytest.skip("free POSIX interval timer required")
-        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 0.05)
+        # Give setup ample time; deliver the alarm only once scoring is active.
+        # A 50ms setup deadline could fire inside a library's logging handler.
+        monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 30.0)
+        monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: elapsed[0]))
         scorer_sleep = 30.0
         real_remaining = verifier._remaining_judge_timeout
         scorer_bounds: list[float] = []
@@ -743,6 +862,19 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
             return real_remaining(timeout)
 
         monkeypatch.setattr(verifier, "_remaining_judge_timeout", remaining_after_scorer)
+        # Ring the alarm from the loop's own wait, which is where a real timer interrupts an idle loop.
+        # A short timer armed by the scorer can expire before the scorer is suspended and raise inside
+        # it, and that is a scorer failure, not the cancellation of cut-off work this case checks.
+        alarm_due: list[bool] = []
+
+        class AlarmedSelector(selectors.DefaultSelector):
+            def select(self, timeout=None):
+                if alarm_due:
+                    alarm_due.clear()
+                    signal.raise_signal(signal.SIGALRM)
+                return super().select(timeout)
+
+        monkeypatch.setattr(asyncio, "new_event_loop", lambda: asyncio.SelectorEventLoop(AlarmedSelector()))
 
     class FakeMetric:
         """Mock metric object for Ragas async evaluation."""
@@ -751,6 +883,13 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
             self.llm = llm
 
         async def ascore(self, **_kwargs):
+            if cutoff == "scorer_timeout":
+                elapsed[0] = 1.0
+            else:
+                # The alarm represents expiry of the virtual deadline.
+                # Fallback must see that expiry too, after scoring is cancelled.
+                elapsed[0] = 31.0
+                alarm_due.append(True)
             try:
                 await asyncio.sleep(scorer_sleep)
             except asyncio.CancelledError:
@@ -774,6 +913,65 @@ def test_ragas_goal_judge_obeys_the_required_judge_time_budget(
     # The cut-off scoring work is cancelled and the client is closed once, not left to the loop's teardown.
     assert cancelled == [True]
     assert [instance.closed for instance in client.instances] == [1]
+
+
+@pytest.mark.parametrize("elapsed", [0.5, 1.0, 1.5])
+@pytest.mark.parametrize("not_applicable", [False, True])
+def test_required_judge_rechecks_its_deadline_after_a_swallowed_timeout(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, elapsed: float, not_applicable: bool
+) -> None:
+    verifier = _load_verifier(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 1.0)
+
+    def judge():
+        # A library or logging handler can catch the interval timer's exception.
+        try:
+            clock[0] = elapsed
+            raise TimeoutError("caught by a dependency")
+        except TimeoutError:
+            return (
+                {"score": None, "status": "not_applicable", "reason": "no reference"}
+                if not_applicable
+                else {"score": 0.75, "reason": "completed"}
+            )
+
+    result = verifier._call_required_judge("accuracy", judge, allow_not_applicable=not_applicable)
+
+    if elapsed >= 1.0:
+        assert result["status"] == "error"
+        assert result["score"] is None
+        assert "time budget exhausted" in result["reason"]
+    elif not_applicable:
+        assert result["status"] == "not_applicable"
+        assert result["score"] is None
+    else:
+        assert result["score"] == 0.75
+        assert result.get("status") != "error"
+    assert verifier._ACTIVE_JUDGE_DEADLINE.get() is None
+
+
+def test_required_judge_rechecks_the_inherited_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    verifier = _load_verifier(tmp_path)
+    clock = [0.0]
+    monkeypatch.setattr(verifier, "signal", SimpleNamespace())
+    monkeypatch.setattr(verifier, "time", SimpleNamespace(monotonic=lambda: clock[0]))
+    monkeypatch.setattr(verifier, "_JUDGE_WALL_TIME_BUDGET_SEC", 10.0)
+    token = verifier._ACTIVE_JUDGE_DEADLINE.set(0.25)
+
+    def judge():
+        clock[0] = 0.5
+        return {"score": 1.0}
+
+    try:
+        result = verifier._call_required_judge("accuracy", judge)
+        assert result["status"] == "error"
+        assert result["score"] is None
+        assert verifier._ACTIVE_JUDGE_DEADLINE.get() == 0.25
+    finally:
+        verifier._ACTIVE_JUDGE_DEADLINE.reset(token)
 
 
 def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
@@ -803,16 +1001,20 @@ def test_verifier_main_keeps_genuine_zero_judge_verdicts_scoreable(
     assert "evaluation_status" not in rich
     assert "evaluation_errors" not in rich
     assert rich["score_policy"] == DEFAULT_SCORE_POLICY
-    assert {metric: numeric[metric] for metric in verifier.DISPLAY_METRICS} == {
+    # The case is a negative case, so skill_efficiency is N/A: Harbor's numeric reward leaves it out,
+    # and the overall averages the other four dimensions.
+    assert {metric: numeric.get(metric) for metric in verifier.DISPLAY_METRICS} == {
         "security": 1.0,
         "skill_execution": 1.0,
-        "skill_efficiency": 1.0,
+        "skill_efficiency": None,
         "accuracy": 0.0,
         "goal_accuracy": 0.0,
         "behavior_check": 0.0,
     }
-    assert numeric["overall"] == 0.6
-    assert overall_score(numeric) == 0.6
+    assert numeric["overall"] == 0.5
+    collected = dict(numeric)
+    collector._merge_reward_sidecars(collected, verifier.VERIFIER_DIR)
+    assert overall_score(collected) == 0.5
 
 
 def test_verifier_main_recovers_malformed_accuracy_and_goal_judges(

@@ -240,7 +240,7 @@ def test_service_run_retains_one_snapshot_before_cleanup_and_replays_six_formats
     assert outcome.provenance["mcp_proof"]["fixture"]["status"] == "used-successfully"
     sections = {section["key"]: section for section in seen["payload"]["sections"]}
     assert ["claude-code", "with_skill", "skill:support", "exercised", 1.0] in sections["coverage"]["rows"]
-    assert ["claude-code", "with_skill", 280, None, 5, 56.0, None] in sections["cost"]["rows"]
+    assert ["claude-code", "with_skill", 280, None, 0, None, None] in sections["cost"]["rows"]
     shutil.rmtree(Path(package.identity.root))
 
     def forbidden(*_args, **_kwargs):

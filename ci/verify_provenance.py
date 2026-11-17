@@ -113,6 +113,7 @@ def verify_receipt(
     run: dict,
     evaluator_workflow: str,
     evaluator_sha: str,
+    caller_workflow_path: str = WORKFLOW_PATH,
 ) -> dict:
     """Return signed identity claims only after signature and context validation."""
     # This optional publisher dependency is never imported by static scans.
@@ -179,7 +180,7 @@ def verify_receipt(
         or claims.get("sha") != workflow_sha
         or not isinstance(ref, str)
         or len(ref) > 1024
-        or claims.get("workflow_ref") != f"{repository}/{WORKFLOW_PATH}@{ref}"
+        or claims.get("workflow_ref") != f"{repository}/{caller_workflow_path}@{ref}"
     ):
         raise ProvenanceError("The execution receipt lacks a valid caller workflow identity.")
     if run["event"] == "pull_request":

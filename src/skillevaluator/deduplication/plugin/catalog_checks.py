@@ -90,8 +90,9 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
             self_paths = {(PurePosixPath(prefix) / skill.root_relative).as_posix() for prefix in prefixes}
             fingerprint = None
         else:
-            # A v1 catalog can have been rooted at this bundle or its skills folder.
-            self_paths = {skill.root_relative, skill.rel}
+            # A v1 catalog can have been rooted at this bundle, its skills folder,
+            # or (OpenClaw) one of its explicitly declared skill roots.
+            self_paths = {skill.root_relative, skill.rel, *skill.catalog_relative_paths}
             fingerprint = hashlib.sha256(skill.entry.embedding_text.encode("utf-8")).hexdigest()
         candidates = []
         for entry, score in scored:

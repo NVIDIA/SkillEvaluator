@@ -72,7 +72,9 @@ def llm_failure_diagnostic(exc: Exception) -> str:
             remedy = "Check the selected LLM provider credentials and model access."
         elif status in (404, 410):
             remedy = (
-                "Model or endpoint unavailable. Check SKILL_EVAL_LLM_MODEL against the provider's available models."
+                "Model or endpoint unavailable. If no model was set, the provider's default may not be callable "
+                "with this key; set SKILL_EVAL_LLM_MODEL (llm-model in CI) to a model the key can use. "
+                "Otherwise check SKILL_EVAL_LLM_MODEL against the provider's available models."
             )
         elif status == 429:
             remedy = "The LLM provider rejected the request due to rate or quota limits. Check quota and retry later."

@@ -10,6 +10,8 @@ parsed values route into the corresponding engine behavior.
 
 from __future__ import annotations
 
+import hashlib
+import json
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -114,6 +116,11 @@ def test_user_config_parses_and_routes_end_to_end(monkeypatch: pytest.MonkeyPatc
     assert result["run_config"]["grading"]["mode"] == "default_plus_custom"
     assert result["run_config"]["task_source"] == "evals_json"
     assert result["run_config"]["harbor"]["stop_on_pass"] is False
+    assert result["run_config"]["harbor"]["resources"] == {"cpus": None, "memory_mb": None, "storage_mb": None}
+    assert result["run_config"]["harbor"]["agent_workdir"] is None
+    assert result["run_config"]["harbor"]["custom_dockerfile_mode"] == "rebase"
+    assert result["run_config"]["harbor"]["runtime_env"]["keys"] == []
+    assert len(result["run_config"]["harbor"]["runtime_env"]["values_sha256"]) == 64
     assert captured["emit"]["grading_mode"] == "default_plus_custom"
     assert captured["pair"]["stop_on_pass"] is False
     assert captured["pair"]["pass_threshold"] == 0.6
@@ -150,6 +157,9 @@ harbor:
     }
     assert "error" not in result
     assert captured["pair"]["environment_kwargs"] == expected
+    expected_hash = hashlib.sha256(
+        json.dumps(expected, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
+    ).hexdigest()
     assert result["run_config"]["harbor"]["environment_kwargs"] == {
         "keys": ["instance_id", "launch_mode", "region"],
         "sources": {
@@ -157,7 +167,45 @@ harbor:
             "launch_mode": "CLI",
             "region": "CLI",
         },
+        "values_sha256": expected_hash,
     }
+
+
+def test_baseline_identity_records_runtime_environment_and_effective_resources(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    runtime_value = "private-runtime-value"
+    config = """\
+schema_version: 1
+harbor:
+  task_source: evals_json
+  resources:
+    cpus: 2
+    memory_mb: 4096
+    storage_mb: 8192
+  agent_workdir: /workspace/project
+  custom_dockerfile_mode: rebase
+  runtime_env:
+    SE_BASELINE_IDENTITY: private-runtime-value
+"""
+    result, _captured = _run_engine(monkeypatch, tmp_path, config, override_cpus=4)
+
+    assert "error" not in result
+    harbor = result["run_config"]["harbor"]
+    runtime_hash = hashlib.sha256(
+        json.dumps(
+            {"SE_BASELINE_IDENTITY": runtime_value},
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    assert harbor["resources"] == {"cpus": 4, "memory_mb": 4096, "storage_mb": 8192}
+    assert harbor["agent_workdir"] == "/workspace/project"
+    assert harbor["custom_dockerfile_mode"] == "rebase"
+    assert harbor["runtime_env"] == {"keys": ["SE_BASELINE_IDENTITY"], "values_sha256": runtime_hash}
+    assert runtime_value not in json.dumps(result["run_config"])
 
 
 def test_stop_on_pass_config_key_routes_sequential_attempt_policy(

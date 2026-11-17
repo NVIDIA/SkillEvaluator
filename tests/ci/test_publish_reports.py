@@ -107,6 +107,62 @@ def report():
     }
 
 
+def failed_summary(*, advisory_downgraded=False):
+    payload = summary()
+    payload.update(
+        passed=0,
+        failed=1,
+        incomplete=0,
+        overall_passed=False,
+        overall_status="failed",
+        total_errors=1,
+        severity_counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
+    )
+    payload["skills"][0].update(
+        passed=False,
+        overall_status="failed",
+        exit_code=1,
+        total_errors=1,
+        severity_counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
+    )
+    payload["enforcement"] = {"mode": "advisory", "downgraded": advisory_downgraded}
+    return payload
+
+
+def failed_report():
+    payload = report()
+    payload.update(
+        overall_passed=False,
+        overall_status="failed",
+        total_errors=1,
+        severity_counts={"critical": 0, "high": 1, "medium": 0, "low": 0},
+    )
+    payload["results"][0].update(
+        passed=False,
+        status="failed",
+        findings=[
+            {
+                "category": "SCHEMA",
+                "severity": "high",
+                "check_name": "fixture_failure",
+                "message": "Fixture validation failed",
+                "file_path": "SKILL.md",
+            }
+        ],
+        summary={
+            "files_scanned": 1,
+            "checks_performed": 1,
+            "errors": 1,
+            "warnings": 0,
+            "critical_count": 0,
+            "high_count": 1,
+            "medium_count": 0,
+            "low_count": 0,
+        },
+    )
+    return payload
+
+
 def valid_archive():
     return archive(
         [
@@ -1062,6 +1118,55 @@ def test_failed_workflow_cannot_publish_a_passing_artifact(tmp_path):
     with pytest.raises(publisher.PublicationError):
         publisher.publish(
             FakeAPI(record={**run_record(), "conclusion": "failure"}),
+            "owner/consumer",
+            123,
+            "https://owner.github.io/consumer",
+            tmp_path / "site",
+            tmp_path / "output",
+            render=fake_render,
+        )
+
+
+def test_advisory_downgraded_failed_summary_can_publish_with_success_conclusion(tmp_path):
+    class AdvisoryAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return signed_receipt(self.record)
+            assert artifact_id == 456
+            return archive(
+                [
+                    ("summary.json", failed_summary(advisory_downgraded=True)),
+                    ("skill-001/skillevaluator-tier1.json", failed_report()),
+                ]
+            )
+
+    publisher.publish(
+        AdvisoryAPI(record={**run_record(), "conclusion": "success"}),
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "output",
+        render=fake_render,
+    )
+
+
+def test_successful_run_with_failed_summary_still_rejected_without_advisory_downgrade_marker(tmp_path):
+    class AdvisoryAPI(FakeAPI):
+        def download_artifact(self, artifact_id):
+            if artifact_id == 457:
+                return signed_receipt(self.record)
+            assert artifact_id == 456
+            return archive(
+                [
+                    ("summary.json", failed_summary(advisory_downgraded=False)),
+                    ("skill-001/skillevaluator-tier1.json", failed_report()),
+                ]
+            )
+
+    with pytest.raises(publisher.PublicationError, match="workflow conclusion contradicts"):
+        publisher.publish(
+            AdvisoryAPI(record={**run_record(), "conclusion": "success"}),
             "owner/consumer",
             123,
             "https://owner.github.io/consumer",

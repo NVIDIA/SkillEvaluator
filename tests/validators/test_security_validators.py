@@ -714,6 +714,164 @@ class TestCodeRiskValidator:
             finding.check_name == "python.lang.security.audit.dangerous-system-call" for finding in result.findings
         )
 
+    def test_semgrep_parse_errors_report_every_path_and_stay_incomplete(self) -> None:
+        result = ValidationResult()
+        errors = [
+            {
+                "code": 3,
+                "level": "warn",
+                "type": "SyntaxError",
+                "path": f"scripts/file{i}.sh",
+                "message": "Syntax error",
+                "spans": [{"start": {"line": i + 1, "col": 1}}],
+            }
+            for i in range(5)
+        ]
+        errors.append({"type": ["PartialParsing", []], "path": "scripts/copy.mjs", "message": "Partial parsing"})
+        output = json.dumps({"results": [], "errors": errors})
+
+        CodeRiskValidator()._process_semgrep_output(output, result)
+
+        assert not result.passed
+        assert result.metadata["incomplete_scans"] == ["semgrep"]
+        assert result.metadata["semgrep_unparsed_files"][0] == "scripts/file0.sh"
+        assert len(result.metadata["semgrep_unparsed_files"]) == 6
+        summary = [e for e in result.errors if "Semgrep partial scan" in e]
+        assert len(summary) == 1
+        assert "6 file(s) could not be fully parsed" in summary[0]
+        assert all(f"scripts/file{i}.sh:{i + 1}" in summary[0] for i in range(5))
+        assert "scripts/copy.mjs" in summary[0]
+        assert "were not scanned" not in summary[0]
+        assert not any("Semgrep scan error" in e for e in result.errors)
+
+    def test_semgrep_parse_error_listing_is_capped(self) -> None:
+        result = ValidationResult()
+        errors = [{"type": "SyntaxError", "path": f"s/f{i}.sh", "message": "Syntax error"} for i in range(25)]
+
+        CodeRiskValidator()._process_semgrep_output(json.dumps({"results": [], "errors": errors}), result)
+
+        assert len(result.metadata["semgrep_unparsed_files"]) == 25
+        assert any("and 5 more" in e for e in result.errors)
+
+    def test_semgrep_parse_errors_count_files_not_locations(self) -> None:
+        result = ValidationResult()
+        errors = [
+            {"type": "SyntaxError", "path": "scripts/a.sh", "spans": [{"start": {"line": 3}}]},
+            {"type": "SyntaxError", "path": "scripts/a.sh", "spans": [{"start": {"line": 9}}]},
+            {"type": "SyntaxError", "path": "scripts/b.sh"},
+        ]
+
+        CodeRiskValidator()._process_semgrep_output(json.dumps({"results": [], "errors": errors}), result)
+
+        assert result.metadata["semgrep_unparsed_files"] == ["scripts/a.sh", "scripts/b.sh"]
+        (summary,) = [e for e in result.errors if "Semgrep partial scan" in e]
+        assert "2 file(s)" in summary
+        assert "scripts/a.sh:3" in summary
+        assert "scripts/a.sh:9" not in summary
+
+    def test_semgrep_parse_errors_use_paths_relative_to_the_skill(self, tmp_path: Path) -> None:
+        skill = tmp_path / "my-skill"
+        (skill / "scripts").mkdir(parents=True)
+        elsewhere = tmp_path / "private-home" / "other.sh"
+        errors = [
+            {"type": "SyntaxError", "path": str(skill / "scripts" / "a.sh"), "spans": [{"start": {"line": 3}}]},
+            {"type": "SyntaxError", "path": str(elsewhere)},
+        ]
+        result = ValidationResult()
+
+        CodeRiskValidator()._process_semgrep_output(
+            json.dumps({"results": [], "errors": errors}), result, skill_path=skill.resolve()
+        )
+
+        assert result.metadata["semgrep_unparsed_files"] == ["scripts/a.sh", "other.sh"]
+        (summary,) = [e for e in result.errors if "Semgrep partial scan" in e]
+        assert "scripts/a.sh:3" in summary
+        assert str(tmp_path) not in summary
+        assert not any(str(tmp_path) in path for path in result.metadata["semgrep_unparsed_files"])
+
+    def test_semgrep_partial_parsing_error_in_semgrep_json_shape(self) -> None:
+        """Semgrep 1.x reports a partially parsed file as ``["PartialParsing", [span, ...]]`` with ``spans``."""
+        result = ValidationResult()
+        error = {
+            "code": 3,
+            "level": "warn",
+            "type": ["PartialParsing", [{"path": "scripts/bad.sh", "start": {"line": 2, "col": 1, "offset": 0}}]],
+            "path": "scripts/bad.sh",
+            "spans": [{"start": {"line": 2, "col": 1, "offset": 0}, "end": {"line": 3, "col": 10, "offset": 23}}],
+        }
+
+        CodeRiskValidator()._process_semgrep_output(json.dumps({"results": [], "errors": [error]}), result)
+
+        assert result.metadata["incomplete_scans"] == ["semgrep"]
+        (summary,) = [e for e in result.errors if "Semgrep partial scan" in e]
+        assert "scripts/bad.sh:2" in summary
+        assert "skips the code it cannot parse" in summary
+
+    def test_run_semgrep_reports_parse_errors_with_relative_paths(
+        self, tmp_path: Path, mock_tool_available
+    ) -> None:
+        skill = tmp_path / "my-skill"
+        (skill / "scripts").mkdir(parents=True)
+        absolute = str(skill.resolve() / "scripts" / "bad.sh")
+        semgrep_result = MagicMock()
+        semgrep_result.exit_code = 0
+        semgrep_result.error_message = None
+        semgrep_result.stdout = json.dumps(
+            {"results": [], "errors": [{"type": "SyntaxError", "path": absolute, "spans": [{"start": {"line": 2}}]}]}
+        )
+
+        with (
+            mock_tool_available("semgrep", "/usr/bin/semgrep"),
+            patch.object(Tools.semgrep, "run", return_value=semgrep_result),
+        ):
+            result = CodeRiskValidator()._run_semgrep(skill)
+
+        assert result.metadata["incomplete_scans"] == ["semgrep"]
+        assert result.metadata["semgrep_unparsed_files"] == ["scripts/bad.sh"]
+        assert not any(str(tmp_path) in error for error in result.errors)
+
+    def test_folder_scan_merge_keeps_unparsed_files_per_skill(self) -> None:
+        first = ValidationResult()
+        first.metadata["semgrep_unparsed_files"] = ["scripts/a.sh"]
+        second = ValidationResult()
+        second.metadata["semgrep_unparsed_files"] = ["scripts/b.sh", "scripts/c.sh"]
+        merged = ValidationResult()
+
+        merged.merge_with_prefix(first, "skill-a")
+        merged.merge_with_prefix(second, "skill-b")
+
+        assert merged.metadata["semgrep_unparsed_files"] == [
+            "[skill-a] scripts/a.sh",
+            "[skill-b] scripts/b.sh",
+            "[skill-b] scripts/c.sh",
+        ]
+
+    def test_semgrep_parse_errors_keep_findings_and_other_errors(self) -> None:
+        result = ValidationResult()
+        output = json.dumps(
+            {
+                "results": [
+                    {
+                        "check_id": "rule.id",
+                        "path": "a.py",
+                        "start": {"line": 1},
+                        "extra": {"severity": "ERROR", "message": "bad", "metadata": {}},
+                    }
+                ],
+                "errors": [
+                    {"type": "SyntaxError", "path": "run.sh", "message": "Syntax error"},
+                    {"message": "invalid security-audit configuration"},
+                ],
+            }
+        )
+
+        CodeRiskValidator()._process_semgrep_output(output, result)
+
+        assert any("Semgrep partial scan" in e and "run.sh" in e for e in result.errors)
+        assert any("invalid security-audit configuration" in e for e in result.errors)
+        assert any(f.check_name == "rule.id" for f in result.findings)
+        assert result.metadata["incomplete_scans"] == ["semgrep"]
+
     def test_semgrep_accepts_valid_clean_report(self) -> None:
         result = ValidationResult()
 

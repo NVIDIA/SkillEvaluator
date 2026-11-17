@@ -20,6 +20,8 @@ from skillevaluator.constants import (
     PLUGIN_CURSOR_MANIFEST_DIR,
     PLUGIN_CURSOR_MANIFEST_TYPE,
     PLUGIN_MANIFEST_TYPE,
+    PLUGIN_OPENCLAW_MANIFEST_FILE,
+    PLUGIN_OPENCLAW_MANIFEST_TYPE,
 )
 from skillevaluator.utils.structured_data import load_bounded_json, load_bounded_yaml
 
@@ -113,6 +115,8 @@ class FormatProfile:
     skills_immediate_children_only: bool = False
     # Declared skill folders are searched at any depth (Codex), not one level.
     skills_recursive: bool = False
+    # Only manifest-declared skill roots load; skills/ is not implicit (OpenClaw).
+    explicit_skills_only: bool = False
     # A root SKILL.md is a single-skill plugin when no skills are declared or bundled.
     root_skill_fallback: bool = False
     default_rules_dir: str | None = None
@@ -137,7 +141,7 @@ class FormatProfile:
     # Reference text used in finding suggestions.
     reference: str = "plugin manifest reference"
     # MCP config dialect: how server entries are normalized before the static policy.
-    mcp_dialect: Literal["claude", "codex", "agent_plugins"] = "claude"
+    mcp_dialect: Literal["claude", "codex", "agent_plugins", "openclaw"] = "claude"
 
 
 _CLAUDE_COMPONENT_FIELDS = frozenset(
@@ -239,10 +243,36 @@ CODEX_PROFILE = FormatProfile(
     reference="Codex plugin packaging reference (developers.openai.com/plugins)",
 )
 
+# Native OpenClaw metadata, read without importing or installing plugin code
+# (docs.openclaw.ai/plugins/manifest and /plugins/manifest/package-json).
+# ``id`` is the stable identity; ``name`` is only a display label.
+OPENCLAW_PROFILE = FormatProfile(
+    manifest_type=PLUGIN_OPENCLAW_MANIFEST_TYPE,
+    label="OpenClaw plugin",
+    manifest_path=PLUGIN_OPENCLAW_MANIFEST_FILE,
+    component_fields=frozenset({"skills", "mcpServers"}),
+    skills_recursive=True,
+    explicit_skills_only=True,
+    stage_from_inventory=True,
+    mcp_dialect="openclaw",
+    reference="OpenClaw plugin manifest reference (docs.openclaw.ai/plugins/manifest)",
+)
+
 PROFILES: dict[str, FormatProfile] = {
     profile.manifest_type: profile
-    for profile in (CLAUDE_PROFILE, AGENT_PLUGINS_V1_PROFILE, CODEX_PROFILE, CURSOR_PROFILE)
+    for profile in (CLAUDE_PROFILE, AGENT_PLUGINS_V1_PROFILE, CODEX_PROFILE, CURSOR_PROFILE, OPENCLAW_PROFILE)
 }
+
+
+def manifest_identity(manifest_type: str | None, data: Any) -> Any:
+    """The stable plugin identity a manifest declares: OpenClaw's ``id``, otherwise ``name``.
+
+    OpenClaw's ``name`` is an optional display label, never an alternative to
+    ``id``. The raw value is returned; callers bound and validate it.
+    """
+    if not isinstance(data, dict):
+        return None
+    return data.get("id" if manifest_type == PLUGIN_OPENCLAW_MANIFEST_TYPE else "name")
 
 
 def profile_for(manifest_type: str | None) -> FormatProfile:

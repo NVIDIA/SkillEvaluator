@@ -10,10 +10,10 @@ from skillevaluator.reporting import HTMLReporter, JSONReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 
 
-def write_arm(run, arm, tokens, seconds, steps=None):
+def write_arm(run, arm, tokens, seconds, steps=None, score=1.0):
     directory = run / "opencode" / arm
     directory.mkdir(parents=True)
-    scores = dict.fromkeys(DEFAULT_METRICS, 1.0)
+    scores = dict.fromkeys(DEFAULT_METRICS, score)
     (directory / "summary.json").write_text(
         json.dumps(
             {
@@ -114,6 +114,51 @@ def render(tmp_path, run):
     html = HTMLReporter(target_path=str(tmp_path)).render_all([result])
     output = json.loads(JSONReporter().render_all([result]))
     return result, resources, html, output
+
+
+@pytest.mark.parametrize("reused_baseline", [False, True])
+def test_failed_task_outcomes_keep_observed_deltas_and_disclosures(tmp_path, reused_baseline):
+    run = tmp_path / "run"
+    write_arm(run, "with-skill", 10, 3, score=0.0)
+    write_arm(run, "without-skill", 20, 5)
+    if reused_baseline:
+        (run / "run_config.json").write_text(
+            json.dumps(
+                {
+                    "baseline": {
+                        "mode": "reused",
+                        "source_run_id": "earlier-run",
+                        "source_evaluated_at": "2026-10-01T00:00:00Z",
+                    }
+                }
+            )
+        )
+    result, resources, html, output = render(tmp_path, run)
+    agent = output["tier3"]["agents"]["opencode"]
+    assert agent["execution_status"] == "succeeded"
+    assert agent["trials"][0]["scores"]["goal_accuracy"] == 0.0
+    assert agent["trials"][0]["attempt_verdict"]["passed"] is False
+    assert agent["trials_baseline"][0]["scores"]["goal_accuracy"] == 1.0
+    assert agent["trials_baseline"][0]["attempt_verdict"]["passed"] is True
+    assert agent["resources"]["tokens"]["delta"] == -10
+    assert agent["resources"]["agent_seconds"]["delta"] == -2
+    assert "-10 (-45%)" in html
+    assert "-2.0 s (-40%)" in html
+    assert "including failed task outcomes" in resources["scope"]
+    assert "including failed task outcomes" in html
+    for disclosure in (
+        "Lower use alone does not establish improved task quality or Efficiency",
+        "Pairing does not certify matched concurrency or budget, or judge-model agreement",
+        "Reused baseline measurements are historical",
+    ):
+        assert disclosure in agent["resources"]["interpretation"]
+        assert disclosure in html
+    if reused_baseline:
+        assert output["tier3"]["token_usage"]["baseline_reused"] is True
+    # Reports retained before interpretation metadata existed still disclose its limits.
+    del resources["interpretation"]
+    legacy_html = HTMLReporter(target_path=str(tmp_path)).render_all([result])
+    assert "Lower use alone does not establish improved task quality or Efficiency" in legacy_html
 
 
 def test_llm_and_tool_seconds_flow_from_trajectories_to_json_and_html(tmp_path):

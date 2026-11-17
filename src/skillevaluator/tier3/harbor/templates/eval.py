@@ -43,6 +43,7 @@ import time
 import unicodedata
 import urllib.error
 import urllib.request
+from collections.abc import Iterator
 from contextvars import ContextVar
 from functools import partial
 from pathlib import Path
@@ -112,6 +113,26 @@ if _CHECKS_PATH.is_file():
 else:  # Source-tree template: the canonical module lives in the package.
     from skillevaluator.tier3.eval_core import checks as _shared_checks
 
+_DECLARATIVE_CHECKS_PATH = _SCRIPT_TESTS_DIR / "declarative_checks.py"
+if _DECLARATIVE_CHECKS_PATH.is_file():
+    _declarative_spec = importlib.util.spec_from_file_location(
+        "_skillevaluator_shared_declarative_checks", _DECLARATIVE_CHECKS_PATH
+    )
+    assert _declarative_spec and _declarative_spec.loader
+    _shared_declarative_checks = importlib.util.module_from_spec(_declarative_spec)
+    _had_checks_module = "checks" in sys.modules
+    _previous_checks_module = sys.modules.get("checks")
+    sys.modules["checks"] = _shared_checks
+    try:
+        _declarative_spec.loader.exec_module(_shared_declarative_checks)
+    finally:
+        if _had_checks_module:
+            sys.modules["checks"] = _previous_checks_module
+        else:
+            sys.modules.pop("checks", None)
+else:
+    from skillevaluator.tier3.eval_core import declarative_checks as _shared_declarative_checks
+
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = _shared_checks.AMBIGUOUS_OUTER_EXEC_OBSERVATION
 UNOBSERVED_INNER_CALL = _shared_checks.UNOBSERVED_INNER_CALL
 UNSUPPORTED_NATIVE_CODEX_EXEC = _shared_checks.UNSUPPORTED_NATIVE_CODEX_EXEC
@@ -169,6 +190,7 @@ _integer_may_fail = _shared_checks._integer_may_fail
 _interpreter_operands = _shared_checks._interpreter_operands
 _interpreter_script_arg = _shared_checks._interpreter_script_arg
 _is_apply_patch_action = _shared_checks._is_apply_patch_action
+_is_editor_view = _shared_checks._is_editor_view
 _is_execution_action = _shared_checks._is_execution_action
 _is_file_read_action = _shared_checks._is_file_read_action
 _is_heredoc_redirect = _shared_checks._is_heredoc_redirect
@@ -194,11 +216,14 @@ _network_lookup_readings = _shared_checks._network_lookup_readings
 _network_redirection = _shared_checks._network_redirection
 _network_shell_tokens = _shared_checks._network_shell_tokens
 _network_tokens_exfiltrate = _shared_checks._network_tokens_exfiltrate
+_normalize_sensitive_path_text = _shared_checks._normalize_sensitive_path_text
 _normalize_skill_names = _shared_checks._normalize_skill_names
 _normalized_write_path = _shared_checks._normalized_write_path
+_normpath_word = _shared_checks._normpath_word
 _number_may_fail = _shared_checks._number_may_fail
 _parse_unit_starts = _shared_checks._parse_unit_starts
 _pass_to_reference = _shared_checks._pass_to_reference
+_path_entry_in = _shared_checks._path_entry_in
 _path_with_shell_cwd = _shared_checks._path_with_shell_cwd
 _pipeline_last_stage_keeps_bindings = _shared_checks._pipeline_last_stage_keeps_bindings
 _pipeline_upstream_names_script = _shared_checks._pipeline_upstream_names_script
@@ -252,11 +277,17 @@ _script_path_matches = _shared_checks._script_path_matches
 _search_path_is_root = _shared_checks._search_path_is_root
 _secret_exposure_finding = _shared_checks._secret_exposure_finding
 _security_finding = _shared_checks._security_finding
+_sensitive_path_match = _shared_checks._sensitive_path_match
+_sensitive_write_target = _shared_checks._sensitive_write_target
 _shell_c_payload = _shared_checks._shell_c_payload
 _shell_c_positional = _shared_checks._shell_c_positional
 _shell_executable = _shared_checks._shell_executable
 _shell_substitution_payloads = _shared_checks._shell_substitution_payloads
+_shell_text_regions = _shared_checks._shell_text_regions
 _shell_tokens = _shared_checks._shell_tokens
+_shell_write_scans = _shared_checks._shell_write_scans
+_shell_write_targets = _shared_checks._shell_write_targets
+_shell_write_texts = _shared_checks._shell_write_texts
 _skill_match_details = _shared_checks._skill_match_details
 _skill_md_arg = _shared_checks._skill_md_arg
 _skill_name_from_ref = _shared_checks._skill_name_from_ref
@@ -284,8 +315,12 @@ _without_plain_patch_headers = _shared_checks._without_plain_patch_headers
 _without_redirections = _shared_checks._without_redirections
 check_error_recovery = _shared_checks.check_error_recovery
 check_script_execution = _shared_checks.check_script_execution
+normalize_optional_reference = _shared_checks.normalize_optional_reference
+normalize_expected_behaviors = _shared_checks.normalize_expected_behaviors
 resolve_should_trigger = _shared_checks.resolve_should_trigger
 score_skill_execution = _shared_checks.score_skill_execution
+skill_efficiency_not_applicable_reason = _shared_checks.skill_efficiency_not_applicable_reason
+skill_execution_not_applicable_reason = _shared_checks.skill_execution_not_applicable_reason
 
 # All 148 constant initializers are AST-identical at the fixed base; shared
 # constants added since are aliased here too.
@@ -321,6 +356,7 @@ _COMMAND_INTRODUCING_WORDS = _shared_checks._COMMAND_INTRODUCING_WORDS
 _COMMAND_POSITION_LEADERS = _shared_checks._COMMAND_POSITION_LEADERS
 _COMMAND_REACHES_BUILTINS = _shared_checks._COMMAND_REACHES_BUILTINS
 _COMMAND_SUBSTITUTION_RE = _shared_checks._COMMAND_SUBSTITUTION_RE
+_COMMENT_WORD_BREAKS = _shared_checks._COMMENT_WORD_BREAKS
 _COMPOUND_CLOSERS = _shared_checks._COMPOUND_CLOSERS
 _COMPOUND_OPENERS = _shared_checks._COMPOUND_OPENERS
 _CURL_OR_WGET_WORD_RE = _shared_checks._CURL_OR_WGET_WORD_RE
@@ -341,6 +377,7 @@ _DYNAMIC_ARGUMENT_RE = _shared_checks._DYNAMIC_ARGUMENT_RE
 _EMPTY_REFERENCE_SHELLS = _shared_checks._EMPTY_REFERENCE_SHELLS
 _EXECUTION_TOOL_HINTS = _shared_checks._EXECUTION_TOOL_HINTS
 _EXPORTED_MARK = _shared_checks._EXPORTED_MARK
+_FD_REDIRECT_TARGET_RE = _shared_checks._FD_REDIRECT_TARGET_RE
 _FILE_READ_VERBS = _shared_checks._FILE_READ_VERBS
 _FUNCTION_HEADER_NAME_RE = _shared_checks._FUNCTION_HEADER_NAME_RE
 _GLUED_AKIA_BODY = _shared_checks._GLUED_AKIA_BODY
@@ -349,8 +386,12 @@ _GLUED_FUNCTION_HEADER_RE = _shared_checks._GLUED_FUNCTION_HEADER_RE
 _GLUED_KEYWORD_RE = _shared_checks._GLUED_KEYWORD_RE
 _GROUPING_TOKENS = _shared_checks._GROUPING_TOKENS
 _HEREDOC_DELIMITER_RE = _shared_checks._HEREDOC_DELIMITER_RE
+_HEREDOC_OPERAND_RE = _shared_checks._HEREDOC_OPERAND_RE
 _HEREDOC_REDIRECTS = _shared_checks._HEREDOC_REDIRECTS
+_HOME_ANCHOR_RE = _shared_checks._HOME_ANCHOR_RE
+_HOME_CREDENTIAL_PATHS = _shared_checks._HOME_CREDENTIAL_PATHS
 _HOME_DIR_PREFIX_RE = _shared_checks._HOME_DIR_PREFIX_RE
+_HOME_SENSITIVE_WRITE_PATHS = _shared_checks._HOME_SENSITIVE_WRITE_PATHS
 _HOME_SHORTHAND_RE = _shared_checks._HOME_SHORTHAND_RE
 _HTTPIE_BODY_FLAGS = _shared_checks._HTTPIE_BODY_FLAGS
 _INERT_PRINT_COMMANDS = _shared_checks._INERT_PRINT_COMMANDS
@@ -364,11 +405,13 @@ _INTERPRETER_GRAMMARS = _shared_checks._INTERPRETER_GRAMMARS
 _JUSTIFYING_SHELLS = _shared_checks._JUSTIFYING_SHELLS
 _LAST_STAGE_IN_CURRENT_SHELL = _shared_checks._LAST_STAGE_IN_CURRENT_SHELL
 _LAST_STAGE_IN_SUBSHELL = _shared_checks._LAST_STAGE_IN_SUBSHELL
+_LINE_CONTINUATION_RE = _shared_checks._LINE_CONTINUATION_RE
 _LISTING_ACTS_ON_NAMES = _shared_checks._LISTING_ACTS_ON_NAMES
 _LITERAL_DOLLAR = _shared_checks._LITERAL_DOLLAR
 _LOOP_HEADER_WORDS = _shared_checks._LOOP_HEADER_WORDS
 _MAPFILE_OPTIONS_WITH_ARG = _shared_checks._MAPFILE_OPTIONS_WITH_ARG
 _MAX_HEREDOCS_PER_LINE = _shared_checks._MAX_HEREDOCS_PER_LINE
+_MAX_HEREDOC_DEPTH = _shared_checks._MAX_HEREDOC_DEPTH
 _MAX_HEREDOC_OPERANDS = _shared_checks._MAX_HEREDOC_OPERANDS
 _MAX_LOOKUP_READINGS = _shared_checks._MAX_LOOKUP_READINGS
 _MAX_NETWORK_ACTION_CHARS = _shared_checks._MAX_NETWORK_ACTION_CHARS
@@ -399,6 +442,8 @@ _OUTPUT_REDIRECTS = _shared_checks._OUTPUT_REDIRECTS
 _PARSES_WHOLE_TEXT_FIRST = _shared_checks._PARSES_WHOLE_TEXT_FIRST
 _PASS_THROUGH_WRAPPERS = _shared_checks._PASS_THROUGH_WRAPPERS
 _PATH_ARG_KEYS = _shared_checks._PATH_ARG_KEYS
+_PATH_COMPONENT_END = _shared_checks._PATH_COMPONENT_END
+_PATH_WORD_RE = _shared_checks._PATH_WORD_RE
 _PIPELINE_OPTION_RE = _shared_checks._PIPELINE_OPTION_RE
 _POSITIONAL_SET_RE = _shared_checks._POSITIONAL_SET_RE
 _PREFIX_EXPANDS_FIRST = _shared_checks._PREFIX_EXPANDS_FIRST
@@ -406,10 +451,13 @@ _PREFIX_OUTLIVES_SPECIAL_BUILTIN = _shared_checks._PREFIX_OUTLIVES_SPECIAL_BUILT
 _PROC_CWD_ALIAS_RE = _shared_checks._PROC_CWD_ALIAS_RE
 _PROC_ROOT_ALIAS_RE = _shared_checks._PROC_ROOT_ALIAS_RE
 _PROMPT_INJECTION_PATTERNS = _shared_checks._PROMPT_INJECTION_PATTERNS
+_PROTECTED_WRITE_PATHS = _shared_checks._PROTECTED_WRITE_PATHS
 _PUNCTUATION_PIECE_RE = _shared_checks._PUNCTUATION_PIECE_RE
 _PUNCTUATION_RUN_RE = _shared_checks._PUNCTUATION_RUN_RE
 _QUOTED_NEWLINE = _shared_checks._QUOTED_NEWLINE
+_QUOTED_STRING_RE = _shared_checks._QUOTED_STRING_RE
 _QUOTED_SYNTAX_MARK = _shared_checks._QUOTED_SYNTAX_MARK
+_QUOTE_CHARS = _shared_checks._QUOTE_CHARS
 _READONLY_ATTRIBUTES = _shared_checks._READONLY_ATTRIBUTES
 _READONLY_MARK = _shared_checks._READONLY_MARK
 _READS_ARGV0_RE = _shared_checks._READS_ARGV0_RE
@@ -418,6 +466,7 @@ _READ_OPTIONS_WITH_ARG = _shared_checks._READ_OPTIONS_WITH_ARG
 _READ_TOOL_HINTS = _shared_checks._READ_TOOL_HINTS
 _REDIRECTION_OPERATOR_RE = _shared_checks._REDIRECTION_OPERATOR_RE
 _REDIRECTION_WORD_RE = _shared_checks._REDIRECTION_WORD_RE
+_REDIRECT_TARGET_RE = _shared_checks._REDIRECT_TARGET_RE
 _REFERENCE_MARK = _shared_checks._REFERENCE_MARK
 _REFERENCE_SHELLS = _shared_checks._REFERENCE_SHELLS
 _REFUSED_ASSIGNMENT_GOES_ON = _shared_checks._REFUSED_ASSIGNMENT_GOES_ON
@@ -435,22 +484,31 @@ _SCRIPT = _shared_checks._SCRIPT
 _SCRIPT_INTERPRETERS = _shared_checks._SCRIPT_INTERPRETERS
 _SECRET_PATTERNS = _shared_checks._SECRET_PATTERNS
 _SECRET_VAR_NAME_RE = _shared_checks._SECRET_VAR_NAME_RE
+_SED_IN_PLACE_FLAG_RE = _shared_checks._SED_IN_PLACE_FLAG_RE
+_SED_OPERANDS_RE = _shared_checks._SED_OPERANDS_RE
+_SED_SCRIPT_OPTION_RE = _shared_checks._SED_SCRIPT_OPTION_RE
+_SENSITIVE_PATH_DIRECTORIES = _shared_checks._SENSITIVE_PATH_DIRECTORIES
 _SENSITIVE_WRITE_PATHS = _shared_checks._SENSITIVE_WRITE_PATHS
 _SHELL_ASSIGNMENT_RE = _shared_checks._SHELL_ASSIGNMENT_RE
 _SHELL_COMMAND_INTERPRETERS = _shared_checks._SHELL_COMMAND_INTERPRETERS
 _SHELL_EXPANSION_CHARS = _shared_checks._SHELL_EXPANSION_CHARS
+_SHELL_LINE_FILL_RE = _shared_checks._SHELL_LINE_FILL_RE
 _SHELL_METACHARS = _shared_checks._SHELL_METACHARS
 _SHELL_NAME_RE = _shared_checks._SHELL_NAME_RE
+_SHELL_SCAN_RE = _shared_checks._SHELL_SCAN_RE
 _SHELL_SEPARATORS = _shared_checks._SHELL_SEPARATORS
 _SHELL_VARIABLE_RE = _shared_checks._SHELL_VARIABLE_RE
+_SHELL_WORD = _shared_checks._SHELL_WORD
 _SOURCING_COMMANDS = _shared_checks._SOURCING_COMMANDS
 _SPECIAL_BUILTINS = _shared_checks._SPECIAL_BUILTINS
 _SPECIAL_BUILTIN_ERROR_STOPS = _shared_checks._SPECIAL_BUILTIN_ERROR_STOPS
 _STDIN_ARGV_RE = _shared_checks._STDIN_ARGV_RE
 _STDIN_DEPENDENT_WRAPPERS = _shared_checks._STDIN_DEPENDENT_WRAPPERS
 _STDIN_TEXT_CONSUMERS = _shared_checks._STDIN_TEXT_CONSUMERS
+_STR_REPLACE_EDITORS = _shared_checks._STR_REPLACE_EDITORS
 _SYNTAX_SHAPE_RE = _shared_checks._SYNTAX_SHAPE_RE
 _SYNTAX_WORDS = _shared_checks._SYNTAX_WORDS
+_TEE_OPERANDS_RE = _shared_checks._TEE_OPERANDS_RE
 _TRANSPARENT_COMMAND_PREFIXES = _shared_checks._TRANSPARENT_COMMAND_PREFIXES
 _UNAUTHORIZED_PATHS = _shared_checks._UNAUTHORIZED_PATHS
 _UNDECIDABLE = _shared_checks._UNDECIDABLE
@@ -558,7 +616,7 @@ def check_workflow_order(tool_calls, skill_tool_names=None, expected_skill=None)
     )
 
 
-def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None):
+def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None, *, agent_workdir="/workspace"):
     return _shared_checks.check_security(
         tool_calls,
         get_agent_text(traj),
@@ -567,6 +625,7 @@ def check_security(traj, tool_calls, expected_skill=None, acceptable_skills=None
         ),
         expected_skill=expected_skill or "",
         acceptable_skills=acceptable_skills,
+        agent_workdir=agent_workdir,
     )
 
 
@@ -581,6 +640,13 @@ logger = logging.getLogger(__name__)
 
 def _env_path(name, default):
     return Path(os.environ.get(name, str(default)))
+
+
+def _declarative_workspace_roots():
+    roots = [Path.cwd(), Path("/workspace"), Path("/workspace/output")]
+    if artifact_root := os.environ.get("HARBOR_ARTIFACTS_DIR"):
+        roots.append(Path(artifact_root))
+    return list(dict.fromkeys(roots))
 
 
 LOGS_DIR = _env_path("HARBOR_LOGS_DIR", "/logs")
@@ -604,7 +670,7 @@ NVIDIA_BUILD_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions"
 DEFAULT_JUDGE_MODELS = {
     "openai": "gpt-6.1-sol",
     "anthropic": "claude-opus-5-5",
-    "nv_build": "nvidia/nemotron-3-super-120b-a12b",
+    "nv_build": "nvidia/nemotron-3.5-lightning-30b-a3b",
     "bedrock": "us.anthropic.claude-opus-5-5",
     "openai-compatible": "nvidia/nvidia/nemotron-3-super-120b-long-ctx",
 }
@@ -612,6 +678,8 @@ JUDGE_REASONING_EFFORT = "medium"
 REASONING_MAX_COMPLETION_TOKENS = 32768
 ANTHROPIC_REFUSAL_FALLBACK_MODEL = "claude-opus-4-8"
 ANTHROPIC_SERVER_SIDE_FALLBACK_BETA = "server-side-fallback-2026-07-01"
+ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV = "SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL"
+_REFUSAL_FALLBACK_DISABLED_VALUES = frozenset({"none", "off", "disabled", "false", "0"})
 _ANTHROPIC_DNS_LABEL_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
 _ANTHROPIC_INTERNAL_LABEL_RE = re.compile(r"^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?$")
 _ANTHROPIC_IPV6_ZONE_RE = re.compile(r"^[A-Za-z0-9._~-]+$")
@@ -698,6 +766,15 @@ _SECTION_USER_REQUEST = _shared_atif._SECTION_USER_REQUEST
 _env_positive_int = _shared_atif._env_positive_int
 _behavior_final_response_limit = _shared_atif._behavior_final_response_limit
 _behavior_check_budget = _shared_atif._behavior_check_budget
+_behavior_user_request_limit = _shared_atif._behavior_user_request_limit
+_DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT = _shared_atif._DEFAULT_BEHAVIOR_USER_REQUEST_LIMIT
+_env_int_or_none = _shared_atif._env_int_or_none
+_BEHAVIOR_SECTION_LABELS = _shared_atif._BEHAVIOR_SECTION_LABELS
+_BEHAVIOR_REQUIRED_EVIDENCE = _shared_atif._BEHAVIOR_REQUIRED_EVIDENCE
+_BEHAVIOR_EVIDENCE_GAP_HINT = _shared_atif._BEHAVIOR_EVIDENCE_GAP_HINT
+_behavior_evidence_completeness = _shared_atif._behavior_evidence_completeness
+_expected_behaviors_verified = _shared_atif._expected_behaviors_verified
+behavior_evidence_gap = _shared_atif.behavior_evidence_gap
 _BEHAVIOR_WRITE_TOOLS = _shared_atif._BEHAVIOR_WRITE_TOOLS
 _BEHAVIOR_EXEC_TOOLS = _shared_atif._BEHAVIOR_EXEC_TOOLS
 _BEHAVIOR_WRITE_COMMAND_MARKERS = _shared_atif._BEHAVIOR_WRITE_COMMAND_MARKERS
@@ -748,6 +825,7 @@ _assemble = _shared_atif._assemble
 _BACKTICK_TOKEN_RE = _shared_atif._BACKTICK_TOKEN_RE
 _VERIFIED_FACTS_MAX = _shared_atif._VERIFIED_FACTS_MAX
 _VERIFIED_FACT_LINE_MAX = _shared_atif._VERIFIED_FACT_LINE_MAX
+_checkable_tokens = _shared_atif._checkable_tokens
 build_verified_facts = _shared_atif.build_verified_facts
 _build_verified_facts_section = _shared_atif._build_verified_facts_section
 build_metric_evidence_bundles = _shared_atif.build_metric_evidence_bundles
@@ -894,6 +972,21 @@ def _strict_judge_replies():
         return _judge_retry_policy() == "strict"
     except ValueError:
         return True
+
+
+def _refusal_fallback_target(model):
+    """Return the refusal fallback target for ``model``, or None for no fallback.
+
+    SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL replaces the built-in target; ``none``,
+    ``off``, ``disabled``, ``false`` or ``0`` turns it off. An empty value counts
+    as unset, and a target equal to ``model`` is never sent. Mirrors
+    ``provider_config.anthropic_refusal_fallback_model``.
+    """
+    value = os.environ.get(ANTHROPIC_REFUSAL_FALLBACK_MODEL_ENV, "").strip()
+    if value.casefold() in _REFUSAL_FALLBACK_DISABLED_VALUES:
+        return None
+    target = value or ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    return None if target == str(model or "").strip() else target
 
 
 def _builtin_refusal_fallback_allowed():
@@ -1878,9 +1971,11 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
     # Server-side fallback (beta, native Claude API only): a safety-classifier
     # refusal is retried on the fallback model within the same call.
     server_side_fallback = (
-        _is_claude_5_5_or_later(model)
+        _refusal_fallback_target(model)
+        if _is_claude_5_5_or_later(model)
         and urlparse(target_url).hostname == "api.anthropic.com"
         and _builtin_refusal_fallback_allowed()
+        else None
     )
 
     def _build_request(include_schema):
@@ -1903,7 +1998,7 @@ def _call_anthropic(prompt, model, max_tokens, temperature, response_schema=None
             "anthropic-version": "2023-06-01",
         }
         if server_side_fallback:
-            payload["fallbacks"] = [{"model": ANTHROPIC_REFUSAL_FALLBACK_MODEL}]
+            payload["fallbacks"] = [{"model": server_side_fallback}]
             headers["anthropic-beta"] = ANTHROPIC_SERVER_SIDE_FALLBACK_BETA
         return urllib.request.Request(target_url, data=json.dumps(payload).encode(), headers=headers)
 
@@ -2001,12 +2096,25 @@ def _classify_bedrock_retry_error(error):
     return is_network, type_name, None
 
 
+_BEDROCK_ANTHROPIC_PREFIX_RE = re.compile(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+
+
 def _bedrock_refusal_fallback_model(model):
-    """Return Opus 4.8 in the same Bedrock geography as a Claude 5.5 or later model, else None."""
-    prefix = re.match(r"(?:(?:[a-z]{2}|global)\.)?anthropic\.", str(model or ""))
+    """Return the Bedrock refusal fallback ID for a Claude 5.5 or later model, else None.
+
+    A bare name such as ``claude-opus-4-8`` gets the request model's geography
+    prefix. A value that is already a Bedrock ID (``us.anthropic.``,
+    ``global.anthropic.``, ``anthropic.``) is used as given.
+    """
+    prefix = _BEDROCK_ANTHROPIC_PREFIX_RE.match(str(model or ""))
     if prefix is None or not _is_claude_5_5_or_later(model):
         return None
-    return prefix.group(0) + ANTHROPIC_REFUSAL_FALLBACK_MODEL
+    target = _refusal_fallback_target(model)
+    if not target:
+        return None
+    bedrock_target = target if _BEDROCK_ANTHROPIC_PREFIX_RE.match(target) else prefix.group(0) + target
+    # Compare the resolved Bedrock ID, not the configured leaf name, with the request model.
+    return None if bedrock_target == str(model).strip() else bedrock_target
 
 
 def _call_bedrock(prompt, model, max_tokens, temperature, timeout=90, provenance=None):
@@ -2768,76 +2876,201 @@ def _judge_retry_feedback(problem):
     )
 
 
-# Judge prompts quote the agent's commands and output, so saved judge evidence
-# also masks credentials that have no fixed key shape: URL userinfo
-# ("https://user:token@host"), Authorization, API-key, token and Cookie header
-# values, and the values of credential flags ("--token VALUE",
-# "curl -u user:password"). Each pattern starts at a fixed literal and scans one
-# bounded run, so long text stays linear. The header patterns accept shell
-# ("-H 'Name: value'"), JSON ('"name": "value"') and Python subscript
-# ('headers["Name"] = f"value"') forms, also with the quotes JSON-escaped
-# ('\"Name\": \"value\"'), as tool-call arguments appear in the behavior and
-# goal prompts.
-_JUDGE_EVIDENCE_URL_USERINFO_RE = re.compile(r"(://)[^\s/?#@'\"`<>]{1,256}@")
-_JUDGE_EVIDENCE_HEADER_SEPARATOR = r"\\?[\"']?\]?[ \t]{0,8}[:=][ \t]{0,8}(?:[bfru]{0,2}\\?[\"'])?"
-# Digest values hold quoted fields (username="...", response="..."), so the rest
-# of the value is masked up to a single quote, a backtick or the end of the line.
-_JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r"digest[ \t]{1,8})[^'`\r\n]{1,512}",
-    re.IGNORECASE,
+# RAGAS writes its input into the prompt as JSON, and tool-call arguments are
+# JSON, so a line break or tab in that text arrives as the two characters "\n",
+# "\r" or "\t". A header, flag or key that starts a line there follows the
+# letter of the escape, where patterns that need a line start, a space or a
+# word boundary before it do not match. So once the whole text is masked, the
+# text between these escapes is masked again as lines of their own.
+_JUDGE_EVIDENCE_ESCAPE_RE = re.compile(r"(\\[nrt])")
+
+
+def _mask_judge_evidence_text(text):
+    """Mask credentials in *text* read as one piece."""
+    # Share finding credential semantics without imposing the finding scanner's
+    # 2,000-character input budget on the longer judge prompt and reply budgets.
+    redacted = _shared_checks._mask_finding_evidence_credentials_as_written(text, preserve_header_format=True)
+    redacted = _redact_configured_credentials(_redact_evidence_text(redacted))
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    return redacted
+
+
+def _mask_judge_evidence_line(text):
+    """Mask credentials in the text between two escapes, which is not trimmed."""
+    redacted = _shared_checks._mask_finding_evidence_credentials_as_written(text, preserve_header_format=True)
+    redacted = redact_secrets_in_log_line(redacted)
+    for pattern in _SECRET_PATTERNS:
+        redacted = pattern.sub("<redacted>", redacted)
+    return redacted
+
+
+# The markers the line pass writes in place of a value. The JWT pattern writes
+# "jwt-" before its marker, and markers next to each other are read as one.
+_JUDGE_EVIDENCE_LINE_MARKERS_RE = re.compile(
+    r"(?:(?:jwt-)?<redacted>|" + re.escape(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_MARKER) + r")+"
 )
-# Other Authorization schemes vary (Bearer, Basic, ApiKey, Bot, SSWS, ...), so the
-# whole value is masked up to its closing quote or the end of the line. Bearer,
-# Basic, Token and Digest stay visible because they say which kind of credential
-# was sent, and a quoted token after them ('Bearer "token"') is masked too.
-_JUDGE_EVIDENCE_AUTH_HEADER_RE = re.compile(
-    r"(\bauthorization"
-    + _JUDGE_EVIDENCE_HEADER_SEPARATOR
-    + r"(?:(?:bearer|basic|token|digest)[ \t]{1,8}(?:\\?[\"'])?)?)"
-    r"[^\s'\"`,;\\][^'\"`\r\n\\]*",
-    re.IGNORECASE,
+# An unquoted value ends at whitespace, a quote, a backtick or a shell
+# operator, unless a backslash escapes it.
+_JUDGE_EVIDENCE_VALUE_END_RE = re.compile(r"[\s'\"`;|&()<>]")
+# The text after a marker runs to the next escape or marker.
+_JUDGE_EVIDENCE_SITE_END_RE = re.compile(
+    _JUDGE_EVIDENCE_ESCAPE_RE.pattern + "|" + _JUDGE_EVIDENCE_LINE_MARKERS_RE.pattern
 )
-# X-API-Key, Api-Key, X-Auth-Token, X-Access-Token and Private-Token headers.
-_JUDGE_EVIDENCE_KEY_HEADER_RE = re.compile(
-    r"(\b(?:api-key|auth-token|access-token|private-token)" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+",
-    re.IGNORECASE,
-)
-# A Cookie header holds "name=value" pairs joined by ";", and every pair is masked.
-_JUDGE_EVIDENCE_COOKIE_HEADER_RE = re.compile(
-    r"(\bcookie" + _JUDGE_EVIDENCE_HEADER_SEPARATOR + r")"
-    r"[^\s'\"`,;\\]+(?:;[ \t]{0,8}[^\s'\"`,;\\]+){0,64}",
-    re.IGNORECASE,
-)
-_JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])--?(?:password|passwd|token|api-key|apikey|secret|access-token|auth-token)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n]+\"|'[^'\r\n]+'|[^\s'\"`\\]+)",
-    re.IGNORECASE,
-)
-# "-u"/"--user" also name ordinary options (python -u, pip --user), so only a
-# user:password value is masked.
-_JUDGE_EVIDENCE_USER_FLAG_RE = re.compile(
-    r"((?<![^\s'\"])(?:-u|--user)(?:[ \t]{1,8}|=))"
-    r"(?:\"[^\"\r\n:]+:[^\"\r\n]+\"|'[^'\r\n:]+:[^'\r\n]+'|[^\s'\"`:\\]{1,256}:[^\s'\"`\\]+)"
-)
+
+
+def _judge_evidence_line_value_spans(text, masked):
+    """Return *text* as the line pass read it, and the spans of the values it replaced there to write *masked*.
+
+    The line pass only replaces values with markers, so the text between two
+    markers is found in *text* in order, and what lies between is a value.
+    """
+    # The shared masker reads the text without its shell line continuations.
+    text = _shared_checks._LINE_CONTINUATION_RE.sub("", text)
+    kept = _JUDGE_EVIDENCE_LINE_MARKERS_RE.split(masked)
+    start = len(kept[0])
+    end = len(text) - len(kept[-1])
+    if len(kept) == 1 or start > end or not text.startswith(kept[0]) or not text.endswith(kept[-1]):
+        return text, []
+    spans = []
+    for between in kept[1:-1]:
+        found = text.find(between, start, end)
+        if found < 0:
+            return text, spans
+        spans.append((start, found))
+        start = found + len(between)
+    spans.append((start, end))
+    return text, spans
+
+
+def _judge_evidence_value_sites(lines, mask_line):
+    """Map the text that each of *lines* can leave after a marker to the spans of the values to mask in it.
+
+    When an unquoted value that ends the line before reads on into a line,
+    it stops at whitespace, a quote, a backtick or a shell operator. So the
+    text left after its marker is the rest of the line from one of those
+    characters, up to the next value that is masked there, or to the line end.
+    """
+    sites = {}
+    for line in dict.fromkeys(lines):
+        masked = mask_line(line) if line else line
+        if masked == line:
+            continue
+        line, spans = _judge_evidence_line_value_spans(line, masked)
+        # A backslash that ends a value is left in place, as it is usually
+        # half of an escaped backslash: a line break escaped twice is "\\n",
+        # and the line ends before its "\n".
+        spans = [(start, start + len(line[start:end].rstrip("\\"))) for start, end in spans]
+        spans = [
+            (start, end)
+            for start, end in spans
+            if end > start and "<redacted" not in line[start:end] and _ERROR_REDACTION_MARKER not in line[start:end]
+        ]
+        if not spans:
+            continue
+        # The first place where each kind of character could end an unquoted
+        # value that read on into the line, with and without a backslash
+        # before it.
+        stops = {}
+        for found in _JUDGE_EVIDENCE_VALUE_END_RE.finditer(line, 0, spans[-1][0]):
+            char = found.group()
+            index = found.start()
+            stops.setdefault((" " if char.isspace() else char, line[index - 1 : index] == "\\"), index)
+        for stop in {0, *stops.values()}:
+            following = [(start - stop, end - stop) for start, end in spans if start >= stop]
+            if not following:
+                continue
+            rest = line[stop:]
+            if len(following) > 1:
+                sites.setdefault(rest[: following[1][0]], set()).add(following[0])
+            sites.setdefault(rest, set()).update(following)
+    return sites
+
+
+def _mask_judge_evidence_value_sites(text, sites):
+    """Mask the values of each text in *sites* that *text* holds between a marker and the next escape or marker."""
+    spans = []
+    after = None
+    for found in _JUDGE_EVIDENCE_SITE_END_RE.finditer(text):
+        if after is not None:
+            rest = text[after : found.start()]
+            values = sites.get(rest)
+            if values is None and not found.group(1) and rest.endswith(("=", ":")):
+                # Inside a quoted string the whole pass reads the unquoted value
+                # of a name to the closing quote or line end, so it can leave
+                # to the assignment rule a "_" flag value that the line, read
+                # on its own, masks whole with that name ("--access_token
+                # pass=..."). The rest then also matches without the word
+                # that ends at the marker.
+                cut = len(rest)
+                while cut and _JUDGE_EVIDENCE_VALUE_END_RE.match(rest, cut - 1) is None:
+                    cut -= 1
+                values = sites.get(rest[:cut])
+            spans.extend((after + start, after + end) for start, end in values or ())
+        after = None if found.group(1) else found.end()
+    if after is not None:
+        spans.extend((after + start, after + end) for start, end in sites.get(text[after:], ()))
+    if not spans:
+        return text
+    merged = []
+    for start, end in sorted(spans):
+        if merged and start <= merged[-1][1]:
+            merged[-1][1] = max(merged[-1][1], end)
+        else:
+            merged.append([start, end])
+    parts = []
+    pos = 0
+    for start, end in merged:
+        parts.extend((text[pos:start], "<redacted>"))
+        pos = end
+    parts.append(text[pos:])
+    return "".join(parts)
 
 
 def _redact_judge_evidence(text):
     """Mask credentials in a judge prompt, reply, or problem before it is saved."""
-    redacted = _redact_configured_credentials(_redact_evidence_text(text))
-    for pattern in _SECRET_PATTERNS:
-        redacted = pattern.sub("<redacted>", redacted)
-    redacted = _JUDGE_EVIDENCE_URL_USERINFO_RE.sub(r"\1<redacted>@", redacted)
-    for pattern in (
-        _JUDGE_EVIDENCE_DIGEST_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_AUTH_HEADER_RE,
-        _JUDGE_EVIDENCE_KEY_HEADER_RE,
-        _JUDGE_EVIDENCE_COOKIE_HEADER_RE,
-        _JUDGE_EVIDENCE_CREDENTIAL_FLAG_RE,
-        _JUDGE_EVIDENCE_USER_FLAG_RE,
-    ):
-        redacted = pattern.sub(r"\1<redacted>", redacted)
-    return redacted
+    text = str(text)
+    # A RAGAS prompt or reply holds tool-call arguments escaped twice, so the
+    # passes below also read the text with one and two levels of escapes
+    # removed (see _mask_unescaped_views in checks.py). That reading only adds
+    # markers to their result, so each pass reads the text as it did before:
+    # masking a value earlier could move a later one out of a pattern's window
+    # or hide the name that a later pass reads.
+    return _shared_checks._mask_unescaped_views(
+        text, _redact_judge_evidence_as_written(text), _redact_judge_evidence_as_written
+    )
+
+
+def _redact_judge_evidence_as_written(text):
+    """Mask credentials in a judge prompt, reply, or problem as written."""
+    # The whole text is masked first, so a form that runs over an escape (a
+    # private key block, a continued or quoted value, a value that holds "\n"
+    # or "\u00e4") is masked whole before the text is split at the escapes.
+    redacted = _mask_judge_evidence_text(text)
+    masked_lines = {}
+
+    def mask_line(line):
+        if line not in masked_lines:
+            masked_lines[line] = _mask_judge_evidence_line(line)
+        return masked_lines[line]
+
+    parts = _JUDGE_EVIDENCE_ESCAPE_RE.split(redacted)
+    if len(parts) > 1:
+        # Text and escapes alternate.
+        parts[::2] = [mask_line(part) if part else part for part in parts[::2]]
+        redacted = "".join(parts)
+    lines = _JUDGE_EVIDENCE_ESCAPE_RE.split(text)[::2]
+    if len(lines) == 1:
+        return redacted
+    # An unquoted value at the end of a line reads on through the escape, so
+    # the whole pass can mask the name that starts the next line with it:
+    # "--password A\n--token B" becomes "--password <redacted> B", where B no
+    # longer follows a name. The lines of the original text still hold the
+    # name, so a value the line pass masks on such a line is masked where the
+    # whole pass left it: in the rest of that line, which follows a marker.
+    # Other copies of the value are left as the whole pass left them.
+    sites = _judge_evidence_value_sites(lines[1:], mask_line)
+    return _mask_judge_evidence_value_sites(redacted, sites) if sites else redacted
 
 
 def _verifier_output_dir():
@@ -2884,6 +3117,10 @@ def _record_judge_attempt(
     if score is not None:
         entry["score"] = score
     attempts.append(entry)
+    _write_judge_attempts(attempts)
+
+
+def _write_judge_attempts(attempts):
     try:
         path = _verifier_output_dir() / JUDGE_ATTEMPTS_FILE_NAME
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -3082,7 +3319,7 @@ BEHAVIOR_CHECK_JSON_SCHEMA = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
@@ -3120,6 +3357,19 @@ If the evidence holds no answer to the question (for example, the agent stopped,
 refused), every criterion is false, unless the expected answer is itself a refusal.
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
+
+For FORMAT_FOLLOWED, judge the entire final response literally against only the format explicitly \
+required by the USER QUESTION, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+Wording leniency does not relax explicit format constraints.
 
 Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
 true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
@@ -3222,10 +3472,96 @@ def _ragas_goal_accuracy_enabled():
     return _is_native_openai_chat_url("openai", request_url)
 
 
+def _ragas_message_text(message):
+    content = message.get("content")
+    if not isinstance(content, str):
+        content = json.dumps(message.get("tool_calls") if content is None else content, default=str)
+    return f"[{message.get('role', 'unknown')}]\n{content}"
+
+
+def _ragas_request_text(body):
+    """Return the judge model and the messages of one RAGAS chat-completions request as text."""
+    try:
+        request = json.loads(body)
+        return request.get("model"), "\n\n".join(_ragas_message_text(message) for message in request["messages"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        return None, body.decode("utf-8", "replace")
+
+
+def _ragas_reply_text(body):
+    """Return the judge's answer in one chat-completions reply: its text, or the tool-call arguments RAGAS parses.
+
+    A reply with neither, such as a refusal or a content-filter stop, is
+    returned whole, so the refusal or the finish reason is kept.
+    """
+    try:
+        message = json.loads(body)["choices"][0]["message"]
+        if message.get("content"):
+            return str(message["content"])
+        if message.get("tool_calls"):
+            return "\n".join(str(call["function"]["arguments"]) for call in message["tool_calls"])
+    except (ValueError, LookupError, TypeError, AttributeError):
+        pass
+    return body.decode("utf-8", "replace")
+
+
+def _record_ragas_exchange(response, problem=None):
+    """Save one RAGAS judge request and its reply, or the HTTP error, as a goal_accuracy attempt.
+
+    _record_judge_attempt redacts the full texts before it shortens them, so the
+    error body is not cut here.
+    """
+    try:
+        model, prompt = _ragas_request_text(response.request.content)
+        reply = None
+        if problem is None and response.is_success:
+            reply = _ragas_reply_text(response.content)
+        elif problem is None:
+            problem = f"HTTP {response.status_code}: {response.text}"
+        _record_judge_attempt(
+            "goal_accuracy",
+            1,
+            prompt=prompt,
+            reply=reply,
+            problem=problem,
+            method="ragas",
+            model=model or _judge_attempt_model(),
+            status="replied" if reply is not None else None,
+        )
+    except TimeoutError:
+        # The required-judge deadline alarm, not an evidence failure.
+        raise
+    except Exception as error:
+        # Saving evidence must never change a score or hide a provider error.
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+
+
+async def _save_ragas_exchange(response):
+    """httpx response hook: RAGAS builds its own prompts and parses its own replies, so save both here."""
+    try:
+        await response.aread()
+    except Exception as error:
+        _record_ragas_exchange(response, f"the reply was not received ({type(error).__name__})")
+        raise
+    _record_ragas_exchange(response)
+
+
+def _ragas_evidence_http_client(openai_module):
+    """Return the SDK's default async HTTP client with the evidence hook, or None to score without evidence."""
+    try:
+        return openai_module.DefaultAsyncHttpxClient(event_hooks={"response": [_save_ragas_exchange]})
+    except TimeoutError:
+        raise
+    except Exception as error:
+        logger.warning("Could not save RAGAS judge evidence: %s", type(error).__name__)
+        return None
+
+
 def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary):
     """Use RAGAS AgentGoalAccuracyWithReference for high-quality two-step evaluation."""
     import asyncio
 
+    import openai
     from openai import AsyncOpenAI
     from ragas.llms.base import llm_factory
     from ragas.messages import AIMessage as RagasAI
@@ -3242,7 +3578,14 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
     suffix = "/chat/completions"
     if not request_url.endswith(suffix) or not _is_native_openai_chat_url("openai", request_url):
         raise RuntimeError("RAGAS goal accuracy requires the selected canonical OpenAI provider")
-    client = AsyncOpenAI(api_key=api_key, base_url=request_url[: -len(suffix)])
+    # The response hook saves each RAGAS request and reply to judge_attempts.json.
+    # It runs in the loop below, whose tasks copy this context, so it sees the
+    # verifier's judge evidence list. Closing the client also closes this one.
+    client = AsyncOpenAI(
+        api_key=api_key,
+        base_url=request_url[: -len(suffix)],
+        http_client=_ragas_evidence_http_client(openai),
+    )
     loop = asyncio.new_event_loop()
     try:
         # Build the scorer inside the try so a setup failure still closes the client.
@@ -3254,10 +3597,11 @@ def _judge_goal_accuracy_ragas(question, ground_truth, agent_text, tool_summary)
             RagasAI(content=agent_text),
         ]
         # Collections metrics take the messages and reference as keywords, not a SingleTurnSample.
+        scorer_timeout = _remaining_judge_timeout(_resolve_judge_wall_time_budget())
         result = loop.run_until_complete(
             asyncio.wait_for(
                 metric.ascore(user_input=user_input, reference=ground_truth),
-                timeout=_remaining_judge_timeout(_resolve_judge_wall_time_budget()),
+                timeout=scorer_timeout,
             )
         )
     finally:
@@ -3378,8 +3722,14 @@ def _behavior_prompt_example(expected_count):
             "results": [
                 {
                     "step": step,
-                    "passed": step % 2 == 1,
-                    "reason": "Seen in the transcript." if step % 2 == 1 else "Not seen in the transcript.",
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
                 }
                 for step in range(1, expected_count + 1)
             ],
@@ -3388,13 +3738,36 @@ def _behavior_prompt_example(expected_count):
     )
 
 
-def judge_behavior_check(conversation_text, expected_behaviors):
+def judge_behavior_check(conversation_text, expected_behaviors, *, evidence_omitted=None):
+    """Judge expected behaviors, or refuse when required evidence did not reach the judge.
+
+    *evidence_omitted* is the behavior_check bundle's omission accounting. When
+    it reports that required evidence is incomplete, no model is called and an
+    explicit evaluation error is returned with no score: grading a shortened
+    final answer scores the evidence loss, not the agent.
+    """
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
+
+    gap = behavior_evidence_gap(evidence_omitted)
+    if gap:
+        return _judge_error(gap, results=[], expectations=_behavior_expectations(expected_behaviors, [], gap))
+
     conversation = _compact_behavior_conversation(conversation_text)
+    if evidence_omitted is not None and conversation != conversation_text:
+        # The bundle is built to fit this budget, so a second cut here would
+        # drop evidence nothing has accounted for. Refuse rather than score it.
+        second_cut = (
+            "behavior_check evidence was shortened again inside the judge, past the omission accounting. "
+            f"{_BEHAVIOR_EVIDENCE_GAP_HINT}"
+        )
+        return _judge_error(
+            second_cut, results=[], expectations=_behavior_expectations(expected_behaviors, [], second_cut)
+        )
 
     prompt = f"""You are evaluating whether an AI agent showed each expected behavior during a task. \
 Read the conversation and decide, for each numbered behavior, whether it was observed.
@@ -3405,9 +3778,33 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors_text}
 
+For each numbered behavior, check only what that behavior requires.
+A format-only behavior does not require the answer's value to be factually correct: a wrong value \
+can still satisfy its format. If a behavior also requires factual correctness, evaluate that requirement too.
+For a behavior about final-response format, judge the entire final response literally against only \
+the stated format requirement, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+When the complete final response establishes a format violation, mark that behavior false; \
+keep null when missing or incomplete evidence prevents checking it.
+Before returning, ensure each passed value agrees with its reason: a reason establishing a violation \
+requires false, not true; an evidence gap that prevents checking requires null.
+
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
-once), "passed" is true (observed) or false (not observed), and "reason" is under 15 words. Add a \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
 one-sentence "summary". Do not include a score: it is computed from the results.
 Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
 {_behavior_prompt_example(expected_count)}"""
@@ -3425,35 +3822,56 @@ Example of the shape for this task's {expected_count} behaviors (the values are 
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        extract_json,
-        metric="behavior_check",
-        salvage=salvage,
-        max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
-        response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
-        schema_name="behavior_check_judgment",
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            extract_json,
+            metric="behavior_check",
+            salvage=salvage,
+            max_tokens=BEHAVIOR_JUDGE_MAX_TOKENS,
+            response_schema=BEHAVIOR_CHECK_JSON_SCHEMA,
+            schema_name="behavior_check_judgment",
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
-        return _judge_error(error, results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    # A salvaged reply leaves the behaviors after the cut unjudged; they count as not observed.
+    # Keep the conservative score denominator without calling missing verdicts failures.
     results = sorted(parsed["results"], key=lambda result: result["step"])
     score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
+
+
+def _behavior_expectations(expected_behaviors, results, error=""):
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
 
 
 def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
     """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
 
     Each expected behavior is judged exactly once, identified by its 1-based
-    ``step`` number, with a boolean ``passed``. *allow_partial* accepts a
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
     salvaged prefix that judges each of its steps once. The score is computed
     from the verdicts, so a ``score`` field in the reply is ignored.
     """
@@ -3469,8 +3887,16 @@ def _behavior_payload_error(parsed, expected_count, *, allow_partial=False):
         return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
     if any(not isinstance(result, dict) for result in results):
         return 'every "results" entry must be an object'
-    if any(not isinstance(result.get("passed"), bool) for result in results):
-        return 'every "results" entry needs "passed" set to true or false'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
     steps = [result.get("step") for result in results]
     if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
         return 'every "results" entry needs an integer "step" number'
@@ -3573,6 +3999,10 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                     except OSError:
                         signal.signal(signal.SIGALRM, previous_alarm_handler)
             result = judge(*args, **kwargs)
+            # Dependency and logging handlers can swallow the alarm exception.
+            # Never accept a result returned after this call's wall-time budget.
+            if time.monotonic() >= deadline:
+                raise TimeoutError("LLM judge time budget exhausted")
         finally:
             if alarm_armed:
                 try:
@@ -3580,7 +4010,15 @@ def _call_required_judge(metric, judge, *args, allow_not_applicable=False, **kwa
                 finally:
                     signal.signal(signal.SIGALRM, previous_alarm_handler)
     except Exception as exc:
-        result = _judge_error(f"Required {metric} judge raised {type(exc).__name__}: {exc}")
+        error = f"Required {metric} judge raised {type(exc).__name__}: {exc}"
+        metadata = {}
+        if metric == "behavior_check":
+            expected_behaviors = kwargs.get("expected_behaviors", args[1] if len(args) > 1 else [])
+            metadata = {
+                "results": [],
+                "expectations": _behavior_expectations(expected_behaviors or [], [], error),
+            }
+        result = _judge_error(error, **metadata)
     finally:
         _ACTIVE_JUDGE_DEADLINE.reset(token)
         _ACTIVE_JUDGE_CALLS.reset(calls_token)
@@ -3669,9 +4107,22 @@ def skill_metrics_applicable(
     return any(str(name).strip().lower() in staged for name in candidates if name and str(name).strip())
 
 
-def _skill_metric_not_applicable():
-    """Scoreless ``skill_execution`` / ``skill_efficiency`` result for an arm without the skill."""
-    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": SKILL_METRICS_NOT_APPLICABLE_REASON}
+def _skill_metric_not_applicable(reason=SKILL_METRICS_NOT_APPLICABLE_REASON):
+    """Scoreless ``skill_execution`` / ``skill_efficiency`` result.
+
+    The default reason covers an arm without the skill. An eval case that gives
+    the metric nothing to score passes its own reason.
+    """
+    return {"score": None, "status": NOT_APPLICABLE_STATUS, "reason": reason}
+
+
+def _case_skill_metric_reasons(should_trigger, expected_skill):
+    """Return the skill metrics this eval case leaves N/A, each with its reason."""
+    reasons = {
+        "skill_execution": skill_execution_not_applicable_reason(should_trigger, expected_skill),
+        "skill_efficiency": skill_efficiency_not_applicable_reason(should_trigger, expected_skill),
+    }
+    return {metric: reason for metric, reason in reasons.items() if reason}
 
 
 def _reward_overall(result, details):
@@ -3727,16 +4178,306 @@ def write_reward_outputs(result, overall):
     REWARD_TXT.write_text(str(sanitized_overall))
 
 
+_YAML_FRONTMATTER = re.compile(r"\ufeff?---[ \t]*\r?\n(.*?)^---[ \t]*\r?$", re.MULTILINE | re.DOTALL)
+_YAML_LINE_PREFIX = re.compile(r"[ \t]*(?:[-?:][ \t]+)*")
+# An anchor (`&a`), a tag (`!`, `!!str`, `!local`, `!<verbatim>`) or both, in either order. They belong to
+# the node that follows them, so a quote after them still opens a string.
+_YAML_PROPERTY = r"(?:&[^\s,\[\]{}]+|!<[^>\s]*>|![^\s,\[\]{}]*)(?=[\s,\[\]{}]|\Z)"
+_YAML_PROPERTIES = re.compile(rf"(?:{_YAML_PROPERTY}[ \t]*)+")
+_YAML_KEY = re.compile(
+    rf"""(?:{_YAML_PROPERTY}[ \t]+)*"""
+    r"""(?:"((?:[^"\\\n]|\\.)*)"|'((?:[^'\n]|'')*)'|([^\s#'"\-?:\[\]{}|>&*!%@`,][^:\n]*?))[ \t]*:(?=[ \t\r\n]|\Z)"""
+)
+_YAML_QUOTED_BODY = {'"': re.compile(r"(?:[^\"\\]|\\.)*", re.DOTALL), "'": re.compile(r"(?:[^']|'')*")}
+_YAML_BLOCK_SCALAR = re.compile(r"([|>])[+-]?\d?[+-]?[ \t]*(?:#[^\n]*)?(?:\r?\n|\Z)")
+_YAML_FLOW_TOKEN = re.compile(
+    r"""(?P<space>\s+)|(?P<comment>(?<!\S)\#[^\n]*)|(?P<open>[\[{])|(?P<close>[\]}])|(?P<comma>,)"""
+    r"""|(?P<colon>:(?=[\s,\[\]{}]|\Z))|(?P<explicit>\?(?=[\s,\[\]{}]|\Z))"""
+    rf"""|(?P<quoted>"(?:[^"\\]|\\.)*"|'(?:[^']|'')*')|(?P<prop>{_YAML_PROPERTY})|(?P<alias>\*[^\s,\[\]{{}}]*)""",
+    re.DOTALL,
+)
+_YAML_FLOW_PLAIN = re.compile(r"(?:[^\s,\[\]{}:]|:(?![\s,\[\]{}]|\Z))+")
+_YAML_ESCAPE = re.compile(r"\\(x[0-9A-Fa-f]{2}|u[0-9A-Fa-f]{4}|U[0-9A-Fa-f]{8}|.)", re.DOTALL)
+_YAML_SIMPLE_ESCAPES = {"0": "\0", "n": "\n", "r": "\r", "t": "\t"}
+
+
+def _yaml_unescape(match: re.Match[str]) -> str:
+    code = match.group(1)
+    if len(code) > 1:
+        try:
+            return chr(int(code[1:], 16))
+        except (ValueError, OverflowError):
+            return match.group(0)
+    return _YAML_SIMPLE_ESCAPES.get(code, code)
+
+
+def _yaml_line_end(text: str, position: int) -> int:
+    end = text.find("\n", position)
+    return len(text) if end < 0 else end
+
+
+def _yaml_unquote(raw: str) -> str:
+    """Return the value of the single- or double-quoted scalar ``raw`` (quotes included)."""
+    body = re.sub(r"[ \t]*\r?\n[ \t]*", " ", raw[1:-1])
+    return _YAML_ESCAPE.sub(_yaml_unescape, body) if raw[0] == '"' else body.replace("''", "'")
+
+
+def _yaml_flow_tokens(text: str, start: int) -> Iterator[tuple[str, str, int, int]]:
+    """Yield ``(kind, token, depth, end)`` for the flow collection that opens at ``text[start]``.
+
+    A flow collection may continue over lines whose keys are not indented, so
+    brackets are counted while skipping quoted strings and comments. A quote
+    opens a string only where a node begins: after ``[``, ``{``, ``,``, a
+    ``:`` or ``?`` indicator, or after the anchor and tag that belong to that
+    node. Inside a plain scalar it is an ordinary character. ``depth`` is the
+    nesting after the token.
+    """
+    depth, node_starts, closed, position = 0, True, False, start
+    while position < len(text):
+        if closed and text[position] == ":":  # JSON-style `"key":value`
+            node_starts, closed, position = True, False, position + 1
+            yield "colon", ":", depth, position
+            continue
+        token = _YAML_FLOW_TOKEN.match(text, position)
+        kind = token.lastgroup if token else None
+        if kind in {"quoted", "prop", "alias", "explicit"} and not node_starts:
+            kind = None  # in the middle of a plain scalar these are ordinary characters
+        if kind is None:
+            plain = _YAML_FLOW_PLAIN.match(text, position)
+            end = plain.end() if plain else position + 1
+            node_starts, closed = False, False
+            yield "plain", text[position:end], depth, end
+            position = end
+            continue
+        position = token.end()
+        if kind in {"space", "comment"}:
+            continue
+        closed = kind in {"close", "quoted"}
+        if kind != "prop":  # an anchor or tag leaves the node it belongs to still to begin
+            node_starts = kind in {"open", "comma", "colon", "explicit"}
+        depth += {"open": 1, "close": -1}.get(kind, 0)
+        yield kind, token.group(), depth, position
+        if depth == 0 and kind == "close":
+            return
+
+
+def _yaml_flow_end(text: str, start: int) -> int:
+    """Return the index just past the flow collection that opens at ``text[start]``."""
+    for kind, _token, depth, end in _yaml_flow_tokens(text, start):
+        if kind == "close" and depth == 0:
+            return end
+    return len(text)
+
+
+def _yaml_flow_mapping_name(text: str, start: int) -> str:
+    """Return the string ``name`` entry of the flow mapping that opens at ``text[start]``."""
+    name, key, value, in_value, nested = "", [], [], False, False
+    for kind, token, depth, _end in _yaml_flow_tokens(text, start):
+        if kind == "open" and depth == 2:
+            nested = True
+        elif depth >= 2 or (kind == "close" and depth == 1):
+            continue  # inside a nested collection, or its end
+        elif kind in {"quoted", "plain"}:
+            (value if in_value else key).append(_yaml_unquote(token) if kind == "quoted" else token)
+        elif kind == "alias":
+            nested = True  # the anchored value is not resolved
+        elif kind == "colon":
+            in_value = True
+        elif kind in {"comma", "close"}:
+            if " ".join(key) == "name":
+                name = "" if nested else " ".join(value)
+            key, value, in_value, nested = [], [], False, False
+    return name
+
+
+def _yaml_node(text: str, start: int, parent: int, *, lookahead: bool = False) -> tuple[str | None, int]:
+    """Consume the node whose value begins at ``text[start]``.
+
+    ``parent`` is the column of the key or ``-`` that owns the node; a plain or
+    block scalar continues over the lines indented deeper than it. Returns the
+    scalar value (``None`` for no value or a flow collection) and the index of
+    the newline that ends the node. With ``lookahead``, an empty value takes a
+    scalar written on the following lines.
+    """
+    while text[start : start + 1] in {" ", "\t"}:
+        start += 1
+    properties = _YAML_PROPERTIES.match(text, start)
+    start = properties.end() if properties else start
+    first = text[start : start + 1]
+    if first == "*":  # an alias is a whole node
+        return None, _yaml_line_end(text, start)
+    if first in {'"', "'"}:
+        body = _YAML_QUOTED_BODY[first].match(text, start + 1)
+        end = body.end()
+        if text[end : end + 1] != first:
+            return None, len(text)  # unterminated: not valid YAML
+        return _yaml_unquote(text[start : end + 1]), _yaml_line_end(text, end + 1)
+    if first in {"[", "{"}:
+        return None, _yaml_line_end(text, _yaml_flow_end(text, start))
+    block = _YAML_BLOCK_SCALAR.match(text, start)
+    if block:
+        position, lines, last_end = block.end(), [], block.end() - 1
+        while position < len(text):
+            end = _yaml_line_end(text, position)
+            line = text[position:end]
+            if line.strip() and len(line) - len(line.lstrip(" \t")) <= parent:
+                break  # the block ends at the next line that is not indented under its key
+            if line.strip():
+                lines.append(line.strip())
+            position, last_end = end + 1, end
+        return (" " if block.group(1) == ">" else "\n").join(lines), min(last_end, len(text))
+    line_end = _yaml_line_end(text, start)
+    head = re.split(r"(?:^|[ \t])#", text[start:line_end], maxsplit=1)
+    value, commented = head[0].strip(), len(head) == 2
+    if not value:
+        position = line_end + 1
+        while lookahead and position < len(text):  # no value here: it may be written on the next lines
+            end = _yaml_line_end(text, position)
+            line = text[position:end]
+            if line.strip() and not line.lstrip().startswith("#"):
+                indent = len(line) - len(line.lstrip(" \t"))
+                if (
+                    indent > parent
+                    and not _YAML_KEY.match(line, indent)
+                    and not re.match(r"[-?](?:[ \t]|$)", line[indent:])
+                ):
+                    return _yaml_node(text, position + indent, parent)
+                break
+            position = end + 1
+        return None, line_end
+    lines, end = [value], line_end
+    while not commented:  # a plain scalar continues over the lines indented under its key
+        position = end + 1
+        while position < len(text) and not text[position : _yaml_line_end(text, position)].strip():
+            position = _yaml_line_end(text, position) + 1
+        if position >= len(text):
+            break
+        next_end = _yaml_line_end(text, position)
+        line = text[position:next_end]
+        if len(line) - len(line.lstrip(" \t")) <= parent or line.lstrip().startswith("#"):
+            break
+        head = re.split(r"(?:^|[ \t])#", line, maxsplit=1)
+        lines.append(head[0].strip())
+        end, commented = next_end, len(head) == 2
+    return " ".join(lines), end
+
+
+def _frontmatter_skill_name(content: str) -> str:
+    """Read the top-level ``name`` of a SKILL.md the way ``yaml.safe_load`` does.
+
+    The verifier image gets PyYAML only as a dependency of the RAGAS packages,
+    so this does not import it. It reads just enough of the structure to tell
+    a root key from text that merely sits on an unindented line: nested
+    mappings and sequences, multi-line flow collections, quoted strings, and
+    plain or block scalars, each with the anchor and tag that may precede it.
+    A quote opens a string only where a node begins. The whole frontmatter may
+    also be one flow mapping. Like ``yaml.safe_load``, a later ``name`` key
+    wins. An alias (``name: *anchor``) is not resolved.
+    """
+    frontmatter = _YAML_FRONTMATTER.match(content)
+    if not frontmatter:
+        return ""
+    text, name, position, first_node = frontmatter.group(1), "", 0, True
+    while position < len(text):
+        end = _yaml_line_end(text, position)
+        line = text[position:end]
+        if not line.strip() or line.lstrip().startswith("#"):
+            position = end + 1
+            continue
+        prefix = _YAML_LINE_PREFIX.match(line).group()
+        value_start = position + len(prefix)
+        if first_node:  # the whole frontmatter may be one flow mapping
+            properties = _YAML_PROPERTIES.match(text, value_start)
+            brace = properties.end() if properties else value_start
+            if not prefix and text[brace : brace + 1] == "{":
+                return _yaml_flow_mapping_name(text, brace)
+            first_node = False
+        key = _YAML_KEY.match(text, value_start)
+        marker = max(prefix.rfind(indicator) for indicator in "-?:")
+        parent = len(prefix) if key else (marker if marker >= 0 else max(len(prefix) - 1, 0))
+        root_name = bool(key) and not prefix and (key.group(1) or key.group(2) or key.group(3)) == "name"
+        value, end = _yaml_node(text, key.end() if key else value_start, parent, lookahead=root_name)
+        if root_name:
+            name = (value or "").strip()
+        position = end + 1
+    return name
+
+
+def _dependency_context(skill: str, *, skills_root: Path = Path("/workspace/skills")) -> dict[str, Any]:
+    """Read bounded dependency evidence from the evaluator-staged skill."""
+    context: dict[str, Any] = {
+        "apt": [],
+        "pip": [],
+        "skill_text": "",
+        "skill_name": "",
+        "skill_dirs": [],
+        "skill_modules": set(),
+        "script_imports": set(),
+    }
+    if not skill or skill in {".", ".."} or Path(skill).name != skill:
+        return context
+    root = skills_root / skill
+    if not root.is_dir():
+        return context
+    context["skill_dirs"] = [
+        str(root),
+        f"/root/.claude/skills/{skill}",
+        f"/root/.agents/skills/{skill}",
+        f"/root/.config/opencode/skills/{skill}",
+        f"/etc/codex/skills/{skill}",
+    ]
+    remaining = 1024 * 1024
+    for index, path in enumerate(root.rglob("*")):
+        if index >= 4096 or remaining <= 0:
+            break
+        if path.is_symlink() or not path.is_file() or not path.resolve().is_relative_to(root.resolve()):
+            continue
+        relative = path.relative_to(root)
+        if path.suffix == ".py":
+            context["skill_modules"].add(path.stem)
+            context["skill_modules"].update(relative.parts[:-1])
+        if path.name == "__init__.py":
+            context["skill_modules"].add(path.parent.name)
+        dependency = path.parent.name == "scripts" and path.name in {"requirements.txt", "apt-packages.txt"}
+        if not dependency and path.name.lower() != "skill.md" and "scripts" not in relative.parts:
+            continue
+        try:
+            with path.open("rb") as stream:
+                data = stream.read(min(remaining, 128 * 1024))
+        except OSError:
+            continue
+        remaining -= len(data)
+        content = data.decode("utf-8", errors="replace")
+        if dependency:
+            key = "pip" if path.name == "requirements.txt" else "apt"
+            context[key].extend(
+                line.split("#", 1)[0].strip()
+                for line in content.splitlines()
+                if line.strip() and not line.lstrip().startswith(("#", "-"))
+            )
+        else:
+            context["skill_text"] += "\n" + content
+            if relative.as_posix().lower() == "skill.md":
+                context["skill_name"] = _frontmatter_skill_name(content) or context["skill_name"]
+            if "scripts" in relative.parts and path.suffix == ".py":
+                imports = re.finditer(r"(?m)^\s*(?:from\s+([\w.]+)\s+import\b|import\s+([\w.]+))", content)
+                context["script_imports"].update((match.group(1) or match.group(2)).split(".")[0] for match in imports)
+    context["skill_modules"] = sorted(context["skill_modules"])
+    context["script_imports"] = sorted(context["script_imports"])
+    return context
+
+
 def main():
     entry = json.loads(ENTRY_PATH.read_text(encoding="utf-8"))
     traj, traj_meta = load_trajectory_with_fallback(ATIF_PATH, ATIF_PATH.parent)
 
     expected_skill = entry.get("expected_skill") or ""
-    expected_script = entry.get("expected_script") or ""
+    expected_script = normalize_optional_reference(entry.get("expected_script"))
     should_trigger = resolve_should_trigger(entry)
     evaluated_skill = entry.get("evaluated_skill") or ""
     acceptable_skills = _resolve_acceptable_skills(entry, expected_skill)
-    expected_behavior = entry.get("expected_behavior", [])
+    expected_behavior = normalize_expected_behaviors(entry.get("expected_behavior", []))
+    declarative_checks = entry.get("checks", [])
     question = entry.get("question", "")
     ground_truth = entry.get("ground_truth", "")
     workspace_mode = entry.get("skill_workspace_mode", "isolated")
@@ -3772,6 +4513,11 @@ def main():
                 skill_execution=_skill_metric_not_applicable(),
                 skill_efficiency=_skill_metric_not_applicable(),
             )
+        else:
+            # A skill metric the case gives nothing to score stays N/A, as on the judged path.
+            for metric, na_reason in _case_skill_metric_reasons(should_trigger, expected_skill).items():
+                skill_scores[metric] = None
+                judge_details[metric] = _skill_metric_not_applicable(na_reason)
         result = {
             "security": 0,
             **skill_scores,
@@ -3782,6 +4528,38 @@ def main():
             "trajectory_source": traj_meta.get("source"),
             "trajectory_detail": traj_meta.get("warning") or traj_meta.get("note"),
         }
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=[],
+                final_response="",
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            base_behavior = {
+                "score": judge_scores["behavior_check"],
+                "status": "accepted" if judged_count else "not_applicable",
+                "reason": "No trajectory or reconstructible agent log"
+                if judged_count
+                else _NO_EXPECTED_BEHAVIOR_REASON,
+                "results": [
+                    {"step": index + 1, "passed": False, "reason": "No trajectory or reconstructible agent log"}
+                    for index in range(judged_count)
+                ],
+            }
+            behavior_result = _shared_declarative_checks.combine_behavior_check(
+                base_behavior, direct_results, judged_count
+            )
+            judge_scores["behavior_check"] = behavior_result["score"]
+            judge_details["behavior_check"] = behavior_result
+            result["behavior_check"] = behavior_result["score"]
         if judge_details:
             result["details"] = judge_details
         write_reward_outputs(result, 0.0)
@@ -3806,7 +4584,13 @@ def main():
         }
 
     # ── Eval 1: security ─────────────────────────────────────────────────
-    security_result = check_security(traj, tool_calls, expected_skill, acceptable_skills)
+    security_result = check_security(
+        traj,
+        tool_calls,
+        expected_skill,
+        acceptable_skills,
+        agent_workdir=entry.get("agent_workdir", "/workspace"),
+    )
     security_score = security_result["score"]
     details["security"] = security_result
 
@@ -3821,9 +4605,26 @@ def main():
             require_evaluated_skill=True,
             skill_tool_names=skill_tools,
             acceptable_skills=acceptable_skills,
+            dependency_context=_dependency_context(evaluated_skill or expected_skill),
         )
         se_score = skill_execution_result["score"]
         details["skill_execution"] = skill_execution_result["details"]
+        if skill_execution_result.get("status") == "environment_invalid":
+            recovery = skill_execution_result["details"]["error_recovery"]
+            write_reward_outputs(
+                {
+                    "evaluation_status": "failed",
+                    "evaluation_errors": {"environment": recovery["reason"]},
+                    "environment_issues": recovery["environment_issues"],
+                    "entry_id": entry.get("id"),
+                    "metric_set": DEFAULT_METRIC_SET,
+                    "score_policy": DEFAULT_SCORE_POLICY,
+                    "details": details,
+                },
+                0.0,
+            )
+            logger.error("[environment] %s", recovery["reason"])
+            raise SystemExit(1)
     else:
         se_score = None
         details["skill_execution"] = _skill_metric_not_applicable()
@@ -3833,8 +4634,10 @@ def main():
         sef_score = None
         details["skill_efficiency"] = _skill_metric_not_applicable()
     elif not should_trigger or not expected_skill:
-        sef_score = 1.0
-        details["skill_efficiency"] = {"message": "Skipped (negative or no expected_skill)"}
+        sef_score = None
+        details["skill_efficiency"] = _skill_metric_not_applicable(
+            skill_efficiency_not_applicable_reason(should_trigger, expected_skill)
+        )
     elif not tool_calls:
         sef_score = 0.0
         details["skill_efficiency"] = {"message": "No tool calls in trajectory"}
@@ -3862,7 +4665,8 @@ def main():
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.
-    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set([])
+    judge_attempts = []
+    judge_evidence_token = _ACTIVE_JUDGE_EVIDENCE.set(judge_attempts)
     try:
         # ── Eval 4: accuracy (LLM judge) ─────────────────────────────────
         acc_result = _call_required_judge(
@@ -3890,17 +4694,47 @@ def main():
         details["goal_accuracy"] = ga_result
 
         # ── Eval 6: behavior_check (LLM judge) ───────────────────────────
-        bc_result = _call_required_judge(
-            "behavior_check",
-            judge_behavior_check,
-            bundles["behavior_check"]["prompt_evidence"],
-            expected_behavior,
-            allow_not_applicable=not _has_judge_reference(expected_behavior),
-        )
+        if declarative_checks:
+            if _has_judge_reference(expected_behavior):
+                bc_result = _call_required_judge(
+                    "behavior_check",
+                    judge_behavior_check,
+                    bundles["behavior_check"]["prompt_evidence"],
+                    expected_behavior,
+                    evidence_omitted=bundles["behavior_check"]["omitted"],
+                )
+            else:
+                bc_result = _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
+        else:
+            bc_result = _call_required_judge(
+                "behavior_check",
+                judge_behavior_check,
+                bundles["behavior_check"]["prompt_evidence"],
+                expected_behavior,
+                evidence_omitted=bundles["behavior_check"]["omitted"],
+                allow_not_applicable=not _has_judge_reference(expected_behavior),
+            )
+        if declarative_checks:
+            direct_results = _shared_declarative_checks.evaluate_declarative_checks(
+                declarative_checks,
+                tool_calls=tool_calls,
+                final_response=_get_final_response(traj),
+                workspace_roots=_declarative_workspace_roots(),
+            )
+            direct_results = _shared_declarative_checks.mark_no_skill_script_checks(
+                declarative_checks,
+                direct_results,
+                has_skill=entry.get("has_skill", True),
+                skill_metrics_on=skill_metrics_on,
+                evaluated_skill=evaluated_skill,
+            )
+            judged_count = len(expected_behavior) if _has_judge_reference(expected_behavior) else 0
+            bc_result = _shared_declarative_checks.combine_behavior_check(bc_result, direct_results, judged_count)
         bc_score = bc_result["score"]
         details["behavior_check"] = bc_result
     finally:
         _ACTIVE_JUDGE_EVIDENCE.reset(judge_evidence_token)
+        _write_judge_attempts(judge_attempts)
 
     # persist refs + omission metadata onto the metric details
     attach_metric_evidence_refs(details, {m: bundles[m]["evidence_refs"] for m in bundles})

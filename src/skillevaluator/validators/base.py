@@ -146,6 +146,10 @@ class ValidatorBase(ABC):
     - Template method for consistent validation patterns
     """
 
+    # CRITICAL checks that judge one skill's own content, not the run's
+    # configuration: they fail that skill but never stop a folder scan early.
+    _FAIL_FAST_EXEMPT_CHECKS: frozenset[str] = frozenset()
+
     @property
     @abstractmethod
     def name(self) -> str:
@@ -293,7 +297,11 @@ class ValidatorBase(ABC):
             # typically configuration errors that affect all skills, so by
             # default we stop early. --continue-on-failure suppresses this so
             # every skill is still scanned and recorded.
-            critical_findings = [f for f in skill_result.findings if f.severity == Severity.CRITICAL]
+            critical_findings = [
+                f
+                for f in skill_result.findings
+                if f.severity == Severity.CRITICAL and f.check_name not in self._FAIL_FAST_EXEMPT_CHECKS
+            ]
             if critical_findings and not _CONTINUE_ON_FAILURE.get():
                 # Return early with just this critical finding
                 return result

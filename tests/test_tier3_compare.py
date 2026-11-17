@@ -784,3 +784,141 @@ def test_compare_never_mixes_agents_across_candidate_roots(
     output = capsys.readouterr().out
     assert "codex" in output
     assert "opencode" not in output
+
+
+def _write_harbor_job(
+    job_dir: Path,
+    scores: dict[str, float],
+    not_applicable: tuple[str, ...] = (),
+    *,
+    case_scores: dict[str, dict[str, float]] | None = None,
+    judge_models_by_case: dict[str, dict[str, str]] | None = None,
+) -> None:
+    from skillevaluator.tier3.harbor.metrics import DEFAULT_METRIC_SET
+
+    trials = []
+    for index in (1, 2):
+        trial = f"case-{index}__trial"
+        case_id = f"case-{index}"
+        trials.append(trial)
+        reward: dict[str, object] = dict((case_scores or {}).get(case_id, scores))
+        details: dict[str, dict[str, object]] = {}
+        for metric in not_applicable:
+            reward[metric] = None
+            details[metric] = {"score": None, "status": "not_applicable", "reason": "no skill under test"}
+        for metric in DEFAULT_METRICS:
+            if metric not in not_applicable and metric != "skill_execution":
+                details[metric] = {
+                    "score": reward[metric],
+                    "judge_model_used": (judge_models_by_case or {}).get(case_id, {}).get(metric, "judge-a"),
+                }
+        if "skill_execution" not in not_applicable:
+            details["skill_execution"] = {"activation": {"passed": True, "score": 1.0}}
+        reward.update(
+            entry_id=case_id,
+            metric_set=DEFAULT_METRIC_SET,
+            score_policy=DEFAULT_SCORE_POLICY,
+            details=details,
+        )
+        path = job_dir / trial / "verifier" / "reward.json"
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(reward), encoding="utf-8")
+    stats = {
+        "n_completed_trials": 2,
+        "n_errored_trials": 0,
+        "n_running_trials": 0,
+        "n_pending_trials": 0,
+        "n_cancelled_trials": 0,
+        "n_retries": 0,
+        "evals": {"agent__model___tasks": {"n_trials": 2, "n_errors": 0, "reward_stats": {"overall": {"0.5": trials}}}},
+    }
+    (job_dir / "result.json").write_text(json.dumps({"n_total_trials": 2, "stats": stats}), encoding="utf-8")
+
+
+@pytest.mark.parametrize(
+    ("baseline_not_applicable", "with_overall", "lift", "judge_fallback", "never_activated"),
+    [
+        # A six-metric mean would give a passing +0.10; the five-dimension policy gives -0.08.
+        ((), 0.6, -0.08, False, False),
+        # The baseline has no skill under test, so the skill metrics drop out of both arms for lift.
+        (("skill_execution", "skill_efficiency"), 0.6, 0.1, False, False),
+        (("skill_execution", "skill_efficiency"), None, None, True, False),
+        (("skill_execution", "skill_efficiency"), 0.6, None, False, True),
+    ],
+    ids=[
+        "five-dimension-reverses-six-metric-lift",
+        "baseline-skill-metrics-not-applicable",
+        "judge-fallback-drops-baseline-case",
+        "never-activated-without-lift-file",
+    ],
+)
+def test_compare_publishes_the_same_overall_and_lift_as_the_run_outputs(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    baseline_not_applicable: tuple[str, ...],
+    with_overall: float | None,
+    lift: float | None,
+    judge_fallback: bool,
+    never_activated: bool,
+) -> None:
+    from skillevaluator.evaluation.tier3_report import agent_eval_result_from_directory
+    from skillevaluator.tier3.harbor.collector import collect_harbor_results
+
+    skill_path = tmp_path / "demo"
+    skill_path.mkdir()
+    (skill_path / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill.\n---\nBody.\n", encoding="utf-8")
+    with_skill = {**dict.fromkeys(DEFAULT_METRICS, 0.5), "goal_accuracy": 1.0, "behavior_check": 1.0}
+    baseline = {**dict.fromkeys(DEFAULT_METRICS, 0.85), "goal_accuracy": 0.0, "behavior_check": 0.0}
+    jobs = tmp_path / "jobs"
+    with_case_scores = None
+    baseline_case_scores = None
+    baseline_judge_models = None
+    if judge_fallback:
+        with_case_scores = {
+            "case-1": dict.fromkeys(DEFAULT_METRICS, 0.9),
+            "case-2": dict.fromkeys(DEFAULT_METRICS, 0.1),
+        }
+        baseline_case_scores = {
+            "case-1": dict.fromkeys(DEFAULT_METRICS, 0.5),
+            "case-2": dict.fromkeys(DEFAULT_METRICS, 0.1),
+        }
+        baseline_judge_models = {"case-2": {"accuracy": "judge-b"}}
+    _write_harbor_job(jobs / "demo-codex-with", with_skill, case_scores=with_case_scores)
+    _write_harbor_job(
+        jobs / "demo-codex-without",
+        baseline,
+        baseline_not_applicable,
+        case_scores=baseline_case_scores,
+        judge_models_by_case=baseline_judge_models,
+    )
+    run_dir = tmp_path / "results" / "demo" / "run"
+    collect_harbor_results("demo", ["codex"], run_dir, jobs, expected_case_ids=["case-1", "case-2"], expected_trials=2)
+    summary = json.loads((run_dir / "codex" / "with-skill" / "summary.json").read_text(encoding="utf-8"))
+    if with_overall is not None:
+        assert summary["overall_score"] == pytest.approx(with_overall)
+    lift_path = run_dir / "codex" / "lift.json"
+    if never_activated:
+        summary["skill_activation"] = {"status": "never_activated"}
+        (run_dir / "codex" / "with-skill" / "summary.json").write_text(json.dumps(summary), encoding="utf-8")
+        lift_path.unlink()
+        recorded_lift = None
+    else:
+        recorded_lift = json.loads(lift_path.read_text(encoding="utf-8"))["overall"]["delta"]
+        agent_eval = agent_eval_result_from_directory(skill_path, run_dir, use_llm_judge=False).metadata["agent_eval"]
+        assert recorded_lift == agent_eval["overall_lift"]
+    if lift is not None:
+        assert recorded_lift == pytest.approx(lift)
+    if judge_fallback:
+        without_summary = json.loads((run_dir / "codex" / "without-skill" / "summary.json").read_text(encoding="utf-8"))
+        assert recorded_lift != pytest.approx(summary["overall_score"] - without_summary["overall_score"])
+    capsys.readouterr()
+
+    assert compare_results(skill_path, results_dir=tmp_path / "results") == 0
+
+    output = capsys.readouterr().out
+    with_overall = summary["overall_score"]
+    expected_lift = (
+        "-" if recorded_lift is None else (f"+{recorded_lift:.2f}" if recorded_lift > 0 else f"{recorded_lift:.2f}")
+    )
+    assert re.search(rf"Overall\s+{with_overall:.2f}\s+{re.escape(expected_lift)}\s", output)
+    assert ("compares only the" in output) is (bool(baseline_not_applicable) and not never_activated)

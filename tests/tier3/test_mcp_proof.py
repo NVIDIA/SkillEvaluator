@@ -622,8 +622,11 @@ def test_a_slow_dns_lookup_counts_against_the_probe_deadline() -> None:
 
 def test_probed_tool_names_and_details_are_printable(fake_mcp: str, monkeypatch: pytest.MonkeyPatch) -> None:
     hostile = [
-        {"name": "\x1b[31mred\x1b[0m", "inputSchema": {"type": [["x"]]}},
-        {"name": "\x1b]0;pwned\x07title", "inputSchema": {"type": [{"x": "string"}]}},
+        {"name": "\x1b[31mred\x1b[0m", "inputSchema": {"type": "object", "properties": {"bad": {"type": [["x"]]}}}},
+        {
+            "name": "\x1b]0;pwned\x07title",
+            "inputSchema": {"type": "object", "properties": {"bad": {"type": [{"x": "string"}]}}},
+        },
         {
             "name": "bell\x07\x9bcsi",
             "inputSchema": {"type": "object", "properties": {"nested": {"type": [["x"]], "minimum": 1}}},

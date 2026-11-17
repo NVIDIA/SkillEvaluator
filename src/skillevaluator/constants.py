@@ -50,6 +50,13 @@ DEFAULT_ALLOWED_SKILL_DIRS = frozenset(
 # SkillEvaluator name; ``tools/`` is the agentskills.io name.
 EXECUTABLE_SKILL_DIRS = ("scripts", "tools")
 
+# File patterns that count as skill scripts under ``EXECUTABLE_SKILL_DIRS``.
+# Script lint parses Python only; Node scripts are recognised for skill-type
+# detection and the script-based checks but are reported as not linted.
+PYTHON_SCRIPT_PATTERNS = ("*.py",)
+NODE_SCRIPT_PATTERNS = ("*.mjs", "*.cjs", "*.js")
+EXECUTABLE_SCRIPT_PATTERNS = (*PYTHON_SCRIPT_PATTERNS, "*.sh", *NODE_SCRIPT_PATTERNS)
+
 # Env var that lets consumers EXTEND the allowed skill-root directory set per
 # repo (comma- or whitespace-separated) without editing bundled config — e.g.
 # ``SKILLEVALUATOR_SCHEMA_ALLOWED_DIRS="data,fixtures"``. Names are added to,
@@ -149,6 +156,22 @@ PLUGIN_CONTAINED_MODE = "contained"
 # Skill manifest file name variants (case-insensitive search)
 SKILL_MANIFEST_VARIANTS = ("SKILL.md", "skill.md")
 
+# Top-level SKILL.md frontmatter fields defined by the agentskills.io spec.
+SPEC_SKILL_FIELDS = frozenset({"name", "description", "license", "compatibility", "metadata", "allowed-tools"})
+
+# SKILL.md size thresholds (bytes) where common agent harnesses start cutting,
+# refusing, or skipping the file: 16,000-64,000 character whole-file reads,
+# 50 KiB tool-output truncation, and a 256,000-byte discovery cap.
+SKILL_MD_SIZE_THRESHOLDS = ((256_000, "high"), (50 * 1024, "medium"), (32 * 1024, "low"))
+
+# Some harnesses show only the first ~60 characters of each description in
+# their skill list, so the "when to use" trigger should appear within it.
+DESCRIPTION_TRIGGER_WINDOW = 60
+DESCRIPTION_TRIGGER_PATTERN = (
+    r"\buse (?:this (?:skill )?|it )?(?:when|for|to|if|whenever)\b"
+    r"|\bwhen (?:the user|a user|you|asked)\b|\btriggers?\b"
+)
+
 # Banned/deprecated packages
 BANNED_PACKAGES = [
     "subprocess32",  # Use subprocess from stdlib
@@ -240,6 +263,9 @@ SIMILARITY_DEFAULT_MODEL = EMBEDDING_DEFAULT_NVIDIA
 SIMILARITY_CHUNK_SIZE = 512  # tokens per chunk for full-body mode
 SIMILARITY_CHUNK_OVERLAP = 64  # token overlap between chunks
 
+# Longest rationale or suggestion string accepted from one Tier 2 LLM verdict.
+TIER2_LLM_MAX_RESPONSE_SCALAR_CHARS = 8_192
+
 
 # =============================================================================
 # CONTEXT DEDUPLICATION CONSTANTS (Phase 1)
@@ -273,13 +299,13 @@ CONTENT_DEDUP_MAX_FILES = 256
 CONTENT_DEDUP_MAX_DISCOVERED_PATHS = 4096
 CONTENT_DEDUP_MAX_FILE_BYTES = 1 * 1024 * 1024
 CONTENT_DEDUP_MAX_TOTAL_BYTES = 8 * 1024 * 1024
-CONTENT_DEDUP_MAX_CHUNKS = 512
+CONTENT_DEDUP_MAX_CHUNKS = 1024
 CONTENT_DEDUP_MAX_PAIR_COMPARISONS = CONTENT_DEDUP_MAX_CHUNKS * (CONTENT_DEDUP_MAX_CHUNKS - 1) // 2
 # All-pairs clustering does one multiply-add per vector component per chunk
-# pair. The budget lets embeddings of up to 2,048 dimensions reach the chunk
+# pair. The budget lets embeddings of up to 1,024 dimensions reach the chunk
 # ceiling; wider embeddings get a lower effective chunk limit derived from it
-# (418 chunks at 3,072 dimensions, 362 at 4,096).
-CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION = 2048
+# (836 chunks at 1,536 dimensions, 724 at 2,048, 591 at 3,072, 512 at 4,096).
+CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION = 1024
 CONTENT_DEDUP_MAX_SCALAR_COMPARISONS = CONTENT_DEDUP_MAX_PAIR_COMPARISONS * CONTENT_DEDUP_SCALAR_BUDGET_DIMENSION
 CONTENT_DEDUP_MAX_LLM_CLUSTERS = 50
 
@@ -383,6 +409,8 @@ QUALITY_SCORE_WEIGHTS = {
 QUALITY_GRADE_THRESHOLDS = [(90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F")]
 QUALITY_DEFAULT_MIN_SCORE = 70
 QUALITY_RECOMMENDED_MAX_TOKENS = 5000
+# Tier 1 estimates tokens as characters / QUALITY_CHARS_PER_TOKEN; it does not run a tokenizer.
+QUALITY_CHARS_PER_TOKEN = 4
 QUALITY_MAX_BODY_LINES = 500
 
 QUALITY_RESERVED_NAMES = ["anthropic", "claude"]
@@ -629,6 +657,16 @@ DIMENSION_HINTS: dict[str, str] = {
     "efficiency": "Uses the skill and tools productively without wasted work.",
 }
 
+# Where each Tier 3 signal's evidence comes from, in plain words.
+SIGNAL_EVIDENCE_SOURCES: dict[str, str] = {
+    "security": "deterministic checks of the agent's commands and outputs",
+    "accuracy": "an LLM judge comparing the final answer with the reference answer",
+    "skill_execution": "deterministic checks of the agent's trajectory",
+    "goal_accuracy": "an LLM judge of whether the user's goal was met",
+    "behavior_check": "an LLM judge of the expected workflow",
+    "skill_efficiency": "deterministic checks of the agent's trajectory",
+}
+
 # Token-efficiency evaluator: derived locally from ``trial.tokens`` (the
 # per-trial trajectory token counters). Per-trial sub-score uses a
 # soft asymptote ``1 / (1 + total / TOKEN_EFFICIENCY_HALF_LIFE)`` over the
@@ -684,6 +722,9 @@ PLUGIN_CODEX_MANIFEST_DIR = ".codex-plugin"
 PLUGIN_CODEX_MANIFEST_TYPE = "codex_plugin_json"
 PLUGIN_CURSOR_MANIFEST_DIR = ".cursor-plugin"
 PLUGIN_CURSOR_MANIFEST_TYPE = "cursor_plugin_json"
+# Native OpenClaw manifest at the plugin root (docs.openclaw.ai/plugins/manifest).
+PLUGIN_OPENCLAW_MANIFEST_FILE = "openclaw.plugin.json"
+PLUGIN_OPENCLAW_MANIFEST_TYPE = "openclaw_plugin_json"
 
 
 # Passive plugin discovery contracts; public dispatch remains unchanged.
@@ -694,6 +735,7 @@ PLUGIN_MANIFEST_PRECEDENCE: tuple[tuple[str, str], ...] = (
     (PLUGIN_AGENT_PLUGINS_V1_MANIFEST_FILE, PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE),
     (f"{PLUGIN_CODEX_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CODEX_MANIFEST_TYPE),
     (f"{PLUGIN_CURSOR_MANIFEST_DIR}/{PLUGIN_CONTAINED_MANIFEST_FILE}", PLUGIN_CURSOR_MANIFEST_TYPE),
+    (PLUGIN_OPENCLAW_MANIFEST_FILE, PLUGIN_OPENCLAW_MANIFEST_TYPE),
 )
 
 PLUGIN_NATIVE_MANIFEST_DIRS: tuple[str, ...] = (
@@ -708,6 +750,7 @@ PLUGIN_CONTAINED_MANIFEST_TYPES = frozenset(
         PLUGIN_AGENT_PLUGINS_V1_MANIFEST_TYPE,
         PLUGIN_CODEX_MANIFEST_TYPE,
         PLUGIN_CURSOR_MANIFEST_TYPE,
+        PLUGIN_OPENCLAW_MANIFEST_TYPE,
     }
 )
 
@@ -716,6 +759,10 @@ PLUGIN_COMPONENT_MAX_ITEMS = 256
 PLUGIN_CONFIG_MAX_BYTES = 256 * 1024
 
 SCAN_ARTIFACT_DIRS = frozenset({"evals", ".evals", "results", ".results", "versions", ".versions"})
+
+# Folders no harness reads as part of a skill: VCS data, caches and dependencies. The artifact
+# folders above are not in this set because harnesses scan them like any other folder.
+SKILL_NOT_SHIPPED_DIRS = SCAN_EXCLUDED_DIRS - SCAN_ARTIFACT_DIRS
 
 PLUGIN_TREE_PRUNED_DIRS = SCAN_EXCLUDED_DIRS - {"__pycache__"}
 

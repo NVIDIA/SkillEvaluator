@@ -20,7 +20,14 @@ from rich.panel import Panel
 from rich.table import Table
 from rich.text import Text
 
+from skillevaluator.reporting.declarative_coverage import render_declarative_coverage
+from skillevaluator.reporting.harbor_viewer import harbor_job_links, normalize_harbor_viewer_for_display
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.reporting.terminal_styles import AMBER, FAINT, GREEN, RED, TEXT, lift_style
+from skillevaluator.tier3.attempt_verdict import required_check_failure_reason
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import evidence_volume_for_conditions, format_evidence_volume
+from skillevaluator.tier3.harbor.baseline_timeouts import kept_with_failed_baseline
 from skillevaluator.tier3.harbor.metrics import (
     CUSTOM_ONLY_METRIC_SET,
     DEFAULT_METRIC_SET,
@@ -35,6 +42,7 @@ from skillevaluator.tier3.harbor.metrics import (
 )
 from skillevaluator.tier3.harbor.progress import redact_progress_detail, secret_values_from_environment
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 
 
 def _number(value: object, *, signed: bool = False) -> str:
@@ -73,8 +81,11 @@ def _score_cell(value: object, *, unavailable: str = "NO SCORE") -> tuple[Text, 
     return Text(f"{numeric:.2f}", style=f"bold {style}"), Text(_score_bar(numeric), style=style)
 
 
+_NOT_APPLICABLE_LABEL = "N/A"
+
+
 def _not_applicable_cell() -> tuple[Text, Text]:
-    return Text("N/A", style="dim italic"), Text("")
+    return Text(_NOT_APPLICABLE_LABEL, style="dim italic"), Text("")
 
 
 def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[str]:
@@ -85,9 +96,15 @@ def _not_applicable_metrics(data: Mapping[str, Any], variant: str) -> frozenset[
     return frozenset(not_applicable_list(raw))
 
 
-def _delta_cell(value: object) -> Text:
+def _delta_cell(value: object, *, not_applicable: bool = False, skipped: bool = False) -> Text:
+    """Lift cell. With no delta it reads N/A for a row that is N/A in either arm, then
+    ``skipped`` when the with-skill arm never ran, then NO SCORE, like the other reporters."""
     numeric = _finite_number(value)
     if numeric is None:
+        if not_applicable:
+            return Text(_NOT_APPLICABLE_LABEL, style="dim italic")
+        if skipped:
+            return Text("skipped", style="dim")
         return Text("NO SCORE", style="dim")
     style = lift_style(numeric)
     return Text(f"{numeric:+.2f}", style=f"bold {style}")
@@ -108,6 +125,113 @@ def _condition_status(data: Mapping[str, Any], variant: str) -> str:
 def _never_activated(data: Mapping[str, Any]) -> bool:
     activation = data.get("skill_activation")
     return isinstance(activation, Mapping) and activation.get("status") == "never_activated"
+
+
+def _run_verdict_agents(agents: Mapping[str, Any]) -> list[Mapping[str, Any]]:
+    """Return the agents a multi-agent run verdict reads, as the canonical report picks them.
+
+    An agent kept by --tolerate-baseline-timeouts is set aside whenever an
+    agent with a complete baseline ranks, so it never decides the verdict.
+    An agent that did not run its with-skill arm to completion is never read:
+    the canonical report sets execution-failed agents aside, and the per-agent
+    headline withholds its quality verdict, so the run verdict must not read it.
+    """
+    raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
+    complete = [raw for raw in raw_agents if not kept_with_failed_baseline(raw)]
+    readable = raw_agents
+    if len(complete) != len(raw_agents) and any(_ranks_like_the_canonical_report(raw) for raw in complete):
+        readable = complete
+    return [raw for raw in readable if _counts_toward_run_verdict(raw)]
+
+
+def _counts_toward_run_verdict(raw: Mapping[str, Any]) -> bool:
+    """Return whether the run verdict may read this agent's with-skill quality."""
+    return raw.get("execution_status") == "succeeded" and _condition_usable(raw, "with_skill")
+
+
+def _run_verdict_from_agents(agents: Mapping[str, Any]) -> tuple[str, str]:
+    """Return the multi-agent run verdict and, when it is incomplete, why.
+
+    The verdict is read from the agents that ran their with-skill arm and is
+    ``pass``, ``fail`` or ``inconclusive`` as in the canonical report. It is
+    ``incomplete`` when no agent can be read, with a reason naming the arm that
+    failed, and empty for a baseline-only run (``--skip-with-skill``), which
+    gives no skill verdict.
+    """
+    verdict_agents = _run_verdict_agents(agents)
+    if not verdict_agents:
+        arm_failures = _arm_failures(agents)
+        return ("", "") if arm_failures is None else ("incomplete", _incomplete_run_reason(arm_failures))
+    agent_verdicts = []
+    for raw in verdict_agents:
+        explicit = str(raw.get("verdict") or "").casefold()
+        if explicit in {"pass", "fail", "neutral", "inconclusive"}:
+            agent_verdicts.append(explicit)
+            continue
+        raw_pass = raw.get("pass_at_k")
+        raw_with = raw_pass.get("with_skill") if isinstance(raw_pass, Mapping) else None
+        raw_checks = raw_with.get("required_checks") if isinstance(raw_with, Mapping) else None
+        agent_verdicts.append(
+            "inconclusive" if _never_activated(raw) else "fail" if required_check_failure_reason(raw_checks) else "pass"
+        )
+    if "pass" in agent_verdicts:
+        return "pass", ""
+    if all(item == "inconclusive" for item in agent_verdicts):
+        return "inconclusive", ""
+    return "fail", ""
+
+
+def _arm_failures(agents: Mapping[str, Any]) -> set[str] | None:
+    """Name how each agent missed the run verdict, or None for a baseline-only run.
+
+    ``both`` is an agent that completed neither arm, ``with_skill`` one whose
+    with-skill arm did not complete, and ``baseline`` one whose with-skill arm
+    completed but whose baseline did not (and was not tolerated), so the agent
+    still failed.
+    """
+    raw_agents = [raw for raw in agents.values() if isinstance(raw, Mapping)]
+    if all(_condition_status(raw, "with_skill") == "skipped" for raw in raw_agents):
+        return None
+    failures = set()
+    for raw in raw_agents:
+        if _condition_usable(raw, "with_skill"):
+            failures.add("baseline")
+        elif _condition_usable(raw, "without_skill") or _condition_status(raw, "without_skill") == "skipped":
+            failures.add("with_skill")
+        else:
+            failures.add("both")
+    return failures
+
+
+def _incomplete_run_reason(arm_failures: set[str]) -> str:
+    """Say which arm kept every agent out of the run verdict, in the budget reason's plain style."""
+    if arm_failures == {"both"}:
+        return "no agent completed either arm; there is no quality verdict to report"
+    if arm_failures <= {"both", "with_skill"}:
+        return "no agent completed its with-skill arm; there is no quality verdict to report"
+    if arm_failures == {"baseline"}:
+        return (
+            "no agent completed its baseline arm, so the run has no complete agent result; "
+            "per-agent verdicts cover the with-skill arm only"
+        )
+    return (
+        "no agent completed both arms (with-skill arm failed for some, baseline arm for the rest); "
+        "there is no quality verdict to report"
+    )
+
+
+def _ranks_like_the_canonical_report(raw: Mapping[str, Any]) -> bool:
+    """Return whether the canonical report ranks the raw agent data ``raw``.
+
+    Data the canonical report cannot read, such as a string in place of a
+    score map, does not rank, so the printed summary stays readable.
+    """
+    from skillevaluator.evaluation.tier3_report import _canonical_agent_rank_from_info
+
+    try:
+        return _canonical_agent_rank_from_info(dict(raw)) is not None
+    except (AttributeError, TypeError, ValueError):
+        return False
 
 
 def _condition_usable(data: Mapping[str, Any], variant: str) -> bool:
@@ -236,6 +360,30 @@ def _attempt_coverage(data: Mapping[str, Any]) -> str:
     if all(isinstance(value, int) and not isinstance(value, bool) and value >= 0 for value in (scored, expected)):
         return f"{scored}/{expected}"
     return ""
+
+
+def _recovered_timeout_lines(agents: Mapping[str, Any]) -> list[str]:
+    """One line per agent whose agent timeouts a later scored attempt recovered."""
+    lines = []
+    for agent, raw in agents.items():
+        conditions = raw.get("conditions") if isinstance(raw, Mapping) else None
+        if not isinstance(conditions, Mapping):
+            continue
+        counts: dict[str, int] = {}
+        for variant, label in (("with_skill", "with skill"), ("without_skill", "baseline")):
+            condition = conditions.get(variant)
+            count = condition.get("recovered_attempts_total") if isinstance(condition, Mapping) else None
+            if isinstance(count, int) and not isinstance(count, bool) and count > 0:
+                counts[label] = count
+        total = sum(counts.values())
+        if total:
+            arms = ", ".join(f"{count} {label}" for label, count in counts.items())
+            subject = "the timed-out attempt is" if total == 1 else "timed-out attempts are"
+            lines.append(
+                f"{agent}: {total} agent timeout{'s' if total != 1 else ''} recovered by a later scored "
+                f"attempt ({arms}); {subject} not scored and stay{'s' if total == 1 else ''} in the run history."
+            )
+    return lines
 
 
 def _concise_trial_reason(reason: str) -> str:
@@ -439,6 +587,108 @@ def _responsive_conditions(table: Table, console: Console) -> Table:
     return compact
 
 
+def _agent_score_headlines(
+    *,
+    result: Mapping[str, Any],
+    agent: str,
+    data: Mapping[str, Any],
+    with_usable: bool,
+    baseline_usable: bool,
+    overall: Mapping[str, Any],
+    safe: Any,
+) -> list[Text]:
+    """Build the compact verdict, lift, and per-arm check-count summary."""
+    pass_at_k = data.get("pass_at_k")
+    with_pass = pass_at_k.get("with_skill") if with_usable and isinstance(pass_at_k, Mapping) else None
+    without_pass = pass_at_k.get("without_skill") if baseline_usable and isinstance(pass_at_k, Mapping) else None
+    required_checks = with_pass.get("required_checks") if isinstance(with_pass, Mapping) else None
+    verdict_reason = required_check_failure_reason(required_checks)
+    headlines = []
+    agents = result.get("agents")
+    multiple_agents = isinstance(agents, Mapping) and len(agents) > 1
+    agent_verdict = "inconclusive" if _never_activated(data) else "fail" if verdict_reason else "pass"
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    budget_partial = budget_incomplete_reason(result.get("budget")) is not None
+    if budget_partial:
+        agent_verdict = "incomplete"
+    if with_usable and (multiple_agents or verdict_reason):
+        verdict_label = f"QUALITY VERDICT ({safe(agent)}):" if multiple_agents else "QUALITY VERDICT:"
+        reason = f" — {safe(verdict_reason)}" if verdict_reason else ""
+        color = "yellow" if agent_verdict == "inconclusive" else RED if agent_verdict == "fail" else GREEN
+        headlines.append(Text(f"{verdict_label} {agent_verdict.upper()}{reason}", style=f"bold {color}"))
+    if (
+        with_usable
+        and baseline_usable
+        and all(
+            _finite_number(value) is not None
+            for value in (overall.get("with_skill"), overall.get("without_skill"), overall.get("delta"))
+        )
+    ):
+        lift_label = "OVERALL SKILL LIFT"
+        if budget_partial:
+            lift_label += " (admitted attempts only)"
+        if verdict_reason and _finite_number(overall.get("delta")) is not None and overall["delta"] > 0:
+            lift_label += " (for reference)"
+        headline = Text(f"{lift_label}   ", style="bold")
+        headline.append_text(_delta_cell(overall["delta"]))
+        if multiple_agents:
+            headline.append(f" · {safe(agent)}", style="dim")
+        headlines.append(headline)
+
+    for label, field, numerator in (
+        ("REQUIRED CHECKS PASSED", "required_checks", "passed"),
+        ("GOALS MET", "correct_answers", "correct"),
+        ("SECURITY CLEAN", "security_clean", "clean"),
+    ):
+        with_counts = with_pass.get(field) if isinstance(with_pass, Mapping) else None
+        without_counts = without_pass.get(field) if isinstance(without_pass, Mapping) else None
+        counts = (
+            (
+                with_counts.get(numerator),
+                with_counts.get("scored"),
+            )
+            if isinstance(with_counts, Mapping)
+            else ()
+        )
+        baseline_counts = (
+            (
+                without_counts.get(numerator),
+                without_counts.get("scored"),
+            )
+            if isinstance(without_counts, Mapping)
+            else ()
+        )
+        line_label = f"{label} ({safe(agent)})" if multiple_agents else label
+        line = Text(f"{line_label}   ", style="bold")
+        valid_with = (
+            len(counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in counts)
+            and counts[1] > 0
+        )
+        valid_without = (
+            len(baseline_counts) == 2
+            and all(isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in baseline_counts)
+            and baseline_counts[1] > 0
+        )
+        if valid_with:
+            line.append(f"{counts[0]}/{counts[1]}")
+            if valid_without:
+                line.append(f" | {baseline_counts[0]}/{baseline_counts[1]}")
+                if counts[1] == baseline_counts[1]:
+                    delta = f"{counts[0] - baseline_counts[0]:+d}"
+                else:
+                    rate_delta = 100 * (counts[0] / counts[1] - baseline_counts[0] / baseline_counts[1])
+                    delta = f"{rate_delta:+.1f} pp"
+                line.append(f" | {delta}")
+            else:
+                line.append(" | N/A | N/A")
+        else:
+            line.append("N/A")
+        headlines.append(line)
+    return headlines
+
+
 def _render_agent_scores(
     *,
     console: Console,
@@ -450,7 +700,8 @@ def _render_agent_scores(
 ) -> None:
     with_usable = _condition_usable(data, "with_skill")
     # A baseline-only run (--skip-with-skill) deliberately leaves the with-skill arm unscored.
-    with_unavailable = "skipped" if _condition_status(data, "with_skill") == "skipped" else "NO SCORE"
+    with_skipped = _condition_status(data, "with_skill") == "skipped"
+    with_unavailable = "skipped" if with_skipped else "NO SCORE"
     baseline_status = _condition_status(data, "without_skill")
     baseline_skipped = baseline_status == "skipped"
     baseline_usable = _condition_usable(data, "without_skill") and not baseline_skipped
@@ -502,14 +753,18 @@ def _render_agent_scores(
                 else None
             )
             baseline_score, baseline_bar = _not_applicable_cell() if baseline_na else _score_cell(baseline_value)
-            row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+            lift_cell = _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped)
+            row.extend([baseline_score, baseline_bar, lift_cell])
         table.add_row(*row)
 
     basis = lift.get("basis")
     if isinstance(basis, Mapping) and basis.get("pairing") == "same_cases_per_metric":
         table.caption = "Lift compares the cases scored by both arms for each evaluator."
     if _not_applicable_metrics(data, "with_skill") or _not_applicable_metrics(data, "without_skill"):
-        table.caption = (str(table.caption or "") + " N/A: no applicable reference or skill in this arm.").strip()
+        table.caption = (
+            str(table.caption or "")
+            + " N/A: no applicable reference or skill in this arm, so it is left out of scores and lift."
+        ).strip()
     if custom_with or custom_without:
         if metrics:
             table.add_section()
@@ -527,7 +782,7 @@ def _render_agent_scores(
                     else None
                 )
                 baseline_score, baseline_bar = _score_cell(baseline_value)
-                row.extend([baseline_score, baseline_bar, _delta_cell(delta)])
+                row.extend([baseline_score, baseline_bar, _delta_cell(delta, skipped=with_skipped)])
             table.add_row(*row)
 
     if not metrics and not custom_with and not custom_without and not show_baseline:
@@ -607,17 +862,33 @@ def _render_agent_scores(
             Text(""),
             table,
         )
-    elif (
-        with_usable
-        and baseline_usable
-        and all(_finite_number(value) is not None for value in (with_overall, baseline_overall, overall.get("delta")))
-    ):
-        headline = Text("OVERALL SKILL LIFT   ", style="bold")
-        headline.append_text(_delta_cell(overall["delta"]))
-        agents = result.get("agents")
-        if isinstance(agents, Mapping) and len(agents) > 1:
-            headline.append(f" · {safe(agent)}", style="dim")
-        content = Group(headline, Text(""), table)
+    else:
+        headlines = _agent_score_headlines(
+            result=result,
+            agent=agent,
+            data=data,
+            with_usable=with_usable,
+            baseline_usable=baseline_usable,
+            overall=overall,
+            safe=safe,
+        )
+        has_overall_lift = (
+            with_usable
+            and baseline_usable
+            and all(
+                _finite_number(value) is not None
+                for value in (overall.get("with_skill"), overall.get("without_skill"), overall.get("delta"))
+            )
+        )
+        if has_overall_lift:
+            lift_index = next(
+                (index for index, headline in enumerate(headlines) if headline.plain.startswith("OVERALL SKILL LIFT")),
+                None,
+            )
+            if lift_index is not None:
+                headlines.insert(lift_index + 1, Text(SKILL_LIFT_DEFINITION, style="dim"))
+        if headlines:
+            content = Group(*headlines, Text(""), table)
     console.print(
         Panel(
             content,
@@ -703,7 +974,7 @@ def _render_dimensions(
                 with_bar,
                 baseline_cell,
                 baseline_bar,
-                _delta_cell(delta),
+                _delta_cell(delta, not_applicable=with_na or baseline_na, skipped=with_skipped),
             ]
             table.add_row(*row)
 
@@ -840,7 +1111,44 @@ def _case_first_summary(result: Mapping[str, Any], *, console: Console, skill_pa
                 save_case_findings(Path(str(run_dir)), fixes)
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("What-to-fix skipped", exc_info=True)
-    return render_case_summary(result, console=console, fixes=fixes)
+    shown = render_case_summary(result, console=console, fixes=fixes)
+    if shown and run_dir and Path(str(run_dir)).is_dir():
+        from skillevaluator.tier3.next_steps import next_steps, render_next_steps
+
+        secrets = secret_values_from_environment(os.environ)
+        try:
+            steps = next_steps(result, run_dir=Path(str(run_dir)), fixes=fixes)
+        except Exception:  # advisory panel: never break the run summary
+            logging.getLogger(__name__).debug("Next steps skipped", exc_info=True)
+            steps = []
+        render_next_steps(
+            steps, console=console, safe=lambda value: redact_progress_detail(value, secret_values=secrets)
+        )
+    return shown
+
+
+def _render_token_usage(console: Console, result: Mapping[str, Any], safe: Any) -> None:
+    """Print the per-agent token sums that the report step recorded: measured, not scored.
+
+    The pointer to the case rows names only the reports the run recorded
+    writing: a Harbor run records ``tier3-benchmark.md`` in ``benchmark_path``
+    only when the file exists, a NeMo Gym run writes ``report.html`` alone, and
+    a run whose report step failed records neither.
+    """
+    from skillevaluator.reporting.tier3_token_usage import (
+        EVALUATE_CASE_POINTER,
+        EVALUATE_REPORT_CASE_POINTER,
+        render_token_usage_table,
+    )
+
+    pointer = (
+        EVALUATE_CASE_POINTER
+        if result.get("benchmark_path")
+        else EVALUATE_REPORT_CASE_POINTER
+        if result.get("report_path")
+        else ""
+    )
+    render_token_usage_table(console, result.get("token_usage"), case_pointer=pointer, text=safe)
 
 
 def render_evaluation_result(
@@ -868,6 +1176,34 @@ def render_evaluation_result(
     duration = result.get("duration_seconds")
     if _finite_number(duration) is not None:
         console.print(f"Time: {float(duration):.1f}s")
+    baseline = result.get("baseline")
+    if isinstance(baseline, Mapping) and (baseline.get("mode") == "reused" or baseline.get("reuse_reason")):
+        from skillevaluator.tier3.baseline_store import baseline_description
+
+        console.print(safe(baseline_description(dict(baseline))))
+    budget = result.get("budget")
+    if isinstance(budget, Mapping) and (
+        budget.get("status") == "exhausted"
+        or budget.get("partial")
+        or budget.get("not_run")
+        or budget.get("observed_overruns")
+        or any(value is not None for value in (budget.get("limits") or {}).values())
+    ):
+        from skillevaluator.tier3.harbor.run_budget import budget_line
+
+        console.print(budget_line(dict(budget), agents=result.get("agents")))
+    from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason
+
+    budget_reason = budget_incomplete_reason(dict(budget)) if isinstance(budget, Mapping) else None
+    if budget_reason:
+        console.print(Text("RUN QUALITY VERDICT: INCOMPLETE", style="bold yellow"))
+        console.print(Text(budget_reason, style="yellow"))
+    provenance_line, provenance_is_template = dataset_provenance_display(result.get("dataset_provenance"))
+    if provenance_line:
+        console.print(Text(provenance_line, style="yellow" if provenance_is_template else "dim"))
+    if comparison := result.get("prior_version_comparison"):
+        for line in version_comparison_lines(comparison):
+            console.print(Text(safe(line)))
 
     agents = result.get("agents")
     incomplete = status in {"failed", "incomplete"} and not any(
@@ -880,7 +1216,88 @@ def render_evaluation_result(
         rendered_feedback_messages = _render_incomplete_execution(result=result, console=console, safe=safe)
     has_cases = False
     if isinstance(agents, Mapping) and agents and not incomplete:
+        if len(agents) > 1 and not budget_reason:
+            run_verdict = str(result.get("verdict") or "").casefold()
+            run_verdict_reason = ""
+            if run_verdict not in {"pass", "fail", "neutral", "inconclusive"}:
+                run_verdict, run_verdict_reason = _run_verdict_from_agents(agents)
+            if run_verdict:
+                style = GREEN if run_verdict == "pass" else RED if run_verdict == "fail" else "yellow"
+                console.print(Text(f"RUN QUALITY VERDICT: {run_verdict.upper()}", style=f"bold {style}"))
+                if run_verdict_reason:
+                    console.print(Text(run_verdict_reason, style="yellow"))
+        if not verbose:
+            for agent, raw in agents.items():
+                if not isinstance(raw, Mapping):
+                    continue
+                pass_at_k = raw.get("pass_at_k")
+                conditions = (
+                    (
+                        pass_at_k.get("with_skill"),
+                        pass_at_k.get("without_skill"),
+                    )
+                    if isinstance(pass_at_k, Mapping)
+                    else ()
+                )
+                if not any(
+                    isinstance(condition, Mapping)
+                    and isinstance(condition.get("cases"), Mapping)
+                    and condition["cases"]
+                    for condition in conditions
+                ):
+                    continue
+                lift = raw.get("lift") if isinstance(raw.get("lift"), Mapping) else {}
+                overall = lift.get("overall") if isinstance(lift.get("overall"), Mapping) else {}
+                if not overall and result.get("metric_set") == CUSTOM_ONLY_METRIC_SET:
+                    custom_lift = raw.get("custom_lift")
+                    overall = (
+                        custom_lift.get("overall")
+                        if isinstance(custom_lift, Mapping) and isinstance(custom_lift.get("overall"), Mapping)
+                        else {}
+                    )
+                with_usable = _condition_usable(raw, "with_skill")
+                baseline_usable = (
+                    _condition_usable(raw, "without_skill") and _condition_status(raw, "without_skill") != "skipped"
+                )
+                headlines = _agent_score_headlines(
+                    result=result,
+                    agent=str(agent),
+                    data=raw,
+                    with_usable=with_usable,
+                    baseline_usable=baseline_usable,
+                    overall=overall,
+                    safe=safe,
+                )
+                for headline in headlines:
+                    console.print(headline)
+                if headlines:
+                    console.print()
         has_cases = _case_first_summary(result, console=console, skill_path=skill_path)
+    sufficiency = result.get("dataset_sufficiency")
+    if isinstance(sufficiency, Mapping) and isinstance(sufficiency.get("coverage_summary"), str):
+        style = "yellow" if sufficiency.get("status") == "provisional" else "dim"
+        console.print(Text(safe(sufficiency["coverage_summary"]), style=style))
+    if isinstance(agents, Mapping) and agents:
+        agent_entries = [(str(name), value) for name, value in agents.items() if isinstance(value, Mapping)]
+        attempt_policy = result.get("attempt_policy") if isinstance(result.get("attempt_policy"), Mapping) else {}
+        for agent_name, best_data in agent_entries:
+            volume = evidence_volume_for_conditions(
+                best_data.get("conditions"),
+                trial_failures=best_data.get("trial_failures"),
+                baseline_only=result.get("mode") == "baseline_only",
+                dataset_summary=result.get("dataset_summary"),
+                rewards_by_arm={
+                    "with_skill": best_data.get("rewards"),
+                    "without_skill": best_data.get("rewards_baseline"),
+                },
+                uniform_attempts=not bool(attempt_policy.get("stop_on_pass")),
+                attempts_per_case=attempt_policy.get("max_attempts"),
+            )
+            evidence_line = format_evidence_volume(volume)
+            if evidence_line:
+                style = "yellow" if evidence_line.startswith("Limited evidence:") else "dim"
+                label = f"{agent_name}: " if len(agent_entries) > 1 else ""
+                console.print(Text(safe(label + evidence_line), style=style))
     detailed = verbose or not has_cases
     if isinstance(agents, Mapping) and agents and not incomplete and detailed:
         metrics = _display_metrics(result, agents)
@@ -896,6 +1313,8 @@ def render_evaluation_result(
             )
 
         _render_dimensions(console=console, agents=agents, safe=safe)
+
+        _render_token_usage(console, result, safe)
 
         # The per-evaluator findings report — evaluator reasonings, evidence
         # pointers, and next-step suggestions — is the feedback surface that
@@ -919,6 +1338,15 @@ def render_evaluation_result(
             )
         except Exception:  # advisory panel: never break the run summary
             logging.getLogger(__name__).debug("Findings report skipped", exc_info=True)
+    elif incomplete and detailed:
+        # A run whose arms all failed has no scores to show, but its attempts still used tokens.
+        _render_token_usage(console, result, safe)
+
+    render_declarative_coverage(console, agents, text=safe)
+
+    # A recovered timeout is neither a failure nor a score; say so instead of staying silent.
+    for line in _recovered_timeout_lines(agents) if isinstance(agents, Mapping) else []:
+        console.print(Text(safe(line), style="yellow"))
 
     errors = result.get("execution_errors") or result.get("error") or []
     if isinstance(errors, str):
@@ -969,6 +1397,30 @@ def render_evaluation_result(
         )
 
     artifact_rows: list[tuple[str, str]] = []
+    viewer_source = dict(result)
+    raw_viewer = viewer_source.get("harbor_viewer")
+    uploads = raw_viewer.get("uploads") if isinstance(raw_viewer, dict) else None
+    if isinstance(raw_viewer, dict) and isinstance(uploads, list) and uploads:
+        # Project raw uploads without replacing canonical jobs or run metadata.
+        from skillevaluator.evaluation.tier3_report import _harbor_viewer_from_engine_result
+
+        uploaded = _harbor_viewer_from_engine_result({"harbor_viewer": {"uploads": uploads}})
+        jobs = normalize_harbor_viewer_for_display(viewer_source).get("jobs", [])
+        by_url = {job["url"]: job for job in jobs}
+        for job in uploaded.get("jobs", []):
+            retained = by_url.get(job["url"])
+            if retained is None:
+                jobs.append(job)
+                by_url[job["url"]] = job
+            elif not retained.get("analysis_url") and job.get("analysis_url"):
+                # Enrich only the same validated job; canonical metadata wins.
+                retained["analysis_url"] = job["analysis_url"]
+        viewer_source["harbor_viewer"] = {**raw_viewer, "jobs": jobs}
+    for job in harbor_job_links(viewer_source):
+        artifact_rows.append(("Harbor job", safe(job["name"])))
+        for key, label in (("url", "Results"), ("analysis_url", "Analysis")):
+            if job.get(key):
+                artifact_rows.append((label, safe(job[key])))
     report_path = result.get("report_path")
     if report_path:
         raw_report_path = str(report_path)

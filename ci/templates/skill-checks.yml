@@ -10,7 +10,7 @@ on:
   workflow_dispatch:
 permissions:
   contents: read
-  # Hosted reports/PR comments: uncomment this, then refresh trusted-caller-blobs.
+  # PR comments or hosted reports: uncomment this, then refresh trusted-caller-blobs.
   # id-token: write
 jobs:
   skills:
@@ -19,5 +19,7 @@ jobs:
       image: ghcr.io/nvidia/skillevaluator-tier1@sha256:RELEASE_IMAGE_DIGEST
       paths: skills
       min-score: 70
+      # Enable only after the reviewed baseline manifest reaches the target branch.
+      security-baselines: false
       scan-mode: auto
       llm: false

@@ -8,11 +8,14 @@ from __future__ import annotations
 import re
 
 import pytest
+from native_comparison_assertions import dimension_lift_labels
 
 from skillevaluator.constants import DIMENSION_MAPPING
 from skillevaluator.evaluation.tier3_report import _validation_result_from_payload, build_agent_eval_payload
 from skillevaluator.reporting import BenchmarkReporter, HTMLReporter
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+
+_SUMMARY_ROWS = {"Required checks passed", "Goals met", "Security clean"}
 
 
 def _agent(*, activated: bool | None, score: float = 0.4, baseline: bool = True) -> dict:
@@ -60,6 +63,10 @@ def _benchmark_rows(benchmark: str) -> dict[str, list[str]]:
     }
 
 
+def _metric_benchmark_rows(benchmark: str) -> dict[str, list[str]]:
+    return {name: cells for name, cells in _benchmark_rows(benchmark).items() if name not in _SUMMARY_ROWS}
+
+
 @pytest.mark.parametrize("baseline", [True, False])
 @pytest.mark.parametrize("score", [0.2, 0.9])
 def test_benchmark_never_activated_scores_do_not_reconstruct_uplift(baseline: bool, score: float) -> None:
@@ -69,8 +76,10 @@ def test_benchmark_never_activated_scores_do_not_reconstruct_uplift(baseline: bo
     assert agent["verdict"] == "inconclusive"
     rows = _benchmark_rows(benchmark)
     scores = {"Overall": agent["with_skill"], **{d["id"].title(): d["with_skill"] for d in agent["dimensions"]}}
-    assert len(rows) == len(DIMENSION_MAPPING) + 1
-    for measure, cells in rows.items():
+    assert _SUMMARY_ROWS.issubset(rows)
+    metric_rows = _metric_benchmark_rows(benchmark)
+    assert len(metric_rows) == len(DIMENSION_MAPPING) + 1
+    for measure, cells in metric_rows.items():
         assert f"{scores[measure]:.1%}" in cells[0]
         assert "INCONCLUSIVE: skill never activated" in cells[0]
         assert "uplift unavailable" in cells[0]
@@ -89,7 +98,7 @@ def _mixed_agents() -> dict[str, dict]:
 def test_benchmark_mixed_agents_keep_inconclusive_missing_baseline_and_measured_lift_distinct() -> None:
     payload, benchmark, _ = _render(_mixed_agents())
     assert payload["agents"]["unactivated"]["with_skill"] > payload["agents"]["activated"]["with_skill"]
-    for cells in _benchmark_rows(benchmark).values():
+    for cells in _metric_benchmark_rows(benchmark).values():
         by_agent = dict(zip(payload["agents"], cells, strict=True))
         assert "INCONCLUSIVE: skill never activated" in by_agent["unactivated"]
         assert "points" not in by_agent["unactivated"]
@@ -100,10 +109,8 @@ def test_benchmark_mixed_agents_keep_inconclusive_missing_baseline_and_measured_
 
 def test_html_mixed_agents_identify_activation_suppression_in_every_grid_cell() -> None:
     payload, _, html = _render(_mixed_agents())
-    # The HTML grid interleaves one cell per agent for every dimension and Overall.
-    labels = re.findall(r'<span class="t3-mad-lift"[^>]*>(.*?)</span>', html, flags=re.DOTALL)
-    assert len(labels) == 3 * (len(DIMENSION_MAPPING) + 1)
-    by_agent = {name: labels[index::3] for index, name in enumerate(payload["agents"])}
+    by_agent = dimension_lift_labels(html, list(payload["agents"]), payload["best_agent"])
+    assert all(len(labels) == len(DIMENSION_MAPPING) + 1 for labels in by_agent.values())
     assert by_agent["unactivated"] == ["inconclusive: skill never activated"] * (len(DIMENSION_MAPPING) + 1)
     assert all(re.fullmatch(r"[+-]\d+\.\d{2} lift", label) for label in by_agent["activated"])
     assert by_agent["no-baseline"] == ["no baseline lift"] * (len(DIMENSION_MAPPING) + 1)
@@ -112,7 +119,7 @@ def test_html_mixed_agents_identify_activation_suppression_in_every_grid_cell() 
 def test_unknown_activation_keeps_legacy_comparisons() -> None:
     payload, benchmark, _ = _render({"legacy": _agent(activated=None)})
     assert payload["agents"]["legacy"]["skill_activation"]["status"] == "unknown"
-    for cells in _benchmark_rows(benchmark).values():
+    for cells in _metric_benchmark_rows(benchmark).values():
         assert "→" in cells[0] and "points" in cells[0]
         assert "INCONCLUSIVE" not in cells[0]
 
@@ -125,8 +132,7 @@ def test_html_grid_names_never_activation_with_or_without_baseline(baseline: boo
             "activated": _agent(activated=True),
         }
     )
-    labels = re.findall(r'<span class="t3-mad-lift"[^>]*>(.*?)</span>', html, flags=re.DOTALL)
-    assert len(labels) == 2 * (len(DIMENSION_MAPPING) + 1)
-    by_agent = {name: labels[index::2] for index, name in enumerate(payload["agents"])}
+    by_agent = dimension_lift_labels(html, list(payload["agents"]), payload["best_agent"])
+    assert all(len(labels) == len(DIMENSION_MAPPING) + 1 for labels in by_agent.values())
     assert by_agent["unactivated"] == ["inconclusive: skill never activated"] * (len(DIMENSION_MAPPING) + 1)
     assert all(re.fullmatch(r"[+-]\d+\.\d{2} lift", label) for label in by_agent["activated"])

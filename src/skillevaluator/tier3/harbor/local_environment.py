@@ -18,11 +18,13 @@ import signal
 import stat
 import subprocess
 import sys
+import tarfile
 import tempfile
-from pathlib import Path
+from collections.abc import Sequence
+from pathlib import Path, PurePosixPath
 from typing import Any, NoReturn
 
-from harbor.environments.base import BaseEnvironment, ExecResult, OutputCallback, OutputStream
+from harbor.environments.base import BaseEnvironment, EnvironmentPath, ExecResult, OutputCallback, OutputStream
 from harbor.environments.capabilities import EnvironmentCapabilities
 from harbor.models.environment_type import EnvironmentType
 
@@ -77,6 +79,7 @@ _BLOCKED_COMMAND_ENV_PREFIXES = ("DYLD_", "LD_", "PYTHON")
 # Harbor transports Claude Code prompts through an uppercased UUID-named
 # variable; keep that contract narrow so unrelated Harbor controls stay private.
 _HARBOR_INSTRUCTION_ENV_RE = re.compile(r"HARBOR_(?:INSTRUCTION|CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32})")
+_CLAUDE_INSTRUCTION_ENV_RE = re.compile(r"CLAUDE_CODE_INSTRUCTION_[0-9A-F]{32}")
 _INNER_ENV_BOOTSTRAP = """
 import json
 import os
@@ -530,6 +533,63 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
     def capabilities(self) -> EnvironmentCapabilities:
         return EnvironmentCapabilities(mounted=True)
 
+    def is_path_mounted(self, environment_path: EnvironmentPath, host_path: Path) -> bool:
+        """Report direct host mappings so Harbor does not copy outputs onto themselves."""
+        path = PurePosixPath(environment_path)
+        try:
+            if self._resolve_path(str(path)).resolve() != host_path.resolve():
+                return False
+        except ValueError:
+            return False
+        # A parent mapping does not cover a child redirected elsewhere.
+        return all(
+            local.resolve() == host_path.joinpath(*child.relative_to(path).parts).resolve()
+            for remote, local in self._path_map()
+            if (child := PurePosixPath(remote)) != path and child.is_relative_to(path)
+        )
+
+    @property
+    def _logs_dir(self) -> Path:
+        """Expose a coherent /logs tree without sharing collected destinations."""
+        return self._root / "runtime-logs"
+
+    @property
+    def _artifact_staging_dir(self) -> Path:
+        """Keep sandbox writes separate from Harbor's collected output destinations."""
+        # Explicit destinations also copy the convention directory. Sharing
+        # their host path would make a transfer delete its own source.
+        return self._logs_dir / "artifacts"
+
+    def _prepare_log_dirs(self) -> None:
+        for directory in (self._logs_dir, self._artifact_staging_dir):
+            directory.mkdir(parents=True, exist_ok=True)
+            if stat_is_link_or_reparse(directory.lstat()):
+                raise ValueError(f"local logs directory cannot be a symlink: {directory}")
+        # Keep role logs in Harbor's retained host locations. Only these
+        # controlled aliases let paths constructed from /logs reach them;
+        # transfers of a role still resolve directly to its real host path.
+        for role, host in (
+            ("agent", self.trial_paths.agent_dir),
+            ("verifier", self.trial_paths.verifier_dir),
+            ("user-agent", self.trial_paths.user_agent_dir),
+        ):
+            alias = self._logs_dir / role
+            target = host.resolve()
+            try:
+                metadata = alias.lstat()
+            except FileNotFoundError:
+                alias.symlink_to(target, target_is_directory=True)
+                continue
+            if not stat.S_ISLNK(metadata.st_mode) or alias.readlink() != target:
+                raise ValueError(f"local logs parent contains an unexpected role entry: {alias}")
+
+    def _reject_logs_parent_transfer(self, path: Path) -> None:
+        # Internal role aliases must never enter a downloaded artifact, and a
+        # parent upload must not replace them. Reject before changing any
+        # source/destination files; secure_copy keeps its no-follow policy.
+        if self._logs_dir.resolve().is_relative_to(path.resolve()):
+            raise ValueError("local logs parent cannot be transferred; select a role or the artifacts directory")
+
     @classmethod
     def preflight(cls) -> None:
         return None
@@ -574,6 +634,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             self._home / ".codex",
         ):
             path.mkdir(parents=True, exist_ok=True)
+        self._prepare_log_dirs()
         self._copy_environment_bundle()
         self._sandbox = local_sandbox.detect(self._sandbox_mode)
         plan = self._sandbox.plan
@@ -735,6 +796,7 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         target = self._resolve_path(target_dir)
         if not self._path_is_within_allowed_local_roots(target):
             raise ValueError(f"local mode upload target is outside the run directory: {target_dir}")
+        self._reject_logs_parent_transfer(target)
         # Prepare and rewrite privately so a failed upload retains the previous
         # verifier. The final secure copy handles overlays and rollback.
         with tempfile.TemporaryDirectory(prefix="skillevaluator-local-upload-") as directory:
@@ -793,10 +855,152 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         source = self._resolve_path(source_dir)
         if not self._path_is_within_allowed_local_roots(source):
             raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
+        self._reject_logs_parent_transfer(source)
         target = Path(target_dir)
         if target.exists():
             shutil.rmtree(target)
         copytree_secure(source, target, dirs_exist_ok=True)
+
+    async def download_dir_with_exclusions(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        exclude: list[str],
+    ) -> None:
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        await super().download_dir_with_exclusions(source_dir=source_dir, target_dir=target_dir, exclude=exclude)
+
+    async def _download_dir_with_exclusions_impl(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        exclude: list[str],
+        service: str | None,
+    ) -> None:
+        if not self.is_main_service(service):
+            from harbor.environments.base import ServiceOperationsUnsupportedError
+
+            raise ServiceOperationsUnsupportedError(self._service_unsupported_message(service))
+        await self._download_local_directory(
+            source_dir=source_dir, target_dir=target_dir, exclude=exclude, filter_files=False
+        )
+
+    async def download_dir_filtered(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        protect: Sequence[str] | None = None,
+    ) -> None:
+        self._reject_logs_parent_transfer(self._resolve_path(source_dir))
+        await self._download_local_directory(
+            source_dir=source_dir,
+            target_dir=target_dir,
+            include=include,
+            exclude=exclude,
+            protect=protect,
+            filter_files=True,
+        )
+
+    async def _download_local_directory(
+        self,
+        *,
+        source_dir: str,
+        target_dir: Path | str,
+        include: Sequence[str] | None = None,
+        exclude: Sequence[str] | None = None,
+        protect: Sequence[str] | None = None,
+        filter_files: bool,
+    ) -> None:
+        """Keep Harbor's directory-transfer scratch files within the local run."""
+        from harbor.environments.base import transfer_tar_filter
+        from harbor.utils.path_filter import filter_paths_by_patterns
+
+        source = self._resolve_path(source_dir)
+        if not self._path_is_within_allowed_local_roots(source):
+            raise ValueError(f"local mode download source is outside the run directory: {source_dir}")
+        self._reject_logs_parent_transfer(source)
+        source_metadata = source.lstat()
+        if not stat.S_ISDIR(source_metadata.st_mode) or stat_is_link_or_reparse(source_metadata):
+            raise ValueError("local directory transfer source must be a non-linked directory")
+        source_root = source.resolve()
+        selected: list[str] | None = None
+        if filter_files:
+
+            def raise_walk_error(error: OSError) -> None:
+                raise error
+
+            paths = []
+            for directory, _subdirectories, filenames in os.walk(source, followlinks=False, onerror=raise_walk_error):
+                for filename in filenames:
+                    path = Path(directory) / filename
+                    metadata = path.lstat()
+                    if stat.S_ISREG(metadata.st_mode) and not stat_is_link_or_reparse(metadata):
+                        paths.append(path.relative_to(source).as_posix())
+            paths.sort()
+            selected = filter_paths_by_patterns(paths, include=include, exclude=exclude)
+            protected = set(protect or ()) - set(selected)
+            selected += [path for path in paths if path in protected]
+
+        # The SDK uses host /tmp for its archive/list. That location is outside
+        # local mode's grant, so use a private per-call directory under the run
+        # instead; never change the SDK's module-global transfer directory.
+        temporary_metadata = self._tmp.lstat()
+        if (
+            not self._path_is_within_allowed_local_roots(self._tmp)
+            or not stat.S_ISDIR(temporary_metadata.st_mode)
+            or stat_is_link_or_reparse(temporary_metadata)
+        ):
+            raise ValueError("local directory transfer staging must remain inside the run")
+        with tempfile.TemporaryDirectory(prefix=".hb-local-transfer-", dir=self._tmp) as temporary:
+            staging = Path(temporary)
+            unpacked = staging / "unpacked"
+            unpacked.mkdir()
+            if selected != []:
+                archive = staging / "transfer.tar.gz"
+                # TMPDIR is a protected local-backend value. Refer to it in
+                # the shell instead of feeding host paths through the logical
+                # /workspace rewrite a second time.
+                archive_argument = f'"$TMPDIR"/{shlex.quote(staging.name)}/transfer.tar.gz'
+                if selected is not None:
+                    listing = staging / "files.list"
+                    # NUL records retain literal newlines/leading dashes. A
+                    # ./ prefix also prevents filenames from becoming options.
+                    listing.write_bytes(b"".join(os.fsencode("./" + name) + b"\0" for name in selected))
+                    listing_argument = f'"$TMPDIR"/{shlex.quote(staging.name)}/files.list'
+                    command = f"tar czf {archive_argument} --null -T {listing_argument}"
+                else:
+                    patterns = list(exclude or ())
+                    if staging.is_relative_to(source_root):
+                        patterns.append("./" + staging.relative_to(source_root).as_posix())
+                    excludes = " ".join(f"--exclude={shlex.quote(pattern)}" for pattern in patterns)
+                    command = f"tar czf {archive_argument} {excludes} ."
+                result = await self.exec(command, cwd=str(source), timeout_sec=600, user="root")
+                if result.return_code != 0:
+                    raise RuntimeError(f"Failed to pack local directory transfer (exit code {result.return_code})")
+                with tarfile.open(archive, "r:gz") as transfer:
+                    for member in transfer.getmembers():
+                        parts = PurePosixPath(member.name)
+                        if parts.is_absolute() or ".." in parts.parts or member.issym() or member.islnk():
+                            raise ValueError("local directory transfer refuses unsafe paths or linked files")
+                        if member.isfile():
+                            original = source.joinpath(*parts.parts)
+                            metadata = original.lstat()
+                            if (
+                                not original.resolve().is_relative_to(source_root)
+                                or not stat.S_ISREG(metadata.st_mode)
+                                or stat_is_link_or_reparse(metadata)
+                                or metadata.st_nlink != 1
+                            ):
+                                raise ValueError("local directory transfer requires regular non-linked files")
+                    transfer.extractall(path=unpacked, filter=transfer_tar_filter)
+            # Secure publication retains the existing no-follow/hard-link
+            # restrictions for destinations, including pre-existing outputs.
+            copytree_secure(unpacked, Path(target_dir), dirs_exist_ok=True)
 
     async def exec(
         self,
@@ -1340,10 +1544,10 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
             "TMPDIR": str(self._tmp),
             "HARBOR_WORKSPACE_DIR": str(self._workspace),
             "HARBOR_TESTS_DIR": str(self._tests),
-            "HARBOR_LOGS_DIR": str(self.trial_paths.trial_dir),
+            "HARBOR_LOGS_DIR": str(self._logs_dir),
             "HARBOR_AGENT_LOGS_DIR": str(self.trial_paths.agent_dir),
             "HARBOR_VERIFIER_DIR": str(self.trial_paths.verifier_dir),
-            "HARBOR_ARTIFACTS_DIR": str(self.trial_paths.artifacts_dir),
+            "HARBOR_ARTIFACTS_DIR": str(self._artifact_staging_dir),
             "HARBOR_SOLUTION_DIR": str(self._solution),
             "HARBOR_INSTALLED_AGENT_DIR": str(self._installed_agent),
             "HARBOR_SKILLS_DIR": str(self._workspace / "skills"),
@@ -1698,8 +1902,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return os.pathsep.join(parts)
 
     def _rewrite_env_values(self, env: dict[str, str]) -> dict[str, str]:
-        """Map Harbor container paths that are passed through environment values."""
-        return {key: self._rewrite_raw_paths(value) for key, value in env.items()}
+        """Map runtime paths while preserving Claude's instruction payload verbatim."""
+        return {
+            key: value if _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) else self._rewrite_raw_paths(value)
+            for key, value in env.items()
+        }
 
     @staticmethod
     def _filter_command_env(env: dict[str, str], *, protected: set[str]) -> dict[str, str]:
@@ -1718,6 +1925,8 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                 )
             if key in protected or key in {"HOME", "TMPDIR", "PATH", "PWD"}:
                 continue
+            if key.startswith("CLAUDE_CODE_INSTRUCTION") and _CLAUDE_INSTRUCTION_ENV_RE.fullmatch(key) is None:
+                continue
             if (
                 key.startswith("HARBOR_")
                 and key != "HARBOR_DECLARED_PORTS"
@@ -1731,8 +1940,9 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         return [
             ("/logs/agent", self.trial_paths.agent_dir),
             ("/logs/verifier", self.trial_paths.verifier_dir),
-            ("/logs/artifacts", self.trial_paths.artifacts_dir),
-            ("/logs", self.trial_paths.trial_dir),
+            ("/logs/user-agent", self.trial_paths.user_agent_dir),
+            ("/logs/artifacts", self._artifact_staging_dir),
+            ("/logs", self._logs_dir),
             ("/workspace", self._workspace),
             ("/tests", self._tests),
             ("/solution", self._solution),
@@ -1830,11 +2040,14 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
         if path is None:
             return self._workspace
         raw = str(path)
+        # Normalize logical spellings before choosing a role mapping, without
+        # following untrusted filesystem links through the virtual parent.
+        logical = str(PurePosixPath(raw))
         for remote, local in self._path_map():
-            if raw == remote:
+            if logical == remote:
                 return local
-            if raw.startswith(remote + "/"):
-                return local / raw[len(remote) + 1 :]
+            if logical.startswith(remote + "/"):
+                return local / logical[len(remote) + 1 :]
         if raw.startswith("~/"):
             return self._home / raw[2:]
         candidate = Path(raw)

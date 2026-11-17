@@ -65,7 +65,9 @@ class EvaluationService:
             return str(raw_errors)
 
         status = result.get("execution_status")
-        if status != "succeeded":
+        from skillevaluator.tier3.harbor.run_budget import budget_fully_denied
+
+        if status != "succeeded" and not (status == "skipped" and budget_fully_denied(result.get("budget"))):
             label = str(status or "unknown")
             return f"Tier 3 evaluation execution status is {label}"
         return None
@@ -76,11 +78,17 @@ class EvaluationService:
 
         return _create_dataset(options.skill_path, **options.engine_kwargs())
 
-    def create_autopilot_dataset(self, skill_path: Path, *, use_llm: bool) -> Path:
+    def create_autopilot_dataset(
+        self,
+        skill_path: Path,
+        *,
+        use_llm: bool,
+        fallback_reason: str | None = None,
+    ) -> Path:
         """Create one missing eval case for the CLI autopilot workflow."""
         from skillevaluator.tier3.generate_dataset import generate_one_case
 
-        return generate_one_case(skill_path, use_llm=use_llm)
+        return generate_one_case(skill_path, use_llm=use_llm, fallback_reason=fallback_reason)
 
     def discover_latest_results(self, skill_path: Path, results_dir: Path | None = None) -> Path | None:
         """Return the latest results directory for a skill, or None if absent.

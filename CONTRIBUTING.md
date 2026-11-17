@@ -11,6 +11,23 @@ Contributions are welcome through GitHub pull requests.
 - Run `make lint`, `make test`, and `make build` locally.
 - Update [CHANGELOG.md](CHANGELOG.md) when the change affects users.
 
+For environment setup, focused tests, documentation checks and the review
+workflow, read the [contributor guide](docs/developer-guide.mdx). For a runnable
+public skill and task, start with the [terminal starter](examples/starter/README.md).
+
+## Documentation And Example Contributions
+
+- Run every command you change against the documented release or checkout and
+  say which you tested. Do not claim support on platforms you did not verify.
+- Keep example inputs public and portable. Include expected-output checks and
+  label seeded failures and missing evidence; a fixture is not a live benchmark.
+- For this starter, run `uv run python scripts/demo_starter.py --output reports/contribution-demo`
+  and `uv run pytest tests/test_demo_starter.py`. Use a new output directory on
+  subsequent runs. Retain reports locally and summarize exactly what ran in
+  the pull request; do not commit generated reports or transcripts.
+- Validate docs with the pinned Fern CLI as described in the contributor guide.
+- Explain recovery from missing dependencies, credentials and incomplete runs.
+
 ## Pull Requests
 
 Use the pull request template, keep each pull request focused, and explain the
@@ -19,6 +36,9 @@ you confirm that you have the right to contribute it under the
 [Apache License 2.0](LICENSE).
 
 ## Signing Your Work
+
+The contribution requirement is the Developer Certificate of Origin (DCO)
+sign-off below, not a Contributor License Agreement (CLA).
 
 - We require that all contributors "sign-off" on their commits. This certifies
   that the contribution is your original work, or you have rights to submit it

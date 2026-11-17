@@ -29,14 +29,17 @@ from skillevaluator.provider_config import (
     effective_reasoning_effort,
 )
 from skillevaluator.tier3.eval_core.atif_helpers import (
+    _BEHAVIOR_EVIDENCE_GAP_HINT,
     _SECTION_COMPACT_TOOL_HISTORY,
     _SECTION_FINAL_RESPONSE,
     _SECTION_USER_REQUEST,
     _behavior_check_budget,
     _behavior_final_response_limit,
     _truncate_for_behavior,
+    behavior_evidence_gap,
 )
 from skillevaluator.tier3.eval_core.character_facts import append_character_facts
+from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors
 
 logger = logging.getLogger(__name__)
 
@@ -629,6 +632,13 @@ _ACCURACY_CRITERIA = (
         "if the response gives an answer and false if it gives none.",
     ),
 )
+_ACCURACY_DEDUCTION_SENTENCES = {
+    "ACTION_CORRECT": "The agent did not take the action the expected answer calls for",
+    "FACTUALLY_ACCURATE": "The answer's facts do not match the expected answer",
+    "TASK_ADDRESSED": "The answer does not address what the user asked",
+    "ACTIONABLE": "The answer does not give the user a result they can act on",
+    "FORMAT_FOLLOWED": "The answer does not follow the output format the question requires",
+}
 _ACCURACY_CRITERIA_KEYS = frozenset(key for key, _question in _ACCURACY_CRITERIA)
 
 ACCURACY_JSON_SCHEMA: dict[str, Any] = {
@@ -667,7 +677,7 @@ BEHAVIOR_CHECK_JSON_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "properties": {
                     "step": {"type": "integer"},
-                    "passed": {"type": "boolean"},
+                    "passed": {"type": ["boolean", "null"]},
                     "reason": {"type": "string"},
                 },
                 "required": ["step", "passed", "reason"],
@@ -694,6 +704,19 @@ If the evidence holds no answer to the question (for example, the agent stopped,
 refused), every criterion is false, unless the expected answer is itself a refusal.
 Be lenient on wording, but strict on factual correctness and on any output format the user \
 question explicitly requires.
+
+For FORMAT_FOLLOWED, judge the entire final response literally against only the format explicitly \
+required by the USER QUESTION, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+Wording leniency does not relax explicit format constraints.
 
 Respond with ONLY one JSON object with a "criteria" object holding exactly these five keys, each \
 true or false, and a one-sentence "reason". Do not include a score: it is computed from the criteria.
@@ -878,9 +901,33 @@ CONVERSATION:
 EXPECTED BEHAVIORS:
 {behaviors}
 
+For each numbered behavior, check only what that behavior requires.
+A format-only behavior does not require the answer's value to be factually correct: a wrong value \
+can still satisfy its format. If a behavior also requires factual correctness, evaluate that requirement too.
+For a behavior about final-response format, judge the entire final response literally against only \
+the stated format requirement, independently of factual correctness.
+When a FINAL RESPONSE section is supplied, its contents are the final answer; other section \
+headings, tool results, history, and artifacts are context, not part of that answer.
+Inspect every line of the final response, including text after an initially valid answer. \
+Line breaks do not end the final response. Do not mentally remove labels or Markdown fence characters \
+when checking the stated format.
+Do not extract a compliant answer from surrounding noncompliant text or substitute a correct \
+value from tool output or the expected answer.
+If only a number is required, extra prose, a label, or a code fence violates that requirement.
+Required prefixes, units, or prose are valid when they match the stated format.
+When the complete final response establishes a format violation, mark that behavior false; \
+keep null when missing or incomplete evidence prevents checking it.
+Before returning, ensure each passed value agrees with its reason: a reason establishing a violation \
+requires false, not true; an evidence gap that prevents checking requires null.
+
 Respond with ONLY one JSON object. "results" must hold exactly {expected_count} entries, one per \
 expected behavior: "step" is the behavior's number (each number from 1 to {expected_count} exactly \
-once), "passed" is true (observed) or false (not observed), and "reason" is under 15 words. Add a \
+once), "passed" is true (observed), false (evidence supports a violation or absence), or null \
+when missing or incomplete evidence prevents checking the behavior. Missing artifact contents, \
+unavailable tool output, or a truncated trace require null, NOT false, for checks that depend on \
+that evidence. A missing observation alone is not proof the behavior failed. Explain that evidence gap \
+in "reason" (under 15 words). An unrelated task \
+can be a valid negative control: evaluate its stated behavior without requiring skill use. Add a \
 one-sentence "summary". Do not include a score: it is computed from the results.
 Example of the shape for this task's {expected_count} behaviors (the values are only an illustration):
 {example}"""
@@ -983,8 +1030,14 @@ def _behavior_prompt_example(expected_count: int) -> str:
             "results": [
                 {
                     "step": step,
-                    "passed": step % 2 == 1,
-                    "reason": "Seen in the transcript." if step % 2 == 1 else "Not seen in the transcript.",
+                    "passed": None if step % 3 == 0 else step % 3 == 1,
+                    "reason": (
+                        "Required tool output was not captured."
+                        if step % 3 == 0
+                        else "Seen in the transcript."
+                        if step % 3 == 1
+                        else "Observed output violates the requirement."
+                    ),
                 }
                 for step in range(1, expected_count + 1)
             ],
@@ -996,16 +1049,40 @@ def _behavior_prompt_example(expected_count: int) -> str:
 def judge_behavior_check(
     conversation_text: str,
     expected_behaviors: list[str],
+    *,
+    evidence_omitted: dict[str, Any] | None = None,
     **kwargs: Any,
 ) -> dict[str, Any]:
-    """Run the behavior check LLM judge; the score is the share of behaviors observed."""
+    """Run the behavior check LLM judge; the score is the share of behaviors observed.
+
+    *evidence_omitted* is the behavior_check bundle's omission accounting. When
+    it reports that required evidence did not reach the judge, no model is
+    called and an explicit evaluation error is returned with no score: grading
+    a shortened final answer scores the evidence loss, not the agent.
+    """
+    expected_behaviors = normalize_expected_behaviors(expected_behaviors)
     if not _has_judge_reference(expected_behaviors):
         return _judge_not_applicable(_NO_EXPECTED_BEHAVIOR_REASON, results=[])
 
     expected_count = len(expected_behaviors)
     behaviors_text = "\n".join(f"{i + 1}. {b}" for i, b in enumerate(expected_behaviors))
 
+    gap = behavior_evidence_gap(evidence_omitted)
+    if gap:
+        return _judge_error(gap, results=[], expectations=_behavior_expectations(expected_behaviors, [], gap))
+
     conversation = _compact_behavior_conversation(conversation_text)
+    if evidence_omitted is not None and conversation != conversation_text:
+        # The bundle is built to fit this budget, so a second cut here would
+        # drop evidence nothing has accounted for. Refuse rather than score it.
+        second_cut = (
+            "behavior_check evidence was shortened again inside the judge, past the omission accounting. "
+            f"{_BEHAVIOR_EVIDENCE_GAP_HINT}"
+        )
+        return _judge_error(
+            second_cut, results=[], expectations=_behavior_expectations(expected_behaviors, [], second_cut)
+        )
+
     prompt = BEHAVIOR_CHECK_PROMPT.format(
         conversation=conversation,
         behaviors=behaviors_text,
@@ -1028,32 +1105,55 @@ def judge_behavior_check(
             return None
         return candidate
 
-    parsed, error, _provenance = _call_validated_json_judge(
-        prompt,
-        lambda payload: _behavior_payload_error(payload, expected_count),
-        call_public_llm,
-        _extract_json,
-        salvage=salvage,
-        **kwargs,
-    )
+    try:
+        parsed, error, _provenance = _call_validated_json_judge(
+            prompt,
+            lambda payload: _behavior_payload_error(payload, expected_count),
+            call_public_llm,
+            _extract_json,
+            salvage=salvage,
+            **kwargs,
+        )
+    except Exception as exc:
+        error = f"Required behavior_check judge raised {type(exc).__name__}: {exc}"
     if error:
-        return _judge_error(error, results=[])
+        return _judge_error(error, results=[], expectations=_behavior_expectations(expected_behaviors, [], error))
 
-    # A salvaged reply leaves the behaviors after the cut unjudged; they count as not observed.
+    # Keep the conservative score denominator without calling missing verdicts failures.
     results = sorted(parsed["results"], key=lambda result: result["step"])
     score = sum(1 for result in results if result["passed"]) / expected_count
     return {
         "score": round(score, 4),
         "reason": parsed.get("summary", ""),
         "results": results,
+        "expectations": _behavior_expectations(expected_behaviors, results),
     }
+
+
+def _behavior_expectations(
+    expected_behaviors: list[str], results: list[dict[str, Any]], error: str = ""
+) -> list[dict[str, Any]]:
+    by_step = {result["step"]: result for result in results}
+    return [
+        {
+            "step": step,
+            "requirement": requirement,
+            "status": ("met" if by_step[step]["passed"] else "unmet")
+            if step in by_step and type(by_step[step]["passed"]) is bool
+            else "not_checked",
+            "reason": by_step[step].get("reason", "")
+            if step in by_step
+            else _redact_configured_credentials(error) or "No judgment returned for this expectation",
+        }
+        for step, requirement in enumerate(expected_behaviors, 1)
+    ]
 
 
 def _behavior_payload_error(parsed: Any, expected_count: int, *, allow_partial: bool = False) -> str | None:
     """Describe what is wrong with a behavior reply, or return ``None`` when it is usable.
 
     Each expected behavior is judged exactly once, identified by its 1-based
-    ``step`` number, with a boolean ``passed``. *allow_partial* accepts a
+    ``step`` number, with a boolean ``passed`` or an explicit null abstention. *allow_partial* accepts a
     salvaged prefix that judges each of its steps once. The score is computed
     from the verdicts, so a ``score`` field in the reply is ignored.
     """
@@ -1069,8 +1169,16 @@ def _behavior_payload_error(parsed: Any, expected_count: int, *, allow_partial: 
         return f'"results" has {len(results)} entries; it needs exactly {expected_count}, one per behavior'
     if any(not isinstance(result, dict) for result in results):
         return 'every "results" entry must be an object'
-    if any(not isinstance(result.get("passed"), bool) for result in results):
-        return 'every "results" entry needs "passed" set to true or false'
+    if any(
+        "passed" not in result or (result["passed"] is not None and type(result["passed"]) is not bool)
+        for result in results
+    ):
+        return 'every "results" entry needs "passed" set to true, false, or null'
+    if any(
+        result["passed"] is None and (not isinstance(result.get("reason"), str) or not result["reason"].strip())
+        for result in results
+    ):
+        return 'unchecked entries need a nonempty "reason" explaining the missing evidence'
     steps = [result.get("step") for result in results]
     if any(isinstance(step, bool) or not isinstance(step, int) for step in steps):
         return 'every "results" entry needs an integer "step" number'

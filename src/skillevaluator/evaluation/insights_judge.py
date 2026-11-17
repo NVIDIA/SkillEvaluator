@@ -19,6 +19,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections.abc import Iterable
 from typing import Any
 
 from skillevaluator.constants import (
@@ -30,6 +31,7 @@ from skillevaluator.constants import (
     INSIGHTS_JUDGE_REASONING_EFFORT,
     INSIGHTS_JUDGE_TEMPERATURE,
 )
+from skillevaluator.evaluation.dataset_case_removal import negated_before, removes_dataset_case
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.inference.diagnostics import safe_llm_model
 from skillevaluator.logging_config import get_logger
@@ -65,6 +67,36 @@ _NEGATIVE_CONTROL_SEMANTIC_PATTERNS = (
         r"\b(?:unrelated|out[\s-]*of[\s-]*scope)\b.{0,48}\b(?:work|task|request|skill|capability)\b", re.IGNORECASE
     ),
 )
+
+
+_REQUIREMENT_NOUN = (
+    r"(?:expectations?|expected(?:\s+(?:output|answer|result))?|assertions?|ground[\s_-]*truth|"
+    r"pass[\s_-]*thresholds?|thresholds?|requirements?|criteria)"
+)
+# "Remove the expected output mismatch" fixes a failure; it does not remove the requirement itself.
+_NOT_FAILURE_OF_REQUIREMENT = r"(?!(?:\s+(?:output|answer|result))?\s+(?:mismatch(?:es)?|failures?|violations?)\b)"
+_WEAKENING_VERB = (
+    r"(?:loosen(?:s|ed|ing)?|relax(?:es|ed|ing)?|weaken(?:s|ed|ing)?|lower(?:s|ed|ing)?|soften(?:s|ed|ing)?|"
+    r"remov(?:e[sd]?|ing)|drop(?:s|ped|ping)?|delet(?:e[sd]?|ing)|skip(?:s|ped|ping)?|disabl(?:e[sd]?|ing))"
+)
+_REQUIREMENT_DETERMINER = (
+    r"(?:the|a|an|my|your|our|their|its|this|that|these|those|any|each|every|all|both|"
+    r"[A-Za-z0-9_-]+(?:'s|\u2019s))"
+)
+_WEAKENING_PATTERN = re.compile(
+    rf"\b{_WEAKENING_VERB}\b(?:\s+{_REQUIREMENT_DETERMINER}){{0,3}}\s+"
+    rf"(?:`?[A-Za-z0-9_-]+`?\s+)?{_REQUIREMENT_NOUN}\b{_NOT_FAILURE_OF_REQUIREMENT}",
+    re.IGNORECASE,
+)
+_PASSIVE_WEAKENING_PATTERN = re.compile(
+    rf"\b{_REQUIREMENT_NOUN}\b{_NOT_FAILURE_OF_REQUIREMENT}[\w\s,'\u2019_-]{{0,48}}\b"
+    rf"(?:is|are|was|were|be|been|being|should\s+be|must\s+be|ought\s+to\s+be|will\s+be)\s+"
+    rf"{_WEAKENING_VERB}\b",
+    re.IGNORECASE,
+)
+
+# Inline-code ticks and quotes must not hide a name: "Remove the `expectation`" is still a removal.
+_QUOTE_PATTERN = re.compile(r"[`\"\u201c\u201d]|(?<!\w)['\u2018\u2019]|['\u2018\u2019](?!\w)")
 
 
 _SYSTEM_PROMPT = """\
@@ -128,6 +160,14 @@ an error message, or a comparison).
 RECOMMENDATIONS (up to {max_recommendations}): concrete, actionable next
 steps for the skill author. Each must be one short imperative sentence.
 Tag each with a category from this set: {categories}.
+- Make each recommendation a distinct action; do not restate a
+  deterministic recommendation or another recommendation in other words.
+- Never recommend loosening, relaxing, or lowering an expectation,
+  assertion, ground truth, or pass threshold so that a failing agent passes.
+- Recommend a different agent or model only when the supplied trials compare
+  agents; otherwise phrase it as an experiment to try ("Try ... to test
+  whether ..."). Phrase any cause the evidence does not establish the same
+  way.
 
 SEVERITY: tag every conclusion and recommendation with one of:
 - \"pass\"   - positive observation / low-effort recommendation
@@ -439,6 +479,22 @@ def _text_case_ids(text: str, known_case_ids: set[str]) -> set[str]:
     return references
 
 
+def _weakens_requirements(text: str, case_ids: Iterable[object] = ()) -> bool:
+    """True when advice removes or weakens a dataset requirement or takes a dataset case out of the dataset.
+
+    ``case_ids`` are the ids of the dataset cases the advice may name; see :func:`removes_dataset_case`.
+    """
+    text = _QUOTE_PATTERN.sub("", text)
+    for pattern in (_WEAKENING_PATTERN, _PASSIVE_WEAKENING_PATTERN):
+        if any(not negated_before(text, match.start()) for match in pattern.finditer(text)):
+            return True
+    return removes_dataset_case(text, case_ids)
+
+
+def _normalized_text(text: object) -> str:
+    return " ".join(str(text or "").lower().split())
+
+
 def _has_negative_control_semantics(text: str) -> bool:
     return any(pattern.search(text) for pattern in _NEGATIVE_CONTROL_SEMANTIC_PATTERNS)
 
@@ -536,6 +592,7 @@ class InsightsJudge(LLMClient):
             raise ValueError(f"Expected JSON object, got {type(data).__name__}")
         canonical = kwargs.get("canonical") if isinstance(kwargs.get("canonical"), dict) else {}
         grounding = _negative_control_grounding(canonical)
+        known_case_ids = tuple(grounding[1])
         # Each entry names the model that wrote it, which on the native
         # Anthropic API can be the server-side fallback.
         provenance = {"model": safe_llm_model(self.model_used)} if self.model_used else {}
@@ -562,6 +619,8 @@ class InsightsJudge(LLMClient):
                 }
             )
 
+        deterministic = kwargs.get("deterministic") if isinstance(kwargs.get("deterministic"), dict) else {}
+        seen_messages = {_normalized_text(text) for text in deterministic.get("suggestions") or []}
         recommendations: list[dict] = []
         for item in (data.get("recommendations") or [])[:INSIGHTS_JUDGE_MAX_RECOMMENDATIONS]:
             if not isinstance(item, dict):
@@ -572,6 +631,11 @@ class InsightsJudge(LLMClient):
             message = (item.get("message") or "").strip()
             if not title and not message:
                 continue
+            if _weakens_requirements(title, known_case_ids) or _weakens_requirements(message, known_case_ids):
+                continue
+            if (key := _normalized_text(message or title)) in seen_messages:
+                continue
+            seen_messages.add(key)
             recommendations.append(
                 {
                     "claim_type": item["claim_type"],

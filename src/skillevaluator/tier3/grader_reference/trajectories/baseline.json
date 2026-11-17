@@ -1,0 +1,14 @@
+{
+  "schema_version": "1.0",
+  "session_id": "baseline",
+  "steps": [
+    {
+      "source": "user",
+      "message": "Use calculator to compute 2 + 3 * 4. Return only the numeric answer."
+    },
+    {
+      "source": "agent",
+      "message": "14"
+    }
+  ]
+}

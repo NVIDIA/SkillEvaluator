@@ -19,14 +19,18 @@ from skillevaluator.constants import (
     DIMENSION_MAPPING,
     DIMENSION_VERDICT_NEUTRAL_THRESHOLD,
     DIMENSION_VERDICT_PASS_THRESHOLD,
+    SIGNAL_EVIDENCE_SOURCES,
     TIER3_LIFT_FAIL_THRESHOLD,
     TIER3_LIFT_PASS_THRESHOLD,
 )
 from skillevaluator.publication_evidence import result_has_publication_evidence, result_publication_evidence
 from skillevaluator.publication_text import publication_confusable_skeleton
 from skillevaluator.reporting.base import (
+    AgentDimensionGate,
     PublicationTargetIdentity,
     ReporterBase,
+    agent_eval_baseline_not_applicable,
+    agent_eval_dimension_breakdown,
     agent_eval_dimension_verdict,
     agent_eval_publication_dataset_provenance,
     agent_eval_publication_evaluated_at,
@@ -49,18 +53,41 @@ from skillevaluator.reporting.base import (
     tier1_unscanned_publication_paths,
     unrecognized_tier2_results,
 )
+from skillevaluator.reporting.declarative_coverage import (
+    DENOMINATOR_NOTE,
+    attempt_denominators,
+    check_status,
+    coverage_summary,
+    declarative_coverage_groups,
+)
 from skillevaluator.reporting.run_status import resolve_run_status
-from skillevaluator.reporting.tier3_scope import completed_agent_result, validate_report_scope
+from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION, pass_at_k_summary
+from skillevaluator.reporting.tier3_coverage import IncompleteArm, incomplete_arms
+from skillevaluator.reporting.tier3_scope import (
+    completed_agent_result,
+    tolerated_baseline_agents,
+    validate_report_scope,
+)
+from skillevaluator.reporting.tier3_token_usage import token_usage_markdown_lines
 from skillevaluator.source_identity import evaluated_source_revision, recorded_evaluated_source
+from skillevaluator.tier3.baseline_store import baseline_description
+from skillevaluator.tier3.dataset_provenance import dataset_provenance_display
+from skillevaluator.tier3.evidence_volume import format_evidence_volume
+from skillevaluator.tier3.version_comparison import version_comparison_lines
 from skillevaluator.tier3_environments import HARBOR_ENV_MODES
 
 if TYPE_CHECKING:
     from skillevaluator.models import Finding, ValidationResult
+    from skillevaluator.reporting.base import PublicationAssessment
 
 
 # These fields are empty because the orchestration input did not supply them,
 # which is a different cause from the legacy/non-live wording used elsewhere.
 _SOURCE_UNRECORDED = "not recorded (not supplied by the orchestration input)"
+# Case rows of the token usage table. The card has a size limit; the JSON payload keeps every case.
+_MAX_TOKEN_USAGE_CASE_ROWS = 50
+# The card's uppercase vocabulary for one shared publication assessment status.
+_ASSESSMENT_STATUSES = {"pass": "PASS", "neutral": "NEUTRAL", "fail": "FAIL", "incomplete": "INCOMPLETE"}
 
 _SIGNAL_DESCRIPTIONS = {
     "security": "unsafe operations, secret leakage, and unauthorized access",
@@ -136,12 +163,17 @@ class BenchmarkReporter(ReporterBase):
         max_findings_shown: int = 5,
         skill_name: str | None = None,
         report_scope: str = "publication",
+        evaluator_version: str | None = None,
     ) -> None:
         self.include_timestamp = include_timestamp
         self.max_findings_shown = max_findings_shown
         validate_report_scope(report_scope, [])
         self.report_scope = report_scope
         self.skill_name = skill_name
+        # The version of the evaluator writing this card. A version recorded in
+        # the Tier 3 payload still wins, because that is the build that ran the
+        # live evaluation; this fills in a run without one, such as Tier 1 only.
+        self.evaluator_version = evaluator_version
 
     @property
     def name(self) -> str:
@@ -170,20 +202,41 @@ class BenchmarkReporter(ReporterBase):
         skill_name = _publication_safe_skill_name(display_skill_name)
         private_labels = _private_environment_labels(ae)
         policy = _benchmark_policy(results, ae, expected_skill_name=expected_skill_name)
-        status = _overall_status(results, ae, policy, expected_skill_name=expected_skill_name)
+        # One assessment decides the verdict and explains it, so the rendered
+        # evidence cannot drift from the status printed above it.
+        assessment = _publication_assessment(results, ae, expected_skill_name=expected_skill_name)
+        status = _assessment_status(assessment)
 
-        lines: list[str] = [
-            f"# Skill Benchmark: {skill_name}",
-            "",
-            (
+        budget = ae.get("budget") if isinstance(ae, dict) else None
+        budget_reason = None
+        if isinstance(budget, dict):
+            from skillevaluator.tier3.harbor.run_budget import budget_incomplete_reason, budget_line
+
+            budget_reason = budget_incomplete_reason(budget)
+        if budget_reason:
+            tier3_callout = f"> **Tier 3: INCOMPLETE** — {budget_reason}"
+        else:
+            tier3_callout = (
                 f"> **Tier 3 completed-agent result: {completed['verdict'].upper()}**"
+                + (
+                    f" — {_publication_safe_inline(completed['reason'], private_labels)}"
+                    if completed and completed.get("reason")
+                    else ""
+                )
                 if completed
                 else "> **Tier 3: No complete agent result**"
             )
+        lines: list[str] = (
+            [tier3_callout, "", f"# Skill Benchmark: {skill_name}", ""]
             if self.report_scope == "tier3"
-            else _verdict_callout(status),
-            "",
-        ]
+            else [
+                f"# Skill Benchmark: {skill_name}",
+                "",
+                _verdict_callout(status),
+                "",
+                *_verdict_evidence_lines(status, assessment, ae, private_labels),
+            ]
+        )
         if self.report_scope == "tier3":
             lines.extend(
                 [
@@ -225,24 +278,47 @@ class BenchmarkReporter(ReporterBase):
                 ]
             )
 
+        if budget_reason and self.report_scope != "tier3":
+            lines.extend([tier3_callout, ""])
+        if isinstance(budget, dict):
+            lines.extend([f"> {budget_line(budget, agents=ae.get('agents'))}", ""])
+
+        tolerated_lines = []
+        for tolerated in tolerated_baseline_agents(ae):
+            scored, expected = tolerated["scored_attempts"], tolerated["expected_attempts"]
+            counts = f" ({scored} of {expected} attempts scored)" if scored is not None and expected is not None else ""
+            tolerated_lines.append(
+                f"Baseline incomplete for **{_publication_safe_inline(tolerated['name'], private_labels)}**"
+                f"{counts}: kept by `--tolerate-baseline-timeouts`, so its baseline and uplift are not reported."
+            )
         if completed and (self.report_scope == "tier3" or completed["needs_attention"]):
             lines.append(
-                f"Completed agent: **{_publication_safe_inline(completed['name'], private_labels)}**; "
+                f"{'Admitted-attempt agent' if budget_reason else 'Completed agent'}: "
+                f"**{_publication_safe_inline(completed['name'], private_labels)}**; "
                 f"score **{completed['score']:.4f}** ({completed['score'] * 100:.2f}%)."
             )
             if completed["lift"] is not None:
                 lines.append(
-                    f"Same-agent comparable lift: **{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
+                    f"Skill Lift{' (admitted attempts only)' if budget_reason else ''}: "
+                    f"**{completed['lift']:+.4f}** ({completed['lift'] * 100:+.2f} percentage points)."
                 )
+                lines.append(SKILL_LIFT_DEFINITION)
+            if pass_summary := pass_at_k_summary((ae or {}).get("pass_at_k"), (ae or {}).get("attempt_policy")):
+                lines.extend([pass_summary, ""])
             if completed["needs_attention"]:
                 lines.append(
                     "**Needs attention:** other execution failures remain. This completed-agent result does not certify the whole run."
                 )
+            lines.extend(tolerated_lines)
             if completed["recovered_attempts"]:
                 lines.append(
                     f"Recovered timeout attempts: {completed['recovered_attempts']}; failed history is retained and excluded from scoring."
                 )
             lines.append("")
+        elif tolerated_lines:
+            # No completed-agent result (for example, a cost limit left the
+            # best agent's coverage short), but the tolerated baselines remain.
+            lines.extend(["**Needs attention:** baseline timeouts were tolerated.", *tolerated_lines, ""])
         self._render_metadata(
             lines,
             results,
@@ -254,6 +330,36 @@ class BenchmarkReporter(ReporterBase):
         )
         self._render_report_purpose(lines)
         self._render_results_at_a_glance(lines, ae, private_labels)
+        lines.extend(_agent_coverage_lines(ae, private_labels))
+        lines.extend(_token_usage_lines(ae, private_labels))
+        groups = declarative_coverage_groups((ae or {}).get("agents"))
+        if groups:
+            lines.extend(["## Declarative-check coverage", "", DENOMINATOR_NOTE, ""])
+            for group in groups:
+                lines.extend(
+                    [
+                        f"### {_md_cell(group['agent'], private_labels)} / {group['arm']}",
+                        "",
+                        coverage_summary(group),
+                        "",
+                        "Per-reward denominators: " + _md_cell(attempt_denominators(group), private_labels),
+                        "",
+                        "| Case / trial | Check | Expected | Status | Reason |",
+                        "| --- | --- | --- | --- | --- |",
+                    ]
+                )
+                for item in group["results"]:
+                    values = (
+                        item["case_id"],
+                        item["trial_id"],
+                        item["type"],
+                        item["expected"],
+                        check_status(item),
+                        item["reason"],
+                    )
+                    case, trial, *evidence = (_md_cell(value, private_labels) for value in values)
+                    lines.append("| " + " | ".join([f"{case} / {trial}", *evidence]) + " |")
+                lines.append("")
         self._render_tier_status(
             lines,
             results,
@@ -325,7 +431,7 @@ class BenchmarkReporter(ReporterBase):
 
         summary = _mapping((ae or {}).get("summary"))
         version = _first_publication_safe_label(
-            ((ae or {}).get("evaluator_version"), summary.get("evaluator_version")),
+            ((ae or {}).get("evaluator_version"), summary.get("evaluator_version"), self.evaluator_version),
         )
         lines.append(
             f"- Evaluator version: `{version}`"
@@ -373,11 +479,28 @@ class BenchmarkReporter(ReporterBase):
                 lines.append("- Agents: not recorded (legacy or non-live result)")
 
         dataset_summary = _dataset_summary(ae)
-        if dataset_summary["total_tasks"] > 0:
+        has_dataset_tasks = dataset_summary["total_tasks"] > 0 and dataset_summary["source"] != "unavailable"
+        if has_dataset_tasks:
             composition = _dataset_composition_label(dataset_summary)
             lines.append(f"- Tasks: {dataset_summary['total_tasks']} evaluation tasks{composition}")
+            sufficiency = ae.get("dataset_sufficiency") if isinstance(ae, dict) else None
+            if isinstance(sufficiency, dict):
+                coverage_summary = _safe_scalar_text(sufficiency.get("coverage_summary"))
+                lines.append(
+                    f"- {coverage_summary}"
+                    if coverage_summary
+                    else f"- Dataset sufficiency: {sufficiency.get('status', 'provisional')} — "
+                    f"{_safe_scalar_text(sufficiency.get('reason')) or 'Dataset sufficiency is provisional'}"
+                )
         else:
             lines.append("- Tasks: not recorded (legacy or non-live result)")
+        evidence_line = format_evidence_volume((ae or {}).get("evidence_volume"))
+        if evidence_line:
+            lines.append(f"- Evidence volume: {evidence_line}.")
+
+        dataset_line, _ = dataset_provenance_display(ae.get("dataset_provenance") if ae else None)
+        if dataset_line:
+            lines.append(f"- {_publication_safe_inline(dataset_line)}")
 
         dataset_provenance = agent_eval_publication_dataset_provenance(ae)
         if dataset_provenance is not None:
@@ -397,6 +520,10 @@ class BenchmarkReporter(ReporterBase):
             if tier3_run_id
             else "- Tier 3 run ID: not recorded (Tier 3 did not complete)"
         )
+        if baseline := _mapping((ae or {}).get("baseline")):
+            lines.append(f"- {_publication_safe_inline(baseline_description(baseline))}")
+        if comparison := _mapping((ae or {}).get("prior_version_comparison")):
+            lines.extend(f"- {_publication_safe_inline(line)}" for line in version_comparison_lines(comparison))
 
         policy = _mapping((ae or {}).get("attempt_policy"))
         attempts = _nonnegative_int(policy.get("max_attempts"))
@@ -449,7 +576,7 @@ class BenchmarkReporter(ReporterBase):
         private_labels: tuple[str, ...],
     ) -> None:
         lines.extend(["## Results at a Glance", ""])
-        agents = _agents(ae)
+        agents = {name: _with_incomplete_baseline(agent) for name, agent in _agents(ae).items()}
         if not agents:
             lines.extend(
                 [
@@ -466,16 +593,99 @@ class BenchmarkReporter(ReporterBase):
         lines.append("| " + " | ".join(_md_cell(header, private_labels) for header in headers) + " |")
         lines.append("|---|" + "|".join(["---:"] * len(agents)) + "|")
 
+        baseline_only = (ae or {}).get("mode") == "baseline_only"
         overall_row = ["Overall"]
-        overall_row.extend(
-            _score_transition_values(
-                agent.get("baseline"),
-                agent.get("with_skill", agent.get("overall_score")),
-                skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+        shared_basis_agents: dict[tuple[str, ...], list[str]] = {}
+        for name, agent in agents.items():
+            with_skill = agent.get("with_skill", agent.get("overall_score"))
+            baseline = agent.get("baseline")
+            lift_overall = _mapping(agent.get("lift_overall"))
+            if (
+                not baseline_only
+                and _number(lift_overall.get("with_skill")) is not None
+                and _number(lift_overall.get("baseline")) is not None
+            ):
+                # Show the scores the published lift subtracts so the row matches it.
+                if _number(lift_overall["with_skill"]) != _number(with_skill) or _number(
+                    lift_overall["baseline"]
+                ) != _number(baseline):
+                    basis = _mapping(agent.get("lift_basis"))
+                    excluded_metrics = basis.get("excluded_metrics")
+                    excluded_cases = basis.get("excluded_cases")
+                    causes = []
+                    if isinstance(excluded_metrics, list) and any(
+                        _mapping(item).get("reason") == "not_applicable" for item in excluded_metrics
+                    ):
+                        causes.append("dimensions only one arm scored")
+                    if isinstance(excluded_cases, list) and any(
+                        _mapping(item).get("reason") == "judge_mixed" for item in excluded_cases
+                    ):
+                        causes.append("cases judged by different models")
+                    shared_basis_agents.setdefault(tuple(causes), []).append(name)
+                with_skill, baseline = lift_overall["with_skill"], lift_overall["baseline"]
+            overall_row.append(
+                _score_transition_values(
+                    baseline,
+                    with_skill,
+                    skill_never_activated=_mapping(agent.get("skill_activation")).get("status") == "never_activated",
+                    baseline_only=baseline_only,
+                )
             )
-            for agent in agents.values()
-        )
         lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in overall_row) + " |")
+
+        for label, field, numerator in (
+            ("Required checks passed", "required_checks", "passed"),
+            ("Goals met", "correct_answers", "correct"),
+            ("Security clean", "security_clean", "clean"),
+        ):
+            row = [label]
+            for agent in agents.values():
+                comparison = agent.get(field)
+                with_skill = comparison.get("with_skill") if isinstance(comparison, dict) else None
+                without_skill = comparison.get("without_skill") if isinstance(comparison, dict) else None
+                difference = comparison.get("difference") if isinstance(comparison, dict) else None
+                with_counts = (
+                    (with_skill.get(numerator), with_skill.get("scored")) if isinstance(with_skill, dict) else ()
+                )
+                without_counts = (
+                    (without_skill.get(numerator), without_skill.get("scored"))
+                    if isinstance(without_skill, dict)
+                    else ()
+                )
+                valid_with = (
+                    len(with_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0 for count in with_counts
+                    )
+                    and with_counts[1] > 0
+                )
+                valid_without = (
+                    len(without_counts) == 2
+                    and all(
+                        isinstance(count, int) and not isinstance(count, bool) and count >= 0
+                        for count in without_counts
+                    )
+                    and without_counts[1] > 0
+                )
+                if valid_with and valid_without:
+                    if comparison.get("difference_unit") == "percentage_points":
+                        delta = (
+                            f"{difference:+.1f} pp"
+                            if isinstance(difference, int | float) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    else:
+                        delta = (
+                            f"{difference:+d}"
+                            if isinstance(difference, int) and not isinstance(difference, bool)
+                            else "N/A"
+                        )
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | {without_counts[0]}/{without_counts[1]} | {delta}")
+                elif valid_with:
+                    row.append(f"{with_counts[0]}/{with_counts[1]} | N/A | N/A")
+                else:
+                    row.append("N/A")
+            lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
 
         has_partial = False
         for dim_id in DIMENSION_MAPPING:
@@ -485,14 +695,65 @@ class BenchmarkReporter(ReporterBase):
                 if dimension and dimension.get("partial"):
                     has_partial = True
                 row.append(
-                    _score_transition(
-                        dimension,
+                    _dimension_cell(
+                        agent,
+                        dim_id,
                         skill_never_activated=(
                             _mapping(agent.get("skill_activation")).get("status") == "never_activated"
                         ),
+                        baseline_only=baseline_only,
                     )
                 )
             lines.append("| " + " | ".join(_md_cell(value, private_labels) for value in row) + " |")
+
+        failed_cases: list[tuple[str, object, str]] = []
+        warning_cases: list[tuple[str, str]] = []
+        for agent_name, agent in agents.items():
+            pass_at_k = _mapping(agent.get("pass_at_k"))
+            with_skill = _mapping(pass_at_k.get("with_skill"))
+            cases = _mapping(with_skill.get("cases"))
+            for case_id, case in cases.items():
+                if not isinstance(case, dict):
+                    continue
+                label = f"{agent_name}: {case_id}" if len(agents) > 1 else str(case_id)
+                attempts = case.get("attempts") if isinstance(case.get("attempts"), list) else []
+                if case.get("passed") is False and case.get("attempts_used", 0) > 0:
+                    reason = case.get("reason") or next(
+                        (
+                            attempt.get("reason")
+                            for attempt in attempts
+                            if isinstance(attempt, dict) and not attempt.get("passed") and attempt.get("reason")
+                        ),
+                        "required check failed",
+                    )
+                    failed_cases.append((label, case.get("best_score"), str(reason)))
+                warning_cases.extend(
+                    (label, str(warning))
+                    for warning in case.get("warnings", [])
+                    if isinstance(warning, str) and warning.strip()
+                )
+        if failed_cases:
+            lines.extend(["", "### Failed cases", "", "| Case | Score | Reason |", "|---|---:|---|"])
+            for case_id, score, reason in failed_cases:
+                score_text = f"{score:.2f}" if isinstance(score, int | float) and not isinstance(score, bool) else "N/A"
+                lines.append(
+                    "| "
+                    + " | ".join(
+                        (
+                            _md_cell(case_id, private_labels),
+                            _md_cell(score_text, private_labels),
+                            _md_cell(_publication_safe_inline(reason, private_labels), private_labels),
+                        )
+                    )
+                    + " |"
+                )
+        if warning_cases:
+            lines.extend(["", "### Warnings", ""])
+            lines.extend(
+                f"- **{_publication_safe_inline(case_id, private_labels)}**: "
+                f"{_publication_safe_inline(warning, private_labels)}"
+                for case_id, warning in warning_cases
+            )
 
         lines.extend(
             [
@@ -509,8 +770,43 @@ class BenchmarkReporter(ReporterBase):
                     "45.0 percentage points above its 47.0% no-skill baseline."
                 ),
                 "",
+                (
+                    "**Not scored** means a signal the dimension needs produced no score, and **Not applicable** "
+                    "means no eval case gave its signals anything to judge; neither is a score of zero. "
+                    "Scoring Methodology below explains each dimension and where its evidence comes from."
+                ),
+                "",
             ]
         )
+        if shared_basis_agents:
+            for causes, names in shared_basis_agents.items():
+                if causes == ("dimensions only one arm scored",):
+                    explanation = (
+                        "compares only the dimensions both arms scored, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can also include dimensions only one arm scored"
+                    )
+                elif causes == ("cases judged by different models",):
+                    explanation = (
+                        "compares cases judged by the same model in both arms, matching the published Skill Lift; "
+                        "the detailed report's Overall scores can include cases judged by different models"
+                    )
+                elif causes:
+                    explanation = (
+                        "uses the dimensions both arms scored and cases judged by the same model, matching the "
+                        "published Skill Lift; the detailed report's Overall scores can include other dimensions "
+                        "or cases"
+                    )
+                else:
+                    explanation = (
+                        "uses the shared comparison basis for the published Skill Lift; the detailed report's "
+                        "arm Overall scores can differ"
+                    )
+                lines.extend(
+                    [
+                        _md_cell("Overall for " + ", ".join(names) + " " + explanation + ".", private_labels),
+                        "",
+                    ]
+                )
         if has_partial:
             lines.extend(
                 [
@@ -568,6 +864,8 @@ class BenchmarkReporter(ReporterBase):
                     evidence = "Completed-agent quality result; publication not assessed"
                     if completed["needs_attention"]:
                         evidence += "; other execution failures need attention"
+            if tier == "Tier 3" and tier_results and (incomplete := _incomplete_arm_evidence(ae, private_labels)):
+                evidence = f"{evidence}; {incomplete}"
             lines.append(f"| {tier} | {purpose} | **{status}** | {_md_cell(evidence, private_labels)} |")
         lines.append("")
 
@@ -687,14 +985,29 @@ class BenchmarkReporter(ReporterBase):
                 "<details>",
                 "<summary>Show dimension definitions, source signals, and thresholds</summary>",
                 "",
-                "| Dimension | Question | Scored signals |",
-                "|---|---|---|",
+                "| Dimension | What it measures | Scored signals | Evidence source | Baseline in this run |",
+                "|---|---|---|---|---|",
             ]
         )
+        agents = _agents(ae)
+        baseline_only = (ae or {}).get("mode") == "baseline_only"
         for dim_id, config in DIMENSION_MAPPING.items():
             signals = _weighted_signals(config)
-            question = config.get("question") or DIMENSION_HINTS.get(dim_id, "")
-            lines.append(f"| {dim_id.title()} | {_trusted_md_cell(question)} | {_trusted_md_cell(signals)} |")
+            meaning = " ".join(
+                part for part in (config.get("question"), DIMENSION_HINTS.get(dim_id)) if isinstance(part, str) and part
+            )
+            evidence = "; ".join(
+                dict.fromkeys(
+                    SIGNAL_EVIDENCE_SOURCES[signal]
+                    for signal in config.get("evaluators", [])
+                    if signal in SIGNAL_EVIDENCE_SOURCES
+                )
+            )
+            baseline = _baseline_coverage(agents, dim_id, baseline_only=baseline_only)
+            lines.append(
+                f"| {dim_id.title()} | {_trusted_md_cell(meaning)} | {_trusted_md_cell(signals)} | "
+                f"{_trusted_md_cell(evidence[:1].upper() + evidence[1:])} | {_trusted_md_cell(baseline)} |"
+            )
 
         lines.extend(
             [
@@ -709,7 +1022,11 @@ class BenchmarkReporter(ReporterBase):
                 ),
                 (
                     "- Overall verdict: PASS only when every configured dimension passes for at least one "
-                    "supported agent. Lift is reported as diagnostic evidence and does not override this gate."
+                    "supported agent, with no with-skill case failing a required goal-accuracy or security check. "
+                    "A scored unmet goal or security issue in any attempt fails its case and that agent's quality "
+                    "verdict, even if all dimensions pass. "
+                    "Baseline-arm required-check failures do not change this quality verdict. "
+                    "Lift is reported as diagnostic evidence and does not override this gate."
                 ),
             ]
         )
@@ -728,6 +1045,40 @@ class BenchmarkReporter(ReporterBase):
                 (
                     "- Token efficiency is a separate report-only signal. It does not change a dimension "
                     "score or the overall verdict."
+                ),
+                (
+                    "- The baseline is the same eval cases run by the same agent without the skill. Every "
+                    "dimension is compared with it when the baseline arm ran and scored that dimension."
+                ),
+                "",
+                "Which number answers which question:",
+                "",
+                (
+                    "- **Overall verdict** (top of this card): whether the evidence supports publishing the skill. "
+                    "It needs every required tier, not only Tier 3 scores."
+                ),
+                (
+                    "- **Dimension score**: how well the agent did on one question above when it had the skill, "
+                    "from 0% to 100%."
+                ),
+                (
+                    "- **Overall** row: when comparable baseline scores are available, the two scores used for "
+                    "published Skill Lift, on the metrics and cases both arms scored comparably. Otherwise, "
+                    "the available arm Overall score(s). These can differ from the headline with-skill score."
+                ),
+                (
+                    "- **Uplift**: the displayed skill score minus the displayed no-skill baseline score. "
+                    "Published Skill Lift compares Overall only on the metrics and cases both arms scored, "
+                    "so it can differ. Uplift does not set the verdict."
+                ),
+                (
+                    "- **pass@k** (HTML report and `pass_at_k_lift.json`): the share of eval cases with at least "
+                    "one passing attempt out of k. It measures how repeatable success is, separately from the "
+                    "dimension scores."
+                ),
+                (
+                    "- **Quality Score** (Tier 1, out of 100): a static review of the skill's files. It is not an "
+                    "input to any Tier 3 score or uplift."
                 ),
                 "",
             ]
@@ -817,6 +1168,20 @@ def _advisory_agent_eval_skip_message(results: list[ValidationResult]) -> str | 
     return None
 
 
+def _publication_assessment(
+    results: list[ValidationResult],
+    ae: dict[str, Any] | None,
+    *,
+    expected_skill_name: str | None = None,
+) -> PublicationAssessment:
+    """Return the one assessment the card's verdict and its explanation share."""
+    return resolve_run_status(
+        results,
+        agent_eval=ae,
+        expected_skill_name=expected_skill_name,
+    ).publication_assessment
+
+
 def _overall_status(
     results: list[ValidationResult],
     ae: dict[str, Any] | None,
@@ -828,7 +1193,12 @@ def _overall_status(
     # benchmark's uppercase vocabulary while every reporter shares one
     # publication assessment implementation.
     del benchmark_policy
-    return resolve_run_status(results, agent_eval=ae, expected_skill_name=expected_skill_name).publication.verdict
+    return _assessment_status(_publication_assessment(results, ae, expected_skill_name=expected_skill_name))
+
+
+def _assessment_status(assessment: PublicationAssessment) -> str:
+    """Project one assessment onto the card's uppercase verdict vocabulary."""
+    return _ASSESSMENT_STATUSES.get(assessment.status, assessment.status.upper())
 
 
 def _is_blocking_publication_skip(
@@ -849,9 +1219,178 @@ def _verdict_callout(status: str) -> str:
         "PASS": "✅ **Overall verdict: PASS — Recommended for publication**",
         "FAIL": "❌ **Overall verdict: FAIL — Publication blocked**",
         "INCOMPLETE": "⚠️ **Overall verdict: INCOMPLETE — Required evidence is missing**",
-        "NEUTRAL": "**Overall verdict: NEUTRAL — One or more dimensions remain below PASS**",
+        "NEUTRAL": "**Overall verdict: NEUTRAL — Publication decision deferred**",
     }
     return f"> {labels.get(status, f'**Overall verdict: {status}**')}"
+
+
+# The decision each status records, in the words of the assessment that
+# produced it. A status without a rule here falls back to its recorded reasons.
+_VERDICT_RULES = {
+    "PASS": "every publication-required tier passed and the Tier 3 dimension gate passed.",
+    "NEUTRAL": (
+        "every publication-required tier completed, but no supported agent scored at or above the "
+        "dimension PASS boundary on every dimension."
+    ),
+    "FAIL": "the evidence below blocks publication.",
+    "INCOMPLETE": "required evidence is missing or unproven, as recorded below.",
+}
+
+_GATE_LABELS = {
+    "pass": "pass",
+    "neutral": "neutral",
+    "fail": "fail",
+    "inconclusive": "inconclusive",
+}
+
+_DIMENSION_GATE_STATE_TEXT = {
+    "never_activated": "the skill never activated, so its scores are diagnostic only",
+    "incomplete_evidence": "no complete dimension set was recorded, so the gate read nothing from this agent",
+    "not_supported": "execution did not succeed, so the gate did not consider this agent",
+}
+
+
+def _dimension_boundaries() -> str:
+    return (
+        f"an agent passes when every dimension is at or above {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} "
+        f"and fails when any dimension is below {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.0%}"
+    )
+
+
+def _dimension_gate_evidence(
+    entry: AgentDimensionGate,
+    agent: dict[str, Any],
+    private_labels: tuple[str, ...],
+) -> str:
+    """Describe, in one cell, what the gate read from one agent."""
+    if entry.state == "scored":
+        failing = [item for item in entry.scores if item[1] < DIMENSION_VERDICT_NEUTRAL_THRESHOLD]
+        below_pass = [
+            item
+            for item in entry.scores
+            if DIMENSION_VERDICT_NEUTRAL_THRESHOLD <= item[1] < DIMENSION_VERDICT_PASS_THRESHOLD
+        ]
+        if failing:
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in failing)
+            return f"{listed} below the {DIMENSION_VERDICT_NEUTRAL_THRESHOLD:.0%} FAIL boundary"
+        if below_pass:
+            listed = "; ".join(f"{name.title()} {_single_score_label(score)}" for name, score in below_pass)
+            return f"{listed} below the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary"
+        lowest = min(entry.scores, key=lambda item: item[1])
+        return (
+            f"every dimension at or above the {DIMENSION_VERDICT_PASS_THRESHOLD:.0%} PASS boundary "
+            f"(lowest: {lowest[0].title()} {_single_score_label(lowest[1])})"
+        )
+    text = _DIMENSION_GATE_STATE_TEXT[entry.state]
+    # Name why the agent was held out when the run recorded a reason, so an
+    # excluded agent is visible here rather than silently absent.
+    if excluded := "; ".join(str(arm) for arm in incomplete_arms(agent)):
+        return f"{text} ({_publication_safe_inline(excluded, private_labels)})"
+    return text
+
+
+def _verdict_evidence_lines(
+    status: str,
+    assessment: PublicationAssessment,
+    ae: dict[str, Any] | None,
+    private_labels: tuple[str, ...],
+) -> list[str]:
+    """Render the rule and the evidence that produced *status*.
+
+    Every statement here is read from ``assessment`` — the same object
+    ``_overall_status`` projects the printed verdict from — and from the
+    per-agent breakdown ``agent_eval_dimension_verdict`` folds into the Tier 3
+    verdict that assessment carries. The explanation therefore cannot describe
+    a decision other than the one in the callout above it.
+    """
+    tier3 = assessment.tier3
+    breakdown = agent_eval_dimension_breakdown(tier3.payload if isinstance(tier3.payload, dict) else ae)
+    gate_passed = tier3.status in {"pass", "neutral"} and any(entry.verdict == "pass" for entry in breakdown)
+    rule = _VERDICT_RULES.get(status, "recorded below.")
+    if status == "PASS" and not gate_passed:
+        rule = "every publication-required tier passed; " + (
+            "the recorded Tier 3 verdict is pass."
+            if assessment.benchmark_policy.get("tier3_required")
+            else "Tier 3 was optional by policy."
+        )
+    elif status == "NEUTRAL" and gate_passed:
+        rule = (
+            "every publication-required tier completed and the Tier 3 dimension gate passed, "
+            "but the recorded Tier 3 verdict is neutral."
+        )
+    lines = [
+        "### Why This Verdict",
+        "",
+        f"- Decision: **{status}** — {rule}",
+    ]
+
+    policy_note = (
+        "required for publication" if assessment.benchmark_policy.get("tier3_required") else "optional by policy"
+    )
+    if tier3.status == "skipped":
+        evidence_note = (
+            "recorded agent scores do not certify a skipped evaluation."
+            if breakdown
+            else "no dimension evidence was recorded."
+        )
+        lines.append(f"- Tier 3 live evaluation: skipped ({policy_note}); {evidence_note}")
+    else:
+        completeness = "publication-complete" if tier3.evidence_complete else "not publication-complete"
+        lines.append(
+            f"- Tier 3 evidence: **{tier3.status.upper()}** ({completeness}; {policy_note}). "
+            f"Dimension gate: {_dimension_boundaries()}."
+        )
+
+    for reason in assessment.reasons or (() if status == "PASS" else (tier3.reason,) if tier3.reason else ()):
+        lines.append(f"- Blocking: {_publication_safe_inline(reason, private_labels)}")
+
+    agents = _agents(ae)
+    if breakdown:
+        lines.extend(
+            [
+                "",
+                "| Agent | Dimension gate | Evidence the gate read |",
+                "|---|---|---|",
+            ]
+        )
+        for entry in breakdown:
+            agent = agents.get(entry.name, {})
+            gate = _GATE_LABELS.get(entry.verdict or "", "not counted")
+            lines.append(
+                "| "
+                + " | ".join(
+                    (
+                        _md_cell(_agent_display_label(entry.name, agent, private_labels), private_labels),
+                        _trusted_md_cell(gate),
+                        _md_cell(_dimension_gate_evidence(entry, agent, private_labels), private_labels),
+                    )
+                )
+                + " |"
+            )
+        # Say why a row that looks worse than the verdict does not contradict
+        # it, but only about rows this table actually shows.
+        if status == "PASS" and gate_passed and any(entry.verdict == "fail" for entry in breakdown):
+            lines.extend(
+                [
+                    "",
+                    (
+                        "A failing agent does not overturn this gate: it asks whether any one supported agent "
+                        "passed every dimension, and one did."
+                    ),
+                ]
+            )
+        elif status == "PASS" and gate_passed and any(entry.verdict is None for entry in breakdown):
+            lines.extend(
+                [
+                    "",
+                    (
+                        "An agent the gate did not count contributed no evidence either way: the gate asks "
+                        "whether any one supported agent passed every dimension, and one did."
+                    ),
+                ]
+            )
+    lines.append("")
+    return lines
 
 
 def _skill_name(results: list[ValidationResult], ae: dict[str, Any] | None) -> str | None:
@@ -975,6 +1514,61 @@ def _human_agent_name(name: str) -> str:
     else:
         humanized = name.title()
     return humanized.replace("Skill" + "evaluator", "SkillEvaluator")
+
+
+def _with_incomplete_baseline(agent: dict[str, Any]) -> dict[str, Any]:
+    """Return ``agent`` for the score table, with a failed baseline arm in place of its baseline scores.
+
+    A baseline arm that ran but failed has no baseline score, which the table
+    would otherwise print as ``baseline not run``. With the arm in its place,
+    each cell says how many baseline attempts scored instead.
+    """
+    arm = next((arm for arm in incomplete_arms(agent) if arm.condition == "without_skill"), None)
+    if arm is None:
+        return agent
+    dimensions = agent.get("dimensions")
+    if isinstance(dimensions, list):
+        dimensions = [{**item, "baseline": arm} if isinstance(item, dict) else item for item in dimensions]
+    return {**agent, "baseline": arm, "dimensions": dimensions}
+
+
+def _agent_coverage_lines(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> list[str]:
+    """List each agent arm that ran but failed, with its scored attempts and first recorded failure."""
+    notes = [
+        f"{_agent_display_label(name, agent, private_labels)}: {arm.describe()}"
+        for name, agent in _agents(ae).items()
+        for arm in incomplete_arms(agent)
+    ]
+    if not notes:
+        return []
+    return ["### Agent coverage", "", *(f"- {_publication_safe_inline(note, private_labels)}" for note in notes), ""]
+
+
+def _token_usage_lines(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> list[str]:
+    """Show measured token usage per agent and per case; it is not scored."""
+    agents = _mapping(ae.get("agents")) if ae else {}
+
+    def agent_label(name: str | None) -> str:
+        if name is None:
+            return "All agents"
+        return _md_cell(_agent_display_label(name, _mapping(agents.get(name)), private_labels), private_labels)
+
+    return token_usage_markdown_lines(
+        (ae or {}).get("token_usage"),
+        heading="## Token Usage",
+        agent_label=agent_label,
+        cell=lambda value: _md_cell(value, private_labels),
+        max_case_rows=_MAX_TOKEN_USAGE_CASE_ROWS,
+    )
+
+
+def _incomplete_arm_evidence(ae: dict[str, Any] | None, private_labels: tuple[str, ...]) -> str:
+    """Name each agent arm that ran but failed, for the Tier 3 evidence cell."""
+    return ", ".join(
+        f"{_agent_display_label(name, agent, private_labels)} {arm}"
+        for name, agent in _agents(ae).items()
+        for arm in incomplete_arms(agent)
+    )
 
 
 def _evaluated_at(ae: dict[str, Any] | None) -> str | None:
@@ -1171,31 +1765,129 @@ def _agent_dimension(agent: dict[str, Any], dim_id: str) -> dict[str, Any] | Non
     return None
 
 
-def _score_transition(dimension: dict[str, Any] | None, *, skill_never_activated: bool = False) -> str:
+def _score_transition(
+    dimension: dict[str, Any] | None,
+    *,
+    skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
+    baseline_only: bool = False,
+) -> str:
     if not dimension:
         return "Not available"
     return _score_transition_values(
         dimension.get("baseline"),
         dimension.get("with_skill", dimension.get("score")),
         skill_never_activated=skill_never_activated,
+        baseline_not_applicable=baseline_not_applicable,
+        baseline_only=baseline_only,
     )
 
 
-def _score_transition_values(baseline: object, score: object, *, skill_never_activated: bool = False) -> str:
+def _single_score_label(score: float) -> str:
+    decimal_places = _score_display_decimal_places(score)
+    return _format_percentage(_percentage_point_units(score, decimal_places), decimal_places)
+
+
+def _agent_has_dimension_signals(agent: dict[str, Any], dim_id: str, *, baseline_only: bool = False) -> bool:
+    metrics = agent.get("metrics_without_skill" if baseline_only else "metrics_with_skill")
+    if not isinstance(metrics, list):
+        return False
+    config = DIMENSION_MAPPING.get(dim_id, {})
+    signals = {*config.get("evaluators", []), *config.get("fallback_evaluators", [])}
+    return any(isinstance(metric, str) and metric in signals for metric in metrics)
+
+
+def _baseline_coverage(agents: dict[str, dict[str, Any]], dim_id: str, *, baseline_only: bool) -> str:
+    """Say whether this run has a no-skill baseline score for one dimension."""
+    if not agents:
+        return "Compared when the baseline arm runs"
+    with_baseline = 0
+    eligible = 0
+    for agent in agents.values():
+        if agent.get("execution_status") == "failed":
+            continue
+        baseline = _number((_agent_dimension(agent, dim_id) or {}).get("baseline"))
+        has_baseline = baseline is not None and 0 <= baseline <= 1
+        has_signals = agent.get("execution_status") == "succeeded" and _agent_has_dimension_signals(
+            agent, dim_id, baseline_only=baseline_only
+        )
+        if not has_baseline and not has_signals:
+            continue
+        eligible += 1
+        if has_baseline:
+            with_baseline += 1
+    if baseline_only:
+        if not eligible:
+            return "Not available"
+        return "Baseline only; no with-skill arm ran" if with_baseline else "Not scored in this run"
+    if not eligible:
+        return "Not available"
+    if with_baseline == eligible:
+        return "Yes, a no-skill baseline was scored"
+    if with_baseline == 0:
+        return "No baseline score; uplift unavailable"
+    return f"Baseline for {with_baseline} of {eligible} agents"
+
+
+def _dimension_cell(
+    agent: dict[str, Any],
+    dim_id: str,
+    *,
+    skill_never_activated: bool = False,
+    baseline_only: bool = False,
+) -> str:
+    """Render one Results at a Glance dimension cell, explaining a missing score."""
+    dimension = _agent_dimension(agent, dim_id)
+    if dimension is not None:
+        return _score_transition(
+            dimension,
+            skill_never_activated=skill_never_activated,
+            baseline_only=baseline_only,
+            baseline_not_applicable=agent_eval_baseline_not_applicable(agent, dimension),
+        )
+    not_applicable = agent.get("not_applicable_dimensions")
+    if isinstance(not_applicable, list) and any(
+        isinstance(entry, dict) and entry.get("id") == dim_id for entry in not_applicable
+    ):
+        return "Not applicable — no eval case gave its signals anything to judge"
+    if agent.get("execution_status") == "succeeded" and _agent_has_dimension_signals(agent, dim_id):
+        return "Not scored — a signal this dimension needs produced no score"
+    return "Not available"
+
+
+def _score_transition_values(
+    baseline: object,
+    score: object,
+    *,
+    skill_never_activated: bool = False,
+    baseline_not_applicable: bool = False,
+    baseline_only: bool = False,
+) -> str:
     """Render ``baseline → score (uplift)`` so the visible arithmetic is exact.
 
     Scores are fractions in [0, 1]. A missing, non-finite, or out-of-range score,
     or a recorded baseline that is not a valid score, is reported as unavailable
-    rather than clamped or published.
+    rather than clamped or published. ``baseline_not_applicable`` marks a
+    dimension the baseline ran but could not score because it has no skill.
     """
     parsed_score = _number(score)
+    parsed_baseline = _number(baseline)
+    if score is None and parsed_baseline is not None and 0 <= parsed_baseline <= 1:
+        baseline_label = _single_score_label(parsed_baseline)
+        if baseline_only:
+            return f"Baseline {baseline_label} — baseline-only run; no with-skill score or uplift"
+        return f"Not scored with the skill — baseline {baseline_label}; uplift unavailable"
     if parsed_score is None or not 0 <= parsed_score <= 1:
         return "Not available"
-    parsed_baseline = _number(baseline)
     if skill_never_activated:
         # No uplift is shown, so the baseline neither sets the precision nor withholds the score.
         parsed_baseline = None
-    elif baseline is not None and (parsed_baseline is None or not 0 <= parsed_baseline <= 1):
+    elif (
+        baseline is not None
+        # A failed baseline arm (see ``_with_incomplete_baseline``) is described below, not scored.
+        and not isinstance(baseline, IncompleteArm)
+        and (parsed_baseline is None or not 0 <= parsed_baseline <= 1)
+    ):
         return "Not available"
     endpoints = (parsed_score,) if parsed_baseline is None else (parsed_baseline, parsed_score)
     decimal_places = _score_display_decimal_places(*endpoints)
@@ -1203,7 +1895,11 @@ def _score_transition_values(baseline: object, score: object, *, skill_never_act
     skill_label = _format_percentage(displayed_score, decimal_places)
     if skill_never_activated:
         return f"{skill_label} — INCONCLUSIVE: skill never activated; uplift unavailable"
+    if isinstance(baseline, IncompleteArm):
+        return f"{skill_label} — {baseline}; uplift unavailable"
     if parsed_baseline is None:
+        if baseline_not_applicable:
+            return f"{skill_label} — baseline N/A (no skill in the baseline arm)"
         return f"{skill_label} — baseline not run; uplift unavailable"
     # Subtract the displayed values, not the raw scores, so a rounding carry can
     # never publish an uplift that disagrees with the two numbers beside it.

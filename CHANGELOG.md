@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- JUnit report generation remembers the next case-name suffix for repeated
+  checks, avoiding quadratic name searches in large collection reports while
+  preserving existing names and collisions with explicitly numbered checks.
+
+## 1.0.0 - 2026-11-17
+
 ### Added
 
 - Dataset-first Tier 3 walkthrough: prepare and review cases before an explicit
@@ -471,16 +479,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- JUnit report generation remembers the next case-name suffix for repeated
-  checks, avoiding quadratic name searches in large collection reports while
-  preserving existing names and collisions with explicitly numbered checks.
+- Script lint measures control-flow nesting without recursively walking expression
+  nodes, so valid long operator or attribute chains no longer abort advisory
+  checks for that script and subsequent files.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
+- The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative
+  percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.
+  Such input, and a malformed number like `1.2.3 km to miles`, now gets the usual `Error:` line instead
+  of a wrong result or a traceback.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and
   package initializers, so dependent documentation assertions are included.
+- The text-analyzer reference skill no longer lists punctuation-only tokens as top words. An ellipsis
+  (`...`) was counted as the empty word `""` and a dash (`-`) as a word, pushing real words out of the top 5.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
   30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be
@@ -496,6 +510,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Partially executed evaluation arms retain scored attempts and per-arm scores without treating missing attempts as failures or enabling aggregate comparisons.
 - Script lint now runs advisory AST checks on Python files with one leading UTF-8 BOM.
+- Task-list descriptions containing status words retain their text and pending status after reload.
 - Failed Tier 3 arms retain scored and errored trial activation diagnostics without restoring aggregate quality or lift, or double-counting token usage.
 - Budget-limited Tier 3 coverage checks retain admitted attempt ordinals, avoiding false missing/excess errors when a denied slot leaves a gap.
 - HTML reports retain budget context for fully budget-denied runs without

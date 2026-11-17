@@ -128,8 +128,12 @@ def test_skipped_and_incomplete_are_not_all_passed() -> None:
     assert error_el is not None
     assert error_el.attrib["type"] == "incomplete"
     assert "scan did not complete" in (error_el.attrib.get("message") or "")
-    assert int(incomplete_suite.attrib["errors"]) == 1
-    assert int(root.attrib["errors"]) == 1
+    execution = next(case for case in incomplete_cases if case.attrib["name"] == "error").find("error")
+    assert execution is not None
+    assert execution.attrib["type"] == "execution"
+    assert int(incomplete_suite.attrib["failures"]) == 0
+    assert int(incomplete_suite.attrib["errors"]) == 2
+    assert int(root.attrib["errors"]) == 2
     assert int(root.attrib["skipped"]) == 1
     passing = [
         case
@@ -212,6 +216,72 @@ def test_incomplete_scan_without_reason_uses_generic_message() -> None:
     assert error.attrib["message"] == "pip-audit scan did not complete"
     assert int(root.attrib["errors"]) == 1
     assert int(root.attrib["skipped"]) == 0
+    _assert_counts_match(root)
+
+
+def test_execution_errors_beside_an_incomplete_scan_are_junit_errors() -> None:
+    result = ValidationResult(validator_name="Code Risk", validator_description="Code risk")
+    result.add_error("Semgrep did not return valid JSON; scan did not complete")
+    result.mark_scan_incomplete("semgrep")
+    result.fail_gate("Code risk score 40 is below the minimum 70")
+    result.add_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.HIGH,
+            check_name="B602",
+            message="subprocess call with shell=True",
+            file_path="scripts/run.py",
+            line_number=3,
+        )
+    )
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    cases = {case.attrib["name"]: case for case in _cases(root)}
+    execution = cases["error"].find("error")
+    assert execution is not None
+    assert execution.attrib["type"] == "execution"
+    assert execution.attrib["message"] == "Semgrep did not return valid JSON; scan did not complete"
+    assert cases["error"].find("failure") is None
+    gate = cases["gate_failure"].find("failure")
+    assert gate is not None
+    assert gate.attrib["message"] == "Code risk score 40 is below the minimum 70"
+    assert cases["B602 (scripts/run.py:3)"].find("failure") is not None
+    assert cases["incomplete/semgrep"].find("error").attrib["type"] == "incomplete"
+    assert int(root.attrib["failures"]) == 2
+    assert int(root.attrib["errors"]) == 2
+    _assert_counts_match(root)
+
+
+def test_independent_error_without_an_incomplete_scan_stays_a_failure() -> None:
+    result = ValidationResult(validator_name="SCHEMA", validator_description="Schema checks")
+    result.add_error("No SKILL.md found in demo")
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    (case,) = _cases(root)
+    assert case.attrib["name"] == "error"
+    assert case.find("error") is None
+    assert case.find("failure") is not None
+    assert int(root.attrib["failures"]) == 1
+    assert int(root.attrib["errors"]) == 0
+    _assert_counts_match(root)
+
+
+def test_advisory_execution_errors_are_not_errors() -> None:
+    result = ValidationResult(validator_name="CONTENT_DEDUP")
+    result.add_error("Embedding provider error: connection refused")
+    result.mark_scan_incomplete("embedding-provider")
+    result.metadata["gating"] = {"tier": 2, "blocking": False}
+
+    root = ET.fromstring(JUnitReporter().render_all([result]))
+    cases = {case.attrib["name"]: case for case in _cases(root)}
+    assert all(case.find("failure") is None and case.find("error") is None for case in cases.values())
+    out = cases["error"].find("system-out")
+    assert out is not None
+    assert out.text == "Advisory, does not gate: Embedding provider error: connection refused"
+    assert cases["error"].find("skipped") is None
+    assert cases["incomplete/embedding-provider"].find("skipped") is not None
+    assert int(root.attrib["errors"]) == 0
+    assert int(root.attrib["skipped"]) == 1
     _assert_counts_match(root)
 
 

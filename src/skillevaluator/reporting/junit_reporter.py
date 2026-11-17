@@ -229,6 +229,7 @@ class _Case:
     classname: str
     failed: bool = False
     errored: bool = False
+    error_type: str = ""
     skipped: bool = False
     message: str = ""
     body: str = ""
@@ -317,13 +318,20 @@ def _cases_for_result(
             )
         )
     gate_failures = set(result.gate_failures)
+    # A group with an incomplete scan recorded that a scanner could not run or crashed,
+    # so its independent errors are execution diagnostics: JUnit <error>, not <failure>.
+    # Gate failures (a minimum score, for example) stay <failure> either way.
+    scan_incomplete = bool(result.incomplete_scans)
     for error in result.independent_errors():
-        base = "gate_failure" if error in gate_failures else "error"
+        is_gate = error in gate_failures
+        execution = scan_incomplete and not is_gate
         cases.append(
             _Case(
-                name=_unique_name(base, used),
+                name=_unique_name("gate_failure" if is_gate else "error", used),
                 classname=classname,
-                failed=True,
+                failed=not execution,
+                errored=execution,
+                error_type="execution" if execution else "",
                 message=_xml_text(error),
                 body=_xml_text(error),
             )
@@ -336,23 +344,29 @@ def _cases_for_result(
                 name=_unique_name(_xml_text(f"incomplete/{tool}"), used),
                 classname=classname,
                 errored=True,
+                error_type="incomplete",
                 message=reason,
                 body=reason,
             )
         )
     gating = _gating(result)
     if gating is not None and not gating.get("blocking", True):
-        # An advisory result never fails the exit gate, so it fails or errors no case here.
+        # An advisory result never fails the exit gate, so it fails or errors no case here:
+        # incomplete scanners are skipped, and failures and execution errors move to system-out.
         cases = [
             _Case(
                 name=case.name,
                 classname=case.classname,
-                skipped=case.skipped or case.errored,
-                message=case.message if case.skipped or case.errored else "",
-                body=case.body if case.skipped or case.errored else "",
+                skipped=case.skipped or case.error_type == "incomplete",
+                message=case.message if case.skipped or case.error_type == "incomplete" else "",
+                body=case.body if case.skipped or case.error_type == "incomplete" else "",
                 file_path=case.file_path,
                 line=case.line,
-                system_out=f"Advisory, does not gate: {case.body}" if case.failed else case.system_out,
+                system_out=(
+                    f"Advisory, does not gate: {case.body}"
+                    if case.failed or case.error_type == "execution"
+                    else case.system_out
+                ),
             )
             for case in cases
         ]
@@ -393,7 +407,7 @@ def _append_case(suite: ET.Element, case: _Case) -> None:
         error = ET.SubElement(testcase, "error")
         if case.message:
             error.set("message", case.message)
-        error.set("type", "incomplete")
+        error.set("type", case.error_type or "error")
         if case.body:
             error.text = case.body
     elif case.failed:

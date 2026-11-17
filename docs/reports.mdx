@@ -349,8 +349,8 @@ merge-request test reports, Jenkins, Azure Pipelines, CircleCI, and Buildkite.
 | `testsuites` | One document per run |
 | `testsuite` | One check group (`ValidationResult`) |
 | `testcase` | One check, finding, gate failure, or incomplete scanner |
-| `failure` | A blocking finding, with `file:line` when recorded; every independent error on the group (schema errors, `No SKILL.md found`, scanner execution diagnostics) as a case named `error`; or a gate failure as a case named `gate_failure` |
-| `error` | An `incomplete/<tool>` case for a scanner that did not complete, with `type="incomplete"` and the scanner's own reason when one was recorded (for example `skillspector not installed`). Other checks and findings in that group keep their real passed or failed status |
+| `failure` | A blocking finding, with `file:line` when recorded; an independent error on a group whose scanners all completed (schema errors, `No SKILL.md found`) as a case named `error`; or a gate failure, such as a minimum score, as a case named `gate_failure` |
+| `error` | An `incomplete/<tool>` case for a scanner that did not complete, with `type="incomplete"` and the scanner's own reason when one was recorded (for example `skillspector not installed`); and, on a group with an incomplete scanner, each independent error that is not a gate failure (a crash or unusable scanner output, such as `Bandit did not return valid JSON; scan did not complete`) as a case named `error` with `type="execution"`. Other checks and findings in that group keep their real passed or failed status |
 | `skipped` | A check group that did not run and does not fail the gate, as one case with its skip reason. A blocking group that was skipped is a `gate_failure` instead |
 | `system-out` | Score and threshold when recorded, and non-failing finding text |
 
@@ -371,8 +371,9 @@ a scored Tier 3 verdict of FAIL or NEUTRAL under `--block-on-agent-eval`, the
 suite gets a `gate_failure` case whose message is the cause: the first error,
 the Tier 3 verdict, or the skip reason. An advisory group (Tier 3 without
 `--block-on-agent-eval`, Tier 2 with `--no-block-on-dedup`) never adds a
-`failure` or `error`; its findings and errors are kept in `system-out` with an
-`Advisory, does not gate:` prefix, and its incomplete scanners are `skipped`.
+`failure` or `error`; its findings, errors, and execution errors are kept in
+`system-out` with an `Advisory, does not gate:` prefix, and its incomplete
+scanners are `skipped`.
 
 ## HTML report
 

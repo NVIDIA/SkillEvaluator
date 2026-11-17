@@ -478,10 +478,16 @@ All notable changes to SkillEvaluator are documented in this file.
   reading it. The baseline's empty workspace skipped that call. OpenCode trials now run with
   `"snapshot": false`; a job's `opencode_config` can turn it back on.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
+- The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative
+  percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.
+  Such input, and a malformed number like `1.2.3 km to miles`, now gets the usual `Error:` line instead
+  of a wrong result or a traceback.
 - Direct Tier 1 validates the target, selected checks and LLM configuration before
   preparing scanners, so configuration errors do not trigger downloads or stdout noise.
 - Documentation-only CI follows imports through collected test modules and
   package initializers, so dependent documentation assertions are included.
+- The text-analyzer reference skill no longer lists punctuation-only tokens as top words. An ellipsis
+  (`...`) was counted as the empty word `""` and a dash (`-`) as a word, pushing real words out of the top 5.
 - The Tier 1 PII scan no longer stalls on a long identifier before an IPv4-shaped value. A line with a
   30-letter name followed by `= "8.8.0.8"` took about a minute to scan, and every further letter doubled that.
 - On Windows, stopping a Tier 3 Harbor run no longer fails with `Harbor process-tree cleanup could not be

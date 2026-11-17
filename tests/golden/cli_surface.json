@@ -508,7 +508,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -704,7 +705,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1610,7 +1612,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1691,7 +1694,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1711,6 +1715,48 @@
           ],
           "param_type": "option",
           "type": "directory"
+        }
+      ]
+    },
+    "precommit-run": {
+      "params": [
+        {
+          "default": "70",
+          "name": "min_score",
+          "opts": [
+            "--min-score"
+          ],
+          "param_type": "option",
+          "type": "integer"
+        },
+        {
+          "name": "quality_config",
+          "opts": [
+            "--quality-config"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "choices": [
+            "quality",
+            "schema",
+            "lint-scripts"
+          ],
+          "name": "check",
+          "opts": [
+            "check"
+          ],
+          "param_type": "argument",
+          "required": true
+        },
+        {
+          "name": "paths",
+          "opts": [
+            "paths"
+          ],
+          "param_type": "argument",
+          "type": "text"
         }
       ]
     },
@@ -1748,7 +1794,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1797,7 +1844,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1868,7 +1916,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1999,7 +2048,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2041,7 +2091,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2099,7 +2150,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2156,7 +2208,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2205,7 +2258,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2276,7 +2330,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2401,7 +2456,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli', 'json', 'html')",
               "multiple": true,
@@ -2528,7 +2584,8 @@
               "json",
               "html",
               "markdown",
-              "sarif"
+              "sarif",
+              "junit"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -2596,7 +2653,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2661,7 +2719,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2792,7 +2851,8 @@
                 "json",
                 "html",
                 "markdown",
-                "sarif"
+                "sarif",
+                "junit"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2870,7 +2930,8 @@
               "json",
               "html",
               "markdown",
-              "sarif"
+              "sarif",
+              "junit"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -5315,7 +5376,8 @@
             "json",
             "html",
             "markdown",
-            "sarif"
+            "sarif",
+            "junit"
           ],
           "default": "('cli',)",
           "multiple": true,

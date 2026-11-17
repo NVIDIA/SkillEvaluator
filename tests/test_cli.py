@@ -343,6 +343,7 @@ def test_validate_preserves_linked_root_support_when_tier2_is_disabled(tmp_path:
         (".html", "json,html,markdown"),
         (".md", "json,html,markdown"),
         (".sarif.json", "sarif"),
+        (".junit.xml", "junit"),
     ],
 )
 def test_similarity_cli_rejects_catalog_collision_with_every_selected_report(
@@ -1470,3 +1471,39 @@ def test_cli_environment_kwargs_sensitive_credential_exits_code_2_without_traceb
     assert "Invalid value for '--ek'" in result.output
     assert "Sensitive key or value detected" in result.output
     assert "Traceback" not in result.output
+
+
+def test_validate_junit_reports_scanner_crash_as_error(tmp_path: Path, monkeypatch) -> None:
+    import xml.etree.ElementTree as ET
+
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Exercise the JUnit mapping for a scanner that did not complete.\n---\n",
+        encoding="utf-8",
+    )
+    reports = tmp_path / "reports"
+
+    def crashed_scan(_path: Path, **_kwargs) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="Code Risk", validator_description="Code risk")
+        result.add_error("Bandit did not return valid JSON; scan did not complete")
+        result.mark_scan_incomplete("bandit")
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", crashed_scan)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "junit", "-o", str(reports)],
+    )
+
+    assert result.exit_code != 0, result.output
+    (report,) = reports.rglob("*.junit.xml")
+    root = ET.fromstring(report.read_text(encoding="utf-8"))
+    errors = {case.attrib["name"]: case.find("error") for case in root.iter("testcase")}
+    assert errors["error"] is not None
+    assert errors["error"].attrib["type"] == "execution"
+    assert errors["incomplete/bandit"] is not None
+    assert errors["incomplete/bandit"].attrib["type"] == "incomplete"
+    assert int(root.attrib["errors"]) == 2
+    assert int(root.attrib["failures"]) == 0

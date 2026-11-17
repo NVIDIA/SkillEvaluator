@@ -133,6 +133,9 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     shell, modelled = _tool_call_shell(call)
     if not modelled:
         return None
+    if len(segments) == 1:
+        # Joining decoded tokens would lose quoted argument boundaries.
+        return status if _cmd_executes_script(command, script, _shell=shell) is True else None
     invocations = [
         index
         for index, segment in enumerate(segments)

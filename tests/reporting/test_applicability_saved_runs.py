@@ -413,7 +413,7 @@ def test_with_skill_na_dimension_never_lets_the_agent_pass(tmp_path, with_scores
 def test_docs_name_only_the_shared_outcome_of_a_with_skill_na_dimension():
     # The other dimensions and the skill's activation decide which verdict other than PASS applies,
     # so the N/A paragraph must not name one; the verdict table covers that.
-    docs = (Path(__file__).resolve().parents[2] / "docs" / "tier3-live-evaluation.mdx").read_text(encoding="utf-8")
+    docs = (Path(__file__).resolve().parents[2] / "docs" / "tier3-results.mdx").read_text(encoding="utf-8")
     normalized = " ".join(docs.split())
     start = normalized.index("An agent's verdict reads only the with-skill arm")
     paragraph = normalized[start : normalized.index("does not affect the verdict.", start)]

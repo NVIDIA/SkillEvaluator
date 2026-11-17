@@ -585,6 +585,11 @@ reviewed source revision.
   checks for that script and subsequent files.
 
 - GitLab JUnit collection includes nested skill folders in catalog reports.
+- Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
+  finished answer (#757). OpenCode's snapshot passed the workspace file list to
+  `git check-ignore --stdin` for a `/workspace/.git` that does not exist, and git could exit before
+  reading it. The baseline's empty workspace skipped that call. OpenCode trials now run with
+  `"snapshot": false`; a job's `opencode_config` can turn it back on.
 - API caller now percent-encodes scalar OpenAPI path values as individual segments and rejects `.` and `..` values with a JSON input error.
 - The calculator reference skill converts negative values (`-40 celsius to fahrenheit`) and takes negative
   percentages, and no longer answers `10% of 50 + 5` with `Result: 5` by ignoring the rest of the input.

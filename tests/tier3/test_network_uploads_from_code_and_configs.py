@@ -1142,20 +1142,29 @@ def test_wgetrc_lines_that_set_an_upload(security_check, line, uploads) -> None:
 # fails without running on.
 _SCAN_BOUND = 40 * 65_536
 _RENDER_BOUND = 5_000
+# How many times over the patterns that checks builds or runs inline (see
+# _count_reader_work) may scan a hostile call's text.
+_INLINE_SCANS = 2
 # Work units per character of a hostile call that mean the reader's whole
 # budget rate (checks._CODE_WORK_PER_CHAR), read when a test runs.
 _BUDGET_RATE = 0
 
 
 class _CountingPattern:
-    """A compiled pattern that adds up the characters its scans are given or cover, and fails past _SCAN_BOUND."""
+    """A compiled pattern that adds up the characters its scans are given or cover, and fails past _SCAN_BOUND.
 
-    def __init__(self, pattern: re.Pattern[str], counts: dict[str, int]) -> None:
+    A pattern checks builds or uses inline (*inline*) adds them to "inline" too.
+    """
+
+    def __init__(self, pattern: re.Pattern[str], counts: dict[str, int], *, inline: bool = False) -> None:
         self._pattern = pattern
         self._counts = counts
+        self._inline = inline
 
     def _count(self, chars: int) -> None:
         self._counts["scanned"] += max(0, chars)
+        if self._inline:
+            self._counts["inline"] += max(0, chars)
         if self._counts["scanned"] > _SCAN_BOUND:
             pytest.fail(f"the reader's patterns scanned more than {_SCAN_BOUND} characters")
 
@@ -1184,6 +1193,8 @@ def _count_reader_work(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """Make the upload reader count its work, and fail as soon as any count passes its bound.
 
     The counts are the characters the reader's patterns scan ("scanned"),
+    of which those that checks builds or uses inline through its re module,
+    as a pattern built for each name would be, scan ("inline"),
     the Python string expressions it reads ("rendered"), the characters of
     the commands it joins from argument vectors ("joined") and of the
     Python strings it splits into words ("split"), the work budgets
@@ -1195,6 +1206,7 @@ def _count_reader_work(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     """
     counts = {
         "scanned": 0,
+        "inline": 0,
         "rendered": 0,
         "joined": 0,
         "split": 0,
@@ -1261,7 +1273,7 @@ def _count_reader_work(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     # readings of their substitutions or the call's own shell command.
     rule = checks._is_network_exfiltration_command
     rule_flags = checks._network_rule_flags
-    reading = {"reader": 0, "depth": 0}
+    reading = {"reader": 0, "depth": 0, "code": 0}
 
     def counting_rule(command: str, *args: Any, **kwargs: Any) -> bool:
         if reading["reader"] and not reading["depth"]:
@@ -1281,8 +1293,45 @@ def _count_reader_work(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
         finally:
             reading["reader"] -= 1
 
+    # Patterns checks builds or uses inline count while the upload reader
+    # reads, not while the network rule reads a text the reader hands it.
+    uploads = checks._network_uploads_in_code_or_config
+
+    def counting_uploads(*args: Any, **kwargs: Any) -> bool:
+        reading["code"] += 1
+        try:
+            return uploads(*args, **kwargs)
+        finally:
+            reading["code"] -= 1
+
+    class CountingRe:
+        def __getattr__(self, name: str) -> Any:
+            return getattr(re, name)
+
+        def compile(self, pattern: Any, flags: int = 0) -> Any:
+            if isinstance(pattern, _CountingPattern):
+                return pattern
+            compiled = re.compile(pattern, flags)
+            if reading["code"] and not reading["depth"]:
+                return _CountingPattern(compiled, counts, inline=True)
+            return compiled
+
+        def search(self, pattern: Any, string: str, flags: int = 0) -> re.Match[str] | None:
+            return self.compile(pattern, flags).search(string)
+
+        def finditer(self, pattern: Any, string: str, flags: int = 0) -> Iterator[re.Match[str]]:
+            return self.compile(pattern, flags).finditer(string)
+
+        def findall(self, pattern: Any, string: str, flags: int = 0) -> list[Any]:
+            return self.compile(pattern, flags).findall(string)
+
+        def sub(self, pattern: Any, repl: Any, string: str, count: int = 0, flags: int = 0) -> str:
+            return self.compile(pattern, flags).sub(repl, string, count)
+
     monkeypatch.setattr(checks, "_is_network_exfiltration_command", counting_rule)
     monkeypatch.setattr(checks, "_network_rule_flags", counting_rule_flags)
+    monkeypatch.setattr(checks, "_network_uploads_in_code_or_config", counting_uploads)
+    monkeypatch.setattr(checks, "re", CountingRe())
     monkeypatch.setattr(checks, "shlex", CountingShlex())
     monkeypatch.setattr(checks, "_python_split_words", counting_split)
     monkeypatch.setattr(checks, "_python_rendered", counting_rendered)
@@ -1328,6 +1377,11 @@ _EMPTY_FAN_OUT = "\n".join(["a0 = ''", *(f"a{level} = {_sixteen_copies(f'a{level
 def _hostile(call: str | dict[str, Any], units_per_char: int = 8) -> tuple[str | dict[str, Any], int, int]:
     """Return a hostile call with the length of the text it holds and the work units it may charge per character."""
     return call, _call_text_length(call), units_per_char
+
+
+# Client names that code may bind to something else, as in requests = 0;
+# HTTPie's and curl's names would also be read as shell words.
+_BOUND_CLIENT_NAMES = sorted(checks._CODE_CLIENT_NAMES - {"HTTP", "http", "https", "pycurl"})
 
 
 # Hostile code the reader reads in full: each of these once made it read the
@@ -1408,6 +1462,34 @@ _HOSTILE_CODE_READ_IN_FULL = [
         *_hostile(_code_call(f"import os, requests\n{_EMPTY_FAN_OUT}\nos.system(a6)"), _BUDGET_RATE),
         id="empty-names",
     ),
+    # Import words and Go import blocks that never close, read once for every
+    # client name the code binds or may load, not once for each name.
+    pytest.param(
+        *_hostile(
+            _code_call("".join(f"{name} = 0\n" for name in _BOUND_CLIENT_NAMES) + "x.put(1)\n" + "import " * 9_000)
+        ),
+        id="bound-client-names-and-import-words",
+    ),
+    pytest.param(
+        *_hostile(_code_call("import requests\nx.put(1)\n" + ("import " + "y " * 90 + "\n") * 340)), id="import-lines"
+    ),
+    pytest.param(*_hostile(_code_call("x.post(1)\nfetch\n" + "import(" * 9_350)), id="go-import-blocks"),
+    pytest.param(
+        *_hostile(_code_call("x.post(1)\nfetch\n" + "import ( 'a' " * 4_500, language="go")), id="go-import-paths"
+    ),
+    # Upload functions imported under many names, then a long comment: each
+    # name in the code is looked up once, not matched against every alias.
+    pytest.param(
+        *_hostile(
+            _code_call(
+                "from requests import "
+                + ", ".join(f"post as a{number}" for number in range(2_600))
+                + "\n# "
+                + "x" * 25_000
+            )
+        ),
+        id="upload-aliases",
+    ),
 ]
 
 
@@ -1423,6 +1505,9 @@ def test_the_code_reader_reads_hostile_code_in_work_that_grows_with_its_length(
     assert counts["programs"] >= 1
     assert 0 < counts["charged"] <= units
     assert 0 < counts["scanned"] <= _SCAN_BOUND
+    # Patterns run inline, as one built for each name would be, read the text
+    # at most twice, however many names the code binds, imports or loads.
+    assert counts["inline"] <= _INLINE_SCANS * length
     assert counts["ruled"] <= _rule_allowance(length)
 
 
@@ -1642,6 +1727,28 @@ def test_a_code_argument_is_split_into_lines_once_however_many_heredoc_words_it_
     _assert_clean(check_security([_code_call(counted(code))]))
     # Splitting the code again for each << word would split it thousands of times.
     assert counted.splits <= 8
+
+
+@pytest.mark.parametrize(
+    "names",
+    [
+        pytest.param({"post"}, id="name"),
+        pytest.param({"post", "send", "put"}, id="names"),
+        pytest.param({"a$", "a$b", "$p", "b$$c"}, id="names-with-dollars"),
+        pytest.param({"a", "a$b", "p$"}, id="a-name-and-a-longer-one"),
+    ],
+)
+def test_imported_names_are_found_where_an_alternation_of_them_would_match(names: set[str]) -> None:
+    # Each run of word characters and $ is looked up once rather than matched
+    # against every name; the places found are those of the alternation.
+    masked = (
+        "post(u) x.post(u) a>post post:x post$x $post posts p$ p$x $p $p$ a$ a$b a$bc a$$b b$$c b$$cd "
+        "send put(u) _put a a$ \n put$\tsend$$ $ $$ a$b$"
+    )
+    alternation = re.compile(r"(?<![\w$.>:])(?:" + "|".join(re.escape(name) for name in sorted(names)) + r")\b")
+    expected = [(match.start(), match.end()) for match in alternation.finditer(masked)]
+    assert expected
+    assert list(checks._code_name_uses(masked, names)) == expected
 
 
 def _check_seconds(

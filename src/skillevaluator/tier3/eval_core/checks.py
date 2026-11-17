@@ -22,7 +22,7 @@ import re
 import shlex
 import warnings
 from array import array
-from collections.abc import Callable, Iterable, Mapping, Sequence, Set
+from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
 from fnmatch import fnmatchcase
 from typing import Any, NamedTuple
 
@@ -7845,6 +7845,37 @@ _CODE_CLIENT_NAMES = frozenset(
 # a client. Node's -e and REPL code may use http and https without loading them.
 _CODE_LOADED_CLIENT_NAMES = frozenset({"request", "got", "http", "https"})
 _NODE_GLOBAL_CLIENT_NAMES = frozenset({"http", "https"})
+# Where code loads or imports a name (see _code_loads and _code_import_words),
+# each found once however many names are looked up: an import word, after
+# which a name may follow on its line within _CODE_IMPORT_LINE_CHARS
+# characters, as in import requests or from x import http; an import
+# statement that starts a line, as in import http.client; a module path
+# that require, import or __import__ is given, or that from or import
+# names, with one pattern for each of _CODE_LOADED_CLIENT_NAMES; and a
+# module path in a Go import block, within _CODE_GO_IMPORT_CHARS characters
+# of its opening parenthesis and before its closing one.
+_CODE_IMPORT_WORD_START_RE = re.compile(r"\bimport\s")
+_CODE_IMPORT_LINE_RE = re.compile(r"(?:^|[\n;])[ \t]*import[ \t]+")
+_CODE_IMPORT_LINE_CHARS = 200
+_CODE_MODULE_LOAD_RES = {
+    name: re.compile(
+        r"(?:\b(?:require|import|__import__)\s*\(\s*|\bfrom\s+|\bimport\s+(?:[\w.]+\s+)?)"
+        rf"['\"`](?:node:)?(?:[\w.@-]+/)*{re.escape(name)}['\"`]"
+    )
+    for name in sorted(_CODE_LOADED_CLIENT_NAMES)
+}
+_CODE_GO_IMPORT_BLOCK_RE = re.compile(r"\bimport\s*\(")
+_CODE_GO_IMPORT_CHARS = 2_000
+_CODE_CLOSING_PARENTHESIS_RE = re.compile(r"\)")
+_CODE_QUOTE_RE = re.compile(r"['\"`]")
+# A quoted module path, with its last part, as http in "net/http" or "node:http".
+_CODE_MODULE_PATH_RE = re.compile(r"['\"`](?:node:)?(?:[\w.@-]+/)*([\w.@-]+)['\"`]")
+_CODE_WORD_RUN_RE = re.compile(r"\w+")
+# A run of word characters and $ that does not follow a dot, > or :, where an
+# imported name may be used (see _code_name_uses), and its parts: runs of $
+# and runs of other characters.
+_CODE_NAME_RUN_RE = re.compile(r"(?<![\w$.>:])[\w$]+")
+_CODE_DOLLAR_PART_RE = re.compile(r"\$+|[^$]+")
 # Members after a client that keep it a client: a class, which starts with a
 # capital letter (requests.Session, LWP::UserAgent, http.client.HTTPSConnection),
 # or one of these factories (axios.create(), Faraday.new, got.extend()). Any
@@ -8422,6 +8453,8 @@ class _CodeReader:
 
     __slots__ = (
         "_bindings",
+        "_go_imports",
+        "_import_words",
         "_imports",
         "_mocked",
         "_names",
@@ -8450,6 +8483,8 @@ class _CodeReader:
         self._pairs: dict[int, int] | None = None
         self._bindings: list[tuple[str, tuple[str, ...], int, int]] | None = None
         self._imports: list[tuple[str, str, bool, int, int]] | None = None
+        self._import_words: dict[bool, frozenset[str]] = {}
+        self._go_imports: frozenset[str] | None = None
         self._names: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
         self._mocked: frozenset[str] | None = None
 
@@ -8575,16 +8610,92 @@ def _code_loads(reader: _CodeReader, name: str) -> bool:
     require, import or __import__ is given, that from or import names, or
     that a Go import block lists, as in require("request"),
     import got from "got", import "net/http" or import ( "net/http" ).
+    *name* is one of _CODE_LOADED_CLIENT_NAMES. The import lines and Go
+    import blocks are read once for every name (see _code_import_words and
+    _code_go_imports).
     """
-    word = re.escape(name)
-    module = rf"['\"`](?:node:)?(?:[\w.@-]+/)*{word}['\"`]"
-    if re.search(rf"(?:^|[\n;])[ \t]*import[ \t]+[^\n;]{{0,200}}?(?<![\w.]){word}\b", reader.masked):
+    if name in _code_import_words(reader, lines=True):
         return True
-    if re.search(
-        rf"(?:\b(?:require|import|__import__)\s*\(\s*|\bfrom\s+|\bimport\s+(?:[\w.]+\s+)?){module}", reader.short
-    ):
+    if _CODE_MODULE_LOAD_RES[name].search(reader.short):
         return True
-    return reader.family in {"go", ""} and re.search(rf"\bimport\s*\([^)]{{0,2000}}?{module}", reader.short) is not None
+    return reader.family in {"go", ""} and name in _code_go_imports(reader)
+
+
+def _code_regions(spans: list[tuple[int, int]]) -> list[tuple[int, int]]:
+    """Merge (first, last) spans of where a word may start, in order of their firsts, into disjoint spans."""
+    merged: list[tuple[int, int]] = []
+    for first, last in spans:
+        if last < first:
+            continue
+        if merged and first <= merged[-1][1] + 1:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], last))
+        else:
+            merged.append((first, last))
+    return merged
+
+
+def _code_next_stop(stops: list[int], position: int, default: int) -> int:
+    """Return the first of the sorted *stops* at or after *position*, else *default*."""
+    index = bisect.bisect_left(stops, position)
+    return stops[index] if index < len(stops) else default
+
+
+def _code_import_words(reader: _CodeReader, *, lines: bool = False) -> frozenset[str]:
+    """Return the words that may follow an import within _CODE_IMPORT_LINE_CHARS characters on its line.
+
+    A word, a run of word characters, counts when it starts at most
+    _CODE_IMPORT_LINE_CHARS characters after the import word and a blank,
+    with no newline or ; between, as requests and http do in
+    import requests or from x import http. With *lines*, only an import that
+    starts a line or follows a ; counts, as in import http.client, and not a
+    word right after a dot. The import words and the newlines and semicolons
+    are found once, and each stretch of text after them is read once,
+    however many imports it follows and however many names are looked up.
+    """
+    cached = reader._import_words.get(lines)
+    if cached is not None:
+        return cached
+    masked = reader.masked
+    stops = [match.start() for match in _CODE_STATEMENT_STOP_RE.finditer(masked)]
+    spans = [
+        (match.end(), min(match.end() + _CODE_IMPORT_LINE_CHARS, _code_next_stop(stops, match.end(), len(masked))))
+        for match in (_CODE_IMPORT_LINE_RE if lines else _CODE_IMPORT_WORD_START_RE).finditer(masked)
+    ]
+    words: set[str] = set()
+    for first, last in _code_regions(spans):
+        for match in _CODE_WORD_RUN_RE.finditer(masked, first, last + 1):
+            if lines and masked[match.start() - 1] == ".":
+                continue
+            # A word that starts at the last place may go on past it.
+            words.add(_CODE_WORD_RUN_RE.match(masked, match.start())[0] if match.end() > last else match[0])
+    reader._import_words[lines] = frozenset(words)
+    return reader._import_words[lines]
+
+
+def _code_go_imports(reader: _CodeReader) -> frozenset[str]:
+    """Return the last parts of the module paths that Go import blocks list, as http for import ( "net/http" ).
+
+    A path counts when it starts at most _CODE_GO_IMPORT_CHARS characters
+    after import ( and before the block's closing parenthesis. The blocks
+    and closing parentheses are found once, and each stretch of text in
+    them is read once, however many blocks open in it.
+    """
+    if reader._go_imports is not None:
+        return reader._go_imports
+    short = reader.short
+    closes = [match.start() for match in _CODE_CLOSING_PARENTHESIS_RE.finditer(short)]
+    spans = [
+        (match.end(), min(match.end() + _CODE_GO_IMPORT_CHARS, _code_next_stop(closes, match.end(), len(short)) - 1))
+        for match in _CODE_GO_IMPORT_BLOCK_RE.finditer(short)
+    ]
+    names: set[str] = set()
+    for first, last in _code_regions(spans):
+        for quote in _CODE_QUOTE_RE.finditer(short, first, last + 1):
+            path = _CODE_MODULE_PATH_RE.match(short, quote.start())
+            if path is not None:
+                names.add(path[1])
+    reader._go_imports = frozenset(names)
+    return reader._go_imports
 
 
 def _code_module_is_client(path: str) -> bool:
@@ -8679,14 +8790,47 @@ def _code_imported_upload_used(reader: _CodeReader) -> bool:
     statements.sort()
     starts = [start for start, _end in statements]
     ends = [end for _start, end in statements]
-    pattern = re.compile(r"(?<![\w$.>:])(?:" + "|".join(re.escape(name) for name in sorted(names)) + r")\b")
-    for match in pattern.finditer(masked):
-        statement = bisect.bisect_right(starts, match.start()) - 1
-        if statement >= 0 and match.start() < ends[statement]:
+    for start, end in _code_name_uses(masked, names):
+        statement = bisect.bisect_right(starts, start) - 1
+        if statement >= 0 and start < ends[statement]:
             continue
-        if _code_called(reader, match.end()) or _code_reference_runs(reader, match.start(), match.end()):
+        if _code_called(reader, end) or _code_reference_runs(reader, start, end):
             return True
     return False
+
+
+def _code_name_uses(masked: str, names: set[str]) -> Iterator[tuple[int, int]]:
+    """Yield where code names one of *names*, as (start, end), in order.
+
+    A name counts where (?<![\\w$.>:])(?:NAME|...)\\b would match it: at the
+    start of a run of word characters and $ that does not follow a dot, >
+    or :, and ending at a word boundary; where several names fit, the
+    shortest. A name ends at a word boundary only at the end of the run or
+    where a $ meets a word character, so each run is split there and walked
+    once through the names split the same way, however many names there are.
+    """
+    trie: dict[str, list[Any]] = {}
+    for name in names:
+        node = trie
+        parts = _CODE_DOLLAR_PART_RE.findall(name)
+        for index, part in enumerate(parts):
+            entry = node.setdefault(part, [False, {}])
+            entry[0] = entry[0] or index == len(parts) - 1
+            node = entry[1]
+    for run in _CODE_NAME_RUN_RE.finditer(masked):
+        parts = _CODE_DOLLAR_PART_RE.findall(run[0])
+        node = trie
+        end = run.start()
+        for index, part in enumerate(parts):
+            entry = node.get(part)
+            if entry is None:
+                break
+            end += len(part)
+            # Past the run's end comes no word character, so a last part of $ ends at no boundary.
+            if entry[0] and (index < len(parts) - 1 or part[0] != "$"):
+                yield run.start(), end
+                break
+            node = entry[1]
 
 
 def _code_client_upload_call(reader: _CodeReader) -> bool:
@@ -8985,7 +9129,7 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
         if name in _CODE_LOADED_CLIENT_NAMES and not (reader.family == "node" and name in _NODE_GLOBAL_CLIENT_NAMES):
             if not _code_loads(reader, name):
                 modules.discard(name)
-        elif bound and re.search(rf"\bimport\s[^\n;]{{0,200}}?\b{name}\b", masked) is None:
+        elif bound and name not in _code_import_words(reader):
             modules.discard(name)
     clients: set[str] = set()
     for match in _CODE_FROM_IMPORT_RE.finditer(masked):

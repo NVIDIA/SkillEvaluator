@@ -1,0 +1,335 @@
+---
+title: "Live Evaluation Grading Reference"
+description: "How standard judges use trajectories, evidence budgets, retries, and fallback models."
+---
+
+For your first comparison, start with [Run a live evaluation](/skills/skillevaluator/tier3-live-evaluation).
+
+## How standard grading judges a trial
+
+With `default` or `default_plus_custom` grading, SkillEvaluator's verifier
+grades each trial after the agent finishes. `security`, `skill_execution`, and
+`skill_efficiency` are deterministic trajectory checks. `accuracy` and
+`goal_accuracy` are LLM judges that call the configured evaluator provider.
+`behavior_check` combines the behavior judge with directly evaluated declared
+checks; a checks-only case makes no behavior judge call. `custom_only` runs
+none of them.
+
+`skill_efficiency` averages skill routing with tool efficiency, the share of
+scored tool calls that did productive work. For Claude Code, Codex and OpenCode
+tool names, reading, searching, listing, writing, editing or patching files,
+running commands and activating a skill are productive, and so are MCP tools
+named `mcp__server__tool` (Claude Code). Codex and OpenCode MCP calls are not
+recognized as MCP calls yet, so most of them count as wasted. Help, version and
+install commands and searches rooted at `/` are wasted. Planning and
+bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,
+background-shell polling and sub-agent calls, are not counted, and a trial with
+only such calls scores 0.0. [Reports](/skills/skillevaluator/reports) lists the tool classes.
+
+The three LLM judges return verdicts only, and the verifier computes the
+scores. A `score` field in a judge reply is ignored.
+
+Error recovery distinguishes skill files, agent command errors, and missing
+runtime dependencies. Missing tools/modules declared by or used by the skill
+are environment problems: recovered failures have no deduction, while an
+unrecovered environment failure without an unrecovered skill fault marks the
+case `environment_invalid`. `skill_execution` then returns no score, the
+verifier skips the judges, and the collector leaves the trial UNSCORED
+(excluded from skill score averages). Any unrecovered skill fault in the same
+trial is scored as a skill failure instead. Agent-only failures remain
+unscored with the environment issue, and are included in its reason and
+`evaluation_errors`. Reports include the missing name and dependency
+declaration/installation guidance. Declare system tools in
+`scripts/apt-packages.txt`, Python packages in `scripts/requirements.txt`, or
+install them in `evals/environment/Dockerfile`. Agent-chosen tools the skill
+does not use remain agent errors. Missing files inside the skill remain skill
+defects (0.25 deduction if recovered); real unrecovered skill/agent failures
+still score zero.
+
+- `accuracy` is passing criteria divided by five. The criteria grade the
+  outcome: `ACTION_CORRECT`, `FACTUALLY_ACCURATE`, `TASK_ADDRESSED`,
+  `ACTIONABLE`, and `FORMAT_FOLLOWED` (the response follows any output format
+  the question explicitly requires; when none is required, it is true only if
+  the response gives an answer). A response that gives no answer fails all
+  five criteria and scores `0.0`, unless the expected answer is itself a
+  refusal. Every case and both arms use the same
+  five criteria. None of them asks whether the agent named or used the skill;
+  `skill_execution` scores that. A reply without all five true/false verdicts
+  is invalid.
+- `goal_accuracy` is `1.0` when the judge decides the goal was `achieved` and
+  `0.0` otherwise, the same binary scale as the RAGAS scorer.
+- `behavior_check` includes the share of expected behaviors observed and any
+  directly evaluated declared checks. When expected behaviors are present, the
+  reply must judge every behavior exactly once, identified by its 1-based
+  `step` number; a reply that skips, repeats, or invents a step is invalid.
+  A checks-only case is evaluated directly without a judge call.
+
+Rewards record `judge_contract: skill-evaluator-judges-v2`. Results written
+before this contract, whose `accuracy` included a `SKILL_IDENTIFIED` criterion,
+are not directly comparable with newer ones: a correct no-skill baseline answer
+used to be capped at `0.8` on positive cases.
+
+### The graded trajectory
+
+The verifier grades Harbor's ATIF `trajectory.json`. When that file is missing
+or has no steps, it rebuilds a trajectory from the agent's own log in the
+trial's agent log directory, trying `claude-code.txt`, `cursor-cli.txt`,
+`cline.txt`, `opencode.txt`, and `codex.txt` in that order:
+
+- `opencode.txt` is OpenCode's JSON event stream. Text events become agent
+  messages, and completed tool events become tool calls whose output keeps the
+  tool's status, exit code, and error text.
+- `codex.txt` is the Codex JSON event log. Shell commands, file changes, MCP
+  tool calls, `web_search` actions (with the full search, open-page, or
+  find-in-page payload), and `collab_tool_call` items become tool calls. Failed
+  commands keep their `status=failed` and `exit_code=` evidence, so
+  error-recovery checks still see them.
+
+Each trial's reward records the artifact it graded in `trajectory_source`. If
+neither `trajectory.json` nor a supported log yields any steps, the reward
+records `No trajectory or reconstructible agent log`. Custom graders read
+`trajectory.json` directly and do not get this rebuild.
+
+### Character-sensitive judging
+
+Set `SKILL_EVAL_JUDGE_CHARACTER_FACTS=1` in the evaluator's host environment to
+append character facts to the `accuracy`, `goal_accuracy`, and `behavior_check`
+prompts. For example, a literal U+00A0 (NO-BREAK SPACE) in code can look like an
+ordinary U+0020 space even when the task treats them differently. The metadata
+identifies non-ASCII whitespace and Unicode format (`Cf`) characters by code
+point, Unicode name, position, and ASCII-escaped context. Their presence alone
+does not indicate an error; the task determines which characters are permitted.
+
+The original prompt and evidence remain intact. Metadata is added separately,
+after evidence selection and compaction, with up to 20 occurrences per field
+and 20 code points of context on either side. Additional occurrences are counted.
+The metadata adds prompt tokens beyond the evidence budgets below.
+Line and column positions are one-based Unicode code points in that field; only
+LF advances the line number. Metadata cannot recover characters removed by
+earlier processing, and does not identify all invisible or look-alike characters.
+
+The option is disabled by default. Enabling it selects the prompt-based goal
+judge instead of the optional RAGAS route, so keep this setting consistent when
+comparing scores. Facts can help a judge interpret evidence but do not guarantee
+correct judgments. Prefer executable checks for requirements they can verify.
+
+### Evidence budgets
+
+Each LLM judge sees a bounded evidence bundle drawn from the trajectory rather
+than the full transcript. Sections are added in priority order until the
+judge's character budget runs out, so lower-priority sections are dropped or
+clipped first:
+
+| Judge | Evidence, highest priority first | Budget variable |
+| --- | --- | --- |
+| `accuracy` | Final response, produced files and writes, the six most recent tool results | `SKILL_EVAL_ACCURACY_BUDGET` |
+| `goal_accuracy` | Final response, end-state file changes, the twelve most recent tool results | `SKILL_EVAL_GOAL_ACCURACY_BUDGET` |
+| `behavior_check` | File changes, final response (capped by `SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`), the user request, and a compact tool history | `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET` |
+
+When the case's expected output or assertions contain a backtick-quoted
+snippet of four or more characters, or an output path under
+`/workspace/output`, `/output`, or `/logs/agent`, every bundle starts with a
+short deterministic fact list marking each one observed or not observed in the
+agent's tool calls.
+
+A judge can score only what its bundle contains. Evidence that was dropped or
+clipped cannot count, so on a long trajectory a behavior that appears only in
+truncated history can be judged as not observed. In the results tree, each
+judge's details in a trial's `reward.json` include an `omitted` record
+(`count`, `truncated`, and `reason`); when `truncated` is `true` on cases that
+matter, raise that judge's budget. For `behavior_check`, the reason names each
+setting that cut evidence: `SKILL_EVAL_BEHAVIOR_CHECK_BUDGET`,
+`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`, or both. Raise each setting it
+names; raising the budget does not clear a cut made by the final-response
+limit. Larger budgets send longer judge prompts and use more evaluator
+tokens. The *default* behavior budget never falls below the final-response
+limit plus 4,000 characters, so raising the limit alone leaves room for the
+tool history; a budget you set yourself is used exactly as set. Set these
+variables in the host environment;
+SkillEvaluator forwards them to the verifier. Defaults and accepted values are
+in [Judge evidence budgets](/skills/skillevaluator/environment-variables#judge-evidence-budgets).
+
+`behavior_check`'s `omitted` record carries four further keys, because
+`truncated` alone cannot say whether the judge still had what it needed:
+
+- `incomplete_sections` — the evidence sections whose complete source did not
+  reach the judge, by name: `final response`, `user request`, `file changes`,
+  `compact tool history`. Each is compared against its unclipped source, so
+  `file changes` and `compact tool history` also appear when a single write
+  body or tool result was longer than its own per-entry allowance, not only
+  when the overall budget was exceeded.
+- `required_complete` and `required_missing` — whether the *required*
+  evidence survived. Only `final response` is required: file changes and the
+  tool history grow with the run, so any finite budget shortens them on a long
+  trajectory, and their loss is reported but never withholds a score.
+- `expected_behaviors_verified` — whether the deterministic fact list already
+  settles every expected behavior, in which case the evidence that was cut
+  cannot change the judge's answer.
+
+When `required_complete` is `false`, `behavior_check` returns an evaluation
+error with no score instead of grading the evidence loss as a behavior
+failure, and **the case then has no overall score at all** — an unscored
+metric that is not "not applicable" leaves `overall_score` null, so the case
+drops out of any gate or comparison keyed on it. Raise the two settings the
+`reason` names, or shorten the case, and re-run. The one exception is
+`expected_behaviors_verified`: when every expected behavior names an artifact
+path or backtick-quoted snippet that the deterministic fact list above the
+evidence already marks observed, the missing text cannot change the answer, so
+the case is judged and scored normally.
+
+### Judge requests and retries
+
+- **Structured output.** Each judge requests a fixed JSON schema. OpenAI and
+  OpenAI-compatible chat-completions endpoints, including NVIDIA Build, receive
+  a strict JSON Schema `response_format`; Anthropic `/v1/messages` receives
+  `output_config`. Bedrock judges use prompt-only JSON.
+- **Automatic downgrade.** If an endpoint rejects the schema option itself
+  with HTTP 400 or 422 (for example, `response_format` is unsupported, or a
+  gateway turned the schema into a `tool_choice` the model rejects), the
+  judge repeats that request without the schema and logs a warning. It then
+  skips the schema for that provider, endpoint, and model for the remaining
+  judge calls in that verifier run. Other 400 and 422 errors are not
+  downgraded.
+- **Reply validation.** Replies are checked against the expected fields either
+  way. An empty, unparseable, or invalid reply, including an empty reply from a
+  reasoning model that ran out of output tokens, gets one retry that names the
+  problem, for example `steps not judged: [2]`. `behavior_check` can also
+  salvage complete per-behavior results from a truncated reply and counts the
+  missing behaviors as not passed.
+- **Saved judge evidence.** The verifier writes every judge attempt to
+  `judge_attempts.json` next to the trial's `skill_evaluator_reward.json` as it
+  happens, so the file also explains a judge that failed. Each entry records
+  the metric, attempt number, method (`llm`, `ragas`, or `salvage`), judge
+  model, status (`accepted`, `rejected`, `replied`, or `error`), and problem,
+  along with the prompt and reply. When `behavior_check` is scored from a
+  truncated reply, the LLM attempts keep their own status (`rejected`, or
+  `error` if the retry failed in transport), and an `accepted` `salvage`
+  entry, numbered like the truncated attempt, holds the rebuilt results.
+  When the RAGAS goal scorer runs, each request it sends is saved as a `ragas`
+  entry with its messages as the prompt and the model named in the request. A
+  `replied` entry holds the judge's reply: the text or the tool-call arguments
+  RAGAS parses, or the whole reply body when it has neither, such as a refusal
+  or a content-filter stop. An `error` entry holds the HTTP status and body,
+  or the reason the reply was not received. A request that fails before any
+  response arrives, such as a refused connection, saves no entry of its own. A
+  last `ragas` entry is `accepted` with the score RAGAS computed, or `error`
+  with the reason the prompt judge ran instead. Only that last entry counts
+  toward `--max-judge-calls`; the request entries do not. Configured
+  credentials, common key shapes, URL userinfo, `Authorization`, API-key,
+  token and `Cookie` header values, and credential flag values (`--token`,
+  `--password`, `curl -u user:password`) are masked, also at the start of a
+  line in JSON-escaped text such as RAGAS prompts, where a line break is the
+  two characters `\n`, and inside JSON-escaped quotes (`-u \"user:password\"`),
+  as in tool-call arguments. That includes a value whose flag or header name
+  was masked together with an unquoted credential value that ends the line
+  before (`--password ...\n--token ...`). Values whose quotes are escaped twice
+  or three times, as when a RAGAS prompt repeats a tool call's arguments, and
+  single-quoted values whose quotes are escaped once or twice, as in Python
+  source (`[\'--password\', \'...\']`), are masked too. Long prompts and
+  replies are shortened. The prompts contain the task question, expected
+  answer, and agent evidence. Pass `--harbor-keep-jobs` to keep the Harbor
+  trial directories that hold this file.
+- **Reasoning models.** GPT-5 and GPT-6 judges get no `temperature` and at
+  least 32,768 output tokens, because reasoning tokens count against the
+  limit; other judges get 16,384. GPT-6 judges and Claude 5.5 or later judges
+  on the Anthropic API are sent reasoning effort `medium`; other models keep
+  their default effort.
+- **Refusals.** A safety-classifier refusal is never scored as an answer. On
+  the native Claude API, Claude 5.5 or later judges use server-side fallback to
+  `claude-opus-4-8`, and on Bedrock a filtered Claude 5.5 reply is retried
+  once on Claude Opus 4.8 in the same geography.
+  `SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL` changes that target, or turns it off
+  with `none`; a target equal to the judge model is never sent. A refusal or an empty reply
+  then moves on to the next `LLM_JUDGE_FALLBACK_MODELS` entry, if any.
+  Each judge's details in the trial's `skill_evaluator_reward.json` record
+  `judge_model_used`, `judge_reasoning_effort`, and `judge_fallback_used`.
+  When a case uses different judge models across its two conditions,
+  repeated attempts, or scoring steps of a multi-step task, it is left out of
+  that judge metric's Skill Lift and counted in `judge_mixed_cases` in
+  `lift.json`. The arm scores keep all scored cases; the affected evaluator,
+  dimension, and overall lift use the remaining eligible comparisons.
+- **RAGAS goal scorer.** With the `openai` provider on the canonical
+  `https://api.openai.com/v1` endpoint and a judge model that is not a GPT-5 or
+  GPT-6 reasoning model, `goal_accuracy` first tries the RAGAS
+  `AgentGoalAccuracyWithReference` scorer through its own client, without the
+  schema or retry handling above but within the same time budget. A RAGAS
+  score is recorded with `"method": "ragas"` and the judge-model fields above.
+  If RAGAS is unavailable, fails, or returns a score other than `0.0` or
+  `1.0`, the verifier log shows a warning with the redacted error, and the
+  prompt judge runs instead (`"method": "custom"`). A case scored by RAGAS in
+  one condition and by the prompt judge in the other counts as a judge mix
+  even with the same model, so it is left out of the `goal_accuracy` lift the
+  same way.
+- **Transient failures.** HTTP 408, 429, and every 5xx response except 501 and
+  505 are retried, including 520–524 proxy errors and 529 overload responses.
+  Connection errors, timeouts, and Bedrock throttling or service-unavailable
+  errors are also retried with jittered exponential backoff. TLS certificate
+  verification failures are terminal, including when an SDK wraps them as a
+  generic connection or service-unavailable error. A `Retry-After` header,
+  in seconds or as an HTTP date, sets the wait; a value
+  above the maximum retry delay fails immediately instead of stalling.
+- **Time budget.** Each judge has its own wall-time budget (180 seconds by
+  default) inside the generated task's 600-second verifier timeout, which
+  leaves time to write failure artifacts. Requests are cut off at the
+  deadline, and a retry whose wait would reach it is not attempted. If you
+  raise the per-judge budget, scale the verifier timeout with
+  `--timeout-multiplier` so the three judges still fit.
+
+Retry counts, delays, and the per-judge budget come from the host environment
+and are forwarded to the verifier; see
+[LLM retries and judge time budget](/skills/skillevaluator/environment-variables#llm-retries-and-judge-time-budget).
+Retries and downgrades do not change scoring formulas. A judge that still fails
+is an evaluation infrastructure failure, not a `0.0` score, and the affected
+condition publishes no scores; see
+[Tier 3 judge failure semantics](/skills/skillevaluator/environment-variables#tier-3-judge-failure-semantics).
+
+### Judge fallback and retry policies
+
+Two opt-in host variables limit which models may answer a standard judge and
+how often it is asked. Both default to the behavior above. They are forwarded
+like `LLM_JUDGE_FALLBACK_MODELS`: only to standard verifier jobs, never to the
+agent environment or `custom_only` runs.
+
+- **`LLM_JUDGE_FALLBACK_POLICY=replace`.** Only the judge model and your
+  `LLM_JUDGE_FALLBACK_MODELS` entries answer. The built-in refusal fallback
+  for Claude 5.5 or later judges (`SKILL_EVAL_LLM_REFUSAL_FALLBACK_MODEL`,
+  default `claude-opus-4-8`) is not used, on the native
+  Claude API or on Bedrock. The default, `append`, keeps it.
+- **`LLM_JUDGE_RETRY_POLICY=strict`.** Each judge tries at most three models:
+  the judge model, then the first two `LLM_JUDGE_FALLBACK_MODELS` entries. It
+  sends at most two requests to each, and all of them share the judge's time
+  budget.
+  - A request that fails with a retryable HTTP status, a connection error, or
+    Bedrock throttling is retried at most once, then the next model is tried.
+    A model the provider reports as not found, invalid, or not accessible to
+    the key moves on without a retry. That covers the errors
+    `LLM_JUDGE_FALLBACK_MODELS` already falls back on, OpenAI's
+    `model_not_found`, a Claude `not_found_error` that names the model, and
+    Bedrock's `AccessDeniedException`, `ResourceNotFoundException`, and
+    invalid model identifier errors. A `Retry-After` wait above the maximum
+    retry delay moves on without waiting. A wait or request that would pass
+    the judge's deadline ends the judge.
+  - A refusal, a TLS certificate failure, an authentication error, and any
+    other non-retryable HTTP status end the judge. So does a provider error,
+    even on HTTP 429, that says a quota, budget, billing, or credit limit was
+    reached, or that a content filter, safety, or security policy rejected
+    the request. Only the provider's error code, type, and message are read
+    (the first 500 characters of a body that is not JSON), and only whole
+    phrases such as `insufficient_quota`, `budget exceeded`,
+    `credit balance`, or `content_filter` count, so a model id or proxy host
+    name in the error does not. These are not retried or handed to another
+    model, and the built-in refusal fallback is not used either.
+  - The first completed reply is final. It must be exactly one JSON object,
+    with only whitespace around it: no prose, Markdown fences, second object,
+    duplicate key, or `NaN`. An empty, invalid, or truncated reply fails the
+    judge without the format retry or `behavior_check` salvage, and
+    `goal_accuracy` skips the RAGAS scorer, which sends its own requests.
+  - The default, `legacy`, keeps the retries, fallbacks, format retry, and
+    salvage described above.
+
+Values are case-insensitive. Any other value stops a run with standard
+grading at configuration, before any trial starts. If one still reaches the
+verifier, every standard judge fails before a request is sent, so the affected
+conditions publish no scores. When set, `run_config.json` records the values as
+`judge.fallback_policy` and `judge.retry_policy`. A `custom_only` run does not
+read them.

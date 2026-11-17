@@ -1,0 +1,117 @@
+---
+title: "Prepare a Tier 3 Dataset"
+description: "Write task guidance, generate or bring cases, and review the dataset before running a live agent."
+---
+
+Prepare the requests and expected outcomes **before running an agent**.
+Both the with-skill and without-skill arms receive the same cases.
+Already have `evals/evals.json`? Go straight to [review and validate](#review-and-validate).
+
+You need an [installed CLI](/skills/skillevaluator/installation#install) and a
+skill folder containing `SKILL.md`. [Configure a provider](/skills/skillevaluator/configuration)
+and add the [llm extra](/skills/skillevaluator/installation-options#choosing-extras)
+for model-backed generation, or use the keyless option with the lightweight install below. Docker is needed
+for the later agent run, not for dataset creation.
+
+<Steps toc={true}>
+
+### Write task guidance
+
+Create `eval-guidance.md` in your working directory. Describe realistic requests,
+observable successful outcomes, and a request outside the skill's scope.
+Adapt this text-analysis example to your skill:
+
+```markdown title="eval-guidance.md"
+# Evaluation guidance for text-analyzer
+
+## Questions
+- Report the word count, character count, and most frequent word in "Red blue blue.".
+- How many words and characters are in "Red blue blue.", and which word occurs most often?
+- I am checking a short message: "Red blue blue.". Report its word count, character count, and most frequent word.
+
+## Behaviors
+- The response reports 3 words and 14 characters for "Red blue blue.".
+- The response identifies "blue" as the most frequent word with 2 occurrences.
+
+## Negative Cases
+- What is 2 + 2?
+
+## Notes
+- All task input is inline; no external files are needed.
+- Judge the reported results, regardless of how they were obtained.
+```
+
+Use outcomes that either arm can achieve. Requiring the agent to read the
+skill's files or use its script makes the no-skill baseline unfair.
+[More authoring examples and guidance sources](/skills/skillevaluator/eval-datasets#choose-a-grounding-source).
+
+### Generate the cases
+
+Replace `./my-skill` with your skill folder:
+
+```bash title="Generate a dataset for review"
+skillevaluator create-eval-dataset ./my-skill --full --prompt eval-guidance.md
+```
+
+Open the generated `./my-skill/evals/evals.json`. Model-backed generation uses
+your configured evaluator provider and can incur charges. It creates cases
+across explicit, implicit, contextual, and negative categories.
+
+<Accordion title="Generate a keyless draft instead">
+
+```bash
+skillevaluator create-eval-dataset ./my-skill --full --no-llm --prompt eval-guidance.md
+```
+
+  This produces local template cases, not model-written tasks. With the
+  example guidance above, it creates three positive cases and one negative.
+  Without an authored negative request, template mode does not invent one.
+  Replace generic prompts and expected outcomes during review.
+</Accordion>
+
+<Accordion title="I already have a dataset">
+  The generation command keeps an existing dataset by default. Review it
+  directly, or use the [regeneration and refinement options](/skills/skillevaluator/eval-datasets)
+  when you intend to change it. `--force` replaces the existing dataset;
+  `--refine` refines it. Do not regenerate merely to run existing cases.
+</Accordion>
+
+### Review and validate
+
+Open `./my-skill/evals/evals.json` and review every case:
+
+| Check | Ready when |
+| --- | --- |
+| Request (`prompt`) | It is a realistic task with enough input to complete it. |
+| Expected outcome | It states observable success, not that the agent used the skill. For the example, use the exact counts for positive cases and `4` for the math case. |
+| Inputs (`files`, when needed) | The declared fixtures exist and are available to both arms. Inline-only cases need no fixture files. |
+| Coverage | Cases cover the skill's intended uses and an appropriate off-scope request. |
+
+Confirm that the file exists and contains your reviewed cases, then run:
+
+```bash title="Validate the reviewed dataset"
+skillevaluator tier3 validate ./my-skill --strict
+```
+
+If the entire `evals/` directory is absent, the validator can report it as
+missing with exit code `0`. Treat that as **not ready**.
+
+Fix errors and warnings before starting a live run. Validation checks structure
+and flagged wording; **it does not confirm that a human reviewed the cases or
+that the dataset is representative**. A small starter is useful for checking
+the workflow, and produces limited evidence about skill performance.
+
+</Steps>
+
+<CardGroup cols={2}>
+  <Card title="Run the reviewed cases" icon="play" href="/skills/skillevaluator/tier3-live-evaluation#before-you-start">
+    Check your provider and Docker, then compare the agent with and without the skill.
+  </Card>
+  <Card title="Choose run settings" icon="sliders" href="/skills/skillevaluator/tier3-run-options">
+    Select an agent and attempt count before spending compute.
+  </Card>
+</CardGroup>
+
+Need the exact JSON fields, fixture layout, run policy, or sufficiency rules?
+Open the [dataset format reference](/skills/skillevaluator/eval-datasets).
+For native Harbor task bundles, use [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).

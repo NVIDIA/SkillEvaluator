@@ -123,6 +123,16 @@ Environment reviewers are optional: configure them if your repository wants
 manual approval; automatic checks do not require a paid reviewer-protection
 feature. Restrict repository and CI workflow write access to trusted maintainers.
 GitLab's protected execution and feedback prerequisites are described below.
+
+On a GitHub workflow revision that supports `environment-deployment`, set
+`environment-deployment: false` in the evaluation caller's `with` block to use
+environment secrets and variables without creating deployment records for CI.
+The default is `true`, preserving existing consumers. Required reviewers and wait
+timers still apply with `false`; custom deployment protection apps require `true`.
+The published 1.0.1 workflow pins predate this input. Upgrade to a reviewed
+supporting workflow revision before adding it, and refresh the trusted feedback
+caller's approved workflow reference and caller blob together.
+
 Choose matching chat and embedding configuration with `--provider`,
 `--embedding-provider`, `--model`, and `--embedding-model`; the default embedding
 provider follows OpenAI or NVIDIA Build; Anthropic defaults to OpenAI embeddings

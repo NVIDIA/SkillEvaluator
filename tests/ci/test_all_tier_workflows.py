@@ -30,7 +30,14 @@ def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():
     paid = workflow["jobs"]["paid-tiers"]
     assert paid["strategy"]["fail-fast"] == "false"
     assert paid["strategy"]["matrix"]["tier"] == ["2", "3"]
-    assert paid["environment"] == "${{ inputs.environment }}"
+    # Existing consumers retain deployment tracking and custom protection apps.
+    assert inputs["environment-deployment"]["type"] == "boolean"
+    assert inputs["environment-deployment"]["default"] == "true"
+    for name in ("paid-tiers", "tier1-llm"):
+        assert workflow["jobs"][name]["environment"] == {
+            "name": "${{ inputs.environment }}",
+            "deployment": "${{ inputs.environment-deployment }}",
+        }
     assert "eligibility" in paid["needs"]
     assert "needs.eligibility.outputs.allowed" in paid["if"]
     checkouts = [s for s in paid["steps"] if s.get("uses", "").startswith("actions/checkout@")]

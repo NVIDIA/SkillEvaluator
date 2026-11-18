@@ -2685,6 +2685,76 @@ def test_anthropic_missing_usage_is_schema_valid(
     assert message["usage"] == expected
 
 
+def _completion_with_backend_tool_names(*names: str) -> dict[str, object]:
+    return {
+        **CHAT_TOOL_RESPONSE,
+        "choices": [
+            {
+                "message": {
+                    "content": "Text before tool calls.",
+                    "tool_calls": [
+                        {"id": f"call-{index}", "type": "function", "function": {"name": name, "arguments": "{}"}}
+                        for index, name in enumerate(names)
+                    ],
+                }
+            }
+        ],
+    }
+
+
+@pytest.mark.parametrize("translator", [chat_completion_to_anthropic_events, chat_completion_to_responses_events])
+@pytest.mark.parametrize("name", ["bad.tool", "bad:tool", "bad/tool", "bad tool", "bad\ntool", "bad\u2013tool"])
+def test_backend_tool_names_are_validated_before_any_event(translator: object, name: str) -> None:
+    assert callable(translator)
+    events = translator(_completion_with_backend_tool_names("valid_tool", name))
+    yielded: list[dict[str, object]] = []
+
+    with pytest.raises(BridgePayloadError, match="tool call name is unsupported by NVIDIA Build"):
+        yielded.append(next(events))
+
+    assert yielded == []
+
+
+@pytest.mark.parametrize("translator", [chat_completion_to_anthropic_events, chat_completion_to_responses_events])
+@pytest.mark.parametrize("name", ["unregistered_tool", "tool-v2", "Tool9", "t" * 96])
+def test_valid_unregistered_backend_tool_names_remain_supported(translator: object, name: str) -> None:
+    assert callable(translator)
+    events = list(translator(_completion_with_backend_tool_names(name)))
+
+    if translator is chat_completion_to_anthropic_events:
+        message = bridge._anthropic_message_from_events(events)
+        names = [block["name"] for block in message["content"] if block["type"] == "tool_use"]
+    else:
+        names = [item["name"] for item in events[-1]["response"]["output"] if item["type"] == "function_call"]
+    assert names == [name]
+
+
+@pytest.mark.parametrize(
+    ("route", "payload"),
+    [
+        ("/v1/messages", {"model": "nvidia/model", "messages": []}),
+        ("/v1/responses", {"model": "nvidia/model", "input": "Hello"}),
+    ],
+)
+def test_malformed_backend_tool_name_is_gateway_error_before_stream(
+    bridge_services: _BridgeServices, monkeypatch: pytest.MonkeyPatch, route: str, payload: dict[str, object]
+) -> None:
+    completion = _completion_with_backend_tool_names("valid_tool", "bad.tool")
+    monkeypatch.setattr(bridge, "_request_build", lambda *_args: completion)
+
+    status, headers, body = _request(f"{bridge_services.url}{route}", payload)
+
+    assert status == 502
+    assert headers["Content-Type"].startswith("application/json")
+    assert json.loads(body)["error"]["type"] == "backend_error"
+    assert "event:" not in body
+    assert "bad.tool" not in body
+    deadline = time.monotonic() + 1
+    while bridge_services.bridge_server.active_workers and time.monotonic() < deadline:
+        time.sleep(0.005)
+    assert f"status=502 path={route} error=invalid_backend_response" in bridge_services.log_path.read_text()
+
+
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:
     malformed_completion = {
         **CHAT_TOOL_RESPONSE,

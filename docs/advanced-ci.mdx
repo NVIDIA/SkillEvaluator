@@ -4,11 +4,15 @@ description: "Prerequisites and reference for explicitly enabled all-tier CI."
 ---
 
 Standard repository onboarding runs quality and security checks without
-a model key. The all-tier integration is a separate, **explicit opt-in and
-unreleased capability**. Released Tier 1 bundles and plain `ci init` run only the
-quality and security checks; all-tier setup requires a reviewed candidate CLI
-and its bundled schema-version 2 descriptor with the platform's all-tier
-capability and immutable pins.
+a model key. All-tier CI is a separate **explicit opt-in** for GitHub and GitLab;
+its CLI and schema-version 2 descriptor were already included in 0.9.0.
+The 1.0.1 release refreshes the verified workflow, tools and image pins.
+Plain `ci init` and the manual Tier 1 configurations keep their existing scope.
+
+For the 1.0.1 pins, install 1.0.1 when its release package is available; before
+publication, use the reviewed GitHub source option on
+[Installation](/skills/skillevaluator/installation#install). An existing CLI or
+committed caller retains its earlier pins until you explicitly upgrade it.
 
 ## Before you opt in
 
@@ -43,7 +47,7 @@ pin, model or secret change, skips the provider-backed jobs. Their prerequisites
 are first checked by the push to the default branch after it merges, a manual
 run there, or the next skill change. To check them before merging, set
 `scan-mode: all` (GitLab: `SKILL_EVAL_SCAN_MODE: all`) on that pull request and
-restore `auto` before merging. `skillevaluator ci demo` works only after the setup
+restore `auto` before merging. `skillevaluator ci demo --tiers 1,2,3` works only after the setup
 has merged.
 
 Reports retain native evidence and an aggregate artifact for 14 days. Feedback

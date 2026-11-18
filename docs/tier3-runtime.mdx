@@ -137,9 +137,10 @@ cloud backend for untrusted code.
 </Warning>
 ## Execution backends
 
-The backend selector and NeMo Gym adapter require the **GitHub source**
-installation; PyPI 0.9.0 uses Harbor. See
-[release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
+The backend selector and NeMo Gym adapter are included in SkillEvaluator
+**1.0.1**; 0.9.0 uses Harbor. See
+[Installation](/skills/skillevaluator/installation#install) for package availability.
+The separate pinned Gym runtime and compatibility requirements below still apply.
 
 `--backend` chooses what executes the cases. The default is Harbor. The experimental
 NeMo Gym adapter stages the same task folders and uses the shared verifier and result
@@ -149,7 +150,7 @@ collector, but requires a Gym interface that is not available in the checked pub
 | Backend | What runs the cases |
 | --- | --- |
 | `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
-| `nemo-gym` | Experimental native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex and Claude Code have completed live runs on the pinned Gym. OpenCode currently fails in Gym's agent setup before either arm starts. |
+| `nemo-gym` | Native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned editable Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex, Claude Code, and OpenCode have completed live paired runs on this pinned runtime. OpenCode requires the full editable checkout; its wheel installation fails during agent setup. |
 
 **Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
 That release's `gym eval run` takes JSONL inputs and configured environments; it has
@@ -157,11 +158,13 @@ neither the positional task-directory argument nor `--sandbox` used by this adap
 Removing that flag alone does not provide the required execution or verifier contract.
 The immutable public source candidate
 [`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
-declares the `TARGET` task-folder argument and the seven required flags. This source
-inspection alone does not establish full runtime support. Beyond the specific live runs
-summarized above, broader agent/grading combinations, paired small/custom-Dockerfile
-runs and input-file handling still need independent qualification, including their
-native execution and verifier artifacts. The agent mappings remain experimental.
+declares the `TARGET` task-folder argument and the seven required flags. Focused live
+Docker runs completed both with-skill and baseline trials for Codex and OpenCode with
+GPT-5.4-mini, and for Claude Code with Claude Sonnet 4.6. The runs retained native
+execution and verifier artifacts and exercised staged input files. These operational
+checks do not establish representative skill quality or compatibility with every model.
+Additional grading modes, custom Dockerfiles, and broader provider/model combinations
+need separate qualification.
 
 The Claude Code mapping uses the same pinned runtime version as Harbor, installed
 by Gym inside the sandbox. It enables native discovery and projects staged skills
@@ -173,13 +176,16 @@ takes its policy endpoint from the same settings as Codex: `SKILL_EVAL_NEMO_GYM_
 `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` and a model from `--model` or
 `--agent-model claude-code=MODEL`.
 
-Install the pinned Gym in its own Python 3.13.14+ environment, separate from
-SkillEvaluator's, and check that its `gym eval run --help` lists `TARGET` and `--sandbox`:
+Use uv 0.13.4 or later on `PATH`. Install the pinned Gym from a persistent full
+source checkout in editable mode, with its own Python 3.13.14+ environment separate
+from SkillEvaluator's. Check that `gym eval run --help` lists `TARGET` and `--sandbox`:
 
 ```bash
+git clone --filter=blob:none https://github.com/NVIDIA-NeMo/Gym.git "$HOME/nemo-gym/source"
+git -C "$HOME/nemo-gym/source" checkout --detach 792fa142f58277aecff05d402061d647e9a92acf
 uv venv --python ">=3.13.14,<3.14" "$HOME/nemo-gym/.venv"
 uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
-  "nemo-gym @ git+https://github.com/NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf"
+  --editable "$HOME/nemo-gym/source"
 "$HOME/nemo-gym/.venv/bin/gym" eval run --help
 ```
 
@@ -442,6 +448,21 @@ See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci
   <Accordion title="evaluate cannot start the environment">
     Start Docker or configure the selected `--env-mode`, then re-run
     `skillevaluator doctor` with the same agent and environment.
+  </Accordion>
+  <Accordion title="NeMo Gym cannot find the OpenCode runtime installer">
+    Use the pinned editable source-checkout installation above. At this Gym
+    revision, a non-editable wheel installation creates component-resource
+    symlinks that its Docker uploader preserves as dangling host-path links.
+    OpenCode then fails before execution with a missing
+    `install_opencode_runtime.sh`. Repoint `SKILL_EVAL_NEMO_GYM_BIN` at the
+    editable installation and rerun; the checkout must remain available.
+  </Accordion>
+  <Accordion title="NeMo Gym cannot resolve or reach its service host">
+    Set `SKILL_EVAL_NEMO_GYM_HOST` to a host LAN or bridge IPv4 address reachable
+    from the Docker task containers. For example, on macOS with networking on
+    `en0`, use `export SKILL_EVAL_NEMO_GYM_HOST=$(ipconfig getifaddr en0)`.
+    Use the interface serving your Docker traffic; the configured address must
+    belong to the host because Gym also binds its services there.
   </Accordion>
   <Accordion title="Docker reports that all predefined address pools have been fully subnetted">
     A trial's Compose project normally creates its own Docker network, and

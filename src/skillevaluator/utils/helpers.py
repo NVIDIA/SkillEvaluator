@@ -97,7 +97,8 @@ def find_skills_in_directory(root_path: Path, *, problems: dict[Path, str] | Non
                 continue
             if is_link_or_reparse(directory):
                 try:
-                    # Internal aliases are already covered through their real paths.
+                    # Skip internal aliases; real targets still follow discovery
+                    # exclusions, so an alias into an excluded directory is ignored.
                     if Path(os.path.realpath(directory)).is_relative_to(resolved_root):
                         continue
                     has_manifest = _linked_directory_contains_skill(directory)

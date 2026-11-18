@@ -20,12 +20,12 @@ a separate demo repository.
 ## Get a version you can run
 
 **These source templates contain placeholders.** Copy the
-[ready-to-use configurations](../bundles/0.9.0/README.md) instead; their reviewed
+[ready-to-use configurations](../bundles/1.0.1/README.md) instead; their reviewed
 workflow commits and container image digest are already filled in.
-The comments-only workflow is a source capability for a future bundle; the
-archived 0.9.0 bundle and released onboarding CLI still offer the hosted publisher.
-For comments only, use a reviewed revision containing the new reusable workflow
-and follow the [comment setup](../README.md#pr-comments-without-hosted-reports).
+The 1.0.1 bundle includes the comments-only workflow; the archived 0.9.0 bundle
+does not. Default CLI feedback still configures the hosted publisher. For
+comments only, copy the versioned workflow and follow the
+[comment setup](../README.md#pr-comments-without-hosted-reports).
 
 Open a file in that folder and use GitHub's **Raw** view to copy its complete
 contents. The generated files and their checksums are kept in this public
@@ -71,6 +71,6 @@ cover results and merge-gating settings.
 
 ## Advanced CI
 
-The unreleased, explicitly enabled all-tier integration has separate
+The explicitly enabled all-tier CLI, already included in 0.9.0, has separate
 [setup and maintainer instructions](all-tiers/README.md). Released templates
 above provide quality and security checks without a model key.

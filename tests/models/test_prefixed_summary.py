@@ -47,8 +47,9 @@ def test_prefixed_merge_keeps_every_summary_counter(nested):
         assert child == original
 
 
-def test_unicode_collection_json_keeps_scanned_files_and_raw_severity_counts(tmp_path):
-    for name in ("first-skill", "second-skill"):
+@pytest.mark.parametrize("broken_count", [2, 1, 0])
+def test_unicode_collection_json_keeps_scanned_files_and_raw_severity_counts(tmp_path, broken_count):
+    for index, name in enumerate(("first-skill", "second-skill")):
         skill = tmp_path / name
         skill.mkdir()
         (skill / "SKILL.md").write_text(f"---\nname: {name}\ndescription: Test\n---\n# Test\n")
@@ -58,21 +59,22 @@ def test_unicode_collection_json_keeps_scanned_files_and_raw_severity_counts(tmp
             "medium.md": "text\u206amore\n",
             "low.md": "hello\u200bworld\n",
         }.items():
-            (skill / filename).write_text(content, encoding="utf-8")
+            (skill / filename).write_text(content if index < broken_count else "Ordinary text\n", encoding="utf-8")
 
     with continue_on_failure_scope(True):
         result = UnicodeSmuggleValidator().validate(tmp_path)
     report = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
 
-    assert not result.passed
+    assert result.passed is (broken_count == 0)
     counts = Counter(finding.severity.value for finding in result.findings)
-    assert counts == {"critical": 2, "high": 2, "medium": 2, "low": 2}
-    assert report["severity_counts"] == counts
+    expected_counts = dict.fromkeys(("critical", "high", "medium", "low"), broken_count)
+    assert counts == Counter(expected_counts)
+    assert report["severity_counts"] == expected_counts
     summary = report["results"][0]["summary"]
     assert summary["files_scanned"] == 10
-    assert summary["errors"] == 4
-    assert summary["warnings"] == 4
-    for severity, count in counts.items():
+    assert summary["errors"] == 2 * broken_count
+    assert summary["warnings"] == 2 * broken_count
+    for severity, count in expected_counts.items():
         assert summary[f"{severity}_count"] == count
 
 

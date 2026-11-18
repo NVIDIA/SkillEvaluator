@@ -843,11 +843,13 @@ _NVIDIA_BUILD_FILE_SENTINEL = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _NVIDIA_BUILD_AGENT_DEFAULT_MODEL = CHAT_DEFAULT_NVIDIA
 _GATEWAY_CODEX_IMPORT_PATH = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
-# The OpenAI-compatible gateway Codex wrapper and container agent wrappers are
+_GATEWAY_CLAUDE_IMPORT_PATH = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayClaudeCode"
+# The OpenAI-compatible gateway wrappers and container agent wrappers are
 # allowed on Harbor-native backends (including GKE).
 _NATIVE_BACKEND_AGENT_IMPORT_PATHS = frozenset(
     {
         _GATEWAY_CODEX_IMPORT_PATH,
+        _GATEWAY_CLAUDE_IMPORT_PATH,
         *CONTAINER_AGENT_IMPORT_PATHS.values(),
     }
 )
@@ -3692,6 +3694,10 @@ def _provider_agent_import_path(provider: ProviderConfig, agent: str, env_mode: 
     """Select only the provider-specific wrappers required for this environment."""
     if agent == "hermes" and provider.provider == "nv_build" and env_mode == "docker":
         return DOCKER_AGENT_IMPORT_PATHS["hermes"]
+    if provider.provider == "openai-compatible" and agent == "claude-code":
+        if env_mode == ENV_MODE_LOCAL:
+            return "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalGatewayClaudeCode"
+        return _GATEWAY_CLAUDE_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "codex" and env_mode != ENV_MODE_LOCAL:
         return _GATEWAY_CODEX_IMPORT_PATH
     if provider.provider == "openai-compatible" and agent == "opencode" and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES:

@@ -45,6 +45,7 @@ Agent-refined mode (--refine):
 """
 
 import argparse
+import ast
 import asyncio
 import hashlib
 import json
@@ -168,14 +169,14 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
                 description = str(frontmatter["description"]).strip()
 
     # Find scripts in scripts/ (historical) and tools/ (agentskills.io)
-    seen_scripts: set[str] = set()
+    script_paths: dict[str, Path] = {}
     for dirname in EXECUTABLE_SKILL_DIRS:
         directory = skill_path / dirname
         if not directory.is_dir():
             continue
         for script_file in directory.glob("*.py"):
-            if script_file.name not in seen_scripts:
-                seen_scripts.add(script_file.name)
+            if script_file.name not in script_paths:
+                script_paths[script_file.name] = script_file
                 scripts.append(script_file.name)
 
     # Detect interactive scripts from SKILL.md content
@@ -217,24 +218,112 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
         # Every script file `tier3 validate` lists, not only the Python ones in "scripts".
         "script_files": evals_spec._skill_script_names(skill_path),
         "interactive_scripts": interactive_scripts,
+        # Scripts that only define code for other scripts to import; the agent never runs them.
+        "import_only_scripts": {name for name, path in script_paths.items() if _is_import_only_script(path)},
         "content": content[:4000],
         "eval_prompt": eval_prompt,
         "eval_prompt_source": eval_prompt_source,
     }
 
 
+# A script file larger than this is not read to decide whether it is import-only.
+_MAX_SCRIPT_BYTES = 1_000_000
+
+_ARGUMENT_PARSING_METHODS = frozenset({"parse_args", "parse_known_args"})
+
+
+def _is_main_guard(test: ast.expr) -> bool:
+    """Whether an if-test is ``__name__ == "__main__"`` (either operand order)."""
+    if not (isinstance(test, ast.Compare) and len(test.ops) == 1 and isinstance(test.ops[0], ast.Eq)):
+        return False
+    operands = [test.left, *test.comparators]
+    return any(isinstance(node, ast.Name) and node.id == "__name__" for node in operands) and any(
+        isinstance(node, ast.Constant) and node.value == "__main__" for node in operands
+    )
+
+
+def _runs_script_code(statement: ast.stmt, local_functions: frozenset[str]) -> bool:
+    """Whether a top-level assignment reads the command line or calls a function this file defines."""
+    for node in ast.walk(statement):
+        if isinstance(node, ast.Call):
+            if isinstance(node.func, ast.Name) and node.func.id in local_functions:
+                return True
+            if isinstance(node.func, ast.Attribute) and node.func.attr in _ARGUMENT_PARSING_METHODS:
+                return True
+        if isinstance(node, ast.Attribute) and node.attr == "argv":
+            return True
+    return False
+
+
+def _only_definitions(body: Sequence[ast.stmt], local_functions: frozenset[str]) -> bool:
+    for statement in body:
+        if isinstance(
+            statement,
+            ast.Import | ast.ImportFrom | ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef | ast.Pass,
+        ):
+            continue
+        if isinstance(statement, ast.Expr) and isinstance(statement.value, ast.Constant):
+            # A docstring or other bare constant.
+            continue
+        if isinstance(statement, ast.Assign | ast.AnnAssign | ast.AugAssign):
+            if _runs_script_code(statement, local_functions):
+                return False
+            continue
+        if isinstance(statement, ast.If):
+            if _is_main_guard(statement.test) or not _only_definitions(
+                [*statement.body, *statement.orelse], local_functions
+            ):
+                return False
+            continue
+        if isinstance(statement, ast.Try):
+            blocks = [*statement.body, *statement.orelse, *statement.finalbody]
+            for handler in statement.handlers:
+                blocks.extend(handler.body)
+            if not _only_definitions(blocks, local_functions):
+                return False
+            continue
+        # A call, loop, with-block or anything else runs when the file is run.
+        return False
+    return True
+
+
+def _is_import_only_script(path: Path) -> bool:
+    """Whether a Python file only defines things (imports, functions, classes, constants) and does nothing when run.
+
+    Such a file is a helper that the skill's real scripts import, like a shared
+    URL check. An agent following SKILL.md has no reason to run it, so it must
+    not become a case's expected_script. A file that cannot be read or parsed is
+    not called import-only: Tier 3 cannot tell what it does, so it stays a candidate.
+    """
+    try:
+        if not path.is_file() or path.stat().st_size > _MAX_SCRIPT_BYTES:
+            return False
+        tree = ast.parse(path.read_text(encoding="utf-8").removeprefix("\ufeff"), filename=path.name)
+    except (OSError, UnicodeDecodeError, SyntaxError, ValueError, RecursionError):
+        return False
+    local_functions = frozenset(
+        node.name for node in tree.body if isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef)
+    )
+    return _only_definitions(tree.body, local_functions)
+
+
 def _pick_primary_script(skill: dict[str, Any]) -> str | None:
-    """Pick the best script for eval: prefer non-interactive scripts.
+    """Pick the best script for eval: a script the agent runs, preferably a non-interactive one.
 
     Uses SKILL.md context to detect interactive scripts (e.g., "browser_login.py
     is interactive because it opens a browser") rather than keyword-matching filenames.
+    An import-only helper module (see `_is_import_only_script`) is passed over while
+    the skill has a script that does something when run; if every script is a helper
+    the first one is still returned.
     """
     scripts = skill.get("scripts", [])
     if not scripts:
         return None
+    import_only = skill.get("import_only_scripts", set())
+    runnable = [s for s in scripts if s not in import_only] or scripts
     interactive = skill.get("interactive_scripts", set())
-    non_interactive = [s for s in scripts if s not in interactive]
-    return non_interactive[0] if non_interactive else scripts[0]
+    non_interactive = [s for s in runnable if s not in interactive]
+    return non_interactive[0] if non_interactive else runnable[0]
 
 
 SECURITY_BEHAVIOR = (

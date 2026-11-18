@@ -28,7 +28,11 @@ def _load_script(module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / f"{module_name}.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(SCRIPTS_DIR))
     return module
 
 
@@ -186,6 +190,29 @@ def test_inline_path_parameters_are_inherited_and_overridden() -> None:
     assert spec == original_spec
 
 
+@pytest.mark.parametrize("schema", [True, False])
+def test_inline_boolean_schemas_preserve_operations(schema: bool) -> None:
+    parser = _load_script("parse_openapi")
+    spec = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/items": {
+                "parameters": [{"name": "filter", "in": "query", "schema": schema}],
+                "get": {"operationId": "listItems", "responses": {"200": {"description": "OK"}}},
+                "post": {"operationId": "createItem", "responses": {"200": {"description": "OK"}}},
+            },
+        },
+    }
+
+    operations = parser.parse_spec(spec)["operations"]
+
+    assert [operation["operation_id"] for operation in operations] == ["listItems", "createItem"]
+    for operation in operations:
+        assert operation["parameters"] == [
+            {"name": "filter", "in": "query", "required": False, "description": "", "schema": schema}
+        ]
+
+
 @pytest.mark.parametrize(
     ("path_parameters", "operation_parameters"),
     [
@@ -195,13 +222,14 @@ def test_inline_path_parameters_are_inherited_and_overridden() -> None:
         ),
         ([{"$ref": "#/components/parameters/ItemId"}], [{"name": "limit", "in": "query"}]),
         ([{"in": "path"}], [{"name": "limit", "in": "query"}]),
+        (True, [{"name": "limit", "in": "query"}]),
         ([], [{"name": "limit", "in": "query"}]),
         ([], []),
     ],
-    ids=["operation-references", "path-reference", "missing-identity", "operation-only", "empty"],
+    ids=["operation-references", "path-reference", "missing-identity", "non-list-path-container", "operation-only", "empty"],
 )
 def test_non_inline_parameter_lists_keep_operation_output(
-    path_parameters: list[dict], operation_parameters: list[dict]
+    path_parameters: list[dict] | bool, operation_parameters: list[dict]
 ) -> None:
     parser = _load_script("parse_openapi")
     spec = {
@@ -217,3 +245,11 @@ def test_non_inline_parameter_lists_keep_operation_output(
 
     assert parameters == parser.parse_parameters(operation_parameters)
     assert len(parameters) == len(operation_parameters)
+
+
+@pytest.mark.parametrize("script", ["call_api", "parse_openapi"])
+def test_scripts_share_one_url_scheme_check(script: str) -> None:
+    module = _load_script(script)
+
+    assert module.validate_http_url.__module__ == "url_safety"
+    assert "def validate_http_url" not in (SCRIPTS_DIR / f"{script}.py").read_text(encoding="utf-8")

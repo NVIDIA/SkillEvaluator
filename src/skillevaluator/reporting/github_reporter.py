@@ -14,7 +14,10 @@ are counted on the closing notice rather than omitted silently.
 from __future__ import annotations
 
 import sys
-from dataclasses import dataclass
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -299,8 +302,8 @@ def _skill_counts(results: list[ValidationResult]) -> tuple[int, int, int, int]:
     return 1, 1, 0, 0
 
 
-def _summary_message(results: list[ValidationResult], omitted: int) -> str:
-    checked, passed, failed, incomplete = _skill_counts(results)
+def _summary_message(counts: tuple[int, int, int, int], omitted: int) -> str:
+    checked, passed, failed, incomplete = counts
     skill_word = "skill" if checked == 1 else "skills"
     text = f"{checked} {skill_word} checked, {passed} passed, {failed} failed, {incomplete} incomplete"
     if omitted:
@@ -334,6 +337,68 @@ def _select(annotations: list[_Annotation]) -> tuple[list[_Annotation], int]:
     return chosen, omitted
 
 
+def _render(annotations: list[_Annotation], counts: tuple[int, int, int, int]) -> str:
+    chosen, omitted = _select(annotations)
+    lines = [item.format_line() for item in chosen]
+    summary = _Annotation(
+        level="notice",
+        kind="finding",
+        severity="info",
+        path="",
+        line=None,
+        end_line=None,
+        check="summary",
+        title="SkillEvaluator",
+        message=_summary_message(counts, omitted),
+    )
+    lines.append(summary.format_line())
+    # Each finding is one command line. A leftover newline would let untrusted
+    # text start ::add-mask / ::stop-commands / ::set-output / ::add-path.
+    sanitized: list[str] = []
+    for line in lines:
+        compact = line.replace("\r", "").replace("\n", "")
+        if compact.startswith(("::add-mask", "::stop-commands", "::set-output", "::add-path")):
+            continue
+        sanitized.append(compact)
+    return "\n".join(sanitized) + "\n"
+
+
+def _write_stdout(text: str) -> None:
+    sys.stdout.buffer.write(text.encode("utf-8", "backslashreplace"))
+    sys.stdout.buffer.flush()
+
+
+# A catalog validates each skill as its own run. While a collection is open,
+# print_all records each skill's annotations here instead of printing them, so
+# the catalog can print one capped stream and one summary for the whole job.
+_collector: ContextVar[list[dict] | None] = ContextVar("github_annotation_collector", default=None)
+
+
+@contextmanager
+def collect_annotations() -> Iterator[list[dict]]:
+    """Collect GitHub annotations from every render in this context instead of printing them.
+
+    Each entry is a plain, picklable dict, so a catalog worker process can return
+    its entries to the parent.
+    """
+    collected: list[dict] = []
+    token = _collector.set(collected)
+    try:
+        yield collected
+    finally:
+        _collector.reset(token)
+
+
+def print_collected_annotations(entries: list[dict]) -> None:
+    """Print one capped annotation stream and one summary for collected per-skill entries."""
+    annotations = [_Annotation(**item) for entry in entries for item in entry["annotations"]]
+    totals = [0, 0, 0, 0]
+    for entry in entries:
+        for index, value in enumerate(entry["counts"]):
+            totals[index] += value
+    _write_stdout(_render(annotations, (totals[0], totals[1], totals[2], totals[3])))
+
+
 class GitHubReporter(ReporterBase):
     """GitHub Actions workflow commands for inline pull-request annotations."""
 
@@ -357,38 +422,26 @@ class GitHubReporter(ReporterBase):
     def render(self, result: ValidationResult) -> str:
         return self.render_all([result])
 
-    def render_all(self, results: list[ValidationResult]) -> str:
+    def annotations(self, results: list[ValidationResult]) -> list[_Annotation]:
         annotations: list[_Annotation] = []
         for result in results:
             annotations.extend(_annotations_for_result(result, self.workspace_root, self.scan_root))
-        chosen, omitted = _select(annotations)
-        lines = [item.format_line() for item in chosen]
-        summary = _Annotation(
-            level="notice",
-            kind="finding",
-            severity="info",
-            path="",
-            line=None,
-            end_line=None,
-            check="summary",
-            title="SkillEvaluator",
-            message=_summary_message(results, omitted),
-        )
-        lines.append(summary.format_line())
-        # Each finding is one command line. A leftover newline would let untrusted
-        # text start ::add-mask / ::stop-commands / ::set-output / ::add-path.
-        sanitized: list[str] = []
-        for line in lines:
-            compact = line.replace("\r", "").replace("\n", "")
-            if compact.startswith(("::add-mask", "::stop-commands", "::set-output", "::add-path")):
-                continue
-            sanitized.append(compact)
-        return "\n".join(sanitized) + "\n"
+        return annotations
+
+    def render_all(self, results: list[ValidationResult]) -> str:
+        return _render(self.annotations(results), _skill_counts(results))
 
     def print_all(self, results: list[ValidationResult]) -> None:
-        payload = self.render_all(results).encode("utf-8", "backslashreplace")
-        sys.stdout.buffer.write(payload)
-        sys.stdout.buffer.flush()
+        collected = _collector.get()
+        if collected is not None:
+            collected.append(
+                {
+                    "annotations": [asdict(item) for item in self.annotations(results)],
+                    "counts": list(_skill_counts(results)),
+                }
+            )
+            return
+        _write_stdout(self.render_all(results))
 
     def get_file_extension(self) -> str:
         return ""

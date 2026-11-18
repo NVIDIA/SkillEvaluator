@@ -413,6 +413,9 @@ GitHub shows at most 10 error and 10 warning annotations per step (50 per
 job). This format emits the most severe first, in a deterministic order
 (severity, path, line, check). The summary notice says how many more were
 not annotated and points at the other reports from the same `-r` list.
+A catalog run (a folder of skills, with any `--workers` value) prints one
+capped stream and one summary for the whole catalog, after every skill has
+finished, rather than one per skill.
 Finding text is escaped per GitHub's workflow-command rules and stripped of
 control characters; credential-shaped values are masked like the other
 reporters. A planted newline or `::add-mask` / `::stop-commands` payload

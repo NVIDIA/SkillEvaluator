@@ -446,53 +446,95 @@ def test_single_check_command_paths_are_relative_to_git_root(tmp_path: Path, mon
     assert "line=2" in result.output
 
 
-def test_catalog_folder_emits_annotations_for_each_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    catalog = tmp_path / "skills"
-    for name in ("group-a/demo", "group-b/demo"):
-        skill = catalog / name
-        shutil.copytree(_TEXT_ANALYZER, skill)
-
-    def schema(_path: Path, **_kwargs) -> list[ValidationResult]:
-        result = ValidationResult(validator_name="SCHEMA")
+def _bad_schema(_path: Path, **_kwargs) -> list[ValidationResult]:
+    result = ValidationResult(validator_name="SCHEMA")
+    for check in ("name", "description"):
         result.add_finding(
             Finding(
                 category="SCHEMA",
                 severity=Severity.HIGH,
-                check_name="name",
-                message=f"bad {_path.name}",
+                check_name=check,
+                message=f"bad {check} in {_path.name}",
                 file_path="SKILL.md",
                 line_number=2,
             )
         )
-        return [result]
+    return [result]
 
-    monkeypatch.setattr("skillevaluator.cli.run_validation", schema)
+
+def _catalog(tmp_path: Path, count: int) -> Path:
+    catalog = tmp_path / "skills"
+    for index in range(count):
+        shutil.copytree(_TEXT_ANALYZER, catalog / f"skill-{index:02d}")
+    return catalog
+
+
+def _validate_catalog_args(catalog: Path, reports: Path, workers: int) -> list[str]:
+    return [
+        "validate",
+        str(catalog),
+        "--tiers",
+        "1",
+        "--checks",
+        "schema",
+        "--workers",
+        str(workers),
+        "--no-autopilot",
+        "-r",
+        "github,json",
+        "-o",
+        str(reports),
+    ]
+
+
+def _assert_one_capped_catalog_stream(output: str, skills: int) -> None:
+    commands = _commands(output)
+    assert sum(line.startswith("::error") for line in commands) == 10
+    summaries = [line for line in commands if line.startswith("::notice title=SkillEvaluator::")]
+    assert len(summaries) == 1, output
+    assert summaries[0].startswith(f"::notice title=SkillEvaluator::{skills} skills checked, 0 passed, {skills} failed")
+    assert f"{skills * 2 - 10} more were not annotated" in summaries[0]
+
+
+def test_catalog_emits_one_capped_stream(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("skillevaluator.cli.run_validation", _bad_schema)
+    catalog = _catalog(tmp_path, 12)
     reports = tmp_path / "reports"
-    result = CliRunner().invoke(
-        cli,
-        [
-            "validate",
-            str(catalog),
-            "--tiers",
-            "1",
-            "--checks",
-            "schema",
-            "--workers",
-            "1",
-            "--no-autopilot",
-            "-r",
-            "github",
-            "-o",
-            str(reports),
-        ],
-    )
-    assert (
-        "file=group-a/demo/SKILL.md" in result.output
-        or "file=skills/group-a/demo/SKILL.md" in result.output
-        or "SKILL.md" in result.output
-    )
-    assert result.output.count("::error") >= 2
-    assert result.output.count("::notice title=SkillEvaluator::") >= 2
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers=1))
+    _assert_one_capped_catalog_stream(result.output, 12)
+    assert "file=" in result.output and "SKILL.md" in result.output
+    assert len(list(reports.glob("skill-*/*.json"))) == 12
+
+
+def test_parallel_catalog_returns_worker_annotations_to_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from concurrent.futures import Future
+
+    import skillevaluator.cli as cli_module
+
+    class InlineExecutor:
+        """Run worker jobs in-process so the test can patch the validator."""
+
+        def __init__(self, max_workers: int) -> None:
+            self.max_workers = max_workers
+
+        def __enter__(self) -> InlineExecutor:
+            return self
+
+        def __exit__(self, *_exc: object) -> None:
+            return None
+
+        def submit(self, fn, job):
+            future: Future = Future()
+            future.set_result(fn(job))
+            return future
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", _bad_schema)
+    monkeypatch.setattr(cli_module, "ProcessPoolExecutor", InlineExecutor)
+    catalog = _catalog(tmp_path, 12)
+    reports = tmp_path / "reports"
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers=2))
+    _assert_one_capped_catalog_stream(result.output, 12)
+    assert len(list(reports.glob("skill-*/*.json"))) == 12
 
 
 @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")

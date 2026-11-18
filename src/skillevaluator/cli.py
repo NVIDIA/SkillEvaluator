@@ -46,6 +46,7 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier2,
     summarize_tier3,
 )
+from skillevaluator.reporting.github_reporter import collect_annotations, print_collected_annotations
 from skillevaluator.reporting.naming import report_basename
 
 # Tier 1 (static validation) is the base install surface and is safe to import
@@ -1546,8 +1547,12 @@ def _catalog_child_argv_from_ctx(
     return argv
 
 
-def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None]:
-    """Run one catalog skill validation in a child process."""
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None, list[dict]]:
+    """Run one catalog skill validation in a child process.
+
+    The child's output is captured, so its GitHub annotations are collected and
+    returned for the parent to print as one stream for the whole catalog.
+    """
     import os
 
     from click.testing import CliRunner
@@ -1557,18 +1562,19 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
-    result = CliRunner().invoke(cli, job["argv"])
+    with collect_annotations() as annotations:
+        result = CliRunner().invoke(cli, job["argv"])
     json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
-        return skill_name, True, "", json_report_name
+        return skill_name, True, "", json_report_name, annotations
     exc = result.exception
     if isinstance(exc, SystemExit):
-        return skill_name, False, "validation failed", json_report_name
+        return skill_name, False, "validation failed", json_report_name, annotations
     if exc is not None:
         if isinstance(exc, click.ClickException):
-            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name
-        return skill_name, False, f"unexpected error: {exc}", json_report_name
-    return skill_name, False, "validation failed", json_report_name
+            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name, annotations
+        return skill_name, False, f"unexpected error: {exc}", json_report_name, annotations
+    return skill_name, False, "validation failed", json_report_name, annotations
 
 
 def _catalog_skill_entry(
@@ -1817,6 +1823,7 @@ def _validate_catalog(
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
+    github_annotations: list[dict] = []
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
             skill_name = skill_dir.relative_to(resolved_target).as_posix()
@@ -1834,7 +1841,11 @@ def _validate_catalog(
             }
             reason = ""
             try:
-                ctx.invoke(validate, **overrides)
+                with collect_annotations() as skill_annotations:
+                    try:
+                        ctx.invoke(validate, **overrides)
+                    finally:
+                        github_annotations.extend(skill_annotations)
             except click.ClickException as exc:
                 reason = str(getattr(exc, "message", exc))
                 failures.append((skill_name, reason))
@@ -1867,6 +1878,8 @@ def _validate_catalog(
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    if github_annotations:
+        print_collected_annotations(github_annotations)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -1914,11 +1927,13 @@ def _validate_catalog_parallel(
     ]
     failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
     worker_reports: dict[str, str | None] = {}
+    worker_annotations: dict[str, list[dict]] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
         for future in as_completed(futures):
-            skill_name, passed, reason, json_report_name = future.result()
+            skill_name, passed, reason, json_report_name, annotations = future.result()
             worker_reports[skill_name] = json_report_name
+            worker_annotations[skill_name] = annotations
             if not passed:
                 failures.append((skill_name, reason))
 
@@ -1932,6 +1947,8 @@ def _validate_catalog_parallel(
     failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
+    # Workers finish in any order; skill order keeps the annotation stream stable.
+    github_annotations = [entry for name in sorted(worker_annotations) for entry in worker_annotations[name]]
     skill_entries = [
         _catalog_skill_entry(
             skill_name,
@@ -1943,6 +1960,8 @@ def _validate_catalog_parallel(
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    if github_annotations:
+        print_collected_annotations(github_annotations)
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:

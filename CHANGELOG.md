@@ -22,6 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Omit incidental OS metadata and Python tool caches from runtime skill copies
+  and decoy identities. Decoy manifests use the version-3 runtime digest and
+  older selections must be regenerated; publication source hashes are unchanged.
+
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

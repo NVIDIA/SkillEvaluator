@@ -187,3 +187,98 @@ def test_checked_fallback_retains_runtime_projection(tmp_path: Path, monkeypatch
     assert decoy_source_digest(source) == expected
     (source / "linked.md").symlink_to(source / "SKILL.md")
     assert decoy_source_digest(source) is None
+
+
+@pytest.mark.parametrize(
+    "relative", [".DS_Store", "Thumbs.db", ".pytest_cache/state", ".mypy_cache/state", ".ruff_cache/state"]
+)
+@pytest.mark.parametrize("parent", ["", "references"])
+def test_incidental_caches_do_not_change_runtime_projection(tmp_path, relative, parent):
+    source = _skill(tmp_path / "source")
+    before = decoy_source_digest(source)
+    publication_before = publication_source_digest(source)
+    extra = source / parent / relative
+    # Keep an ordinary parent present in the control tree too.
+    if parent:
+        extra_parent = source / parent
+        extra_parent.mkdir()
+        before = decoy_source_digest(source)
+        publication_before = publication_source_digest(source)
+    extra.parent.mkdir(parents=True, exist_ok=True)
+    extra.write_text("incidental cache", encoding="utf-8")
+    assert decoy_source_digest(source) == before
+    assert publication_source_digest(source) != publication_before
+    extra.write_text("changed cache", encoding="utf-8")
+    assert decoy_source_digest(source) == before
+    snapshot = tmp_path / "snapshot"
+    secure_copy.copytree_secure(source, snapshot, allowed_root=source, ignore=decoy_source_copy_ignore(source))
+    assert not (snapshot / parent / relative.split("/")[0]).exists()
+    assert decoy_source_digest(snapshot) == before
+
+
+@pytest.mark.parametrize("relative", [".DS_Store", ".pytest_cache"])
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "fifo"])
+def test_cache_names_do_not_hide_unsafe_nodes(tmp_path, relative, kind):
+    source = _skill(tmp_path / "source")
+    extra = source / relative
+    if kind == "symlink":
+        extra.symlink_to(source / "SKILL.md")
+    elif kind == "hardlink":
+        extra.hardlink_to(source / "SKILL.md")
+    else:
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFOs are unavailable")
+        os.mkfifo(extra)
+    assert decoy_source_digest(source) is None
+
+
+def test_runtime_algorithm_changes_without_reinterpreting_publication(tmp_path):
+    from skillevaluator.tier3.decoy_identity import DECOY_SOURCE_DIGEST_ALGORITHM
+
+    assert DECOY_SOURCE_DIGEST_ALGORITHM == "skill-evaluator-decoy-runtime/3"
+    source = _skill(tmp_path / "source")
+    before = decoy_source_digest(source)
+    ordinary = source / "references"
+    ordinary.mkdir()
+    assert decoy_source_digest(source) != before
+    before = decoy_source_digest(source)
+    (ordinary / "guide.md").write_text("authored instructions", encoding="utf-8")
+    assert decoy_source_digest(source) != before
+
+
+@pytest.mark.parametrize("name,kind", [(".DS_Store", "directory"), (".pytest_cache", "file")])
+def test_cache_name_with_other_regular_kind_remains_authored_content(tmp_path, name, kind):
+    source = _skill(tmp_path / "source")
+    before = decoy_source_digest(source)
+    entry = source / name
+    if kind == "directory":
+        entry.mkdir()
+    else:
+        entry.write_text("authored file", encoding="utf-8")
+    assert decoy_source_digest(source) != before
+
+
+@pytest.mark.parametrize("unsafe", ["reparse", "mount"])
+def test_cache_filter_does_not_hide_reparse_points_or_mounts(tmp_path, monkeypatch, unsafe):
+    from types import SimpleNamespace
+
+    from skillevaluator.tier3.runtime_projection import runtime_cache_entry_is_excluded
+
+    source = _skill(tmp_path / "source")
+    cache = source / ".pytest_cache"
+    cache.mkdir()
+    real_lstat = Path.lstat
+    observed = cache.lstat()
+
+    def metadata(path):
+        if path == cache:
+            return SimpleNamespace(
+                st_mode=observed.st_mode,
+                st_nlink=1,
+                st_dev=observed.st_dev + (unsafe == "mount"),
+                st_file_attributes=0x400 if unsafe == "reparse" else 0,
+            )
+        return real_lstat(path)
+
+    monkeypatch.setattr(Path, "lstat", metadata)
+    assert not runtime_cache_entry_is_excluded(source, cache)

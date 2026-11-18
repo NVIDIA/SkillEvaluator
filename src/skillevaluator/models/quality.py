@@ -15,7 +15,6 @@ from dataclasses import dataclass, field
 from skillevaluator.constants import (
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_GRADE_THRESHOLDS,
-    QUALITY_RECOMMENDED_MAX_TOKENS,
     QUALITY_SCORE_WEIGHTS,
 )
 
@@ -115,6 +114,7 @@ class QualityScoreResult:
 
     # Metrics
     total_tokens: int = 0
+    recommended_max_tokens: int | None = None  # token budget in force; None when no config was applied
     frontmatter_tokens: int = 0
     instructions_tokens: int = 0
     script_count: int = 0
@@ -162,7 +162,11 @@ class QualityScoreResult:
                 "total_tokens": self.total_tokens,
                 "estimated_tokens": self.total_tokens,
                 "estimate_method": f"characters/{QUALITY_CHARS_PER_TOKEN}",
-                "recommended_max_tokens": QUALITY_RECOMMENDED_MAX_TOKENS,
+                **(
+                    {"recommended_max_tokens": self.recommended_max_tokens}
+                    if self.recommended_max_tokens is not None
+                    else {}
+                ),
                 "frontmatter_tokens": self.frontmatter_tokens,
                 "instructions_tokens": self.instructions_tokens,
                 "script_count": self.script_count,

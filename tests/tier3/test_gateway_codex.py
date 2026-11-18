@@ -30,6 +30,12 @@ def test_gateway_adapter_selection_preserves_other_routes(provider, mode, agent)
     expected = runner._nvidia_build_agent_import_path(config, agent, mode)
     if provider == "openai-compatible" and mode != "local" and agent == "codex":
         expected = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayCodex"
+    if provider == "openai-compatible" and agent == "claude-code":
+        expected = (
+            "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorLocalGatewayClaudeCode"
+            if mode == "local"
+            else "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayClaudeCode"
+        )
     if provider == "openai-compatible" and mode in {"docker", "kata"} and agent == "opencode":
         expected = "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorGatewayOpenCode"
     assert runner._agent_import_path(config, agent, mode) == expected

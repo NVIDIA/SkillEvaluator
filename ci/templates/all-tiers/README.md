@@ -1,17 +1,19 @@
 # Advanced CI setup and maintainer reference
 
-This is the explicitly enabled, unreleased all-tier integration. For standard
+This is the explicitly enabled all-tier integration for GitHub and GitLab. For standard
 no-key Tier 1 onboarding, use the [template catalog](../README.md),
 [GitHub guide](../../../docs/github-actions.mdx) or
 [GitLab guide](../../../docs/gitlab-ci.mdx).
 
-Released 0.8.0 bundles and plain `skillevaluator ci init` remain Tier 1 only.
+The all-tier CLI was already included in 0.9.0. The 1.0.1 release refreshes its
+verified pins; plain `skillevaluator ci init` and manual Tier 1 bundles retain
+their existing scope.
 A successful setup command is configuration preparation, not a completed CI
 run. Inspect real provider-backed outputs before claiming all tiers passed.
 
-## Candidate templates
+## All-tier templates
 
-The unreleased all-tier setup uses two thin consumer files per platform:
+The all-tier setup uses two thin consumer files per platform:
 
 | Platform | Evaluation | Trusted feedback |
 | --- | --- | --- |
@@ -20,8 +22,8 @@ The unreleased all-tier setup uses two thin consumer files per platform:
 
 These files contain placeholders. Use a reviewed schema-version 2 release
 with the platform's all-tier capability and immutable workflow, tools and
-image pins. Released 0.8.0 downloads remain Tier 1 only. Install a reviewed
-candidate build and use `ci init --tiers 1,2,3` to select its bundled
+image pins. Archived manual bundles through 0.9.0 contain Tier 1 configurations.
+Use `ci init --tiers 1,2,3` with the matching installed release to select its bundled
 `ci-release-all-tiers.json`; use `--release` to review an alternate descriptor.
 The all-tier CLI renders these references and approves the exact GitHub caller blob. See
 [the onboarding guide](#opt-in-to-three-tier-ci).
@@ -40,7 +42,7 @@ The CLI's `--tier3-required`, GitHub's `tier3-required` input and GitLab's
 make Tier 3 blocking. Reports expire after 14 days, Docker is the default, and
 native local mode is also supported.
 
-Maintainers must refresh the candidate descriptor's `workflow_ref`,
+Maintainers must refresh the release descriptor's `workflow_ref`,
 `feedback_ref`, `gitlab_ref` and `tools_ref` together after workflow, runtime or
 feedback fixes, so new consumers receive the reviewed implementation.
 `evaluator_version` and `runtime_lock_sha256` must match the package version and
@@ -55,10 +57,11 @@ failed or incomplete results. `--tier3-required` is deprecated and ignored; it
 cannot make Tier 3 block CI. Docker is the default. `--env-mode local` runs native
 agent CLIs on the selected CI runner. This setup supports these two modes only.
 
-This is an unreleased capability. Released 0.8.0 bundles and the default
-`ci init` setup remain Tier 1 only. Install a reviewed candidate build that
-includes the all-tier CLI and its bundled `ci-release-all-tiers.json`, then
-opt in with `--tiers 1,2,3`. The CLI selects that descriptor automatically.
+The default `ci init` setup remains Tier 1 only. Opt in with `--tiers 1,2,3`
+to select the installed release's bundled `ci-release-all-tiers.json`. For
+1.0.1 pins, install its release package when available, or use the reviewed
+source installation before publication. Existing committed callers are not
+silently upgraded by installing a newer package.
 It must declare schema version 2 and `all-tiers-github` or `all-tiers-gitlab`,
 with immutable workflow, feedback, tools and image references. A Tier 1
 descriptor cannot enable all-tier setup.
@@ -70,9 +73,9 @@ skillevaluator ci init --tiers 1,2,3 \
   --platform github --provider openai --paths skills --mode pr --no-input
 ```
 
-To review an alternate candidate descriptor, add
+To review an alternate release descriptor, add
 `--release ./reviewed-ci-release.json` to either command. Review its immutable
-references before using it; the option does not install the candidate CLI.
+references before using it; the option does not upgrade the installed CLI.
 
 For GitLab 17.0 or later, select `--platform gitlab`. GitHub uses your local
 `gh` login; GitLab uses only a process-scoped `SKILLEVALUATOR_GITLAB_TOKEN`
@@ -120,6 +123,16 @@ Environment reviewers are optional: configure them if your repository wants
 manual approval; automatic checks do not require a paid reviewer-protection
 feature. Restrict repository and CI workflow write access to trusted maintainers.
 GitLab's protected execution and feedback prerequisites are described below.
+
+On a GitHub workflow revision that supports `environment-deployment`, set
+`environment-deployment: false` in the evaluation caller's `with` block to use
+environment secrets and variables without creating deployment records for CI.
+The default is `true`, preserving existing consumers. Required reviewers and wait
+timers still apply with `false`; custom deployment protection apps require `true`.
+The published 1.0.1 workflow pins predate this input. Upgrade to a reviewed
+supporting workflow revision before adding it, and refresh the trusted feedback
+caller's approved workflow reference and caller blob together.
+
 Choose matching chat and embedding configuration with `--provider`,
 `--embedding-provider`, `--model`, and `--embedding-model`; the default embedding
 provider follows OpenAI or NVIDIA Build; Anthropic defaults to OpenAI embeddings
@@ -241,11 +254,12 @@ rules and job overrides, keep `test` in any `stages` list, and add
 
 The opt-in [CLI setup](#opt-in-to-three-tier-ci) creates
 `.github/workflows/skill-checks-all-tiers.yml` and
-`.github/workflows/feedback-all-tiers.yml`. This unreleased path needs a reviewed
-candidate build and its bundled capability-bearing descriptor; the 0.8.0
-[released downloads](../../bundles/0.8.0/README.md) remain Tier 1 only. `--tiers 1,2,3` selects the candidate's
-bundled descriptor; `--release` can override it for an alternate reviewed candidate.
-The [candidate source templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/templates)
+`.github/workflows/feedback-all-tiers.yml`. Use a compatible installed CLI and
+its bundled capability-bearing descriptor. The archived 0.9.0
+[manual configurations](../../bundles/0.9.0/README.md) remain Tier 1 only.
+`--tiers 1,2,3` selects the installed release's bundled descriptor; `--release`
+can override it with another reviewed descriptor.
+The [source templates](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/templates)
 contain placeholders and must be filled with reviewed immutable references.
 
 The shared `evaluate-all-tiers.yml` and `feedback-all-tiers.yml` files define
@@ -421,13 +435,14 @@ disabled, the job reports its prepared branch and a manual PR action.
 ## GitLab checks and feedback
 
 This path requires **GitLab 17.0 or later** for validated include inputs.
-The unreleased [all-tier CLI path](#opt-in-to-three-tier-ci)
+The [all-tier CLI path](#opt-in-to-three-tier-ci)
 creates two thin files: `.gitlab-ci.yml` includes the pinned shared evaluation
 configuration, and `.gitlab/skill-feedback.yml` includes pinned trusted feedback.
-Install a reviewed candidate build; `--tiers 1,2,3` selects its bundled
-schema-version 2 descriptor declaring `all-tiers-gitlab`. Use `--release` only
-to override it with an alternate reviewed descriptor. Released 0.8.0
-[released configurations](../../bundles/0.8.0/README.md) remain Tier 1 only. The CLI never replaces an existing,
+`--tiers 1,2,3` selects the installed release's bundled schema-version 2
+descriptor declaring `all-tiers-gitlab`. Use `--release` only to override it
+with another reviewed descriptor. Archived 0.9.0
+[manual configurations](../../bundles/0.9.0/README.md) remain Tier 1 only.
+The CLI never replaces an existing,
 different `.gitlab-ci.yml`, such as a released Tier 1 setup: `--mode preview`
 prints the rendered files and the merge steps, and `--mode save` and `--mode pr`
 stop with an error until you merge by hand.
@@ -659,7 +674,7 @@ quotes generated variable values automatically.
 
 For two small consumer files and automatic artifact-backed PR/MR feedback, use
 the opt-in [three-tier CLI onboarding](#opt-in-to-three-tier-ci).
-This unreleased capability gates only on Tier 1 and runs advisory Tier 2 and
+This capability gates only on Tier 1 and runs advisory Tier 2 and
 paired Tier 3, defaults to Docker, and supports native local mode. Failed or
 incomplete advisory results retain their native evidence without blocking CI.
 The deprecated Tier 3 required settings are ignored. It requires an

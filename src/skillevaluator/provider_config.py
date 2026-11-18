@@ -18,7 +18,7 @@ import unicodedata
 import uuid
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote, unquote_to_bytes, urlsplit, urlunsplit
 
 import idna
@@ -234,7 +234,7 @@ class ProviderConfig:
     # Extra HTTP headers for the ``openai-compatible`` chat client, as (name, value)
     # pairs so the frozen dataclass stays hashable. Values may be secrets: never
     # print them. ``extra_headers_dict`` returns them in SDK form.
-    extra_headers: tuple[tuple[str, str], ...] = ()
+    extra_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
 
     def extra_headers_dict(self) -> dict[str, str]:
         """Return the extra headers as the mapping the OpenAI SDK expects."""
@@ -522,6 +522,7 @@ def _build_vertex_openapi_adc_config(
     base_url_env: str,
     timeout_seconds: float = 10.0,
     environ: Mapping[str, str] | None = None,
+    extra_headers: tuple[tuple[str, str], ...] = (),
 ) -> ProviderConfig:
     """Build a ProviderConfig using Google Application Default Credentials for Vertex OpenAPI."""
     token = _get_google_access_token(timeout_seconds=timeout_seconds, environ=environ)
@@ -538,6 +539,7 @@ def _build_vertex_openapi_adc_config(
         credential_env=CREDENTIAL_SOURCE_ADC,
         base_url_env=base_url_env,
         credential_expiry=get_adc_token_expiry(token),
+        extra_headers=extra_headers,
     )
 
 
@@ -608,6 +610,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
 
     base_url = _required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/")
     api_key = env.get("SKILL_EVAL_LLM_API_KEY")
+    extra_headers = resolve_extra_headers(env)
     if _is_vertex_openapi_endpoint(base_url) and not api_key:
         return _build_vertex_openapi_adc_config(
             provider=provider,
@@ -615,6 +618,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             base_url=base_url,
             base_url_env="SKILL_EVAL_LLM_BASE_URL",
             environ=env,
+            extra_headers=extra_headers,
         )
     return ProviderConfig(
         provider=provider,
@@ -624,7 +628,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
         litellm_model=f"openai/{model}",
         credential_env="SKILL_EVAL_LLM_API_KEY",
         base_url_env="SKILL_EVAL_LLM_BASE_URL",
-        extra_headers=resolve_extra_headers(env),
+        extra_headers=extra_headers,
     )
 
 
@@ -704,8 +708,18 @@ def _required(environ: Mapping[str, str], variable: str) -> str:
 
 EXTRA_HEADERS_ENV = "SKILL_EVAL_LLM_EXTRA_HEADERS"
 _HEADER_TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_HEADER_VALUE = re.compile(r"[!-~](?:[\t -~]*[!-~])?")
 # Owned by the SDK: an override here would break auth or the request body.
 _RESERVED_HEADERS = frozenset({"authorization", "content-type", "content-length", "host"})
+
+
+def _unique_header_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    members: dict[str, object] = {}
+    for name, value in pairs:
+        if name in members:
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} has a repeated JSON key.")
+        members[name] = value
+    return members
 
 
 def resolve_extra_headers(environ: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:
@@ -722,8 +736,10 @@ def resolve_extra_headers(environ: Mapping[str, str] | None = None) -> tuple[tup
     if raw is None or not raw.strip():
         return ()
     try:
-        parsed = json.loads(raw)
-    except ValueError:
+        parsed = json.loads(raw, object_pairs_hook=_unique_header_members)
+    except ProviderConfigurationError:
+        raise
+    except (ValueError, RecursionError):
         raise ProviderConfigurationError(
             f"{EXTRA_HEADERS_ENV} must be a JSON object of header names to string values."
         ) from None
@@ -747,6 +763,11 @@ def resolve_extra_headers(environ: Mapping[str, str] | None = None) -> tuple[tup
             )
         if "\r" in value or "\n" in value:
             raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} value for {name} must not contain line breaks.")
+        if value and not _HEADER_VALUE.fullmatch(value):
+            raise ProviderConfigurationError(
+                f"{EXTRA_HEADERS_ENV} value for {name} must be ASCII without control characters "
+                "or surrounding whitespace."
+            )
         seen.add(name.lower())
         headers.append((name, value.replace("{uuid}", session_id)))
     return tuple(headers)

@@ -507,6 +507,7 @@ class LLMClient:
         self._timeout = timeout
         self._client: Any = None
         self._provider_config: ProviderConfig | None = None
+        self._provider_config_lock = threading.Lock()
         self.last_failure: str | None = None
         # Per thread, because one client can serve concurrent calls.
         self._call_state = threading.local()
@@ -573,9 +574,12 @@ class LLMClient:
 
     def _resolved_config(self) -> ProviderConfig:
         """Resolve and cache the selected public provider configuration."""
-        if self._provider_config is not None:
+        with self._provider_config_lock:
+            if self._provider_config is None:
+                self._provider_config = self._load_provider_config()
             return self._provider_config
 
+    def _load_provider_config(self) -> ProviderConfig:
         if self._api_key or self._base_url:
             base_url = _effective_openai_base_url(self._base_url)
             provider = "openai" if _is_canonical_openai_base_url(base_url) else "openai-compatible"
@@ -584,7 +588,7 @@ class LLMClient:
                 extra_headers = resolve_extra_headers() if provider == "openai-compatible" else ()
             except ProviderConfigurationError as exc:
                 raise LLMClientError(str(exc)) from exc
-            self._provider_config = ProviderConfig(
+            return ProviderConfig(
                 provider=provider,
                 model=model,
                 api_key=self._api_key,
@@ -592,7 +596,6 @@ class LLMClient:
                 litellm_model=f"openai/{model}",
                 extra_headers=extra_headers,
             )
-            return self._provider_config
 
         try:
             config = resolve_llm_provider()
@@ -600,7 +603,6 @@ class LLMClient:
             raise LLMClientError(str(exc)) from exc
         if self._model:
             config = replace(config, model=self._model, litellm_model=_litellm_model(config.provider, self._model))
-        self._provider_config = config
         return config
 
     def _request_max_tokens(self, config: ProviderConfig) -> int | None:

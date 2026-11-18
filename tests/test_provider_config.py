@@ -757,6 +757,20 @@ def test_openai_compatible_without_extra_headers_sends_none() -> None:
     assert resolve_llm_provider({**_OPENAI_COMPATIBLE_ENV, "SKILL_EVAL_LLM_EXTRA_HEADERS": "  "}).extra_headers == ()
 
 
+def test_openai_compatible_vertex_adc_retains_extra_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-adc-token")
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_BASE_URL": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p/locations/l/endpoints/openapi",
+            "SKILL_EVAL_LLM_EXTRA_HEADERS": '{"X-Team": "evaluation"}',
+        }
+    )
+
+    assert config.extra_headers_dict() == {"X-Team": "evaluation"}
+    assert "evaluation" not in repr(config)
+
+
 @pytest.mark.parametrize(
     "env",
     [
@@ -782,6 +796,9 @@ def test_other_providers_ignore_extra_headers(env: dict[str, str]) -> None:
         ('{"x-a": 1}', "must be a string, not int"),
         ('{"x-a": "secret-value\\r\\nx-b: injected"}', "must not contain line breaks"),
         ('{"X-A": "secret-value", "x-a": "other"}', "sets x-a more than once"),
+        ('{"x-a": 1, "x-a": "secret-value"}', "has a repeated JSON key"),
+        ('{"X-Team": "évaluation secret-value"}', "must be ASCII"),
+        ('{"X-Team": " secret-value"}', "or surrounding whitespace"),
     ],
 )
 def test_invalid_extra_headers_fail_without_echoing_values(raw: str, expected: str) -> None:

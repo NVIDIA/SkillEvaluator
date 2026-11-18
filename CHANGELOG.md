@@ -12,7 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Preserve warnings from passing rules, workflows, and workflow references when validating collections, including each member's context and warning counts.
+- Preserve warnings from passing rules, workflows, and workflow references when
+  validating collections, including each member's context and warning counts.
+  Single-workflow reports also display reference warnings in the report body.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

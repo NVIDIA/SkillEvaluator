@@ -3,12 +3,13 @@
 
 """Tests for ScriptLintValidator -- AST-based advisory lint checks."""
 
+import ast
 from pathlib import Path
 
 import pytest
 
 from skillevaluator.models.result import Severity, ValidationResult
-from skillevaluator.validators.script_lint import ScriptLintValidator
+from skillevaluator.validators.script_lint import ScriptLintValidator, _calculate_nesting_depth
 
 
 @pytest.fixture
@@ -230,3 +231,54 @@ class TestScriptLintValidator:
         v = ScriptLintValidator()
         assert "Lint" in v.name
         assert "Advisory" in v.name
+
+
+@pytest.mark.parametrize("directory", ["scripts", "tools"])
+@pytest.mark.parametrize(
+    "expression",
+    [" + ".join(["value"] * 1500), "value" + ".next" * 1500],
+    ids=["binary-expression", "attribute-chain"],
+)
+def test_deep_expression_does_not_abort_other_script_checks(tmp_path, directory, expression):
+    (tmp_path / "SKILL.md").write_text("# Example\n", encoding="utf-8")
+    scripts = tmp_path / directory
+    scripts.mkdir()
+    (scripts / "first.py").write_text(
+        "#!/usr/bin/env python3\nimport argparse\ndef calculate(value):\n    if value:\n        return "
+        + expression
+        + "\n    return 42\n",
+        encoding="utf-8",
+    )
+    (scripts / "second.py").write_text("print('example')\n", encoding="utf-8")
+
+    result = ScriptLintValidator().validate(tmp_path)
+
+    findings = {(Path(f.file_path).name, f.check_name) for f in result.findings}
+    assert ("first.py", "magic_numbers") in findings
+    assert ("second.py", "flat_script") in findings
+    assert ("second.py", "missing_shebang") in findings
+    assert not any(f.check_name == "deep_nesting" for f in result.findings)
+    assert result.passed
+
+
+def test_deep_expression_keeps_actual_control_flow_depth():
+    source = "def calculate(value):\n"
+    for depth in range(1, 8):
+        source += "    " * depth + "if value:\n"
+    source += "    " * 8 + "return " + " + ".join(["value"] * 1500) + "\n"
+
+    assert _calculate_nesting_depth(ast.parse(source)) == 7
+
+
+@pytest.mark.parametrize(
+    ("source", "expected"),
+    [
+        ("value = 42\n", 0),
+        ("if first:\n    if second:\n        pass\nif third:\n    pass\n", 2),
+        ("try:\n    with context():\n        pass\nexcept Exception:\n    while condition:\n        pass\n", 2),
+        ("async def work():\n    async for item in items:\n        async with item:\n            pass\n", 2),
+    ],
+    ids=["flat", "siblings", "try-branches", "async"],
+)
+def test_control_flow_depth_keeps_existing_branch_semantics(source, expected):
+    assert _calculate_nesting_depth(ast.parse(source)) == expected

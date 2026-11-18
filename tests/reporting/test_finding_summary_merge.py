@@ -15,6 +15,7 @@ def test_merge_matches_reconciliation_across_overlapping_summaries() -> None:
         ("schema", ("a/SKILL.md", "b/SKILL.md"), Severity.LOW),
         ("quality", ("b/SKILL.md", "c/SKILL.md"), Severity.HIGH),
         ("schema", ("a/SKILL.md", "d/SKILL.md"), Severity.MEDIUM),
+        ("quality", ("c/SKILL.md",), Severity.LOW),
     ):
         result = ValidationResult(validator_name=validator)
         for path in paths:
@@ -37,7 +38,7 @@ def test_merge_matches_reconciliation_across_overlapping_summaries() -> None:
 
     assert merged == summarize_findings(results)
     assert merged["distinct_occurrences"] == 4
-    assert merged["duplicates_removed"] == 2
+    assert merged["duplicates_removed"] == 3
     assert merged["groups"][0]["severity"] == "high"
     assert merged["groups"][0]["validators"] == ["quality", "schema"]
     merged["groups"][0]["metadata"]["source"]["name"] = "changed"

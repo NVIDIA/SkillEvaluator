@@ -104,6 +104,17 @@ def test_single_attempt_runs_are_flagged_but_stop_on_pass_skips_are_not(tmp_path
     assert next_steps({"agents": {"a": stopped}}, run_dir=tmp_path) == []
 
 
+def test_failed_unscored_attempts_do_not_recommend_spending_on_more_repetitions(tmp_path: Path) -> None:
+    _dataset(tmp_path, ids=("c1",), negative=False)
+    failed = _agent({"c1": _case(missing=1)}, {"c1": _case(missing=1)})
+    failed["execution_status"] = "failed"
+
+    steps = next_steps({"agents": {"codex": failed}}, run_dir=tmp_path, fixes=[{"kind": "run error"}])
+
+    assert "single attempt" not in _kinds(steps)
+    assert all("--n-attempts" not in step["action"] for step in steps)
+
+
 def test_agent_dependent_effect_is_a_hypothesis_to_test(tmp_path: Path) -> None:
     _dataset(tmp_path)
     flat = _agent(

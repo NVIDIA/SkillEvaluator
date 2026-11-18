@@ -8162,6 +8162,10 @@ _CODE_ARGUMENT_CHARS = 2_000
 # transport=ASGITransport(app=app), is a test client that calls a handler or
 # app in the same process, not an HTTP client.
 _CODE_TEST_DOUBLE_NAMES = frozenset({"supertest", "MockTransport", "ASGITransport", "WSGITransport"})
+# So is a client built with a transport= name the code binds only to one of
+# them, as in transport = httpx.MockTransport(handler) and then
+# httpx.Client(transport=transport).
+_CODE_TRANSPORT_NAME_RE = re.compile(r"\btransport\s*=\s*([A-Za-z_]\w*)\b(?!\s*[(.\[])")
 # So is a client built with httpx's app= shortcut, as in
 # httpx.AsyncClient(app=app, base_url="http://test").
 _CODE_APP_KEYWORD_RE = re.compile(r"\bapp\s*=(?![=>])")
@@ -9509,11 +9513,27 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
     doubles: set[str] = set()
     if any(double in short for double in _CODE_TEST_DOUBLE_NAMES) or _CODE_APP_KEYWORD_RE.search(short):
         others: set[str] = set()
+        undecided: list[tuple[str, int, int]] = []
         for name, _chain, start, end in bindings:
             stop = min(end, start + _CODE_RECEIVER_CHARS)
             if not reader.spend(stop - start):
                 return None
-            (doubles if _code_names_test_double(reader, start, stop) else others).add(name)
+            if reader.short[start:stop].strip() == name:
+                # name = name, as a keyword argument such as transport=transport reads, binds nothing new.
+                continue
+            if _code_names_test_double(reader, start, stop):
+                doubles.add(name)
+            else:
+                others.add(name)
+                undecided.append((name, start, stop))
+        # A binding whose transport= is a name the code binds only to a double is a double too, as
+        # client is in transport = httpx.MockTransport(handler); client = httpx.Client(transport=transport).
+        base = doubles - others
+        if base:
+            others = set()
+            for name, start, stop in undecided:
+                match = _CODE_TRANSPORT_NAME_RE.search(reader.short, start, stop)
+                (doubles if match is not None and match[1] in base else others).add(name)
         doubles -= others
     reader._doubles = frozenset(doubles)
     chains: dict[str, list[tuple[str, ...]]] = {}

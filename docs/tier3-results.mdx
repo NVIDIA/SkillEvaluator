@@ -307,7 +307,10 @@ These do not warn:
   `httpx.MockTransport`, `ASGITransport`, a client built with httpx's
   `app=`, aiohttp's `TestClient`, and `test_request_context(method="POST")`,
   and a request such a client sends, as in `client.send(req)` after
-  `client = httpx.Client(transport=httpx.MockTransport(handler))`;
+  `client = httpx.Client(transport=httpx.MockTransport(handler))`, also
+  where the code first binds the transport to a name it binds only to such
+  a double, as in `transport = httpx.ASGITransport(app=app)` and then
+  `httpx.AsyncClient(transport=transport)`;
 - names that hold a client's result rather than the client, as `v` in
   `v = Version(requests.get(URL).json()["version"])` and then `v.post`, and
   words inside strings;

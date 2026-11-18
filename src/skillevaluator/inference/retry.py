@@ -149,7 +149,7 @@ def extract_http_status(exc: BaseException) -> int | None:
 
 
 def extract_retry_after(exc: BaseException) -> str | None:
-    """Retain the innermost Retry-After header along the HTTP status's causal chain."""
+    """Retain the innermost parsable Retry-After along the HTTP status's causal chain."""
     retry_after = None
     seen: set[int] = set()
     current: BaseException | None = exc
@@ -159,7 +159,7 @@ def extract_retry_after(exc: BaseException) -> str | None:
         headers = current.headers if isinstance(current, urllib.error.HTTPError) else getattr(response, "headers", None)
         if headers:
             value = headers.get("retry-after") or headers.get("Retry-After")
-            if value:
+            if value and parse_retry_after(value, fallback_delay=-1.0) >= 0:
                 retry_after = value
         current = _exception_cause(current)
     return retry_after

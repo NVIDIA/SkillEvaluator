@@ -112,6 +112,30 @@ def test_empty_inner_retry_after_keeps_usable_outer_header(link, header):
     assert extract_retry_after(wrapper) == "31"
 
 
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize("value", ["garbage", " \t "])
+def test_malformed_inner_retry_after_keeps_parsable_outer_header(link, value):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "60"}, None)
+    underlying = httpx.HTTPStatusError(
+        "rate limited",
+        request=httpx.Request("POST", "http://localhost/"),
+        response=httpx.Response(429, headers={"Retry-After": value}),
+    )
+    setattr(wrapper, link, underlying)
+
+    assert extract_retry_after(wrapper) == "60"
+
+
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize("value", ["0", "Wed, 21 Oct 2015 07:28:00 GMT"])
+def test_parsable_inner_retry_after_with_zero_delay_wins(link, value):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "60"}, None)
+    underlying = urllib.error.HTTPError("http://localhost/", 429, "rate limited", {"Retry-After": value}, None)
+    setattr(wrapper, link, underlying)
+
+    assert extract_retry_after(wrapper) == value
+
+
 def test_empty_inner_retry_after_does_not_bypass_outer_delay_limit(monkeypatch):
     calls = 0
     sleeps = []

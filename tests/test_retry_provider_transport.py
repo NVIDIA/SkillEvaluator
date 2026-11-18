@@ -11,6 +11,8 @@ import os
 import socket
 import ssl
 import threading
+import urllib.error
+import urllib.request
 from contextlib import contextmanager
 from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -19,7 +21,7 @@ from pathlib import Path
 import pytest
 
 from skillevaluator.inference.client import LLMClient
-from skillevaluator.inference.retry import extract_http_status, is_retriable_exception
+from skillevaluator.inference.retry import extract_http_status, is_retriable_exception, retry_call_with_backoff
 from skillevaluator.provider_config import ProviderConfig
 
 
@@ -71,8 +73,9 @@ def isolated_provider_environment(monkeypatch, tmp_path):
 
 
 class _Server(ThreadingHTTPServer):
-    def __init__(self, statuses, tls_context=None):
+    def __init__(self, statuses, tls_context=None, *, retry_after=None):
         self.statuses = statuses
+        self.retry_after = retry_after
         self.requests: list[int] = []
         self.connections = 0
         self.tls_context = tls_context
@@ -127,6 +130,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.send_response(status)
         self.send_header("Content-Type", "application/json")
         self.send_header("Content-Length", str(len(body)))
+        if self.server.retry_after is not None:
+            self.send_header("Retry-After", self.server.retry_after)
         self.end_headers()
         self.wfile.write(body)
 
@@ -135,8 +140,8 @@ class _Handler(BaseHTTPRequestHandler):
 
 
 @contextmanager
-def _server(statuses, tls_context=None):
-    server = _Server(statuses, tls_context)
+def _server(statuses, tls_context=None, *, retry_after=None):
+    server = _Server(statuses, tls_context, retry_after=retry_after)
     worker = threading.Thread(target=server.serve_forever, daemon=True)
     worker.start()
     try:
@@ -145,6 +150,42 @@ def _server(statuses, tls_context=None):
         server.shutdown()
         server.server_close()
         worker.join(timeout=5)
+
+
+@pytest.mark.parametrize("inner_retry_after", ["garbage", "", "0"])
+def test_wrapped_retry_after_preserves_parsable_delay_over_http(
+    isolated_provider_environment, inner_retry_after, record_property
+):
+    with _server([429, 200], retry_after=inner_retry_after) as server:
+        url = f"http://127.0.0.1:{server.server_port}"
+
+        def operation():
+            request = urllib.request.Request(url, data=b"{}", method="POST")
+            try:
+                with urllib.request.urlopen(request, timeout=2) as response:
+                    return response.status
+            except urllib.error.HTTPError as inner:
+                outer = urllib.error.HTTPError(url, 503, "wrapper", {"Retry-After": "60"}, None)
+                raise outer from inner
+
+        result = None
+        error = None
+        try:
+            result = retry_call_with_backoff(operation, max_retries=1, max_delay=0.01, base_delay=0)
+        except urllib.error.HTTPError as caught:
+            error = caught
+
+        record_property("inner_retry_after", inner_retry_after)
+        record_property("http_statuses", server.requests)
+        if inner_retry_after == "0":
+            assert result == 200
+            assert error is None
+            assert server.requests == [429, 200]
+        else:
+            assert result is None
+            assert error is not None
+            assert error.code == 503
+            assert server.requests == [429]
 
 
 def _client(monkeypatch, endpoint, provider="bedrock"):

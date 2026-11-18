@@ -25,6 +25,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
     GITLEAKS_VERSION,
+    SKILLSPECTOR_UV_ENV,
     SKILLSPECTOR_VERSION,
     SKILLSPECTOR_WHEEL_URL,
     ensure_gitleaks,
@@ -415,6 +416,8 @@ class ExternalTool:
             return ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message=error)
 
         cmd = [self._path, *launch_args, *args]
+        if launch_args:
+            child_env = {**(os.environ if child_env is None else child_env), **SKILLSPECTOR_UV_ENV}
 
         if log_command:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")

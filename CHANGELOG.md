@@ -22,7 +22,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- The managed SkillSpector runtime now runs on Python 3.13. uv otherwise
+- The managed SkillSpector runtime now runs on Python 3.12 or 3.13, preferring
+  3.13 and using an installed 3.12 when 3.13 can't be downloaded. uv otherwise
   picked its newest Python, 3.14, for which yara-python publishes no wheels, so
   the Tier 1 security scan failed to install on hosts without a C toolchain,
   including a default Windows setup.

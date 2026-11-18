@@ -18,7 +18,7 @@ from unittest.mock import patch
 import pytest
 
 from skillevaluator.models.result import Severity
-from skillevaluator.utils import scanner_install, tool_runner
+from skillevaluator.utils import tool_runner
 from skillevaluator.utils.tool_runner import (
     CVSS_THRESHOLDS,
     ExternalTool,
@@ -522,8 +522,6 @@ class TestAutomaticSkillSpectorVersion:
             "--quiet",
             "--from",
             str(scanner_bin.parent / "runtime/skillspector/2.13.4/skillspector-2.13.4-py3-none-any.whl"),
-            "--python",
-            scanner_install.SKILLSPECTOR_PYTHON,
             "skillspector",
             "scan",
             "target",
@@ -616,7 +614,6 @@ class TestAutomaticSkillSpectorVersion:
         assert result.exit_code == 0
         assert result.stdout.splitlines()[:4] == ["tool", "run", "--quiet", "--from"]
         assert result.stdout.splitlines()[4].endswith("/2.13.4/skillspector-2.13.4-py3-none-any.whl")
-        assert result.stdout.splitlines()[5:7] == ["--python", scanner_install.SKILLSPECTOR_PYTHON]
         assert tool.path == str(packaged_uv)
         assert tool.resolution_source == "uv tool run"
 

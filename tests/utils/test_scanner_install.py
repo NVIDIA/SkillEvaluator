@@ -51,8 +51,7 @@ class TestSkillSpectorWheel:
         assert wheel.read_bytes() == payload
         assert run.call_args.args[0][-2:] == ["skillspector", "--version"]
         assert str(wheel) in run.call_args.args[0]
-        python = run.call_args.args[0].index("--python")
-        assert run.call_args.args[0][python + 1] == scanner_install.SKILLSPECTOR_PYTHON
+        assert run.call_args.kwargs["env"]["UV_PYTHON"] == scanner_install.SKILLSPECTOR_PYTHON
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_prepare_reports_environment_failure(self, monkeypatch):
@@ -88,12 +87,11 @@ class TestSkillSpectorWheel:
             "--quiet",
             "--from",
             str(wheel),
-            "--python",
-            scanner_install.SKILLSPECTOR_PYTHON,
             "skillspector",
             "scan",
             "y",
         ]
+        assert run.call_args.kwargs["env"]["UV_PYTHON"] == scanner_install.SKILLSPECTOR_PYTHON
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_checksum_mismatch_never_runs(self):

@@ -33,9 +33,11 @@ SKILLSPECTOR_WHEEL_SHA256 = "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2
 # SkillSpector needs Python 3.12+, and its yara-python dependency publishes wheels only
 # through CPython 3.13. Left unpinned, uv picks its newest Python and has to compile
 # yara-python, which fails on hosts without a C toolchain such as a default Windows install.
-# A plain version, not a range: on Windows uv can be a .cmd shim, and cmd.exe reads < and >
-# in an argument as redirection.
-SKILLSPECTOR_PYTHON = "3.13"
+# The range keeps an installed 3.12 usable offline; uv prefers 3.13 and downloads it only when
+# neither is installed. It travels in UV_PYTHON, not --python: on Windows uv can be a .cmd shim,
+# and cmd.exe reads < and > in an argument as redirection.
+SKILLSPECTOR_PYTHON = ">=3.12,<3.14"
+SKILLSPECTOR_UV_ENV = MappingProxyType({"UV_PYTHON": SKILLSPECTOR_PYTHON})
 GITLEAKS_VERSION = "8.30.0"
 
 _GITLEAKS_SHA256 = MappingProxyType(
@@ -117,8 +119,8 @@ def ensure_skillspector_wheel() -> str | None:
 
 
 def skillspector_uv_run_args(wheel: Path) -> tuple[str, ...]:
-    """Arguments after ``uv`` that run the pinned SkillSpector wheel on a Python with prebuilt dependencies."""
-    return ("tool", "run", "--quiet", "--from", str(wheel), "--python", SKILLSPECTOR_PYTHON, "skillspector")
+    """Arguments after ``uv`` that run the pinned SkillSpector wheel; pair them with ``SKILLSPECTOR_UV_ENV``."""
+    return ("tool", "run", "--quiet", "--from", str(wheel), "skillspector")
 
 
 def prepare_skillspector(uv: str) -> str | None:
@@ -135,6 +137,7 @@ def prepare_skillspector(uv: str) -> str | None:
             capture_output=True,
             text=True,
             timeout=900,
+            env={**os.environ, **SKILLSPECTOR_UV_ENV},
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

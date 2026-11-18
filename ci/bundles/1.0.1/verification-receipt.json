@@ -1,0 +1,97 @@
+{
+  "all_verified": true,
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+  "source_revision": "c9369a7811bde083b550f2ac488222e8c388d7fd",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "public_manifest_matches_smoke_tested_image": true,
+  "anonymous_pull_verified": true,
+  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/44181265342",
+  "image_config_digest": "sha256:ede4e16ac4fd5839ce91a0f2a9f8d449755487de0e62cefe3fa792c6f56f20df",
+  "image_smoke_cases": [
+    {
+      "case": "all-pass",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "0b3a1dda0c931a4f6731e0615319084f92476ead75fe62667acdd61d41af7540",
+      "base_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb",
+      "head_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb"
+    },
+    {
+      "case": "invalid-name",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "failed",
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "incomplete": 0,
+      "summary_bytes": 718,
+      "summary_json_sha256": "1ba3bd01c918ced1d90cd36faed085a93ec350532c62bad8ecb549e3aa5fa39d",
+      "base_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb",
+      "head_sha": "261e184d7c1d00008e46aa6e08bb1cab8a7cd931"
+    },
+    {
+      "case": "changed-one",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "099c87bf77ac9f29a3f39f9f76c9b073bce47ad348a36ee8e63832549a35182b",
+      "base_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb",
+      "head_sha": "d7cddaebf4c3d57a8b4004610c5e654076d64f42"
+    },
+    {
+      "case": "no-change",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 365,
+      "summary_json_sha256": "3ab14e1e323a53f3936992559879ce8b2609fccaceec883de718a930ba518f76",
+      "base_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb",
+      "head_sha": "d8304046be951eaa2c7b0efae09e6e541dfb5b02"
+    },
+    {
+      "case": "missing-llm-key",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "error",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 464,
+      "summary_json_sha256": "40c43e63291c5d3d336018770f32587f28286e06409896431a05383628b3978b",
+      "base_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb",
+      "head_sha": "e64e3e9bbad76af8b35e3877d71e42c6fb464cbb"
+    }
+  ],
+  "runtime_observation_identity_method": "Containerd manifest descriptor plus exact runtime config/rootfs match; public config digest matches Linux smoke image ID",
+  "runtime_observed_image_id": "sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+  "runtime_observed_manifest_descriptor": {
+    "mediaType": "application/vnd.docker.distribution.manifest.v2+json",
+    "digest": "sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+    "size": 4099
+  },
+  "official_anonymous_pull_job": 134388371979,
+  "public_manifest_digest": "sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+  "platform_manifest_digest": "sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a",
+  "runtime_observation_sha256": "8646c5a5cc1059bd5474b791ca46edaf034cc798b7e06788fd2ea43a26a8d901",
+  "verified_at_utc": "2026-11-17T21:44:20.618995+00:00"
+}

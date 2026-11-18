@@ -16,6 +16,32 @@ def _finding(severity):
     return Finding("SECURITY", severity, "example", "Check this source", file_path="SKILL.md")
 
 
+class _NoScanList(list):
+    """Reject membership scans while retaining the result's ordinary list operations."""
+
+    __slots__ = ()
+
+    def __contains__(self, _value):
+        raise AssertionError("diagnostic restoration must not scan the accumulated list")
+
+
+def test_reconciliation_does_not_scan_accumulated_diagnostics():
+    result = ValidationResult()
+    result.add_finding(_finding(Severity.HIGH))
+    errors = result.errors = _NoScanList(result.errors)
+    warnings = result.warnings = _NoScanList(result.warnings)
+
+    result.recalculate_keeping_independent(
+        ["error b", "error a", "error b"], ["warning b", "warning a", "warning b"], keep_all_errors=True
+    )
+
+    assert result.errors is errors
+    assert result.warnings is warnings
+    assert result.errors[1:] == ["error b", "error a"]
+    assert result.warnings == ["warning b", "warning a"]
+    assert (result.summary.errors, result.summary.warnings) == (3, 2)
+
+
 @pytest.mark.parametrize("incomplete", [False, True])
 @pytest.mark.parametrize("keep_errors", [False, True])
 @pytest.mark.parametrize("repeat_warnings", [False, True])

@@ -1515,7 +1515,7 @@ def _count_reader_work(monkeypatch: pytest.MonkeyPatch) -> dict[str, int]:
     # reads, not while the network rule reads a text the reader hands it.
     uploads = checks._network_uploads_in_code_or_config
 
-    def counting_uploads(*args: Any, **kwargs: Any) -> bool:
+    def counting_uploads(*args: Any, **kwargs: Any) -> str:
         reading["code"] += 1
         try:
             return uploads(*args, **kwargs)

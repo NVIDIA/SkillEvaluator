@@ -66,10 +66,17 @@ a negative interaction means less; zero means additive. For example, baseline
 below baseline. For more than two skills this is total departure from additive
 individual gains, rather than an isolated higher-order interaction.
 
-These signs describe the observed estimate, without a confidence interval or
-statistical significance test. A small interaction can reflect trial noise;
-with one attempt on ten binary-outcome cases, one outcome changing in an
-individual or combined configuration moves the interaction by 0.10. Configurations
+These signs describe the observed estimate. JSON and terminal reports also
+include an advisory 95% expanded-percentile case-bootstrap interval, its case
+count, the number of cases with non-zero interaction, and a precision label.
+All arms stay paired: attempts are averaged within a case, its interaction is
+calculated, then whole cases are resampled together with a recorded seed and
+resample count. No interval is reported for a single case. The interval
+measures variation across the reviewed cases, not all provider or trial noise;
+a zero-width interval on identical case interactions is not proof of certainty.
+A sign alone is not a significance test. On ten cases at `--n-attempts 1`,
+one binary outcome flipping in an individual or combined configuration moves
+the interaction by 0.10. Configurations
 run sequentially: baseline, each individual, then combined. Provider changes,
 rate limiting, or timeouts during a long experiment can therefore align with
 configuration order. Repeat the experiment before interpreting a small

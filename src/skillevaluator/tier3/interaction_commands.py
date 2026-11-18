@@ -125,5 +125,16 @@ def _print_report(report: dict[str, Any]) -> None:
             click.echo(f"  {name}: {value:.4f}")
         click.echo(f"  Combined: {score['combined']:.4f}; combined lift: {score['combined_lift']:+.4f}")
         click.echo(f"  Interaction: {score['interaction']:+.4f} ({score['classification']})")
+        if uncertainty := score.get("uncertainty"):
+            interval = (
+                f"[{uncertainty['ci_low']:+.4f}, {uncertainty['ci_high']:+.4f}]"
+                if uncertainty["ci_low"] is not None
+                else "unavailable (need at least two cases)"
+            )
+            click.echo(
+                f"  {uncertainty['confidence']:.0%} case-bootstrap interval: {interval}; "
+                f"{uncertainty['n_cases']} cases, {uncertainty['nonzero_cases']} non-zero; "
+                f"precision: {uncertainty['precision']}"
+            )
     click.echo("Negative interaction means less than additive gain; combined performance may still exceed baseline.")
     click.echo(f"Evidence: {Path(report['run_dir']) / 'interaction.json'}")

@@ -21,6 +21,11 @@
 SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
 on task results: start with quality checks, then compare runs with and without a skill.
 
+Catch skill issues before merge. Connect your repository to SkillEvaluator with a
+[CI template](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
+for automated quality and security gates, without building or maintaining
+evaluation code.
+
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
 the [NVIDIA Verified Skills pipeline](https://github.com/NVIDIA/skills).
@@ -69,7 +74,7 @@ skillevaluator validate \
 
 <p><img src="https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/928cc9d483fe9fef2d5011c3ca8f132cda46730a/docs/assets/get-started-ci.svg" width="250" alt="Add it to your repo via CI"></p>
 
-Our CI template checks every skill change, no code to maintain. Run in your GitHub repo to open a setup PR:
+Check every skill change. Run in your GitHub repo to open a setup PR:
 
 ```bash
 skillevaluator ci init

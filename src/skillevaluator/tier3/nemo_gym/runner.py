@@ -369,7 +369,7 @@ def gym_eval_command(
         "--sandbox",
         sandbox,
         "--model-type",
-        "openai_model",
+        os.environ.get("SKILL_EVAL_NEMO_GYM_MODEL_TYPE", "").strip() or "openai_model",
         "--model",
         model,
         "--model-url",
@@ -382,6 +382,13 @@ def gym_eval_command(
     ]
     if n_concurrent:
         command += ["--concurrency", str(n_concurrent)]
+    if os.environ.get("SKILL_EVAL_NEMO_GYM_FABRIC", "").strip() in {"1", "true"}:
+        # POC: Gym's NeMo Fabric agent with Relay instead of the per-harness Gym agent.
+        adapter = {"codex": "nvidia.fabric.codex", "claude-code": "nvidia.fabric.claude"}[agent]
+        command[command.index("--agent") + 1] = "nemo_fabric_agent"
+        prefix = "++nemo_fabric_agent.responses_api_agents.nemo_fabric_agent"
+        command += [f"{prefix}.adapter_id={adapter}", f"{prefix}.relay=true"]
+        inherit_sandbox_environment = False
     if inherit_sandbox_environment:
         # Gym's Codex agent starts Codex with only its own variables unless told to keep the sandbox's.
         gym_agent = NEMO_GYM_AGENTS[agent]

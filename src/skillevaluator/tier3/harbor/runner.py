@@ -942,6 +942,7 @@ _TRUSTED_NETWORK_HOST_ENV_VARS = frozenset(
 )
 _HARBOR_BASE_ENV_VARS = _TRUSTED_NETWORK_HOST_ENV_VARS | {
     "COMSPEC",
+    "SKILLEVALUATOR_NEMO_RELAY_BINARY",
     "HOME",
     "LANG",
     "LC_ALL",
@@ -1945,8 +1946,22 @@ def build_harbor_run_command(
         command.extend(["--env", backend.import_path])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
-    for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
+    agent_kwargs = _harbor_agent_kwargs(agent, model, env_mode)
+    from skillevaluator.tier3.harbor import fabric_agents
+
+    if fabric_agents.fabric_launcher_enabled() and agent in fabric_agents.FABRIC_AGENT_IMPORT_PATHS:
+        agent_index = command.index("--agent") + 1
+        if env_mode == ENV_MODE_LOCAL:
+            command[agent_index] = fabric_agents.FABRIC_LOCAL_AGENT_IMPORT_PATHS[agent]
+            agent_kwargs = fabric_agents.fabric_local_agent_kwargs(agent)
+        else:
+            command[agent_index] = fabric_agents.FABRIC_AGENT_IMPORT_PATHS[agent]
+            agent_kwargs = fabric_agents.fabric_agent_kwargs(agent)
+    for name, value in sorted(agent_kwargs.items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
+    if agent == "hermes":
+        # Harbor 0.25 Hermes otherwise requires OPENAI_API_KEY for non-native providers.
+        command.extend(["--api-key-name", "NVIDIA_API_KEY"])
     for name, value in sorted(validated_environment_kwargs.items()):
         # A SkillEvaluator GKE wrapper option, not a Harbor constructor kwarg.
         if env_mode == "gke" and name == "allow_workload_identity":

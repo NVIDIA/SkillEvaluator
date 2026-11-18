@@ -14,6 +14,7 @@ from harbor.agents.installed.base import with_prompt_template
 from harbor.agents.installed.hermes import Hermes
 
 from skillevaluator.tier3.harbor import HERMES_VERSION
+from skillevaluator.tier3.harbor import relay as nemo_relay
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
@@ -46,6 +47,12 @@ class SkillEvaluatorHermes(Hermes):
                 'export PATH="$HOME/.local/bin:/usr/local/bin:$PATH" && hermes --version'
             ),
         )
+
+    async def exec_as_agent(self, environment: BaseEnvironment, command: str, env=None, cwd=None, timeout_sec=None):  # type: ignore[no-untyped-def]
+        if nemo_relay.relay_binary() is not None and "hermes --yolo chat" in command:
+            plugins = await nemo_relay.write_relay_config(environment, "hermes")
+            env = {**(env or {}), nemo_relay.HERMES_PLUGINS_ENV: plugins}
+        return await super().exec_as_agent(environment, command=command, env=env, cwd=cwd, timeout_sec=timeout_sec)
 
     @with_prompt_template
     async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:  # noqa: ARG002

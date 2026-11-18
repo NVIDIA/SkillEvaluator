@@ -29,6 +29,7 @@ from harbor.utils.env import parse_bool_env_value
 
 from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
+from skillevaluator.tier3.harbor import relay as nemo_relay
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
@@ -268,6 +269,11 @@ class SkillEvaluatorClaudeCode(_InstalledClaudeCode):
                         "CLAUDE_CODE_OAUTH_TOKEN",
                     }
                 }
+        relay = nemo_relay.relay_binary()
+        if relay is not None and nemo_relay.is_claude_launch(command):
+            await nemo_relay.install_relay(environment, relay)
+            command = nemo_relay.wrap_claude_launch(command)
+            env = nemo_relay.relay_env(env)
         return await super().exec_as_agent(
             environment,
             command=command,
@@ -913,6 +919,11 @@ class _NvidiaBuildBridgeAgent:
         routed_env.update(client_env)
         for name in self._BRIDGE_CLIENT_ENV_UNSET:
             routed_env.pop(name, None)
+        relay = nemo_relay.relay_binary()
+        if relay is not None and nemo_relay.is_codex_launch(command):
+            await nemo_relay.install_relay(environment, relay, agent_name="codex")
+            command = nemo_relay.wrap_codex_launch(command)
+            routed_env["NEMO_RELAY_OPENAI_BASE_URL"] = self._bridge_api_url()
         routed_command = self._rewrite_bridge_client_command(command)
         unset_args = " ".join(f"-u {shlex.quote(name)}" for name in self._BRIDGE_CLIENT_ENV_UNSET)
         with environment.scoped_exec_env(client_env):

@@ -704,6 +704,7 @@ def emit_reports(
                 requested_tiers=requested_tiers,
                 displayed_tiers=displayed_tiers,
                 expected_skill_name=expected_skill_name,
+                explicit_skill_name=explicit_skill_name,
             )
         elif fmt == "sarif":
             reporter = reporter_cls(workspace_root=repository_root, scan_root=scan_root)

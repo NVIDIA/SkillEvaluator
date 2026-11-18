@@ -70,12 +70,17 @@ def load_expected() -> dict:
     """Return the expected results for the evaluator that runs the demo.
 
     The top-level values are what the release pinned in the starter guide reports.
-    When the evaluator is this checkout's own source, the ``checkout`` values
-    replace them, because the source can score the starter differently until a
+    Reviewed ``evaluator_versions`` values select the installed release when
+    it differs from the guide's pinned release. When the evaluator is this
+    checkout's own source, the ``checkout`` values replace them, because the
+    source can score the starter differently until a
     release includes its changes.
     """
     expected = json.loads((FIXTURES / "expected.json").read_text(encoding="utf-8"))
     checkout = expected.pop("checkout", {})
+    evaluator_versions = expected.pop("evaluator_versions", {})
+    for label, values in evaluator_versions.get(version("skillevaluator"), {}).items():
+        expected[label] |= values
     evaluator = find_spec("skillevaluator")
     source = (FIXTURES.parents[1] / "src").resolve()
     if evaluator and evaluator.origin and Path(evaluator.origin).resolve().is_relative_to(source):

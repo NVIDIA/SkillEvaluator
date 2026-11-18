@@ -11,22 +11,15 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
 
-
-def _validate_http_url(url: str) -> str:
-    """Reject local-file and custom URL schemes before fetching a spec."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Only absolute HTTP or HTTPS URLs are supported")
-    return url
+from url_safety import validate_http_url
 
 
 def fetch_spec(url: str) -> dict:
     """Fetch OpenAPI spec from URL."""
     try:
-        req = urllib.request.Request(_validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
-        # _validate_http_url() rejects non-HTTP schemes before this request.
+        req = urllib.request.Request(validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
+        # validate_http_url() rejects non-HTTP schemes before this request.
         with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
             content = response.read().decode("utf-8")
             return json.loads(content)

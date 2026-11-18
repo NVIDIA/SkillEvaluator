@@ -29,7 +29,7 @@ def test_enriched_tier1_requires_admission_and_keeps_the_keyless_path():
     assert enriched["runs-on"] == "ubuntu-24.04"
     assert "inputs.tier1-llm" in enriched["if"]
     assert "needs.eligibility.outputs.allowed == 'true'" in enriched["if"]
-    assert enriched["environment"] == "${{ inputs.environment }}"
+    assert enriched["environment"]["name"] == "${{ inputs.environment }}"
     check = next(step for step in enriched["steps"] if step.get("id") == "current-head")
     evaluate = next(step for step in enriched["steps"] if "run_tier1_image.py" in step.get("run", ""))
     assert enriched["steps"].index(check) < enriched["steps"].index(evaluate)

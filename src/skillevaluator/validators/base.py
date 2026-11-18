@@ -205,15 +205,15 @@ class ValidatorBase(ABC):
     def _find_all_skills(self, root_path: Path) -> list[Path]:
         """Recursively find all skill directories containing SKILL.md files.
 
-        Manifests beneath any directory in :data:`SCAN_EXCLUDED_DIRS` (e.g.
-        ``evals/``, ``results/``, ``.versions/``) are skipped so that
-        evaluation snapshots and version archives do not get scanned as
-        live skills.
+        Manifests beneath an excluded directory below ``root_path`` (e.g.
+        ``evals/``, ``results/``, ``.versions/`` in :data:`SCAN_EXCLUDED_DIRS`)
+        are skipped so that evaluation snapshots and version archives do not
+        get scanned as live skills.
         """
         skill_dirs: set[Path] = set()
         for manifest_name in SKILL_MANIFEST_VARIANTS:
             for skill_md in root_path.rglob(manifest_name):
-                if any(part in SCAN_EXCLUDED_DIRS for part in skill_md.parts):
+                if any(part in SCAN_EXCLUDED_DIRS for part in skill_md.relative_to(root_path).parts):
                     continue
                 skill_dirs.add(skill_md.parent)
         return sorted(skill_dirs)

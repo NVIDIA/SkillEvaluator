@@ -343,6 +343,137 @@ class TestEvidenceProjection:
             {"file": "SKILL.md"},
         ]
 
+    def test_static_parse_limit_uses_parser_span_when_the_reason_has_no_line(self) -> None:
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "scripts/helper.mjs",
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "phase": "static",
+                    "message": "A security-relevant expression could not be fully resolved.",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    "parser_diagnostic": {
+                        "cause": "runtime_dependent",
+                        "check": "command_string_runtime",
+                        "start_line": 74,
+                        "end_line": 170,
+                        "source_start_offset": 3958,
+                    },
+                }
+            ],
+        }
+
+        finding, is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert is_error
+        assert "at target lines 74-170" in finding.suggestion
+        reason = finding.metadata["skillspector_evidence"]["reasons"][0]
+        assert reason["start_line"] == 74
+        assert reason["end_line"] == 170
+        assert "parser_diagnostic" not in reason
+        assert "_parser_span" not in reason
+        assert "source_start_offset" not in json.dumps(finding.metadata)
+
+    def test_static_parse_limit_keeps_the_reason_line_when_present(self) -> None:
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "scripts/helper.pl",
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    "start_line": 3,
+                    "parser_diagnostic": {"start_line": 74, "end_line": 170},
+                }
+            ],
+        }
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert "at target line 3" in finding.suggestion
+        assert "74-170" not in finding.suggestion
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["start_line"] == 3
+        assert "end_line" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+
+    def test_static_parse_limit_does_not_invent_a_parser_span(self) -> None:
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "scripts/helper.pl",
+            "target_disposition": "partial",
+            "reasons": [{"reason_code": "static_parse_limit", "analyzers": ["static_patterns_tool_misuse"]}],
+        }
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert "at target line" not in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+
+    def test_static_parse_limit_single_line_span_uses_target_line(self) -> None:
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "hooks/hooks.json",
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    "parser_diagnostic": {"start_line": 11, "end_line": 11},
+                }
+            ],
+        }
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+
+        assert "at target line 11" in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+
+    def test_row_end_line_without_parser_diagnostic_keeps_upstream_suggestion_and_id(self) -> None:
+        """A row that already has lines 3-7 must keep the upstream suggestion and finding ID."""
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "scripts/helper.pl",
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    "start_line": 3,
+                    "end_line": 7,
+                }
+            ],
+        }
+        baseline_issue = copy.deepcopy(issue)
+        del baseline_issue["evidence"]["reasons"][0]["end_line"]
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+        baseline, _ = SecurityValidator._convert_skillspector_issue(baseline_issue)
+
+        assert finding.suggestion == baseline.suggestion
+        assert finding.finding_id == baseline.finding_id
+        assert "at target line 3" in finding.suggestion
+        assert "3-7" not in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["end_line"] == 7
+        assert "_parser_span" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+
+        issue["evidence"]["reasons"] = [
+            {"reason_code": "read_error", "start_line": 4, "end_line": 5},
+            {"reason_code": "read_error", "start_line": 4, "end_line": 12},
+        ]
+        baseline_issue = copy.deepcopy(issue)
+        for reason in baseline_issue["evidence"]["reasons"]:
+            del reason["end_line"]
+        grouped, _ = SecurityValidator._convert_skillspector_issue(issue)
+        grouped_baseline, _ = SecurityValidator._convert_skillspector_issue(baseline_issue)
+        assert grouped.suggestion == grouped_baseline.suggestion
+        assert grouped.finding_id == grouped_baseline.finding_id
+        assert grouped.suggestion.count("read_error") == 1
+        assert "at target line 4" in grouped.suggestion
+        assert "at target lines" not in grouped.suggestion
+
     @pytest.mark.parametrize("field", ["observed_characters", "observed_seconds"])
     @pytest.mark.parametrize(
         "value",

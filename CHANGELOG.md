@@ -28,6 +28,11 @@ All notable changes to SkillEvaluator are documented in this file.
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
   README, starting with the next release. Published 1.0.1 metadata is unchanged.
+- Incomplete SkillSpector scans now quote the parser span, cause, and check from
+  `parser_diagnostic` on `static_parse_limit` rows that have no line of their own,
+  keep a bounded copy of that diagnostic in `skillspector_completeness`, and, when
+  every such row is `runtime_dependent`, explain that SkillSpector could not resolve
+  a command or code string known only at run time. The check stays `INCOMPLETE`.
 
 ## 1.0.1 - 2026-11-17
 

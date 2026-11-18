@@ -71,6 +71,9 @@ _LIMIT_FIELDS = tuple(
 # must stay the same across runs, so it shows only the limits that the file and
 # the configuration fix; the finding's metadata keeps every limit.
 _RUN_DEPENDENT_LIMITS = frozenset(field for field, seconds in _LIMIT_FIELDS if seconds)
+# Set on a reason only while building the suggestion, then dropped. A row's own
+# end_line stays in metadata and must not change grouping or finding IDs.
+_PARSER_SPAN = "_parser_span"
 
 
 def diagnostic_text(value: object, *, max_length: int = 4096) -> str | None:
@@ -192,6 +195,15 @@ def _reasons(rows: object, text: Callable[..., str | None]) -> list[dict]:
         for field in ("start_line", "end_line"):
             if (line := _line(row.get(field))) is not None:
                 reason[field] = line
+        if "start_line" not in reason:
+            diagnostic = row.get("parser_diagnostic")
+            if isinstance(diagnostic, dict):
+                start = _line(diagnostic.get("start_line"))
+                end = _line(diagnostic.get("end_line"))
+                if start is not None and end is not None and end >= start:
+                    reason["start_line"] = start
+                    reason["end_line"] = end
+                    reason[_PARSER_SPAN] = True
         metrics = row.get("limits")
         if isinstance(metrics, dict):
             limits = {}
@@ -348,22 +360,35 @@ def _reason_details(reasons: list[dict]) -> list[str]:
 
     The run time and the time budget (``observed_seconds``, ``limit_seconds``)
     are left out, so the text, and the ``finding_id`` that hashes it, is the
-    same in every run of one scan.
+    same in every run of one scan. A ``parser_diagnostic`` span is part of that
+    text; an ``end_line`` that was already on the row is not.
     """
     grouped: dict[tuple, list[str]] = {}
     for reason in reasons:
         limits = sorted(
             (key, value) for key, value in (reason.get("limits") or {}).items() if key not in _RUN_DEPENDENT_LIMITS
         )
-        key = (reason["reason_code"], reason.get("start_line"), reason.get("message"), tuple(limits))
+        start_line = reason.get("start_line")
+        parser_end = reason.get("end_line") if reason.get(_PARSER_SPAN) is True else None
+        if parser_end == start_line:
+            parser_end = None
+        key = (
+            reason["reason_code"],
+            start_line,
+            parser_end,
+            reason.get("message"),
+            tuple(limits),
+        )
         analyzers = grouped.setdefault(key, [])
         analyzers.extend(name for name in reason.get("analyzers", []) if name not in analyzers)
     details = []
-    for (reason_code, start_line, message, limits), analyzers in grouped.items():
+    for (reason_code, start_line, parser_end, message, limits), analyzers in grouped.items():
         detail = reason_code
         if analyzers:
             detail += f" ({', '.join(analyzers)})"
-        if start_line:
+        if reason_code == "static_parse_limit" and start_line and parser_end:
+            detail += f" at target lines {start_line}-{parser_end}"
+        elif start_line:
             detail += f" at target line {start_line}"
         if message:
             detail += f": {message.rstrip('.')}"
@@ -405,7 +430,10 @@ def reference_suggestion(
             "`--format json` and review the rows for this file in "
             "`analysis_completeness.ledger_exceptions`, then address every limitation before rerunning the scan."
         )
-    return " ".join([summary, *_reason_details(reasons), action])
+    details = _reason_details(reasons)
+    for reason in reasons:
+        reason.pop(_PARSER_SPAN, None)
+    return " ".join([summary, *details, action])
 
 
 def reference_summary(findings: Iterable[object]) -> dict | None:

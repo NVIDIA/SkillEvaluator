@@ -189,7 +189,7 @@ def next_steps(
                 observed,
             )
         )
-    elif most_attempts == 1:
+    elif most_attempts == 1 and not partial:
         steps.append(
             _step(
                 "single attempt",

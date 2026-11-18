@@ -43,6 +43,20 @@ def env_for(consumer, **updates):
     }
 
 
+@pytest.mark.parametrize(
+    ("environment", "expected"),
+    [
+        ({"SKILLEVALUATOR_TOOLS_REF": "a" * 40}, "a" * 40),
+        ({"SKILL_EVAL_TOOLS_REF": "b" * 40}, "b" * 40),
+        ({"SKILLEVALUATOR_TOOLS_REF": "a" * 40, "SKILL_EVAL_TOOLS_REF": "b" * 40}, "a" * 40),
+        ({"SKILLEVALUATOR_TOOLS_REF": "", "SKILL_EVAL_TOOLS_REF": "b" * 40}, "b" * 40),
+        ({}, ""),
+    ],
+)
+def test_context_records_tools_ref_from_platform_environment(environment, expected):
+    assert run_tiers.context(environment)["runtime"]["tools_ref"] == expected
+
+
 @pytest.mark.parametrize("tier", [2, 3])
 @pytest.mark.parametrize("legacy_required", ["false", "true", "unused-legacy-value"])
 def test_missing_credentials_retains_incomplete_advisory_tier(consumer, tmp_path, tier, legacy_required):

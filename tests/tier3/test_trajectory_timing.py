@@ -178,13 +178,45 @@ def test_overflowing_native_timing_preserves_other_component(llm_ms, tool_ms, ex
 
 def test_overflowing_native_llm_timing_preserves_known_zero_tool_time() -> None:
     trajectory = {
+        "steps": [{"source": "agent", "extra": {"llm_duration_ms": 1e308}, "tool_calls": []} for _ in range(2)]
+    }
+
+    assert trajectory_timing(trajectory) == {"llm_seconds": None, "tool_seconds": 0.0, "source": "atif"}
+
+
+@pytest.mark.parametrize(
+    "agent_step",
+    [
+        {},
+        {"extra": {}},
+        {"extra": {"llm_duration_ms": None}},
+        {"extra": {"llm_duration_ms": True}},
+        {"extra": {"llm_duration_ms": "250"}},
+        {"extra": {"llm_duration_ms": -1}},
+    ],
+    ids=["missing-extra", "missing-duration", "null", "boolean", "string", "negative"],
+)
+def test_missing_or_invalid_native_llm_timing_preserves_known_zero_tool_time(agent_step: dict[str, Any]) -> None:
+    trajectory = {
         "steps": [
-            {"source": "agent", "extra": {"llm_duration_ms": 1e308}, "tool_calls": []}
-            for _ in range(2)
+            {"source": "agent", "extra": {"llm_duration_ms": 250}},
+            {"source": "agent", "tool_calls": [], **agent_step},
         ]
     }
 
     assert trajectory_timing(trajectory) == {"llm_seconds": None, "tool_seconds": 0.0, "source": "atif"}
+
+
+@pytest.mark.parametrize("calls", [{}, "unknown", [{}]])
+def test_unknown_native_tool_calls_do_not_become_known_zero(calls: Any) -> None:
+    trajectory = {
+        "steps": [
+            {"source": "agent", "extra": {"llm_duration_ms": 250}},
+            {"source": "agent", "tool_calls": calls},
+        ]
+    }
+
+    assert trajectory_timing(trajectory) is None
 
 
 def test_native_atif_extras_win_over_inference() -> None:

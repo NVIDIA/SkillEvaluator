@@ -333,6 +333,21 @@ jobs:
       - name: Install and smoke-test the wheel on Python 3.12, 3.13, and 3.14
         shell: bash
         run: |
+          smoke_cli() {
+            local smoke_label="$1"
+            shift
+            local smoke_log smoke_exit
+            smoke_log="$(mktemp "$RUNNER_TEMP/skillevaluator-smoke.XXXXXX")"
+            if "$@" >"$smoke_log" 2>&1; then
+              rm -f "$smoke_log"
+            else
+              smoke_exit=$?
+              printf '::error::%s failed (exit %s)\n' "$smoke_label" "$smoke_exit"
+              cat "$smoke_log"
+              rm -f "$smoke_log"
+              return "$smoke_exit"
+            fi
+          }
           wheel="$(find "$PWD/dist" -maxdepth 1 -type f -name 'skillevaluator-*.whl' -print -quit)"
           test -n "$wheel"
           for python_version in 3.12 3.13 3.14; do
@@ -344,11 +359,11 @@ jobs:
             "$venv/bin/python" -c 'from importlib.resources import files; assert files("skillevaluator.tier3.harbor").joinpath("templates/eval.py").is_file()'
             "$venv/bin/python" -c 'from importlib.resources import files; from skillevaluator.quality_config import load_quality_config; assert files("skillevaluator.config").joinpath("quality-default.yaml").is_file(); c=load_quality_config(); assert [h["heading"] for h in c["expected_headers"]]==["## Prerequisites","## Limitations","## Troubleshooting"], c'
             "$venv/bin/skillevaluator" --version
-            "$venv/bin/skillevaluator" --help >/dev/null
-            "$venv/bin/skillevaluator" models --help >/dev/null
-            "$venv/bin/skillevaluator" ci --help >/dev/null
+            smoke_cli "CLI help (Python ${python_version})" "$venv/bin/skillevaluator" --help
+            smoke_cli "Models help (Python ${python_version})" "$venv/bin/skillevaluator" models --help
+            smoke_cli "CI help (Python ${python_version})" "$venv/bin/skillevaluator" ci --help
             SKILL_EVAL_LLM_PROVIDER=nv_build NVIDIA_API_KEY=nvapi-ci-placeholder \
-              "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker >/dev/null
+              smoke_cli "Tier 3 doctor (Python ${python_version})" "$venv/bin/skillevaluator" doctor --agents opencode --env-mode docker
             "$venv/bin/python" -c 'import io; from skillevaluator.tier3.harbor.progress import PlainProgressReporter,ProgressEvent,Tier3RunPlan; s=io.StringIO(); r=PlainProgressReporter(stream=s,refresh_interval=60); r.start(Tier3RunPlan(skill_name="wheel-smoke",environment="docker",agents=("opencode",))); r.emit(ProgressEvent(stage="configuration",state="complete")); r.close(); assert "configuration: complete" in s.getvalue()'
           done
       - name: Run the installed verifier with Python 3.9

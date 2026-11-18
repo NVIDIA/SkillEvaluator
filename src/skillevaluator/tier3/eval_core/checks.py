@@ -21,7 +21,7 @@ import posixpath
 import re
 import shlex
 from array import array
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from fnmatch import fnmatchcase
 from typing import Any
 
@@ -356,8 +356,15 @@ def _is_plain_cache_cleanup(text: str) -> bool:
     return True
 
 
+# Finds a match in exactly the texts where r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+[^\n;`]+"
+# does, in linear time: after "rm -", the first r or f within the line, then
+# the first blank after it, followed by a character other than a newline,
+# ";" or "`", or by newlines and such a character. The other form
+# backtracks quadratically when it fails on a long line, as on "rm -" and
+# 40,000 letters r.
+_RM_PATTERN = re.compile(r"\brm\s+-[^\n;`rf]*[rf][^\s;`]*(?:[^\S\n][^\n;`]|[^\S\n]?\n+[^\n;`])")
 _DESTRUCTIVE_PATTERNS = [
-    (re.compile(r"\brm\s+-[^\n;`]*[rf][^\n;`]*\s+[^\n;`]+"), "rm -rf"),
+    (_RM_PATTERN, "rm -rf"),
     (re.compile(r"\bmkfs(?:\.|\s)"), "mkfs"),
     (re.compile(r"\bdd\s+if="), "dd if="),
     (re.compile(r"\bchmod\s+-?r?\s*777\s+/"), "chmod 777 /"),
@@ -5405,6 +5412,488 @@ def _allowed_workspace_skills(
     return {name for name in allowed if name}
 
 
+# Text that can build an rm command line from expansions or escapes: a
+# command that eval starts with an argument, also behind any number of "!",
+# "{", reserved words, coproc, assignments, redirections, and time, builtin
+# or command with -p or --, or a command in which env takes -S or
+# --split-string. Words are read as the shell splits them, with quotes and
+# backslashes removed, and the text inside quotes is read again as commands,
+# as bash -c and eval read it. One scan reads the text once at each quoting
+# depth, so it is linear in the text and bounds no repeat.
+_RM_EVAL_PREFIXES = frozenset({"!", "{", "if", "then", "elif", "else", "while", "until", "do", "coproc"})
+_RM_EVAL_PREFIXES_WITH_OPTIONS = frozenset({"time", "builtin", "command"})
+# coproc NAME runs a compound command that starts with one of these words, as
+# in coproc NAME { eval ...; }; a "(" there ends the coproc words anyway.
+_RM_COPROC_COMPOUND_WORDS = frozenset({"{", "if", "while", "until"})
+_RM_EVAL_PREFIX_OPTION_RE = re.compile(r"-[-p]+")
+_RM_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*(?:\[[^\]]*\])?\+?=")
+_RM_ARRAY_ASSIGNMENT_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\+?=")  # The word before an array literal's "(".
+_RM_ENV_WORD_RE = re.compile(r"\benv\b")
+_RM_FD_NAME_RE = re.compile(r"\{[A-Za-z_]\w*\}")
+
+
+def _rm_abbreviated(option: str, shortest: int) -> str:
+    """A pattern for GNU long *option* and each abbreviation of it at least *shortest* characters long."""
+    return "|".join(re.escape(option[:length]) for length in range(len(option), shortest - 1, -1))
+
+
+# env -S, also bundled (-iS) or as --split-string, which getopt_long also takes abbreviated to --s.
+_RM_SPLIT_STRING_LONG = _rm_abbreviated("--split-string", 3)
+_RM_SPLIT_STRING_OPTION_RE = re.compile(rf"-[^-]*?S|(?:{_RM_SPLIT_STRING_LONG})(?![^=])")
+# One step of the scan: a redirection operator, whose target word follows,
+# a $'...' word, the $ of a $"..." word, a run of word characters, a
+# backslash-newline continuation, an escaped character, a quoted string
+# (also unterminated), a run of blanks, or a character that ends a command.
+_RM_GATE_TOKEN_RE = re.compile(
+    r"""(?P<redirect>[0-9]*(?:<<<|<<-?|<>|[<>]&-?|>>|>\||&>>?|[<>]))"""
+    r"""|\$'(?P<ansi_c>(?:[^'\\]|\\.)*)'?|(?P<locale>\$(?="))"""
+    r"""|(?:[^\\'"$ \t\n;&|()<>`]|\$(?!['"]))+|\\\n|\\.|\\$|'[^']*'?|"(?:[^"\\]|\\.)*"?|[ \t]+|[\n;&|()`]""",
+    re.DOTALL,
+)
+_RM_ANSI_C_WORD_RE = re.compile(r"\$'((?:[^'\\]|\\.)*)'?", re.DOTALL)
+# A quoted step of the gate that closes.
+_RM_GATE_CLOSED_RE = re.compile(r"""\$'(?:[^'\\]|\\.)*'|'[^']*'|"(?:[^"\\]|\\.)*\"""", re.DOTALL)
+# Quoted text nested deeper than this opens the gate when it holds eval or env.
+_RM_MAX_GATE_DEPTH = 4
+# git's own options before its subcommand that take the next word as their value.
+_RM_GIT_VALUE_OPTIONS = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--config-env", "--super-prefix", "--attr-source"}
+)
+# In eval or env -S text, a command word built from an expansion counts as rm
+# when its leading options are all rm options and one of them is recursive, as
+# in "$CMD -rf /w" or "$CMD -f -r /w". Long options may be abbreviated, as
+# getopt_long reads them.
+_RM_RECURSIVE_OPTION_RE = re.compile(rf"{_rm_abbreviated('--recursive', 3)}|-[dfiIrRv]*[rR][dfiIrRv]*")
+_RM_FORCE_OPTION_RE = re.compile(_rm_abbreviated("--force", 3))
+# A recursive rm option in text this check cannot split into words.
+_RM_RECURSIVE_WORD_RE = re.compile(rf"(?:^|\s)(?:(?:{_rm_abbreviated('--recursive', 3)})(?![^\s'\"])|-[dfiIrRv]*[rR])")
+_RM_OPTION_RE = re.compile(
+    "|".join(
+        [
+            r"-[dfiIrRv]+",
+            _rm_abbreviated("--recursive", 3),
+            _rm_abbreviated("--force", 3),
+            _rm_abbreviated("--dir", 3),
+            _rm_abbreviated("--verbose", 6),
+            _rm_abbreviated("--one-file-system", 3),
+            _rm_abbreviated("--no-preserve-root", 3),
+            rf"(?:{_rm_abbreviated('--preserve-root', 3)})(?:=all)?",
+            rf"(?:{_rm_abbreviated('--interactive', 3)})(?:=\w+)?",
+        ]
+    )
+)
+_RM_ANSI_C_ESCAPES = dict(zip("abeEfnrtv", "\a\b\x1b\x1b\f\n\r\t\v"))  # noqa: B905 -- same length; Python 3.9.
+_RM_ANSI_C_ESCAPE_RE = re.compile(
+    r"\\(x[0-9A-Fa-f]{1,2}|u[0-9A-Fa-f]{1,4}|U[0-9A-Fa-f]{1,8}|[0-7]{1,3}|c.|.)", re.DOTALL
+)
+# git grep -O, also bundled (-nO) or abbreviated (--op), runs its value as a
+# pager command on the files it finds; env -S, also bundled (-iS), splits the
+# value joined to it into a command line.
+_RM_JOINED_VALUE_OPTION_RE = re.compile(r"((?:^|(?<=\s))(?:-[A-Za-z0-9]*?[OS]|--op[a-z-]*=))")
+_RM_GIT_PAGER_VALUE_RE = re.compile(r"-[A-Za-z0-9]*?O(.+)|--op[a-z-]*=(.+)", re.DOTALL)
+# In text the shell lexer cannot split, more distinct deletion fragments than
+# this make the whole action count as destructive, which bounds the work to
+# a few seconds.
+_RM_MAX_FALLBACK_FRAGMENTS = 65_536
+# Once the texts the strict readings (see _rm_targets_outside_tmp) check count
+# more characters than this, of a trace where its caller shares one count
+# across it and of the text a reading starts from otherwise, they stop and find
+# nothing, and the trace's later calls are read only as main reads them. Each
+# text of up to 64 KiB they check counts before each check of it, also one they
+# then do not read (see _rm_read_cost): its length, _RM_EXTRA_CHARS_PER_READ
+# more, about the work of reading a short text, and _RM_EXTRA_CHARS_PER_WORD
+# more for each word, shell operator and substitution, which cost the lexer and
+# the walk more than a character does. So does each here-document body the
+# lexer checks for them beyond main's "rm -", and, at any length, each call,
+# word and substitution the eval gate reads, unless the gate opens a strict
+# reading of it, which counts it instead (see _rm_gated). A longer text that is
+# read is read in one pass, where each command and body it holds counts before
+# its check. This bounds their work to about a second.
+_RM_MAX_EXTRA_CHARS = 262_144
+_RM_EXTRA_CHARS_PER_READ = 64
+_RM_EXTRA_CHARS_PER_WORD = 10
+# The most work one force-only target can ask the budget for before it spends
+# any (see _rm_force_operand_is_protected): every dot-glob spelling in every
+# directory the shell can be in.
+_RM_MAX_TARGET_LOOKAHEAD = (1 << _RM_MAX_DOT_GLOB_COMPONENTS) * _RM_MAX_WORKDIRS
+# An option word that may give rm a recursive or force option.
+_RM_FLAG_WORD_RE = re.compile(r"(?:^|\s)-\S*[rf]", re.IGNORECASE)
+_RM_NAME_WORD_RE = re.compile(r"\brm\b", re.IGNORECASE)
+# An escape in a $'...' word that may spell a letter, which a search of the undecoded text cannot see.
+_RM_ANSI_C_LETTER_RE = re.compile(r"\\[xuUc0-7]")
+# env's -S, also bundled after -i, -v or -0, or --split-string, with the string joined to it.
+_RM_ENV_SPLIT_RE = re.compile(rf"-[iv0]*S(.*)|(?:{_RM_SPLIT_STRING_LONG})(?:=(.*))?", re.DOTALL)
+# The start of a $'...' word, spelled so that a scan for shell strings in this source does not read one.
+_RM_DOLLAR_QUOTE = chr(36) + chr(39)
+_RM_QUOTES_DROPPED = str.maketrans({chr(39): None, chr(34): None})
+# One step of the one-pass command split (see _rm_command_spans): a quoted
+# string, $'...' word or backtick substitution, each also unterminated, an
+# escaped character, a run of other characters, or one character.
+_RM_COMMAND_TOKEN_RE = re.compile(
+    r"""'[^']*(?P<single>')?"""
+    r"""|\$'[^'\\]*(?:\\.[^'\\]*)*(?P<ansi_c>')?"""
+    r"""|"[^"\\]*(?:\\.[^"\\]*)*(?P<double>")?"""
+    r"""|`[^`\\]*(?:\\.[^`\\]*)*(?P<backtick>`)?"""
+    r"""|\\.|[^\\'"`$()#\n;&|<>]+|.""",
+    re.DOTALL,
+)
+
+
+def _rm_plain_forms(text: str) -> tuple[str, str]:
+    """Return *text* without quotes and backslashes, once with its line continuations joined and once without.
+
+    Joining makes a name split by a continuation read whole, as in
+    ``e\\<newline>val``. Only a backslash before a line feed joins, as in the
+    shells: before a carriage return it escapes that character. The other form
+    keeps every newline, so a line after an escaped backslash, as in
+    ``echo x\\\\<newline>ln``, where the shell starts a new command, keeps
+    its first word. A word counts when it appears in either form.
+    """
+    table = {ord("'"): None, ord('"'): None, ord("\\"): None}
+    return text.replace("\\\n", "").translate(table), text.translate(table)
+
+
+def _rm_name_forms(text: str) -> list[str]:
+    """Return the forms of *text* in which a quoted or escaped rm name reads as rm, other than *text* itself.
+
+    These are the forms of _rm_plain_forms, read after each backslash before
+    a blank becomes a character that is not a blank. Such a backslash keeps
+    the blank in the word: ``rm\\ -rf /w`` names a command "rm -rf", which
+    does not exist, so it must not read as ``rm -rf /w``. Backslashes are
+    read in pairs, as the shells read them, so in ``"rm" \\\\ -rf /w`` the
+    blank after the escaped backslash still splits the words.
+    """
+    escaped = re.sub(r"\\(.)", lambda match: "\0" if match.group(1) in " \t" else match.group(0), text)
+    return [form for form in dict.fromkeys(_rm_unquoted_forms(escaped)) if form != text]
+
+
+def _rm_unquoted_forms(text: str) -> list[str]:
+    """Return the forms of _rm_plain_forms, also read with each ``$'...'`` word decoded and ``$"`` read as ``"``."""
+    forms = list(_rm_plain_forms(text))
+    if _RM_DOLLAR_QUOTE in text or '$"' in text:
+        decoded = _RM_ANSI_C_WORD_RE.sub(lambda match: _rm_ansi_c_text(match.group(1)), text).replace('$"', '"')
+        forms.extend(_rm_plain_forms(decoded))
+    return forms
+
+
+def _rm_names_link_command(text: str) -> bool:
+    """True when *text* may name ln or cp, so the link-evidence fallback must walk it.
+
+    _shell_executable reads a kept backslash as a path separator and ignores
+    case, so ``a\\\\ln`` names ln; any such word still holds "ln" or "cp" once
+    quotes and backslashes are dropped. The walk reads CR LF as a line feed
+    before it joins continued lines, so ``"l\\<CR><LF>n"`` reads as ln there;
+    that form is read too, so this test finds every link the walk finds.
+    """
+    forms = {*_rm_plain_forms(text), *_rm_plain_forms(text.replace("\r\n", "\n"))}
+    return any("ln" in form.casefold() or "cp" in form.casefold() for form in forms)
+
+
+def _rm_git_subcommand(args: list[str]) -> int:
+    """Return the index of git's subcommand in *args*, the words after git, past git's own options."""
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        index += 2 if args[index] in _RM_GIT_VALUE_OPTIONS else 1
+    return index
+
+
+def _rm_git_grep_options(args: list[str]) -> list[int]:
+    """Return the positions in *args*, the words after git grep, that git may read as its options.
+
+    Those end at ``--``, and the word after ``-e`` or ``-f``, also bundled, as
+    in ``-ne``, is a pattern or a file name, not an option.
+    """
+    positions: list[int] = []
+    index = 0
+    while index < len(args) and args[index] != "--":
+        positions.append(index)
+        index += 2 if re.fullmatch(r"-[A-NP-Za-z0-9]*[ef]", args[index]) else 1
+    return positions
+
+
+def _rm_command_may_build_rm(words: list[str]) -> bool:
+    """True when eval with an argument or git grep -O is a command of *words*, behind prefixes, or env takes -S."""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in _RM_EVAL_PREFIXES:
+            index += 1
+            if word == "coproc" and words[index + 1 : index + 2] and words[index + 1] in _RM_COPROC_COMPOUND_WORDS:
+                index += 1  # The coprocess NAME.
+        elif word == "function":
+            index += 2  # function NAME, before the { of its body.
+        elif word in _RM_EVAL_PREFIXES_WITH_OPTIONS:
+            index += 1
+            while index < len(words) and _RM_EVAL_PREFIX_OPTION_RE.fullmatch(words[index]):
+                index += 1
+        elif _RM_ASSIGNMENT_WORD_RE.match(word):
+            index += 1
+        else:
+            break
+    if words[index : index + 1] == ["eval"] and index + 1 < len(words):
+        return True
+    # git also runs behind the wrappers the walk skips, as in sudo git grep -O...
+    git = _rm_eval_command_index(words, index) if any("git" in word.casefold() for word in words[index:]) else None
+    if git is not None and git < len(words) and _shell_executable(words[git]) == "git":
+        grep = git + 1 + _rm_git_subcommand(words[git + 1 :])
+        args = words[grep + 1 :]
+        if words[grep : grep + 1] == ["grep"] and any(
+            _RM_GIT_PAGER_VALUE_RE.fullmatch(args[position]) for position in _rm_git_grep_options(args)
+        ):
+            return True
+    env = next((position for position, word in enumerate(words) if _RM_ENV_WORD_RE.search(word)), None)
+    return env is not None and any(_RM_SPLIT_STRING_OPTION_RE.match(word) for word in words[env + 1 :])
+
+
+def _rm_heredoc_spans(text: str) -> list[tuple[int, int]]:
+    """Return the here-document body spans of *text* (see _heredoc_body_spans), or none where it reads none.
+
+    A line with more ``<<`` than _heredoc_body_spans reads operators in all
+    reads none here without being scanned, since its scan of a line takes
+    time that grows with the operators on it times the line's length.
+    """
+    if "<<" not in text or any(line.count("<<") > _MAX_HEREDOC_OPERANDS for line in text.split("\n")):
+        return []
+    return _heredoc_body_spans(text, "bash") or []
+
+
+# Answers of _rm_may_build_rm for texts read before, since a text may be asked about at each place it is
+# read; cleared once it holds more than _RM_GATE_MEMO_ENTRIES answers or _RM_GATE_MEMO_CHARS characters of text.
+_RM_GATE_MEMO: dict[tuple[str, int], bool] = {}
+_RM_GATE_MEMO_ENTRIES = 1 << 16
+_RM_GATE_MEMO_CHARS = 1 << 20
+_RM_GATE_MEMO_HELD = [0]  # The characters of text it holds.
+# The last text over 64 KiB that _rm_may_build_rm answered, as ((text, depth), answer) in one slot, so a
+# reading in another thread sees a text and its own answer together.
+_RM_GATE_LAST_LONG: list[Any] = [None]
+
+
+def _rm_may_build_rm(text: str, _depth: int = 0) -> bool:
+    """Answer _rm_reads_again_as_commands, remembering the answers for texts of up to 64 KiB and the last longer one.
+
+    One call's text is asked about by each reading that may read it, so a
+    text over 64 KiB is answered once while it is the last such text asked.
+    """
+    key = (text, _depth)
+    known = _RM_GATE_MEMO.get(key)
+    if known is not None:
+        return known
+    if len(text) > 65_536:
+        last = _RM_GATE_LAST_LONG[0]
+        if last is not None and last[0] == key:
+            return bool(last[1])
+    answer = _rm_reads_again_as_commands(text, _depth)
+    if len(text) > 65_536:
+        _RM_GATE_LAST_LONG[0] = (key, answer)
+    else:
+        if len(_RM_GATE_MEMO) >= _RM_GATE_MEMO_ENTRIES or _RM_GATE_MEMO_HELD[0] + len(text) > _RM_GATE_MEMO_CHARS:
+            _RM_GATE_MEMO.clear()
+            _RM_GATE_MEMO_HELD[0] = 0
+        _RM_GATE_MEMO[key] = answer
+        _RM_GATE_MEMO_HELD[0] += len(text)
+    return answer
+
+
+def _rm_gate_reads(text: str) -> bool:
+    """True when the eval gate (see _rm_reads_again_as_commands) reads *text*, which it turns away otherwise.
+
+    The gate reads text that, in a form without quotes or backslashes (see
+    _rm_unquoted_forms), holds eval, env beside an S or --s, or grep beside
+    an O or --op; it answers False for other text without reading it.
+    """
+    # Without a quote or backslash, every form is the text itself.
+    forms = _rm_unquoted_forms(text) if any(char in text for char in "\\'\"") else (text,)
+    return any(
+        "eval" in form
+        or ("env" in form and ("S" in form or "--s" in form))
+        or ("grep" in form and ("O" in form or "--op" in form))
+        for form in forms
+    )
+
+
+def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
+    """True for eval, env -S or git grep -O text, also when quotes or backslashes split the name.
+
+    See _RM_EVAL_PREFIXES; function NAME before a body counts as one too. A
+    command ends at a newline, ";", "&", "|", a parenthesis or a backtick. A
+    redirection and its target word are not words of the command. A
+    ``$'...'`` word reads decoded and a ``$"..."`` word as ``"..."``, and a
+    double-quoted word runs past the quotes of a substitution in it (see
+    _rm_double_quote_end), as in ``"$(eval "$X -rf /w")"``. A
+    comment is skipped, and a here-document body is read on its own, as the
+    walk reads them, so a quote in either pairs with no quote outside it.
+    Where a quote does not close, the text is also read with its quotes and
+    backslashes dropped, as the one-pass reading reads it.
+    """
+    if not _rm_gate_reads(text):
+        return False
+    if _depth >= _RM_MAX_GATE_DEPTH:
+        return True
+    if "<<" in text:
+        text = text.replace("\r\n", "\n")
+        pieces: list[str] = []
+        previous = 0
+        for start, end in _rm_heredoc_spans(text):
+            if _rm_may_build_rm(text[start + 1 : end], _depth + 1):
+                return True
+            pieces.extend((text[previous:start], "\n"))
+            previous = end
+        text = "".join([*pieces, text[previous:]])
+    words: list[str] = []
+    word: list[str] | None = None
+    target = False  # The next word is a redirection target.
+    unterminated = False  # A quote does not close.
+    nested_quotes = True  # Each substitution in double quotes so far closes.
+    index = 0
+    while index < len(text):
+        match = _RM_GATE_TOKEN_RE.match(text, index)
+        if match is None:  # Every character starts a step, so this is not reached.
+            break
+        token = match.group()
+        first = token[0]
+        index = match.end()
+        if first == "#" and word is None:
+            # A comment runs to the end of its line.
+            newline = text.find("\n", match.start())
+            index = len(text) if newline < 0 else newline
+            continue
+        if match.group("redirect") is not None or first in " \t\n;&|()`":
+            if word is not None:
+                joined = "".join(word)
+                # A {name} joined to a redirection names the descriptor, as in {fd}>/dev/null.
+                if not target and not (match.group("redirect") is not None and _RM_FD_NAME_RE.fullmatch(joined)):
+                    words.append(joined)
+                target = False
+                word = None
+            if match.group("redirect") is not None:
+                target = not token.endswith("-")
+            elif first not in " \t":
+                if _rm_command_may_build_rm(words):
+                    return True
+                words = []
+                target = False
+            continue
+        if token == "\\\n":
+            continue  # A continued line goes on in the same word.
+        if word is None:
+            word = []
+        if match.group("locale") is not None:
+            continue  # The $ of $"...", which bash reads as "...".
+        if first == "\\":
+            word.append(token[1:])
+        elif match.group("ansi_c") is not None or first in "'\"":
+            if nested_quotes and first == '"' and ("$(" in token or "`" in token):
+                # A quote inside a substitution in double quotes does not close them, as in "$(eval "$X")".
+                # Once one does not close, which scans the rest of the text, the rest is read as before.
+                end = _rm_double_quote_end(text, match.start())
+                nested_quotes = end is not None
+                if end is not None:
+                    token, index = text[match.start() : end], end
+            closed = _RM_GATE_CLOSED_RE.fullmatch(token) is not None
+            unterminated |= not closed
+            if match.group("ansi_c") is not None:
+                content = _rm_ansi_c_text(match.group("ansi_c"))
+            else:
+                content = token[1:-1] if closed else token[1:]
+            # Quoted text may be a command line of its own, as for bash -c or eval.
+            if _rm_may_build_rm(content, _depth + 1):
+                return True
+            word.append(content)
+        else:
+            word.append(token)
+    if word is not None and not target:
+        words.append("".join(word))
+    if _rm_command_may_build_rm(words):
+        return True
+    # The one-pass reading reads text whose quote does not close with its quotes dropped.
+    return unterminated and _rm_may_build_rm(_rm_plain_forms(text)[0], _depth + 1)
+
+
+_RM_DOUBLE_QUOTE_STEP_RE = re.compile(r'\\.|"|\$\(|`', re.DOTALL)
+
+
+def _rm_double_quote_end(text: str, start: int) -> int | None:
+    """Return the end of the double-quoted string that opens at *start*, or None where it does not close.
+
+    A ``$( )`` or backtick substitution in it is command text of its own, as
+    _rm_shell_words reads it, so a quote inside one does not close the string.
+    """
+    index = start + 1
+    while (match := _RM_DOUBLE_QUOTE_STEP_RE.search(text, index)) is not None:
+        step, index = match.group(), match.end()
+        if step == '"':
+            return index
+        if step == "$(":
+            end = _rm_group_end(text, match.start() + 1)
+            if end is None:
+                return None
+            index = end + 1
+        elif step == "`":
+            close = _RM_BACKTICK_END_RE.match(text, index)
+            if close is None:
+                return None
+            index = close.end()
+    return None
+
+
+def _rm_may_name(text: str, names: tuple[str, ...]) -> bool:
+    """False when no form of *text* without quotes or backslashes (see _rm_unquoted_forms) holds any of *names*.
+
+    Where *text* holds no backslash and no ``$'...'`` or ``$"..."`` word, or
+    the start of one, each such form is *text* with its quotes dropped;
+    otherwise this is True.
+    """
+    if "\\" in text or _RM_DOLLAR_QUOTE in text or '$"' in text:
+        return True
+    plain = text.translate(_RM_QUOTES_DROPPED)
+    return any(name in plain for name in names)
+
+
+# The names without which the eval gate (see _rm_reads_again_as_commands) finds no text it reads again.
+_RM_GATE_NAMES = ("eval", "env", "grep")
+
+
+def _rm_candidate(text: str, extra_chars: list[int] | None = None) -> bool:
+    """True for text the rm check reads: an rm with an option, or eval or env -S text.
+
+    Where the strict readings count the texts they check in *extra_chars*,
+    *text* counts there first where the eval gate reads it (see _rm_gated).
+    """
+    if not _rm_may_name(text, ("rm", "eval", "env", "grep")):
+        return False  # No form of the text names any of these.
+    if re.search(r"\brm\s+-", text) is not None:
+        return True
+    return _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(text, extra_chars)
+
+
+def _rm_gated(text: str, extra_chars: list[int] | None) -> bool:
+    """Answer the eval gate (see _rm_may_build_rm) for *text*, which counts toward *extra_chars* where the gate reads it.
+
+    Text the gate turns away without reading it (see _rm_gate_reads) counts
+    nothing, and the answer is False. Reading other text is the strict
+    readings' work, so it counts first (see _rm_read_cost), at any length,
+    and stops with them: where the count is spent, or *text* would take it
+    past ``_RM_MAX_EXTRA_CHARS``, the gate does not read it, *text* spends
+    the count, and the answer is False. Where the gate opens a strict
+    reading of *text* (True), that reading counts what it checks of *text*
+    before each check (see _rm_targets_outside_tmp), so *text* is not
+    counted here as well; otherwise it counts here. Without *extra_chars*,
+    the gate runs.
+    """
+    if extra_chars is None:
+        return _rm_may_build_rm(text)
+    if not _rm_gate_reads(text):
+        return False
+    cost = _rm_read_cost(text)
+    if extra_chars[0] + cost > _RM_MAX_EXTRA_CHARS:
+        extra_chars[0] += cost
+        return False
+    if _rm_may_build_rm(text):
+        return True
+    extra_chars[0] += cost
+    return False
+
+
 def _rm_group_end(text: str, start: int) -> int | None:
     """Find a substitution's closing parenthesis without expanding its output."""
     depth = 1
@@ -5438,10 +5927,88 @@ def _rm_group_end(text: str, start: int) -> int | None:
 
 
 def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
-    """Keep rm operands separate from comments and backtick command payloads."""
+    """Keep rm operands separate from comments and backtick command payloads.
+
+    The payloads are main's: substitutions, ``$'...'`` words and the
+    here-document bodies that hold "rm -". Every caller reads as main does,
+    so the lexer does none of the strict readings' work (see _rm_shell_words).
+    """
+    parsed = _rm_shell_words(command_text, wide=False)
+    if parsed is None:
+        return None
+    tokens, payloads, kinds = parsed
+    # No zip(strict=): same lengths, and the verifier runs on Python 3.9.
+    return tokens, [payload for payload, kind in zip(payloads, kinds) if kind != "unescaped"]  # noqa: B905
+
+
+def _rm_heredoc_expands(text: str, start: int) -> bool:
+    """True when the here-documents whose bodies follow the line ending at *start* expand substitutions.
+
+    Their delimiters are not quoted or escaped, so the shell runs each ``$( )``
+    and backtick substitution in the body.
+    """
+    header = text[text.rfind("\n", 0, start) + 1 : start]
+    delimiters = re.findall(r"(?<!<)<<(?!<)-?[ \t]*([^\s;&|<>()]+)", header)
+    return bool(delimiters) and not any(char in "'\"\\" for delimiter in delimiters for char in delimiter)
+
+
+_RM_BODY_SUBSTITUTION_RE = re.compile(r"\\.|\$\(|`", re.DOTALL)
+_RM_BACKTICK_END_RE = re.compile(r"[^`\\]*(?:\\.[^`\\]*)*`", re.DOTALL)
+
+
+def _rm_body_substitutions(body: str) -> list[str]:
+    """Return the ``$( )`` and backtick substitutions of an expanding here-document *body*, where quotes are text."""
+    payloads: list[str] = []
+    index = 0
+    while (match := _RM_BODY_SUBSTITUTION_RE.search(body, index)) is not None:
+        index = match.end()
+        if match.group() == "$(":
+            end = _rm_group_end(body, match.start() + 1)
+            if end is None:
+                break
+            payloads.append(body[match.end() : end])
+            index = end + 1
+        elif match.group() == "`":
+            close = _RM_BACKTICK_END_RE.match(body, index)
+            if close is None:
+                break
+            payloads.append(_rm_backtick_text(body[index : close.end() - 1], quoted=False))
+            index = close.end()
+    return payloads
+
+
+def _rm_backtick_text(payload: str, *, quoted: bool) -> str:
+    """Return a backtick substitution's text as the shell runs it.
+
+    The shell drops a backslash before ``$``, a backtick or a backslash in
+    it, and before ``"`` too when the substitution is inside double quotes.
+    """
+    return re.sub(r'\\([$`\\"])' if quoted else r"\\([$`\\])", r"\1", payload) if "\\" in payload else payload
+
+
+def _rm_shell_words(
+    command_text: str, *, wide: bool, extra_chars: list[int] | None = None
+) -> tuple[list[str], list[str], list[str]] | None:
+    """Tokenize as _rm_shell_tokens does, and give each payload's kind.
+
+    The kinds are "heredoc", "substitution" and "ansi_c", as main reads them,
+    and "unescaped": a substitution's text as the shell runs it, where that
+    differs from its payload (see _rm_backtick_text). A here-document body is
+    a payload where it holds "rm -", as main reads it. For the strict
+    readings (*wide*, see _rm_targets_outside_tmp) a body is one also where
+    it holds eval, env -S or pager text (see _rm_candidate), and each
+    substitution of a body that expands them (see _rm_heredoc_expands) is an
+    "unescaped" payload. Those checks are the strict readings' work, so each
+    body they check counts toward *extra_chars* first (see _rm_read_cost), or
+    toward a count of this text's own without it; once that count is spent,
+    the bodies left are read only as main reads them.
+    """
     text = command_text.replace("\r\n", "\n")
     normalized: list[str] = []
     payloads: list[str] = []
+    kinds: list[str] = []
+    if wide and extra_chars is None:
+        extra_chars = [0]
     # Data in a heredoc has its own quoting rules and must not break the
     # surrounding shell. Keep broad rm inspection of script/patch bodies,
     # but tokenize each body separately only when it contains a candidate.
@@ -5453,8 +6020,21 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
     for start, end in spans:
         pieces.extend((text[previous:start], "\n"))
         body = text[start + 1 : end]
-        if re.search(r"\brm\s+-", body):
+        plain = re.search(r"\brm\s+-", body) is not None
+        expands = wide and ("$(" in body or "`" in body) and _rm_heredoc_expands(text, start)
+        if wide and (expands or not plain) and extra_chars is not None:
+            # The checks below are the strict readings' own work, so the body counts toward their limit first.
+            if not _rm_extra_spent(extra_chars):
+                extra_chars[0] += _rm_read_cost(body)
+            wide = not _rm_extra_spent(extra_chars)
+            expands = expands and wide
+        if plain or (wide and _rm_candidate(body)):
             payloads.append(body)
+            kinds.append("heredoc")
+        if expands:
+            for payload in _rm_body_substitutions(body):
+                payloads.append(payload)
+                kinds.append("unescaped")
         previous = end
     pieces.append(text[previous:])
     text = "".join(pieces)
@@ -5480,6 +6060,7 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
             if end >= len(text):
                 return None
             payloads.append(text[index + 2 : end])
+            kinds.append("ansi_c")
             normalized.append("${__rm_ansi_c}")
             word_start = False
             index = end + 1
@@ -5489,6 +6070,7 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
             if end is None:
                 return None
             payloads.append(text[index + 2 : end])
+            kinds.append("substitution")
             # A substitution is one shell word even when it contains spaces
             # or parentheses. Redirections consume the whole word, while rm
             # operands keep unknown output and never gain an exemption.
@@ -5512,6 +6094,11 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
             if end >= len(text):
                 return None
             payloads.append(text[index + 1 : end])
+            kinds.append("substitution")
+            shown = _rm_backtick_text(payloads[-1], quoted=quote == '"')
+            if shown != payloads[-1]:
+                payloads.append(shown)
+                kinds.append("unescaped")
             # Inspect the payload separately, but keep its unknown output in
             # any enclosing rm operand instead of granting a /tmp exemption.
             normalized.append("${__rm_substitution}")
@@ -5554,7 +6141,7 @@ def _rm_shell_tokens(command_text: str) -> tuple[list[str], list[str]] | None:
     lexer.whitespace_split = True
     lexer.commenters = ""
     try:
-        return list(lexer), payloads
+        return list(lexer), payloads, kinds
     except ValueError:
         return None
 
@@ -5595,36 +6182,86 @@ def _rm_wrapped_command_index(words: list[str], start: int) -> int | None:
 
 def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
     """True for an xargs child rm, False for its option values/help, else unknown."""
+    return _rm_xargs_reader(tokens)(rm_index)
+
+
+def _rm_xargs_reader(tokens: list[str]) -> Callable[[int], bool | None]:
+    """Return _rm_xargs_context for *tokens* as a function of the rm index, reading each simple command once."""
 
     def boundary(token: str) -> bool:
         return token in _SHELL_SEPARATORS or bool(re.fullmatch(r"[;&|(){}]+", token))
 
-    start = rm_index
-    while start and not boundary(tokens[start - 1]):
-        start -= 1
-    end = rm_index + 1
-    while end < len(tokens) and not boundary(tokens[end]):
-        end += 1
-    words: list[str] = []
-    target = None
-    skip_next = False
-    for index in range(start, end):
-        token = tokens[index]
-        if skip_next:
-            skip_next = False
-        elif _REDIRECTION_WORD_RE.fullmatch(token):
-            skip_next = True
-        else:
-            if index == rm_index:
-                target = len(words)
-            words.append(token)
-    if target is None:
-        return None
+    starts: list[int] = []  # The start of the simple command of each token, read on first use.
+    commands: dict[int, tuple[dict[int, int], list[tuple[str, int]]]] = {}
 
+    def context(rm_index: int) -> bool | None:
+        if not starts:
+            start = 0
+            for index, token in enumerate(tokens):
+                starts.append(start)
+                if boundary(token):
+                    start = index + 1
+        start = starts[rm_index]
+        if start not in commands:
+            end = start
+            while end < len(tokens) and not boundary(tokens[end]):
+                end += 1
+            # Each word's position among the words left once redirections and their targets are dropped.
+            positions: dict[int, int] = {}
+            words: list[str] = []
+            skip_next = False
+            for index in range(start, end):
+                token = tokens[index]
+                if skip_next:
+                    skip_next = False
+                elif _REDIRECTION_WORD_RE.fullmatch(token):
+                    skip_next = True
+                else:
+                    positions[index] = len(words)
+                    words.append(token)
+            commands[start] = (positions, _rm_xargs_steps(words))
+        positions, steps = commands[start]
+        target = positions.get(rm_index)
+        return None if target is None else _rm_xargs_answer(steps, target)
+
+    return context
+
+
+def _rm_xargs_answer(steps: list[tuple[str, int]], target: int) -> bool | None:
+    """Answer _rm_xargs_context for the word at *target* from the steps _rm_xargs_steps found."""
+    for step, cursor in steps:
+        if step == "none":
+            return None
+        if step == "false":
+            return False
+        if step == "from":
+            return target >= cursor
+        if step == "before" and target < cursor:
+            return False
+        if step == "child":
+            if cursor < 0:
+                return None
+            if cursor == target:
+                return True
+            if cursor > target:
+                return False
+    return True
+
+
+def _rm_xargs_steps(words: list[str]) -> list[tuple[str, int]]:
+    """Walk xargs and its options in *words*, a simple command without redirections, for every word at once.
+
+    The steps are "none" (no xargs runs here), "false" (help or version),
+    "from" (an unknown option: a word from there may be the child), "before"
+    (a word before this index is an option or its value) and "child" (the
+    command xargs runs, or -1 when it cannot be read).
+    """
+    steps: list[tuple[str, int]] = []
     cursor = _rm_wrapped_command_index(words, 0)
     for _ in range(_MAX_SHELL_WRAPPERS):
         if cursor is None or cursor >= len(words) or _shell_executable(words[cursor]) != "xargs":
-            return None
+            steps.append(("none", -1))
+            return steps
         cursor += 1
         while cursor < len(words):
             option = _resolved_shell_arg(words[cursor], {})
@@ -5634,7 +6271,8 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
             if not option.startswith("-") or option == "-":
                 break
             if option in {"--help", "--version"}:
-                return False
+                steps.append(("false", -1))
+                return steps
             if option.startswith("--"):
                 name, equals, _ = option.partition("=")
                 if name in {
@@ -5659,7 +6297,8 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
                 }:
                     cursor += 1
                 else:
-                    return target >= cursor
+                    steps.append(("from", cursor))
+                    return steps
                 continue
             offset = 1
             while offset < len(option):
@@ -5673,18 +6312,15 @@ def _rm_xargs_context(tokens: list[str], rm_index: int) -> bool | None:
                 elif flag in "iel":
                     break  # Legacy optional values must be attached to the option.
                 else:
-                    return target >= cursor
+                    steps.append(("from", cursor))
+                    return steps
             cursor += 1
-        if target < cursor:
-            return False
+        steps.append(("before", cursor))
         cursor = _rm_wrapped_command_index(words, cursor)
-        if cursor == target:
-            return True
+        steps.append(("child", -1 if cursor is None else cursor))
         if cursor is None:
-            return None
-        if cursor > target:
-            return False
-    return True
+            return steps
+    return steps
 
 
 def _rm_inline_code(executable: str, words: list[str], index: int) -> str | None:
@@ -5943,7 +6579,7 @@ def _rm_symlink_fallback(command_text: str) -> bool:
         elif not char or char in "\n;&|()":
             # Split only outside quotes, so a multiline print/search argument
             # containing ln syntax cannot become a fallback command.
-            if index - start <= 4096:
+            if index - start <= 4096 and _rm_names_link_command(shell[start:index]):
                 parsed = _rm_shell_tokens(shell[start:index])
                 if parsed and parsed[0]:
                     command = _rm_wrapped_command_index(parsed[0], 0)
@@ -5961,7 +6597,8 @@ def _rm_symlink_fallback(command_text: str) -> bool:
 def _rm_symlink_creation_seen(command_text: str, _depth: int = 0) -> bool:
     """Recognize link-creation evidence without inferring filesystem state."""
     if _depth > 3 or len(command_text) > 65_536:
-        return _rm_symlink_fallback(command_text)
+        # The fallback finds only ln and cp commands; skip its walk when none is named.
+        return _rm_names_link_command(command_text) and _rm_symlink_fallback(command_text)
     candidate = command_text.translate({ord("'"): None, ord('"'): None, ord("\\"): None})
     if "symlink" not in candidate and not re.search(r"\b(?:ln|cp)\b", candidate):
         return False
@@ -6271,33 +6908,75 @@ def _rm_find_exec_protected(
     find hands the command every file under its start paths, so they, not the
     ``{}`` placeholder, are the deletion targets. No start path means ".".
     """
-    start = rm_index
-    while start and not (tokens[start - 1] in _SHELL_SEPARATORS or re.fullmatch(r"[;&|()]+", tokens[start - 1])):
-        start -= 1
-    words = [token.replace(_QUOTED_SYNTAX_MARK, "") for token in tokens[start:rm_index]]
-    find_index = next((index for index, word in enumerate(words) if _shell_executable(word) == "find"), None)
-    if find_index is None or not _RM_FIND_EXEC_ACTIONS.intersection(words[find_index + 1 :]):
-        return False
-    paths: list[str] = []
-    index = find_index + 1
-    while index < len(words):
-        word = words[index]
-        if word == "--":  # Ends find's leading options; start paths follow.
+    return _rm_find_exec_reader(tokens)(rm_index, workdirs, budget)
+
+
+def _rm_find_exec_reader(tokens: list[str]) -> Callable[[int, tuple[str, ...], list[int] | None], bool]:
+    """Answer _rm_find_exec_protected for each word of *tokens*, reading the tokens once in all.
+
+    Each simple command's find and its start paths are found once, so many
+    words in one command do not each read the command again. Each answer
+    spends *budget* as _rm_find_exec_protected does.
+    """
+    words = [token.replace(_QUOTED_SYNTAX_MARK, "") for token in tokens]
+    starts: list[int] = []  # Where the simple command that holds each word starts.
+    finds: list[int] = []  # The first find word at or after each position.
+    actions: list[int] = []  # The first -exec, -execdir, -ok or -okdir word at or after each position.
+    paths_of: dict[int, tuple[list[int], list[str]]] = {}  # Each find's start paths, with their positions.
+
+    def read() -> None:
+        start = 0
+        for index, token in enumerate(tokens):
+            starts.append(start)
+            if token in _SHELL_SEPARATORS or re.fullmatch(r"[;&|()]+", token):
+                start = index + 1
+        found = action = len(tokens)
+        for index in range(len(tokens) - 1, -1, -1):
+            found = index if _shell_executable(words[index]) == "find" else found
+            action = index if words[index] in _RM_FIND_EXEC_ACTIONS else action
+            finds.append(found)
+            actions.append(action)
+        finds.reverse()
+        actions.reverse()
+
+    def start_paths(find_index: int) -> tuple[list[int], list[str]]:
+        # Read as far as they go: up to any later word, they read the same.
+        positions: list[int] = []
+        index = find_index + 1
+        while index < len(words):
+            word = words[index]
+            if word == "--":  # Ends find's leading options; start paths follow.
+                index += 1
+                break
+            if word in {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"} or word.startswith("-O"):
+                index += 1
+            elif word == "-D":
+                index += 2
+            elif word == "-f" and index + 1 < len(words):  # BSD find names a start path with -f.
+                positions.append(index + 1)
+                index += 2
+            else:
+                break
+        while index < len(words) and not words[index].startswith(("-", "(", ")", "!", ",")):
+            positions.append(index)
             index += 1
-            break
-        if word in {"-H", "-L", "-P", "-E", "-X", "-d", "-s", "-x"} or word.startswith("-O"):
-            index += 1
-        elif word == "-D":
-            index += 2
-        elif word == "-f" and index + 1 < len(words):  # BSD find names a start path with -f.
-            paths.append(words[index + 1])
-            index += 2
-        else:
-            break
-    while index < len(words) and not words[index].startswith(("-", "(", ")", "!", ",")):
-        paths.append(words[index])
-        index += 1
-    return any(_rm_force_operand_is_protected(path, workdirs, budget) for path in paths or ["."])
+        return positions, [words[position] for position in positions]
+
+    def protected(rm_index: int, workdirs: tuple[str, ...], budget: list[int] | None = None) -> bool:
+        if not starts:
+            read()
+        find_index = finds[starts[rm_index]]
+        if find_index >= rm_index or actions[find_index + 1] >= rm_index:
+            return False
+        if find_index not in paths_of:
+            paths_of[find_index] = start_paths(find_index)
+        positions, paths = paths_of[find_index]
+        count = bisect.bisect_left(positions, rm_index)
+        if not count:
+            return _rm_force_operand_is_protected(".", workdirs, budget)
+        return any(_rm_force_operand_is_protected(paths[index], workdirs, budget) for index in range(count))
+
+    return protected
 
 
 def _rm_call_workdirs(tool_call: dict[str, Any], workdirs: tuple[str, ...]) -> tuple[str, ...]:
@@ -6426,6 +7105,467 @@ def _rm_xargs_fallback(command_text: str) -> bool:
     )
 
 
+def _rm_unmarked(word: str) -> str:
+    """Return a token's text without the quoted-syntax mark."""
+    if word.startswith(_QUOTED_SYNTAX_MARK) and not word.startswith(_QUOTED_SYNTAX_MARK * 2):
+        word = word[1:]
+    return word.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK)
+
+
+def _rm_ansi_c_text(literal: str) -> str:
+    """Decode the escapes of a ``$'...'`` word as bash does."""
+
+    def decode(match: re.Match[str]) -> str:
+        escape = match.group(1)
+        if escape[0] in "xuU" and len(escape) > 1:
+            code = int(escape[1:], 16)
+        elif escape[0] in "01234567":
+            code = int(escape, 8) & 0xFF
+        elif escape[0] == "c" and len(escape) > 1:
+            code = ord(escape[1]) & 0x1F
+        else:
+            return _RM_ANSI_C_ESCAPES.get(escape, escape if escape in "\\'\"?" else "\\" + escape)
+        return chr(code) if code <= 0x10FFFF else ""
+
+    return _RM_ANSI_C_ESCAPE_RE.sub(decode, literal)
+
+
+def _rm_segments(tokens: list[str]) -> list[tuple[int, int]]:
+    """Return the start and end of each simple command in rm *tokens*.
+
+    ``{}`` is a word, the path find -exec or xargs -I{} puts there, not a brace.
+    The words of an array literal, from the "(" right after a NAME= or
+    NAME+= word to the ")" that closes it, as in ``cmd=("rm" -rf build)``,
+    are values, not a command.
+    """
+    segments: list[tuple[int, int]] = []
+    start = 0
+    array = False  # Inside the words of an array literal.
+    for index, token in enumerate([*tokens, ";"]):
+        separator = (
+            token in _SHELL_SEPARATORS
+            or token in {"<(", ">("}
+            or (token != "{}" and re.fullmatch(r"[;&|(){}]+", token) is not None)
+        )
+        if array:
+            if separator and token.startswith(")"):
+                array = False
+                start = index + 1
+            continue
+        if separator:
+            if index > start:
+                segments.append((start, index))
+            start = index + 1
+            array = token == "(" and index > 0 and _RM_ARRAY_ASSIGNMENT_RE.fullmatch(tokens[index - 1]) is not None
+    return segments
+
+
+def _rm_eval_command_index(words: list[str], start: int) -> int | None:
+    """Find the command word as _rm_wrapped_command_index does, also behind other assignments and redirections.
+
+    bash and zsh take NAME+=value and NAME[i]=value as assignments before a
+    command, as in ``a[0]=1 eval '$X -rf /w'``, and a redirection may come
+    anywhere, as in ``>/dev/null eval '$X -rf /w'`` or
+    ``sudo >/dev/null rm -rf /w``; _command_start reads only NAME=value.
+    Each such assignment reads as one here, and each redirection, with its
+    target and a ``{name}`` before it, is dropped. Assignments after a
+    wrapper are skipped too, as in ``time X=1 eval ...`` or ``sudo X=1 rm``.
+    """
+    kept: list[int] = []
+    skip = False
+    for position in range(start, len(words)):
+        word = words[position]
+        if skip:
+            skip = False
+        elif _REDIRECTION_WORD_RE.fullmatch(word):
+            skip = not word.endswith("-")
+        elif not (
+            _RM_FD_NAME_RE.fullmatch(word)
+            and position + 1 < len(words)
+            and _REDIRECTION_WORD_RE.fullmatch(words[position + 1])
+        ):
+            kept.append(position)
+    shaped = [
+        "_=" if _RM_ASSIGNMENT_WORD_RE.match(_rm_unmarked(words[position])) else words[position] for position in kept
+    ]
+    index = _rm_wrapped_command_index(shaped, 0)
+    for _ in range(_MAX_SHELL_WRAPPERS):
+        if index is None or index >= len(shaped) or shaped[index] != "_=":
+            break
+        index = _rm_wrapped_command_index(shaped, index)
+    if index is None:
+        return None
+    return kept[index] if index < len(kept) else len(words)
+
+
+def _rm_unescaped_variants(texts: list[tuple[str, bool]]) -> list[tuple[str, bool]]:
+    """Add each text again with the backslash before ``$`` or a backtick dropped, as bash drops it in double quotes.
+
+    Only a text where that starts a substitution or quoting is added again;
+    elsewhere it changes no reading, as ``\\$X`` and ``$X`` both read as an expansion.
+    """
+    variants: list[tuple[str, bool]] = []
+    for text, continued in texts:
+        variants.append((text, continued))
+        if re.search(r"\\(?:\$[('{\"]|`)", text):
+            variants.append((text.replace("\\$", "$").replace("\\`", "`"), continued))
+    return variants
+
+
+def _rm_reread_texts(
+    words: list[str], names: list[str] | None = None, decode: Callable[[str], str | None] | None = None
+) -> list[tuple[str, bool]]:
+    """Return text one simple command parses again as a command line, and whether more words follow it.
+
+    That is eval's arguments, an env -S string with the words after it, as
+    env -S passes them on, and the pager command of git grep -O, behind git's
+    own options, which git runs with the names of the matching files after
+    it, read as ``"$@"`` after the command, as git's shell runs it. A simple
+    command behind coproc runs in a coprocess as written, and so does the
+    compound command behind coproc NAME (see _RM_COPROC_COMPOUND_WORDS).
+    *names* are the words read with each ``$'...'`` word decoded, which name
+    the command; the text keeps *words*. A text that holds ``\\$`` or a
+    backslash before a backtick is also read without that backslash.
+    With *decode*, which returns a text with each ``$'...'`` word put back in
+    it, or None for a text without one, only the texts that hold such a word
+    are returned, decoded; an env -S string is decoded before env reads its
+    ``\\_``, as the shell decodes the words before env runs.
+    """
+    plain = [_rm_unmarked(word) for word in words]
+    shown = plain if names is None else [_rm_unmarked(word) for word in names]
+    start = 0
+    if shown[:1] == ["coproc"]:
+        start = 2 if shown[2:3] and shown[2] in _RM_COPROC_COMPOUND_WORDS else 1
+    index = _rm_eval_command_index(words if names is None else names, start)
+    if index is not None and index < len(plain):
+        executable = _shell_executable(shown[index])
+        args = plain[index + 1 :]
+        texts: list[tuple[str, bool]] = []
+        if executable == "eval":
+            texts = [(" ".join(args[1:] if args[:1] == ["--"] else args), False)]
+        elif executable == "git":
+            grep = _rm_git_subcommand(shown[index + 1 :])
+            if shown[index + 1 + grep : index + 2 + grep] == ["grep"]:
+                # git runs a pager command that holds shell syntax as sh -c '<pager> "$@"', with the file names.
+                # An option word spelled as a $'...' word is read decoded.
+                grep_args, grep_names = args[grep + 1 :], shown[index + 2 + grep :]
+                matches = [
+                    _RM_GIT_PAGER_VALUE_RE.fullmatch(grep_args[position])
+                    or _RM_GIT_PAGER_VALUE_RE.fullmatch(grep_names[position])
+                    for position in _rm_git_grep_options(grep_names)
+                ]
+                texts = [((match.group(1) or match.group(2)) + ' "$@"', True) for match in matches if match is not None]
+        texts = _rm_unescaped_variants(texts)
+        if decode is None:
+            return texts
+        decoded = [(decode(text), continued) for text, continued in texts]
+        return [(text, continued) for text, continued in decoded if text is not None]
+    # _rm_wrapped_command_index stops at an env option it does not model, -S among them.
+    # Options are read as the shell passes them, with each $'...' word decoded.
+    covered = 0  # Words before this are options or option values of an earlier env, not commands.
+    for position, word in enumerate(shown):
+        if position < covered or _shell_executable(word) != "env":
+            continue
+        cursor = position + 1
+        while cursor < len(shown) and shown[cursor].startswith("-") and shown[cursor] != "--":
+            split = _RM_ENV_SPLIT_RE.fullmatch(plain[cursor]) or _RM_ENV_SPLIT_RE.fullmatch(shown[cursor])
+            if split is not None:
+                value = split.group(1) or split.group(2)
+                rest = cursor + 1
+                if not value and rest < len(plain):
+                    value, rest = plain[rest], rest + 1
+                value = value or ""
+                tail = "".join(" " + shlex.quote(word) for word in plain[rest:])
+                if decode is not None:
+                    decoded_value, decoded_tail = decode(value), decode(tail)
+                    if decoded_value is None and decoded_tail is None:
+                        return []
+                    value = value if decoded_value is None else decoded_value
+                    tail = tail if decoded_tail is None else decoded_tail
+                # env -S reads "\_" as a space; the words after the string follow as they are.
+                return [("env " + value.replace("\\_", " ") + tail, False)]
+            cursor += 2 if shown[cursor] in {"-u", "-C", "--unset", "--chdir"} else 1
+        # This env takes no -S; another env may run behind it, as in env env -S ... or sudo -i env -S ...
+        covered = cursor
+    return []
+
+
+def _rm_decoded_tokens(tokens: list[str], payloads: list[str], kinds: list[str]) -> list[str] | None:
+    """Return *tokens* with each ``$'...'`` word decoded in place, or None when there is none.
+
+    The k-th ``${__rm_ansi_c}`` of *tokens* stands for the k-th ``$'...'``
+    payload; where the counts differ, as in text that spells that
+    placeholder itself, this returns None too.
+    """
+    decoded = [_rm_ansi_c_text(payload) for payload, kind in zip(payloads, kinds) if kind == "ansi_c"]  # noqa: B905
+    placeholder = "${__rm_ansi_c}"
+    if not decoded or sum(token.count(placeholder) for token in tokens) != len(decoded):
+        return None
+    values = iter(decoded)
+    return [
+        re.sub(re.escape(placeholder), lambda _: next(values), token) if placeholder in token else token
+        for token in tokens
+    ]
+
+
+def _rm_decoded_rereads(
+    tokens: list[str], payloads: list[str], kinds: list[str], read: set[int] | None = None
+) -> list[list[tuple[str, bool]]] | None:
+    """Return _rm_reread_texts for each segment of *tokens*, with each ``$'...'`` word decoded in place.
+
+    The shell decodes a ``$'...'`` word and joins it with the text around it
+    before eval or env -S reads the whole again, so
+    ``eval $'rm -rf /tmp/x' /workspace`` runs ``rm -rf /tmp/x /workspace``
+    and ``eval r$'m -rf /workspace'`` runs ``rm -rf /workspace``. Only texts
+    that hold such a word are returned. Where _rm_decoded_tokens returns
+    None, so does this. *read* gets the place of each ``$'...'`` word,
+    counted among those words, that a returned text holds.
+    """
+    decoded = [_rm_ansi_c_text(payload) for payload, kind in zip(payloads, kinds) if kind == "ansi_c"]  # noqa: B905
+    names = _rm_decoded_tokens(tokens, payloads, kinds)
+    if not decoded:
+        return []
+    if names is None:
+        return None
+    marked: list[str] = []
+    count = 0
+    for token in tokens:
+        pieces = token.split("${__rm_ansi_c}")
+        word = pieces[0]
+        for piece in pieces[1:]:
+            word += "${__rm_ansi_c_" + str(count) + "}" + piece
+            count += 1
+        marked.append(word)
+
+    def decoded_word(match: re.Match[str]) -> str:
+        index = int(match.group(1))
+        if index >= len(decoded):
+            return match.group()
+        if read is not None:
+            read.add(index)
+        return decoded[index]
+
+    def decode(text: str) -> str | None:
+        return re.sub(r"\$\{__rm_ansi_c_([0-9]+)\}", decoded_word, text) if "${__rm_ansi_c_" in text else None
+
+    return [_rm_reread_texts(marked[start:end], names[start:end], decode) for start, end in _rm_segments(marked)]
+
+
+def _rm_leading_recursive_option(args: Iterable[str]) -> bool:
+    """True when the leading options in *args* are all rm options and one is recursive."""
+    recursive = False
+    for arg in args:
+        if arg == "--" or not arg.startswith("-") or arg == "-":
+            break
+        if _RM_OPTION_RE.fullmatch(arg) is None:
+            return False
+        recursive |= _RM_RECURSIVE_OPTION_RE.fullmatch(arg) is not None
+    return recursive
+
+
+def _rm_may_name_recursive_rm(text: str) -> bool:
+    """True when text this check cannot read names rm, or holds an expansion and a recursive rm option."""
+    return re.search(r"\brm\b", text) is not None or (
+        re.search(r"[$`]", text) is not None and _RM_RECURSIVE_WORD_RE.search(text) is not None
+    )
+
+
+def _rm_spelled_forms(text: str) -> list[str]:
+    """Return *text* and the forms in which eval, env -S or a pager may read it.
+
+    Those are the forms without quotes or backslashes, with ``$'...'`` words
+    decoded (see _rm_unquoted_forms), each also with env's ``\\_`` read as a
+    blank and with a pager or env -S option split from its value, as in
+    ``-Orm\\ -rf`` or ``-Srm\\_-rf``.
+    A word that starts with ``$-`` is also read without the ``$``, as rm
+    reads a locale-quoted option once eval has the text (see _rm_shown).
+    """
+    forms: list[str] = []
+    for base in dict.fromkeys((text, text.replace("\\_", " "))):
+        for form in (base, *_rm_unquoted_forms(base)):
+            forms.extend((form, _RM_JOINED_VALUE_OPTION_RE.sub(r"\1 ", form)))
+            if "$-" in form:
+                forms.append(re.sub(r"(?<!\S)\$-", "-", form))
+    return list(dict.fromkeys(forms))
+
+
+def _rm_may_count_as_rm(text: str) -> bool:
+    """True when eval, env -S or pager *text*, read again as a command line, may hold an rm that counts.
+
+    That needs, in a form of it (see _rm_spelled_forms), a word that names rm
+    and an option word with r or f in it, or an expansion and a recursive rm
+    option. A ``$'...'`` word with an escape that may spell a letter counts
+    too, as its text is not decoded at every depth here. Other text gives no
+    finding when read again, so it is not read.
+    """
+    if _RM_DOLLAR_QUOTE in text and _RM_ANSI_C_LETTER_RE.search(text):
+        return True
+    return any(
+        (_RM_NAME_WORD_RE.search(form) is not None and _RM_FLAG_WORD_RE.search(form) is not None)
+        or (re.search(r"[$`]", form) is not None and _RM_RECURSIVE_WORD_RE.search(form.lower()) is not None)
+        for form in _rm_spelled_forms(text)
+    )
+
+
+def _rm_shown(word: str) -> str:
+    """Return an rm word as rm reads it: unmarked, and without the $ of a locale-quoted option, as in ``$"-rf"``."""
+    word = _rm_unmarked(word)
+    return word[1:] if word.startswith("$-") else word
+
+
+def _rm_names_rm(text: str) -> bool:
+    """True when *text*, or a form of it without quotes or backslashes, holds an rm with an option."""
+    return _rm_may_name(text, ("rm",)) and any(re.search(r"\brm\s+-", form) for form in (text, *_rm_name_forms(text)))
+
+
+def _rm_command_matches(words: list[str]) -> bool:
+    """True when the destructive-command regex matches an rm command's own *words*, also without backslashes.
+
+    The words are read as rm reads them (see _rm_shown), so ``"rm" -rf /w``
+    and ``$'rm' -rf /w`` match, and so does ``"rm" \\\\ -rf /w``, whose
+    escaped backslash is a word of its own.
+    """
+    text = " ".join(_rm_shown(word) for word in words).lower()
+    return any(_RM_PATTERN.search(form) is not None for form in dict.fromkeys((text, text.replace("\\", ""))))
+
+
+def _rm_holds_rm_text(text: str) -> bool:
+    """True when the destructive-command regex matches *text*, where a quoted rm name read as a command counts."""
+    return _RM_PATTERN.search(text.lower()) is not None
+
+
+def _rm_strict_may_count(text: str, names: bool) -> bool:
+    """True when a strict reading of *text*, which is not eval or env -S text, may count an rm.
+
+    That needs eval, env -S or git grep -O text in it that may count an rm
+    (see _rm_may_count_as_rm), or, where quoted rm names count (*names*), a
+    form of it without quotes or backslashes that the destructive-command
+    regex matches or that holds xargs. Other text gives no finding when read
+    strictly, so it is not read.
+    """
+    if _rm_may_count_as_rm(text) and _rm_may_build_rm(text):
+        return True
+    return names and any(
+        _RM_PATTERN.search(form) is not None or "xargs" in form
+        for form in (text.lower(), *(form.lower() for form in _rm_name_forms(text)))
+    )
+
+
+def _rm_long_option(option: str, *, abbreviated: bool) -> tuple[bool, bool]:
+    """Say whether long rm *option* is --recursive and whether it is --force, abbreviated too where *abbreviated*."""
+    if abbreviated:
+        return _RM_RECURSIVE_OPTION_RE.fullmatch(option) is not None, _RM_FORCE_OPTION_RE.fullmatch(option) is not None
+    return option == "--recursive", option == "--force"
+
+
+def _rm_command_words(tokens: list[str], names: list[str]) -> dict[int, int]:
+    """Map each word of rm *tokens* that runs as a command to the end of the words it takes.
+
+    That is the first word of a simple command, behind assignments,
+    redirections, reserved words, coproc and the wrappers that
+    _rm_wrapped_command_index skips, such as env, sudo, nice, time and
+    command, or the command that busybox, find -exec, -execdir, -ok or
+    -okdir, or xargs runs. A simple command whose wrappers cannot be read
+    has none. Elsewhere a word is another command's argument, as rm is in
+    ``grep 'rm' -rn .``. *names* are *tokens* with each ``$'...'`` word
+    decoded, which name the commands.
+    """
+    commands: dict[int, int] = {}
+    for start, end in _rm_segments(tokens):
+        words = names[start:end]
+        executables = [_shell_executable(_rm_unmarked(word)) for word in words]
+        begin = 0
+        if _rm_unmarked(words[0]) == "coproc":
+            begin = 2 if len(words) > 2 and _rm_unmarked(words[2]) in _RM_COPROC_COMPOUND_WORDS else 1
+        index = _rm_eval_command_index(words, begin)
+        for _ in range(_MAX_SHELL_WRAPPERS):
+            while index is not None and index < len(executables) and executables[index] == "busybox":
+                index += 1
+            if index is None or index >= len(executables):
+                break
+            commands[start + index] = end
+            if executables[index] == "find":
+                # find gives the command after -exec every word up to the next ";" or "+" word, so
+                # a later -exec there is that command's argument. Each word is read once.
+                option = index + 1
+                while option < len(words):
+                    if _rm_unmarked(words[option]) not in _RM_FIND_EXEC_ACTIONS:
+                        option += 1
+                        continue
+                    stop = next(
+                        (
+                            position
+                            for position in range(option + 2, len(words))
+                            if _rm_unmarked(words[position]) in {";", "+"}
+                        ),
+                        len(words),
+                    )
+                    child = _rm_eval_command_index(words[option + 1 : stop], 0)
+                    if child is not None:
+                        child += option + 1
+                        while child < stop and executables[child] == "busybox":
+                            child += 1
+                        if child < stop:
+                            commands[start + child] = start + stop
+                    option = stop + 1
+            if executables[index] != "xargs":
+                break
+            # The command xargs runs, read past xargs's options as _rm_xargs_context reads them.
+            steps = _rm_xargs_steps(words[index:])
+            children = [cursor for step, cursor in steps if step == "child" and cursor > 0]
+            if not children or children[0] + index >= len(executables):
+                break
+            index += children[0]
+    return commands
+
+
+def _rm_command_spans(text: str, bodies: list[tuple[int, int]]) -> tuple[list[tuple[int, int]], bool]:
+    """Split shell *text* into the spans of its commands, in one pass.
+
+    A command ends at a newline, ";", "&" or "|" outside quotes, backticks,
+    parentheses and comments, and where a here-document body (a span of
+    *bodies*) starts; a body is part of no command. The "&" of a redirection
+    (``>&``, ``<&``, ``&>``) ends none. Also returns whether the last command
+    is unterminated: a quote, backtick or parenthesis in it does not close,
+    so the shell does not run it.
+    """
+    spans: list[tuple[int, int]] = []
+    start = index = depth = 0
+    unterminated = False
+    skips = iter(bodies)
+    skip = next(skips, None)
+    while index < len(text):
+        while skip is not None and skip[0] < index:
+            skip = next(skips, None)
+        if skip is not None and skip[0] == index:
+            spans.append((start, index))
+            start = index = skip[1]
+            skip = next(skips, None)
+            continue
+        match = _RM_COMMAND_TOKEN_RE.match(text, index)
+        if match is None:  # Every character starts a step, so this is not reached.
+            break
+        token, end = match.group(), match.end()
+        if token[0] in "'\"`" or token[:2] == _RM_DOLLAR_QUOTE:
+            unterminated |= not any(match.group(name) for name in ("single", "ansi_c", "double", "backtick"))
+        elif token == "#" and (not index or text[index - 1] in " \t\n;&|()<>"):
+            newline = text.find("\n", index)
+            end = len(text) if newline < 0 else newline
+        elif token == "(":
+            depth += 1
+        elif token == ")":
+            depth = max(depth - 1, 0)
+        elif not depth and (
+            token in {"\n", ";", "|"}
+            or (token == "&" and text[index - 1 : index] not in {"<", ">"} and text[end : end + 1] != ">")
+        ):
+            spans.append((start, index))
+            start = end
+        index = end
+    spans.append((start, len(text)))
+    return spans, unterminated or depth > 0
+
+
 def _rm_targets_fallback(
     command_text: str,
     _depth: int,
@@ -6434,40 +7574,214 @@ def _rm_targets_fallback(
     _workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,),
     _find_protected: bool = False,
     _budget: list[int] | None = None,
+    _dynamic: bool = False,
+    _joined: bool = False,
+    _strict: bool = False,
+    _names: bool = True,
+    _extra_budget: list[int] | None = None,
+    _main_only: bool = False,
+    _extra_chars: list[int] | None = None,
+    _oversized: bool = False,
 ) -> bool:
     """Confine parse failures and budgets to candidate deletion commands.
 
     Raw separators can cut a quoted word or substitution short; that fragment
     remains unresolved and keeps a finding. Continued lines are joined first
-    so a deletion target on the next physical line cannot disappear.
+    so a deletion target on the next physical line cannot disappear. Each
+    "rm -" fragment is read as main reads it, each distinct one once while
+    the work budget lasts; a repeat is charged what a read cost while the
+    budget left can cover that and the most any target asks for before it
+    spends (``_RM_MAX_TARGET_LOOKAHEAD``), so the budget runs as main's does,
+    and is read again otherwise. Past ``_RM_MAX_FALLBACK_FRAGMENTS`` distinct
+    fragments the action counts as destructive.
+
+    Unless *_main_only*, the commands of the text are then read strictly
+    (see _rm_targets_outside_tmp), split where the shell splits them (see
+    _rm_command_spans), when a form of one without quotes or backslashes
+    holds a quoted rm name (where *_names* allows such names), or when it is
+    or holds eval or env -S text (*_dynamic*) that may count an rm (see
+    _rm_may_count_as_rm), so the lexer's limits do not end those readings:
+    bash runs the first line of a script or an eval string before it reports
+    a syntax error on a later line. A command that already holds "rm -", with
+    no separator inside it, was read above. An unterminated last command is
+    read with its quotes and backslashes dropped. Here-document bodies are
+    read as the walk reads them. These reads spend *_extra_budget* and are
+    not a level of nesting. They, and the ones nested in these, stop once the
+    strict readings have read ``_RM_MAX_EXTRA_CHARS`` characters
+    (*_extra_chars*, counted from here unless the caller counts them).
     """
     if _rm_xargs_fallback(command_text):
         return True
     text = command_text.replace("\\\r\n", "").replace("\\\n", "")
+    budget = _budget if _budget is not None else [_RM_MAX_FORCE_RESOLUTIONS]
+    extra_budget = budget if _strict else _extra_budget if _extra_budget is not None else [_RM_MAX_FORCE_RESOLUTIONS]
+    options: dict[str, Any] = {
+        "_symlink_seen": _symlink_seen,
+        "_find_protected": _find_protected,
+        "_dynamic": _dynamic,
+        "_joined": _joined,
+        "_extra_budget": extra_budget,
+        "_main_only": _main_only,
+        "_extra_chars": _extra_chars if _extra_chars is not None else [0],
+    }
+    # Each "rm -" match reads the fragment it starts in once, also when several
+    # matches share a fragment, and each read spends the work budget again.
+    starts = [match.start() for match in re.finditer(r"\brm\s+-", text)]
+    spent: dict[tuple[str, tuple[str, ...]], int] = {}  # The work each distinct fragment cost.
     workdirs = _workdirs
     seen = set(workdirs)
     cds = _RM_CD_RE.finditer(text)
     cd = next(cds, None)
-    for match in re.finditer(r"\brm\s+-", text):
-        start = max(text.rfind(char, 0, match.start()) for char in "\n;&|") + 1
+    for piece in re.finditer(r"[^\n;&|]+", text):
+        reads = bisect.bisect_left(starts, piece.end()) - bisect.bisect_left(starts, piece.start())
+        if not reads:
+            continue
         # Each cd before the fragment applies in order, as apply_patch paths do.
-        while cd is not None and cd.start() < start:
+        while cd is not None and cd.start() < piece.start():
             workdirs = _rm_cd_workdirs(cd.group(1) or "~", workdirs, seen)
             cd = next(cds, None)
-        tail = text[start : start + 65_537]
-        separator = re.search(r"[\n;&|]", tail)
-        fragment = tail[: separator.start()] if separator else tail
+        fragment = piece.group()
         if len(fragment) > 65_536 or fragment == command_text:
             return True
-        if _rm_targets_outside_tmp(
-            fragment,
-            _depth + 1,
-            _symlink_seen=_symlink_seen,
-            _workdirs=workdirs,
-            _find_protected=_find_protected,
-            _budget=_budget,
-        ):
-            return True
+        key = (fragment, workdirs)
+        while reads:
+            cost = spent.get(key)
+            # A read that spent nothing never consulted the budget.
+            if cost == 0 or (cost is not None and budget[0] >= cost + _RM_MAX_TARGET_LOOKAHEAD):
+                repeats = min(reads, (budget[0] - _RM_MAX_TARGET_LOOKAHEAD) // cost) if cost else reads
+                budget[0] -= cost * repeats
+                reads -= repeats
+                continue
+            if cost is None and len(spent) >= _RM_MAX_FALLBACK_FRAGMENTS:
+                return True
+            before = budget[0]
+            if _rm_targets_outside_tmp(
+                fragment,
+                _depth if _strict else _depth + 1,
+                _workdirs=workdirs,
+                _budget=budget,
+                _strict=_strict,
+                _names=_names,
+                **options,
+            ):
+                return True
+            spent[key] = before - budget[0]
+            reads -= 1
+    if _main_only:
+        return False
+    return _rm_fallback_commands_count(
+        text,
+        command_text,
+        _depth,
+        workdirs=_workdirs,
+        names=_names,
+        extra_budget=extra_budget,
+        options=options,
+        oversized=_oversized,
+    )
+
+
+def _rm_fallback_commands_count(
+    text: str,
+    command_text: str,
+    depth: int,
+    *,
+    workdirs: tuple[str, ...],
+    names: bool,
+    extra_budget: list[int],
+    options: dict[str, Any],
+    oversized: bool = False,
+) -> bool:
+    """Read the commands of one-pass *text* strictly, as _rm_targets_fallback describes.
+
+    *oversized* marks *text* that is over 64 KiB or 4,096 tokens: where it is
+    one command, that command gives the finding. Where the lexer cannot split
+    a text that is one command for another reason, each piece of it between
+    newlines, ";", "&" and "|", also inside quotes, is read strictly as main
+    reads its fragments, a quoted rm name only beside rm text, so a
+    here-document inside ``"$( )"`` reads as lines of text. Here-document
+    bodies are read the same way, nested up to ``_RM_MAX_GATE_DEPTH`` deep;
+    deeper bodies keep only the reading of their "rm -" fragments. Each
+    command and body checked here counts toward the strict readings' limit
+    before its check (see _rm_read_cost), and this reading stops once that
+    count is spent.
+    """
+    extra_chars: list[int] = options["_extra_chars"]
+    work = [(text, command_text, names, workdirs, 0)]
+    while work:
+        text, command_text, names, workdirs, level = work.pop()
+        bodies = _rm_heredoc_spans(text)
+        spans, unterminated = _rm_command_spans(text, bodies)
+        read: set[tuple[str, tuple[str, ...]]] = set()
+        seen = set(workdirs)
+        cds = _RM_CD_RE.finditer(text)
+        cd = next(cds, None)
+        for number, (start, end) in enumerate(spans):
+            command = text[start:end]
+            last = unterminated and number == len(spans) - 1
+            if not last and re.search(r"\brm\s+-", command) and not re.search(r"[\n;&|]", command):
+                continue  # Read with the text's "rm -" fragments.
+            # Checking a command is these readings' work too, so it counts toward their limit first.
+            if not _rm_extra_spent(extra_chars):
+                extra_chars[0] += _rm_read_cost(command)
+            if _rm_extra_spent(extra_chars):
+                return False
+            if last:
+                # The shell does not run it; it is read as words, with no quote or backslash.
+                command = _rm_plain_forms(command)[0]
+                if command == text[start:end]:
+                    continue
+                forms = [command]
+            else:
+                forms = _rm_name_forms(command) if re.search(r"[\\'\"$]", command) else []
+            if not (
+                (names and any(re.search(r"\brm\s+-", form) for form in forms))
+                or ((options["_dynamic"] or _rm_may_build_rm(command)) and _rm_may_count_as_rm(command))
+            ):
+                continue
+            while cd is not None and cd.start() < start:
+                workdirs = _rm_cd_workdirs(cd.group(1) or "~", workdirs, seen)
+                cd = next(cds, None)
+            if (command, workdirs) in read:
+                continue
+            read.add((command, workdirs))
+            if len(command) > 65_536 or (command == command_text and oversized):
+                return True
+            if command == command_text:
+                pieces = re.findall(r"[^\n;&|]+", command)
+                if len(pieces) > 1 and any(
+                    _rm_targets_outside_tmp(
+                        piece,
+                        depth,
+                        _workdirs=workdirs,
+                        _budget=extra_budget,
+                        _strict=True,
+                        _names=names and _rm_holds_rm_text(piece),
+                        **options,
+                    )
+                    for piece in pieces
+                ):
+                    return True
+                continue
+            if _rm_targets_outside_tmp(
+                command, depth, _workdirs=workdirs, _budget=extra_budget, _strict=True, _names=names, **options
+            ):
+                return True
+        if level >= _RM_MAX_GATE_DEPTH:
+            continue
+        # A body's commands are read the same way, where the walk reads a body, in order: a quoted rm
+        # name counts there beside rm text. Its "rm -" fragments were read with the text's.
+        nested: list[tuple[str, str, bool, tuple[str, ...], int]] = []
+        for start, end in bodies:
+            body = text[start + 1 : end]
+            # Each body counts toward the limit before its check, as a command does.
+            if not _rm_extra_spent(extra_chars):
+                extra_chars[0] += _rm_read_cost(body)
+            if _rm_extra_spent(extra_chars):
+                break
+            if _rm_candidate(body) or (options["_dynamic"] and _rm_may_count_as_rm(body)):
+                nested.append((body, "", _rm_holds_rm_text(body), workdirs, level + 1))
+        work.extend(reversed(nested))
     return False
 
 
@@ -6517,6 +7831,13 @@ def _rm_targets_outside_tmp(
     _workdirs: tuple[str, ...] = (_APPLY_PATCH_DEFAULT_WORKDIR,),
     _find_protected: bool = False,
     _budget: list[int] | None = None,
+    _dynamic: bool = False,
+    _joined: bool = False,
+    _strict: bool = False,
+    _names: bool = True,
+    _extra_budget: list[int] | None = None,
+    _main_only: bool = False,
+    _extra_chars: list[int] | None = None,
 ) -> bool:
     """Withhold nested /tmp cleanup exemptions after observed link creation.
 
@@ -6530,11 +7851,71 @@ def _rm_targets_outside_tmp(
     popd before it; *_find_protected* marks script text that an enclosing
     find -exec runs on a protected tree. *_budget* caps the work spent
     resolving force-only targets; a caller can share one across a whole trace.
+
+    eval arguments and env -S strings are read again as command lines, with
+    ``$'...'`` escapes and env's ``\\_`` decoded. In that text (*_dynamic*), a
+    command word built from an expansion counts as rm when its leading
+    options are all rm options, one of them recursive, and a target follows,
+    and long options may be abbreviated. *_joined* marks text that more words
+    follow where it is read: a ``$'...'`` word that eval or env -S reads with
+    text after it, which the shell joins with that text, and the pager text
+    of git grep -O, which git runs with the names of the matching files.
+    There a command word built from an expansion counts as rm without a
+    target in the text, as in ``eval $'$X -rf '/w``.
+
+    Every word that names rm counts, as in the text the destructive-command
+    regex finds. Text this walk reads where that regex does not reach (text
+    read again as a command line, a ``$'...'`` word read decoded, eval or
+    env -S text, and a quoted rm name) is read strictly (*_strict*): there an
+    rm word counts only when it runs as a command (see _rm_command_words) or
+    xargs runs it, and either the text is read again as a command line
+    (*_dynamic*) or a quoted rm name counts there (*_names*) and the
+    destructive-command regex matches the rm command's own words (see
+    _rm_command_matches). So in ``grep 'rm' -rn .`` rm is grep's argument,
+    and in ``rm notes.txt && grep 'rm' -rn .`` neither rm counts. A quoted
+    rm name counts in the action's own words and in a substitution, but not
+    in a quoted word or here-document read as commands, such as
+    ``bash -c`` text, unless that text holds rm text the regex matches.
+    A strict reading inside the regex's own reading spends *_extra_budget*,
+    so it never changes what that reading finds. *_main_only* reads only as
+    main does: every word that names rm, with none of these other readings.
+    Each text of up to 64 KiB that a strict reading checks counts toward
+    *_extra_chars*, which a caller can share across a trace (counted from
+    here otherwise), before each check of it, also when it is then not read
+    (see _rm_read_cost); so does a here-document body or substitution,
+    which only these readings check beyond main's "rm -", before the checks
+    that keep it from them (see _rm_shell_words), and a word or substitution
+    the eval gate reads (see _rm_gated). Past
+    ``_RM_MAX_EXTRA_CHARS`` characters there, strict readings stop and find
+    nothing, so a text that would take the count past them is not read, and
+    the bodies left are read as main reads them.
     """
     if _budget is None:
         _budget = [_RM_MAX_FORCE_RESOLUTIONS]
+    if _extra_budget is None:
+        _extra_budget = _budget if _strict else [_RM_MAX_FORCE_RESOLUTIONS]
+    # The budget a strict reading spends here.
+    extra = _budget if _strict else _extra_budget
+    # The xargs-only query is the destructive-command regex's own gate, so it reads only what main reads.
+    more = not _xargs_only and not _main_only
+    if more and _extra_chars is None:
+        _extra_chars = [0]  # Counted from here unless the caller counts them.
     if _depth > 3:
-        return _rm_xargs_fallback(command_text) if _xargs_only else True
+        # Deeper text came from rm, eval or env -S text; keep the finding where it, or a form of it, may name rm.
+        if _xargs_only:
+            return _rm_xargs_fallback(command_text)
+        return _main_only or any(_rm_may_name_recursive_rm(form.lower()) for form in _rm_spelled_forms(command_text))
+    if _strict and not _xargs_only:
+        if _extra_chars is not None and len(command_text) <= 65_536 and not _rm_extra_spent(_extra_chars):
+            # Checking a text is work too, so it counts first. A longer text is read in one pass, where
+            # each text it holds counts as it is read.
+            _extra_chars[0] += _rm_read_cost(command_text)
+        if _rm_extra_spent(_extra_chars):
+            return False  # These readings have read their limit, or this text would pass it (see _RM_MAX_EXTRA_CHARS).
+        if _dynamic and not _rm_may_count_as_rm(command_text):
+            return False
+        if not _dynamic and not _rm_strict_may_count(command_text, _names):
+            return False
     if len(command_text) > 65_536:
         return (
             _rm_xargs_fallback(command_text)
@@ -6546,6 +7927,14 @@ def _rm_targets_outside_tmp(
                 _workdirs=_workdirs,
                 _find_protected=_find_protected,
                 _budget=_budget,
+                _dynamic=_dynamic,
+                _joined=_joined,
+                _strict=_strict,
+                _names=_names,
+                _extra_budget=_extra_budget,
+                _main_only=_main_only,
+                _extra_chars=_extra_chars,
+                _oversized=True,
             )
         )
     if _xargs_only and "xargs" not in command_text.casefold():
@@ -6555,8 +7944,9 @@ def _rm_targets_outside_tmp(
         candidate = command_text.replace("\\\r\n", "").replace("\\\n", "")
         if "xargs" not in candidate.translate({ord("'"): None, ord('"'): None, ord("\\"): None}).casefold():
             return False
-    tokenized = _rm_shell_tokens(command_text)
-    if tokenized is None:
+    # Only the strict readings read what the lexer's wide checks add, so only they do that work, counted.
+    tokenized = _rm_shell_words(command_text, wide=more, extra_chars=_extra_chars)
+    if tokenized is None or len(tokenized[0]) > 4096:
         return (
             _rm_xargs_fallback(command_text)
             if _xargs_only
@@ -6567,22 +7957,44 @@ def _rm_targets_outside_tmp(
                 _workdirs=_workdirs,
                 _find_protected=_find_protected,
                 _budget=_budget,
+                _dynamic=_dynamic,
+                _joined=_joined,
+                _strict=_strict,
+                _names=_names,
+                _extra_budget=_extra_budget,
+                _main_only=_main_only,
+                _extra_chars=_extra_chars,
+                _oversized=tokenized is not None,
             )
         )
-    tokens, payloads = tokenized
-    if len(tokens) > 4096:
-        return (
-            _rm_xargs_fallback(command_text)
-            if _xargs_only
-            else _rm_targets_fallback(
-                command_text,
-                _depth,
-                _symlink_seen=_symlink_seen or _rm_symlink_creation_seen(command_text),
-                _workdirs=_workdirs,
-                _find_protected=_find_protected,
-                _budget=_budget,
-            )
-        )
+    tokens, payloads, kinds = tokenized
+    # Nested texts read without a finding and without spending work: such a read gives the same
+    # answer again, so a repeat, as of one quoted word written many times, is not read again.
+    clean: set[tuple[Any, ...]] = set()
+
+    def nested(text: str, workdirs: tuple[str, ...], find_protected: bool, **options: Any) -> bool:
+        key = (text, workdirs, find_protected, *options.items())
+        if key in clean:
+            return False
+        spent = (_budget[0], _extra_budget[0])
+        if _rm_targets_outside_tmp(
+            text,
+            _depth + 1,
+            _xargs_only=_xargs_only,
+            _symlink_seen=_symlink_seen,
+            _workdirs=workdirs,
+            _find_protected=find_protected,
+            _budget=extra if options["_strict"] else _budget,
+            _extra_budget=_extra_budget,
+            _main_only=_main_only,
+            _extra_chars=_extra_chars,
+            **options,
+        ):
+            return True
+        if (_budget[0], _extra_budget[0]) == spent:
+            clean.add(key)
+        return False
+
     commands = _rm_sequential_commands(command_text, tokens)
     if commands is not None and len(commands) > 1:
         seen = _symlink_seen
@@ -6596,6 +8008,13 @@ def _rm_targets_outside_tmp(
                 _workdirs=workdirs,
                 _find_protected=_find_protected,
                 _budget=_budget,
+                _dynamic=_dynamic,
+                _joined=_joined,
+                _strict=_strict,
+                _names=_names,
+                _extra_budget=_extra_budget,
+                _main_only=_main_only,
+                _extra_chars=_extra_chars,
             ):
                 return True
             seen |= _rm_symlink_creation_seen(command)
@@ -6619,44 +8038,207 @@ def _rm_targets_outside_tmp(
     payload_workdirs = tuple(dict.fromkeys(path for paths in states for path in paths))
     if not all(states) or len(payload_workdirs) > _RM_MAX_WORKDIRS:
         payload_workdirs = ()
-    for payload in payloads:
-        if re.search(r"\brm\s+-", payload) and _rm_targets_outside_tmp(
-            payload,
-            _depth + 1,
-            _xargs_only=_xargs_only,
-            _symlink_seen=_symlink_seen,
-            _workdirs=payload_workdirs,
-            _find_protected=_find_protected,
-            _budget=_budget,
-        ):
+    segments = _rm_segments(tokens)
+    # Each word with its $'...' words decoded: these name commands and options.
+    names = (_rm_decoded_tokens(tokens, payloads, kinds) if more else None) or tokens
+    # Text read again as a command line, and whether more words follow it there: in text that is
+    # itself followed by more words (*_joined*), that may hold for any of it.
+    rereads = [
+        [(text, continued or _joined) for text, continued in _rm_reread_texts(tokens[start:end], names[start:end])]
+        if more
+        else []
+        for start, end in segments
+    ]
+    # A $'...' word that eval or env -S reads again is read as that text, decoded.
+    ansi_c_reread = any("${__rm_ansi_c}" in text for texts in rereads for text, _ in texts)
+    # The place of each such word among the $'...' words, where the placeholders map to them.
+    reread_words: set[int] = set()
+    # The text read again is also read with each $'...' word decoded in place, as the shell joins it.
+    decoded_rereads = _rm_decoded_rereads(tokens, payloads, kinds, reread_words) if ansi_c_reread else []
+    # Where the decoded text is read, the text with its placeholders is not: the shell runs only the former.
+    decoded = decoded_rereads is not None and ansi_c_reread
+    if decoded_rereads is None:
+        # Text that spells the placeholder itself: keep the finding where the words may name rm.
+        joined_text = " ".join(
+            [*(_rm_ansi_c_text(payload) for payload, kind in zip(payloads, kinds) if kind == "ansi_c")]  # noqa: B905
+            + [text for texts in rereads for text, _ in texts]
+        )
+        if _rm_may_name_recursive_rm(joined_text):
             return True
+        decoded_rereads = []
+    # The shell joins such a word with the text after it, so its last command may take more words from there.
+    ansi_c_joined = any(
+        re.search(r"\$\{__rm_ansi_c\}.", text, re.DOTALL) or (continued and "${__rm_ansi_c}" in text)
+        for texts in rereads
+        for text, continued in texts
+    )
+    if _dynamic and "<<" in command_text:
+        # In eval or env -S text, a here-document body may be fed to a shell that runs it there.
+        text = command_text.replace("\r\n", "\n")
+        bodies = [text[start + 1 : end] for start, end in _heredoc_body_spans(text, "bash") or []]
+        # No zip(strict=): same lengths, and the verifier runs on Python 3.9.
+        kept = {payload for payload, kind in zip(payloads, kinds) if kind == "heredoc"}  # noqa: B905
+        unread = [body for body in bodies if body not in kept]
+        payloads, kinds = [*payloads, *unread], [*kinds, *["heredoc"] * len(unread)]
+    # Each decoded $'...' text read below as eval or env -S text, and whether it was read as joined: the
+    # same text read again from the command line that eval or env -S reads would give the same answer.
+    decoded_read: dict[str, bool] = {}
+    # The answer for each word and substitution of this text checked below for an rm or eval text (see
+    # _rm_candidate), whose check counts toward the strict readings' limit where the eval gate reads it, so a
+    # repeat is not counted again.
+    # Here-document bodies were counted when the lexer checked them, and unescaped text counts on its own below.
+    candidates: dict[str, bool] = {}
+
+    def counted_candidate(text: str) -> bool:
+        known = candidates.get(text)
+        if known is None:
+            known = candidates[text] = _rm_candidate(text, _extra_chars)
+        return known
+
+    ansi_c_words = 0  # The $'...' words before this payload.
+    for payload, kind in zip(payloads, kinds):  # noqa: B905 -- same length; the verifier runs on Python 3.9.
+        # In eval or env -S text, a substitution or here-document runs in the shell that reads it again,
+        # so its text is read the same way. Of the $'...' words, only those that text holds are read so;
+        # where its placeholders do not map to them, every one is.
+        dynamic = _dynamic or (kind == "ansi_c" and (ansi_c_words in reread_words if decoded else ansi_c_reread))
+        ansi_c_words += kind == "ansi_c"
+        joined = kind == "ansi_c" and ansi_c_joined
+        substitution = kind in {"substitution", "unescaped"}
+        # A $'...' word is also read with its escapes decoded, as eval and env -S see it.
+        for text in dict.fromkeys((payload, _rm_ansi_c_text(payload)) if kind == "ansi_c" and more else (payload,)):
+            # The text the destructive-command regex reads on its own, as main reads it.
+            plain = kind != "unescaped" and text == payload and re.search(r"\brm\s+-", payload) is not None
+            if kind == "ansi_c" and text == payload and not plain and more and _rm_ansi_c_text(payload) != payload:
+                continue  # The shell runs only the decoded text, read next.
+            if kind == "unescaped" and more and _extra_chars is not None:
+                # Only the strict readings read this text, so checking it counts toward their limit, as there.
+                if len(text) <= 65_536 and not _rm_extra_spent(_extra_chars):
+                    _extra_chars[0] += _rm_read_cost(text)
+                if _rm_extra_spent(_extra_chars):
+                    continue
+            if not (
+                plain
+                or (
+                    more
+                    and (
+                        (counted_candidate(text) if kind in {"substitution", "ansi_c"} else _rm_candidate(text))
+                        or (dynamic and _rm_may_name_recursive_rm(text))
+                        # A substitution runs its text as commands, where a quoted rm name runs too.
+                        or (substitution and _names and _rm_names_rm(text))
+                    )
+                )
+            ):
+                continue
+            if nested(
+                text,
+                payload_workdirs,
+                _find_protected,
+                _dynamic=dynamic,
+                _joined=joined,
+                _strict=_strict or not plain,
+                # A substitution runs in this shell. Elsewhere a quoted rm name is data, or text for
+                # another shell, unless the text holds rm text.
+                _names=_names if substitution else _rm_holds_rm_text(text),
+            ):
+                return True
+            if dynamic and text != payload:
+                decoded_read[text] = decoded_read.get(text, False) or joined
+    # Each text read again below as a command line, with the directories it runs in.
+    reread_read: set[tuple[str, tuple[str, ...]]] = set()
+    decoded_rereads = decoded_rereads or [[] for _ in segments]
+    # No zip(strict=): same lengths, and the verifier runs on Python 3.9.
+    for (start, _end), texts, decoded_texts in zip(segments, rereads, decoded_rereads):  # noqa: B905
+        for text, continued in [
+            *((text, continued) for text, continued in texts if not (decoded and "${__rm_ansi_c}" in text)),
+            *((text, continued or _joined) for text, continued in decoded_texts),
+        ]:
+            if text in decoded_read and (decoded_read[text] or not continued):
+                continue  # Read above with the same or more words after it.
+            if nested(
+                text,
+                token_workdirs[start],
+                _find_protected,
+                _dynamic=True,
+                _joined=continued,
+                _strict=True,
+                _names=_names,
+            ):
+                return True
+            reread_read.add((text, token_workdirs[start]))
+    # The words that run as commands, read when an rm word counts only there.
+    command_words = _rm_command_words(tokens, names) if more and (_strict or _dynamic or names is not tokens) else {}
+    # In eval or env -S text, the command words that an expansion builds into rm.
+    dynamic_rm = {
+        index
+        for index, stop in command_words.items()
+        if _dynamic
+        and re.search(r"[$`]", names[index])
+        and _rm_leading_recursive_option(_rm_shown(names[position]) for position in range(index + 1, stop))
+    }
+    xargs_context_of = _rm_xargs_reader(tokens)
+    find_exec_protected = _rm_find_exec_reader(tokens)
+
+    def force_only_deletes(index: int, operands: list[str], workdirs: tuple[str, ...], budget: list[int]) -> bool:
+        # Without recursion, -f only silences prompts and missing-file errors.
+        if any(_rm_force_operand_is_protected(operand, workdirs, budget) for operand in operands):
+            return True
+        # Under find -exec, only targets that can be a found file inherit find's
+        # start paths. A ";" or "+" there ends the -exec command.
+        find_targets = [operand for operand in operands if operand not in {";", "+"}]
+        return (not find_targets or any(_rm_operand_follows_find(operand) for operand in find_targets)) and (
+            _find_protected or find_exec_protected(index, workdirs, budget)
+        )
+
     for index, token in enumerate(tokens):
         workdirs = token_workdirs[index]
-        if re.search(r"\brm\s+-", token) and _rm_targets_outside_tmp(
-            token,
-            _depth + 1,
-            _xargs_only=_xargs_only,
-            _symlink_seen=_symlink_seen,
-            _workdirs=workdirs,
-            _find_protected=_find_protected
-            or (not _xargs_only and _rm_find_exec_protected(tokens, index, workdirs, _budget)),
-            _budget=_budget,
-        ):
-            return True
-        if not re.search(r"\brm$", token):
+        plain = re.search(r"\brm\s+-", token) is not None
+        if plain or (more and counted_candidate(token)):
+            strict = _strict or not plain
+            find_protected = _find_protected or (
+                not _xargs_only and find_exec_protected(index, workdirs, extra if strict else _budget)
+            )
+            # eval's one argument, read strictly, was read above as the command line eval runs,
+            # where at least as much counts.
+            again = strict and find_protected == _find_protected and (_rm_unmarked(token), workdirs) in reread_read
+            if not again and nested(
+                token,
+                workdirs,
+                find_protected,
+                _strict=strict,
+                # A quoted word read as commands, such as bash -c text, is not this shell's command line.
+                _names=_rm_holds_rm_text(_rm_unmarked(token)),
+            ):
+                return True
+        named = re.search(r"\brm$", names[index]) is not None
+        # main's reading: every word that names rm.
+        mains = not _strict and re.search(r"\brm$", token) is not None
+        counts = mains or index in dynamic_rm
+        if not counts and more and named and (_names or _dynamic):
+            # Read strictly, or a $'...' word that names rm: it counts where it runs as a command.
+            counts = xargs_context_of(index) is True or (
+                index in command_words and (_dynamic or _rm_command_matches(names[index : command_words[index]]))
+            )
+        if not counts:
             continue
 
-        xargs_context = _rm_xargs_context(tokens, index)
+        xargs_context = xargs_context_of(index)
         if xargs_context is False:
             continue
 
-        recursive = False
+        last = len(tokens) if mains else command_words.get(index, len(tokens))
+        # Options a $'...' word spells count too; the word stays an operand, as main reads it.
+        recursive = index in dynamic_rm
         force = False
+        # The options as main reads them, which decide what main's reading spends.
+        main_recursive = main_force = False
         options_ended = False
         operands: list[str] = []
         skip_next = False
-        for raw_arg in tokens[index + 1 :]:
+        brace = False
+        for position in range(index + 1, last):
+            raw_arg = tokens[position]
             if re.fullmatch(r"[;&|(){}]+", raw_arg):
+                brace = raw_arg == "{}"
                 break
             if skip_next:
                 skip_next = False
@@ -6665,21 +8247,33 @@ def _rm_targets_outside_tmp(
             if _is_heredoc_redirect(raw_arg) or _REDIRECTION_WORD_RE.fullmatch(raw_arg):
                 skip_next = True
                 continue
-            arg = raw_arg
-            if arg.startswith(_QUOTED_SYNTAX_MARK) and not arg.startswith(_QUOTED_SYNTAX_MARK * 2):
-                arg = arg[1:]
-            arg = arg.replace(_QUOTED_SYNTAX_MARK * 2, _QUOTED_SYNTAX_MARK)
+            arg = _rm_unmarked(raw_arg)
             if not options_ended and arg == "--":
                 options_ended = True
             elif not options_ended and arg.startswith("-") and arg != "-":
                 if arg.startswith("--"):
-                    recursive |= arg == "--recursive"
-                    force |= arg == "--force"
+                    long_recursive, long_force = _rm_long_option(arg, abbreviated=_dynamic)
+                    recursive |= long_recursive
+                    force |= long_force
+                    main_recursive |= arg == "--recursive"
+                    main_force |= arg == "--force"
                 else:
                     recursive |= "r" in arg[1:] or "R" in arg[1:]
                     force |= "f" in arg[1:]
+                    main_recursive |= "r" in arg[1:] or "R" in arg[1:]
+                    main_force |= "f" in arg[1:]
             else:
                 operands.append(arg)
+                # A $'...' or $"..." option, as in rm $'-rf' /w or rm $'--recursive' /w.
+                shown = _rm_shown(names[position])
+                if more and not options_ended and shown != arg and re.fullmatch(r"-\S+", shown):
+                    if shown.startswith("--"):
+                        long_recursive, long_force = _rm_long_option(shown, abbreviated=_dynamic)
+                        recursive |= long_recursive
+                        force |= long_force
+                    else:
+                        recursive |= "r" in shown[1:] or "R" in shown[1:]
+                        force |= "f" in shown[1:]
 
         if not recursive and not force:
             continue
@@ -6688,25 +8282,179 @@ def _rm_targets_outside_tmp(
             return True
         if _xargs_only:
             continue
+        # main's budget pays only for main's own reading of the word: where the options read
+        # otherwise here, main's force-only reading runs first, and this reading spends the strict budget.
+        main_reading = mains and (recursive, force) == (main_recursive, main_force)
+        if (
+            mains
+            and not main_reading
+            and main_force
+            and not main_recursive
+            and force_only_deletes(index, operands, workdirs, _budget)
+        ):
+            return True
         if not recursive:
-            # Without recursion, -f only silences prompts and missing-file errors.
-            if any(_rm_force_operand_is_protected(operand, workdirs, _budget) for operand in operands):
-                return True
-            # Under find -exec, only targets that can be a found file inherit find's
-            # start paths. A ";" or "+" there ends the -exec command.
-            find_targets = [operand for operand in operands if operand not in {";", "+"}]
-            if (not find_targets or any(_rm_operand_follows_find(operand) for operand in find_targets)) and (
-                _find_protected or _rm_find_exec_protected(tokens, index, workdirs, _budget)
-            ):
+            if force_only_deletes(index, operands, workdirs, _budget if main_reading else extra):
                 return True
             continue
         # Nested script strings can end before a dynamic target is appended.
+        # An expansion read as rm needs a target, so eval "$LS -R" is not one, unless
+        # more words follow the text (*_joined*) or the next word is {}, which find
+        # -exec and xargs -I{} replace with a path. A word that names rm, such as
+        # ${X}rm, keeps this finding as on main.
         if not operands:
+            if index in dynamic_rm and not _joined and not brace and not named:
+                continue
             return True
         for operand in operands:
             if not _rm_tmp_operand_is_exempt(operand, symlink_seen=_symlink_seen):
                 return True
     return False
+
+
+def _rm_reading(
+    pattern: Any,
+    text: str,
+    matched: bool,
+    symlink_seen: bool,
+    main_only: bool = False,
+    extra_chars: list[int] | None = None,
+) -> bool | None:
+    """Say how check_security reads an action for rm: not at all (None), as main does (False), or strictly (True).
+
+    The destructive-command regex (*matched*) and the xargs-only query open
+    main's whole-action walk; with *main_only* (see _rm_repr_call), nothing
+    else opens a walk. Otherwise eval, env -S or git grep -O text that
+    may count an rm (see _rm_may_count_as_rm), or a quoted or escaped rm name
+    (a form without quotes or backslashes that *pattern* matches once
+    lowercased, as in ``$'\\U00000072m'``, or that holds xargs and rm, as in
+    ``xargs $'rm' -rf``), opens a strict walk, where only that text and an rm
+    that runs as a command can give the finding: in ``grep 'rm' -rn .`` rm
+    is grep's argument. The eval gate's reading of that text is the strict
+    readings' work, so where the gate reads the action's text, it counts
+    toward the trace's *extra_chars* first (see _rm_gated); text that may
+    not count an rm is not read. Once that count is spent, nothing else
+    opens a walk.
+    """
+    if matched or _rm_targets_outside_tmp(text, _xargs_only=True, _symlink_seen=symlink_seen):
+        return False
+    if main_only:
+        return None
+    # The gate's own first test only scans the text, so it counts nothing. The rm test scans up to
+    # 30 spellings of text the gate would read, so once the count is spent it is not run, and text
+    # it turns away counts its length (it is not lexed, so not the per-word cost of _rm_read_cost).
+    if _rm_may_name(text, _RM_GATE_NAMES) and _rm_gate_reads(text) and not _rm_extra_spent(extra_chars):
+        if _rm_may_count_as_rm(text):
+            if _rm_gated(text, extra_chars):
+                return True
+        elif extra_chars is not None:
+            extra_chars[0] += len(text)
+    if _rm_extra_spent(extra_chars):
+        return None
+    if any(
+        pattern.search(form.lower()) or ("xargs" in form.lower() and _RM_NAME_WORD_RE.search(form))
+        for form in _rm_name_forms(text)
+    ):
+        return True
+    return None
+
+
+def _rm_repr_call(tool_call: dict[str, Any]) -> bool:
+    """True when the action text of *tool_call* holds an argument that is not a string, such as an argv list.
+
+    _action_text writes such an argument as Python writes it, as in
+    ``['bash', '-lc', 'echo don\\'t']``, whose quotes are not the shell's,
+    so the rm check reads that call only as main reads it.
+    """
+    args = _action_args(tool_call)
+    return any(
+        value and not isinstance(value, str)
+        for value in (args.get(key) for key in ("command", "cmd", "code", "raw", "path", "file_path"))
+    )
+
+
+def _rm_extra_spent(extra_chars: list[int] | None) -> bool:
+    """True once the strict readings have read more than ``_RM_MAX_EXTRA_CHARS`` characters (*extra_chars*).
+
+    A trace's later calls are then read only as main reads them, so a trace
+    of many calls that each hold eval or env -S text or a quoted rm name
+    takes about main's time once that much has been read.
+    """
+    return extra_chars is not None and extra_chars[0] > _RM_MAX_EXTRA_CHARS
+
+
+def _rm_read_cost(text: str) -> int:
+    """Return the characters a strict reading counts for *text* toward ``_RM_MAX_EXTRA_CHARS``.
+
+    That is its length, ``_RM_EXTRA_CHARS_PER_READ`` more, and
+    ``_RM_EXTRA_CHARS_PER_WORD`` more for each of its blank-separated words,
+    newlines and shell operator characters (``;&|()<>``) and each backtick,
+    ``$(`` and start of a ``$'...'`` word: the walk reads each word and
+    command, and the lexer reads each substitution as a longer placeholder
+    word, so text dense with them takes more work than its length shows.
+    """
+    pieces = (
+        len(text.split())
+        + sum(text.count(char) for char in ";&|()<>\n`")
+        + text.count("$(")
+        + text.count(_RM_DOLLAR_QUOTE)
+    )
+    return len(text) + _RM_EXTRA_CHARS_PER_READ + _RM_EXTRA_CHARS_PER_WORD * pieces
+
+
+def _rm_call_deletes(
+    text: str,
+    *,
+    symlink_seen: bool,
+    workdirs: tuple[str, ...],
+    budget: list[int],
+    extra_budget: list[int],
+    strict: bool = False,
+    main_only: bool = False,
+    extra_chars: list[int] | None = None,
+) -> bool:
+    """Read one call's command for rm, as check_security and the plugin security scan do.
+
+    A strict reading (see _rm_reading) spends only *extra_budget*. Otherwise
+    main's own reading spends *budget*, the trace's work budget, exactly as
+    main's walk does, and the other readings spend *extra_budget*. A reading
+    that stops at a finding may stop before main's would have, so then main's
+    reading alone runs again from the budget the call started with, to spend
+    what main spends and leave later calls the budget main leaves them. Once
+    the budget is spent, main's reading would leave it spent, so it does not
+    run again. *main_only* reads only as main does (see _rm_repr_call), and
+    so does a call once the strict readings have read their limit
+    (*extra_chars*, shared across the trace, see _rm_extra_spent).
+    """
+    if main_only or _rm_extra_spent(extra_chars):
+        return _rm_targets_outside_tmp(
+            text, _symlink_seen=symlink_seen, _workdirs=workdirs, _budget=budget, _main_only=True
+        )
+    if strict:
+        return _rm_targets_outside_tmp(
+            text,
+            _symlink_seen=symlink_seen,
+            _workdirs=workdirs,
+            _budget=extra_budget,
+            _strict=True,
+            _extra_budget=extra_budget,
+            _extra_chars=extra_chars,
+        )
+    before = budget[0]
+    if not _rm_targets_outside_tmp(
+        text,
+        _symlink_seen=symlink_seen,
+        _workdirs=workdirs,
+        _budget=budget,
+        _extra_budget=extra_budget,
+        _extra_chars=extra_chars,
+    ):
+        return False
+    if budget[0] < 0:
+        return True
+    budget[0] = before
+    _rm_targets_outside_tmp(text, _symlink_seen=symlink_seen, _workdirs=workdirs, _budget=budget, _main_only=True)
+    return True
 
 
 def check_security(
@@ -6759,6 +8507,10 @@ def check_security(
     )
     rm_workdirs: tuple[str, ...] = (initial_workdir,) if initial_workdir is not None else ()
     rm_budget = [_RM_MAX_FORCE_RESOLUTIONS]
+    # The readings main's walk does not make spend their own budget, so they never change what it finds.
+    rm_extra_budget = [_RM_MAX_FORCE_RESOLUTIONS]
+    # The characters those readings have read, which stop them past _RM_MAX_EXTRA_CHARS.
+    rm_extra_chars = [0]
     for tc in tool_calls:
         action = str(tc.get("action", ""))
         observation = str(tc.get("observation", ""))
@@ -6816,20 +8568,26 @@ def check_security(
                     )
                 ):
                     continue
-                if (
-                    pattern.search(action_text_lower)
-                    or (
-                        label == "rm -rf"
-                        and _rm_targets_outside_tmp(
-                            action_text,
-                            _xargs_only=True,
-                            _symlink_seen=symlink_seen,
-                        )
+                matched = pattern.search(action_text_lower) is not None
+                rm_main_only = label == "rm -rf" and (_rm_repr_call(tc) or _rm_extra_spent(rm_extra_chars))
+                rm_strict = (
+                    _rm_reading(
+                        pattern, action_text, matched, symlink_seen, main_only=rm_main_only, extra_chars=rm_extra_chars
                     )
-                ) and (
+                    if label == "rm -rf"
+                    else None
+                )
+                if (matched or rm_strict is not None) and (
                     label != "rm -rf"
-                    or _rm_targets_outside_tmp(
-                        action_text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs, _budget=rm_budget
+                    or _rm_call_deletes(
+                        action_text,
+                        symlink_seen=symlink_seen,
+                        workdirs=rm_workdirs,
+                        budget=rm_budget,
+                        extra_budget=rm_extra_budget,
+                        strict=bool(rm_strict),
+                        main_only=rm_main_only,
+                        extra_chars=rm_extra_chars,
                     )
                 ):
                     findings.append(

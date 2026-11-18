@@ -8,7 +8,7 @@ Global options go before the command: `skillevaluator -v validate <skill-dir>`.
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report` | `cli,json,html` for `tier1 PATH`, `tier2 PATH`, `validate`; `cli` for focused commands | `cli`, `json`, `html`, `markdown`, `sarif`; comma-separated or repeated |
+| `-r, --report` | `cli,json,html` for `tier1 PATH`, `tier2 PATH`, `validate`; `cli` for focused commands | `cli`, `json`, `html`, `markdown`, `sarif`, `junit`; comma-separated or repeated |
 | `-o, --output-dir` | `reports` | Report directory |
 
 Passing `-r` is honored exactly: `-r cli` writes no files. Basenames:
@@ -31,7 +31,7 @@ rubric, LLM security and finding verification when a provider is configured.
 | `--skip CHECKS` | none | Leave checks out (also `secrets` for Gitleaks); the run cannot certify Tier 1 |
 | `--llm / --no-llm` | on when a provider is configured | Explicit `--llm` requires a valid provider |
 | `--min-score INTEGER` | `70` | Quality and rubric minimum |
-| `--quality-config PATH` | packaged | Replace expected-heading rules |
+| `--quality-config PATH` | packaged | Adjust expected-heading, error-handling, token-budget, description-length (minimum and maximum), and reserved-name rules |
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers |
 | `--profile TEXT` | `default` | Validation policy |
 

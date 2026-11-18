@@ -17,8 +17,10 @@ from functools import cached_property
 from types import MappingProxyType
 from typing import TYPE_CHECKING
 
+from skillevaluator.models.result import Severity
+
 if TYPE_CHECKING:
-    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.models.result import Finding, ValidationResult
     from skillevaluator.reporting.base import PublicationAssessment
 from skillevaluator.reporting.base import (
     assess_publication,
@@ -79,19 +81,29 @@ class RunStatus:
         return outcome if outcome is not None else result_status(result)
 
 
-def _blocking_finding(result: ValidationResult) -> bool:
-    for finding in result.findings:
-        if finding.severity.is_error() or finding.to_legacy_string() in result.errors:
+def finding_blocks(result: ValidationResult, finding: Finding) -> bool:
+    """Return whether *finding* blocks *result*.
+
+    A finding blocks when its severity is an error or when the validator recorded
+    its legacy line in ``result.errors`` (for example a MEDIUM finding added with
+    ``is_error=True``, or one under a fail-on-medium policy).
+    """
+    severity = finding.severity
+    if (isinstance(severity, Severity) and severity.is_error()) or finding.to_legacy_string() in result.errors:
+        return True
+    # Folder merges prefix legacy errors and place those same labels inside
+    # finding paths. Respect fail-on-medium/low in either representation.
+    location, prefix = finding.location or "", ""
+    while location.startswith("[") and "] " in location:
+        label, _, location = location.partition("] ")
+        prefix += label + "] "
+        if f"{prefix}{finding.tag} {finding.message} in {location}" in result.errors:
             return True
-        # Folder merges prefix legacy errors and place those same labels inside
-        # finding paths. Respect fail-on-medium/low in either representation.
-        location, prefix = finding.location or "", ""
-        while location.startswith("[") and "] " in location:
-            label, _, location = location.partition("] ")
-            prefix += label + "] "
-            if f"{prefix}{finding.tag} {finding.message} in {location}" in result.errors:
-                return True
     return False
+
+
+def _blocking_finding(result: ValidationResult) -> bool:
+    return any(finding_blocks(result, finding) for finding in result.findings)
 
 
 def result_status(result: ValidationResult) -> Status:

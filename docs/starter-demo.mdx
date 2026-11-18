@@ -47,9 +47,10 @@ retain the terminal output, and `receipt.json` records the version and time.
 Expected scalar values live in
 [`examples/starter/expected.json`](https://github.com/NVIDIA/SkillEvaluator/blob/main/examples/starter/expected.json);
 they are checked against new results, not substituted for them. The scores
-in this guide are from the pinned 0.8.0 release. The current source can score
-the same skill differently, so a run with your checkout's own evaluator is
-checked against the `checkout` scores in that file instead. Historical
+in this guide are from the pinned 0.8.0 release. Other versions can score
+the same skill differently: the runner uses the installed version's
+`evaluator_versions` entry when present, including for 1.0.1. Running this checkout's own evaluator
+uses the `checkout` scores instead. Historical
 benchmark scores are not evidence for this run.
 
 ## Interpret the reports
@@ -169,7 +170,7 @@ self-checks are not a substitute for feedback from a first-time human user.
 | Output directory already exists | Keep it as evidence; use a new `--output` path. Nothing is overwritten. |
 | A checked score or report field differs | Read the retained JSON/text, confirm `receipt.json` if present and the installed version; do not blindly update expectations. A failed demo does not write a success receipt. |
 | Analysis count differs | Check file contents, encoding and newlines; the input is UTF-8 plain text with a final newline. |
-| Scanner or sandbox is missing | The keyless demo does not need either. Follow [scanner setup](/skills/skillevaluator/installation#system-tools) or [agent setup](/skills/skillevaluator/agents-and-sandboxes) before adding those stages. |
+| Scanner or sandbox is missing | The keyless demo does not need either. Follow [scanner setup](/skills/skillevaluator/installation-options#system-tools) or [agent setup](/skills/skillevaluator/agents-and-sandboxes) before adding those stages. |
 | Template reference asks you to sign in | Use the [public template reference](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/README.md) and [versioned bundles](https://github.com/NVIDIA/SkillEvaluator/tree/main/ci/bundles/0.8.0), not a private mirror. Check bundle files against `SHA256SUMS.txt`. |
 
 The public template reference and versioned downloadable bundles were consolidated

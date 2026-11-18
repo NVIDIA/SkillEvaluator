@@ -441,7 +441,7 @@ checks in
 
 ```text
 each area starts at 100
-each triggered finding subtracts its fixed deduction, floored at 0
+each triggered finding subtracts its deduction, floored at 0
 
 Quality = 0.35 * Correctness
         + 0.25 * Discoverability
@@ -466,9 +466,12 @@ type. Only one block below can fire on a given skill:
 | resource-based | No documentation of the available resources (10) |
 | guide-only | Fewer than 20 non-blank body lines (15) |
 
-The Reliability rules and the expected-heading list are configurable with
-`--quality-config`, so those deductions are defaults rather than fixed; see
-[Tier 1 validation](/skills/skillevaluator/tier1-validation).
+Some rules are configurable with `--quality-config`, so their deductions and
+thresholds are defaults rather than fixed: the Reliability rules and the
+expected-heading list, the reserved-name words (Correctness), the
+description length limits (Discoverability) and the token budget (Efficiency). The
+token budget in force is reported as `metrics.recommended_max_tokens`; see
+[Tier 1 reference](/skills/skillevaluator/tier1-reference#the-checks).
 
 **Range and units:** 0–100 points. Grades are A at 90 or above, B at 80, C at
 70, D at 60, F below. The default `--min-score` is 70, and the minimum is an
@@ -697,7 +700,7 @@ beside the point estimate.
 
 ## Next steps
 
-- [Tier 3: Live Evaluation](/skills/skillevaluator/tier3-live-evaluation) — how a run
+- [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) — how a run
   is configured and what the verifier grades
 - [Reports & Results](/skills/skillevaluator/reports) — every file a run writes and
   how to read it

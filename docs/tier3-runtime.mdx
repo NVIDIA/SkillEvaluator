@@ -1,0 +1,522 @@
+---
+title: "Live Evaluation Runtime Reference"
+description: "Backend compatibility, credential handling, execution environments, and CI behavior."
+---
+
+For your first comparison, start with [Run a live evaluation](/skills/skillevaluator/tier3-live-evaluation).
+
+## How a run works
+
+`tier3 evaluate` reads the accepted dataset (or native task source), resolves
+each agent's actual provider route and the enabled standard-grading route, and
+makes bounded credential-bearing model-catalog requests before image preparation
+or task staging. Definitive native-provider authentication, authoritative model
+rejection, and deterministic Bedrock credential/configuration failures stop
+immediately. Non-authoritative OpenAI catalog permission or membership results,
+compatible-gateway catalog authentication, unsupported catalogs, and transient
+failures are reported as degraded rather than blocking the run. A successful
+NVIDIA Build or compatible-gateway listing is also inconclusive when that
+catalog does not authenticate inference. The optional real per-agent runtime
+preflight is the stronger check for agent routes. A degraded route used only by the
+standard grader remains unproven until grading begins. Native Harbor judge selection is likewise inconclusive
+until runtime when no host judge override is set. `result.json` retains the
+redacted target-by-target outcome under `run_config.credential_validation`,
+including when an enabled agent runtime preflight fails.
+
+SkillEvaluator then builds the Harbor task bundle. Before spending the full
+A/B matrix, you can pass `--agent-runtime-preflight` to run one extra agent-only
+execution per agent. It uses the first staged evaluation task and its real prompt,
+so it can consume substantial tokens and exercise task actions; grading is the
+only part disabled. It is off by default. Harbor then starts the selected
+environment and runs the agent in both arms; with standard grading, each transcript is
+judged against the case's expected output and assertions using the configured
+evaluator provider (see
+[How standard grading judges a trial](/skills/skillevaluator/tier3-grading#how-standard-grading-judges-a-trial)). Finally, SkillEvaluator collects the artifacts and
+computes the dimension scores, pass rates, and Skill Lift. Harbor task and job
+directories are transient: they are deleted after collection whether the run
+succeeds or fails, unless you pass `--harbor-keep-jobs`.
+
+Two credential roles are involved: the evaluator provider generates datasets
+and performs standard grading, while the live agent uses its own native
+credential. Both come **only from the host environment** — a checked-out skill
+can never supply, replace, or reroute them:
+
+| Credential | Used for | How to set |
+| --- | --- | --- |
+| Evaluator LLM provider | Dataset generation and standard grading | `SKILL_EVAL_LLM_PROVIDER` plus the provider key — see [Providers & Credentials](/skills/skillevaluator/configuration) |
+| Live agent credential | The agent actually performing the task | Export it in the host environment where you run `skillevaluator` |
+
+```bash title="Agent credentials are host-environment exports, never config entries"
+export SKILL_EVAL_LLM_PROVIDER=openai
+export OPENAI_API_KEY=sk-...          # evaluator, and codex's runtime
+export ANTHROPIC_API_KEY=sk-ant-...   # claude-code's runtime
+```
+
+`evals/config.yml` may still add permitted task-scoped values through
+`harbor.runtime_env`, but any entry that names — or `${VAR}`-references — an
+operator-owned credential (`OPENAI_API_KEY`, `ANTHROPIC_API_KEY`,
+`NVIDIA_API_KEY`, the base-URL variables, `AWS_*`) fails the run with a hard
+error. This prevents a skill from swapping a credential or routing a trusted
+key to an attacker-controlled endpoint. [Providers &
+Credentials](/skills/skillevaluator/configuration) lists every blocked name.
+
+`runtime_env` also cannot override host launcher, language-runtime, Docker,
+Compose, proxy, or tracing controls. Configure the selected backend in the
+host environment instead.
+
+One deliberate exception collapses the two roles: with the `nv_build` provider
+in `--env-mode docker`, `kata`, or `local`, a single `NVIDIA_API_KEY` powers the
+evaluator and all three agents. Direct OpenCode talks to NVIDIA Build directly;
+Codex and experimental Claude Code use an in-container (Docker and Kata) or local compatibility bridge.
+Explicit model overrides are preserved exactly. Without an override, all three
+agents default to Nemotron 3.5 Lightning (`nvidia/nemotron-3.5-lightning-30b-a3b`); direct
+OpenCode renders it as `nvidia/nvidia/nemotron-3.5-lightning-30b-a3b` because its
+adapter namespace precedes the NVIDIA catalog ID. Override models explicitly
+when you want to compare harnesses or models:
+
+```bash title="NVIDIA Build model overrides"
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/nvidia/nemotron-3.5-lightning-30b-a3b
+skillevaluator tier3 evaluate ./my-skill --agents codex --env-mode docker \
+  --agent-model codex=nvidia/nemotron-3.5-lightning-30b-a3b
+skillevaluator tier3 evaluate ./my-skill --agents claude-code --env-mode docker \
+  --agent-model claude-code=nvidia/nemotron-3.5-lightning-30b-a3b
+skillevaluator tier3 evaluate ./my-skill --agents opencode --env-mode docker \
+  --agent-model opencode=nvidia/meta/llama-3.1-8b-instruct
+```
+
+On cloud env-modes the bridges are
+unavailable: `opencode` still works with `NVIDIA_API_KEY` directly, but
+`codex` and `claude-code` fall back to their own native credentials and
+explicit models — see [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
+## Where agents run
+
+`--env-mode` selects one of 27 environment modes: 26 Harbor-native backends,
+including the default Docker backend, plus SkillEvaluator's **local mode**,
+which runs the agent CLI directly on the host under an OS-sandbox policy.
+Managed backends such as `daytona`, `e2b`, and `modal` require their mapped
+Harbor 0.25 extra; OpenShift, Apple Container, and Singularity instead use
+system CLIs and have no Harbor Python extra. These are selectable integration
+modes, not evidence that every managed backend was exercised end to end for
+this release. The transport integration suites target Docker and local;
+Kata mode reuses the Docker transport but has not been exercised on a KVM host.
+Validate any managed backend's extra, credentials, infrastructure, and
+constructor settings with `doctor` and its Harbor preflight before relying on
+it.
+
+Harbor's `cua-cloud`, `opensandbox`, `hf-sandbox`, `podman`, `prime`,
+`smol`, `sbx`, `sail`, and `kernel` backends are not selectable until they can
+receive SkillEvaluator's complete generated task bundle through a trusted
+image or backend-native provisioning path.
+
+Environment kwargs are only for Harbor-native non-Docker backends. Pass
+non-secret constructor settings with the repeatable, operator-only
+`--environment-kwarg KEY=VALUE` / `--ek KEY=VALUE` option. Skill-owned
+`evals/config.yml` cannot set them. `docker` and `local` reject any environment
+kwargs, and `kata` accepts only `kata_runtime` and `kata_dns`. Fields owned by Harbor runtime policy are also reserved: resource
+overrides, mounts, network policy, extra Compose definitions, SkillEvaluator's
+own lifecycle fields (`delete`, `force_build`, `keep_containers`), output
+mount controls (`auto_mounts`, `auto_mounting`), and
+Kubernetes pod security are not exposed through this surface. Other
+backend-specific timeout and retention knobs remain operator-owned. The
+`cwsandbox` and `wandb` modes also reserve `forward_compose_env` to prevent host
+environment values from being copied into task Compose definitions. Use the same
+eligible-backend flags with `doctor` and `health-check`; never pass secrets
+through constructor kwargs. GKE requires
+`cluster_name`, `region`, `namespace`, `registry_location`, and
+`registry_name`; ACK requires `namespace`; EC2 requires `region` plus `ami_id`
+for its default ephemeral launch mode or `instance_id` with
+`launch_mode=attach`. The complete environment/extra matrix, examples, Docker
+resource tuning, local-mode safety controls, and workspace modes live in
+[Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes).
+
+<Warning>
+Local mode executes the agent on your host rather than in a container. It is
+experimental and intended for trusted skills and workspaces — use Docker or a
+cloud backend for untrusted code.
+</Warning>
+## Execution backends
+
+The backend selector and NeMo Gym adapter are included in SkillEvaluator
+**1.0.1**; 0.9.0 uses Harbor. See
+[Installation](/skills/skillevaluator/installation#install) for package availability.
+The separate pinned Gym runtime and compatibility requirements below still apply.
+
+`--backend` chooses what executes the cases. The default is Harbor. The experimental
+NeMo Gym adapter stages the same task folders and uses the shared verifier and result
+collector, but requires a Gym interface that is not available in the checked public
+`nemo-gym==0.7.0` release.
+
+| Backend | What runs the cases |
+| --- | --- |
+| `harbor` (default) | Harbor orchestrates the trials, runs the agent and the sandbox. Every `--env-mode` is available. |
+| `nemo-gym` | Native Gym task-folder adapter, restricted to `--env-mode docker`. Needs the pinned editable Gym install below; public Gym 0.7.0 is incompatible and fails preflight. Codex, Claude Code, and OpenCode have completed live paired runs on this pinned runtime. OpenCode requires the full editable checkout; its wheel installation fails during agent setup. |
+
+**Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
+That release's `gym eval run` takes JSONL inputs and configured environments; it has
+neither the positional task-directory argument nor `--sandbox` used by this adapter.
+Removing that flag alone does not provide the required execution or verifier contract.
+The immutable public source candidate
+[`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
+declares the `TARGET` task-folder argument and the seven required flags. Focused live
+Docker runs completed both with-skill and baseline trials for Codex and OpenCode with
+GPT-5.4-mini, and for Claude Code with Claude Sonnet 4.6. The runs retained native
+execution and verifier artifacts and exercised staged input files. These operational
+checks do not establish representative skill quality or compatibility with every model.
+Additional grading modes, custom Dockerfiles, and broader provider/model combinations
+need separate qualification.
+
+The Claude Code mapping uses the same pinned runtime version as Harbor, installed
+by Gym inside the sandbox. It enables native discovery and projects staged skills
+into the task workdir's `.claude/skills/` directory because Gym uses a private
+Claude configuration directory. The baseline uses the same discovery settings
+without the target skill. Gym's required Anthropic credential field receives only
+a placeholder; policy credentials remain in the model-server environment. Claude Code
+takes its policy endpoint from the same settings as Codex: `SKILL_EVAL_NEMO_GYM_MODEL_URL`,
+`SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` and a model from `--model` or
+`--agent-model claude-code=MODEL`.
+
+Use uv 0.13.4 or later on `PATH`. Install the pinned Gym from a persistent full
+source checkout in editable mode, with its own Python 3.13.14+ environment separate
+from SkillEvaluator's. Check that `gym eval run --help` lists `TARGET` and `--sandbox`:
+
+```bash
+git clone --filter=blob:none https://github.com/NVIDIA-NeMo/Gym.git "$HOME/nemo-gym/source"
+git -C "$HOME/nemo-gym/source" checkout --detach 792fa142f58277aecff05d402061d647e9a92acf
+uv venv --python ">=3.13.14,<3.14" "$HOME/nemo-gym/.venv"
+uv pip install --python "$HOME/nemo-gym/.venv/bin/python" \
+  --editable "$HOME/nemo-gym/source"
+"$HOME/nemo-gym/.venv/bin/gym" eval run --help
+```
+
+Then point SkillEvaluator at it and run:
+
+```bash
+# Requires the pinned Gym install described below.
+export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
+# Codex needs an endpoint that serves the OpenAI Responses API; NVIDIA Build does not.
+export SKILL_EVAL_NEMO_GYM_MODEL_URL=https://api.openai.com/v1
+export SKILL_EVAL_NEMO_GYM_MODEL_API_KEY="$OPENAI_API_KEY"
+skillevaluator tier3 doctor --backend nemo-gym --agents codex
+skillevaluator tier3 evaluate ./my-skill --backend nemo-gym --agents codex --model <model>
+```
+
+`tier3 doctor --backend nemo-gym` checks the Gym CLI interface and its version, that the Docker
+daemon answers, the `SKILL_EVAL_NEMO_GYM_*` settings, each selected agent's policy model
+endpoint, and the selected agents and `--env-mode`. The endpoint check uses
+an isolated, unauthenticated HTTP probe with a three-second deadline. It honors
+`HTTP_PROXY`, `HTTPS_PROXY` and `NO_PROXY` (also lowercase), but sends no endpoint
+or proxy credentials and does not follow redirects. Policy endpoint HTTP responses,
+including authentication errors, count as reachable. Proxy authentication failures
+(`407`), failed HTTPS tunnels, and plain-HTTP proxy gateway errors (`502`, `504`)
+fail the check instead. HTTPS origin responses after a successful tunnel still
+count as reachable, including `502` and `504`. It does not
+validate credentials or model compatibility. The separate CLI interface check runs
+`gym eval run --help` with a 15-second timeout and a combined stdout/stderr limit of
+256 KiB, without policy credentials or server startup. Timeout, interruption, or output
+overflow stops its isolated process group with bounded TERM/KILL cleanup. It rejects
+missing task-folder arguments and required flags before dataset
+generation or task staging. Passing this necessary check does not certify live runtime
+compatibility. A Gym run reports
+configuration, Docker image, per-agent and collection progress.
+
+Public Gym 0.7.0 requires Python 3.13.14 or later. Gym runs as its own pinned install
+rather than a SkillEvaluator dependency. Point `SKILL_EVAL_NEMO_GYM_BIN` at that
+install's `gym` executable. The run records `execution_backend` (name, Gym version,
+sandbox) in `result.json`; keep Harbor and NeMo Gym scores apart unless the model,
+harness and judge match.
+
+The adapter's required Gym contract is `gym eval run TASKS --sandbox docker`, with
+`--agent`, `--model-type openai_model`, `--model`, `--model-url`, `--output`, and
+`--concurrency`, plus Hydra overrides for repeats, credentials and cache disabling.
+Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
+`tasks_dir` or `task_folder` argument. Each rollout must identify its task and provide
+`verifier_return_code` and `verifier_logs_dir`, where the SkillEvaluator verifier's rewards and trajectory can
+be collected. The Gym implementation must execute inside Docker and resolve task
+environment templates; a host-only agent harness does not meet this contract.
+
+The adapter maps `codex`, `claude-code` and `opencode` and accepts `default`,
+`default_plus_custom` and `custom_only` grading modes. These are adapter capabilities;
+the live-run status in the table above does not qualify every combination.
+Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
+not supported on the NeMo Gym path and is rejected before the run starts; use
+`--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
+`harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
+`resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
+`skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
+`--agent-model` (one model per agent) apply the same way. `--timeout-multiplier` (or
+`harbor.timeout_multiplier`) scales each task's agent, verifier, and environment-build timeouts
+as on Harbor, and Gym enforces them. `harbor.agent_workdir` and `harbor.pre_agent_setup`
+(alias `setup_commands`, with-skill-only runs) work as on Harbor: Gym starts the agent in
+that working directory and runs the setup commands as the task's environment healthcheck
+before the agent. `--copy-repo` stages the whole repository under
+`/workspace/repo/` as on Harbor, and a `skill_workspace.decoy_manifest` stages the same
+verified decoy snapshot into every arm. Native `evals/harbor/` tasks (`task_source: native_harbor`, or
+`auto` without `evals/evals.json`) are staged with Harbor's own native staging and run on Gym; their verifiers may write
+`reward.json` or a numeric `reward.txt`, and `--override-cpus`/`--override-memory-mb` apply to them, as on Harbor. `harbor.base_image_mode`
+(reuse/rebuild) builds Harbor's shared eval base image that the task images start from. `--custom-dockerfile-mode` rebase and preserve
+behave as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
+Docker mode. It rejects `--stop-on-pass`,
+`--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
+`--reuse-baseline`, `--compare-to`, `--max-agent-tokens`, `--max-judge-calls`,
+`--max-attempts-total`, `--max-cost-usd`, `--price-file`, `--tolerate-baseline-timeouts`,
+and the config keys
+`resources.storage_mb`, `max_agent_tokens`, `max_judge_calls`, `max_attempts_total`,
+`max_cost_usd`, `price_file` and `tolerate_baseline_timeouts: true` under `harbor`, MCP
+servers in `evals/environment/mcp_servers.toml` or a native task's `[[environment.mcp_servers]]`, a model URL with embedded credentials, and Windows hosts,
+whether set by flag or config (a flag overrides its config key), before anything
+starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
+falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`
+references resolved from Gym's environment. Gym receives only the variables Harbor's
+Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT` and TLS settings),
+Gym's `UV_*` package-index settings and credentials, `NETRC`, and the policy and judge
+credentials; relative Docker and TLS paths are made absolute first. Judge overrides
+(`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on Harbor, and Vertex
+AI ADC tokens are refreshed before every `gym eval run`. Every agent and arm is staged
+from one skill snapshot before the first launch. A missing or failed attempt counts as a
+failed trial, and the arm keeps its other scored trials. Excess rollouts are reported
+as execution errors and scoring remains bounded by the planned attempts. Any launch
+or rollout-count failure marks the
+run, the agent's progress row and the report as failed. If Gym's process group cannot be
+confirmed stopped after a timeout or interruption, no further arm starts beside it. After a
+timeout, the run records that as an execution error, finishes as failed and keeps the scores
+of the arms that finished. After an interruption, the progress output reports it and the run
+ends. Either way, check for leftover Gym servers and Docker sandboxes before you run again.
+A finished run updates `latest`
+and records the same dataset snapshot and publication target as a Harbor run. As on
+Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
+the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under `_nemo-gym/`
+in the run folder, and the rollouts hold the raw agent responses.
+## Harbor 0.25 compatibility
+
+The `tier3` extra installs Harbor 0.25.0, the supported Tier 3 backend for this
+release. The `[all]` extra includes `tier3`. Existing SkillEvaluator commands do
+not change: the public `--agents` and `--env-mode` options map built-in names and
+installed adapters to Harbor's unified `--agent` and `--env` selectors.
+
+The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
+and environment/agent subclass interfaces form one compatibility surface. This
+release targets stable Harbor 0.25.0 rather than unreleased `main`. Harbor stays
+behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
+it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
+patched 1.92 and 1.93 releases validated with this integration while excluding
+prerelease and as-yet unvalidated 1.94 behavior.
+
+The integration preserves SkillEvaluator's runtime and artifact contracts while
+using Harbor 0.25:
+
+- Every Harbor process starts in an empty, evaluator-owned working directory
+  with `.env` loading and Harbor telemetry disabled. Harbor ignores `.env.local`
+  and `.env` files around your project, so it sees only SkillEvaluator's
+  allowlisted environment. Relative host paths such as `KUBECONFIG` keep their
+  meaning. Disabling `.env` loading needs python-dotenv 1.2.0 or newer, which
+  the `tier3` extra requires; with an older release, `doctor` and
+  `tier3 evaluate` fail the prerequisite check until you reinstall the extra.
+- Codex runs with `reasoning_effort=high`, the effort Harbor 0.22 used by
+  default, so results stay comparable across Harbor upgrades.
+- Harbor installs Codex 0.161.0, Claude Code 2.1.292 and OpenCode 1.19.5
+  rather than the latest release, so a new CLI release does not change
+  results. Claude Code runs Claude 5.5 and later models with
+  `reasoning_effort=medium`. Local mode uses your installed CLIs and checks
+  that they are new enough for the model.
+- Installed Codex adapters merge existing user and MCP configuration before the
+  selected runtime provider and endpoint take precedence over conflicting route
+  keys.
+- Docker, Kata, and local execution stream stdout and stderr through secret redaction
+  before Harbor callbacks receive them. Each command has a 16 MiB combined raw
+  stdout/stderr limit; exceeding it terminates the command process tree and
+  fails the trial instead of returning partial output.
+- The parent Harbor orchestration process has its own 16 MiB combined
+  stdout/stderr limit for the full job. Overflow or timeout terminates and reaps
+  the Harbor POSIX process group or Windows task tree while retaining only a
+  bounded, redacted diagnostic tail. A POSIX process that deliberately creates
+  a new session can escape process-group cleanup, so the host-side Harbor CLI,
+  configuration, and local-mode skills must be trusted. Run untrusted evaluated
+  workloads in Docker or another isolated Harbor backend instead of local mode.
+- Ctrl+C stops the whole run. Agents still waiting for a `--max-agents` slot,
+  queued conditions, and remaining `--stop-on-pass` attempts never start. Each
+  running Harbor job receives SIGTERM, which Harbor handles by stopping its
+  trial environments, and has up to 30 seconds to exit before its POSIX process
+  group is killed and reaped. The progress view shows the agents that are
+  stopping; a second Ctrl+C skips the wait. On Windows the Harbor task tree is
+  stopped immediately. The progress view marks unfinished stages as
+  interrupted.
+- A skipped or exceeded Ctrl+C wait, a Ctrl+C on Windows, or a SkillEvaluator
+  process that is killed rather than interrupted (for example with `kill` or by
+  a cancelled CI job) can leave trial containers or in-container agent
+  processes running, and the trials' Compose networks behind. Each leftover
+  network keeps a subnet from Docker's limited default address pools. Harbor's
+  Docker backends name each Compose project after its trial, so
+  `docker ps -a --filter label=com.docker.compose.project` and
+  `docker network ls --filter label=com.docker.compose.project` list the
+  candidates; check their project names before removing the containers with
+  `docker rm -f` and then the networks with `docker network rm`.
+- Docker accepts Harbor stdin payloads and isolates main-container execution
+  from sidecar operations without placing environment values on Compose argv.
+  For NVIDIA Build, the credential reaches the trusted parent over stdin; each
+  main-container exec then uses a short-lived, container-only stdin handoff that
+  is removed before the requested command runs.
+- Native Windows main-container artifact transfer requires `tar` in the image
+  and accepts regular files and directories only. Links, junctions, hardlinks,
+  sparse files, special files, compressed streams, and unsafe or colliding
+  Windows path spellings fail closed before publication.
+- Generated tasks retain schema 1.3, which Harbor 0.25 accepts. User-owned native
+  tasks, including schema 1.4, are staged without a schema rewrite. Collection
+  accepts Harbor 0.25 job, trial, reward, and ATIF v1.8 artifacts, including
+  single-step `step_results: null`, authoritative multi-step results, and
+  multimodal tool output, which judges and reports see as text with
+  `[image]`/`[audio]` markers.
+- Native tasks follow Harbor 0.25's separate-verifier precedence. For a verify
+  pass that runs in a separate verifier container, a `docker_image` in the step
+  or task `[verifier.environment]`, or a `Dockerfile` or `docker-compose.yaml`
+  in the step or task `tests/` directory, defines a dedicated verifier that
+  must ship its own test script and never receives SkillEvaluator's grader.
+  Otherwise the separate verifier is built from `environment/` and receives the
+  uploaded tests. SkillEvaluator validates the verifier's Compose model against
+  its environment allowlist, and rejects `docker-compose.yml` verifier
+  definitions, which Harbor ignores. Standard grading modes reject separate
+  verifiers entirely; see [Custom Graders & Tasks](/skills/skillevaluator/custom-graders).
+- Harbor 0.25 rejects a `reward.json` whose top-level values are not all
+  finite numbers. SkillEvaluator's verifier and wrapped custom graders already
+  write numeric rewards; a native task's own test script must do the same. When
+  Harbor's job statistics do not account for every trial, the failure names the
+  first trial or step exception Harbor recorded, such as
+  `VerifierOutputParseError`, instead of reporting only a trial count.
+## Two ways to run Tier 3
+
+| Use case | Command | When to use |
+| --- | --- | --- |
+| Full validation | `skillevaluator validate ./my-skill` | Run all three tiers; Tier 3 uses autopilot and is advisory by default, optionally blocking |
+| Focused evaluation | `skillevaluator tier3 evaluate ./my-skill --agents codex` | Iterate on datasets, agents, environments, and grading settings |
+
+Attached to `validate`, Tier 3 is advisory by default: its results appear in the
+combined reports without changing the exit code. Add `--block-on-agent-eval`
+to make its findings gate, including evidence that the selected YAML/JSON
+dataset or native Harbor source is missing or invalid. A blocking Tier 3 passes
+only with a completed `PASS` verdict and complete attempt coverage; `NEUTRAL`
+and `FAIL` verdicts exit 1. Autopilot is enabled
+by default for skills: it generates one starter case when no source exists and
+reuses valid existing sources unchanged. `--full` remains supported but is
+unnecessary. Use `--tiers 1,2` or `--no-tier3` to skip live evaluation;
+`--no-autopilot` requires an existing evaluation source.
+
+```bash title="Make attached Tier 3 blocking"
+skillevaluator validate ./my-skill --agents codex \
+  --block-on-agent-eval
+```
+
+<Note>
+`validate` forwards a dedicated Tier 3 flag group (`--agents`, `--env-mode`,
+`--grading-mode`, and the rest) to the live-eval engine whenever Tier 3 is
+enabled, which is the default for skills. `--agent-eval` remains a supported
+alias for `--tier3`; explicit tier selection and disable flags control the
+scope. See the [CLI Reference](/skills/skillevaluator/cli-reference) for the full group.
+</Note>
+## Paired Tier 3 in automatic CI
+
+The [all-tier CI setup](/skills/skillevaluator/advanced-ci) consumes
+committed native `evals/` datasets with full coverage. It runs each selected
+case both with and without the skill; it does not use autopilot, generate new
+cases, or skip the baseline. Docker is the default, with native local mode as
+the other supported CI environment. Cloud backends remain available through
+the expert CLI but are outside this onboarding path.
+
+Tier 3 and Tier 2 are advisory; only Tier 1 gates CI. Onboarding's
+`--tier3-required`, GitHub's `tier3-required` input and GitLab's
+`SKILL_EVAL_TIER3_REQUIRED` variable are deprecated and ignored, even when true;
+they cannot make Tier 3 block CI. CI preserves native
+reports for missing credentials, readiness failures and partial runs as well
+as completed scores. Native reports include coverage and paired arm evidence,
+Skill Lift, attempts, available latency/resource metrics and trial links. An
+incomplete advisory result is visible and never described as a completed pass.
+See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#retained-three-tier-ci-evidence).
+
+## Troubleshooting
+
+<AccordionGroup>
+  <Accordion title="A public LLM provider is required for live evaluation">
+    Set `SKILL_EVAL_LLM_PROVIDER` and the corresponding evaluator-provider key.
+    See [Providers & Credentials](/skills/skillevaluator/configuration).
+  </Accordion>
+  <Accordion title="Agent authentication fails">
+    Export the agent's credential in the host environment where you run
+    `skillevaluator` — agent credentials are read only from the host, never
+    from `evals/config.yml`. It is a separate role from the evaluator key,
+    except with `nv_build` in Docker, Kata, or local mode, where one
+    `NVIDIA_API_KEY` covers both.
+  </Accordion>
+  <Accordion title="evaluate cannot start the environment">
+    Start Docker or configure the selected `--env-mode`, then re-run
+    `skillevaluator doctor` with the same agent and environment.
+  </Accordion>
+  <Accordion title="NeMo Gym cannot find the OpenCode runtime installer">
+    Use the pinned editable source-checkout installation above. At this Gym
+    revision, a non-editable wheel installation creates component-resource
+    symlinks that its Docker uploader preserves as dangling host-path links.
+    OpenCode then fails before execution with a missing
+    `install_opencode_runtime.sh`. Repoint `SKILL_EVAL_NEMO_GYM_BIN` at the
+    editable installation and rerun; the checkout must remain available.
+  </Accordion>
+  <Accordion title="NeMo Gym cannot resolve or reach its service host">
+    Set `SKILL_EVAL_NEMO_GYM_HOST` to a host LAN or bridge IPv4 address reachable
+    from the Docker task containers. For example, on macOS with networking on
+    `en0`, use `export SKILL_EVAL_NEMO_GYM_HOST=$(ipconfig getifaddr en0)`.
+    Use the interface serving your Docker traffic; the configured address must
+    belong to the host because Gym also binds its services there.
+  </Accordion>
+  <Accordion title="Docker reports that all predefined address pools have been fully subnetted">
+    A trial's Compose project normally creates its own Docker network, and
+    Docker carves each one from a limited set of default address pools. Each
+    running trial holds a network, so a run holds up to `--n-concurrent`
+    networks for each agent running in parallel, and up to `--max-agents`
+    agents run in parallel, every selected agent by default. Networks that
+    interrupted or killed runs left behind, or too many trials at once, can use
+    the pools up. Docker then fails to create the next trial's network with
+    this error, or with `could not find an available, non-overlapping IPv4
+    address pool`, and the trial's failure reason names the cause ahead of
+    Docker's message. List the leftover trial containers and networks with
+    `docker ps -a --filter label=com.docker.compose.project` and
+    `docker network ls --filter label=com.docker.compose.project`, check their
+    project names, and remove the containers with `docker rm -f` and then the
+    networks with `docker network rm`. Then rerun, with a lower
+    `--n-concurrent` or `--max-agents` if the pools still run out.
+  </Accordion>
+  <Accordion title="No eval dataset or native task source found">
+    Write task requests and observable outcomes in `eval-guidance.md`, then run
+    `skillevaluator create-eval-dataset ./my-skill --prompt eval-guidance.md`.
+    For explicit skill-only generation, use
+    `skillevaluator create-eval-dataset ./my-skill --grounding skill`, or author an
+    accepted dataset file under `evals/`. See
+    [Eval Datasets](/skills/skillevaluator/eval-datasets).
+  </Accordion>
+  <Accordion title="Agent model is rejected">
+    Supply a model valid for that agent with `--agent-model AGENT=MODEL`. The
+    evaluator provider's default model is not automatically valid for every
+    agent.
+  </Accordion>
+  <Accordion title="A claude-code trial fails with AgentSafetyRefusalError">
+    The model provider's safety classifier stopped the selected model on that
+    case. SkillEvaluator turns Claude Code's refusal model fallback off
+    (`CLAUDE_CODE_DISABLE_REFUSAL_FALLBACK=1` in every staged task), so the
+    attempt ends on the selected model instead of retrying on another one.
+    Like any other failed trial, the attempt is not scored, so the arm no
+    longer has complete attempt coverage and its execution fails: after one
+    refusal in 20 cases with 3 attempts each, the run's `result.json` records
+    `Scored attempt coverage is 59/60`. `tier3 evaluate` then exits 1, and so
+    does `validate --block-on-agent-eval`. `tier3 evaluate --verbose` lists the
+    refused trial and its `AgentSafetyRefusalError` in the terminal. The
+    execution errors in `result.json` call it an `Unscoreable reward`, not an
+    agent runtime failure, because a refusal is the model's response to the
+    case rather than an infrastructure failure. Review the case prompt and the
+    skill content that the agent read, then rerun, or run the arm with another
+    model through `--agent-model claude-code=MODEL`. See
+    [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#supported-agents).
+  </Accordion>
+  <Accordion title="Results look wrong or a case is hard to diagnose">
+    Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and
+    deleted by default whether the run succeeds or fails. With retention on,
+    the Artifacts panel prints the exact
+    `skillevaluator tier3 harbor-view <JOBS_DIR>` command to browse the
+    retained jobs; `skillevaluator view` opens the HTML report.
+  </Accordion>
+</AccordionGroup>

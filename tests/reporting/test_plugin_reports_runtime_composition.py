@@ -8,7 +8,7 @@ from copy import deepcopy
 import pytest
 
 from skillevaluator.models import ValidationResult
-from skillevaluator.reporting import HTMLReporter
+from skillevaluator.reporting import HTMLReporter, JUnitReporter
 from skillevaluator.reporting.plugin_runtime import project_plugin_runtime
 from skillevaluator.reporting.plugin_static import project_plugin_static
 
@@ -83,3 +83,24 @@ def test_invalid_retained_runtime_is_rejected_before_html_rendering(entrypoint):
         else:
             plugin_reports.augment_plugin_report(reporter, "previously rendered document", results)
     assert reporter.calls == []
+
+
+@pytest.mark.parametrize("with_runtime", [False, True], ids=["static", "static-and-runtime"])
+def test_junit_keeps_plugin_evidence_out_of_the_xml(with_runtime):
+    from skillevaluator.reporting import plugin_reports
+
+    metadata = {"plugin": {"name": "retained-plugin", "component_inventory": {"complete": True, "components": []}}}
+    if with_runtime:
+        metadata["plugin_runtime_report"] = project_plugin_runtime(
+            {"run_dir": "/absent/saved-run", "execution_status": "succeeded"},
+            provenance={"plugin": "retained-plugin", "runtime_evidence": {}},
+        ).payload()
+    results = [ValidationResult(validator_name="SCHEMA", metadata=metadata)]
+    assert project_plugin_static(results) is not None
+    reporter = JUnitReporter()
+    plain = reporter.render_all(results)
+
+    # Neither the static nor the runtime adapter adds to JUnit, and neither raises.
+    assert plugin_reports.augment_plugin_report(reporter, None, results) == plain
+    assert plugin_reports.augment_plugin_report(reporter, plain, results) == plain
+    assert plugin_reports.render_plugin_report(reporter, results) == plain

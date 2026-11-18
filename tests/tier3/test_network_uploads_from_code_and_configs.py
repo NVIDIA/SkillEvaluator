@@ -63,10 +63,7 @@ def _network(result: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 _UPLOAD_MESSAGE = "Agent issued a network command that could exfiltrate data"
-_INCOMPLETE_INSPECTION_MESSAGE = (
-    "Upload inspection of code or a client config the agent ran stopped at its work "
-    "limit before it could decide, so the call counts as a possible network upload"
-)
+_INCOMPLETE_INSPECTION_MESSAGE = "Upload inspection stopped at its work limit before it could decide"
 
 
 def _assert_upload(result: dict[str, Any], *, incomplete: bool = False) -> None:

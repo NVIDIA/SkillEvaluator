@@ -13919,14 +13919,17 @@ def check_security(
             if upload:
                 # A reading that stopped before it could decide warns and scores
                 # as an upload, but its finding says so (see SECURITY_INSPECTION_INCOMPLETE).
+                # The message stays under 80 characters: the Tier 3 report lists the
+                # result's reason, which begins with this message, and then the finding
+                # with its attribution label, and it drops a line whose first 80
+                # characters match an earlier line's.
                 incomplete = upload == _UPLOAD_INCOMPLETE
                 findings.append(
                     _security_finding(
                         finding_type="network_exfiltration_risk",
                         severity="warning",
                         message=(
-                            "Upload inspection of code or a client config the agent ran stopped at its work "
-                            "limit before it could decide, so the call counts as a possible network upload"
+                            "Upload inspection stopped at its work limit before it could decide"
                             if incomplete
                             else "Agent issued a network command that could exfiltrate data"
                         ),

@@ -7,6 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/skillevaluator.svg?label=PyPI)](https://pypi.org/project/skillevaluator/)
+[![Reusable CI templates](https://img.shields.io/badge/Reusable%20CI-templates-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
 [![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
 [![Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
@@ -19,6 +20,11 @@
 
 SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
 on task results: start with quality checks, then compare runs with and without a skill.
+
+Catch skill issues before merge. Connect your repository to SkillEvaluator with a
+[CI template](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
+for automated quality and security gates, without building or maintaining
+evaluation code.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -68,7 +74,7 @@ skillevaluator validate \
 
 <p><img src="https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/928cc9d483fe9fef2d5011c3ca8f132cda46730a/docs/assets/get-started-ci.svg" width="250" alt="Add it to your repo via CI"></p>
 
-Our CI template checks every skill change, no code to maintain. Run in your GitHub repo to open a setup PR:
+Check every skill change. Run in your GitHub repo to open a setup PR:
 
 ```bash
 skillevaluator ci init
@@ -96,7 +102,7 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 
 ### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill?
 
-Requires [GitHub source](https://docs.nvidia.com/skills/skillevaluator/installation); not in PyPI 0.9.0. No model key or agent run.
+Included in SkillEvaluator 1.0.1; see [Installation](https://docs.nvidia.com/skills/skillevaluator/installation) for package availability. No model key or agent run.
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -115,7 +121,7 @@ Illustrative summary of versioned profiles. Full output can include notes and sc
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` on current source includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
+`validate` in 1.0.1 includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
 [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
@@ -166,7 +172,7 @@ Each tier is independent. Use the [all-tier installation](https://docs.nvidia.co
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
 | Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-reference.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
-| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | GitHub source; no API key or agent run |
+| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | SkillEvaluator 1.0.1; no API key or agent run |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 

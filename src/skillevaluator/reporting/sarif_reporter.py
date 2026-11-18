@@ -98,12 +98,18 @@ def _resolve_for_reporting(path: Path) -> Path:
     Non-strict ``realpath`` can instead expand their suffix on each call, so
     detect loops strictly before falling back for missing path components.
     """
-    try:
-        return Path(os.path.realpath(path, strict=True))
-    except OSError as exc:
-        if exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921:
-            return path.absolute()
-        return Path(os.path.realpath(path))
+    suffix: list[str] = []
+    while True:
+        try:
+            resolved = Path(os.path.realpath(path, strict=True))
+        except OSError as exc:
+            is_loop = exc.errno == errno.ELOOP or getattr(exc, "winerror", None) == 1921
+            if is_loop and path.parent != path:
+                suffix.append(path.name)
+                path = path.parent
+                continue
+            resolved = path.absolute() if is_loop else Path(os.path.realpath(path))
+        return Path(os.path.normpath(resolved.joinpath(*reversed(suffix))))
 
 
 def _resolve_artifact_path(file_path: str, scan_root: Path | None) -> Path:

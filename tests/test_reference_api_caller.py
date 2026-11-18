@@ -27,7 +27,11 @@ def _load_script(module_name: str):
     spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / f"{module_name}.py")
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(SCRIPTS_DIR))
     return module
 
 
@@ -113,3 +117,11 @@ def test_openapi_parser_rejects_non_http_urls_without_opening_them() -> None:
     result = parser.fetch_spec("file:///etc/passwd")
 
     assert result == {"error": "Failed to fetch spec: Only absolute HTTP or HTTPS URLs are supported"}
+
+
+@pytest.mark.parametrize("script", ["call_api", "parse_openapi"])
+def test_scripts_share_one_url_scheme_check(script: str) -> None:
+    module = _load_script(script)
+
+    assert module.validate_http_url.__module__ == "url_safety"
+    assert "def validate_http_url" not in (SCRIPTS_DIR / f"{script}.py").read_text(encoding="utf-8")

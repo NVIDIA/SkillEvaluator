@@ -272,7 +272,7 @@ def test_every_git_root_lookup_names_a_non_ascii_root(tmp_path: Path, monkeypatc
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows strips trailing whitespace in directory names")
-@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n"])
+@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n", "repo\r"])
 @pytest.mark.parametrize("lookup", [resolve_git_root, find_git_repo_root, git_root_for], ids=lambda f: f.__name__)
 def test_every_git_root_lookup_preserves_trailing_whitespace(tmp_path: Path, folder: str, lookup) -> None:
     repo_root = tmp_path / folder
@@ -284,7 +284,7 @@ def test_every_git_root_lookup_preserves_trailing_whitespace(tmp_path: Path, fol
 
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Windows strips trailing whitespace in directory names")
-@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n"])
+@pytest.mark.parametrize("folder", ["repo ", "repo\t", "repo\n", "repo\r"])
 @pytest.mark.parametrize("consumer", ["ci-onboarding", "verifier-provenance"])
 def test_additional_git_root_consumers_preserve_trailing_whitespace(tmp_path: Path, folder: str, consumer) -> None:
     repo_root = tmp_path / folder

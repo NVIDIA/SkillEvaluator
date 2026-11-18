@@ -33,23 +33,32 @@ class SetupError(Exception):
     """A safely described setup failure."""
 
 
-def run(args: list[str], *, cwd: Path | None = None, optional: bool = False, timeout: int = 60) -> str:
+def run(
+    args: list[str],
+    *,
+    cwd: Path | None = None,
+    optional: bool = False,
+    timeout: int = 60,
+    preserve_newlines: bool = False,
+) -> str:
     env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_")}
     env["GIT_TERMINAL_PROMPT"] = "0"
     if args[0] in {"gh", "git"}:
         env["GH_HOST"] = "github.com"
         env.pop("GH_REPO", None)
     try:
-        result = subprocess.run(args, cwd=cwd, env=env, text=True, capture_output=True, timeout=timeout)
+        result = subprocess.run(
+            args, cwd=cwd, env=env, text=not preserve_newlines, capture_output=True, timeout=timeout
+        )
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise SetupError(f"Could not run {args[0]}; check that it is installed and responsive.") from exc
     if result.returncode and not optional:
         # Do not echo subprocess stderr: authentication helpers can include credentials.
         raise SetupError(f"{args[0]} could not complete this step. Check authentication, access and repository state.")
-    return result.stdout if not result.returncode else ""
+    return os.fsdecode(result.stdout) if not result.returncode else ""
 
 
-def git(repo: Path, *args: str, optional: bool = False, network: bool = False) -> str:
+def git(repo: Path, *args: str, optional: bool = False, network: bool = False, preserve_newlines: bool = False) -> str:
     command = ["git", "-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false"]
     if not network:
         command += ["-c", "protocol.allow=never"]
@@ -63,7 +72,7 @@ def git(repo: Path, *args: str, optional: bool = False, network: bool = False) -
             "credential.https://github.com.helper=!gh auth git-credential",
         ]
     try:
-        return run([*command, *args], cwd=repo, optional=optional)
+        return run([*command, *args], cwd=repo, optional=optional, preserve_newlines=preserve_newlines)
     except SetupError as exc:
         if network and args and args[0] == "push":
             raise SetupError(
@@ -75,7 +84,9 @@ def git(repo: Path, *args: str, optional: bool = False, network: bool = False) -
 
 def repository_root(path: Path) -> Path:
     repo = path.resolve(strict=True)
-    top = Path(git(repo, "rev-parse", "--show-toplevel").removesuffix("\n")).resolve(strict=True)
+    top = Path(git(repo, "rev-parse", "--show-toplevel", preserve_newlines=True).removesuffix("\n")).resolve(
+        strict=True
+    )
     if top != repo:
         raise SetupError("Run from the Git repository root, or pass that root using --repo.")
     return repo

@@ -4,6 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Retain destructive-command findings when a recursive rm receives its first deletion target through a backtick substitution.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

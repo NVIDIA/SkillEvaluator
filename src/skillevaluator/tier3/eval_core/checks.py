@@ -8310,6 +8310,34 @@ def _rm_targets_outside_tmp(
     return False
 
 
+def _rm_backtick_target_seen(text: str, _depth: int = 0) -> bool:
+    """Open the existing target walk for a parsed substitution operand.
+
+    A closing backtick after an operandless rm is not an operand. Preserve
+    the original regex language and use shell words to distinguish that case.
+    """
+    if _depth > 3 or len(text) > 65_536 or "`" not in text or not _rm_may_name(text, ("rm",)):
+        return False
+    if _rm_read_cost(text) > _RM_MAX_EXTRA_CHARS:
+        return False
+    parsed = _rm_shell_words(text, wide=False)
+    if parsed is None or len(parsed[0]) > 4096:
+        return False
+    tokens = parsed[0]
+    for index, end in _rm_command_words(tokens, tokens).items():
+        words = tokens[index:end]
+        if (
+            _shell_executable(words[0]) == "rm"
+            and any("${__rm_substitution}" in word for word in words[1:])
+            and _RM_PATTERN.search(" ".join(_rm_shown(word) for word in words).lower())
+        ):
+            return True
+    # The existing classifier also reads quoted script text. Bound these
+    # nested readings independently of its original regex and work budget.
+    candidates = dict.fromkeys(token for token in tokens if "`" in token and token != text)
+    return any(_rm_backtick_target_seen(token, _depth + 1) for token in list(candidates)[:16])
+
+
 def _rm_reading(
     pattern: Any,
     text: str,
@@ -8338,6 +8366,8 @@ def _rm_reading(
         return False
     if main_only:
         return None
+    if _rm_backtick_target_seen(text):
+        return False
     # The gate's own first test only scans the text, so it counts nothing. The rm test scans up to
     # 30 spellings of text the gate would read, so once the count is spent it is not run, and text
     # it turns away counts its length (it is not lexed, so not the per-word cost of _rm_read_cost).

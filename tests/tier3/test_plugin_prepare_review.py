@@ -137,6 +137,10 @@ def test_explicit_dataset_preserves_non_files_fixture_paths(tmp_path: Path) -> N
         (["CON", "con.txt", "LPT1"], ["case-CON", "case-con.txt", "case-LPT1"]),
         (["NUL.tar.gz", "com9.log", "LPT0", "COM10"], ["case-NUL.tar.gz", "case-com9.log", "LPT0", "COM10"]),
         (["CON", "case-CON", "con"], ["case-CON", "case-CON-2", "case-con-3"]),
+        (
+            ["CON." + "x" * 124, "CON." + "x" * 118 + ".yy"],
+            ["case-CON." + "x" * 119, "case-CON." + "x" * 118],
+        ),
         (["x" * 129], ["x" * 128]),
         (["x" * 127 + ".z"], ["x" * 127]),
         (["x" * 128] * 2, ["x" * 128, "x" * 126 + "-2"]),
@@ -156,6 +160,7 @@ def test_explicit_dataset_preserves_non_files_fixture_paths(tmp_path: Path) -> N
         "reserved",
         "reserved-extensions",
         "reserved-prefix-collision",
+        "reserved-long",
         "long",
         "truncation-dot",
         "long-duplicate",

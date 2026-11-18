@@ -4,7 +4,69 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Add a README badge linking to the reusable GitHub and GitLab CI templates,
+  and explain how to add automated quality and security gates to a skills
+  repository without maintaining evaluation code.
+- Expand repository CI onboarding in the README, linked from the Get started
+  table, with guided setup, current GitHub and GitLab templates, and their
+  validation and security coverage. Highlight the verified 500+ static rules
+  and detection patterns behind the CI check groups. Use `validate --tiers 1`
+  and scanner setup in the CLI getting-started card, with the all-tier command
+  in a collapsible section.
+- Simplify the README Harness Check introduction with key-free and agent-free
+  callouts now that the supporting 1.0.1 package is published.
+- Describe the other Tier 1 checks alongside Harness Check in the README and
+  include `harness` in the reference page's default check list.
+
 ### Fixed
+
+- Malformed optional trajectory `final_metrics` leave condition usage unavailable
+  and no longer abort fresh or reused Tier 3 result collection.
+- Allow GitHub all-tier CI to opt out of deployment records while retaining
+  environment secrets. Existing consumers keep deployment tracking by default.
+- Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
+  README, starting with the next release. Published 1.0.1 metadata is unchanged.
+- Tier 3 security grading now gives a destructive-command finding for a
+  recursive `rm` that Python or Node code runs from a literal argument
+  vector, as in
+  `python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/home/u'])"`,
+  `spawnSync('rm', ['-rf', '/home/u'])` or an execution tool's `code`
+  argument, and for an argument-vector command such as
+  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 1.0.1. The
+  vector is checked as the shell command it names, from where the interpreter
+  starts, so a `/tmp` target, a force-only `rm -f` of a file outside system
+  and home paths, and a cache or trial output cleanup still score `1.0`. The
+  Tier 3 guide lists the forms that are not read. Python code nested too deep
+  to parse no longer stops the check on Python 3.12 and later. Both the host
+  checker and the bundled Harbor verifier apply the fix.
+
+## 1.0.1 - 2026-11-17
+
+### Documentation
+
+- Refresh the versioned CI catalog and comments-only setup for 1.0.1, and
+  clarify that all-tier CLI onboarding was already included in 0.9.0.
+  Keep published PyPI availability separate from the new release pins.
+- Describe Harness Check, JUnit and the NeMo Gym adapter as 1.0.1 capabilities
+  while keeping package availability explicit.
+
+### Fixed
+
+- Disable OpenCode snapshots by default to avoid broken-pipe failures after a
+  completed task, while preserving explicit user snapshot settings.
+- Preserve opaque Claude gateway model IDs across Docker, local, and native Harbor
+  command construction while keeping native Anthropic, Vertex, and Bedrock routes
+  independent from a gateway-backed judge.
+- Count a standalone Tier 2 evaluation as one skill in JSON and HTML reports,
+  and prioritize failed-runtime recovery without hiding authored source or runner
+  instructions.
+- Select starter-demo score expectations by the installed evaluator version,
+  preserving the released 0.9.0 example while recognizing the 1.0.0 scores.
+- Retain the GitLab tools revision in aggregated report provenance.
+- Document the tested editable NeMo Gym installation required by OpenCode and
+  the completed Codex, Claude Code, and OpenCode live paired runs.
 
 - Folder validators apply skill-discovery exclusions only below the requested
   scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
@@ -15,6 +77,14 @@ All notable changes to SkillEvaluator are documented in this file.
   existing skill its first two cases ask the agent to convert, under
   `evals/files/`, and each case declares `files` so only its own fixture is
   staged. Previously those cases had no workspace input to work from.
+- The bundled `api-caller` example no longer fails Tier 2 deduplication: its
+  two scripts share one HTTP(S) URL check from `scripts/url_safety.py` instead
+  of each defining `_validate_http_url()`, and `call_api.py` no longer repeats the
+  SKILL.md usage section in its module docstring.
+- Tier 3 dataset generation no longer names an import-only helper module, such
+  as `url_safety.py`, as a case's `expected_script` when the skill has a script
+  that does something when run. A skill with one script, or only helpers, keeps
+  its previous choice.
 
 - Tier 3 security grading now reads `rm` that `eval`, `env -S` or a
   `git grep -O` pager runs, with `$'...'` words decoded and joined, so
@@ -32,20 +102,6 @@ All notable changes to SkillEvaluator are documented in this file.
   These readings stop once the texts they check count 256 KiB of a trace,
   each word, shell operator and substitution counting 10 characters more,
   and the rest of the trace keeps its earlier reading.
-
-- Tier 3 security grading now gives a destructive-command finding for a
-  recursive `rm` that Python or Node code runs from a literal argument
-  vector, as in
-  `python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/home/u'])"`,
-  `spawnSync('rm', ['-rf', '/home/u'])` or an execution tool's `code`
-  argument, and for an argument-vector command such as
-  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 1.0.0. The
-  vector is checked as the shell command it names, from where the interpreter
-  starts, so a `/tmp` target, a force-only `rm -f` of a file outside system
-  and home paths, and a cache or trial output cleanup still score `1.0`. The
-  Tier 3 guide lists the forms that are not read. Python code nested too deep
-  to parse no longer stops the check on Python 3.12 and later. Both the host
-  checker and the bundled Harbor verifier apply the fix.
 
 ## 1.0.0 - 2026-11-17
 

@@ -565,10 +565,11 @@ Runs can be bounded with `--max-agent-tokens`, `--max-judge-calls`,
 `--max-attempts-total`, `--max-cost-usd`, and `--price-file`. The price file is
 JSON keyed by model identifier; each model entry requires `input_per_mtok` and
 `output_per_mtok`, and may set `cached_input_per_mtok` (defaulting to the
-input rate). Cached prompt tokens use the cached rate and remaining prompt
-tokens use the input rate. A model key must exactly match the resolved agent
-model. Relative `harbor.price_file` paths resolve from the source skill
-directory.
+input rate). Duplicate JSON object keys and boolean rates are rejected; rates
+must be finite and non-negative. Cached prompt tokens use the cached rate and
+remaining prompt tokens use the input rate. A model key must exactly match the
+resolved agent model. Relative `harbor.price_file` paths resolve from the source
+skill directory.
 
 The price file is user-supplied, not a verified billing rate card. Its currency
 is as supplied by the file, labelled USD by `--max-cost-usd`; no currency

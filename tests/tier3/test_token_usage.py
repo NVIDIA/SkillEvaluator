@@ -8,9 +8,11 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.tier3 import token_usage
 from skillevaluator.tier3.harbor.collector import _pass_summary
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage, normalize_token_counts
@@ -629,6 +631,18 @@ def test_no_measured_attempt_gives_no_token_usage() -> None:
 # A real dataset ID that Harbor's 32-character trial name cuts short.
 _LONG_CASE = "huggingface-factory-peft-sft-local-return"
 _CUT_CASE = _LONG_CASE[:32].rstrip("_-")
+
+
+def test_truncated_case_names_do_not_scan_stop_on_pass_matches() -> None:
+    cases = [f"case-{index:03d}-with-a-long-descriptive-name" for index in range(50)]
+    agent = _agent([_trial(case[:32], 100, 20) for case in cases], [_trial(case[:32], 90, 10) for case in cases])
+
+    with patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match:
+        usage = build_token_usage({"codex": agent}, dataset_case_ids=cases)
+
+    assert usage is not None
+    assert [row["entry_id"] for row in usage["agents"]["codex"]["cases"]] == cases
+    assert match.call_count == 0
 
 
 def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() -> None:

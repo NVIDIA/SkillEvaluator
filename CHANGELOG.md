@@ -61,6 +61,23 @@ All notable changes to SkillEvaluator are documented in this file.
   that does something when run. A skill with one script, or only helpers, keeps
   its previous choice.
 
+- Tier 3 security grading now reads `rm` that `eval`, `env -S` or a
+  `git grep -O` pager runs, with `$'...'` words decoded and joined, so
+  `eval '$CMD -rf /workspace'` and `env -S 'rm\_-rf\_/workspace'` receive a
+  destructive-command finding, and so does a quoted `rm` command name such as
+  `"rm" -rf /workspace`, in `bash -c` text or text a here-document feeds to a
+  shell only beside other `rm` text. Other commands keep their reading, so
+  `grep 'rm' -rn .` and an array literal such as `cmd=("rm" -rf build)` do
+  not receive it. The `rm` pattern now runs in linear time: `rm -` and
+  40,000 letters `r` take milliseconds instead of 10 to 13 seconds. Text the
+  lexer cannot split is read in one pass, command by command, where more
+  than 65,536 distinct `rm` fragments get it, and so does a command read for
+  a quoted `rm` name or for `eval`, `env -S` or pager text that may run
+  `rm`, also one inside such text, when it is over 64 KiB or 4,096 tokens.
+  These readings stop once the texts they check count 256 KiB of a trace,
+  each word, shell operator and substitution counting 10 characters more,
+  and the rest of the trace keeps its earlier reading.
+
 ## 1.0.0 - 2026-11-17
 
 ### Release overview

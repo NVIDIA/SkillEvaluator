@@ -39,6 +39,69 @@ def test_scope_projection_distinguishes_clean_zero_from_skipped():
     assert result == original
 
 
+@pytest.mark.parametrize(
+    "dependency_message",
+    ["No duplicate dependency references found", "Dependency references do not apply to this manifest"],
+)
+def test_plugin_dependency_checks_do_not_hide_completed_context_or_misplace_catalog_skips(dependency_message):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    context = _within()
+    dependency = ValidationResult(validator_name="Plugin Dependency Deduplication")
+    dependency.add_success("plugin_dep_dedup", dependency_message)
+    catalogs = [
+        ValidationResult(
+            validator_name=name,
+            metadata={"skipped": True, "optional_skip": True, "skip_reason": "No local catalog supplied"},
+        )
+        for name in ("Inter-Skill Deduplication", "Inter-Plugin Deduplication")
+    ]
+    results = [dependency, context, *catalogs]
+    before = deepcopy(results)
+
+    views = tier2_scope_views(results)
+    within, across = views[:2]
+    assert (within.completed, within.duplicates, within.affected) == (1, 0, 0)
+    assert within.results == (context,)
+    assert across.results == tuple(catalogs)
+    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (0, None, None, None)
+    assert not across.not_run
+
+    output = HTMLReporter(include_timestamp=False).render_all(results)
+    within_html = output.split('id="tier2-within"', 1)[1].split("</section>", 1)[0]
+    across_html = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
+    dependency_html = output.split('id="tier2-other"', 1)[1].split("</section>", 1)[0]
+    assert "Unavailable" not in within_html
+    assert "No local catalog supplied" not in within_html
+    assert across_html.count("No local catalog supplied") == 1
+    assert all(result.validator_name in across_html for result in catalogs)
+    assert "Not run by this command." not in across_html
+    assert dependency_message in dependency_html
+    assert "No semantic overlaps detected." not in dependency_html
+    assert 'class="tier2-scope-summary"' not in dependency_html
+    assert results == before
+
+
+@pytest.mark.parametrize("context_present", [False, True])
+def test_dependency_only_evidence_cannot_establish_semantic_comparison_coverage(context_present):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    dependency = ValidationResult(validator_name="Plugin Dependency Deduplication")
+    dependency.add_success("plugin_dep_dedup", "No duplicate dependency references found")
+    results = [dependency]
+    if context_present:
+        results.append(ValidationResult(validator_name="Context Deduplication"))
+
+    within = tier2_scope_views(results)[0]
+    assert within.completed is None
+    assert within.duplicates is None
+    assert within.affected is None
+    assert within.not_run is not context_present
+    output = HTMLReporter(include_timestamp=False).render_all(results)
+    assert "No semantic overlaps detected." not in output
+    assert "No duplicate dependency references found" in output
+
+
 def test_catalog_counts_self_exclusion_and_pairwise_is_not_catalog():
     from skillevaluator.reporting.tier2_views import tier2_scope_views
 

@@ -39,7 +39,9 @@ def _count(value: object) -> int | None:
 
 def _scope(result: ValidationResult) -> str | None:
     name = " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
-    if "similarity" in name:
+    if name == "plugin dependency deduplication":
+        return "other"
+    if name in {"inter skill deduplication", "inter plugin deduplication"} or "similarity" in name:
         return "across"
     if "dedup" in name or "context optimization" in name:
         return "within"
@@ -214,19 +216,24 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 _skip_views(members),
             )
         )
-    unknown = tuple(result for result in results if _scope(result) is None)
-    if unknown:
+    other = tuple(result for result in results if _scope(result) in {None, "other"})
+    if other:
+        notes = []
+        if any(_scope(result) == "other" for result in other):
+            notes.append("Dependency-reference checks are separate from content comparisons.")
+        if any(_scope(result) is None for result in other):
+            notes.append("Comparison scope unavailable.")
         views.append(
             Tier2ScopeView(
                 "other",
                 "Other recorded checks",
-                unknown,
+                other,
                 None,
                 None,
                 None,
                 None,
-                ("Comparison scope unavailable.",),
-                skips=_skip_views(unknown),
+                tuple(notes),
+                skips=_skip_views(other),
             )
         )
     return tuple(views)

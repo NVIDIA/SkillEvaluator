@@ -159,7 +159,7 @@ def extract_retry_after(exc: BaseException) -> str | None:
         headers = current.headers if isinstance(current, urllib.error.HTTPError) else getattr(response, "headers", None)
         if headers:
             value = headers.get("retry-after") or headers.get("Retry-After")
-            if value is not None:
+            if value:
                 retry_after = value
         current = _exception_cause(current)
     return retry_after

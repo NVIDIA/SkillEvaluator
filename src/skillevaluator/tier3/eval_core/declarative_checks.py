@@ -93,6 +93,9 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
         return None
     command = _command_text(call)
     tokens = _script_invocation._shell_tokens(command, strip_comment_text=True)
+    if not tokens:
+        # Uncertain comment boundaries are not evidence of a simple command.
+        return None
     if any(
         token
         in {

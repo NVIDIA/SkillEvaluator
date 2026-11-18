@@ -250,3 +250,62 @@ def test_comment_only_lines_keep_the_existing_command_boundaries(tmp_path, shell
     assert completed.returncode == status
     assert result["passed"] is (status == 0)
     assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("operand", "relative_script"),
+    [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
+)
+@pytest.mark.parametrize("argument", ['"$(printf " # hi")"', '"`printf " # hi"`"', '"${0:+" # hi"}"'])
+@pytest.mark.parametrize(("status", "tail", "shell_status"), [(2, " |& cat", 0), (0, " |& cat; false", 1)])
+def test_nested_expansion_quotes_cannot_hide_a_real_pipeline(
+    tmp_path, shell, operand, relative_script, argument, status, tail, shell_status
+):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, operand, relative_script, status, f" {argument}{tail}"
+    )
+    assert completed.returncode == shell_status
+    assert completed.returncode != status
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize(
+    "argument",
+    [
+        "'$(printf \" # hi\")'",
+        "'`printf \" # hi\"`'",
+        "'${0:+\" # hi\"}'",
+        "$'$(printf \" # hi\")'",
+        "$'`printf \" # hi\"`'",
+        "$'${0:+\" # hi\"}'",
+        r'"\$(printf \" # hi\")"',
+        r'"\`printf \" # hi\"\`"',
+        r'"\${0:+\" # hi\"}"',
+    ],
+)
+def test_literal_substitution_text_keeps_the_script_status(tmp_path, shell, status, argument):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, f" {argument} # note |& ignored"
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize(
+    "comment",
+    [' # "$(printf " # hi")" |& ignored', ' # "`printf " # hi"`" |& ignored', ' # "${0:+" # hi"}" |& ignored'],
+)
+def test_substitution_text_inside_a_comment_keeps_the_script_status(tmp_path, shell, status, comment):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, comment
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]

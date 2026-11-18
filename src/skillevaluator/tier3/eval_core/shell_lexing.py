@@ -190,8 +190,8 @@ def _keep_attached_descriptors(text: str) -> str:
     return "".join(out)
 
 
-def _without_shell_comment_text(text: str) -> str:
-    """Keep each real comment's # marker so command boundaries stay unchanged."""
+def _without_shell_comment_text(text: str) -> str | None:
+    """Keep comment markers, or return None for unmodelled nested quote contexts."""
     out = []
     quote = None
     word_start = True
@@ -205,6 +205,10 @@ def _without_shell_comment_text(text: str) -> str:
                 word_start = False
             index += 2
             continue
+        if quote not in {"'", "$'"} and (text.startswith(("$(", "${"), index) or char == "`"):
+            # Expansions have their own quote context, even within double quotes.
+            # Do not guess which hashes are comments and discard real operators.
+            return None
         if quote is not None:
             out.append(char)
             if char == quote[-1]:
@@ -240,6 +244,8 @@ def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False) -> list[str]:
     if strip_comment_text:
         # Comments end at physical newlines, before those become separators.
         normalized = _without_shell_comment_text(normalized)
+        if normalized is None:
+            return []
         source = normalized
     normalized = normalized.replace("\n", " ; ")
     normalized = _keep_attached_descriptors(_mark_quoted_syntax(normalized))

@@ -121,7 +121,7 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     segments: list[list[str]] = [[]]
     separators: list[str] = []
     for token in tokens:
-        if token in _SHELL_SEPARATORS:
+        if token in _SHELL_SEPARATORS or token == "|&":
             if not segments[-1]:
                 return None
             separators.append(token)
@@ -135,7 +135,13 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
         return None
     if len(segments) == 1:
         # A negated shell pipeline records the inverse of the script status.
-        if segments[0][0] == "!":
+        words = segments[0]
+        start = 0
+        if words[0] == "time":
+            start = 1
+            while start < len(words) and words[start] == "-p":
+                start += 1
+        if start < len(words) and words[start] == "!":
             return None
         # Joining decoded tokens would lose quoted argument boundaries.
         return status if _cmd_executes_script(command, script, _shell=shell) is True else None

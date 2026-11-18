@@ -159,16 +159,16 @@ hosted publisher. The comment shows counts, status, quality score and grade, and
 the first action for each affected skill. The workflow run links to downloadable
 reports. No Pages settings, site history branch or report URL are needed.
 
-This is a source capability for a future release bundle. Existing archived
-bundles and the released `skillevaluator ci init` still configure hosted
-publication. Use a reviewed immutable revision containing the new workflow and
-helpers; do not add its filename to an older release pin.
+The [1.0.1 bundle](bundles/1.0.1/README.md) includes the comments-only workflow;
+the archived 0.9.0 bundle does not. Default `skillevaluator ci init` feedback
+still configures hosted publication. Use the versioned comments-only file;
+do not add its filename to an older release pin.
 
 1. Keep `.github/workflows/skill-checks.yml` named **Skill checks**, with one
    reusable scan job and the default **skill-evaluator-tier1** artifact name.
    Enable `id-token: write` alongside `contents: read` for signed execution
    receipts. Keep the reviewed evaluator workflow and image pins.
-2. Copy [`comment-skill-checks.yml`](templates/comment-skill-checks.yml) into
+2. Copy [`comment-skill-checks.yml`](bundles/1.0.1/comment-skill-checks.yml) into
    `.github/workflows/`. Pin its `uses:` and `tools-ref` to the reviewed comment
    workflow revision. Set `trusted-evaluator-shas` to the approved scanner
    revision; this may differ from the comment tools revision.

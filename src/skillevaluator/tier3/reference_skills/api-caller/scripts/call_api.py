@@ -2,41 +2,18 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""
-Generic API Caller
-
-Call any REST API endpoint directly or using an OpenAPI spec.
-
-Usage:
-    # Direct call
-    python call_api.py --url "https://api.example.com/data" --method GET
-
-    # With headers
-    python call_api.py --url "https://api.example.com/data" --headers '{"Authorization": "Bearer TOKEN"}'
-
-    # POST with body
-    python call_api.py --url "https://api.example.com/items" --method POST --data '{"name": "test"}'
-
-    # Using OpenAPI spec
-    python call_api.py --spec "https://api.weather.gov/openapi.json" --operation "point" --params '{"latitude": 37.7749}'
-"""
+"""Call a REST endpoint directly or through an OpenAPI operation. See SKILL.md for usage."""
 
 import argparse
 import json
 import sys
 from urllib.error import HTTPError, URLError
-from urllib.parse import urlencode, urlparse
+from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
+from url_safety import validate_http_url
+
 _UNSET = object()
-
-
-def _validate_http_url(url: str) -> str:
-    """Reject local-file and custom URL schemes before making a request."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Only absolute HTTP or HTTPS URLs are supported")
-    return url
 
 
 def make_request(
@@ -55,7 +32,7 @@ def make_request(
     }
 
     try:
-        url = _validate_http_url(url)
+        url = validate_http_url(url)
         # Prepare headers
         req_headers = {
             "User-Agent": "skills-agent/1.0 (api-caller skill)",
@@ -74,7 +51,7 @@ def make_request(
         req = Request(url, data=body, headers=req_headers, method=method)
 
         # Make request
-        # _validate_http_url() rejects non-HTTP schemes before this request.
+        # validate_http_url() rejects non-HTTP schemes before this request.
         with urlopen(req, timeout=timeout) as response:  # nosec B310
             result["status_code"] = response.status
             result["headers"] = dict(response.headers)
@@ -147,7 +124,10 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
     for key, value in params.items():
         placeholder = "{" + key + "}"
         if placeholder in url_path:
-            url_path = url_path.replace(placeholder, str(value))
+            path_value = str(value)
+            if path_value in {".", ".."}:
+                raise ValueError(f"Path parameter '{key}' must not be '.' or '..'")
+            url_path = url_path.replace(placeholder, quote(path_value, safe=""))
         else:
             query_params[key] = value
 
@@ -239,7 +219,11 @@ def main():
             )
             sys.exit(1)
 
-        url = build_url_from_spec(spec, path, params)
+        try:
+            url = build_url_from_spec(spec, path, params)
+        except ValueError as exc:
+            _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
+            sys.exit(1)
         method = spec_method
 
         print(f"Resolved OpenAPI operation: {method} {url}", file=sys.stderr)

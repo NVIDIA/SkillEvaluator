@@ -6,6 +6,7 @@ from __future__ import annotations
 import json
 import re
 import shlex
+import subprocess
 import sys
 import tomllib
 from collections.abc import Sequence
@@ -916,3 +917,30 @@ def test_fern_pin_guard_rejects_unreviewed_dependency_changes(
 
     with pytest.raises(AssertionError):
         test_the_pinned_fern_cli_version_matches_the_fern_config()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="Package smoke runs in Ubuntu Bash.")
+@pytest.mark.parametrize("command_exit", [0, 7])
+def test_package_smoke_preserves_failed_command_diagnostics(tmp_path: Path, command_exit: int) -> None:
+    package = _load("ci.yml")["jobs"]["package"]
+    step = next(step for step in package["steps"] if step.get("name", "").startswith("Install and smoke-test"))
+    helper = step["run"].split('\nwheel="', 1)[0]
+    program = (
+        "import os, sys; assert os.environ['SMOKE_TEST_FLAG'] == 'enabled'; "
+        f"print('smoke diagnostic'); print('smoke stderr', file=sys.stderr); sys.exit({command_exit})"
+    )
+    command = [sys.executable, "-c", program]
+    invocation = "SMOKE_TEST_FLAG=enabled smoke_cli 'Test command (Python 3.12)' " + shlex.join(command)
+    script = "set -e\nRUNNER_TEMP=" + shlex.quote(str(tmp_path)) + "\n" + helper + "\n" + invocation
+
+    result = subprocess.run(["bash", "-c", script], capture_output=True, text=True, check=False)
+
+    assert result.returncode == command_exit
+    assert result.stderr == ""
+    assert not list(tmp_path.glob("skillevaluator-smoke.*"))
+    if command_exit:
+        assert "Test command (Python 3.12) failed (exit 7)" in result.stdout
+        assert "smoke diagnostic" in result.stdout
+        assert "smoke stderr" in result.stdout
+    else:
+        assert result.stdout == ""

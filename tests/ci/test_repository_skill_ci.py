@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Keep this repository's consumer callers compatible with trusted upstream CI."""
 
+import json
 import re
 import subprocess
 from pathlib import Path
@@ -10,6 +11,8 @@ import yaml
 ROOT = Path(__file__).parents[2]
 SCAN = ".github/workflows/skill-checks-all-tiers.yml"
 FEEDBACK = ".github/workflows/skill-feedback-all-tiers.yml"
+# Reviewed support commit on main; runtime and image retain their release pins.
+REVIEWED_PRODUCER_WORKFLOW_REF = "bf44a24704833083c556feb0b433ab0d647c3826"
 
 
 def workflow(path):
@@ -34,12 +37,13 @@ def test_repository_skill_checks_use_reviewed_full_three_tier_configuration():
     job = scan["jobs"]["skills"]
     prefix = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@"
     assert job["uses"].startswith(prefix)
-    runtime = job["uses"].removeprefix(prefix)
-    assert re.fullmatch(r"[0-9a-f]{40}", runtime)
+    producer = job["uses"].removeprefix(prefix)
+    assert re.fullmatch(r"[0-9a-f]{40}", producer)
+    assert producer == REVIEWED_PRODUCER_WORKFLOW_REF
     inputs = job["with"]
     assert re.fullmatch(r"ghcr.io/nvidia/skillevaluator-tier1@sha256:[0-9a-f]{64}", inputs["image"])
     assert inputs["tools-repository"] == "NVIDIA/SkillEvaluator"
-    assert inputs["tools-ref"] == runtime
+    assert re.fullmatch(r"[0-9a-f]{40}", inputs["tools-ref"])
     assert inputs["tiers"] == "1,2,3"
     assert inputs["paths"] == "skills"
     assert inputs["scan-mode"] == "auto"
@@ -59,6 +63,7 @@ def test_repository_skill_checks_use_reviewed_full_three_tier_configuration():
         "claude-code=aws/anthropic/eccn-claude-opus-5-5",
     ]
     assert inputs["environment"] == "skillevaluator"
+    assert inputs["environment-deployment"] == "false"
     assert inputs["n-attempts"] == inputs["n-concurrent"] == "1"
     assert "tier3-required" not in inputs
     secrets = {key: "${{ secrets." + key + " }}" for key in ("OPENAI_API_KEY", "ANTHROPIC_API_KEY", "NVIDIA_API_KEY")}
@@ -102,3 +107,31 @@ def test_repository_skill_has_committed_complete_dataset_prerequisites():
     for manifest in skills:
         digests = dataset_preflight(manifest.parent)
         assert "evals/evals.json" in digests
+
+
+def test_repository_callers_pin_a_released_evaluator_runtime():
+    """The pinned runtime must stay resolvable after the pull request that set it merges.
+
+    GitHub resolves ``uses: owner/repo/path@<sha>`` only for a commit reachable
+    from a branch or tag. A commit taken from a pull-request branch vanishes once
+    that branch is squash-merged and deleted, and every later run then fails before
+    any job starts with "error parsing called workflow ... workflow was not found".
+    Runtime and publisher pins remain in released descriptors. The producer
+    workflow may use the separately reviewed main commit above to receive a
+    workflow-only fix without changing the released evaluator runtime.
+    """
+    descriptors = [
+        ROOT / "src/skillevaluator/ci-release-all-tiers.json",
+        *sorted((ROOT / "ci/bundles").glob("*/release.json")),
+    ]
+    released = set()
+    for descriptor in descriptors:
+        data = json.loads(descriptor.read_text())
+        released.update(
+            str(value)
+            for key, value in data.items()
+            if key.endswith("_ref") and re.fullmatch(r"[0-9a-f]{40}", str(value))
+        )
+    assert released
+    runtime = workflow(SCAN)["jobs"]["skills"]["with"]["tools-ref"]
+    assert runtime in released, f"{runtime} is not a workflow_ref or tools_ref of any committed release descriptor"

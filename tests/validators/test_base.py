@@ -188,6 +188,26 @@ class TestValidatorBase:
         assert "skill-b" in names
         assert "skill-c" in names
 
+    @pytest.mark.parametrize("excluded_name", ["results", "evals", ".versions"])
+    @pytest.mark.parametrize("at_root", [False, True], ids=["ancestor", "scan-root"])
+    def test_find_all_skills_scopes_exclusions_below_the_root(self, tmp_path, excluded_name, at_root):
+        root = tmp_path / excluded_name
+        if not at_root:
+            root /= "checkout"
+        live = root / "live-skill"
+        live.mkdir(parents=True)
+        (live / "SKILL.md").write_text("---\nname: live-skill\n---", encoding="utf-8")
+        snapshot = root / "evals" / "snapshot"
+        snapshot.mkdir(parents=True)
+        (snapshot / "SKILL.md").write_text("---\nname: snapshot\n---", encoding="utf-8")
+
+        validator = ConcreteValidator()
+
+        assert validator._find_all_skills(root) == [live]
+        result = validator.validate(root)
+        assert result.passed
+        assert any(detail.metadata.get("skill_count") == 1 for detail in result.success_details)
+
     def test_find_all_skills_nested(self, tmp_path):
         """Test finding skills in nested directory structure."""
         root = tmp_path / "project"

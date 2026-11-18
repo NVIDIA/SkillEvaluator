@@ -39,7 +39,15 @@ from skillevaluator.publication_identity import (
     publication_paths_skipped_by_scan,
     publication_target_from_path,
 )
-from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter, SARIFReporter
+from skillevaluator.reporting import (
+    CLIReporter,
+    HTMLReporter,
+    JSONReporter,
+    JUnitReporter,
+    MarkdownReporter,
+    SARIFReporter,
+)
+from skillevaluator.reporting.junit_reporter import junit_target_identity
 from skillevaluator.reporting.naming import DEFAULT_REPORT_BASENAME
 from skillevaluator.reporting.presentation import FinalRenderContext, build_final_render_context
 from skillevaluator.reporting.run_status import result_tier
@@ -153,6 +161,7 @@ REPORTERS = {
     "html": HTMLReporter,
     "markdown": MarkdownReporter,
     "sarif": SARIFReporter,
+    "junit": JUnitReporter,
 }
 
 
@@ -643,8 +652,9 @@ def emit_reports(
     explicit_skill_name: str | None = None,
     content_label: str = "Skill",
     announce_paths: bool = True,
-    sarif_scan_root: Path | None = None,
-    sarif_repository_root: Path | None = None,
+    scan_root: Path | None = None,
+    repository_root: Path | None = None,
+    catalog_root: Path | None = None,
     requested_tiers: tuple[int, ...] | None = None,
     displayed_tiers: tuple[int, ...] | None = None,
     presentation_context: FinalRenderContext | None = None,
@@ -663,6 +673,10 @@ def emit_reports(
     The JSON report records *target_path* too. *explicit_skill_name* names
     the one skill a single-skill run validated, so the JSON ``skills`` list
     names it even when no finding path or quality score does.
+
+    *scan_root* is the evaluated target and *repository_root* the base that
+    SARIF and JUnit file paths are made relative to (the Git root when the
+    target is inside a repository); both formats get the same pair.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -690,11 +704,15 @@ def emit_reports(
                 requested_tiers=requested_tiers,
                 displayed_tiers=displayed_tiers,
                 expected_skill_name=expected_skill_name,
+                explicit_skill_name=explicit_skill_name,
             )
         elif fmt == "sarif":
+            reporter = reporter_cls(workspace_root=repository_root, scan_root=scan_root)
+        elif fmt == "junit":
             reporter = reporter_cls(
-                workspace_root=sarif_repository_root,
-                scan_root=sarif_scan_root,
+                workspace_root=repository_root,
+                scan_root=scan_root,
+                target_identity=junit_target_identity(scan_root, repository_root, catalog_root),
             )
         elif fmt == "json":
             reporter = reporter_cls(

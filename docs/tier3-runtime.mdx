@@ -319,7 +319,8 @@ See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci
     `skillevaluator doctor` with the same agent and environment.
   </Accordion>
   <Accordion title="NeMo Gym cannot find the OpenCode runtime installer">
-    Use the [pinned editable source-checkout installation](/skills/skillevaluator/nemo-gym#install-the-pinned-gym). At this Gym
+    In the [advanced NeMo Gym reference](/skills/skillevaluator/nemo-gym#advanced-reference), open
+    **Install Gym for OpenCode** and follow the editable setup. At this Gym
     revision, a non-editable wheel installation creates component-resource
     symlinks that its Docker uploader preserves as dangling host-path links.
     OpenCode then fails before execution with a missing

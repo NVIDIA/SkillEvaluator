@@ -4,6 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Add a README badge linking to the reusable GitHub and GitLab CI templates.
+
 ### Fixed
 
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

@@ -9,6 +9,16 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,
   and explain how to add automated quality and security gates to a skills
   repository without maintaining evaluation code.
+- Expand repository CI onboarding in the README, linked from the Get started
+  table, with guided setup, current GitHub and GitLab templates, and their
+  validation and security coverage. Highlight the verified 500+ static rules
+  and detection patterns behind the CI check groups. Use `validate --tiers 1`
+  and scanner setup in the CLI getting-started card, with the all-tier command
+  in a collapsible section.
+- Simplify the README Harness Check introduction with key-free and agent-free
+  callouts now that the supporting 1.0.1 package is published.
+- Describe the other Tier 1 checks alongside Harness Check in the README and
+  include `harness` in the reference page's default check list.
 
 ### Fixed
 

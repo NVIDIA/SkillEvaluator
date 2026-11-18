@@ -190,8 +190,58 @@ def _keep_attached_descriptors(text: str) -> str:
     return "".join(out)
 
 
-def _shell_tokens(cmd: Any) -> list[str]:
-    normalized = str(cmd).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+def _without_shell_comment_text(text: str) -> str:
+    """Keep each real comment's # marker so command boundaries stay unchanged."""
+    out = []
+    quote = None
+    word_start = True
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'" and index + 1 < len(text):
+            pair = text[index : index + 2]
+            out.append(pair)
+            if quote is None and pair != "\\\n":
+                word_start = False
+            index += 2
+            continue
+        if quote is not None:
+            out.append(char)
+            if char == quote[-1]:
+                quote = None
+            index += 1
+            continue
+        if char == "#" and word_start:
+            out.append(char)
+            end = text.find("\n", index)
+            if end < 0:
+                break
+            index = end
+            continue
+        if char == "$" and text.startswith("'", index + 1):
+            quote = "$'"
+            word_start = False
+            out.append("$'")
+            index += 2
+            continue
+        if char in "'\"`":
+            quote = char
+            word_start = False
+        else:
+            word_start = char in " \t\n" or char in _SHELL_METACHARS
+        out.append(char)
+        index += 1
+    return "".join(out)
+
+
+def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False) -> list[str]:
+    source = str(cmd)
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    if strip_comment_text:
+        # Comments end at physical newlines, before those become separators.
+        normalized = _without_shell_comment_text(normalized)
+        source = normalized
+    normalized = normalized.replace("\n", " ; ")
     normalized = _keep_attached_descriptors(_mark_quoted_syntax(normalized))
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -200,6 +250,6 @@ def _shell_tokens(cmd: Any) -> list[str]:
         return list(lexer)
     except ValueError:
         try:
-            return shlex.split(str(cmd), posix=True)
+            return shlex.split(source, posix=True)
         except ValueError:
             return []

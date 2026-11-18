@@ -18,6 +18,8 @@ All notable changes to SkillEvaluator are documented in this file.
   script command whose quoted path contains spaces. Pipeline tails (`|` and `|&`)
   and negated commands (`!` and `time [-p] !`) remain unattributed instead of
   using another process's status or the inverse of the script's status.
+  A trailing shell comment containing `|&` does not hide the script's recorded
+  status; quoted or escaped hashes still leave real pipelines unattributed.
 
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.

@@ -170,3 +170,83 @@ def test_literal_exclamation_argument_does_not_hide_script_status(status):
     )
 
     assert result["passed"] is (status == 0)
+
+
+def _run_and_grade_comment_command(tmp_path, shell, operand, relative_script, status, suffix, prefix=""):
+    executable = shutil.which(shell)
+    if sys.platform == "win32" or executable is None:
+        pytest.skip(f"Requires POSIX {shell} to record actual shell statuses")
+    script = tmp_path / relative_script
+    script.parent.mkdir(parents=True)
+    script.write_text("import sys\nprint('script-ran')\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8")
+    command = f"{prefix}{shlex.quote(sys.executable)} {operand} {status}{suffix}"
+    completed = subprocess.run(
+        [executable, "-c", command], cwd=tmp_path, capture_output=True, text=True, check=False, timeout=10
+    )
+    assert "script-ran\n" in completed.stdout, completed.stderr
+    results = evaluate_declarative_checks(
+        [
+            {"type": "script_invoked", "script": relative_script},
+            {"type": "command_succeeded", "script": relative_script},
+        ],
+        tool_calls=[
+            {
+                "action": "exec_command",
+                "action_input": {"command": command, "shell": executable},
+                "observation": f"Process exited with code {completed.returncode}",
+            }
+        ],
+        final_response="",
+        workspace_roots=[],
+    )
+    assert results[0]["passed"] is True
+    return completed, results[1]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("operand", "relative_script"),
+    [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
+)
+@pytest.mark.parametrize("status", [0, 2])
+def test_trailing_comment_does_not_hide_recorded_script_status(tmp_path, shell, operand, relative_script, status):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, operand, relative_script, status, " # note |& ignored"
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("hash_word", ["'#'", '"#"', r"\#", "word#", r"word\ #", "''#", "word\u00a0#", "\v#"])
+def test_literal_hash_does_not_hide_a_real_stderr_pipeline(tmp_path, shell, hash_word):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", 2, f" {hash_word} |& cat"
+    )
+    assert completed.returncode == 0
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("comment_start", [" # note |& ignored", " \\\n# note |& ignored"])
+def test_a_comment_does_not_hide_the_next_physical_line(tmp_path, shell, comment_start):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", 2, f"{comment_start}\nprintf 'later\\n'"
+    )
+    assert completed.returncode == 0
+    assert completed.stdout == "script-ran\nlater\n"
+    assert result["passed"] is None
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("prefix", ["# note\n", "printf 'before\\n'\n# note\n"])
+def test_comment_only_lines_keep_the_existing_command_boundaries(tmp_path, shell, status, prefix):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, "", prefix
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]

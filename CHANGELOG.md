@@ -22,6 +22,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

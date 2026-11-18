@@ -344,6 +344,25 @@ def test_tokenless_trajectory_still_reports_authentication_failure(metrics: dict
     )
 
 
+@pytest.mark.parametrize("final_metrics", (None, [], False, 42, "unavailable", [1], True))
+@pytest.mark.parametrize("message,reason", (("Completed the task.", ""), ("401 Unauthorized", "Unauthorized")))
+def test_fresh_runtime_failure_scan_accepts_nonobject_final_metrics(
+    tmp_path: Path, final_metrics: object, message: str, reason: str
+) -> None:
+    job_dir = tmp_path / "job"
+    trial_name = "case-001__attempt"
+    agent_dir = job_dir / trial_name / "agent"
+    agent_dir.mkdir(parents=True)
+    (agent_dir / "trajectory.json").write_text(
+        json.dumps({"steps": [{"source": "agent", "message": message}], "final_metrics": final_metrics}),
+        encoding="utf-8",
+    )
+
+    failures = collector_module._extract_agent_runtime_failures(job_dir)
+
+    assert failures == ([{"trial": trial_name, "reason": reason}] if reason else [])
+
+
 @pytest.mark.parametrize("failure_artifact", ("result.json", "agent/opencode.txt"))
 def test_explicit_runtime_failure_wins_over_step_token_usage(tmp_path: Path, failure_artifact: str) -> None:
     trial_dir = tmp_path / "case-001__attempt"

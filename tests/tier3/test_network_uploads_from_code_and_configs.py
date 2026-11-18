@@ -2137,6 +2137,44 @@ def test_a_receiver_bracket_s_opener_is_looked_up_where_a_scan_back_finds_it(see
                 assert reader.opener_before(close) == _scanned_opener(masked, close), (masked, close)
 
 
+class _SearchCountingPattern:
+    """A pattern that records the length of each text it searches."""
+
+    def __init__(self, pattern: re.Pattern[str], searched: list[int]) -> None:
+        self._pattern = pattern
+        self._searched = searched
+
+    def search(self, string: str, *args: Any) -> re.Match[str] | None:
+        self._searched.append(len(string))
+        return self._pattern.search(string, *args)
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pattern, name)
+
+
+@pytest.mark.parametrize(
+    ("code", "searches"),
+    [
+        # Each def( once made the requests_mock and respx fixture patterns
+        # read up to 300 characters of its parameters.
+        pytest.param("import requests\nx.post(1)\n" + "def a(" * 2_000, 0, id="names-no-library"),
+        pytest.param(
+            "import requests\n\n\ndef test_items(requests_mock):\n    requests.post('https://example.com/x')\n",
+            1,
+            id="names-requests-mock",
+        ),
+    ],
+)
+def test_a_mocking_library_s_pattern_runs_only_over_code_that_names_the_library(monkeypatch, code, searches) -> None:
+    searched: list[int] = []
+    libraries = tuple(
+        (_SearchCountingPattern(entry[0], searched), *entry[1:]) for entry in checks._CODE_MOCK_LIBRARY_RES
+    )
+    monkeypatch.setattr(checks, "_CODE_MOCK_LIBRARY_RES", libraries)
+    _assert_clean(check_security([_code_call(code, language="python")]))
+    assert len(searched) == searches
+
+
 def _mock_calls(names: int, length: int) -> dict[str, Any]:
     """Return JavaScript code of about *length* characters: Jest mock calls whose argument names got *names* times."""
     call = "jest.mock(" + "got " * names + ")\n"

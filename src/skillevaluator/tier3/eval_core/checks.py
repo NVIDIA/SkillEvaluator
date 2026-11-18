@@ -8035,11 +8035,13 @@ _CODE_PATCH_IMPORT_RE = re.compile(r"\bfrom\s+(?:unittest\s*\.\s*)?mock\s+import
 # (@responses.activate, responses.start() or RequestsMock), requests_mock
 # (imported from, its Mocker, or its pytest fixture), respx (respx.mock,
 # respx.start() or its respx_mock fixture), pytest-httpx's httpx_mock
-# fixture, and aioresponses.
+# fixture, and aioresponses. Each match holds one of the words listed with
+# its pattern, so a pattern runs only over code that holds one of them.
 _CODE_MOCK_LIBRARY_RES = (
     (
         re.compile(r"(?=[Rr])(?:\bresponses\s*\.\s*(?:activate|start|RequestsMock)\b|(?<![\w.])RequestsMock\s*\()"),
         "requests",
+        ("responses", "RequestsMock"),
     ),
     (
         re.compile(
@@ -8047,14 +8049,16 @@ _CODE_MOCK_LIBRARY_RES = (
             r"|\bdef\s+\w+\s*\([^)]{0,300}?\brequests_mock\b)"
         ),
         "requests",
+        ("requests_mock",),
     ),
     (
         re.compile(
             r"(?=[dr])(?:\brespx\s*\.\s*(?:mock|start)\b|\bdef\s+\w+\s*\([^)]{0,300}?\b(?:respx_mock|httpx_mock)\b)"
         ),
         "httpx",
+        ("respx", "httpx_mock"),
     ),
-    (re.compile(r"\baioresponses\s*\("), "aiohttp"),
+    (re.compile(r"\baioresponses\s*\("), "aiohttp", ("aioresponses",)),
 )
 # Mocked names that turn off other rules: fetch, and urllib's urlopen and
 # Request. The object-store and curl upload spellings
@@ -8688,8 +8692,8 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
     # The path each mocking call replaces (see _code_mock_path).
     paths: list[tuple[str, ...]] = []
     reader._mock_paths = paths
-    for pattern, client in _CODE_MOCK_LIBRARY_RES:
-        if pattern.search(masked):
+    for pattern, client, words in _CODE_MOCK_LIBRARY_RES:
+        if any(word in masked for word in words) and pattern.search(masked):
             mocked.add(client)
     # Each mocking call whose arguments are read, as (start, opener, close), in order.
     calls: list[tuple[int, int, int]] = []

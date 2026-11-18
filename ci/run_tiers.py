@@ -149,7 +149,7 @@ def context(env: dict) -> dict:
             "os": platform.system(),
             "architecture": platform.machine(),
             "evaluator": importlib.metadata.version("skillevaluator"),
-            "tools_ref": env.get("SKILLEVALUATOR_TOOLS_REF", ""),
+            "tools_ref": env.get("SKILLEVALUATOR_TOOLS_REF") or env.get("SKILL_EVAL_TOOLS_REF", ""),
         },
     }
 

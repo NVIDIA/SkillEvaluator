@@ -174,6 +174,25 @@ class FindingVerifier(LLMClient):
     # -- Response parsing -------------------------------------------------
 
     @staticmethod
+    def _rejected_verdict_indices(line: str) -> set[int]:
+        """Recover legacy aliases only to withhold a rejected row's findings."""
+        try:
+            pairs = json.loads(line, object_pairs_hook=list)
+        except (ValueError, TypeError):
+            return set()
+        indices: set[int] = set()
+        for name, value in pairs:
+            if name != "index":
+                continue
+            try:
+                index = int(value)
+            except (ValueError, TypeError, OverflowError):
+                continue
+            if index >= 0:
+                indices.add(index)
+        return indices
+
+    @staticmethod
     def _parse_verdicts(response_text: str) -> dict[int, Verdict]:
         verdicts: dict[int, Verdict] = {}
         seen: set[int] = set()
@@ -183,18 +202,21 @@ class FindingVerifier(LLMClient):
                 continue
             try:
                 obj = json.loads(line, object_pairs_hook=reject_duplicate_object_pairs)
-                idx = obj.get("index")
-                if type(idx) is not int or idx < 0 or "verdict" not in obj:
-                    continue
-                if idx in seen:
-                    # Neither reply owns an unambiguous verdict for this finding.
-                    # Remember repeats so a third row cannot restore the verdict.
-                    verdicts.pop(idx, None)
-                    continue
-                seen.add(idx)
-                verdicts[idx] = obj
             except (ValueError, TypeError):
+                obj = {}
+            idx = obj.get("index")
+            if type(idx) is not int or idx < 0 or "verdict" not in obj:
+                for rejected in FindingVerifier._rejected_verdict_indices(line):
+                    seen.add(rejected)
+                    verdicts.pop(rejected, None)
                 continue
+            if idx in seen:
+                # Neither reply owns an unambiguous verdict for this finding.
+                # Remember repeats so a third row cannot restore the verdict.
+                verdicts.pop(idx, None)
+                continue
+            seen.add(idx)
+            verdicts[idx] = obj
         return verdicts
 
     # -- High-level entry point -------------------------------------------

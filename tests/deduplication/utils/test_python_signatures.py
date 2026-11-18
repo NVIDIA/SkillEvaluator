@@ -15,6 +15,42 @@ def _collected(content: str) -> CollectedFile:
     return CollectedFile(Path("script.py"), "script.py", ".py", content, len(content.splitlines()))
 
 
+_CONTINUED_BODIES = [
+    ("def helper(): \\\nreturn 1\n", ["def helper():"]),
+    ("class A(\n    B,\n): \\\nvalue = 1\n", ["class A(\n    B,\n):"]),
+    (
+        "class A:\n    def f(self, a: int = 1) -> int: \\\nreturn a\n",
+        ["class A:", "    def f(self, a: int = 1) -> int:"],
+    ),
+]
+
+
+@pytest.mark.parametrize(("source", "expected"), _CONTINUED_BODIES)
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"])
+def test_continued_inline_bodies_do_not_abort_signature_extraction(source, expected, newline):
+    collected = _collected(source.replace("\n", newline))
+
+    chunks = chunk_python(collected, min_chars=1)
+
+    assert [chunk.text for chunk in chunks] == expected
+    assert chunk_file(collected) == []
+
+
+@pytest.mark.parametrize("source", [case[0] for case in _CONTINUED_BODIES])
+def test_collected_continued_body_does_not_abort_intra_skill_validation(tmp_path, source):
+    from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
+
+    (tmp_path / "SKILL.md").write_text("# Example\n", encoding="utf-8")
+    scripts = tmp_path / "scripts"
+    scripts.mkdir()
+    (scripts / "example.py").write_text(source, encoding="utf-8")
+
+    result = IntraSkillValidator().validate(tmp_path)
+
+    assert result.incomplete_scans == []
+    assert result.findings == []
+
+
 def test_long_multiline_signature_survives_minimum_length_filter():
     signature = (
         "def convert(\n"

@@ -43,3 +43,47 @@ error_handling:
     message: "Lib modules may lack error handling"
     suggestion: "Library code should handle errors explicitly with try/except or raise"
     markers: ["raise", "assert", "ValueError", "TypeError", "RuntimeError"]
+
+# Efficiency rules. They overlay the same way as error_handling: a custom file may set any
+# subset, omitted keys keep the values below, and points: 0 turns a rule off.
+efficiency:
+  # SKILL.md is estimated at more than max_tokens tokens (characters divided by 4, frontmatter
+  # included). The finding appends the estimate and the limit to the message. Keep the message
+  # short: report summaries cut a finding message at 160 characters.
+  token_budget:
+    points: 15
+    message: "Large skill"
+    suggestion: "Per agentskills.io, SKILL.md should be concise (~500 lines) — large skill bodies increase token cost after invocation; long or unfocused top-level descriptions can degrade agent routing accuracy. Keep required sections concise; move detailed examples, reference material, and supporting docs to the references/ directory"
+    max_tokens: 5000
+
+# Discoverability rules. They overlay the same way as error_handling and efficiency.
+discoverability:
+  # The frontmatter description, with surrounding whitespace removed, has fewer than min_chars
+  # characters. A skill without a description key, or with an empty one, is not checked here; a
+  # key left without a value is read as null and counted as the 4-character text "None". The
+  # finding appends the length and the minimum to the message.
+  description_too_short:
+    points: 20
+    message: "Description too short (recommend 50-150 chars)"
+    suggestion: "Add more context: what tasks does this skill handle?"
+    min_chars: 20
+  # The description, with surrounding whitespace removed, has more than max_chars characters.
+  # The finding appends the length and the maximum to the message.
+  description_too_long:
+    points: 5
+    message: "Description very long (recommend 50-150 chars)"
+    suggestion: "Keep descriptions concise for progressive disclosure"
+    max_chars: 200
+
+# Correctness rules. They overlay the same way as the sections above.
+correctness:
+  # The frontmatter name contains one of the terms as a whole word (any case). This is an
+  # error-level rule: its finding is HIGH and fails the quality check whatever the score.
+  # The finding appends the matched terms to the message. A term may contain only letters,
+  # digits and single hyphens, like a skill name. The schema check keeps its own
+  # reserved-word list, which this file does not change.
+  reserved_name:
+    points: 15
+    message: "Name contains reserved word"
+    suggestion: "Remove reserved words from skill name"
+    terms: [anthropic, claude]

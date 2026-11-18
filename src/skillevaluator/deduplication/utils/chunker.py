@@ -262,15 +262,20 @@ def _python_signature(
     header_lines[-1] = header_lines[-1].encode("utf-8")[:body_column].decode("utf-8")
     header = "\n".join(header_lines)
     end_line, end_column = 1, len(header_lines[0])
-    for token in tokenize.generate_tokens(io.StringIO(header).readline):
-        if token.type == tokenize.NEWLINE:
-            # The header is one logical line. Do not read body decorators:
-            # their AST expression may start after a parenthesized @ line.
-            break
-        if token.type == tokenize.OP and token.string == ":":
-            # Earlier colons can belong to annotations, defaults, or lambdas.
-            # Comments between the header and body are not signature tokens.
-            end_line, end_column = token.end
+    try:
+        for token in tokenize.generate_tokens(io.StringIO(header).readline):
+            if token.type == tokenize.NEWLINE:
+                # The header is one logical line. Do not read body decorators:
+                # their AST expression may start after a parenthesized @ line.
+                break
+            if token.type == tokenize.OP and token.string == ":":
+                # Earlier colons can belong to annotations, defaults, or lambdas.
+                # Comments between the header and body are not signature tokens.
+                end_line, end_column = token.end
+    except tokenize.TokenError:
+        # The AST has validated the source; cutting before a continued body
+        # can leave an incomplete token after the complete header's colon.
+        pass
     return "\n".join([*header_lines[: end_line - 1], header_lines[end_line - 1][:end_column]])
 
 

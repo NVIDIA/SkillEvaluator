@@ -383,6 +383,26 @@ class SkillEvaluatorClaudeCode(_InstalledClaudeCode):
             return []
 
 
+class SkillEvaluatorGatewayClaudeCode(SkillEvaluatorClaudeCode):
+    """Preserve an explicit gateway's opaque catalog ID in Claude's model selection."""
+
+    def _resolved_model_name(self) -> str | None:
+        # A gateway judge can coexist with independent native/Vertex/Bedrock
+        # agent credentials. Preserve those routes' native model parsing.
+        access = self.model_connection
+        endpoint = access.execution_base_url
+        if (
+            self._uses_vertex_auth()
+            or access.provider is None
+            or not endpoint
+            or urlsplit(endpoint).hostname == "api.anthropic.com"
+        ):
+            return super()._resolved_model_name()
+        # Harbor normally removes a provider prefix. Gateway catalog IDs can
+        # contain several slashes, and every segment belongs to the upstream ID.
+        return self.model_name or super()._resolved_model_name()
+
+
 class SkillEvaluatorLocalClaudeCode(SkillEvaluatorClaudeCode):
     """Claude Code wrapper that skips bootstrap install in local mode."""
 
@@ -420,6 +440,10 @@ class SkillEvaluatorLocalClaudeCode(SkillEvaluatorClaudeCode):
             cwd=cwd,
             timeout_sec=timeout_sec,
         )
+
+
+class SkillEvaluatorLocalGatewayClaudeCode(SkillEvaluatorLocalClaudeCode, SkillEvaluatorGatewayClaudeCode):
+    """Use the local CLI while preserving the selected gateway catalog ID."""
 
 
 class SkillEvaluatorGatewayCodex(SkillEvaluatorCodex):

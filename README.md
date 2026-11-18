@@ -7,6 +7,7 @@
 [![License](https://img.shields.io/badge/License-Apache%202.0-green.svg)](LICENSE)
 [![Python](https://img.shields.io/badge/Python-3.12%20%7C%203.13%20%7C%203.14-blue.svg)](https://www.python.org/)
 [![PyPI](https://img.shields.io/pypi/v/skillevaluator.svg?label=PyPI)](https://pypi.org/project/skillevaluator/)
+[![Reusable CI templates](https://img.shields.io/badge/Reusable%20CI-templates-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
 [![Documentation](https://img.shields.io/badge/Documentation-docs.nvidia.com-blue.svg)](https://docs.nvidia.com/skills/skillevaluator/)
 [![Paper](https://img.shields.io/badge/arXiv-2608.20614-b31b1b.svg)](https://arxiv.org/abs/2608.20614)
 [![Blog](https://img.shields.io/badge/Blog-NVIDIA%20Developer-76B900.svg)](https://developer.nvidia.com/blog/evaluating-ai-agent-skill-performance-with-nvidia-skillevaluator/)
@@ -19,6 +20,11 @@
 
 SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
 on task results: start with quality checks, then compare runs with and without a skill.
+
+Catch skill issues before merge. Connect your repository to SkillEvaluator with a
+[CI template](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
+for automated quality and security gates, without building or maintaining
+evaluation code.
 
 Agent skills are folders of instructions and supporting files defined by the
 [Agent Skills specification](https://agentskills.io/). SkillEvaluator is part of
@@ -68,7 +74,7 @@ skillevaluator validate \
 
 <p><img src="https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/928cc9d483fe9fef2d5011c3ca8f132cda46730a/docs/assets/get-started-ci.svg" width="250" alt="Add it to your repo via CI"></p>
 
-Our CI template checks every skill change, no code to maintain. Run in your GitHub repo to open a setup PR:
+Check every skill change. Run in your GitHub repo to open a setup PR:
 
 ```bash
 skillevaluator ci init

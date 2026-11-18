@@ -12,9 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Full-body embeddings stop once a chunk covers the document end, avoiding extra
-  embedding inputs and pooled weight for already-covered tails. Rebuild saved
-  full-body catalogs to use the corrected pooling.
+- Full-body embeddings stop windowing a long section once a window reaches its end,
+  avoiding extra embedding inputs and pooled weight for already-covered tails.
+  Rebuild saved full-body catalogs to use the corrected pooling.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
+  README, starting with the next release. Published 1.0.1 metadata is unchanged.
+
 ## 1.0.1 - 2026-11-17
 
 ### Documentation

@@ -1,0 +1,16 @@
+{
+  "skill_name": "csv-summary",
+  "evals": [
+    {
+      "id": "csv-summary-001",
+      "prompt": "Summarize input/sales.csv as a Markdown table.",
+      "expected_output": "summary.md lists region, units and price with value counts, and min/max for units and price.",
+      "assertions": [
+        "summary.md exists beside input/sales.csv",
+        "summary.md has one row each for region, units and price",
+        "The units row shows minimum 3 and maximum 12"
+      ],
+      "files": ["files/sales.csv"]
+    }
+  ]
+}

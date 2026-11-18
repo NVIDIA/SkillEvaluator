@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `doctor`, `health-check`, and `tier3 doctor` accept `--json` to print the
+  same readiness rows as one JSON object on stdout, so CI can read scanner
+  and credential failures without scraping the table. Guided installation is
+  not part of this change.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

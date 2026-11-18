@@ -507,6 +507,25 @@ def create_temp_config(content: str, suffix: str = ".toml") -> Path:
     return config_path
 
 
+class _DeferredTool:
+    """Build an ``ExternalTool`` on first access so importing the CLI does not log."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._args = args
+        self._kwargs = kwargs
+        self._name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._name = name
+
+    def __get__(self, _obj: object, owner: type | None = None) -> ExternalTool:
+        if owner is None:
+            raise AttributeError(self._name)
+        tool = ExternalTool(*self._args, **self._kwargs)
+        setattr(owner, self._name, tool)
+        return tool
+
+
 class Tools:
     """Registry of external tools.
 
@@ -514,22 +533,22 @@ class Tools:
     tools and evaluation tools used by SkillEvaluator validators.
     """
 
-    gitleaks = ExternalTool("Gitleaks", "gitleaks", managed=True)
-    pip_audit = ExternalTool("pip-audit", "pip-audit", prefer_interpreter_sibling=True)
-    safety = ExternalTool("Safety", "safety")
-    bandit = ExternalTool(
+    gitleaks = _DeferredTool("Gitleaks", "gitleaks", managed=True)
+    pip_audit = _DeferredTool("pip-audit", "pip-audit", prefer_interpreter_sibling=True)
+    safety = _DeferredTool("Safety", "safety")
+    bandit = _DeferredTool(
         "Bandit",
         "bandit",
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_BANDIT_PATH",
     )
-    semgrep = ExternalTool(
+    semgrep = _DeferredTool(
         "Semgrep",
         "semgrep",
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_SEMGREP_PATH",
     )
-    skillspector = ExternalTool(
+    skillspector = _DeferredTool(
         "skillspector",
         "skillspector",
         prefer_interpreter_sibling=True,

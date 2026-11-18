@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import ast
 import bisect
+import heapq
 import json
 import posixpath
 import re
@@ -7361,6 +7362,8 @@ _PY_ARGV_RUNNERS = frozenset(
 )
 _PY_EXEC_RE = re.compile(r"os\.(exec|spawn)([lv])p?(e?)")
 _PY_SPAWN_EXEC = frozenset({"asyncio.create_subprocess_exec", "asyncio.subprocess.create_subprocess_exec"})
+# The modules whose functions run programs or shell commands, as words.
+_PY_RUNNER_MODULE_WORD_RE = re.compile(r"\b(?:os|subprocess|asyncio)\b")
 # Mocking replaces functions with stand-ins, so code that mocks is not read.
 _PY_MOCK_MODULES = frozenset({"mock", "unittest.mock"})
 _PY_MOCK_NAMES = frozenset({"mock", "mocker", "monkeypatch", "MonkeyPatch"})
@@ -7654,7 +7657,11 @@ def _python_runs_programs(name: str) -> bool:
 
 
 def _python_argv_lists(
-    source: str, tree: ast.Module | None = None, *, strings: _PythonStrings | None = None
+    source: str,
+    tree: ast.Module | None = None,
+    *,
+    strings: _PythonStrings | None = None,
+    nodes: tuple[dict[type, list[Any]], dict[ast.AST, ast.AST]] | None = None,
 ) -> list[list[str]]:
     """Return each literal argument vector Python source passes to a call that runs a program.
 
@@ -7679,12 +7686,13 @@ def _python_argv_lists(
     path in a variable or an f-string field reads as _CODE_PLACEHOLDER, a
     vector with a starred item is skipped, cmd.split() of a str reads as its
     words (each split charged to the work of *strings*), and mocking is
-    left to the caller.
+    left to the caller. *nodes* are the tree's nodes (see _python_tree_nodes)
+    when the caller has walked the tree already.
     """
     tree = tree if tree is not None else _parse_python(source)
     if tree is None:
         return []
-    by_type, parents = _python_tree_nodes(tree)
+    by_type, parents = nodes if nodes is not None else _python_tree_nodes(tree)
     names = _python_imported_names(by_type, mocks=strings is None)
     if names is None:
         return []
@@ -7853,8 +7861,12 @@ _UPLOAD_SHELL_GATE_RE = re.compile(
 # _code_client_chain), as does Net::HTTP::Post; mock.patch and mocker.patch
 # are test helpers, and get is a download.
 _CODE_UPLOAD_CALL_RE = re.compile(
-    r"(?<!mock)(?<!mocker)(?:\.|->)\s*(?:(?:post|put|patch)(?:_form)?|Post(?:Form)?)\b(?!\s*=(?!=))"
-    r"|\bHTTP::(?:Post|Put|Patch)\b"
+    # This pattern and others the reader runs over the whole code start with a
+    # lookahead on the characters a match may start with, so that any other
+    # character is passed over before an alternative is tried.
+    r"(?=[-.H])"
+    r"(?:(?<!mock)(?<!mocker)(?:\.|->)\s*(?:(?:post|put|patch)(?:_form)?|Post(?:Form)?)\b(?!\s*=(?!=))"
+    r"|\bHTTP::(?:Post|Put|Patch)\b)"
 )
 # HTTP client modules and classes. A receiver such as queue, TestClient(app),
 # or a route decorator's app or router names none of them.
@@ -7908,7 +7920,7 @@ _CODE_IMPORT_LINE_RE = re.compile(r"(?:^|[\n;])[ \t]*import[ \t]+")
 _CODE_IMPORT_LINE_CHARS = 200
 _CODE_MODULE_LOAD_RES = {
     name: re.compile(
-        r"(?:\b(?:require|import|__import__)\s*\(\s*|\bfrom\s+|\bimport\s+(?:[\w.]+\s+)?)"
+        r"(?=[_fir])(?:\b(?:require|import|__import__)\s*\(\s*|\bfrom\s+|\bimport\s+(?:[\w.]+\s+)?)"
         rf"['\"`](?:node:)?(?:[\w.@-]+/)*{re.escape(name)}['\"`]"
     )
     for name in sorted(_CODE_LOADED_CLIENT_NAMES)
@@ -7965,6 +7977,9 @@ _CODE_NAMED_IMPORT_ITEM_RE = re.compile(
 )
 # One name of a chain read forward, with a PHP namespace separator or a Go & before it.
 _CODE_CHAIN_WORD_RE = re.compile(r"[&*\\]?([A-Za-z_$@][\w$]*)")
+# A bound value's first name with the blanks around it, and the blanks and line ends after them.
+_CODE_NAME_VALUE_RE = re.compile(r"[ \t]*([A-Za-z_$@][\w$]*)[ \t]*")
+_CODE_LINE_BLANKS_RE = re.compile(r"[ \t\r\n]*")
 # How far back one receiver chain or forward one bound value is read, and how
 # many rounds of names bound through other names are followed.
 _CODE_RECEIVER_CHARS = 300
@@ -8006,10 +8021,11 @@ _CODE_APP_KEYWORD_RE = re.compile(r"\bapp\s*=(?![=>])")
 # .multiple), pytest's monkeypatch, and Jest's and Vitest's mock, doMock,
 # spyOn and stubGlobal; an assignment to the global fetch replaces fetch.
 _CODE_MOCK_CALL_RE = re.compile(
-    r"(?:\b(?:mock|mocker)\s*\.\s*|(?<![\w$.]))(patch)(?:\s*\.\s*(?:object|dict|multiple))?\s*\("
+    r"(?=[gjmpvw])"
+    r"(?:(?:\b(?:mock|mocker)\s*\.\s*|(?<![\w$.]))(patch)(?:\s*\.\s*(?:object|dict|multiple))?\s*\("
     r"|\bmonkeypatch\s*\.\s*(?:setattr|setitem|delattr|delitem)\s*\("
     r"|\b(?:jest|vi)\s*\.\s*(?:mock|doMock|spyOn|stubGlobal)\s*\("
-    r"|\b(?:global|globalThis|window)\s*\.\s*(fetch)\s*=(?!=)"
+    r"|\b(?:global|globalThis|window)\s*\.\s*(fetch)\s*=(?!=))"
 )
 _CODE_PATCH_IMPORT_RE = re.compile(r"\bfrom\s+(?:unittest\s*\.\s*)?mock\s+import\b[^\n;]{0,200}?\bpatch\b")
 # HTTP mocking libraries in use, and the client each replaces: responses
@@ -8018,15 +8034,23 @@ _CODE_PATCH_IMPORT_RE = re.compile(r"\bfrom\s+(?:unittest\s*\.\s*)?mock\s+import
 # respx.start() or its respx_mock fixture), pytest-httpx's httpx_mock
 # fixture, and aioresponses.
 _CODE_MOCK_LIBRARY_RES = (
-    (re.compile(r"\bresponses\s*\.\s*(?:activate|start|RequestsMock)\b|(?<![\w.])RequestsMock\s*\("), "requests"),
+    (
+        re.compile(r"(?=[Rr])(?:\bresponses\s*\.\s*(?:activate|start|RequestsMock)\b|(?<![\w.])RequestsMock\s*\()"),
+        "requests",
+    ),
     (
         re.compile(
-            r"\brequests_mock\s*\.\s*(?:Mocker|mock)\b|\bfrom\s+requests_mock\s+import\b"
-            r"|\bdef\s+\w+\s*\([^)]{0,300}?\brequests_mock\b"
+            r"(?=[dfr])(?:\brequests_mock\s*\.\s*(?:Mocker|mock)\b|\bfrom\s+requests_mock\s+import\b"
+            r"|\bdef\s+\w+\s*\([^)]{0,300}?\brequests_mock\b)"
         ),
         "requests",
     ),
-    (re.compile(r"\brespx\s*\.\s*(?:mock|start)\b|\bdef\s+\w+\s*\([^)]{0,300}?\b(?:respx_mock|httpx_mock)\b"), "httpx"),
+    (
+        re.compile(
+            r"(?=[dr])(?:\brespx\s*\.\s*(?:mock|start)\b|\bdef\s+\w+\s*\([^)]{0,300}?\b(?:respx_mock|httpx_mock)\b)"
+        ),
+        "httpx",
+    ),
     (re.compile(r"\baioresponses\s*\("), "aiohttp"),
 )
 # Mocked names that turn off other rules: fetch, and urllib's urlopen and
@@ -8072,12 +8096,13 @@ _CODE_PYCURL_UPLOAD_OPTIONS = (
     rf"(?:(?:POSTFIELDS|COPYPOSTFIELDS|HTTPPOST|MIMEPOST|READFUNCTION|READDATA|INFILE)\b|UPLOAD\b{_CODE_OPTION_OFF})"
 )
 _CODE_UPLOAD_MASKED_RE = re.compile(
+    r"(?=[.Cph])(?:"
     rf"\bpycurl\s*\.\s*{_CODE_PYCURL_UPLOAD_OPTIONS}"
     rf"|\.\s*setopt\s*\([^()\n;]{{0,200}}?\b{_CODE_PYCURL_UPLOAD_OPTIONS}"
     r"|\bCURLOPT_(?:POSTFIELDS|COPYPOSTFIELDS|HTTPPOST|MIMEPOST|READFUNCTION|READDATA|INFILE)\b"
     rf"|\bCURLOPT_(?:POST|UPLOAD|PUT)\b{_CODE_OPTION_OFF}"
     r"|\.\s*(?:put_object|upload_file|upload_fileobj|upload_from_filename|upload_from_string)\s*\("
-    r"|\bhttp\s*\.\s*(?:Post|PostForm)\s*\("
+    r"|\bhttp\s*\.\s*(?:Post|PostForm)\s*\()"
 )
 # A call, by the name before its parenthesis. Those that may send an upload
 # method or data (see _code_client_call_uploads): fetch, Request, a request
@@ -9090,10 +9115,22 @@ def _code_value_chain(reader: _CodeReader, start: int) -> tuple[tuple[str, ...],
     await, new or yield, as in requests.Session(), new GuzzleHttp\\Client(),
     &http.Client{} or require("axios").create(). A value that starts with a
     bracket names nothing and ends at its closing bracket. At most
-    _CODE_RECEIVER_CHARS characters are read.
+    _CODE_RECEIVER_CHARS characters are read. A value that is one name with
+    no bracket, dot, \\, -> or :: after it, as s0 in s1 = s0, is read at once.
     """
     masked = reader.masked
     end = min(len(masked), start + _CODE_RECEIVER_CHARS)
+    alone = _CODE_NAME_VALUE_RE.match(masked, start, end)
+    if alone is not None:
+        word, idx = alone[1].lstrip("$@"), alone.end()
+        ahead = _CODE_LINE_BLANKS_RE.match(masked, idx, end).end()
+        if (
+            ahead + 2 < end
+            and word not in _CODE_VALUE_KEYWORDS
+            and masked[idx] not in "([{"
+            and masked[ahead] not in "-.:\\"
+        ):
+            return (word,), idx
     names: list[str] = []
     idx = start
     while idx < end and masked[idx] in " \t":
@@ -9292,23 +9329,67 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
         if len(chain) == 2 and chain[0] in _CODE_MODULE_LOADERS and chain[1] not in _CODE_CLIENT_NAMES:
             foreign.add(name)
     foreign -= modules | clients
-    # Each pass reads the sets as they stand, without copying them for each binding.
-    for _ in range(_CODE_BINDING_PASSES):
-        added = False
-        for name, chain, _start, _end in bindings:
-            if not chain or name in doubles or name in modules or name in clients:
-                continue
-            if chain[-1] in modules and (len(chain) == 1 or (len(chain) == 2 and chain[0] in _CODE_MODULE_LOADERS)):
-                modules.add(name)
-            elif _code_client_chain(chain, modules, clients, foreign, call=True):
-                clients.add(name)
-            else:
-                continue
-            added = True
-        if not added:
-            break
+    _code_follow_bindings(bindings, modules, clients, foreign, doubles)
     reader._names = (frozenset(modules), frozenset(clients), frozenset(foreign - modules - clients))
     return reader._names
+
+
+def _code_follow_bindings(
+    bindings: list[tuple[str, tuple[str, ...], int, int]],
+    modules: set[str],
+    clients: set[str],
+    foreign: set[str],
+    doubles: set[str],
+) -> None:
+    """Add to *modules* and *clients* the names bound to them, in up to _CODE_BINDING_PASSES passes over *bindings*.
+
+    A pass reads the bindings in order, with the sets as they stand: a name
+    bound to a module alias, as r in r = requests, is a module, and one bound
+    to a chain that reaches a client (see _code_client_chain) is a client.
+    A binding that did not count can only count once a name in its chain is
+    added, so after the first pass a pass reads again, still in order, only
+    the bindings whose chain holds a name added since they were last read:
+    those the last pass added, and those this pass adds before them. Each
+    name's bindings are looked up in at most two passes, so the work grows
+    with the bindings' length, not with the passes times the bindings.
+    """
+
+    def follows(index: int) -> bool:
+        name, chain, _start, _end = bindings[index]
+        if not chain or name in doubles or name in modules or name in clients:
+            return False
+        if chain[-1] in modules and (len(chain) == 1 or (len(chain) == 2 and chain[0] in _CODE_MODULE_LOADERS)):
+            modules.add(name)
+        elif _code_client_chain(chain, modules, clients, foreign, call=True):
+            clients.add(name)
+        else:
+            return False
+        return True
+
+    added = [bindings[index][0] for index in range(len(bindings)) if follows(index)]
+    # The bindings whose chain holds each name, in order.
+    holders: dict[str, list[int]] = {}
+    if added:
+        for index, (_name, chain, _start, _end) in enumerate(bindings):
+            for word in set(chain):
+                holders.setdefault(word, []).append(index)
+    for _ in range(_CODE_BINDING_PASSES - 1):
+        if not added:
+            break
+        queued = {index for word in added for index in holders.get(word, ())}
+        queue = list(queued)
+        heapq.heapify(queue)
+        added = []
+        while queue:
+            index = heapq.heappop(queue)
+            if not follows(index):
+                continue
+            name = bindings[index][0]
+            added.append(name)
+            for later in holders.get(name, ()):
+                if later > index and later not in queued:
+                    queued.add(later)
+                    heapq.heappush(queue, later)
 
 
 def _code_names_test_double(reader: _CodeReader, start: int, stop: int) -> bool:
@@ -10153,7 +10234,12 @@ def _python_rendered_strings(nodes: Any, strings: _PythonStrings) -> list[str] |
     return values
 
 
-def _python_shell_commands(source: str, tree: ast.Module | None, strings: _PythonStrings) -> list[str]:
+def _python_shell_commands(
+    source: str,
+    tree: ast.Module | None,
+    strings: _PythonStrings,
+    nodes: tuple[dict[type, list[Any]], dict[ast.AST, ast.AST]] | None = None,
+) -> list[str]:
     """Return each string Python source passes to a call that runs it as a shell command.
 
     The calls are os.system, os.popen, subprocess.getoutput and
@@ -10164,12 +10250,12 @@ def _python_shell_commands(source: str, tree: ast.Module | None, strings: _Pytho
     *strings*, so a URL or path in a variable or an f-string field reads as
     _CODE_PLACEHOLDER, and a name bound once to a command string reads as
     that string. *tree* is the source's syntax tree when the caller has
-    parsed it already.
+    parsed it already, and *nodes* its nodes when the caller has walked it.
     """
     tree = tree if tree is not None else _parse_python(source)
     if tree is None:
         return []
-    by_type, parents = _python_tree_nodes(tree)
+    by_type, parents = nodes if nodes is not None else _python_tree_nodes(tree)
     names = _python_imported_names(by_type, mocks=False)
     if names is None:
         return []
@@ -10370,22 +10456,29 @@ def _code_shell_commands(reader: _CodeReader, tree: ast.Module | None = None) ->
     each joined into one command once its characters are charged to the
     reader's work, and shell strings (see _python_shell_commands); *tree* is
     the code's syntax tree when the caller has parsed it. Once the work is
-    spent no more vectors are joined. Node: see _node_shell_commands.
+    spent no more vectors are joined. Python code that never names os,
+    subprocess or asyncio, through whose names every such call goes (see
+    _python_imported_names), runs none, so its tree is not walked; code with
+    other than ASCII characters is walked, as Python reads some of them in
+    names as ASCII letters. Node: see _node_shell_commands.
     Ruby, Perl and PHP: see _script_shell_commands. Other code runs none.
     """
     if reader.family == "python":
+        if reader.code.isascii() and not _PY_RUNNER_MODULE_WORD_RE.search(reader.code):
+            return []
         tree = tree if tree is not None else _parse_python(reader.code)
         if tree is None:
             return []
-        # One set of names for both readings, so each name's text is built once.
-        strings = _PythonStrings(_python_bound_vectors(_python_tree_nodes(tree)[0], strings=True), reader.work)
+        # One walk of the tree and one set of names for both readings, so each name's text is built once.
+        nodes = _python_tree_nodes(tree)
+        strings = _PythonStrings(_python_bound_vectors(nodes[0], strings=True), reader.work)
         commands: list[str] = []
-        for argv in _python_argv_lists(reader.code, tree, strings=strings):
+        for argv in _python_argv_lists(reader.code, tree, strings=strings, nodes=nodes):
             # A vector may name the same long text many times, so its join is charged before it is built.
             if not reader.spend(sum(len(item) + 1 for item in argv)):
                 return commands
             commands.append(shlex.join(argv))
-        return [*commands, *_python_shell_commands(reader.code, tree, strings)]
+        return [*commands, *_python_shell_commands(reader.code, tree, strings, nodes)]
     if reader.family == "node":
         return _node_shell_commands(reader)
     if reader.family in {"ruby", "perl", "php"}:

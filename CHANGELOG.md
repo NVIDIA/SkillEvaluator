@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers from the `openai-compatible`
+  chat client, for gateways that reject requests without a routing header. A `{uuid}`
+  placeholder becomes one random UUID per client. Other providers ignore the variable.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

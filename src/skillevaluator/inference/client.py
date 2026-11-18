@@ -58,6 +58,7 @@ from skillevaluator.provider_config import (
     effective_reasoning_effort,
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
+    resolve_extra_headers,
     resolve_llm_provider,
 )
 
@@ -579,12 +580,17 @@ class LLMClient:
             base_url = _effective_openai_base_url(self._base_url)
             provider = "openai" if _is_canonical_openai_base_url(base_url) else "openai-compatible"
             model = self._model or self.default_model or CHAT_DEFAULT_MODELS[provider]
+            try:
+                extra_headers = resolve_extra_headers() if provider == "openai-compatible" else ()
+            except ProviderConfigurationError as exc:
+                raise LLMClientError(str(exc)) from exc
             self._provider_config = ProviderConfig(
                 provider=provider,
                 model=model,
                 api_key=self._api_key,
                 base_url=base_url,
                 litellm_model=f"openai/{model}",
+                extra_headers=extra_headers,
             )
             return self._provider_config
 
@@ -663,6 +669,8 @@ class LLMClient:
             client_kwargs["http_client"] = self._http_client
         if self._timeout is not None:
             client_kwargs["timeout"] = self._timeout
+        if config.provider == "openai-compatible" and config.extra_headers:
+            client_kwargs["default_headers"] = config.extra_headers_dict()
         client = OpenAI(**client_kwargs)
         if (
             config.base_url is not None

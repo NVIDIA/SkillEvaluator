@@ -9,6 +9,12 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 lift intervals compute faster when every case has the same lift;
   results are unchanged.
 
+### Documentation
+
+- Add a README badge linking to the reusable GitHub and GitLab CI templates,
+  and explain how to add automated quality and security gates to a skills
+  repository without maintaining evaluation code.
+
 ### Fixed
 
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

@@ -522,6 +522,8 @@ class TestAutomaticSkillSpectorVersion:
             "--quiet",
             "--from",
             str(scanner_bin.parent / "runtime/skillspector/2.13.4/skillspector-2.13.4-py3-none-any.whl"),
+            "--python",
+            scanner_install.SKILLSPECTOR_PYTHON,
             "skillspector",
             "scan",
             "target",

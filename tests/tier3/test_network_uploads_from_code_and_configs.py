@@ -16,6 +16,7 @@ from __future__ import annotations
 
 import gc
 import math
+import random
 import re
 import shlex
 import sys
@@ -2108,6 +2109,32 @@ _FULL_WIDTH_OS = chr(0xFF4F) + chr(0xFF53)
 )
 def test_python_shell_commands_named_through_a_runner_module_are_still_read(security_check, code) -> None:
     _assert_upload(security_check(_code_call(code, language="python")))
+
+
+def _scanned_opener(masked: str, close: int) -> int:
+    """Return the ( or [ that a scan back from the ) or ] at *close* finds it closes, counting only those four; -1 for none."""
+    depth = 0
+    for position in range(close, -1, -1):
+        if masked[position] in ")]":
+            depth += 1
+        elif masked[position] in "([":
+            depth -= 1
+            if not depth:
+                return position
+    return -1
+
+
+@pytest.mark.parametrize("seed", range(4))
+def test_a_receiver_bracket_s_opener_is_looked_up_where_a_scan_back_finds_it(seed: int) -> None:
+    # Code of many brackets that never open, as in )).post(1), once read 300
+    # characters back for each call; the opener is now looked up instead.
+    choices = random.Random(seed)
+    for _ in range(200):
+        masked = "".join(choices.choice("()[]{}x ") for _ in range(60))
+        reader = checks._CodeReader(masked, ([], masked, masked), "python")
+        for close, char in enumerate(masked):
+            if char in ")]":
+                assert reader.opener_before(close) == _scanned_opener(masked, close), (masked, close)
 
 
 def _mock_calls(names: int, length: int) -> dict[str, Any]:

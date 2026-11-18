@@ -8199,6 +8199,7 @@ _CODE_INSPECTION_CALLS = frozenset(
     }
 )
 _CODE_BRACKET_RE = re.compile(r"[()\[\]{}]")
+_CODE_ROUND_BRACKET_RE = re.compile(r"[()\[\]]")
 _CODE_OPENING_BRACKET_RE = re.compile(r"[(\[{]")
 # Where a string or comment may start: "#" comments, and in C-like languages
 # (JavaScript, Go, PHP) "//" and "/* */" ones.
@@ -8548,7 +8549,9 @@ class _CodeReader:
         "_mock_paths",
         "_mocked",
         "_names",
+        "_openers",
         "_pairs",
+        "_round_levels",
         "code",
         "family",
         "literals",
@@ -8579,6 +8582,8 @@ class _CodeReader:
         self._names: tuple[frozenset[str], frozenset[str], frozenset[str]] | None = None
         self._mocked: frozenset[str] | None = None
         self._mock_paths: list[tuple[str, ...]] = []
+        self._round_levels: dict[int, int] | None = None
+        self._openers: dict[int, list[int]] = {}
 
     @property
     def pairs(self) -> dict[int, int]:
@@ -8595,6 +8600,28 @@ class _CodeReader:
     def spend(self, chars: int) -> bool:
         """Charge *chars* more characters read to the work; False once it is spent."""
         return self.work.spend(chars)
+
+    def opener_before(self, close: int) -> int:
+        """Return where the ( or [ stands that the ) or ] at *close* closes, counting only those four brackets; -1 for none.
+
+        That is the nearest opener before *close* after which as many of
+        them close as open, which a scan back from *close* finds first. The
+        brackets are counted once, so each lookup is a binary search.
+        """
+        if self._round_levels is None:
+            # How many more of the brackets close than open before each closer, and the openers by that count.
+            self._round_levels = {}
+            level = 0
+            for match in _CODE_ROUND_BRACKET_RE.finditer(self.masked):
+                if match[0] in ")]":
+                    self._round_levels[match.start()] = level
+                    level += 1
+                else:
+                    self._openers.setdefault(level, []).append(match.start())
+                    level -= 1
+        openers = self._openers.get(self._round_levels[close] + 1, [])
+        index = bisect.bisect_left(openers, close) - 1
+        return openers[index] if index >= 0 else -1
 
     def literal_at(self, position: int) -> tuple[int, int, str] | None:
         """Return the string literal that starts at *position*, if one does."""
@@ -9107,18 +9134,9 @@ def _code_receiver(reader: _CodeReader, end: int, *, after_dot: bool = True) -> 
                 return None, idx
             break
         if masked[idx - 1] in ")]":
-            depth = 0
-            position = idx - 1
-            while position >= limit:
-                if masked[position] in ")]":
-                    depth += 1
-                elif masked[position] in "([":
-                    depth -= 1
-                    if not depth:
-                        break
-                position -= 1
+            position = reader.opener_before(idx - 1)
             if position < limit:
-                # The caller charges the chain up to idx; the scan for its opener went further.
+                # The caller charges the chain up to idx; the text back to the limit, which holds no opener, is charged here.
                 reader.spend(idx - limit)
                 return None, idx
             idx = position

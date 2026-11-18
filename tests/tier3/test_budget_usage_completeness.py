@@ -46,6 +46,66 @@ def test_only_retained_atif_locations_contribute_to_budget_usage(tmp_path, relat
     assert budget.admit(agent="a", arm="with", case_id="next", attempt=1)
 
 
+@pytest.mark.parametrize("verifier", ["trial/verifier", "trial/steps/check/verifier"], ids=["harbor", "native-step"])
+@pytest.mark.parametrize(
+    "sample", [{}, {"attempts": [{"method": "llm"}] * 3}], ids=["sample-without-attempts", "sample-with-attempts"]
+)
+def test_only_retained_verifier_locations_contribute_to_judge_budget_usage(tmp_path, verifier, sample):
+    artifact = tmp_path / verifier / "judge_attempts.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"attempts": [{"method": "llm"}]}', encoding="utf-8")
+    for copied_skill in ("trial/agent/sessions/skills/demo", "trial/steps/check/agent/sessions/skills/demo"):
+        for relative in (
+            "judge_attempts.json",
+            "verifier/judge_attempts.json",
+            "steps/check/verifier/judge_attempts.json",
+        ):
+            example = tmp_path / copied_skill / relative
+            example.parent.mkdir(parents=True, exist_ok=True)
+            example.write_text(json.dumps(sample), encoding="utf-8")
+    budget = BudgetController(max_judge_calls=3)
+    assert budget.admit(agent="a", arm="with", case_id="first", attempt=1)
+
+    usage = runner._budget_usage(tmp_path)
+
+    assert usage == {"judge_calls": 1}
+    budget.record_usage(usage)
+    assert budget.metadata()["used"]["judge_calls"] == 1
+    assert budget.admit(agent="a", arm="with", case_id="next", attempt=1)
+
+
+@pytest.mark.parametrize("sample", [{}, {"attempts": []}], ids=["unrelated-object", "zero-call-example"])
+def test_copied_judge_examples_do_not_establish_measured_usage(tmp_path, sample):
+    example = tmp_path / "trial/agent/sessions/skills/demo/judge_attempts.json"
+    example.parent.mkdir(parents=True)
+    example.write_text(json.dumps(sample), encoding="utf-8")
+    budget = BudgetController(max_judge_calls=3)
+    assert budget.admit(agent="a", arm="with", case_id="first", attempt=1)
+
+    usage = runner._budget_usage(tmp_path)
+
+    assert usage == {}
+    budget.record_usage(usage)
+    assert budget.metadata()["unmeasured_attempts"]["judge_calls"] == 1
+    assert not budget.admit(agent="a", arm="with", case_id="next", attempt=1)
+
+
+def test_all_retained_verifier_locations_contribute_to_judge_call_limit(tmp_path):
+    for verifier in ("trial/verifier", "trial/steps/first/verifier", "trial/steps/second/verifier"):
+        artifact = tmp_path / verifier / "judge_attempts.json"
+        artifact.parent.mkdir(parents=True)
+        artifact.write_text('{"attempts": [{"method": "llm"}]}', encoding="utf-8")
+    budget = BudgetController(max_judge_calls=3)
+    assert budget.admit(agent="a", arm="with", case_id="first", attempt=1)
+
+    usage = runner._budget_usage(tmp_path)
+
+    assert usage == {"judge_calls": 3}
+    budget.record_usage(usage)
+    assert budget.metadata()["used"]["judge_calls"] == 3
+    assert not budget.admit(agent="a", arm="with", case_id="next", attempt=1)
+
+
 @pytest.mark.parametrize(
     "field,large_value",
     [
@@ -153,15 +213,16 @@ def test_unreadable_trajectory_does_not_leave_a_complete_subtotal(tmp_path: Path
     ],
 )
 @pytest.mark.parametrize("include_valid", [False, True])
+@pytest.mark.parametrize("verifier", ["verifier", "steps/check/verifier"], ids=["harbor", "native-step"])
 def test_malformed_judge_evidence_is_not_zero_or_a_complete_subtotal(
-    tmp_path: Path, raw: str, include_valid: bool
+    tmp_path: Path, raw: str, include_valid: bool, verifier: str
 ) -> None:
-    bad = tmp_path / "malformed" / "judge_attempts.json"
-    bad.parent.mkdir()
+    bad = tmp_path / "malformed" / verifier / "judge_attempts.json"
+    bad.parent.mkdir(parents=True)
     bad.write_text(raw, encoding="utf-8")
     if include_valid:
-        good = tmp_path / "valid" / "judge_attempts.json"
-        good.parent.mkdir()
+        good = tmp_path / "valid" / verifier / "judge_attempts.json"
+        good.parent.mkdir(parents=True)
         good.write_text('{"attempts": [{"method": "llm"}]}', encoding="utf-8")
     budget = BudgetController(max_judge_calls=10)
     assert budget.admit(agent="a", arm="with", case_id="first", attempt=1)
@@ -174,9 +235,12 @@ def test_malformed_judge_evidence_is_not_zero_or_a_complete_subtotal(
     assert not budget.admit(agent="a", arm="with", case_id="next", attempt=1)
 
 
-def test_complete_zero_usage_is_still_measured(tmp_path: Path) -> None:
+@pytest.mark.parametrize("verifier", ["verifier", "steps/check/verifier"], ids=["harbor", "native-step"])
+def test_complete_zero_usage_is_still_measured(tmp_path: Path, verifier: str) -> None:
     _trajectory(tmp_path, "zero", dict.fromkeys(_metrics(), 0))
-    (tmp_path / "judge_attempts.json").write_text('{"attempts": []}', encoding="utf-8")
+    artifact = tmp_path / "zero" / verifier / "judge_attempts.json"
+    artifact.parent.mkdir(parents=True)
+    artifact.write_text('{"attempts": []}', encoding="utf-8")
 
     assert runner._budget_usage(tmp_path) == {
         "input_tokens": 0,

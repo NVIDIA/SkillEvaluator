@@ -4823,7 +4823,12 @@ def _budget_usage(job_dir: Path) -> dict[str, Any]:
     judge_calls = 0
     saw_judge_artifact = False
     judge_complete = True
-    for artifact_path in job_dir.glob("**/judge_attempts.json"):
+    judge_paths = (
+        path
+        for pattern in ("*/verifier/judge_attempts.json", "*/steps/*/verifier/judge_attempts.json")
+        for path in job_dir.glob(pattern)
+    )
+    for artifact_path in judge_paths:
         saw_judge_artifact = True
         try:
             payload = json.loads(artifact_path.read_text(encoding="utf-8"))

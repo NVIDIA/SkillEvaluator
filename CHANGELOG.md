@@ -15,8 +15,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 budget accounting keeps incomplete token, cost, and judge-call evidence
   unmeasured instead of accepting partial subtotals or malformed judge logs as
   zero calls, stopping further admissions under the affected configured limit.
-  Only retained ATIF trajectory locations contribute; copied skill examples
-  named trajectory.json do not consume or invalidate the attempt budget.
+  Only retained ATIF trajectory and verifier artifact locations contribute;
+  copied skill examples named trajectory.json or judge_attempts.json do not
+  consume or invalidate the attempt budget.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

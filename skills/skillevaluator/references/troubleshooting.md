@@ -8,7 +8,7 @@
 | Scanner `INCOMPLETE` | SkillSpector, Gitleaks or Bandit missing or failed | `skillevaluator health-check --tier 1`; install the `security` extra; an old scanner earlier on `PATH` wins over the pinned one |
 | `--skip` used and publication fails | Skipped checks cannot certify Tier 1 | Rerun without `--skip` |
 | Schema: directory does not match name | Folder name differs from frontmatter `name` | Rename one so both match (kebab-case) |
-| Quality below minimum | Missing expected headings, vague description, no examples, `SKILL.md` over 500 lines or 5,000 tokens | Follow each finding's suggestion; move detail into `references/` |
+| Quality below minimum | Missing expected headings, vague description, no examples, `SKILL.md` over 500 lines or 5,000 tokens (the token limit is `efficiency.token_budget.max_tokens` in `--quality-config`) | Follow each finding's suggestion; move detail into `references/` |
 | Rubric fails although the score is high | One criterion below 7/10 | Read that criterion's feedback in the JSON report |
 | Tier 2 needs embeddings | Anthropic and Bedrock have no embeddings | Set `SKILL_EVAL_EMBEDDING_*` for another provider |
 | `<skill-dir>/evals/config.yml` rejected | Unknown key or credential in `runtime_env` | Fix the key; move secrets to the host environment |

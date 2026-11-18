@@ -558,6 +558,12 @@ As another command's argument, as in `grep 'rm' -rn .` or
 array literal, as in `cmd=("rm" -rf build)` or
 `declare -a cmd=('rm' '-rf' 'build')`, are values, not a command, so they do
 not receive it either, also where `"${cmd[@]}"` runs them later.
+Such an argument or array word does receive the finding four or more `$( )`
+levels deep, where the check stops splitting words and any `rm` text it
+reads there gets the finding, as in
+`echo $(echo $(echo $(echo $(git 'rm' -r --cached build))))`, and after a
+`$(` or backtick that does not close, whose command is read with its quotes
+dropped, as in ``echo `git 'rm' -r --cached build``.
 In a quoted word or here-document read as commands, such as `bash -c` text,
 a here-string or text piped to a shell, a quoted name counts only where that
 text also holds `rm` text that the pattern below matches, so
@@ -604,10 +610,25 @@ even when it only cleans `/tmp` or prints; such text over 64 KiB does too.
 These readings stop once the texts they check count 256 KiB of a trace.
 Each text of up to 64 KiB counts before each check of it, also one they
 then do not read, such as a here-document body or substitution that runs
-no `rm`, or a command of text read in one pass: its length, 64 characters
-more, and 10 more for each word, newline, shell operator character (`;`,
-`&`, `|`, `(`, `)`, `<` or `>`), backtick, `$(` and `$'...'` word in it,
-which cost the lexer and the walk more than a character does. Text read
+no `rm`: its length, 64 characters more, and 10 more for each word,
+newline, shell operator character (`;`, `&`, `|`, `(`, `)`, `<` or `>`),
+backtick, `$(` and `$'...'` word in it, which cost the lexer and the walk
+more than a character does. The check of a call, word or substitution for
+`eval`, `env -S` or pager text counts its text the same way at any length
+where it reads that text, unless it finds such text, whose reading then
+counts it. It reads only text that, with quotes and backslashes dropped,
+holds `eval`, `env` beside an `S` or `--s`, or `grep` beside an `O` or
+`--op`, and a call only where it also names `rm` beside an `r` or `f`
+option or holds an expansion beside a recursive option; a call that holds
+such text but names no such `rm` counts its length alone. So
+`source .venv/bin/activate && python -m pytest -q` and
+`grep -rn 'def main' src/` count nothing. A longer text that is read does
+not count as a whole: it is
+read in one pass, where each command and here-document body that reading
+checks counts the same way before its check, at any length. So four calls
+of `rm -rf /tmp/x; echo` and 70,000 more characters spend the limit, while
+five such calls with 60,000 characters, which the check splits into words
+and in which no reading checks a text, count nothing. Text read
 again, such as `eval` text or a
 command read in pieces, counts again at each level it is read. A text that
 would take the count past 256 KiB is not read: it, the rest of its call and
@@ -683,10 +704,11 @@ from a shell string, is checked as the shell command the vector names. The
 calls read are Python's `subprocess.run`, `call`, `check_call`, `check_output`
 and `Popen` (the vector as the first argument or `args=`, with an
 `executable=` other than `None` naming the program), `os.exec*`, `os.spawn*`,
-`os.posix_spawn`, `os.posix_spawnp` and `asyncio.create_subprocess_exec`,
-named by module (which an earlier notebook cell may have imported) or through
-the code's imports, as in `import subprocess as sp` or
-`from subprocess import run`, and Node's `spawn`, `spawnSync`, `execFile` and
+`os.posix_spawn`, `os.posix_spawnp` and `asyncio.create_subprocess_exec`
+(whose `executable=` names the program in the same way), named by module
+(which an earlier notebook cell may have imported) or through the code's
+imports, as in `import subprocess as sp` or `from subprocess import run`,
+and Node's `spawn`, `spawnSync`, `execFile` and
 `execFileSync`, matched by name. The code is a `python -c`, `node -e`,
 `node -p`, `bun -e` or `deno eval` payload (Node and Bun options written as
 one word before the code, such as `--input-type=module`, a `-pe` cluster, and
@@ -783,8 +805,12 @@ forms are not read as argument vectors and keep the result they had before:
   assignment expression or a chained assignment, as in
   `subprocess.run(cmd := [...])` and `cmd = base = [...]`, and a program
   given as an item of a vector, as in `os.execvp(cmd[0], cmd)`, as the
-  positional `executable` of `Popen` or by an `executable=` that is not a
-  string literal, as in `executable=shutil.which('rm')`;
+  positional `executable` of `Popen`, also passed on by `run`, `call`,
+  `check_call` or `check_output`, or by an `executable=` that is not a
+  string literal, as in `executable=shutil.which('rm')`: a `subprocess` call
+  with a third positional argument, or a starred one after the first, is not
+  read, so `subprocess.Popen(['rm', '-rf', '/home/u'], -1, '/bin/echo')`
+  does not receive the finding;
 - a runner reached through `__import__('subprocess')`, `getattr`, another name
   it is bound to (`run = subprocess.run`) or a renamed JavaScript import
   (`{ spawnSync: run }`), a program that a Python string, `pty` or an event
@@ -878,13 +904,14 @@ forms are not read as argument vectors and keep the result they had before:
   vector, and a `code` argument of up to 64 KiB, are read whatever the size of
   the rest of the call); code nested more than three shells, input documents
   or substitutions deep; a command with more than 256 here-documents, and a
-  line with more than 256 `<<`; a payload after more than 64 words of its
-  command's options, as in `python3 -u -u ... -c "..."`; shell text whose
-  commands that may run a vector hold over 4096 shell words, take over 32 KiB
-  outside here-document bodies, as a payload padded with a 33,000-character
-  comment does, take more than the split has left in the trace, or hold over
-  16 substitutions (`$( )`, backticks or `$'...'`) and more than one for each
-  40 of their characters, as `python3 -c "..." $(:)$(:)...` does
+  line with more than 256 `<<`; a payload after 64 or more words of its
+  command's options, as in `python3 -u -u ... -c "..."` with 63 `-u`
+  words and `-c`; shell text whose commands that may run a vector hold over
+  4096 shell words, take over 32 KiB outside here-document bodies, as a
+  payload padded with a 33,000-character comment does, take more than the
+  split has left in the trace, or hold over 16 substitutions (`$( )`,
+  backticks or `$'...'`) and more than one for each 40 of their characters,
+  as `python3 -c "..." $(:)$(:)...` does
   (those commands are the ones that name `cd`, `pushd` or `popd` as a word,
   those that name an interpreter or a shell, a word ending in `sh` included,
   and a quoted `rm`, and those that start a here-document on the line of such
@@ -925,8 +952,9 @@ forms are not read as argument vectors and keep the result they had before:
   `/tmp` path, and one whose command is over 1 KiB or that has more than
   eight items naming `rm`, `eval`, `env` or `grep`. A vector is plain when
   each item that names such text is a word the shell needs no quotes for, of
-  letters, digits and `@%+=:,./-_`, as `/home/u/firmware` is. A plain vector
-  is always read, as one `rm` command, so an item that names `rm` is read only
+  letters, digits and `@%+=:,./-_`, as `/home/u/firmware` is. These limits
+  do not apply to a plain vector, which is read, apart from the cases in the
+  next two items, as one `rm` command, so an item that names `rm` is read only
   as a target, not as the start of another `rm` command as in shell text:
   `['rm', '-rf', '/tmp/x', '/tmp/rm', '-rf']` does not receive the finding,
   while `rm -rf /tmp/x /tmp/rm -rf` does, for the second `rm` with no target;
@@ -935,6 +963,10 @@ forms are not read as argument vectors and keep the result they had before:
   `['rm', '-f', 'f{1..300}.txt', '/etc/hosts']` does. Python and Node pass
   braces literally, while shell text expands them, and a target that expands
   past 256 words counts as protected there;
+- the vectors of Python code not yet read once those read come to 4,096
+  items, each use of a bound vector counting again, as an `rm` vector after
+  1,024 calls of `subprocess.run(cmd)` with a four-item `cmd`, and a vector
+  of more items than are left, such as `[*cmd, *cmd, ...]` of a long `cmd`;
 - Python code that does not parse. Python code is parsed by the Python that
   runs the grader, so the host checker and the Harbor verifier can differ:
   code that needs a newer Python than the task image has, and code nested

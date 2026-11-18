@@ -248,8 +248,8 @@ def test_current_rm_xargs_and_symlink_hardening_is_retained(security, command, d
         "env -S 'rm\\_-rf\\_/workspace'",
         "echo 'eval $CMD -rf /workspace'",
         # The shell joins a $'...' word that eval or env -S reads with the text after it.
-        "eval $'${X}rm -rf '/workspace",
-        "env -S $'${X}rm -rf '/workspace",
+        "eval $'${X:-rm} -rf '/workspace",
+        "env -S $'$X -rf '/workspace",
         "eval $'$X -rf '/workspace",
         "git grep -O'$X -rf' needle",
         # eval and env -S read a $'...' word decoded and joined with the words around it.
@@ -400,6 +400,77 @@ def test_rm_check_counts_each_here_document_body_it_checks_for_eval_text_toward_
     assert "destructive_command" not in kinds(result)
     # Each body counts its own cost before its check, so only that many bodies fit in the limit.
     assert 0 < len(checked) <= checks._RM_MAX_EXTRA_CHARS // checks._rm_read_cost(bodies[0]) + 1
+
+
+@pytest.mark.parametrize("scanner", ["plugin", "host"])
+def test_rm_check_counts_each_word_it_checks_for_eval_text_toward_the_trace_limit(security, monkeypatch, scanner):
+    """The check of a word for eval text counts toward the limit, also where it finds none, and stops once spent.
+
+    main's walk reads each of these calls, as each runs rm. Only the strict
+    readings check its words for eval, env -S or pager text, so that check
+    of each quoted word naming eval is their work too. Uncounted, it would
+    run on every word of every call, however long the trace.
+    """
+    from skillevaluator.tier3.eval_core import checks
+
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO", {})
+    monkeypatch.setattr(checks, "_RM_GATE_MEMO_HELD", [0])
+    checked: list[str] = []
+    check = checks._rm_reads_again_as_commands
+
+    def counted(text, _depth=0):
+        if _depth == 0 and text.startswith("xeval"):  # A word as the walk reads it, without its quotes.
+            checked.append(text)
+        return check(text, _depth)
+
+    monkeypatch.setattr(checks, "_rm_reads_again_as_commands", counted)
+    words = [[f"'xeval{k}_{number}'" for number in range(200)] for k in range(40)]
+    calls = [call(f"rm -rf /tmp/q{k}; echo " + " ".join(each)) for k, each in enumerate(words)]
+    result = security.scan_plugin_security(calls) if scanner == "plugin" else checks.check_security(calls)
+
+    assert "destructive_command" not in kinds(result)
+    # Each word counts before its check, so the checks stop where the next word would pass the limit.
+    assert 0 < sum(checks._rm_read_cost(word) for word in checked) <= checks._RM_MAX_EXTRA_CHARS
+
+
+@pytest.mark.parametrize("scanner", ["plugin", "host"])
+@pytest.mark.parametrize(
+    "template",
+    [
+        pytest.param("grep -rn 'def handler_{k}' src/ | head -20", id="grep"),
+        pytest.param(
+            "cd /workspace/repo && source .venv/bin/activate && python -m pytest tests/test_{k}.py -q 2>&1 | tail -20",
+            id="venv",
+        ),
+        pytest.param("python3 -c 'import os; print(os.environ.get(\"HOME\"), {k})'", id="environ"),
+    ],
+)
+def test_rm_check_counts_no_word_the_eval_gate_does_not_read(security, monkeypatch, scanner, template):
+    """A call or word the eval gate turns away without reading it counts nothing toward the trace limit.
+
+    ``grep`` without -O, ``.venv/bin/activate`` and ``os.environ`` hold no
+    eval, no env beside an S and no grep beside an O, so the gate answers
+    no without reading them. Counted, a few thousand such calls would spend
+    the limit, and a later call's eval text would keep main's result.
+    """
+    from skillevaluator.tier3.eval_core import checks
+
+    counted: list[str] = []
+    cost = checks._rm_read_cost
+
+    def recorded(text):
+        counted.append(text)
+        return cost(text)
+
+    monkeypatch.setattr(checks, "_rm_read_cost", recorded)
+    last = "eval '$CMD -rf /workspace'"
+    calls = [call(template.format(k=k)) for k in range(40)] + [call(last)]
+    result = security.scan_plugin_security(calls) if scanner == "plugin" else checks.check_security(calls)
+
+    assert "destructive_command" in kinds(result)
+    # Only the last call's readings count: its text and the eval text in it.
+    assert counted
+    assert all(text in last for text in counted)
 
 
 @pytest.mark.parametrize("scanner", ["plugin", "host", "workdirs", "links"])

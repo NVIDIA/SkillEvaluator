@@ -21,6 +21,7 @@ import json
 import posixpath
 import re
 import shlex
+import threading
 import warnings
 from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping, Sequence, Set
@@ -5706,9 +5707,11 @@ _RM_MAX_FALLBACK_FRAGMENTS = 65_536
 # more, about the work of reading a short text, and _RM_EXTRA_CHARS_PER_WORD
 # more for each word, shell operator and substitution, which cost the lexer and
 # the walk more than a character does. So does each here-document body the
-# lexer checks for them beyond main's "rm -". A longer text is read in one
-# pass, where each command and body it holds counts before its check. This
-# bounds their work to about a second.
+# lexer checks for them beyond main's "rm -", and, at any length, each call,
+# word and substitution the eval gate reads, unless the gate opens a strict
+# reading of it, which counts it instead (see _rm_gated). A longer text that is
+# read is read in one pass, where each command and body it holds counts before
+# its check. This bounds their work to about a second.
 _RM_MAX_EXTRA_CHARS = 262_144
 _RM_EXTRA_CHARS_PER_READ = 64
 _RM_EXTRA_CHARS_PER_WORD = 10
@@ -5894,26 +5897,38 @@ def _rm_may_build_rm(text: str, _depth: int = 0) -> bool:
     return answer
 
 
+def _rm_gate_reads(text: str) -> bool:
+    """True when the eval gate (see _rm_reads_again_as_commands) reads *text*, which it turns away otherwise.
+
+    The gate reads text that, in a form without quotes or backslashes (see
+    _rm_unquoted_forms), holds eval, env beside an S or --s, or grep beside
+    an O or --op; it answers False for other text without reading it.
+    """
+    # Without a quote or backslash, every form is the text itself.
+    forms = _rm_unquoted_forms(text) if any(char in text for char in "\\'\"") else (text,)
+    return any(
+        "eval" in form
+        or ("env" in form and ("S" in form or "--s" in form))
+        or ("grep" in form and ("O" in form or "--op" in form))
+        for form in forms
+    )
+
+
 def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     """True for eval, env -S or git grep -O text, also when quotes or backslashes split the name.
 
     See _RM_EVAL_PREFIXES; function NAME before a body counts as one too. A
     command ends at a newline, ";", "&", "|", a parenthesis or a backtick. A
     redirection and its target word are not words of the command. A
-    ``$'...'`` word reads decoded and a ``$"..."`` word as ``"..."``. A
+    ``$'...'`` word reads decoded and a ``$"..."`` word as ``"..."``, and a
+    double-quoted word runs past the quotes of a substitution in it (see
+    _rm_double_quote_end), as in ``"$(eval "$X -rf /w")"``. A
     comment is skipped, and a here-document body is read on its own, as the
     walk reads them, so a quote in either pairs with no quote outside it.
     Where a quote does not close, the text is also read with its quotes and
     backslashes dropped, as the one-pass reading reads it.
     """
-    # Without a quote or backslash, every form is the text itself.
-    forms = _rm_unquoted_forms(text) if any(char in text for char in "\\'\"") else (text,)
-    if not any(
-        "eval" in form
-        or ("env" in form and ("S" in form or "--s" in form))
-        or ("grep" in form and ("O" in form or "--op" in form))
-        for form in forms
-    ):
+    if not _rm_gate_reads(text):
         return False
     if _depth >= _RM_MAX_GATE_DEPTH:
         return True
@@ -5931,6 +5946,7 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     word: list[str] | None = None
     target = False  # The next word is a redirection target.
     unterminated = False  # A quote does not close.
+    nested_quotes = True  # Each substitution in double quotes so far closes.
     index = 0
     while index < len(text):
         match = _RM_GATE_TOKEN_RE.match(text, index)
@@ -5969,6 +5985,13 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
         if first == "\\":
             word.append(token[1:])
         elif match.group("ansi_c") is not None or first in "'\"":
+            if nested_quotes and first == '"' and ("$(" in token or "`" in token):
+                # A quote inside a substitution in double quotes does not close them, as in "$(eval "$X")".
+                # Once one does not close, which scans the rest of the text, the rest is read as before.
+                end = _rm_double_quote_end(text, match.start())
+                nested_quotes = end is not None
+                if end is not None:
+                    token, index = text[match.start() : end], end
             closed = _RM_GATE_CLOSED_RE.fullmatch(token) is not None
             unterminated |= not closed
             if match.group("ansi_c") is not None:
@@ -5989,6 +6012,33 @@ def _rm_reads_again_as_commands(text: str, _depth: int = 0) -> bool:
     return unterminated and _rm_may_build_rm(_rm_plain_forms(text)[0], _depth + 1)
 
 
+_RM_DOUBLE_QUOTE_STEP_RE = re.compile(r'\\.|"|\$\(|`', re.DOTALL)
+
+
+def _rm_double_quote_end(text: str, start: int) -> int | None:
+    """Return the end of the double-quoted string that opens at *start*, or None where it does not close.
+
+    A ``$( )`` or backtick substitution in it is command text of its own, as
+    _rm_shell_words reads it, so a quote inside one does not close the string.
+    """
+    index = start + 1
+    while (match := _RM_DOUBLE_QUOTE_STEP_RE.search(text, index)) is not None:
+        step, index = match.group(), match.end()
+        if step == '"':
+            return index
+        if step == "$(":
+            end = _rm_group_end(text, match.start() + 1)
+            if end is None:
+                return None
+            index = end + 1
+        elif step == "`":
+            close = _RM_BACKTICK_END_RE.match(text, index)
+            if close is None:
+                return None
+            index = close.end()
+    return None
+
+
 def _rm_may_name(text: str, names: tuple[str, ...]) -> bool:
     """False when no form of *text* without quotes or backslashes (see _rm_unquoted_forms) holds any of *names*.
 
@@ -6002,11 +6052,49 @@ def _rm_may_name(text: str, names: tuple[str, ...]) -> bool:
     return any(name in plain for name in names)
 
 
-def _rm_candidate(text: str) -> bool:
-    """True for text the rm check reads: an rm with an option, or eval or env -S text."""
+# The names without which the eval gate (see _rm_reads_again_as_commands) finds no text it reads again.
+_RM_GATE_NAMES = ("eval", "env", "grep")
+
+
+def _rm_candidate(text: str, extra_chars: list[int] | None = None) -> bool:
+    """True for text the rm check reads: an rm with an option, or eval or env -S text.
+
+    Where the strict readings count the texts they check in *extra_chars*,
+    *text* counts there first where the eval gate reads it (see _rm_gated).
+    """
     if not _rm_may_name(text, ("rm", "eval", "env", "grep")):
         return False  # No form of the text names any of these.
-    return re.search(r"\brm\s+-", text) is not None or _rm_may_build_rm(text)
+    if re.search(r"\brm\s+-", text) is not None:
+        return True
+    return _rm_may_name(text, _RM_GATE_NAMES) and _rm_gated(text, extra_chars)
+
+
+def _rm_gated(text: str, extra_chars: list[int] | None) -> bool:
+    """Answer the eval gate (see _rm_may_build_rm) for *text*, which counts toward *extra_chars* where the gate reads it.
+
+    Text the gate turns away without reading it (see _rm_gate_reads) counts
+    nothing, and the answer is False. Reading other text is the strict
+    readings' work, so it counts first (see _rm_read_cost), at any length,
+    and stops with them: where the count is spent, or *text* would take it
+    past ``_RM_MAX_EXTRA_CHARS``, the gate does not read it, *text* spends
+    the count, and the answer is False. Where the gate opens a strict
+    reading of *text* (True), that reading counts what it checks of *text*
+    before each check (see _rm_targets_outside_tmp), so *text* is not
+    counted here as well; otherwise it counts here. Without *extra_chars*,
+    the gate runs.
+    """
+    if extra_chars is None:
+        return _rm_may_build_rm(text)
+    if not _rm_gate_reads(text):
+        return False
+    cost = _rm_read_cost(text)
+    if extra_chars[0] + cost > _RM_MAX_EXTRA_CHARS:
+        extra_chars[0] += cost
+        return False
+    if _rm_may_build_rm(text):
+        return True
+    extra_chars[0] += cost
+    return False
 
 
 def _rm_group_end(text: str, start: int) -> int | None:
@@ -6863,7 +6951,9 @@ def _rm_argv_commands_that_matter(
     limit = spans[-1][0] if unterminated and spans else len(text)
     spans = spans[:-1] if unterminated else spans
     commands = [text[start:end] for start, end in spans]
-    otherwise: list[bool] = []
+    # Whether each command matters for a reason other than starting a here-document: it changes
+    # directory, names an interpreter or a shell and a quoted rm, or is part of a quoted substitution.
+    matters_besides_heredoc: list[bool] = []
     directories: list[bool] = []
     split_forms: list[str] = []
     programs = 0
@@ -6876,7 +6966,7 @@ def _rm_argv_commands_that_matter(
             and _rm_argv_names_rm(command)
         )
         programs += program and not directory
-        otherwise.append(directory or program)
+        matters_besides_heredoc.append(directory or program)
         directories.append(directory)
         split_forms.append(forms[1])
     # The commands of a "$( )" substitution inside double quotes, as in
@@ -6890,7 +6980,7 @@ def _rm_argv_commands_that_matter(
             programs += 1
             grouped.update(range(first, last + 1))
     for index in grouped:
-        otherwise[index] = True
+        matters_besides_heredoc[index] = True
         split_forms[index] = "$"
     # The commands left out with the bodies of their line, and where each such line's bodies end.
     left_out: set[int] = set()
@@ -6905,7 +6995,7 @@ def _rm_argv_commands_that_matter(
         while index >= 0 and spans[index][0] >= line_start:
             line.append(index)
             index -= 1
-        if (index >= 0 and spans[index][1] > line_start) or any(otherwise[other] for other in line):
+        if (index >= 0 and spans[index][1] > line_start) or any(matters_besides_heredoc[other] for other in line):
             continue
         left_out.update(line)
         bodies_end[body_start] = body_end
@@ -6930,7 +7020,8 @@ def _rm_argv_commands_that_matter(
         if blank and end not in bodies_end:
             continue
         if blank or not (
-            otherwise[index] or (index not in left_out and _RM_ARGV_HEREDOC_RE.search(command) is not None)
+            matters_besides_heredoc[index]
+            or (index not in left_out and _RM_ARGV_HEREDOC_RE.search(command) is not None)
         ):
             if run and _RM_ARGV_SEPARATORS_RE.fullmatch(text, run[1], start):
                 run[1] = end
@@ -6988,10 +7079,11 @@ _RM_ARGV_SYNTAX_ONLY_RE = re.compile(r"[\d;&|<>(){}!-]*")
 
 
 def _rm_argv_cut_words(command: str, max_words: int) -> str:
-    """Return a command of shell text cut before its run of blanks after the first *max_words* such runs.
+    """Return a command of shell text cut at the run of blanks after its first *max_words* words.
 
-    The runs count outside quotes, backticks, ``$'...'`` strings and
-    parentheses, ``$( )`` included; a command with no more runs, or that
+    The runs of blanks that end words count outside quotes, backticks,
+    ``$'...'`` strings and parentheses, ``$( )`` included, and blanks before
+    the first word end none; a command with no more such runs, or that
     reaches a comment first, is returned whole. The words after the cut are
     the program's own arguments, which may be many, so they are left out of
     the split, substitutions among them too.
@@ -7001,7 +7093,10 @@ def _rm_argv_cut_words(command: str, max_words: int) -> str:
         return command
     if _QUOTED_SYNTAX_MARK in command or _QUOTED_NEWLINE.strip() in command:
         return command
-    gaps_left = max_words
+    # Blanks before the first word, as after "&&" or ";", end no word, so a command keeps as many
+    # words after another command as at the start of a line.
+    first_word = len(command) - len(command.lstrip())
+    words_left = max_words
     depth = index = 0
     while index < len(command):
         match = _RM_COMMAND_TOKEN_RE.match(command, index)
@@ -7011,10 +7106,10 @@ def _rm_argv_cut_words(command: str, max_words: int) -> str:
         if token == "#" and (not index or command[index - 1] in " \t\n;&|()<>"):
             return command
         if not depth and token[0] not in "'\"\\`" and not token.startswith(_RM_DOLLAR_QUOTE):
-            gaps = [gap.start() for gap in re.finditer(r"[ \t]+", token)]
-            if len(gaps) > gaps_left:
-                return command[: index + gaps[gaps_left]]
-            gaps_left -= len(gaps)
+            gaps = [gap.start() for gap in re.finditer(r"[ \t]+", token) if index + gap.start() >= first_word]
+            if len(gaps) >= words_left:
+                return command[: index + gaps[words_left - 1]]
+            words_left -= len(gaps)
         depth = depth + 1 if token == "(" else max(depth - 1, 0) if token == ")" else depth
         index = end
     return command
@@ -7364,6 +7459,12 @@ _PY_EXEC_RE = re.compile(r"os\.(exec|spawn)([lv])p?(e?)")
 _PY_SPAWN_EXEC = frozenset({"asyncio.create_subprocess_exec", "asyncio.subprocess.create_subprocess_exec"})
 # The modules whose functions run programs or shell commands, as words.
 _PY_RUNNER_MODULE_WORD_RE = re.compile(r"\b(?:os|subprocess|asyncio)\b")
+# How many items the argument vectors that _python_argv_lists collects from
+# one source may hold in all. A bound vector is read once however often the
+# code uses it, but each use adds its items, so a long vector passed or
+# spread thousands of times would make the vectors grow with its length
+# times its uses.
+_PY_ARGV_MAX_ITEMS = 4096
 # Mocking replaces functions with stand-ins, so code that mocks is not read.
 _PY_MOCK_MODULES = frozenset({"mock", "unittest.mock"})
 _PY_MOCK_NAMES = frozenset({"mock", "mocker", "monkeypatch", "MonkeyPatch"})
@@ -7388,13 +7489,21 @@ _JS_ARGV_RE = re.compile(
 )
 
 
+# warnings.catch_warnings saves and restores the process-wide filter list, so
+# two threads that parse at once could each restore the copy the other saved
+# and leave the ignore filter of _parse_python in place for the whole
+# process; parses that change the filters take turns.
+_PARSE_WARNINGS_LOCK = threading.Lock()
+
+
 def _parse_python(source: str) -> ast.Module | None:
     """Parse Python source, or return None when it does not parse.
 
     Warnings the parser raises, such as a SyntaxWarning for an invalid escape
-    in a string, are not printed: the code is read, not run.
+    in a string, are not printed: the code is read, not run. The filters are
+    changed under _PARSE_WARNINGS_LOCK (see there).
     """
-    with warnings.catch_warnings():
+    with _PARSE_WARNINGS_LOCK, warnings.catch_warnings():
         warnings.simplefilter("ignore")
         try:
             return ast.parse(source)
@@ -7668,18 +7777,20 @@ def _python_argv_lists(
     The call must name a function of subprocess, os or asyncio through the
     code's imports (see _python_imported_names) and may run (see
     _python_calls_that_may_run). The vector holds the program first: argv[0]
-    of a subprocess call (or its executable= value other than None), and the path or file
-    argument of os.exec*, os.spawn*, os.posix_spawn and posix_spawnp. Every
-    item must be a str literal; a whole vector may also be a name bound once
-    to such a list (see _python_bound_vectors), and ``*name`` or ``*[...]``
-    of such a vector stands for its items, as in
-    ``create_subprocess_exec(*cmd)``. A call with a shell= value other than
-    False, None or another false constant, or with **kwargs, is skipped,
-    since the vector may then be shell arguments; so is source that does
-    not parse or that mocks. *tree* is the source's syntax tree when the
-    caller has parsed it already. The tree is walked once; which names are
-    used, and which are bound to vectors, is worked out only for code that
-    needs it.
+    of a subprocess call or of create_subprocess_exec (or its executable=
+    value other than None), and the path or file argument of os.exec*,
+    os.spawn*, os.posix_spawn and posix_spawnp. Every item must be a str
+    literal; a whole vector may also be a name bound once to such a list (see
+    _python_bound_vectors), and ``*name`` or ``*[...]`` of such a vector
+    stands for its items, as in ``create_subprocess_exec(*cmd)``. A call
+    with a shell= value other than False, None or another false constant, or
+    with **kwargs, is skipped, since the vector may then be shell arguments;
+    so is a subprocess call with a third positional argument, Popen's
+    executable, or a starred argument after the first, which may hold it,
+    and so is source that does not parse or that mocks. *tree* is the
+    source's syntax tree when the caller has parsed it already. The tree is
+    walked once; which names are used, and which are bound to vectors, is
+    worked out only for code that needs it.
 
     With *strings*, as the upload check reads vectors, an item need not be
     a literal: it is read with _python_rendered and *strings*, so a URL or
@@ -7688,6 +7799,13 @@ def _python_argv_lists(
     words (each split charged to the work of *strings*), and mocking is
     left to the caller. *nodes* are the tree's nodes (see _python_tree_nodes)
     when the caller has walked the tree already.
+
+    Vectors are collected, in the order the walk finds their calls, while
+    their items come to at most _PY_ARGV_MAX_ITEMS in all; a vector that
+    would pass that ends the collection. Each literal or bound vector is read
+    once however often the code uses it, but each use counts its items, so
+    the time stays linear in the source also when it passes a long vector, or
+    spreads it with ``*name``, thousands of times.
     """
     tree = tree if tree is not None else _parse_python(source)
     if tree is None:
@@ -7704,6 +7822,11 @@ def _python_argv_lists(
     if not runners:
         return []
     bound: dict[str, ast.AST] | None = None
+    # What each vector node reads as, spread with *name or *[...] and as a whole vector, worked out once.
+    spread: dict[Any, list[str] | None] = {}
+    whole: dict[Any, list[str] | None] = {}
+    items_left = _PY_ARGV_MAX_ITEMS
+    full = False
 
     def bound_value(node: Any) -> Any:
         nonlocal bound
@@ -7713,19 +7836,27 @@ def _python_argv_lists(
         return node
 
     def items(nodes: list[Any]) -> list[str] | None:
+        nonlocal full
         if strings is not None:
             return _python_rendered_strings(nodes, strings)
-        # Str literals, and *name or *[...] of a literal vector, one level deep.
+        # Str literals, and *name or *[...] of a literal vector, one level deep. A vector with more items
+        # than are left to collect ends the collection.
         values: list[str] = []
         for node in nodes:
             if isinstance(node, ast.Starred):
-                expanded = _python_literal_strings(bound_value(node.value))
+                value = bound_value(node.value)
+                if value not in spread:
+                    spread[value] = _python_literal_strings(value)
+                expanded = spread[value]
                 if expanded is None:
                     return None
                 values += expanded
             elif isinstance(node, ast.Constant) and isinstance(node.value, str):
                 values.append(node.value)
             else:
+                return None
+            if len(values) > items_left:
+                full = True
                 return None
         return values
 
@@ -7741,7 +7872,11 @@ def _python_argv_lists(
             text = _python_rendered(node.func.value, strings)
             return _python_split_words(text, strings) if text else None
         node = bound_value(node)
-        return items(node.elts) if isinstance(node, (ast.List, ast.Tuple)) else None
+        if not isinstance(node, (ast.List, ast.Tuple)):
+            return None
+        if node not in whole:
+            whole[node] = items(node.elts)
+        return whole[node]
 
     vectors: list[list[str]] = []
     for call in _python_calls_that_may_run(runners, by_type, parents):
@@ -7750,16 +7885,20 @@ def _python_argv_lists(
         name = _python_qualified_name(call.func, names) or ""
         keywords = {keyword.arg: keyword.value for keyword in call.keywords}
         argv: list[str] | None = None
-        program: Any = None
+        # create_subprocess_exec passes executable= on to Popen, as the subprocess calls do.
+        program: Any = keywords.get("executable") if name in _PY_ARGV_RUNNERS or name in _PY_SPAWN_EXEC else None
+        # executable=None, the default, names no program.
+        if isinstance(program, ast.Constant) and program.value is None:
+            program = None
         if name in _PY_ARGV_RUNNERS:
             shell = keywords.get("shell")
             if shell is not None and not (isinstance(shell, ast.Constant) and not shell.value):
                 continue
+            # Popen's third positional argument, which run, call, check_call and check_output pass on to it, is
+            # its executable, and a starred argument after the first may hold it.
+            if len(call.args) > 2 or any(isinstance(arg, ast.Starred) for arg in call.args[1:]):
+                continue
             argv = vector(call.args[0] if call.args else keywords.get("args"))
-            program = keywords.get("executable")
-            # executable=None, the default, names no program.
-            if isinstance(program, ast.Constant) and program.value is None:
-                program = None
         elif name in _PY_SPAWN_EXEC:
             argv = items(call.args)
         elif name in {"os.posix_spawn", "os.posix_spawnp"} and len(call.args) >= 2:
@@ -7774,6 +7913,8 @@ def _python_argv_lists(
             if not args or (form == "v" and len(args) != 2):
                 continue
             program, argv = args[0], vector(args[1]) if form == "v" else items(args[1:])
+        if full:
+            break
         if program is not None:
             path = (
                 _python_rendered_strings([program], strings)
@@ -7782,7 +7923,10 @@ def _python_argv_lists(
             )
             argv = [path[0], *argv[1:]] if path and argv else None
         if argv:
-            vectors.append(argv)
+            if len(argv) > items_left:
+                break
+            items_left -= len(argv)
+            vectors.append(list(argv))
     return vectors
 
 
@@ -11915,7 +12059,7 @@ def _rm_decoded_tokens(tokens: list[str], payloads: list[str], kinds: list[str])
 
 
 def _rm_decoded_rereads(
-    tokens: list[str], payloads: list[str], kinds: list[str]
+    tokens: list[str], payloads: list[str], kinds: list[str], read: set[int] | None = None
 ) -> list[list[tuple[str, bool]]] | None:
     """Return _rm_reread_texts for each segment of *tokens*, with each ``$'...'`` word decoded in place.
 
@@ -11924,7 +12068,8 @@ def _rm_decoded_rereads(
     ``eval $'rm -rf /tmp/x' /workspace`` runs ``rm -rf /tmp/x /workspace``
     and ``eval r$'m -rf /workspace'`` runs ``rm -rf /workspace``. Only texts
     that hold such a word are returned. Where _rm_decoded_tokens returns
-    None, so does this.
+    None, so does this. *read* gets the place of each ``$'...'`` word,
+    counted among those words, that a returned text holds.
     """
     decoded = [_rm_ansi_c_text(payload) for payload, kind in zip(payloads, kinds) if kind == "ansi_c"]  # noqa: B905
     names = _rm_decoded_tokens(tokens, payloads, kinds)
@@ -11944,7 +12089,11 @@ def _rm_decoded_rereads(
 
     def decoded_word(match: re.Match[str]) -> str:
         index = int(match.group(1))
-        return decoded[index] if index < len(decoded) else match.group()
+        if index >= len(decoded):
+            return match.group()
+        if read is not None:
+            read.add(index)
+        return decoded[index]
 
     def decode(text: str) -> str | None:
         return re.sub(r"\$\{__rm_ansi_c_([0-9]+)\}", decoded_word, text) if "${__rm_ansi_c_" in text else None
@@ -12485,7 +12634,8 @@ def _rm_targets_outside_tmp(
     here otherwise), before each check of it, also when it is then not read
     (see _rm_read_cost); so does a here-document body or substitution,
     which only these readings check beyond main's "rm -", before the checks
-    that keep it from them (see _rm_shell_words). Past
+    that keep it from them (see _rm_shell_words), and a word or substitution
+    the eval gate reads (see _rm_gated). Past
     ``_RM_MAX_EXTRA_CHARS`` characters there, strict readings stop and find
     nothing, so a text that would take the count past them is not read, and
     the bodies left are read as main reads them.
@@ -12651,8 +12801,10 @@ def _rm_targets_outside_tmp(
     ]
     # A $'...' word that eval or env -S reads again is read as that text, decoded.
     ansi_c_reread = any("${__rm_ansi_c}" in text for texts in rereads for text, _ in texts)
+    # The place of each such word among the $'...' words, where the placeholders map to them.
+    reread_words: set[int] = set()
     # The text read again is also read with each $'...' word decoded in place, as the shell joins it.
-    decoded_rereads = _rm_decoded_rereads(tokens, payloads, kinds) if ansi_c_reread else []
+    decoded_rereads = _rm_decoded_rereads(tokens, payloads, kinds, reread_words) if ansi_c_reread else []
     # Where the decoded text is read, the text with its placeholders is not: the shell runs only the former.
     decoded = decoded_rereads is not None and ansi_c_reread
     if decoded_rereads is None:
@@ -12681,10 +12833,25 @@ def _rm_targets_outside_tmp(
     # Each decoded $'...' text read below as eval or env -S text, and whether it was read as joined: the
     # same text read again from the command line that eval or env -S reads would give the same answer.
     decoded_read: dict[str, bool] = {}
+    # The answer for each word and substitution of this text checked below for an rm or eval text (see
+    # _rm_candidate), whose check counts toward the strict readings' limit where the eval gate reads it, so a
+    # repeat is not counted again.
+    # Here-document bodies were counted when the lexer checked them, and unescaped text counts on its own below.
+    candidates: dict[str, bool] = {}
+
+    def counted_candidate(text: str) -> bool:
+        known = candidates.get(text)
+        if known is None:
+            known = candidates[text] = _rm_candidate(text, _extra_chars)
+        return known
+
+    ansi_c_words = 0  # The $'...' words before this payload.
     for payload, kind in zip(payloads, kinds):  # noqa: B905 -- same length; the verifier runs on Python 3.9.
         # In eval or env -S text, a substitution or here-document runs in the shell that reads it again,
-        # so its text is read the same way.
-        dynamic = _dynamic or (kind == "ansi_c" and ansi_c_reread)
+        # so its text is read the same way. Of the $'...' words, only those that text holds are read so;
+        # where its placeholders do not map to them, every one is.
+        dynamic = _dynamic or (kind == "ansi_c" and (ansi_c_words in reread_words if decoded else ansi_c_reread))
+        ansi_c_words += kind == "ansi_c"
         joined = kind == "ansi_c" and ansi_c_joined
         substitution = kind in {"substitution", "unescaped"}
         # A $'...' word is also read with its escapes decoded, as eval and env -S see it.
@@ -12704,7 +12871,7 @@ def _rm_targets_outside_tmp(
                 or (
                     more
                     and (
-                        _rm_candidate(text)
+                        (counted_candidate(text) if kind in {"substitution", "ansi_c"} else _rm_candidate(text))
                         or (dynamic and _rm_may_name_recursive_rm(text))
                         # A substitution runs its text as commands, where a quoted rm name runs too.
                         or (substitution and _names and _rm_names_rm(text))
@@ -12775,7 +12942,7 @@ def _rm_targets_outside_tmp(
     for index, token in enumerate(tokens):
         workdirs = token_workdirs[index]
         plain = re.search(r"\brm\s+-", token) is not None
-        if plain or (more and _rm_candidate(token)):
+        if plain or (more and counted_candidate(token)):
             strict = _strict or not plain
             find_protected = _find_protected or (
                 not _xargs_only and find_exec_protected(index, workdirs, extra if strict else _budget)
@@ -12895,7 +13062,14 @@ def _rm_targets_outside_tmp(
     return False
 
 
-def _rm_reading(pattern: Any, text: str, matched: bool, symlink_seen: bool, main_only: bool = False) -> bool | None:
+def _rm_reading(
+    pattern: Any,
+    text: str,
+    matched: bool,
+    symlink_seen: bool,
+    main_only: bool = False,
+    extra_chars: list[int] | None = None,
+) -> bool | None:
     """Say how check_security reads an action for rm: not at all (None), as main does (False), or strictly (True).
 
     The destructive-command regex (*matched*) and the xargs-only query open
@@ -12906,13 +13080,28 @@ def _rm_reading(pattern: Any, text: str, matched: bool, symlink_seen: bool, main
     lowercased, as in ``$'\\U00000072m'``, or that holds xargs and rm, as in
     ``xargs $'rm' -rf``), opens a strict walk, where only that text and an rm
     that runs as a command can give the finding: in ``grep 'rm' -rn .`` rm
-    is grep's argument.
+    is grep's argument. The eval gate's reading of that text is the strict
+    readings' work, so where the gate reads the action's text, it counts
+    toward the trace's *extra_chars* first (see _rm_gated); text that may
+    not count an rm is not read. Once that count is spent, nothing else
+    opens a walk.
     """
     if matched or _rm_targets_outside_tmp(text, _xargs_only=True, _symlink_seen=symlink_seen):
         return False
     if main_only:
         return None
-    if (_rm_may_count_as_rm(text) and _rm_may_build_rm(text)) or any(
+    # The gate's own first test only scans the text, so it counts nothing. The rm test scans up to
+    # 30 spellings of text the gate would read, so once the count is spent it is not run, and text
+    # it turns away counts its length (it is not lexed, so not the per-word cost of _rm_read_cost).
+    if _rm_may_name(text, _RM_GATE_NAMES) and _rm_gate_reads(text) and not _rm_extra_spent(extra_chars):
+        if _rm_may_count_as_rm(text):
+            if _rm_gated(text, extra_chars):
+                return True
+        elif extra_chars is not None:
+            extra_chars[0] += len(text)
+    if _rm_extra_spent(extra_chars):
+        return None
+    if any(
         pattern.search(form.lower()) or ("xargs" in form.lower() and _RM_NAME_WORD_RE.search(form))
         for form in _rm_name_forms(text)
     ):
@@ -13278,19 +13467,17 @@ def _rm_argv_deletes_outside_tmp(
             commands.setdefault((command, dirs), vector)
     if not commands:
         return False
-    with warnings.catch_warnings():
-        # The link checks parse Python with ast.parse, which may warn (see _parse_python).
-        warnings.simplefilter("ignore")
-        # Interpreter code is read for links in linear time (see _rm_argv_symlink_call_seen).
-        symlink_seen = (
-            symlink_seen
-            or _rm_symlink_creation_seen(shell_text, _call_seen=_rm_argv_symlink_call_seen)
-            or (
-                bool(code)
-                and ("symlink" in code or re.search(r"\b(?:ln|cp)\b", code) is not None)
-                and _rm_argv_symlink_call_seen(language or "", code, tree)
-            )
+    # Interpreter code is read for links in linear time (see _rm_argv_symlink_call_seen), and parsed
+    # without printing parser warnings (see _parse_python).
+    symlink_seen = (
+        symlink_seen
+        or _rm_symlink_creation_seen(shell_text, _call_seen=_rm_argv_symlink_call_seen)
+        or (
+            bool(code)
+            and ("symlink" in code or re.search(r"\b(?:ln|cp)\b", code) is not None)
+            and _rm_argv_symlink_call_seen(language or "", code, tree)
         )
+    )
 
     def lifted(command: str, dirs: tuple[str, ...]) -> bool:
         # main's cache and agent output cleanup rules lift the command as they lift it alone. Every cache
@@ -13600,7 +13787,9 @@ def check_security(
                 matched = pattern.search(action_text_lower) is not None
                 rm_main_only = label == "rm -rf" and (_rm_repr_call(tc) or _rm_extra_spent(rm_extra_chars))
                 rm_strict = (
-                    _rm_reading(pattern, action_text, matched, symlink_seen, main_only=rm_main_only)
+                    _rm_reading(
+                        pattern, action_text, matched, symlink_seen, main_only=rm_main_only, extra_chars=rm_extra_chars
+                    )
                     if label == "rm -rf"
                     else None
                 )

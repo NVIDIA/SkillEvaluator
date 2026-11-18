@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Documentation
+
+- Describe SkillEvaluator's task comparisons, quality and security checks, and CI
+  regression checks in the package summary, starting with the next release.
+
 ### Fixed
 
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

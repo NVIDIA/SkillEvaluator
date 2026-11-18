@@ -8,7 +8,7 @@ requires = ["setuptools >= 77", "wheel"]
 [project]
 name = "skillevaluator"
 version = "1.0.1"
-description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
+description = "Test whether AI agent skills improve task results. Check quality and security, compare runs with and without skills, and catch regressions in CI."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
 keywords = [

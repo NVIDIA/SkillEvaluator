@@ -219,7 +219,7 @@ def resolve_git_remote_url(local_path: Path) -> str | None:
 
         if rel_path and rel_path != ".":
             tree_segment = "/tree/" if https_url.startswith("https://github.com/") else "/-/tree/"
-            encoded_branch = quote(branch, safe="/")
+            encoded_branch = quote(branch, safe="/", errors="surrogateescape")
             encoded_path = quote(rel_path, safe="/", errors="surrogateescape")
             return f"{https_url}{tree_segment}{encoded_branch}/{encoded_path}"
         return https_url

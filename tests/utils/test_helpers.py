@@ -7,8 +7,8 @@ import errno
 import os
 import subprocess
 import sys
-from pathlib import Path
-from unittest.mock import patch
+from pathlib import Path, PureWindowsPath
+from unittest.mock import Mock, patch
 
 import pytest
 
@@ -277,8 +277,14 @@ class TestResolveGitRemoteUrl:
         """A path outside any git repo (and no source_url) returns ``None``."""
         assert resolve_git_remote_url(tmp_path) is None
 
-    @pytest.mark.parametrize("remote", ["https://github.com/example/project.git", "https://gitlab.com/example/project.git"])
-    def test_source_link_quotes_ref_and_relative_path(self, tmp_path: Path, remote: str) -> None:
+    @pytest.mark.parametrize(
+        ("remote", "tree_segment"),
+        [
+            ("https://github.com/example/project.git", "/tree/"),
+            ("https://gitlab.com/example/project.git", "/-/tree/"),
+        ],
+    )
+    def test_source_link_quotes_ref_and_relative_path(self, tmp_path: Path, remote: str, tree_segment: str) -> None:
         repo_root = tmp_path / "repo"
         _init_git_repo(repo_root, remote)
         subprocess.run(["git", "checkout", "-b", "feature/#100%"], cwd=repo_root, check=True, capture_output=True)
@@ -288,8 +294,29 @@ class TestResolveGitRemoteUrl:
         with patch.dict("os.environ", _clean_ci_env(), clear=True):
             url = resolve_git_remote_url(sub_dir)
 
-        tree_segment = "/tree/" if "github.com" in remote else "/-/tree/"
         assert url == f"{remote.removesuffix('.git')}{tree_segment}feature/%23100%25/skills/caf%C3%A9%20%23100%25"
+
+    def test_source_link_uses_forward_slashes_for_windows_relative_paths(self, tmp_path: Path) -> None:
+        local_path = Mock()
+        local_path.resolve.return_value.relative_to.return_value = PureWindowsPath("skills", "my skill")
+        with (
+            patch("skillevaluator.utils.helpers.resolve_git_root", return_value=tmp_path),
+            patch("skillevaluator.utils.helpers._git_output", return_value="https://github.com/example/project.git"),
+            patch.dict("os.environ", _clean_ci_env(GITHUB_REF_NAME="main"), clear=True),
+        ):
+            url = resolve_git_remote_url(local_path)
+
+        assert url == "https://github.com/example/project/tree/main/skills/my%20skill"
+
+    def test_source_link_quotes_surrogate_escaped_branch_bytes(self, tmp_path: Path) -> None:
+        repo_root = tmp_path / "repo"
+        _init_git_repo(repo_root, "https://github.com/example/project.git")
+        sub_dir = repo_root / "skills"
+        sub_dir.mkdir()
+        with patch.dict("os.environ", _clean_ci_env(GITHUB_REF_NAME="feature-\udcff"), clear=True):
+            url = resolve_git_remote_url(sub_dir)
+
+        assert url == "https://github.com/example/project/tree/feature-%FF/skills"
 
     @pytest.mark.skipif(sys.platform == "win32", reason="non-UTF-8 path bytes are a POSIX filesystem case")
     def test_source_link_quotes_original_filename_bytes(self, tmp_path: Path) -> None:

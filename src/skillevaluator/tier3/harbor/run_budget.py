@@ -29,6 +29,15 @@ class Price:
     cached_input_per_mtok: float | None = None
 
 
+def _unique_price_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError(f"duplicate JSON object key {key!r} in price file")
+        result[key] = value
+    return result
+
+
 @dataclass(frozen=True)
 class PriceBook:
     prices: dict[str, Price]
@@ -39,8 +48,8 @@ class PriceBook:
     def load(cls, path: Path) -> PriceBook:
         try:
             contents = path.read_bytes()
-            raw = json.loads(contents.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = json.loads(contents.decode("utf-8"), object_pairs_hook=_unique_price_object)
+        except (OSError, ValueError) as exc:
             raise BudgetConfigurationError(f"{path}: invalid price file: {exc}") from exc
         if not isinstance(raw, dict) or not raw:
             raise BudgetConfigurationError(f"{path}: price file must be a non-empty object")
@@ -48,10 +57,17 @@ class PriceBook:
         for model, value in raw.items():
             if not isinstance(model, str) or not isinstance(value, dict):
                 raise BudgetConfigurationError(f"{path}: each model price must be an object")
+            if any(
+                isinstance(value.get(field), bool)
+                for field in ("input_per_mtok", "output_per_mtok", "cached_input_per_mtok")
+            ):
+                raise BudgetConfigurationError(f"{path}: {model} prices must not be booleans")
             try:
                 input_price = float(value["input_per_mtok"])
                 output_price = float(value["output_per_mtok"])
                 cached_input_price = float(value.get("cached_input_per_mtok", input_price))
+            except OverflowError as exc:
+                raise BudgetConfigurationError(f"{path}: {model} prices must be finite and non-negative") from exc
             except (KeyError, TypeError, ValueError) as exc:
                 raise BudgetConfigurationError(
                     f"{path}: {model} must provide input_per_mtok and output_per_mtok, with optional cached_input_per_mtok"

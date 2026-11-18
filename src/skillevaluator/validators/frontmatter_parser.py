@@ -34,15 +34,26 @@ class ParsedFrontmatter:
     line_count: int
 
 
+class _FrontmatterLoader(yaml.SafeLoader):
+    """Keep source locations when safe scalar constructors reject a value."""
+
+    def construct_object(self, node: yaml.Node, deep: bool = False) -> Any:
+        try:
+            return super().construct_object(node, deep=deep)
+        except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
+            value = node.value[:80] if isinstance(node.value, str) else ""
+            kind = node.tag.rsplit(":", 1)[-1]
+            raise yaml.constructor.ConstructorError(
+                None, None, f"invalid {kind} value {value!r}", node.start_mark
+            ) from exc
+
+
 def load_frontmatter_yaml(raw: str) -> Any:
     """Load frontmatter while reporting native loading failures as YAML errors."""
     try:
-        return yaml.safe_load(raw)
-    except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError, RecursionError) as exc:
-        # SafeLoader raises native exceptions for impossible dates and invalid
-        # explicitly tagged values such as ``!!int ""`` and ``!!bool maybe``.
-        # Deep nesting can also exceed the parser's Python recursion limit.
-        raise yaml.YAMLError(str(exc)) from exc
+        return yaml.load(raw, Loader=_FrontmatterLoader)
+    except RecursionError as exc:
+        raise yaml.YAMLError("frontmatter nesting exceeds the parser recursion limit") from exc
 
 
 def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, ValidationResult]:

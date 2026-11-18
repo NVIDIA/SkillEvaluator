@@ -6,10 +6,11 @@
 from pathlib import Path
 
 import pytest
+import yaml
 
 from skillevaluator.harness.overlay import _tab_indent_breaks_yaml
 from skillevaluator.tier1.commands import run_validation
-from skillevaluator.validators.frontmatter_parser import parse_frontmatter
+from skillevaluator.validators.frontmatter_parser import load_frontmatter_yaml, parse_frontmatter
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY
 from skillevaluator.validators.markdown import markdown_link_targets
 from skillevaluator.validators.quality_score import QualityScoreValidator
@@ -53,6 +54,34 @@ def test_schema_reports_a_yaml_finding(malformed_skill: Path) -> None:
 
     assert not result.passed
     assert any(finding.check_name == "yaml_syntax" for finding in result.findings)
+
+
+@pytest.mark.parametrize(
+    ("raw_value", "kind", "value"),
+    [
+        ("2026-02-30", "timestamp", "2026-02-30"),
+        ('!!int ""', "int", ""),
+        ("!!bool maybe", "bool", "maybe"),
+        ("!!float invalid", "float", "invalid"),
+        ("!!timestamp invalid", "timestamp", "invalid"),
+    ],
+)
+def test_native_scalar_error_keeps_value_and_actual_source_location(tmp_path, raw_value, kind, value):
+    skill = tmp_path / "invalid-location"
+    skill.mkdir()
+    raw = f"name: invalid-location\ndescription: Test a source location\nextra: {raw_value}"
+    (skill / "SKILL.md").write_text(f"---\n{raw}\n---\n# Example\n", encoding="utf-8")
+
+    with pytest.raises(yaml.constructor.ConstructorError) as error:
+        load_frontmatter_yaml(raw)
+    assert error.value.problem_mark.line == 2
+    assert error.value.problem_mark.column == 7
+    assert error.value.problem == f"invalid {kind} value {value!r}"
+
+    result = SchemaValidator().validate(skill)
+    finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
+    assert finding.line_number == 4
+    assert f"invalid {kind} value {value!r}" in finding.message
 
 
 def test_version_reports_the_parse_error(malformed_skill: Path) -> None:

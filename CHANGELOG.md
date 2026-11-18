@@ -12,6 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Malformed optional trajectory `final_metrics` leave condition usage unavailable
+  and no longer abort fresh or reused Tier 3 result collection.
 - NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
   such as `case` and `case-` retain separate rewards, trajectories and attempt records.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

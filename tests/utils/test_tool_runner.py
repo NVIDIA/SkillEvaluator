@@ -799,7 +799,7 @@ def test_version_parses_tool_output(tmp_path, monkeypatch):
     [
         ("win32", "winget install Gitleaks.Gitleaks", "uv tool install semgrep"),
         ("darwin", "brew install gitleaks", "brew install semgrep"),
-        ("linux", "go install github.com/gitleaks/gitleaks", "uv tool install semgrep"),
+        ("linux", "go install github.com/zricethezav/gitleaks/v8@latest", "uv tool install semgrep"),
     ],
 )
 def test_scanner_install_hints_match_the_host_platform(monkeypatch, platform, gitleaks, semgrep):

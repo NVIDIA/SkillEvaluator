@@ -325,7 +325,7 @@ class ExternalTool:
             "Bundled with the security extra — reinstall with: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
-        gitleaks_go = "go install github.com/gitleaks/gitleaks/v8@latest"
+        gitleaks_go = "go install github.com/zricethezav/gitleaks/v8@latest"
         if sys.platform == "win32":
             gitleaks_hint = f"Install with: winget install Gitleaks.Gitleaks or {gitleaks_go}"
             semgrep_hint = "Optional; install separately with: uv tool install semgrep"

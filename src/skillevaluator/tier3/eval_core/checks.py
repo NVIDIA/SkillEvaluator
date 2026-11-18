@@ -8131,7 +8131,7 @@ _CODE_CHAIN_WORD_RE = re.compile(r"[&*\\]?([A-Za-z_$@][\w$]*)")
 _CODE_NAME_VALUE_RE = re.compile(r"[ \t]*([A-Za-z_$@][\w$]*)[ \t]*")
 _CODE_LINE_BLANKS_RE = re.compile(r"[ \t\r\n]*")
 # How far back one receiver chain or forward one bound value is read, and how
-# many rounds of names bound through other names are followed.
+# many passes of names bound through other names are followed.
 _CODE_RECEIVER_CHARS = 300
 _CODE_BINDING_PASSES = 8
 # The work one tool call's reading may spend (see _CodeWork): _CODE_WORK_PER_CHAR
@@ -9476,7 +9476,7 @@ def _code_client_names(reader: _CodeReader) -> tuple[frozenset[str], frozenset[s
     ax = require("axios") or import ax from "axios". The clients are the
     names bound to a chain that reaches a client (see _code_client_chain),
     as in s = requests.Session() or api = axios.create(), followed for up to
-    _CODE_BINDING_PASSES rounds of names bound through other names, and the
+    _CODE_BINDING_PASSES passes of names bound through other names, and the
     upload functions and client classes "from <client module> import"
     binds (_CODE_IMPORTED_CLIENT_RE), or JavaScript imports by name from a
     client module. A name whose every binding names a
@@ -10115,7 +10115,7 @@ def _code_request_sends(reader: _CodeReader) -> _CodeSends | None:
     _CODE_ARGUMENT_CHARS characters, are sent there, and so are the names
     that the value of a binding passes, where the binding is, when the code
     sends the name it binds after it (see _code_sent_after), followed for up
-    to _CODE_BINDING_PASSES rounds, as req is in prepared = req.prepare() or
+    to _CODE_BINDING_PASSES passes, as req is in prepared = req.prepare() or
     prepared = s.prepare_request(req) before s.send(prepared). The text
     read is charged to the reader's work.
     """

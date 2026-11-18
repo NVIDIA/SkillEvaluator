@@ -803,10 +803,12 @@ def test_version_parses_tool_output(tmp_path, monkeypatch):
     ],
 )
 def test_scanner_install_hints_match_the_host_platform(monkeypatch, platform, gitleaks, semgrep):
+    gitleaks_tool = ExternalTool("Gitleaks", "gitleaks")
+    semgrep_tool = ExternalTool("Semgrep", "semgrep")
     monkeypatch.setattr(tool_runner.sys, "platform", platform)
 
-    gitleaks_hint = ExternalTool("Gitleaks", "gitleaks").get_install_hint()
-    semgrep_hint = ExternalTool("Semgrep", "semgrep").get_install_hint()
+    gitleaks_hint = gitleaks_tool.get_install_hint()
+    semgrep_hint = semgrep_tool.get_install_hint()
 
     assert gitleaks in gitleaks_hint
     assert semgrep in semgrep_hint

@@ -89,6 +89,10 @@ on:
         description: Execution environment with optional repository-configured reviewers
         type: string
         default: skillevaluator
+      environment-deployment:
+        description: Create deployment records; keep true for custom deployment protection apps
+        type: boolean
+        default: true
       tier3-required:
         description: Deprecated and ignored; Tier 2 and Tier 3 are always advisory
         type: boolean
@@ -230,7 +234,9 @@ jobs:
     # A PR that changes no skill skips the paid tiers; the aggregate records them as skipped.
     if: ${{ needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' }}
     runs-on: ${{ inputs.runner }}
-    environment: ${{ inputs.environment }}
+    environment:
+      name: ${{ inputs.environment }}
+      deployment: ${{ inputs.environment-deployment }}
     permissions:
       contents: read
       pull-requests: read
@@ -370,7 +376,9 @@ jobs:
     if: ${{ inputs.tier1-llm && needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' && contains(format(',{0},', inputs.tiers), ',1,') }}
     # Match the keyless image job even when native Tier 3 uses a local runner.
     runs-on: ubuntu-24.04
-    environment: ${{ inputs.environment }}
+    environment:
+      name: ${{ inputs.environment }}
+      deployment: ${{ inputs.environment-deployment }}
     permissions:
       contents: read
       pull-requests: read

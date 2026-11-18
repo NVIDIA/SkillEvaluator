@@ -24,7 +24,8 @@ def analyze(text: str) -> dict:
 
     avg_word_len = round(sum(len(w) for w in words) / max(word_count, 1), 2)
 
-    freq = Counter(w.lower().strip(".,;:!?\"'()[]{}") for w in words)
+    tokens = (w.lower().strip(".,;:!?\"'()[]{}") for w in words)
+    freq = Counter(t for t in tokens if any(ch.isalnum() for ch in t))
     top_words = freq.most_common(5)
 
     return {

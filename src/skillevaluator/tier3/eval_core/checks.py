@@ -7820,6 +7820,64 @@ def _rm_sequential_commands(command_text: str, tokens: list[str]) -> list[str] |
     return [command for command in commands if command.strip()]
 
 
+def _rm_scoped_find_xargs(text: str, *, symlink_seen: bool) -> bool:
+    """Recognize only a NUL-delimited, non-following temporary-file pipeline."""
+    if symlink_seen or len(text) > 4096 or any(char in text for char in "\n\r\\$`"):
+        return False
+    try:
+        lexer = shlex.shlex(text, posix=False, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        words = list(lexer)
+    except ValueError:
+        return False
+    if len(words) > 128 or words.count("|") != 1:
+        return False
+    pipe = words.index("|")
+    producer, consumer = words[:pipe], words[pipe + 1 :]
+    if not producer or producer[0] not in {"find", "/bin/find", "/usr/bin/find"}:
+        return False
+    cursor = 1
+    if cursor < len(producer) and producer[cursor] == "-P":
+        cursor += 1
+    if cursor >= len(producer):
+        return False
+    root = producer[cursor]
+    if len(root) > 1 and root[0] in "\"'" and root[-1] == root[0]:
+        root = root[1:-1]
+    if not re.fullmatch(r"/tmp/[A-Za-z0-9_.-]+(?:/[A-Za-z0-9_.-]+)*", root):
+        return False
+    if any(part in {".", ".."} for part in root.split("/")):
+        return False
+    cursor += 1
+    if producer[cursor : cursor + 2] != ["-type", "f"]:
+        return False
+    cursor += 2
+    while cursor < len(producer) - 1:
+        if producer[cursor] not in {"-name", "-iname"} or cursor + 1 >= len(producer):
+            return False
+        pattern = producer[cursor + 1]
+        quoted = len(pattern) > 1 and pattern[0] in "\"'" and pattern[-1] == pattern[0]
+        # Unquoted globs can expand to more find arguments before find runs.
+        if not quoted and re.fullmatch(r"[A-Za-z0-9_.-]+", pattern) is None:
+            return False
+        cursor += 2
+    if producer[cursor:] != ["-print0"]:
+        return False
+    if not consumer or consumer[0] not in {"xargs", "/bin/xargs", "/usr/bin/xargs"}:
+        return False
+    cursor, nul = 1, False
+    while cursor < len(consumer) and consumer[cursor] in {"-0", "--null", "-r", "--no-run-if-empty"}:
+        nul |= consumer[cursor] in {"-0", "--null"}
+        cursor += 1
+    if cursor < len(consumer) and consumer[cursor] == "--":
+        cursor += 1
+    if not nul or cursor >= len(consumer) or consumer[cursor] not in {"rm", "/bin/rm", "/usr/bin/rm"}:
+        return False
+    flags = consumer[cursor + 1 :]
+    return bool(flags) and all(flag in {"-f", "--force"} for flag in flags)
+
+
 def _rm_targets_outside_tmp(
     command_text: str,
     _depth: int = 0,
@@ -8276,6 +8334,8 @@ def _rm_targets_outside_tmp(
         if not recursive and not force:
             continue
         if xargs_context:
+            if not recursive and force and not operands and _rm_scoped_find_xargs(command_text, symlink_seen=_symlink_seen):
+                continue
             # xargs can append or replace targets with paths absent from this trace.
             return True
         if _xargs_only:

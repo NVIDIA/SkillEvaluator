@@ -22,6 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Preserve the temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline that removes regular files under a literal temporary
+  root, without weakening detection of unknown producers or link traversal.
+
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

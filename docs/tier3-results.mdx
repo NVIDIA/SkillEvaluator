@@ -275,6 +275,15 @@ recognized regenerable caches, such as `.pytest_cache`, `__pycache__`, or
 access. Mixed targets, dynamic shell expressions, compound commands and
 unsupported forms retain the existing destructive-command classification.
 
+A narrow temporary-file pipeline is exempt: `find /tmp/cache -type f -print0 |
+xargs -0 -r rm -f` keeps NUL-delimited paths under its literal temporary root.
+The producer may use `-P` and quoted `-name`/`-iname` filters; the consumer must
+use NUL input and force-only removal, without written targets or other options.
+Link evidence, path traversal, link-following modes, whitespace-delimited output,
+custom formatting, additional commands and unknown syntax retain the finding.
+The exemption reads only one pipeline of at most 4 KiB and 128 words. It uses
+command-text evidence and does not prove containment through pre-existing links.
+
 A destructive-command finding scores the Security dimension `0.0`. Other
 recursive `rm` commands outside `/tmp`, and `xargs rm` with a recursive or
 force option, receive this finding. A force-only `rm -f` or `rm --force`

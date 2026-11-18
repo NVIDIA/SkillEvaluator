@@ -54,7 +54,8 @@ All notable changes to SkillEvaluator are documented in this file.
   and through `xh`, `wget -e post_file=.env`, or a curl `-K` config or
   `.wgetrc` the same call writes, which scored `1.0` before this change.
   Routes, test clients, mocks and code that is only written do not warn; a
-  call whose reading spends its work budget does. The Tier 3 guide lists the
+  call whose reading spends its work budget does, reported as an incomplete
+  inspection rather than observed unsafe behavior. The Tier 3 guide lists the
   forms that are not read. Both the host checker and the bundled Harbor
   verifier apply the fix.
 

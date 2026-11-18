@@ -77,10 +77,28 @@ a zero-width interval on identical case interactions is not proof of certainty.
 A sign alone is not a significance test. On ten cases at `--n-attempts 1`,
 one binary outcome flipping in an individual or combined configuration moves
 the interaction by 0.10. Configurations
-run sequentially: baseline, each individual, then combined. Provider changes,
+run sequentially by default: baseline, each individual, then combined. Provider changes,
 rate limiting, or timeouts during a long experiment can therefore align with
 configuration order. Repeat the experiment before interpreting a small
 interaction as a reliable effect.
+
+For a structured JSON, JSONL or YAML source, set `--execution-order interleaved`
+to run all configurations for one case and attempt before moving to the next
+block. A seeded initial configuration order rotates between blocks to balance
+time order; `--schedule-seed` defaults to `0`. The same seed and reviewed inputs
+reproduce the plan, not the model outcomes. This reduces alignment between a
+configuration and provider drift, but does not remove trial noise or changes
+within a block. Native Harbor task suites continue to use sequential execution;
+requesting interleaving for one is a usage error before model work.
+
+Interleaving keeps the same total trial budget but starts a separate evaluation
+for each configuration/case/attempt, so job startup and readiness checks can
+make it slower. Each run retains its own reports and rewards. `interaction.json`
+records the complete schedule and each step's state before and after execution.
+Missing, duplicated or mismatched steps prevent a numeric result, as do changes
+in model, scorer, environment or evaluator identity between blocks. Attempts
+are still averaged within each case before equal-weight case aggregation and
+uncertainty estimation. The full original source remains retained once.
 
 The terminal prints baseline, individual and combined scores, combined lift,
 and signed interaction separately for each agent/model. Add `--json` for a

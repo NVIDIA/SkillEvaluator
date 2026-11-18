@@ -574,6 +574,8 @@ skillevaluator tier3 interact ./skills/a ./skills/b \
 | `--environment-kwarg`, `--ek` | None | Repeatable backend `KEY=VALUE`; never pass secrets. |
 | `--n-attempts` | `1` | Positive fixed attempt budget for every case; disables early stopping. |
 | `--n-concurrent` | Source config or `4` | Concurrent trials within a configuration. |
+| `--execution-order` | `sequential` | `interleaved` rotates configurations within each case/attempt block; requires a structured dataset. |
+| `--schedule-seed` | `0` | Reproducible initial configuration order for interleaving. |
 | `--metric` | `goal_accuracy` | Outcome metric: `goal_accuracy`, `accuracy`, or `overall` for `custom_only` grading. |
 | `--results-dir` | `SKILLEVALUATOR_RESULTS_DIR` or `interaction-results` beside the source | Output root outside all inputs; home shortcuts and symlinked parents are resolved. |
 | `--harbor-keep-jobs` | Off | Retain raw Harbor jobs alongside collected evidence. |

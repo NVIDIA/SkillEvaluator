@@ -37,6 +37,20 @@ from skillevaluator.tier3_environments import all_env_modes
 )
 @click.option("--n-concurrent", type=click.IntRange(min=1), default=None)
 @click.option(
+    "--execution-order",
+    type=click.Choice(["sequential", "interleaved"]),
+    default="sequential",
+    show_default=True,
+    help="Interleave configurations within each case/attempt block for structured datasets.",
+)
+@click.option(
+    "--schedule-seed",
+    type=click.IntRange(min=0, max=2**32 - 1),
+    default=0,
+    show_default=True,
+    help="Reproducible initial configuration order for interleaved execution.",
+)
+@click.option(
     "--metric",
     type=click.Choice(["goal_accuracy", "accuracy", "overall"]),
     default="goal_accuracy",
@@ -61,6 +75,8 @@ def interact_command(
     n_attempts: int,
     n_concurrent: int | None,
     metric: str,
+    execution_order: str,
+    schedule_seed: int,
     results_dir: Path | None,
     harbor_keep_jobs: bool,
     as_json: bool,
@@ -94,6 +110,8 @@ def interact_command(
                     harbor_keep_jobs=harbor_keep_jobs,
                 ),
                 metric=metric,
+                execution_order=execution_order,
+                schedule_seed=schedule_seed,
                 on_configuration=lambda name: click.echo(f"Tier 3 interaction: running {name}", err=True),
                 progress_reporter=create_progress_reporter("auto", stream=click.get_text_stream("stderr")),
             )

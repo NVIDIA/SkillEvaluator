@@ -6,6 +6,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add opt-in case/attempt interleaving for structured skill-interaction suites,
+  with a reproducible rotated configuration schedule, retained step evidence,
+  and cross-block comparability checks. Native task suites remain sequential.
+
 - Report an advisory paired case-bootstrap interval and contributing case counts for Tier 3 skill interactions, without changing their scores or verdicts.
 
 ### Documentation

@@ -821,3 +821,246 @@ def test_terminal_reports_interval_and_single_case_limitation(tmp_path, capsys):
     text = capsys.readouterr().out
     assert "95% case-bootstrap interval: unavailable (need at least two cases)" in text
     assert "1 cases, 1 non-zero" in text
+
+
+def test_interleaved_schedule_is_seeded_and_counterbalances_complete_blocks():
+    from collections import Counter
+
+    from skillevaluator.tier3.interaction_schedule import interaction_schedule
+
+    cases = [f"case-{index}" for index in range(4)]
+    configs = ["baseline", "individual-1", "individual-2", "combined"]
+    schedule = interaction_schedule(cases, configs, n_attempts=2, seed=7)
+    assert schedule == interaction_schedule(list(reversed(cases)), configs, n_attempts=2, seed=7)
+    assert schedule != interaction_schedule(cases, configs, n_attempts=2, seed=3)
+    assert len(schedule) == 32
+    coverage = Counter((step["case_id"], step["attempt"], step["configuration"]) for step in schedule)
+    assert set(coverage.values()) == {1}
+    for offset in range(0, len(schedule), len(configs)):
+        block = schedule[offset : offset + len(configs)]
+        assert len({(step["case_id"], step["attempt"]) for step in block}) == 1
+        assert {step["configuration"] for step in block} == set(configs)
+    for position in range(len(configs)):
+        assert set(Counter(step["configuration"] for step in schedule[position :: len(configs)]).values()) == {2}
+
+
+def _interleaved_engine(monkeypatch, *, fail_at=None, interrupt_at=None, drift=False):
+    calls = []
+    values = {"baseline": 0.2, "individual-1": 0.3, "individual-2": 0.35, "combined": 0.6}
+
+    def evaluate(self, options, **kwargs):
+        entries = json.loads((options.skill_path / "evals" / "evals.json").read_text())
+        assert len(entries) == 1
+        entry = entries[0]
+        calls.append((options, copy.deepcopy(entry)))
+        if len(calls) == interrupt_at:
+            raise KeyboardInterrupt
+        if len(calls) == fail_at:
+            raise TimeoutError
+        condition = "without-skill" if options.skip_with_skill else "with-skill"
+        result = _evidence(
+            options.results_dir / "run",
+            {entry["id"]: [values[options.results_dir.name]]},
+            n_attempts=options.n_attempts,
+            condition=condition,
+        )
+        if drift and entry["id"] == "case-2":
+            result["agents"]["codex"]["model"] = "changed-model"
+        (Path(result["run_dir"]) / "dataset_snapshot.json").write_text(
+            json.dumps({"dataset": [{**entry, "has_skill": condition == "with-skill"}]}), encoding="utf-8"
+        )
+        return result
+
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    return calls
+
+
+def _two_case_source(tmp_path):
+    source = _source(tmp_path)
+    path = source / "evals" / "evals.json"
+    data = json.loads(path.read_text())
+    data["evals"].append({"id": "case-2", "prompt": "Other reviewed task", "expected_output": "Other answer"})
+    path.write_text(json.dumps(data), encoding="utf-8")
+    return source
+
+
+@pytest.mark.parametrize("suffix", ["json", "jsonl", "yaml", "yml"])
+def test_interleaves_case_attempts_and_retains_real_evidence(monkeypatch, tmp_path, suffix):
+    import yaml
+
+    source = _two_case_source(tmp_path)
+    original = source / "evals" / "evals.json"
+    data = json.loads(original.read_text())
+    dataset = original.with_suffix("." + suffix)
+    if suffix == "jsonl":
+        dataset.write_text("\n".join(json.dumps(entry) for entry in data["evals"]), encoding="utf-8")
+    elif suffix in {"yaml", "yml"}:
+        dataset.write_text(yaml.safe_dump(data), encoding="utf-8")
+    if dataset != original:
+        original.unlink()
+    before = dataset.read_bytes()
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(monkeypatch)
+    report = run_interaction(
+        skills,
+        eval_source=source,
+        options=EvaluationOptions(source, n_attempts=2),
+        execution_order="interleaved",
+        schedule_seed=7,
+    )
+    assert report["status"] == "complete", report
+    assert len(calls) == 16
+    assert all(call.n_attempts == 1 and call.stop_on_pass is False for call, _ in calls)
+    assert report["execution_order"] == "interleaved" and report["schedule_seed"] == 7
+    assert all(step["status"] == "complete" for step in report["schedule"])
+    assert [(entry["id"], call.results_dir.name) for call, entry in calls] == [
+        (step["case_id"], step["configuration"]) for step in report["schedule"]
+    ]
+    score = report["agents"]["codex"]
+    assert score["interaction"] == pytest.approx(0.15)
+    assert score["uncertainty"]["n_cases"] == 2
+    for cases in score["evidence"].values():
+        assert set(cases) == {"case-1", "case-2"}
+        for rows in cases.values():
+            assert len(rows) == 2
+            assert {row["scheduled_attempt"] for row in rows} == {1, 2}
+            assert all(Path(row["reward_path"]).is_file() for row in rows)
+    assert dataset.read_bytes() == before
+    assert (Path(report["run_dir"]) / "source" / "evals" / dataset.name).read_bytes() == before
+    assert json.loads((Path(report["run_dir"]) / "interaction.json").read_text()) == report
+
+
+@pytest.mark.parametrize("problem", ["failure", "missing_case", "duplicate_attempt", "model_drift"])
+def test_interleaved_runs_fail_closed_on_missing_or_incomparable_evidence(monkeypatch, tmp_path, problem):
+    from skillevaluator.tier3.interaction_schedule import compare_interleaved
+
+    source = _two_case_source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(
+        monkeypatch, fail_at=3 if problem == "failure" else None, drift=problem == "model_drift"
+    )
+    report = run_interaction(
+        skills, eval_source=source, options=EvaluationOptions(source), execution_order="interleaved"
+    )
+    if problem == "missing_case":
+        for config in report["configurations"]:
+            config["runs"] = [run for run in config["runs"] if run["case_id"] != "case-2"]
+    elif problem == "duplicate_attempt":
+        report["configurations"][0]["runs"].append(report["configurations"][0]["runs"][0])
+    checked = compare_interleaved(
+        report["configurations"], case_ids=["case-1", "case-2"], metric="goal_accuracy", n_attempts=1
+    )
+    assert checked["status"] in {"incomplete", "incomparable"}
+    assert all("interaction" not in score for score in checked["agents"].values())
+    assert len(calls) == 8
+
+
+def test_interleaved_interruption_retains_schedule_and_finished_runs(monkeypatch, tmp_path):
+    source = _two_case_source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    _interleaved_engine(monkeypatch, interrupt_at=3)
+    root = tmp_path / "experiment-results"
+    with pytest.raises(KeyboardInterrupt):
+        run_interaction(
+            skills,
+            eval_source=source,
+            options=EvaluationOptions(source, results_dir=root),
+            execution_order="interleaved",
+        )
+    report = json.loads(next(root.glob("interaction_*/interaction.json")).read_text())
+    assert report["status"] == "incomplete"
+    assert [step["status"] for step in report["schedule"][:4]] == ["complete", "complete", "interrupted", "pending"]
+    assert "agents" not in report
+
+
+def test_native_interleaving_is_rejected_before_running_or_writing_results(monkeypatch, tmp_path):
+    from skillevaluator.tier3.commands import init_harbor_task
+
+    source = _skill(tmp_path / "native-repo", "reviewed-native")
+    subprocess.run(["git", "init", "-q", str(source.parent)], check=True)
+    init_harbor_task(source, force=False, case_id="case-1", mode="default", language="python", with_config=True)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(monkeypatch)
+    root = tmp_path / "experiment-results"
+    with pytest.raises(ValueError, match="use sequential for native"):
+        run_interaction(
+            skills,
+            eval_source=source,
+            options=EvaluationOptions(source, results_dir=root),
+            execution_order="interleaved",
+        )
+    assert not calls and not root.exists()
+
+
+def test_cli_interleaved_json_keeps_progress_separate(monkeypatch, tmp_path):
+    source = _two_case_source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    _interleaved_engine(monkeypatch)
+    result = CliRunner().invoke(
+        cli,
+        [
+            "tier3",
+            "interact",
+            *map(str, skills),
+            "--eval-source",
+            str(source),
+            "--execution-order",
+            "interleaved",
+            "--schedule-seed",
+            "7",
+            "--json",
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["schedule_seed"] == 7
+    assert "attempt 1" in result.stderr
+
+
+def test_interleaved_staging_keeps_each_case_fixed_across_installed_sets(monkeypatch, tmp_path):
+    from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
+
+    source = _two_case_source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(monkeypatch)
+    fake = EvaluationService.evaluate
+    staged = []
+
+    def evaluate(self, options, **kwargs):
+        subprocess.run(["git", "init", "-q", str(options.skill_path.parent)], check=True)
+        tasks = generate_harbor_tasks(
+            options.skill_path,
+            tmp_path / f"actual-staged-{len(calls)}",
+            with_skill=not options.skip_with_skill,
+            workspace_skill_paths=list(options.include_skills),
+            workspace_mode=options.skill_workspace_mode,
+        )
+        assert len(tasks) == 1
+        task = tasks[0]
+        entry = json.loads((task / "tests" / "entry.json").read_text())
+        installed = {path.parent.name for path in (task / "environment" / "skills").glob("*/SKILL.md")}
+        staged.append((options.results_dir.name, installed, entry, (task / "instruction.md").read_bytes()))
+        return fake(self, options, **kwargs)
+
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    report = run_interaction(
+        skills, eval_source=source, options=EvaluationOptions(source), execution_order="interleaved"
+    )
+    assert report["status"] == "complete"
+    expected = {"baseline": set(), "individual-1": {"a"}, "individual-2": {"b"}, "combined": {"a", "b"}}
+    for config, installed, _, _ in staged:
+        assert installed == expected[config]
+    for case_id in ("case-1", "case-2"):
+        rows = [row for row in staged if row[2]["id"] == case_id]
+        assert len(rows) == 4
+        assert len({row[3] for row in rows}) == 1
+        assert len({row[2]["ground_truth"] for row in rows}) == 1
+
+
+@pytest.mark.parametrize("kwargs", [{"execution_order": "random"}, {"schedule_seed": -1}, {"schedule_seed": True}])
+def test_invalid_schedule_options_fail_before_running(monkeypatch, tmp_path, kwargs):
+    source = _source(tmp_path)
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(monkeypatch)
+    with pytest.raises(ValueError):
+        run_interaction(skills, eval_source=source, options=EvaluationOptions(source), **kwargs)
+    assert not calls

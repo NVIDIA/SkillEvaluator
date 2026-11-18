@@ -62,7 +62,7 @@ def _load_state(state_path: Path) -> tuple[dict, str | None]:
     counter = 0
 
     # Pattern: - [X] task_ID: content (status)
-    pattern = r"^- \[(.)\] (task_\d+): (.+?) \((pending|in_progress|completed|cancelled)\)"
+    pattern = r"^- \[(.)\] (task_\d+): (.+?) \((pending|in_progress|completed|cancelled)\)$"
 
     for line in content.split("\n"):
         match = re.match(pattern, line.strip())

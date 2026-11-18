@@ -23,6 +23,53 @@ def _metrics() -> dict[str, object]:
 
 
 @pytest.mark.parametrize(
+    "relative", ["trial/agent/trajectory.json", "trial/steps/1/agent/trajectory.json", "trial/trajectory.json"]
+)
+@pytest.mark.parametrize(
+    "sample", [{}, {"final_metrics": _metrics()}], ids=["sample-without-metrics", "sample-with-metrics"]
+)
+def test_only_retained_atif_locations_contribute_to_budget_usage(tmp_path, relative, sample):
+    trajectory = tmp_path / relative
+    trajectory.parent.mkdir(parents=True)
+    trajectory.write_text(json.dumps({"final_metrics": _metrics()}), encoding="utf-8")
+    for copied_skill in ("trial/agent/sessions/skills/demo", "trial/steps/1/agent/sessions/skills/demo"):
+        example = tmp_path / copied_skill / "trajectory.json"
+        example.parent.mkdir(parents=True)
+        example.write_text(json.dumps(sample), encoding="utf-8")
+    budget = BudgetController(max_agent_tokens=100, max_cost_usd=10, price_book=PriceBook({}))
+    assert budget.admit(agent="a", arm="with", case_id="first", attempt=1)
+
+    usage = runner._budget_usage(tmp_path)
+
+    assert usage == {"input_tokens": 10, "output_tokens": 5, "cost_usd": 0.2}
+    budget.record_usage(usage)
+    assert budget.admit(agent="a", arm="with", case_id="next", attempt=1)
+
+
+@pytest.mark.parametrize(
+    "field,large_value",
+    [
+        ("total_cost_usd", 1e308),
+        ("total_prompt_tokens", 10**308),
+        ("total_completion_tokens", 10**308),
+        ("total_cached_tokens", 10**308),
+    ],
+    ids=["cost", "prompt", "completion", "cached"],
+)
+def test_overflowing_totals_withhold_only_the_affected_dimension(tmp_path, field, large_value):
+    metrics = {**_metrics(), field: large_value}
+    _trajectory(tmp_path, "first", metrics)
+    _trajectory(tmp_path, "second", metrics)
+
+    usage = runner._budget_usage(tmp_path)
+
+    if field == "total_cost_usd":
+        assert usage == {"input_tokens": 20, "output_tokens": 10}
+    else:
+        assert usage == {"cost_usd": pytest.approx(0.4)}
+
+
+@pytest.mark.parametrize(
     "field,invalid",
     [
         ("total_prompt_tokens", None),
@@ -81,7 +128,11 @@ def test_nonobject_or_missing_metrics_do_not_leave_a_complete_subtotal(tmp_path:
     assert runner._budget_usage(tmp_path) == {}
 
 
-@pytest.mark.parametrize("raw", [b"not JSON", b"\xff"], ids=["invalid-json", "invalid-utf8"])
+@pytest.mark.parametrize(
+    "raw",
+    [b"not JSON", b"\xff", b"[" * 1_000_000 + b"]" * 1_000_000],
+    ids=["invalid-json", "invalid-utf8", "deeply-nested"],
+)
 def test_unreadable_trajectory_does_not_leave_a_complete_subtotal(tmp_path: Path, raw: bytes) -> None:
     _trajectory(tmp_path, "valid", _metrics())
     bad = tmp_path / "malformed" / "agent" / "trajectory.json"
@@ -91,7 +142,16 @@ def test_unreadable_trajectory_does_not_leave_a_complete_subtotal(tmp_path: Path
     assert runner._budget_usage(tmp_path) == {}
 
 
-@pytest.mark.parametrize("raw", ["not JSON", "{}", '{"attempts": null}', '{"attempts": [null]}'])
+@pytest.mark.parametrize(
+    "raw",
+    [
+        "not JSON",
+        "{}",
+        '{"attempts": null}',
+        '{"attempts": [null]}',
+        pytest.param("[" * 1_000_000 + "]" * 1_000_000, id="deeply-nested"),
+    ],
+)
 @pytest.mark.parametrize("include_valid", [False, True])
 def test_malformed_judge_evidence_is_not_zero_or_a_complete_subtotal(
     tmp_path: Path, raw: str, include_valid: bool

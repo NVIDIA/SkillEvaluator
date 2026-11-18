@@ -757,7 +757,9 @@ def _trajectory_agent_runtime_failure_reason(trajectory: Any) -> str:
     steps = trajectory.get("steps")
     if not isinstance(steps, list):
         return ""
-    final_metrics = trajectory.get("final_metrics") or {}
+    final_metrics = trajectory.get("final_metrics")
+    if not isinstance(final_metrics, dict):
+        final_metrics = {}
     total_prompt = final_metrics.get("total_prompt_tokens")
     total_completion = final_metrics.get("total_completion_tokens")
     tokenless = (total_prompt in (None, 0)) and (total_completion in (None, 0))

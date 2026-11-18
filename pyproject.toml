@@ -7,7 +7,7 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "1.0.0"
+version = "1.0.1"
 description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
@@ -113,7 +113,7 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/NVIDIA/SkillEvaluator#readme"
+Documentation = "https://docs.nvidia.com/skills/skillevaluator/"
 Repository = "https://github.com/NVIDIA/SkillEvaluator"
 
 [project.scripts]
@@ -206,8 +206,9 @@ ignore = [
 # human-readable progress and results to stdout by design.
 "src/skillevaluator/tier3/generate_dataset.py" = ["T201"]
 # Reference skill scripts are standalone executables run by the agent under
-# Harbor (not imported); printing to stdout is their output contract.
-"src/skillevaluator/tier3/reference_skills/**" = ["T201"]
+# Harbor; printing to stdout is their output contract. Shared helpers beside
+# them are imported from the script directory, not as a package (INP001).
+"src/skillevaluator/tier3/reference_skills/**" = ["T201", "INP001"]
 # pytest test directories are implicit namespace packages by design (no
 # __init__.py anywhere under tests/).
 "tests/**" = ["INP001"]

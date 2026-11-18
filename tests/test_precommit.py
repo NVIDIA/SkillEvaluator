@@ -397,6 +397,31 @@ def test_case_only_checkout_alias_keeps_schema_checks(
     assert "description" in result.output
 
 
+@pytest.mark.parametrize("relative", ["skills/demo/SKILL.md", "skills/demo/deleted/sub/file.py"])
+def test_checkout_alias_reanchors_existing_and_deleted_paths_on_case_sensitive_filesystems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    repo = tmp_path / "repo"
+    skill = _write_skill(repo / "skills", "demo")
+    fixture = _write_skill(repo / "evals", "fixture")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(repo, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    original_resolve = Path.resolve
+
+    def preserve_alias(path: Path, strict: bool = False) -> Path:
+        if path.is_relative_to(alias):
+            return path.absolute()
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+
+    assert skill_root_for(alias / relative, cwd=repo) == skill
+    assert skill_root_for(alias / fixture.relative_to(repo) / "SKILL.md", cwd=repo) is None
+
+
 def test_case_only_checkout_alias_keeps_exclusions_and_root_boundary(tmp_path: Path) -> None:
     repo = tmp_path / "CaseProbe"
     repo.mkdir()

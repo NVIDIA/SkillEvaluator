@@ -2695,7 +2695,8 @@
                 <div class="t3-summary-action" id="tier3-next-steps-preview">
                     {% set primary_step = (insights_view.next_steps or []) | first %}
                     {% set primary_recommendation = (insights_view.recommendations or []) | first %}
-                    {% if primary_step or primary_recommendation %}<p><strong>Next action:</strong> {{ primary_step.action if primary_step else (primary_recommendation.title or primary_recommendation.message) }}</p>{% endif %}
+                    {% if insights_view.execution_errors and primary_step and primary_step.target != 'evaluation' %}<p><strong>Next action:</strong> Resolve the recorded execution errors before changing the skill or dataset, then rerun the affected attempts.</p>
+                    {% elif primary_step or primary_recommendation %}<p><strong>Next action:</strong> {{ primary_step.action if primary_step else (primary_recommendation.title or primary_recommendation.message) }}</p>{% endif %}
                     <div class="t3-summary-links"><a href="#tier3-page-suggestions">View insights</a>{% if insights_view.execution_errors %}<a href="#tier3-execution-errors">Execution errors</a>{% endif %}</div>
                 </div>
             </div>

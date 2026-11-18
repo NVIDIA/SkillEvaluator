@@ -110,6 +110,39 @@ def _write_native_skill(tmp_path: Path) -> Path:
     return skill
 
 
+@pytest.mark.parametrize("with_skill", (False, True))
+@pytest.mark.parametrize("relative", ("repo-context.json", "fixtures/repo-context.json"))
+def test_native_tasks_reserve_only_the_generated_context_metadata_path(
+    tmp_path: Path, with_skill: bool, relative: str
+) -> None:
+    skill = _write_native_skill(tmp_path)
+    subprocess.run(["git", "init", "-q", str(skill)], check=True)
+    native_task = skill / "evals" / "harbor" / "case-001"
+    environment = native_task / "environment"
+    authored = environment / relative
+    authored.parent.mkdir(parents=True)
+    authored.write_text('{"authored": "task input"}', encoding="utf-8")
+    (environment / "Dockerfile").write_text(
+        f"FROM python:3.12-slim\nCOPY {relative} /opt/fixture.json\n", encoding="utf-8"
+    )
+    tests_dir = native_task / "tests"
+    tests_dir.mkdir()
+    (tests_dir / "test.sh").write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
+    output_dir = tmp_path / "tasks"
+
+    if relative == "repo-context.json":
+        with pytest.raises(ValueError, match="reserved for generated repository-context metadata"):
+            stage_native_harbor_tasks(skill, output_dir, with_skill=with_skill, grading_mode="custom_only")
+        assert not (output_dir / "case-001").exists()
+    else:
+        staged = stage_native_harbor_tasks(skill, output_dir, with_skill=with_skill, grading_mode="custom_only")
+        assert len(staged) == 1
+        assert (staged[0] / "environment" / relative).read_text(encoding="utf-8") == authored.read_text(
+            encoding="utf-8"
+        )
+    assert authored.read_text(encoding="utf-8") == '{"authored": "task input"}'
+
+
 def _write_repo_context_fixture(repo: Path) -> Path:
     skill = repo / "skill"
     skill.mkdir(parents=True)

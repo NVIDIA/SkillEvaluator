@@ -3513,6 +3513,7 @@ def context_optimization_check(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("context"),
+        explicit_skill_name=skill_path.resolve().name,
         **_report_roots(skill_path),
     ):
         raise click.ClickException("context optimization check failed")
@@ -3549,6 +3550,7 @@ def dedup_scan(
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("dedup"),
+        explicit_skill_name=skill_path.resolve().name,
         **_report_roots(skill_path),
     ):
         raise click.ClickException("dedup scan failed")

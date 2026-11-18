@@ -56,7 +56,7 @@ Choose one path before writing files:
 
 | User need | Evaluator shape |
 | --- | --- |
-| Existing `evals.json` task plus extra domain checks | Top-level BYOG: `evals/grader.py` or `evals/grader.sh` |
+| Existing `evals/evals.json` task plus extra domain checks | Top-level BYOG: `evals/grader.py` or `evals/grader.sh` |
 | Existing benchmark prompt/rubric that can run in the generated workspace | Top-level BYOG plus `evals/evals.json` and `evals/files/` |
 | Benchmark owns task layout, setup, service lifecycle, or verifier harness | Native BYOT/BYOG: `evals/harbor/<case>/...` |
 | User wants only custom reward/pass criteria | `grading.mode: custom_only` |

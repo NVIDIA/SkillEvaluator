@@ -7,8 +7,10 @@ import json
 import re
 import subprocess
 import sys
+from math import isfinite
 from pathlib import Path
-from time import monotonic
+from queue import Empty, Queue
+from threading import Thread
 from typing import Any
 
 if __package__:
@@ -36,19 +38,37 @@ SUPPORTED_CHECK_TYPES = (
 
 _PATTERN_TIMEOUT_SECONDS = 1.0
 _PATTERN_BUDGET_SECONDS = 5.0
+_PATTERN_STARTUP_TIMEOUT_SECONDS = 10.0
 _PATTERN_WORKER = """
 import json
 import re
 import sys
+from time import monotonic
 
 pattern, text = json.load(sys.stdin)
+print(json.dumps(["ready"]), flush=True)
+started = monotonic()
 try:
     matched = re.search(pattern, text) is not None
 except (re.error, RecursionError, OverflowError) as exc:
-    print("error:" + str(exc))
+    kind, detail = "error", str(exc)
 else:
-    print("match" if matched else "no_match")
+    kind, detail = "match" if matched else "no_match", None
+elapsed = monotonic() - started
+print(json.dumps([kind, detail, elapsed]), flush=True)
 """
+
+
+def _pattern_worker_messages(worker: subprocess.Popen[str], payload: str, messages: Queue[str | None]) -> None:
+    try:
+        with worker.stdin:
+            worker.stdin.write(payload)
+        for line in worker.stdout:
+            messages.put(line)
+    except (OSError, UnicodeError, ValueError):
+        pass
+    finally:
+        messages.put(None)
 
 
 def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tuple[bool | None, str | None]:
@@ -56,30 +76,65 @@ def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tup
     timeout = min(_PATTERN_TIMEOUT_SECONDS, budget[0])
     if timeout <= 0:
         return None, "the regular expression time budget was exhausted"
-    started = monotonic()
-    try:
-        result = subprocess.run(
-            [sys.executable, "-I", "-c", _PATTERN_WORKER],
-            input=json.dumps([pattern, text]),
-            capture_output=True,
-            encoding="utf-8",
-            timeout=timeout,
-            check=False,
-        )
-    except subprocess.TimeoutExpired:
-        return None, "the regular expression timed out"
-    except OSError:
+    if not sys.executable:
         return None, "the regular expression worker could not be started"
-    finally:
-        budget[0] -= max(0.0, monotonic() - started)
-    if result.returncode != 0:
-        return None, "the regular expression worker failed"
-    if result.stdout == "match\n":
+    timeout_reason = (
+        "the regular expression time budget was exhausted"
+        if budget[0] < _PATTERN_TIMEOUT_SECONDS
+        else "the regular expression timed out"
+    )
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-I", "-c", _PATTERN_WORKER],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="ascii",
+        ) as worker:
+            messages: Queue[str | None] = Queue()
+            reader = Thread(target=_pattern_worker_messages, args=(worker, json.dumps([pattern, text]), messages))
+            try:
+                reader.start()
+                try:
+                    ready = messages.get(timeout=_PATTERN_STARTUP_TIMEOUT_SECONDS)
+                except Empty:
+                    return None, "the regular expression worker did not become ready"
+                if ready != '["ready"]\n':
+                    return None, "the regular expression worker returned an invalid result"
+                try:
+                    output = messages.get(timeout=timeout)
+                except Empty:
+                    budget[0] -= timeout
+                    return None, timeout_reason
+                try:
+                    worker.wait(timeout=_PATTERN_STARTUP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    return None, "the regular expression worker failed"
+                if worker.returncode != 0:
+                    return None, "the regular expression worker failed"
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait()
+                if reader.ident is not None:
+                    reader.join()
+    except (OSError, RuntimeError):
+        return None, "the regular expression worker could not be started"
+    try:
+        kind, detail, elapsed = json.loads(output) if output is not None else []
+        if type(elapsed) not in (int, float) or not isfinite(elapsed) or elapsed < 0:
+            raise ValueError("invalid worker duration")
+    except (ValueError, TypeError, OverflowError):
+        return None, "the regular expression worker returned an invalid result"
+    budget[0] -= elapsed
+    if elapsed > timeout:
+        return None, timeout_reason
+    if kind == "match" and detail is None:
         return True, None
-    if result.stdout == "no_match\n":
+    if kind == "no_match" and detail is None:
         return False, None
-    if result.stdout.startswith("error:"):
-        return None, "it is not a valid regular expression: " + result.stdout.removeprefix("error:").strip()
+    if kind == "error" and isinstance(detail, str):
+        return None, "it is not a valid regular expression: " + detail
     return None, "the regular expression worker returned an invalid result"
 
 

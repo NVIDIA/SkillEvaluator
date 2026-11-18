@@ -181,13 +181,131 @@ def test_deep_pattern_compilation_is_not_checked_instead_of_aborting_evaluation(
     assert "not a valid regular expression" in result["reason"]
 
 
+def test_worker_startup_does_not_consume_pattern_deadlines_or_shared_budget(monkeypatch):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    monkeypatch.setattr(declarative_checks, "_PATTERN_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(declarative_checks, "_PATTERN_BUDGET_SECONDS", 0.5)
+    monkeypatch.setattr(
+        declarative_checks,
+        "_PATTERN_WORKER",
+        "import time\ntime.sleep(0.75)\n" + declarative_checks._PATTERN_WORKER,
+    )
+    results = evaluate_declarative_checks(
+        [{"type": "output_matches", "pattern": r"ready\b"}] * 2,
+        tool_calls=[],
+        final_response="ready",
+        workspace_roots=[],
+    )
+
+    assert [result["passed"] for result in results] == [True, True]
+
+
+@pytest.mark.parametrize("pattern", ["[é-a]", "[\ud800-a]"])
+def test_pattern_errors_use_ascii_protocol_and_later_checks_continue(monkeypatch, pattern):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    monkeypatch.setattr(
+        declarative_checks,
+        "_PATTERN_WORKER",
+        'import sys\nsys.stdout.reconfigure(encoding="ascii", errors="strict")\n' + declarative_checks._PATTERN_WORKER,
+    )
+    invalid, literal = evaluate_declarative_checks(
+        [{"type": "output_matches", "pattern": pattern}, {"type": "output_contains", "text": "ready"}],
+        tool_calls=[],
+        final_response="ready",
+        workspace_roots=[],
+    )
+
+    assert invalid["passed"] is None
+    assert "not a valid regular expression" in invalid["reason"]
+    assert "bad character range" in invalid["reason"]
+    assert literal["passed"] is True
+
+
+@pytest.mark.parametrize("executable", [None, ""])
+def test_missing_python_executable_leaves_patterns_unscored(monkeypatch, executable):
+    monkeypatch.setattr(sys, "executable", executable)
+    unavailable, literal = evaluate_declarative_checks(
+        [{"type": "output_matches", "pattern": "ready"}, {"type": "output_contains", "text": "ready"}],
+        tool_calls=[],
+        final_response="ready",
+        workspace_roots=[],
+    )
+
+    assert unavailable["passed"] is None
+    assert "worker could not be started" in unavailable["reason"]
+    assert literal["passed"] is True
+
+
+def test_remaining_shared_budget_is_reported_as_exhausted(monkeypatch):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    monkeypatch.setattr(declarative_checks, "_PATTERN_TIMEOUT_SECONDS", 0.5)
+    monkeypatch.setattr(declarative_checks, "_PATTERN_BUDGET_SECONDS", 0.05)
+    result = _evaluate({"type": "output_matches", "pattern": "^(a|aa)+$"}, response="a" * 100 + "!")
+
+    assert result["passed"] is None
+    assert "budget was exhausted" in result["reason"]
+
+
+@pytest.mark.parametrize("ready", [False, True])
+def test_unresponsive_pattern_workers_are_reaped_and_later_checks_continue(monkeypatch, ready):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    workers = []
+    popen = subprocess.Popen
+
+    def track_worker(*args, **kwargs):
+        worker = popen(*args, **kwargs)
+        workers.append(worker)
+        return worker
+
+    monkeypatch.setattr(subprocess, "Popen", track_worker)
+    monkeypatch.setattr(declarative_checks, "_PATTERN_STARTUP_TIMEOUT_SECONDS", 2.0 if ready else 0.05)
+    monkeypatch.setattr(declarative_checks, "_PATTERN_TIMEOUT_SECONDS", 0.05)
+    monkeypatch.setattr(
+        declarative_checks,
+        "_PATTERN_WORKER",
+        "print('[\"ready\"]', flush=True)\nimport time\ntime.sleep(60)" if ready else "import time\ntime.sleep(60)",
+    )
+    unavailable, literal = evaluate_declarative_checks(
+        [{"type": "output_matches", "pattern": "ready"}, {"type": "output_contains", "text": "ready"}],
+        tool_calls=[],
+        final_response="ready",
+        workspace_roots=[],
+    )
+
+    assert unavailable["passed"] is None
+    assert ("timed out" if ready else "did not become ready") in unavailable["reason"]
+    assert literal["passed"] is True
+    assert len(workers) == 1
+    assert workers[0].returncode is not None
+
+
+@pytest.mark.parametrize("output", ['["match", null]', '["match", null, true]', '["match", null, "0.1"]'])
+def test_invalid_worker_protocol_cannot_become_a_match(monkeypatch, output):
+    from skillevaluator.tier3.eval_core import declarative_checks
+
+    monkeypatch.setattr(
+        declarative_checks,
+        "_PATTERN_WORKER",
+        f"print('[\"ready\"]', flush=True)\nprint({output!r}, flush=True)",
+    )
+
+    result = _evaluate({"type": "output_matches", "pattern": "ready"}, response="ready")
+
+    assert result["passed"] is None
+    assert "invalid result" in result["reason"]
+
+
 def test_pattern_worker_failure_cannot_become_a_match(monkeypatch):
     from skillevaluator.tier3.eval_core import declarative_checks
 
     def unavailable_worker(*args, **kwargs):
         raise OSError("worker unavailable")
 
-    monkeypatch.setattr(declarative_checks.subprocess, "run", unavailable_worker)
+    monkeypatch.setattr(declarative_checks.subprocess, "Popen", unavailable_worker)
     result = _evaluate({"type": "output_matches", "pattern": "ready"}, response="ready")
     assert result["passed"] is None
     assert "worker could not be started" in result["reason"]

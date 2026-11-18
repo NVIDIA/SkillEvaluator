@@ -33,6 +33,7 @@ These variables select and configure the provider used for LLM-backed checks and
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
 | `ANTHROPIC_API_KEY` | — | Credential for the `anthropic` provider. |
+| `SKILL_EVAL_LLM_EXTRA_HEADERS` | unset | JSON object of extra HTTP headers for the `openai-compatible` chat client only, for gateways that need a routing header (for example `{"x-opencode-session": "{uuid}"}`). A `{uuid}` placeholder is replaced once per client with a random UUID. Other providers ignore it. Values are never printed. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Alternate OpenAI endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK default | Absolute HTTP(S) Anthropic API root. Accepts an unversioned root or a legacy terminal `/v1`; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |

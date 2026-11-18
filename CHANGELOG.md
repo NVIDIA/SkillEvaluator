@@ -21,7 +21,9 @@ All notable changes to SkillEvaluator are documented in this file.
   A trailing shell comment containing `|&` does not hide the script's recorded
   status; quoted or escaped hashes still leave real pipelines unattributed.
   Nested expansion quoting leaves status unattributed when shell comment
-  boundaries cannot be determined safely.
+  boundaries cannot be determined safely, including Bash expansion openers
+  split by line continuations. Plain braced identifier arguments retain their
+  recorded status, and Zsh keeps its distinct continuation behavior.
 
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.

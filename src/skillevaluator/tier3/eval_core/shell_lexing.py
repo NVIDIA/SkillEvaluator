@@ -9,6 +9,7 @@ import shlex
 from typing import Any
 
 _ATTACHED_DESCRIPTOR_RE = re.compile(r"(\d+)(>>|>\||>&|<&|<>|>|<)(?![<])")
+_BRACED_IDENTIFIER_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
 
 
 # Words the walk reads as shell syntax when they stand unquoted. Quoted or
@@ -190,7 +191,7 @@ def _keep_attached_descriptors(text: str) -> str:
     return "".join(out)
 
 
-def _without_shell_comment_text(text: str) -> str | None:
+def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str | None:
     """Keep comment markers, or return None for unmodelled nested quote contexts."""
     out = []
     quote = None
@@ -205,10 +206,22 @@ def _without_shell_comment_text(text: str) -> str | None:
                 word_start = False
             index += 2
             continue
-        if quote not in {"'", "$'"} and (text.startswith(("$(", "${"), index) or char == "`"):
-            # Expansions have their own quote context, even within double quotes.
-            # Do not guess which hashes are comments and discard real operators.
-            return None
+        if quote not in {"'", "$'"}:
+            if char == "`":
+                return None
+            if char == "$":
+                following = index + 1
+                if shell != "zsh":
+                    # Bash removes continuations before recognizing an opener;
+                    # Zsh does not join these into a substitution.
+                    while text.startswith("\\\n", following):
+                        following += 2
+                if text.startswith("(", following) or (
+                    text.startswith("{", following) and not _BRACED_IDENTIFIER_RE.match(text, following)
+                ):
+                    # A plain identifier cannot nest quotes. Other expansions
+                    # can: do not guess comment boundaries inside their words.
+                    return None
         if quote is not None:
             out.append(char)
             if char == quote[-1]:
@@ -238,12 +251,12 @@ def _without_shell_comment_text(text: str) -> str | None:
     return "".join(out)
 
 
-def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False) -> list[str]:
+def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False, _shell: str | None = None) -> list[str]:
     source = str(cmd)
     normalized = source.replace("\r\n", "\n").replace("\r", "\n")
     if strip_comment_text:
         # Comments end at physical newlines, before those become separators.
-        normalized = _without_shell_comment_text(normalized)
+        normalized = _without_shell_comment_text(normalized, shell=_shell)
         if normalized is None:
             return []
         source = normalized

@@ -92,7 +92,10 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     if status is None:
         return None
     command = _command_text(call)
-    tokens = _script_invocation._shell_tokens(command, strip_comment_text=True)
+    shell, modelled = _tool_call_shell(call)
+    if not modelled:
+        return None
+    tokens = _script_invocation._shell_tokens(command, strip_comment_text=True, _shell=shell)
     if not tokens:
         # Uncertain comment boundaries are not evidence of a simple command.
         return None
@@ -132,9 +135,6 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
         else:
             segments[-1].append(token)
     if not segments[-1]:
-        return None
-    shell, modelled = _tool_call_shell(call)
-    if not modelled:
         return None
     if len(segments) == 1:
         # A negated shell pipeline records the inverse of the script status.

@@ -309,3 +309,70 @@ def test_substitution_text_inside_a_comment_keeps_the_script_status(tmp_path, sh
     assert completed.returncode == status
     assert result["passed"] is (status == 0)
     assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("operand", "relative_script"),
+    [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
+)
+@pytest.mark.parametrize("continuations", [1, 2])
+@pytest.mark.parametrize("expansion", ['(printf " # hi")', '{0:+" # hi"}'])
+@pytest.mark.parametrize(("status", "tail", "bash_status"), [(2, " |& cat", 0), (0, " |& cat; false", 1)])
+def test_continued_expansion_openers_respect_the_recorded_shell(
+    tmp_path, shell, operand, relative_script, continuations, expansion, status, tail, bash_status
+):
+    argument = '"$' + "\\\n" * continuations + expansion + '"'
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, operand, relative_script, status, f" {argument}{tail}"
+    )
+    if shell == "bash":
+        assert completed.returncode == bash_status
+        assert completed.returncode != status
+        assert result["passed"] is None
+        assert "could not be attributed" in result["reason"]
+    else:
+        # Zsh does not form an expansion across this continuation: the inner
+        # quote ends the argument, making the hash a real trailing comment.
+        assert completed.returncode == status
+        assert result["passed"] is (status == 0)
+        assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("operand", "relative_script"),
+    [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
+)
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("argument", ['"${NAME}"', '"${_NAME2}"', '"$' + "\\\n" + '{NAME}"'])
+def test_plain_braced_identifiers_keep_the_script_status(
+    tmp_path, monkeypatch, shell, operand, relative_script, status, argument
+):
+    # Expansion results are argument data, not another shell parsing pass.
+    value = '# " |& false $(false)'
+    monkeypatch.setenv("NAME", value)
+    monkeypatch.setenv("_NAME2", value)
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, operand, relative_script, status, f" {argument} # note |& ignored"
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("quoting", ["single", "ansi-c", "escaped"])
+def test_literal_continued_expansion_text_keeps_the_script_status(tmp_path, shell, status, quoting):
+    literal = "$" + "\\\n" + '(printf " # hi")'
+    if quoting == "escaped":
+        argument = '"\\$' + "\\\n" + '(printf \\" # hi\\")"'
+    else:
+        argument = ("$" if quoting == "ansi-c" else "") + shlex.quote(literal)
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, f" {argument} # note |& ignored"
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]

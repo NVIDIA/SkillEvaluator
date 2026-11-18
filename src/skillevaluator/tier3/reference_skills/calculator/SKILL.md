@@ -57,6 +57,7 @@ For conversions:
 - No symbolic algebra (no variables, no equations).
 - Only supports basic arithmetic operators: `+`, `-`, `*`, `/`, `**`, `%`, parentheses.
 - Unit conversions are limited to: celsius/fahrenheit, miles/km, kg/lbs, meters/feet.
+- Arithmetic expressions return a real number of at most 1000 decimal digits; larger, infinite, or non-real arithmetic results return an error.
 
 ## Troubleshooting
 

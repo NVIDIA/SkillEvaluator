@@ -5,6 +5,7 @@
 """Calculator — safe arithmetic evaluation and unit conversions."""
 
 import ast
+import math
 import operator
 import re
 import sys
@@ -20,6 +21,54 @@ OPERATORS = {
     ast.UAdd: operator.pos,
 }
 
+# Keep printed integers below Python's default int-to-str limit (4,300 digits).
+MAX_RESULT_DIGITS = 1000
+
+
+def _log10_int(n: int) -> float:
+    """Return log10(n) for a positive int without converting the whole value to float."""
+    text = str(n)
+    lead = text[:12]
+    significand = int(lead) / 10 ** (len(lead) - 1)
+    return math.log10(significand) + len(text) - 1
+
+
+def _int_digit_count(n: int) -> int:
+    return len(str(abs(n)))
+
+
+def _integer_pow_exceeds_digit_budget(base: object, exp: object) -> bool:
+    if type(base) is not int or type(exp) is not int or exp <= 0:
+        return False
+    abs_base = abs(base)
+    if abs_base <= 1:
+        return False
+    digits_minus_one = exp * _log10_int(abs_base)
+    return not math.isfinite(digits_minus_one) or digits_minus_one >= MAX_RESULT_DIGITS
+
+
+def _check_result(value):
+    if isinstance(value, complex):
+        raise ValueError("result is not a real number")
+    if isinstance(value, float) and not math.isfinite(value):
+        raise ValueError("result is too large")
+    if type(value) is int and _int_digit_count(value) > MAX_RESULT_DIGITS:
+        raise ValueError("result is too large")
+    return value
+
+
+def _apply(op, *args):
+    try:
+        return _check_result(op(*args))
+    except OverflowError:
+        raise ValueError("result is too large") from None
+
+
+def _pow(base, exp):
+    if _integer_pow_exceeds_digit_budget(base, exp):
+        raise ValueError("result is too large")
+    return _apply(operator.pow, base, exp)
+
 
 def safe_eval(expr: str) -> float:
     """Evaluate arithmetic expression using AST — no eval()."""
@@ -28,18 +77,24 @@ def safe_eval(expr: str) -> float:
     def _eval(node):
         if isinstance(node, ast.Expression):
             return _eval(node.body)
-        if isinstance(node, ast.Constant) and isinstance(node.value, (int, float)):
-            return node.value
+        if isinstance(node, ast.Constant):
+            if type(node.value) not in (int, float):
+                raise ValueError(f"Unsupported value: {type(node.value).__name__}")
+            return _check_result(node.value)
         if isinstance(node, ast.BinOp):
             op = OPERATORS.get(type(node.op))
             if op is None:
                 raise ValueError(f"Unsupported operator: {type(node.op).__name__}")
-            return op(_eval(node.left), _eval(node.right))
+            left = _eval(node.left)
+            right = _eval(node.right)
+            if isinstance(node.op, ast.Pow):
+                return _pow(left, right)
+            return _apply(op, left, right)
         if isinstance(node, ast.UnaryOp):
             op = OPERATORS.get(type(node.op))
             if op is None:
                 raise ValueError(f"Unsupported unary: {type(node.op).__name__}")
-            return op(_eval(node.operand))
+            return _apply(op, _eval(node.operand))
         raise ValueError(f"Unsupported node: {type(node).__name__}")
 
     return _eval(tree)

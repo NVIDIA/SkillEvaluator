@@ -28,6 +28,9 @@ All notable changes to SkillEvaluator are documented in this file.
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
   README, starting with the next release. Published 1.0.1 metadata is unchanged.
+- The calculator reference skill refuses Boolean constants, bounds exponentiation
+  before computing it, and reports non-real or oversized results instead of hanging
+  or raising a cryptic conversion error.
 
 ## 1.0.1 - 2026-11-17
 

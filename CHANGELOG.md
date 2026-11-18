@@ -4,6 +4,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Add GitHub Actions annotation reports with `-r github`. The format prints
+  `::error`, `::warning`, and `::notice` workflow commands on stdout so a job
+  that runs the CLI can annotate the pull request without uploading SARIF.
+  Incomplete scanners are warnings, gate failures stay errors, and the run
+  ends with a summary notice that records how many findings were not annotated
+  under GitHub's per-step cap.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

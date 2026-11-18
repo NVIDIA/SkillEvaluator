@@ -86,6 +86,7 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 | `junit` | JUnit XML | CI systems that show native test reports need a JUnit artifact |
+| `github` | GitHub Actions workflow commands | A workflow that runs the CLI itself needs inline annotations without uploading SARIF |
 
 HTML reports use a shared NVIDIA presentation across all three tiers, with
 numbered Insights cards, expandable findings, and tables alongside charts.
@@ -333,8 +334,8 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` format
-prints to the terminal and never writes a file. A full `validate` run's
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` and `github` formats
+print to the terminal and never write a file. `github` has no file extension and no catalog-collision check, because it does not create a report path. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
 and never clobbers the previous run.
@@ -376,6 +377,50 @@ the Tier 3 verdict, or the skip reason. An advisory group (Tier 3 without
 `failure` or `error`; its findings, errors, and execution errors are kept in
 `system-out` with an `Advisory, does not gate:` prefix, and its incomplete
 scanners are `skipped`.
+
+## GitHub annotations
+
+`-r github` prints GitHub Actions workflow commands on stdout so a job that
+runs `skillevaluator validate` or `tier1` itself can put findings on the pull
+request diff and the run summary. It does not write a file, does not upload
+SARIF, and does not need a token or extra permission. Combine it with other
+formats, for example `-r cli,github,sarif`.
+
+Use this when the reusable SkillEvaluator workflow is not in the job and
+GitHub Code Scanning is unavailable (private repositories without code
+scanning, or a plain `run:` step). Prefer SARIF when you can upload to code
+scanning: it is not capped at ten errors and ten warnings per step. Prefer
+JUnit when a CI system ingests test reports rather than workflow commands.
+
+| Finding | Workflow command |
+| --- | --- |
+| CRITICAL or HIGH | `::error` |
+| MEDIUM or LOW | `::warning` |
+| INFO | `::notice` |
+| Gate failure (for example a quality score below `--min-score`) | `::error`, even when other findings on that group are warnings |
+| Scanner that did not complete | `::warning` with a "did not complete" message |
+
+`file=` is the path relative to the Git repository root (the scanned folder
+when the target is not in a Git repository), using the same resolution rules
+as SARIF and JUnit. GitHub resolves it against the checkout. `line=` (and
+`endLine=` when recorded) is included when the finding has a location.
+`file` is omitted when the path is outside the repository. `title=` is the
+check group and check name. An incomplete scan is never a clean log: each
+unfinished scanner is a warning, and the run ends with one `::notice`
+summary (skills checked, passed, failed, incomplete).
+
+GitHub shows at most 10 error and 10 warning annotations per step (50 per
+job). This format emits the most severe first, in a deterministic order
+(severity, path, line, check). The summary notice says how many more were
+not annotated and points at the other reports from the same `-r` list.
+Finding text is escaped per GitHub's workflow-command rules and stripped of
+control characters; credential-shaped values are masked like the other
+reporters. A planted newline or `::add-mask` / `::stop-commands` payload
+stays on one escaped line.
+
+```bash title="CLI job with inline annotations"
+skillevaluator validate ./skills --tiers 1 -r cli,github
+```
 
 ## HTML report
 

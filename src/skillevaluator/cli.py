@@ -500,7 +500,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit", "github"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -622,7 +622,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
 
 
 def _report_roots(target_path: Path) -> dict[str, Path]:
-    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+    """Return the scan and repository roots SARIF, JUnit, and GitHub paths are made relative to.
 
     The repository root is the Git root containing *target_path*, so a finding
     reads the same repository-relative ``file`` from every command; outside Git

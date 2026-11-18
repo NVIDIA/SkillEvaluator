@@ -3968,6 +3968,10 @@ def scan_plugin_security(
     target_seen = False
     rm_workdirs = (_current_checks._APPLY_PATCH_DEFAULT_WORKDIR,)
     rm_budget = [_current_checks._RM_MAX_FORCE_RESOLUTIONS]
+    # The readings main's walk does not make spend a budget of their own, shared across the trace.
+    rm_extra_budget = [_current_checks._RM_MAX_FORCE_RESOLUTIONS]
+    # The characters those readings have read, which stop them past a limit, as in check_security.
+    rm_extra_chars = [0]
     for tool_call in tool_calls:
         if _tool_mentions_any_skill(tool_call, expected_skill, acceptable_skills):
             target_seen = True
@@ -3976,8 +3980,14 @@ def scan_plugin_security(
             continue
         text = _action_text(tool_call)
         rm_workdirs = _current_checks._rm_call_workdirs(tool_call, rm_workdirs)
-        if _current_checks._rm_targets_outside_tmp(
-            text, _symlink_seen=symlink_seen, _workdirs=rm_workdirs, _budget=rm_budget
+        if _current_checks._rm_call_deletes(
+            text,
+            symlink_seen=symlink_seen,
+            workdirs=rm_workdirs,
+            budget=rm_budget,
+            extra_budget=rm_extra_budget,
+            main_only=_current_checks._rm_repr_call(tool_call),
+            extra_chars=rm_extra_chars,
         ):
             result["findings"].append(
                 _security_finding(

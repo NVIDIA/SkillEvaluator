@@ -7800,8 +7800,9 @@ def _python_argv_lists(
     left to the caller. *nodes* are the tree's nodes (see _python_tree_nodes)
     when the caller has walked the tree already.
 
-    Vectors are collected, in the order the walk finds their calls, while
-    their items come to at most _PY_ARGV_MAX_ITEMS in all; a vector that
+    Without *strings*, vectors are collected, in the order the walk finds their calls, while
+    their items come to at most _PY_ARGV_MAX_ITEMS in all (with *strings*, each use is charged to
+    its work instead); a vector that
     would pass that ends the collection. Each literal or bound vector is read
     once however often the code uses it, but each use counts its items, so
     the time stays linear in the source also when it passes a long vector, or
@@ -7923,9 +7924,14 @@ def _python_argv_lists(
             )
             argv = [path[0], *argv[1:]] if path and argv else None
         if argv:
-            if len(argv) > items_left:
+            if strings is None:
+                if len(argv) > items_left:
+                    break
+                items_left -= len(argv)
+            elif not strings.work.spend(len(argv)):
+                # With *strings*, each use of a vector is charged to the reading's work instead, and a
+                # reading that spends it gives its answer as spent work does (see _python_split_words).
                 break
-            items_left -= len(argv)
             vectors.append(list(argv))
     return vectors
 

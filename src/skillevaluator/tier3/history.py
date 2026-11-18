@@ -311,7 +311,7 @@ def collect_history(skill_path: Path, results_dir: Path | None = None, agent: st
     for directory in directories:
         try:
             observed = _run_rows(directory, agent)
-        except (OSError, ValueError, SecurePathError) as exc:
+        except (OSError, ValueError, RecursionError, SecurePathError) as exc:
             observed = [
                 (
                     {

@@ -59,7 +59,7 @@ Need uv first? Use the **Install uv** section below.
   </Tab>
   <Tab title="GitHub source">
 
-Use this for changes not yet on PyPI, including **Harness Check**.
+Use this for changes not yet available in a published package.
 You need Git and either uv or an activated Python 3.12–3.14 environment.
 
 ```bash title="Install current source with uv"
@@ -83,8 +83,9 @@ use the [development guide](/skills/skillevaluator/developer-guide#set-up-a-deve
 </div>
 </div>
 
-The latest [PyPI release is 0.9.0](https://pypi.org/project/skillevaluator/).
-**Harness Check requires the GitHub source option** until it is released.
+Harness Check, JUnit reports, and the NeMo Gym adapter are included in
+SkillEvaluator **1.0.1**. Check the [published PyPI versions](https://pypi.org/project/skillevaluator/#history);
+if 1.0.1 is not yet available, use the GitHub source option above.
 See [release differences](/skills/skillevaluator/installation-options#release-and-source-differences).
 Use the [all-tier option](#all-tiers) below when you need model-backed checks or live evaluation.
 
@@ -138,7 +139,8 @@ powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | ie
 
   Add [all evaluation dependencies](#all-tiers) later, or
   choose [individual extras](/skills/skillevaluator/installation-options#choosing-extras).
-  Harness Check still requires the GitHub source installation.
+  In 1.0.1, the base package also includes Harness Check, Bandit, and uv.
+  Model clients, the Tier 3 runtime, and pip-audit still require their extras.
 </Accordion>
 
 ## Verify your install
@@ -205,7 +207,7 @@ For just one capability, [choose individual extras](/skills/skillevaluator/insta
 | Guide | What you need next |
 | --- | --- |
 | [Tier 1: Validation](/skills/skillevaluator/tier1-validation) | A skill folder and [scanner setup](/skills/skillevaluator/installation-options#system-tools) for full validation. No API key for static checks. |
-| [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | GitHub source installation and a skill folder. No API key or agent run. |
+| [Tier 1: Harness Check](/skills/skillevaluator/harness-check) | SkillEvaluator 1.0.1 and a skill folder. No API key or agent run. |
 | [Tier 2: Deduplication](/skills/skillevaluator/tier2-deduplication) | The [all-tier option](#all-tiers) and a provider for embeddings and model analysis. |
 | [Tier 3: Live Agent Evaluation](/skills/skillevaluator/tier3-live-evaluation) | The [all-tier option](#all-tiers), a [reviewed dataset](/skills/skillevaluator/prepare-dataset), a model API key, and Docker. |
 

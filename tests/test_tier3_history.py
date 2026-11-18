@@ -155,7 +155,8 @@ def test_deeply_nested_artifact_does_not_hide_other_history_runs(tmp_path, artif
     _run(root, 1)
     broken = _run(root, 2)
     _run(root, 3, score=0.9)
-    (broken / artifact).write_text('{"nested":' + "[" * 10_000 + "0" + "]" * 10_000 + "}")
+    depth = 1_000_000  # Decoder stack limits differ across supported Python versions.
+    (broken / artifact).write_text('{"nested":' + "[" * depth + "0" + "]" * depth + "}")
 
     result = CliRunner().invoke(cli, ["tier3", "history", str(skill), "--json"])
 
@@ -165,6 +166,41 @@ def test_deeply_nested_artifact_does_not_hide_other_history_runs(tmp_path, artif
     assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
     assert rows[1]["lift_status"] == "unavailable"
     assert any(artifact in reason for reason in rows[1]["lift_reasons"])
+
+
+@pytest.mark.parametrize("field", ["publication_target", "attempt_policy", "run_config"])
+def test_decodable_nested_identity_does_not_hide_other_history_runs(tmp_path, field):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    result_path = broken / "result.json"
+    result = json.loads(result_path.read_text())
+    if field == "run_config":
+        result["comparison_identity"].pop("config")
+        _write(result_path, result)
+        path = broken / "run_config.json"
+        payload = json.loads(path.read_text())
+        payload["nested"] = "nested-identity-placeholder"
+    else:
+        path = result_path
+        payload = result
+        payload[field] = {"nested": "nested-identity-placeholder"}
+    nested = "[" * 2_000 + "0" + "]" * 2_000
+    text = json.dumps(payload).replace('"nested-identity-placeholder"', nested)
+    assert isinstance(json.loads(text), dict)  # The decoder succeeds; the identity walker must be isolated.
+    path.write_text(text)
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), "--json"])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output)["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["status"] == "corrupt"
+    assert rows[1]["lift_status"] == "unavailable"
+    assert rows[1]["lift_reasons"]
 
 
 def test_unknown_old_identity_does_not_create_a_trend(tmp_path):

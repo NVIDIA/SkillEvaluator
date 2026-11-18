@@ -36,7 +36,8 @@ def test_latest_results_skips_run_with_deeply_nested_json(tmp_path: Path, artifa
     root = skill_path / "evals" / "results"
     healthy = _write_completed_run(root, "20260705_120000")
     broken = _write_completed_run(root, "20260705_130000")
-    (broken / artifact).write_text('{"nested":' + "[" * 10_000 + "0" + "]" * 10_000 + "}", encoding="utf-8")
+    depth = 1_000_000  # Decoder stack limits differ across supported Python versions.
+    (broken / artifact).write_text('{"nested":' + "[" * depth + "0" + "]" * depth + "}", encoding="utf-8")
 
     assert resolve_latest_results(skill_path) == healthy
 

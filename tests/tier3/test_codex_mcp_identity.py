@@ -9,6 +9,7 @@ import pytest
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
 from skillevaluator.tier3.eval_core.checks import check_tool_efficiency
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import recorded_mcp_identity
 from skillevaluator.tier3.eval_core.log_converters import (
     load_trajectory_with_fallback,
     synthetic_trajectory_from_codex_txt,
@@ -121,9 +122,7 @@ def test_native_log_keeps_server_boundaries_for_efficiency(tmp_path, server, too
     assert result["details"]["productive"] == int(expected == 1)
 
 
-@pytest.mark.parametrize(
-    ("server", "tool"), [("project__filesystem", "inspect"), ("project", "filesystem__inspect")]
-)
+@pytest.mark.parametrize(("server", "tool"), [("project__filesystem", "inspect"), ("project", "filesystem__inspect")])
 def test_native_log_keeps_ambiguous_labels_attributed_to_recorded_server(tmp_path, server, tool):
     trajectory = _load_native_mcp_log(tmp_path, server, tool, "/")
     calls = extract_tool_calls_as_dicts(trajectory)
@@ -172,9 +171,35 @@ def test_long_mcp_label_does_not_trust_metadata_matching_only_its_prefix(tmp_pat
     tool_call = trajectory["steps"][0]["tool_calls"][0]
     tool_call["extra"] = {"mcp_server": server + "other", "mcp_tool": "inspect"}
 
-    signals = compute_plugin_signals(
-        trajectory, {}, declared={"mcp": ["project", server, server + "other"]}
-    )
+    signals = compute_plugin_signals(trajectory, {}, declared={"mcp": ["project", server, server + "other"]})
 
     assert signals["activations"][0]["server"] == "project"
     assert list(signals["mcp_calls"]["by_server"]) == ["project"]
+
+
+def test_oversized_recorded_mcp_server_keeps_plugin_report_bounded(tmp_path):
+    server = "plugin_a_" * 1125
+    trajectory = _load_native_mcp_log(tmp_path, server, "inspect", "/workspace/project")
+
+    signals = compute_plugin_signals(trajectory, {}, declared={"mcp": ["docs"]})
+
+    assert signals["evidence_complete"] is True
+    assert len(signals["activations"]) == 1
+    activation = signals["activations"][0]
+    assert all(len(activation[field]) <= 256 for field in ("name", "server", "tool"))
+    assert all(len(name) <= 256 for name in signals["mcp_calls"]["by_server"])
+
+
+@pytest.mark.parametrize(
+    ("server", "tool"),
+    [
+        ("s" * 1025, "lookup"),
+        ("docs", "t" * 1025),
+        ("doc\ns", "lookup"),
+        ("docs", "look\tup"),
+        ("docs\x7f", "lookup"),
+    ],
+    ids=["oversized-server", "oversized-tool", "newline-server", "tab-tool", "delete-server"],
+)
+def test_recorded_mcp_identity_rejects_oversized_or_control_character_names(server, tool):
+    assert recorded_mcp_identity(f"mcp__{server}__{tool}", {"mcp_server": server, "mcp_tool": tool}) is None

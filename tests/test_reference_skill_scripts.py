@@ -57,7 +57,12 @@ def _load_script(name: str) -> ModuleType:
     spec = importlib.util.spec_from_file_location(f"reference_script_{name}", SCRIPTS[name])
     assert spec and spec.loader
     module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
+    scripts_dir = str(SCRIPTS[name].parent)
+    sys.path.insert(0, scripts_dir)
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(scripts_dir)
     return module
 
 

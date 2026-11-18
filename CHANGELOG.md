@@ -6,13 +6,65 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Codex JSONL reconstruction preserves recorded MCP server and tool names as
-  `mcp__server__tool`, allowing tool efficiency to recognize MCP work and apply
-  the existing filesystem-root search policy. Their separately recorded identity
-  also keeps server names containing `__` intact for scoring and plugin reports.
-  Full identities are checked before display-label truncation.
+- Trajectories rebuilt from native Codex logs preserve recorded MCP server and
+  tool names, including server names containing `__`, for scoring and plugin
+  reports. Full identities are checked before display-label truncation, and
+  oversized names and names containing control characters are not trusted for
+  identity matching.
+  In rebuilt logs, MCP tools named `task`, `update_plan`, `spawn_agent`, or `wait`
+  count as MCP work rather than neutral planning; an MCP tool named `skill` no
+  longer produces a false Skill-tool activation. Codex `tier3 import-traces`
+  candidates also use `mcp__server__tool` labels. Harbor-provided Codex
+  trajectories and their existing MCP classification are unchanged.
+
+- Allow GitHub all-tier CI to opt out of deployment records while retaining
+  environment secrets. Existing consumers keep deployment tracking by default.
+- Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
+  README, starting with the next release. Published 1.0.1 metadata is unchanged.
+
+## 1.0.1 - 2026-11-17
+
+### Documentation
+
+- Refresh the versioned CI catalog and comments-only setup for 1.0.1, and
+  clarify that all-tier CLI onboarding was already included in 0.9.0.
+  Keep published PyPI availability separate from the new release pins.
+- Describe Harness Check, JUnit and the NeMo Gym adapter as 1.0.1 capabilities
+  while keeping package availability explicit.
+
+### Fixed
+
+- Disable OpenCode snapshots by default to avoid broken-pipe failures after a
+  completed task, while preserving explicit user snapshot settings.
+- Preserve opaque Claude gateway model IDs across Docker, local, and native Harbor
+  command construction while keeping native Anthropic, Vertex, and Bedrock routes
+  independent from a gateway-backed judge.
+- Count a standalone Tier 2 evaluation as one skill in JSON and HTML reports,
+  and prioritize failed-runtime recovery without hiding authored source or runner
+  instructions.
+- Select starter-demo score expectations by the installed evaluator version,
+  preserving the released 0.9.0 example while recognizing the 1.0.0 scores.
+- Retain the GitLab tools revision in aggregated report provenance.
+- Document the tested editable NeMo Gym installation required by OpenCode and
+  the completed Codex, Claude Code, and OpenCode live paired runs.
+
+- Folder validators apply skill-discovery exclusions only below the requested
+  scan root. A checkout inside a directory named `results`, `evals`, or `.versions`
+  no longer loses every live skill, while nested evaluation snapshots remain excluded.
 
 - Reject duplicate price-file keys and boolean rates before budget accounting, and report unrepresentable integer rates as configuration errors.
+- The bundled `create-custom-grader` example now ships the benchmark folder and
+  existing skill its first two cases ask the agent to convert, under
+  `evals/files/`, and each case declares `files` so only its own fixture is
+  staged. Previously those cases had no workspace input to work from.
+- The bundled `api-caller` example no longer fails Tier 2 deduplication: its
+  two scripts share one HTTP(S) URL check from `scripts/url_safety.py` instead
+  of each defining `_validate_http_url()`, and `call_api.py` no longer repeats the
+  SKILL.md usage section in its module docstring.
+- Tier 3 dataset generation no longer names an import-only helper module, such
+  as `url_safety.py`, as a case's `expected_script` when the skill has a script
+  that does something when run. A skill with one script, or only helpers, keeps
+  its previous choice.
 
 ## 1.0.0 - 2026-11-17
 

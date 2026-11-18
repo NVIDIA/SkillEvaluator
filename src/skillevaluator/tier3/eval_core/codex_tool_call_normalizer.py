@@ -19,18 +19,25 @@ _MAX_SOURCE_CHARS = 64 * 1024
 _MAX_OBJECT_NESTING = 64
 _MAX_STATEMENTS = 256
 _MAX_TOOL_CALLS = 128
+_MAX_RECORDED_MCP_NAME_CHARS = 1024
 
 
 def recorded_mcp_identity(function_name: str, extra: Any) -> tuple[str, str] | None:
     """Return a recorded MCP server/tool pair consistent with its display name.
 
     The display name alone is ambiguous when either component contains ``__``.
-    Ignore incomplete or inconsistent metadata on other ATIF calls.
+    Ignore incomplete, inconsistent, or malformed metadata on other ATIF calls.
+    Bound names before downstream matching can expand plugin-prefixed aliases.
     """
     if not isinstance(extra, dict):
         return None
     server, tool = extra.get("mcp_server"), extra.get("mcp_tool")
     if not isinstance(server, str) or not server or not isinstance(tool, str) or not tool:
+        return None
+    if any(
+        len(name) > _MAX_RECORDED_MCP_NAME_CHARS or re.search(r"[\x00-\x1f\x7f-\x9f]", name) is not None
+        for name in (server, tool)
+    ):
         return None
     return (server, tool) if function_name == f"mcp__{server}__{tool}" else None
 

@@ -22,6 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- The managed SkillSpector runtime now runs on Python 3.13. uv otherwise
+  picked its newest Python, 3.14, for which yara-python publishes no wheels, so
+  the Tier 1 security scan failed to install on hosts without a C toolchain,
+  including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

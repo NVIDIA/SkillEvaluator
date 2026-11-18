@@ -32,6 +32,7 @@ from skillevaluator.utils.scanner_install import (
     gitleaks_platform,
     managed_gitleaks_path,
     managed_skillspector_wheel,
+    skillspector_uv_run_args,
 )
 
 logger = get_logger(__name__)
@@ -245,7 +246,7 @@ class ExternalTool:
             wheel = managed_skillspector_wheel()
             if uv is not None and wheel is not None:
                 self._path = uv
-                self._uv_run = (uv, ("tool", "run", "--quiet", "--from", str(wheel), "skillspector"))
+                self._uv_run = (uv, skillspector_uv_run_args(wheel))
                 self._ensure = (uv, ensure_skillspector_wheel)
                 self.resolution_source = "uv tool run"
         elif self.command == "gitleaks":

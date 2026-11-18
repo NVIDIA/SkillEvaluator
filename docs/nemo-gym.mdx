@@ -7,7 +7,7 @@ Run your Tier 3 tasks through **NeMo Gym**. SkillEvaluator prepares the cases,
 grades the runs with and without your skill, and produces the comparison report.
 
 <Note>
-  **Experimental · Docker · Linux/macOS.** Gym runs the agent and sandbox;
+  **Experimental · Docker · Linux (macOS untested).** Gym runs the agent and sandbox;
   SkillEvaluator supplies the shared verifier, scores, and reports.
 </Note>
 
@@ -78,8 +78,7 @@ skillevaluator tier3 doctor --backend nemo-gym --env-mode docker \
   --agents codex --agent-model codex=gpt-5.4-mini
 ```
 
-Fix failed checks. A missing `evals/` folder can return a successful validation
-exit code, so check the file itself. Doctor checks the CLI, Docker, and endpoint
+Fix failed checks before continuing. Doctor checks the CLI, Docker, and endpoint
 reachability; it does **not** prove that credentials or the model will work.
 
 ### Run the comparison
@@ -93,7 +92,9 @@ skillevaluator tier3 evaluate ./my-skill \
 
 This uses your existing cases. It does not generate a missing dataset.
 Saved run settings can limit which cases run; check the reported coverage.
-`--no-stop-on-pass` disables inherited Harbor early stopping, which Gym does not support.
+Gym always runs every attempt. `--no-stop-on-pass` only matters when
+`evals/config.yml` sets `harbor.stop_on_pass: true`, which Gym otherwise rejects;
+without that setting you can leave it out.
 
 </Steps>
 
@@ -107,7 +108,7 @@ skillevaluator view ./my-skill
 | --- | --- |
 | **Status and coverage** | Both arms completed with enough evidence to compare. |
 | **Skill Lift and trials** | How outcomes changed, and what happened in individual cases. |
-| **Backend** | The run identifies `nemo-gym`; compare runs with matching models, agents, and judges. |
+| **Backend** | The report shows **Backend: NeMo Gym** (`nemo-gym` in `result.json`); compare runs with matching models, agents, and judges. |
 
 The command prints the path to the latest `report.html` and opens it in your browser.
 By default, the run directory is under `./my-skill/evals/results/`. It also contains
@@ -116,7 +117,7 @@ By default, the run directory is under `./my-skill/evals/results/`. It also cont
 
 ## Supported configurations
 
-Use **Docker on Linux or macOS**. Windows, local mode, and managed sandbox
+Use **Docker on Linux**. macOS is allowed but has not had a live run. Windows, local mode, and managed sandbox
 backends are not supported by this adapter.
 
 | Agent | Current status |
@@ -140,7 +141,7 @@ for other environments or unsupported run options.
   </Accordion>
   <Accordion title="Doctor passes, but the model call fails">
     Check the policy URL, API key, and explicit `--agent-model` selection.
-    Codex needs a Responses-compatible endpoint. Doctor's unauthenticated
+    Codex and Claude Code need a Responses-compatible endpoint. Doctor's unauthenticated
     reachability probe can pass even when the endpoint rejects authentication.
     Check the failed trial and `_nemo-gym/` logs for the inference error.
   </Accordion>
@@ -181,19 +182,16 @@ export SKILL_EVAL_NEMO_GYM_BIN="$HOME/nemo-gym/.venv/bin/gym"
 
   <Accordion title="Gym interface and compatibility">
 
-**Compatibility status:** installing `nemo-gym==0.7.0` does not enable this backend.
-That release's `gym eval run` takes JSONL inputs and configured environments; it has
-neither the positional task-directory argument nor `--sandbox` used by this adapter.
-Removing that flag alone does not provide the required execution or verifier contract.
-The immutable public source candidate
-[`NVIDIA-NeMo/Gym@792fa142f58277aecff05d402061d647e9a92acf`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
-declares the `TARGET` task-folder argument and the seven required flags. Focused live
-Docker runs completed both with-skill and baseline trials for Codex and OpenCode with
-GPT-5.4-mini, and for Claude Code with Claude Sonnet 4.6. The runs retained native
-execution and verifier artifacts and exercised staged input files. These operational
-checks do not establish representative skill quality or compatibility with every model.
-Additional grading modes, custom Dockerfiles, and broader provider/model combinations
-need separate qualification.
+**Why the pinned commit:** the public `nemo-gym==0.7.0` release reads JSONL inputs and
+configured environments. It has no task-folder argument and no `--sandbox` option, so
+SkillEvaluator can't use it. The pinned commit
+[`792fa142`](https://github.com/NVIDIA-NeMo/Gym/blob/792fa142f58277aecff05d402061d647e9a92acf/nemo_gym/cli/main.py)
+adds both. Install that commit until a public release includes them.
+
+**What has been run live:** Docker runs completed both arms for Codex and OpenCode with
+GPT-5.4-mini, and for Claude Code with Claude Sonnet 4.6, and kept Gym's execution and
+verifier artifacts. These runs show the backend works end to end. They don't measure
+skill quality or cover every model, grading mode, or custom Dockerfile.
 
   </Accordion>
   <Accordion title="Claude Code model routing and skill discovery">
@@ -207,6 +205,8 @@ a placeholder; policy credentials remain in the model-server environment. Claude
 takes its policy endpoint from the same settings as Codex: `SKILL_EVAL_NEMO_GYM_MODEL_URL`,
 `SKILL_EVAL_NEMO_GYM_MODEL_API_KEY` and a model from `--model` or
 `--agent-model claude-code=MODEL`.
+Like Codex, it needs an endpoint that supports the OpenAI Responses API; NVIDIA Build
+returns 404 for `/v1/responses`.
 
   </Accordion>
   <Accordion title="Readiness probes and verifier contract">
@@ -242,58 +242,61 @@ environment templates; a host-only agent harness does not meet this contract.
   </Accordion>
   <Accordion title="Options, saved configuration, and retained artifacts">
 
+**Agents and grading modes**
+
 The adapter maps `codex`, `claude-code` and `opencode` and accepts `default`,
 `default_plus_custom` and `custom_only` grading modes. These are adapter capabilities;
 the live-run status in the table above does not qualify every combination.
-Every other `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is
-not supported on the NeMo Gym path and is rejected before the run starts; use
-`--backend harbor` for those modes. Unset flags fall back to these `evals/config.yml` keys, as on Harbor:
-`harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`,
-`resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, and
-`skill_workspace.mode`/`include`. `--skip-baseline`, `--skip-with-skill`, `--max-cases` and
-`--agent-model` (one model per agent) apply the same way. `--timeout-multiplier` (or
-`harbor.timeout_multiplier`) scales each task's agent, verifier, and environment-build timeouts
-as on Harbor, and Gym enforces them. `harbor.agent_workdir` and `harbor.pre_agent_setup`
-(alias `setup_commands`, with-skill-only runs) work as on Harbor: Gym starts the agent in
-that working directory and runs the setup commands as the task's environment healthcheck
-before the agent. `--copy-repo` stages the whole repository under
-`/workspace/repo/` as on Harbor, and a `skill_workspace.decoy_manifest` stages the same
-verified decoy snapshot into every arm. Native `evals/harbor/` tasks (`task_source: native_harbor`, or
-`auto` without `evals/evals.json`) are staged with Harbor's own native staging and run on Gym; their verifiers may write
-`reward.json` or a numeric `reward.txt`, and `--override-cpus`/`--override-memory-mb` apply to them, as on Harbor. `harbor.base_image_mode`
-(reuse/rebuild) builds Harbor's shared eval base image that the task images start from. `--custom-dockerfile-mode` rebase and preserve
-behave as on Harbor. `--environment-kwarg` is rejected, as Harbor rejects it in
-Docker mode. It rejects `--stop-on-pass`,
-`--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`,
-`--reuse-baseline`, `--compare-to`, `--max-agent-tokens`, `--max-judge-calls`,
-`--max-attempts-total`, `--max-cost-usd`, `--price-file`, `--tolerate-baseline-timeouts`,
-and the config keys
-`resources.storage_mb`, `max_agent_tokens`, `max_judge_calls`, `max_attempts_total`,
-`max_cost_usd`, `price_file` and `tolerate_baseline_timeouts: true` under `harbor`, MCP
-servers in `evals/environment/mcp_servers.toml` or a native task's `[[environment.mcp_servers]]`, a model URL with embedded credentials, and Windows hosts,
-whether set by flag or config (a flag overrides its config key), before anything
-starts (`tier3 PATH --autopilot` checks these before it writes a dataset); it never
-falls back to Harbor. `runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as `${NAME}`
-references resolved from Gym's environment. Gym receives only the variables Harbor's
-Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT` and TLS settings),
-Gym's `UV_*` package-index settings and credentials, `NETRC`, and the policy and judge
-credentials; relative Docker and TLS paths are made absolute first. Judge overrides
-(`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on Harbor, and Vertex
-AI ADC tokens are refreshed before every `gym eval run`. Every agent and arm is staged
-from one skill snapshot before the first launch. A missing or failed attempt counts as a
-failed trial, and the arm keeps its other scored trials. Excess rollouts are reported
-as execution errors and scoring remains bounded by the planned attempts. Any launch
-or rollout-count failure marks the
-run, the agent's progress row and the report as failed. If Gym's process group cannot be
-confirmed stopped after a timeout or interruption, no further arm starts beside it. After a
-timeout, the run records that as an execution error, finishes as failed and keeps the scores
-of the arms that finished. After an interruption, the progress output reports it and the run
-ends. Either way, check for leftover Gym servers and Docker sandboxes before you run again.
-A finished run updates `latest`
-and records the same dataset snapshot and publication target as a Harbor run. As on
-Harbor without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
-the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under `_nemo-gym/`
-in the run folder, and the rollouts hold the raw agent responses.
+
+**Works as on Harbor**
+
+| Setting | On Gym |
+| --- | --- |
+| `evals/config.yml`: `harbor.n_attempts`, `pass_threshold`, `n_concurrent`, `max_cases`, `agents.<agent>.model`, `resources` (`cpus`, `memory_mb`), `runtime_env`, `grading.mode`, `skill_workspace.mode`/`include` | Unset flags fall back to these configuration keys, as on Harbor. |
+| `--skip-baseline`, `--skip-with-skill`, `--max-cases`, `--agent-model` | Apply the same way; `--agent-model` selects one model per agent. |
+| `--timeout-multiplier`, `harbor.timeout_multiplier` | Scale each task's agent, verifier, and environment-build timeouts as on Harbor; Gym enforces them. |
+| `harbor.agent_workdir`, `harbor.pre_agent_setup` (alias `setup_commands`, with-skill-only runs) | Work as on Harbor: Gym starts the agent in that working directory and runs setup commands as the task's environment healthcheck before the agent. |
+| `--copy-repo` | Stages the whole repository under `/workspace/repo/` as on Harbor. |
+| `skill_workspace.decoy_manifest` | Stages the same verified decoy snapshot into every arm. |
+| Native `evals/harbor/` tasks (`task_source: native_harbor`, or `auto` without `evals/evals.json`); `--override-cpus`, `--override-memory-mb` | Use Harbor's own native staging and run on Gym; verifiers may write `reward.json` or a numeric `reward.txt`, and overrides apply as on Harbor. |
+| `harbor.base_image_mode` (`reuse`/`rebuild`) | Builds Harbor's shared eval base image that the task images start from. |
+| `--custom-dockerfile-mode` (`rebase`, `preserve`) | Behave as on Harbor. |
+| `--environment-kwarg` | Rejected, as Harbor rejects it in Docker mode. |
+
+**Rejected before the run starts**
+
+- **Environment modes:** Every non-Docker `--env-mode` (including `local`, `daytona`, `e2b` and `singularity`) is rejected on the NeMo Gym path; use `--backend harbor` for those modes.
+- **Flags:** Gym rejects `--environment-kwarg`, `--stop-on-pass`, `--harbor-keep-jobs`, `--agent-runtime-preflight`, `--override-storage-mb`, `--reuse-baseline`, `--compare-to`, `--max-agent-tokens`, `--max-judge-calls`, `--max-attempts-total`, `--max-cost-usd`, `--price-file` and `--tolerate-baseline-timeouts`.
+- **Configuration keys:** Gym rejects `resources.storage_mb`, `max_agent_tokens`, `max_judge_calls`, `max_attempts_total`, `max_cost_usd`, `price_file` and `tolerate_baseline_timeouts: true` under `harbor`.
+- **Other conditions:** Gym rejects MCP servers in `evals/environment/mcp_servers.toml` or a native task's `[[environment.mcp_servers]]`, a model URL with embedded credentials, and Windows hosts, whether set by flag or config (a flag overrides its config key).
+- These restrictions apply before anything starts. `tier3 PATH --autopilot` checks them before it writes a dataset. Gym never silently switches or falls back to Harbor.
+
+**Credentials and environment**
+
+`runtime_env` (alias `passthrough_env`) entries reach the agent's sandbox as
+`${NAME}` references resolved from Gym's environment. Gym receives only the
+variables Harbor's Docker backend allows (including `DOCKER_HOST`, `DOCKER_CONTEXT`
+and TLS settings), Gym's `UV_*` package-index settings and credentials, `NETRC`, and
+the policy and judge credentials; relative Docker and TLS paths are made absolute first.
+Judge overrides (`LLM_JUDGE_MODEL`, `SKILL_EVAL_JUDGE_*`) reach Gym's verifier as on
+Harbor, and Vertex AI ADC tokens are refreshed before every `gym eval run`.
+
+**Failures, interruptions and artifacts**
+
+Every agent and arm is staged from one skill snapshot before the first launch. A
+missing or failed attempt counts as a failed trial, and the arm keeps its other
+scored trials. Excess rollouts are reported as execution errors and scoring remains
+bounded by the planned attempts. Any launch or rollout-count failure marks the run,
+the agent's progress row and the report as failed. If Gym's process group cannot be
+confirmed stopped after a timeout or interruption, no further arm starts beside it.
+After a timeout, the run records that as an execution error, finishes as failed and
+keeps the scores of the arms that finished. After an interruption, the progress
+output reports it and the run ends. Either way, check for leftover Gym servers and
+Docker sandboxes before you run again. A finished run updates `latest` and records
+the same dataset snapshot and publication target as a Harbor run. As on Harbor
+without `--harbor-keep-jobs`, the staged tasks and per-trial files are removed at
+the end; Gym's own redacted `gym.log` and its `rollouts.jsonl` stay under
+`_nemo-gym/` in the run folder, and the rollouts hold the raw agent responses.
 
   </Accordion>
 </AccordionGroup>

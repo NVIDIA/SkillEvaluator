@@ -67,6 +67,9 @@ def measured_condition_usage(condition_dir: Path) -> dict[str, float | None]:
             seen.add(trial_id)
             trajectory = json.loads(reward_path.with_name("trajectory.json").read_text(encoding="utf-8"))
             metrics = trajectory["final_metrics"]
+            if not isinstance(metrics, dict):
+                complete = False
+                continue
             for field in fields:
                 value = metrics.get(field)
                 if type(value) in (int, float) and math.isfinite(value) and value >= 0:

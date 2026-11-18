@@ -339,8 +339,10 @@ These do not warn:
   `mock.patch("requests.post")` or `mock.patch("requests.Session")`, a
   `fetch` the code assigns, and the client that `responses`,
   `requests_mock`, `respx`, pytest-httpx's `httpx_mock`, or `aioresponses`
-  replaces. A shell command is not read when the code mocks `subprocess`,
-  `os.system`, `os.popen`, `os.exec*`, or `child_process`, and a curl
+  replaces. A mocking call inside another's arguments counts as a call of
+  its own, and the other reads only the names around it. A shell command is
+  not read when the code mocks `subprocess`, `os.system`, `os.popen`,
+  `os.exec*`, or `child_process`, and a curl
   upload option or object-store upload is not read when it mocks `boto3`,
   `pycurl`, PHP's `curl_setopt`, Google Cloud's `storage`, or the upload
   method itself, as in `mock.patch.object(client, "upload_file")`.

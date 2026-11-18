@@ -8027,6 +8027,9 @@ _CODE_MOCK_CALL_RE = re.compile(
     r"|\b(?:jest|vi)\s*\.\s*(?:mock|doMock|spyOn|stubGlobal)\s*\("
     r"|\b(?:global|globalThis|window)\s*\.\s*(fetch)\s*=(?!=))"
 )
+# What the reader reads in place of a mocking call inside another's
+# arguments (see _code_mocked_names): no name, so no client, member or path word.
+_CODE_MOCK_HOLE = "("
 _CODE_PATCH_IMPORT_RE = re.compile(r"\bfrom\s+(?:unittest\s*\.\s*)?mock\s+import\b[^\n;]{0,200}?\bpatch\b")
 # HTTP mocking libraries in use, and the client each replaces: responses
 # (@responses.activate, responses.start() or RequestsMock), requests_mock
@@ -8645,6 +8648,13 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
     module a client. A bare patch(...) counts only when the code imports
     patch from mock. Importing mock, or a name such as mock that the code
     assigns, mocks nothing. Arguments are read within the reader's work.
+
+    A mocking call inside another's arguments is read as a call of its own,
+    and only once: the other call reads its arguments around it, with a
+    hole (_CODE_MOCK_HOLE) in its place, as jest.mock("a", () =>
+    jest.mock("b")) reads a and then b. A name before a hole is not the
+    last name, and no path runs across a hole, so a hole can only leave a
+    name unmocked that reading through it would mock.
     """
     masked = reader.masked
     mocked: set[str] = set()
@@ -8654,6 +8664,8 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
     for pattern, client in _CODE_MOCK_LIBRARY_RES:
         if pattern.search(masked):
             mocked.add(client)
+    # Each mocking call whose arguments are read, as (start, opener, close), in order.
+    calls: list[tuple[int, int, int]] = []
     bare_patch: bool | None = None
     for match in _CODE_MOCK_CALL_RE.finditer(masked):
         if match[2]:
@@ -8666,24 +8678,66 @@ def _code_mocked_names(reader: _CodeReader) -> frozenset[str]:
                 continue
         opener = match.end() - 1
         close = reader.pairs.get(opener)
-        if close is None or not reader.spend(min(close - opener, _CODE_ARGUMENT_CHARS)):
+        if close is not None:
+            calls.append((match.start(), opener, close))
+    starts = [start for start, _opener, _close in calls]
+    for index, (_start, opener, close) in enumerate(calls):
+        holes = _code_mock_holes(calls, starts, index, min(close - 1, opener + 1 + _CODE_ARGUMENT_CHARS))
+        if not reader.spend(min(close - opener, _CODE_ARGUMENT_CHARS) - sum(end - start for start, end in holes)):
             continue
         arguments = _code_arguments(reader, opener, close)[:2]
-        target = [name for start, end in arguments for name in _CODE_IDENTIFIER_RE.findall(reader.code, start, end)]
-        paths.append(_code_mock_path(reader, arguments))
+        names = [_code_names_around(reader.code, start, end, holes) for start, end in arguments]
+        target = [name for group in names for name in group]
+        paths.append(_code_mock_path(reader, arguments, names[0] if names else []))
         # The names are walked once from the last, carrying whether a member
         # after the current name replaces a client, so a long target is not
         # read again for each name in it.
         replaced = False
         for position in range(len(target) - 1, -1, -1):
             name = target[position]
+            if name == _CODE_MOCK_HOLE:
+                continue
             if name not in _CODE_CLIENT_NAMES or position == len(target) - 1 or replaced:
                 mocked.add(name)
             replaced = replaced or _code_mock_replaces_client(name)
     return frozenset(mocked)
 
 
-def _code_mock_path(reader: _CodeReader, arguments: list[tuple[int, int]]) -> tuple[str, ...]:
+def _code_mock_holes(
+    calls: list[tuple[int, int, int]], starts: list[int], index: int, end: int
+) -> list[tuple[int, int]]:
+    """Return the spans, up to *end*, of the mocking calls inside the arguments of ``calls[index]``, not those inside them.
+
+    *calls* are the mocking calls read, as (start, opener, close), by start,
+    and *starts* their starts. A call that starts after another's opener
+    and before *end*, which is inside that call's arguments, is inside it.
+    """
+    holes: list[tuple[int, int]] = []
+    later = index + 1
+    while later < len(calls) and calls[later][0] < end:
+        start, _opener, close = calls[later]
+        holes.append((start, min(close, end)))
+        later = bisect.bisect_left(starts, close, later + 1)
+    return holes
+
+
+def _code_names_around(code: str, start: int, end: int, holes: list[tuple[int, int]]) -> list[str]:
+    """Return the names between start and end outside *holes*, with _CODE_MOCK_HOLE where each hole is."""
+    names: list[str] = []
+    for hole_start, hole_end in holes:
+        if hole_start >= end:
+            break
+        if hole_end <= start:
+            continue
+        names += _CODE_IDENTIFIER_RE.findall(code, start, max(start, hole_start))
+        names.append(_CODE_MOCK_HOLE)
+        start = hole_end
+    if start < end:
+        names += _CODE_IDENTIFIER_RE.findall(code, start, end)
+    return names
+
+
+def _code_mock_path(reader: _CodeReader, arguments: list[tuple[int, int]], first: list[str]) -> tuple[str, ...]:
     """Return the names of the path a mocking call replaces, from its first two arguments.
 
     A string first argument names the whole path, as os and system in
@@ -8692,13 +8746,14 @@ def _code_mock_path(reader: _CodeReader, arguments: list[tuple[int, int]]) -> tu
     its member, as in monkeypatch.setattr(os, "system", fake) or
     mock.patch.object(app.storage, "backend"). A value that replaces the
     target, as fake in mock.patch("os.system", fake), is not part of it.
+    *first* holds the names of the first argument (see _code_names_around).
     """
     literals = [reader.literal_at(start + _code_blank_prefix(reader.code, start, end)) for start, end in arguments]
     if not arguments:
         return ()
     if literals[0] is not None:
         return tuple(_CODE_IDENTIFIER_RE.findall(literals[0][2][:_CODE_ARGUMENT_CHARS]))
-    path = _CODE_IDENTIFIER_RE.findall(reader.code, *arguments[0])
+    path = list(first)
     if len(literals) > 1 and literals[1] is not None:
         path += _CODE_IDENTIFIER_RE.findall(literals[1][2][:_CODE_ARGUMENT_CHARS])
     return tuple(path)

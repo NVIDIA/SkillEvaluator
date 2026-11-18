@@ -440,9 +440,12 @@ def test_mutually_selected_skills_keep_valid_manifests_after_evaluator_updates(t
     assert load_decoy_manifest(beta, beta_manifest)[0] == [alpha, gamma]
 
 
-def test_old_full_source_digest_requires_regeneration(selection: SimpleNamespace, tmp_path: Path) -> None:
+@pytest.mark.parametrize("algorithm", ["skill-evaluator-source-tree/2", "skill-evaluator-decoy-runtime/2"])
+def test_old_full_source_digest_requires_regeneration(
+    algorithm: str, selection: SimpleNamespace, tmp_path: Path
+) -> None:
     manifest = _select(selection)
-    manifest["source_digest_algorithm"] = "skill-evaluator-source-tree/2"
+    manifest["source_digest_algorithm"] = algorithm
     path = tmp_path / "old-manifest.json"
     write_decoy_manifest(manifest, path)
 

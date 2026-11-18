@@ -542,8 +542,11 @@ The manifest records the catalog hash and embedding identity, selected paths
 and scores, target manifest hash, and selected runtime-content hashes. The
 target's own collection uses a root relative to its parent directory, so an
 identical checkout can reuse the manifest. The hashes cover everything staging
-copies from a selected skill, including ignored or untracked files and empty
-folders, so generate a manifest you plan to commit from a fresh clone.
+copies from a selected skill, including other ignored or untracked files and
+empty folders. Regular `.DS_Store` and `Thumbs.db` files and `.pytest_cache`,
+`.mypy_cache`, and `.ruff_cache` directories are omitted from both staging and
+the decoy hash. Generate a committed manifest from a fresh clone and regenerate
+older manifests for the `skill-evaluator-decoy-runtime/3` recipe.
 Unrelated external collections
 retain an absolute root. Evaluator-only files are excluded from decoy hashes;
 changing a decoy's evaluation config does not require a new selection. Output

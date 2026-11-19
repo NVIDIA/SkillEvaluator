@@ -33,6 +33,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
+  command hooks in an exact, reviewed plugin package. Applied waivers are
+  reported and clear only the matching unmodeled-hook gate.
 - Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
   reports. `skillevaluator ci init --channel stable` prepares both workflows
   with release-managed references and preserves signed scan verification.

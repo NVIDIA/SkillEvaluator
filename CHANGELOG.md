@@ -46,6 +46,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with a
+  skill, and the `--policy` and `--quality-config` files are read within the
+  structured-data limits. Chained YAML merge keys no longer take memory and time that
+  double with each level (a 943-byte file took over a gigabyte), and nested aliases no longer
+  expand when a dataset is staged or a policy value is stringified. A file over a limit
+  is an invalid dataset, policy or config, not an out-of-memory kill. JSON datasets
+  nested past the parser's recursion limit are invalid datasets, not a traceback. A
+  YAML dataset must stay within 1,024 items per list or mapping and 20,000 nodes.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the

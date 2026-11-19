@@ -16,6 +16,12 @@ from typing import Literal, TypedDict
 
 import yaml
 
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
+
 DEFAULT_QUALITY_CONFIG = files("skillevaluator.config").joinpath("quality-default.yaml")
 _ATX_HEADING_RE = re.compile(r"^(#{1,6})[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$")
 _EXPECTED_HEADER_KEYS = frozenset({"heading", "alternatives", "points", "message", "suggestion"})
@@ -274,27 +280,6 @@ def _parse_rule_section(section: str, raw: object, source: str, base: dict | Non
     return parsed
 
 
-class _UniqueKeySafeLoader(yaml.SafeLoader):
-    """SafeLoader that rejects repeated mapping keys instead of keeping the last value."""
-
-    def construct_mapping(self, node: yaml.MappingNode, deep: bool = False) -> dict:
-        seen: set[object] = set()
-        for key_node, _ in node.value:
-            if key_node.tag == "tag:yaml.org,2002:merge":
-                continue
-            key = self.construct_object(key_node, deep=deep)
-            try:
-                duplicate = key in seen
-            except TypeError:
-                continue  # unhashable keys are rejected by the base constructor
-            if duplicate:
-                raise yaml.constructor.ConstructorError(
-                    "while constructing a mapping", node.start_mark, f"duplicate key {key!r}", key_node.start_mark
-                )
-            seen.add(key)
-        return super().construct_mapping(node, deep=deep)
-
-
 def _yaml_error_detail(exc: yaml.YAMLError) -> str:
     mark = getattr(exc, "problem_mark", None)
     problem = getattr(exc, "problem", None)
@@ -333,13 +318,16 @@ def _load(path: Path | None) -> tuple[QualityConfig, dict]:
     except OSError as exc:
         raise QualityConfigError(f"{source}: cannot read file: {exc.strerror or exc}") from exc
     try:
-        raw = yaml.load(text, Loader=_UniqueKeySafeLoader)  # nosec B506
-    except yaml.YAMLError as exc:
-        raise QualityConfigError(f"{source}: invalid YAML: {_yaml_error_detail(exc)}") from exc
-    except RecursionError as exc:
-        raise QualityConfigError(f"{source}: invalid YAML: nesting is too deep") from exc
-    except (ValueError, TypeError, KeyError, AttributeError) as exc:
-        raise QualityConfigError(f"{source}: invalid YAML: cannot parse a value: {exc}") from exc
+        # Bounded: the file may sit in the repository under test, and a merge-key chain expands
+        # inside plain ``yaml.load``. A repeated key is a syntax error, as with the local loader.
+        raw = load_bounded_yaml(text)
+    except StructuredDataLimitError as exc:
+        raise QualityConfigError(f"{source}: invalid YAML: {exc}") from exc
+    except StructuredDataSyntaxError as exc:
+        cause = exc.__cause__
+        if isinstance(cause, yaml.YAMLError):
+            raise QualityConfigError(f"{source}: invalid YAML: {_yaml_error_detail(cause)}") from exc
+        raise QualityConfigError(f"{source}: invalid YAML: cannot parse a value: {cause or exc}") from exc
     if not isinstance(raw, dict):
         raise QualityConfigError(f"{source}: expected_headers must be a list")
     # A custom file may omit expected_headers and inherit the packaged list; the packaged file may not.

@@ -23,6 +23,7 @@ _ALLOWED = {
     "config/__init__.py": "reads configuration files that ship in the package",
     "harness/overlay.py": "reads harness profile files that ship in the package",
     "validators/security.py": "uses its own bounded SkillSpector baseline loader",
+    "quality_config.py": "re-parses with a local loader for the error wording, after the bounded loader refused the text",
     "validators/pii_waivers.py": "re-parses with the structured_data loader for an error position after the bounded read",
     "tier3/evals_config.py": "re-parses with the structured_data loader for an error position after the bounded read",
     "tier3/dataset_migration.py": "the author runs it on their own dataset; its loader rejects repeated keys",

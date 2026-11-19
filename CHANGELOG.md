@@ -66,7 +66,9 @@ All notable changes to SkillEvaluator are documented in this file.
   stringified. A file over a limit is an invalid dataset, policy or config, not
   an out-of-memory kill. JSON datasets nested past the parser's recursion limit
   are invalid datasets, not a traceback. A YAML dataset must stay within 1,024
-  items per list or mapping and 20,000 nodes.
+  items per list or mapping and 20,000 nodes. A quality config with nesting past
+  100 levels or an integer past 14,000 bits is refused with a structure-limit
+  message instead of the settings' own error.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the

@@ -1580,7 +1580,6 @@ def _skillspector_excluded_pngs(completeness: dict, components: list[dict], scan
     references = completeness.get("references")
     if (
         scanned_root is None
-        or completeness.get("status") != "complete"
         or not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
         or not isinstance(exclusions, list)
         or len(exclusions) != surplus
@@ -3923,6 +3922,7 @@ class SecurityValidator(ValidatorBase):
                 result.add_error("skillspector reported execution_successful=false; security scan did not complete")
             return False
 
+        completeness_status: str | None = None
         findings_after_filtering: int | None = None
         universal_analyzer_ids: frozenset[str] = frozenset()
         analysis_completeness = data.get("analysis_completeness")
@@ -4743,7 +4743,10 @@ class SecurityValidator(ValidatorBase):
             covered_count = analysis_completeness["total_components"]
             excluded_pngs = []
             if inventory_count != covered_count:
-                excluded_pngs = _skillspector_excluded_pngs(analysis_completeness, normalized_components, scanned_root)
+                if completeness_status == "complete":
+                    excluded_pngs = _skillspector_excluded_pngs(
+                        analysis_completeness, normalized_components, scanned_root
+                    )
                 if not excluded_pngs:
                     result.add_error(
                         "skillspector JSON component inventory contradicts analysis completeness; "

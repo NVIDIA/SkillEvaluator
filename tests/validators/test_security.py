@@ -8914,39 +8914,9 @@ def plugin_with_excluded_png(tmp_path: Path) -> tuple[Path, dict]:
     logo.parent.mkdir()
     logo.write_bytes(_png_bytes())
 
-    payload = _skillspector_json_report()
-    payload["metadata"]["skillspector_version"] = "2.13.4"
-    payload["components"] = [
-        {"path": path, "executable": False, "size_bytes": (plugin / path).stat().st_size}
-        for path in (".claude-plugin/plugin.json", "README.md", "assets/logo.png")
-    ]
-    completeness = payload["analysis_completeness"]
-    # SkillSpector reports the full inventory, but the PNG is outside the
-    # coverage denominator. YARA and artifact integrity still inspected it.
-    completeness.update(total_components=2, scanned_components=2, fully_inspected_files=2, references=[])
-    statuses = completeness["analyzer_statuses"]
-    statuses.append({**statuses[0], "analyzer_id": "bundled_execution_surface"})
-    patterns = []
-    for status in statuses:
-        analyzer = status["analyzer_id"]
-        if analyzer.startswith("static_patterns_"):
-            patterns.append(analyzer)
-            status.update(planned_work=2, completed=2)
-        elif analyzer in {"artifact_integrity", "static_yara"}:
-            status.update(planned_work=3, completed=3)
-    completeness["scope_exclusions"] = [
-        {
-            "outcome": "out_of_scope",
-            "phase": "static",
-            "reason_code": "binary_content",
-            "path": "assets/logo.png",
-            "start_line": None,
-            "end_line": None,
-            "fatal": False,
-            "analyzers": patterns,
-        }
-    ]
-    return plugin, payload
+    # Captured with SkillSpector 2.13.4 and --no-llm against the files above.
+    report = Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.4-plugin-png-no-llm.json"
+    return plugin, json.loads(report.read_text(encoding="utf-8"))
 
 
 @patch("skillevaluator.validators.security.Tools")
@@ -8958,6 +8928,27 @@ def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugi
     assert result.passed, result.errors
     assert not result.incomplete_scans
     assert any("1 passive PNG file (assets/logo.png)" in warning for warning in result.warnings)
+
+
+@pytest.mark.parametrize("include_status", [False, True], ids=["statusless", "unexpected-status"])
+@patch("skillevaluator.validators.security.Tools")
+def test_legacy_skillspector_reports_cannot_use_png_exclusions(
+    mock_tools, plugin_with_excluded_png, include_status: bool
+) -> None:
+    plugin, modern = plugin_with_excluded_png
+    payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+    payload["components"].append(modern["components"][-1])
+    completeness = payload["analysis_completeness"]
+    completeness.update(references=[], scope_exclusions=modern["analysis_completeness"]["scope_exclusions"])
+    if include_status:
+        completeness["status"] = "complete"
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.is_incomplete
+    expected = "status' must be absent" if include_status else "inventory contradicts analysis completeness"
+    assert any(expected in error for error in result.errors)
+    assert not any("passive PNG" in warning for warning in result.warnings)
 
 
 @patch("skillevaluator.validators.security.Tools")

@@ -163,7 +163,8 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
         except StructuredDataSyntaxError:
             frontmatter = None
         except StructuredDataLimitError as exc:
-            raise ValueError(f"Manifest structured-data complexity limit exceeded: {skill_md}") from exc
+            # A ValueError subclass, so callers that already handle ValueError are unchanged.
+            raise StructuredDataLimitError(f"Manifest structured-data complexity limit exceeded: {skill_md}") from exc
         if isinstance(frontmatter, dict):
             if frontmatter.get("name"):
                 name = str(frontmatter["name"]).strip()
@@ -1929,7 +1930,11 @@ Agent-refined mode (--refine):
         print("Use --refine to apply matching retained traces, or --force to overwrite.")
         return DatasetGenerationResult(status="unchanged", path=output_path)
 
-    skill = _parse_skill(skill_path, prompt_file=args.prompt)
+    try:
+        skill = _parse_skill(skill_path, prompt_file=args.prompt)
+    except StructuredDataLimitError as exc:
+        # The command reports a dataset-generation error as one line, not a traceback.
+        raise DatasetGenerationError(str(exc)) from exc
     auto_cases: list[dict[str, Any]] | None = None
     auto_evidence: tuple[dict[str, dict[str, Any]], dict[str, Path]] | None = None
     auto_input_required = (

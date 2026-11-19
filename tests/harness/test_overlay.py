@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
-from tests.yaml_alias_fixtures import alias_graph_lines, deeply_nested_flow, merge_bomb_yaml
+from tests.yaml_alias_fixtures import alias_bomb_skill_md, alias_graph_lines, deeply_nested_flow, merge_bomb_yaml
 
 from skillevaluator.cli import cli
 from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
@@ -1285,11 +1285,10 @@ def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path
 
 
 def test_nested_alias_frontmatter_reads_as_empty_manifest(tmp_path):
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
     skill = tmp_path / "demo-skill"
     skill.mkdir()
-    (skill / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+    (skill / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
 
     from skillevaluator.harness import overlay
 

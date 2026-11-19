@@ -180,10 +180,9 @@ class TestValidatePydanticModel:
 
 
 def test_nested_alias_frontmatter_is_an_error_not_a_parse(tmp_path: Path) -> None:
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
     test_file = tmp_path / "SKILL.md"
-    test_file.write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+    test_file.write_text(alias_bomb_skill_md(), encoding="utf-8")
 
     parsed, result = parse_frontmatter(test_file)
 

@@ -33,8 +33,11 @@ def alias_graph_lines(levels: int) -> list[str]:
     return lines
 
 
-def alias_bomb_skill_md(levels: int = OVER_LIMIT_LEVELS, *, alias_fields: tuple[str, ...] = ()) -> str:
-    """Return a SKILL.md with a valid name and description plus the alias graph as an extra key.
+_DEFAULT_BODY = "# Demo\n\n## Instructions\n\n1. Step\n"
+
+
+def alias_bomb_frontmatter(levels: int = OVER_LIMIT_LEVELS, *, alias_fields: tuple[str, ...] = ()) -> str:
+    """Return frontmatter YAML (no ``---`` fences) with a valid name and description plus the alias graph.
 
     A field in ``alias_fields`` (``name`` or ``description``) is the alias itself, so a reader that
     stringifies that field expands the graph; the plain string for it is dropped.
@@ -47,7 +50,14 @@ def alias_bomb_skill_md(levels: int = OVER_LIMIT_LEVELS, *, alias_fields: tuple[
         head.append("description: Demo skill used for testing. Use when demoing.")
     # An alias must come after its anchor, so the aliased fields go last.
     tail = [f"{field}: *{_ANCHORS[levels]}" for field in alias_fields]
-    return "---\n" + "\n".join([*head, *graph, *tail]) + "\n---\n# Demo\n\n## Instructions\n\n1. Step\n"
+    return "\n".join([*head, *graph, *tail])
+
+
+def alias_bomb_skill_md(
+    levels: int = OVER_LIMIT_LEVELS, *, alias_fields: tuple[str, ...] = (), body: str = _DEFAULT_BODY
+) -> str:
+    """Return a SKILL.md whose frontmatter is :func:`alias_bomb_frontmatter`, followed by ``body``."""
+    return f"---\n{alias_bomb_frontmatter(levels, alias_fields=alias_fields)}\n---\n{body}"
 
 
 def merge_bomb_yaml(levels: int = 16) -> str:

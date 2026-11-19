@@ -96,3 +96,19 @@ def test_workspace_skill_name_reads_a_plain_name(tmp_path: Path):
     skill = _skill(tmp_path, "---\nname: renamed\n---\n# Demo\n")
 
     assert _workspace_skill_name(skill) == "renamed"
+
+
+def test_create_eval_dataset_reports_over_limit_frontmatter_as_one_error_line(tmp_path: Path):
+    from click.testing import CliRunner
+
+    from skillevaluator.cli import cli
+
+    skill = _skill(tmp_path, alias_bomb_skill_md(OVER_LIMIT_LEVELS))
+
+    result = CliRunner().invoke(cli, ["tier3", "create-eval-dataset", str(skill), "--no-llm"])
+
+    assert result.exit_code != 0
+    assert "complexity limit exceeded" in result.output
+    # A traceback would leave the ValueError as the exception; a clean error exits through SystemExit.
+    assert isinstance(result.exception, SystemExit)
+    assert "Traceback" not in result.output

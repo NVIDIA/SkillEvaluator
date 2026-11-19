@@ -209,9 +209,9 @@ skills:
 
 
 def test_nested_alias_manifest_is_reported_as_yaml_complexity(tmp_path: Path) -> None:
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_FRONTMATTER
+    from tests.yaml_alias_fixtures import alias_bomb_frontmatter
 
-    _write_manifest(tmp_path, NESTED_ALIAS_FRONTMATTER + "\n")
+    _write_manifest(tmp_path, alias_bomb_frontmatter() + "\n")
 
     result = PluginSchemaValidator().validate(tmp_path)
 

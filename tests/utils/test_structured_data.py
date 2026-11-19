@@ -433,10 +433,32 @@ def test_bounded_yaml_walks_the_members_of_a_set() -> None:
 @pytest.mark.parametrize("last_key_wins", [False, True])
 @pytest.mark.parametrize(
     "raw",
-    ["%YAML 1." + "1" * 4_301 + "\n---\na: 1\n", 'a: "\\UFFFFFFFF"\n'],
-    ids=["yaml-directive-digits", "out-of-range-escape"],
+    ["%YAML 1." + "1" * 4_301 + "\n---\na: 1\n", 'a: "\\UFFFFFFFF"\n', 'a: "\\U00110000"\n'],
+    ids=["yaml-directive-digits", "escape-above-a-c-int", "escape-above-unicode"],
 )
 def test_bounded_yaml_reports_a_scanner_value_error_as_a_syntax_error(raw: str, last_key_wins: bool) -> None:
     # PyYAML's scanner converts these itself and raises a plain ValueError, not a YAMLError.
     with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML"):
         load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+
+def test_bounded_yaml_reports_a_scanner_overflow_error_as_a_syntax_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.12's ``chr()`` raises OverflowError, not ValueError, for a code point above a C int.
+    # Simulate it, so the case does not depend on the interpreter running the tests.
+    def overflow(*args: object, **kwargs: object) -> object:
+        raise OverflowError("Python int too large to convert to C int")
+
+    monkeypatch.setattr(structured_data.yaml, "parse", overflow)
+
+    with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML") as caught:
+        load_bounded_yaml("a: 1\n")
+    assert isinstance(caught.value.__cause__, OverflowError)
+
+
+def test_bounded_yaml_rejects_the_reported_alias_graph_at_its_reported_size() -> None:
+    # Nine levels of nine-way fan-out in a few hundred bytes. Only the loader runs here, and it
+    # never stringifies the graph, so this stays cheap if the limit regresses.
+    from tests.yaml_alias_fixtures import REPORTED_LEVELS, alias_bomb_frontmatter
+
+    with pytest.raises(StructuredDataLimitError, match=r"expanded node or edge count"):
+        load_bounded_yaml(alias_bomb_frontmatter(REPORTED_LEVELS), last_key_wins=True)

@@ -1746,11 +1746,10 @@ class TestSchemaPortabilityChecks:
 
 
 def test_nested_alias_frontmatter_reports_complexity_finding(tmp_path: Path) -> None:
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
     skill_dir = tmp_path / "demo-skill"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
 
     result = SchemaValidator().validate(skill_dir)
 

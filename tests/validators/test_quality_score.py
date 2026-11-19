@@ -7,7 +7,7 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
+from tests.yaml_alias_fixtures import alias_bomb_skill_md, scalar_alias_fan_yaml
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
 from skillevaluator.quality_config import load_quality_config, quality_config_digest
@@ -2185,11 +2185,10 @@ def test_nested_alias_frontmatter_is_rejected_without_expanding(tmp_path: Path) 
     """A tiny frontmatter block with nested aliases must not be stringified field by field."""
     import time
 
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
     skill_dir = tmp_path / "demo-skill"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
 
     started = time.perf_counter()
     result = QualityScoreValidator().validate(skill_dir)

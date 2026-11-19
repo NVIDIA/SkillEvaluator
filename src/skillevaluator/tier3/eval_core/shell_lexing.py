@@ -192,10 +192,12 @@ def _keep_attached_descriptors(text: str) -> str:
 
 
 def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str | None:
-    """Keep comment markers, or return None for unmodelled nested quote contexts."""
+    """Strip comment text only when its quote context can be modelled."""
     out = []
     quote = None
     word_start = True
+    unmodelled_expansion = False
+    stripped_comment = False
     index = 0
     while index < len(text):
         char = text[index]
@@ -208,7 +210,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             continue
         if quote not in {"'", "ansi-c"}:
             if char == "`":
-                return None
+                unmodelled_expansion = True
             if char == "$":
                 following = index + 1
                 if shell != "zsh":
@@ -221,7 +223,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
                 ):
                     # A plain identifier cannot nest quotes. Other expansions
                     # can: do not guess comment boundaries inside their words.
-                    return None
+                    unmodelled_expansion = True
         if quote is not None:
             out.append(char)
             if char == ("'" if quote == "ansi-c" else quote):
@@ -229,6 +231,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             index += 1
             continue
         if char == "#" and word_start:
+            stripped_comment = True
             out.append(char)
             end = text.find("\n", index)
             if end < 0:
@@ -248,6 +251,10 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             word_start = char in " \t\n" or char in _SHELL_METACHARS
         out.append(char)
         index += 1
+    if unmodelled_expansion and stripped_comment:
+        return None
+    # With no comment removed, keep the original spelling and the existing
+    # status attribution, including expansions next to a quoted literal hash.
     return "".join(out)
 
 

@@ -405,7 +405,18 @@ def test_literal_continued_expansion_text_keeps_the_script_status(tmp_path, shel
     [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
 )
 @pytest.mark.parametrize("status", [0, 2])
-@pytest.mark.parametrize("argument", [' "$(pwd)/out.json"', " `printf x`", ' "${MODEL:-gpt}"'])
+@pytest.mark.parametrize(
+    "argument",
+    [
+        ' "$(pwd)/out.json"',
+        ' "$(pwd)/out#data.json"',
+        ' "$(pwd)" "#out.json"',
+        " `printf x`",
+        ' "`pwd`/out#data.json"',
+        ' "${MODEL:-gpt}"',
+        ' "${MODEL:-gpt}" "#out.json"',
+    ],
+)
 def test_expansions_without_comments_keep_the_script_status(
     tmp_path, shell, operand, relative_script, status, argument
 ):
@@ -413,6 +424,17 @@ def test_expansions_without_comments_keep_the_script_status(
     assert completed.returncode == status
     assert result["passed"] is (status == 0)
     assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("argument", ['"$(pwd)/out#data.json"', '"$(pwd)" "#out.json"', '"`pwd`/out#data.json"'])
+def test_quoted_hash_with_substitution_does_not_hide_a_real_pipeline(tmp_path, shell, argument):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", 2, f" {argument} | cat"
+    )
+    assert completed.returncode == 0
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])

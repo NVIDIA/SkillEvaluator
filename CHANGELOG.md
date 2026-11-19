@@ -4,6 +4,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Report an advisory paired case-bootstrap interval and contributing case counts for Tier 3 skill interactions, without changing their scores or verdicts.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

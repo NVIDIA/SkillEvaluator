@@ -94,9 +94,8 @@ skillevaluator tier3 validate ./my-skill --strict
 ```
 
 If the validator reports a missing `evals/` directory, create the dataset
-before continuing. Starting with the next release, the CLI exits with code
-`1` in this case. Version 1.0.1 can report the missing directory and exit with
-code `0`.
+before continuing. Releases after 1.0.1 exit with code `1` in this case; 1.0.1
+and earlier can report the missing directory and still exit with code `0`.
 
 Fix errors and warnings before starting a live run. Validation checks structure
 and flagged wording; **it does not confirm that a human reviewed the cases or

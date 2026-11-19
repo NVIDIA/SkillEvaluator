@@ -52,6 +52,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
+  repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
   any independently measured component, instead of stopping report collection with `OverflowError`.
   Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
@@ -66,7 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
   exhausting memory during the quality check.
 - The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
   which fixes false incomplete-analysis findings on valid JSON hook
-  `timeout` fields.
+  `timeout` fields. SkillSpector's Gemini provider uses `google-auth[requests]`,
+  which brings `google-auth`, `cryptography`, `cffi`, `pycparser`, `pyasn1`,
+  and `pyasn1-modules` into the Tier 1 image.
 - Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
   from text-pattern coverage when the remaining coverage and the full YARA
   and artifact-integrity counts agree.
@@ -86,6 +90,9 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- SARIF reports retain findings on cyclic symbolic links (which previously
+  aborted on Python 3.12), preserve the named link on expanding cycles on every
+  supported Python, and normalize parent paths before workspace containment checks.
 - Tier 2 content clustering uses much less memory on skills with many chunks;
   similarity scores and clusters are unchanged.
 - Naming checks reject a trailing newline in skill, workflow, and rule path components,

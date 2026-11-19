@@ -24,8 +24,8 @@ set to ``/fixture/<name>``:
 
 - the hooks-only plugin in ``tests/fixtures/plugins/bundled-script-hooks``,
   with v2.13.3 and v2.13.4;
-- that plugin with hook ``timeout`` keys, with v2.13.4, which also records a
-  ``static_parse_limit`` row on the manifest;
+- that plugin with hook ``timeout`` keys, with v2.13.4 and v2.13.6. Only
+  v2.13.4 records an extra ``static_parse_limit`` row on the manifest;
 - that plugin with hook scripts that send their input to a remote host, with
   v2.13.3;
 - a skill with a ``.claude/settings.json`` command hook, with v2.13.3, and the
@@ -71,6 +71,7 @@ PLUGIN = _FIXTURES / "plugins" / "bundled-script-hooks"
 _PLUGIN_REPORT = "skillspector-2.13.3-bundled-script-hooks-no-llm.json"
 _PLUGIN_REPORT_2_13_4 = "skillspector-2.13.4-bundled-script-hooks-no-llm.json"
 _TIMEOUT_REPORT = "skillspector-2.13.4-bundled-script-hooks-timeout-no-llm.json"
+_TIMEOUT_REPORT_2_13_6 = "skillspector-2.13.6-bundled-script-hooks-timeout-no-llm.json"
 _REVIEW_REPORT = "skillspector-2.13.6-bundled-script-hooks-reviewed-no-llm.json"
 _UPLOAD_REPORT = "skillspector-2.13.3-upload-hooks-no-llm.json"
 _SETTINGS_REPORT = "skillspector-2.13.3-settings-hook-no-llm.json"
@@ -580,6 +581,7 @@ _CAPTURES: list[tuple[str, Callable[[Path], Path], str]] = [
     (_PLUGIN_REPORT, _plugin, "hooks/hooks.json"),
     (_PLUGIN_REPORT_2_13_4, _plugin, "hooks/hooks.json"),
     (_TIMEOUT_REPORT, _timeout_plugin, "hooks/hooks.json"),
+    (_TIMEOUT_REPORT_2_13_6, _timeout_plugin, "hooks/hooks.json"),
     (_UPLOAD_REPORT, _upload_plugin, "hooks/hooks.json"),
     (_SETTINGS_REPORT, _settings_skill, ".claude/settings.json"),
     (_SETTINGS_IMAGE_REPORT, _settings_image_skill, ".claude/settings.json"),
@@ -784,6 +786,7 @@ class TestUnmodeledHooks:
             pytest.param(_PLUGIN_REPORT, _plugin, "hooks/hooks.json", "plugin", id="plugin-2.13.3"),
             pytest.param(_PLUGIN_REPORT, _plugin, "hooks/hooks.json", None, id="folder-2.13.3"),
             pytest.param(_PLUGIN_REPORT_2_13_4, _plugin, "hooks/hooks.json", "plugin", id="plugin-2.13.4"),
+            pytest.param(_TIMEOUT_REPORT_2_13_6, _timeout_plugin, "hooks/hooks.json", "plugin", id="timeout-2.13.6"),
             pytest.param(_UPLOAD_REPORT, _upload_plugin, "hooks/hooks.json", "plugin", id="network-hooks"),
             pytest.param(_SETTINGS_REPORT, _settings_skill, ".claude/settings.json", "skill", id="skill-settings"),
             pytest.param(_SETTINGS_REPORT, _settings_skill, ".claude/settings.json", None, id="settings-scan"),

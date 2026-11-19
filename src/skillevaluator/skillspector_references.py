@@ -296,6 +296,54 @@ def index_legacy_reference_reasons(
     return by_target
 
 
+def _with_ledger_parser_spans(
+    rows: object,
+    target: str,
+    completeness: object,
+    normalize_path: Callable[[object], str | None],
+    text: Callable[..., str | None],
+) -> object:
+    """*rows* with a ledger ``parser_diagnostic`` on each structured reason that has no line.
+
+    SkillSpector builds an AE1 finding's ``evidence.reasons`` without the
+    ``parser_diagnostic`` of the ledger row behind each reason, so the span is
+    read from ``analysis_completeness.ledger_exceptions``: the one row for the
+    same target and ``reason_code``. A reason with a line of its own, or with
+    no row or several rows to match, is left as it is.
+    """
+    if not isinstance(rows, list) or not isinstance(completeness, dict):
+        return rows
+    ledger = completeness.get("ledger_exceptions")
+    if not isinstance(ledger, list):
+        return rows
+
+    def needs_span(row: object) -> bool:
+        return (
+            isinstance(row, dict)
+            and _line(row.get("start_line")) is None
+            and not isinstance(row.get("parser_diagnostic"), dict)
+            and text(row.get("reason_code"), max_length=128) is not None
+        )
+
+    if not any(needs_span(row) for row in rows[:_MAX_REASONS]):
+        return rows
+    matches: dict[str, list[dict]] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict) or normalize_path(entry.get("path")) != target:
+            continue
+        if reason_code := text(entry.get("reason_code"), max_length=128):
+            matches.setdefault(reason_code, []).append(entry)
+    filled: list[object] = []
+    for row in rows:
+        if needs_span(row):
+            candidates = matches.get(text(row.get("reason_code"), max_length=128) or "", [])
+            diagnostic = candidates[0].get("parser_diagnostic") if len(candidates) == 1 else None
+            if isinstance(diagnostic, dict):
+                row = {**row, "parser_diagnostic": diagnostic}
+        filled.append(row)
+    return filled
+
+
 def issue_diagnostics(
     issue: Mapping[str, object],
     *,
@@ -310,7 +358,9 @@ def issue_diagnostics(
     and up to 16 ``reasons``, with ``reasons_truncated`` when SkillSpector or
     this projection left some out. Before v2.12.0 the reasons come from the
     target's ledger rows in *completeness* (or *legacy_reason_index*), and the
-    finding gets no evidence without them. ``skillspector_occurrences`` lists
+    finding gets no evidence without them. A structured reason without a line
+    takes the ``parser_diagnostic`` span of its one matching ledger row in
+    *completeness*. ``skillspector_occurrences`` lists
     up to 128 of the issue's ``occurrences``. Any other issue gets ``{}``.
     Paths go through *normalize_path* and other text through *text*.
     """
@@ -323,7 +373,9 @@ def issue_diagnostics(
     evidence = issue.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
     rows = evidence.get("reasons") if structured else None
-    if not rows:
+    if rows:
+        rows = _with_ledger_parser_spans(rows, target, completeness, normalize_path, text)
+    else:
         if legacy_reason_index is None:
             legacy_reason_index = index_legacy_reference_reasons(
                 [issue], completeness=completeness, normalize_path=normalize_path, text=text

@@ -952,7 +952,9 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     error now labels that row as `scripts/helper.mjs:74-170 [static;
     static_parse_limit; runtime_dependent command_string_runtime;
     analyzers=static_patterns_tool_misuse]` and adds a short hint to review
-    those lines and prefer fixed argument lists. Updating SkillSpector does
+    those lines and prefer fixed argument lists. An AE1 finding for a skill
+    line that names the helper quotes the same span in its suggestion
+    (`at target lines 74-170`), read from that ledger row. Updating SkillSpector does
     not clear this limit today. If the helper is valid and the command is
     safe, report a minimal reproducer to SkillSpector. JSON reports keep a
     bounded `parser_diagnostic` on the matching

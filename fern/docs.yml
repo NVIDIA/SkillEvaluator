@@ -71,6 +71,9 @@ navigation:
       - page: Configure a Tier 3 Run
         path: ../docs/tier3-run-options.mdx
         slug: tier3-run-options
+      - page: NeMo Gym Integration
+        path: ../docs/nemo-gym.mdx
+        slug: nemo-gym
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation

@@ -442,6 +442,16 @@ def preflight_json_structure(
     preflight.run(raw, position, len(raw))
 
 
+def reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build an object while rejecting ambiguous duplicate members."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object member")
+        result[key] = value
+    return result
+
+
 def load_bounded_json(
     raw: str,
     *,

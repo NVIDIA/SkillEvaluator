@@ -77,9 +77,11 @@ All notable changes to SkillEvaluator are documented in this file.
   inspection rather than observed unsafe behavior. The Tier 3 guide lists the
   forms that are not read. Both the host checker and the bundled Harbor
   verifier apply the fix.
-- The calculator reference skill refuses Boolean constants, bounds exponentiation
-  before computing it, and reports non-real or oversized results instead of hanging
-  or raising a cryptic conversion error.
+- The calculator reference skill refuses Boolean constants and caps arithmetic
+  results at 1000 digits. It checks exponentiation before computing it, so integer
+  results of 1001 to 4300 digits, which printed before, now return
+  `Error: result is too large`. Larger, infinite or non-real results report an
+  error instead of hanging or raising a cryptic conversion error.
 
 ## 1.0.1 - 2026-11-17
 

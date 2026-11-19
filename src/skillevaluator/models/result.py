@@ -346,8 +346,6 @@ class ValidationSummary:
         }
 
 
-
-
 def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = None) -> Finding:
     """Copy *finding* with *prefix* applied to every location it names.
 
@@ -387,6 +385,7 @@ def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = 
         suggestion=finding.suggestion,
         metadata=metadata,
     )
+
 
 @dataclass
 class ValidationResult:
@@ -628,12 +627,20 @@ class ValidationResult:
         """
         self.recalculate_from_findings()
         if keep_all_errors or self.is_incomplete:
+            seen_errors = set(self.errors)
             for error in errors:
-                if error not in self.errors:
+                if error not in seen_errors:
                     self.add_error(error)
-        for warning in warnings:
-            if keep_repeated_warnings or warning not in self.warnings:
+                    seen_errors.add(error)
+        if keep_repeated_warnings:
+            for warning in warnings:
                 self.add_warning(warning)
+        else:
+            seen_warnings = set(self.warnings)
+            for warning in warnings:
+                if warning not in seen_warnings:
+                    self.add_warning(warning)
+                    seen_warnings.add(warning)
 
     def _finding_legacy_lines(self) -> set[str]:
         """Return the legacy error and warning lines that only repeat a structured finding."""

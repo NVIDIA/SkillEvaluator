@@ -86,6 +86,8 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Tier 2 content clustering uses much less memory on skills with many chunks;
+  similarity scores and clusters are unchanged.
 - Naming checks reject a trailing newline in skill, workflow, and rule path components,
   instead of treating the name before that newline as a complete kebab-case match.
 - LLM retries retain the innermost valid `Retry-After` header through exception

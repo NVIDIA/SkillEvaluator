@@ -55,6 +55,23 @@ class TestUnionFind:
 
 
 class TestBuildClusters:
+    def test_separated_cluster_members_keep_their_pair_scores(self, make_chunk) -> None:
+        chunks = [
+            make_chunk(source_file=f"{index}.md", embedding=vector)
+            for index, vector in enumerate(
+                [[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0], [0.0, 0.6, 0.8], [0.96, 0.28, 0.0]]
+            )
+        ]
+
+        clusters = build_clusters(chunks, threshold=0.75)
+
+        assert [[member.source_file for member in cluster.members] for cluster in clusters] == [
+            ["0.md", "4.md"],
+            ["1.md", "3.md"],
+        ]
+        assert [cluster.max_similarity for cluster in clusters] == pytest.approx([0.96, 0.8])
+        assert [cluster.avg_similarity for cluster in clusters] == pytest.approx([0.96, 0.8])
+
     def test_fewer_than_2_chunks_returns_empty(self, make_chunk) -> None:
         assert build_clusters([make_chunk(embedding=[1.0, 0.0])]) == []
         assert build_clusters([]) == []

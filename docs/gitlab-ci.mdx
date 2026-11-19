@@ -91,12 +91,14 @@ To migrate an existing Tier 1 setup, replace its pinned SkillEvaluator include
 with the stable include. Remove `SKILL_EVAL_IMAGE` and any `skill-evaluation`
 `image` override so the stable include selects the image. Keep your skill paths,
 minimum score, scan settings, and root job rules. Use a Docker executor that
-reports the job image through `CI_JOB_IMAGE`, and keep the included
-`before_script` when customizing the job.
+reports the job image through `CI_JOB_IMAGE`. The included `before_script`
+and `after_script` take precedence over any project defaults for those keys.
+Keep both hooks when customizing `skill-evaluation`.
 
-New pipelines use the latest promoted release. Retrying a job uses the
-configuration saved when its pipeline was created. Use the versioned setup above
-to review each upgrade before adopting it.
+GitLab resolves the stable include when it creates a pipeline. A promotion can
+take a few minutes to reach new pipelines because the remote file is cached.
+Retrying a job uses the configuration saved when its pipeline was created. Use
+the versioned setup above to review each upgrade before adopting it.
 
 ## See the results
 
@@ -104,10 +106,10 @@ Open the `skill-evaluation` job and download its `skill-evaluator-report`
 artifact. Open `index.html` for the consolidated view, then select a skill for
 its detailed HTML report. JSON, Markdown and SARIF are included.
 
-Stable-channel jobs also include `skill-evaluator-ci.json` alongside the HTML
-in the artifact. It records the SkillEvaluator release, the pinned job
-configuration commit, the image digest, the commit scanned, and the GitLab
-pipeline and job IDs.
+Stable-channel jobs write `skill-evaluator-ci.json` after collecting the scan
+reports, including when a scan returns a failing verdict. The artifact records
+the SkillEvaluator release, the pinned job configuration commit, the image
+digest, the commit scanned, and the GitLab pipeline and job IDs.
 
 <Frame caption="Real demo result: the skill scored 98.2 and failed a 100-point threshold. The score and the scan verdict are separate.">
   <img src="./assets/repository-ci-results-example.png" alt="Example report table showing a failed skill with a quality score of 98.2 and a link to its report" />

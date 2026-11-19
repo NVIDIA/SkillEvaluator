@@ -139,13 +139,19 @@ GitHub. Include that file and its source template in the release commit. The
 consumer's root `.gitlab-ci.yml` retains the merge-request rules.
 [GitLab CI setup](docs/gitlab-ci.mdx#follow-the-latest-stable-release)
 
-Before promotion, run GitLab CI Lint with a consumer root configuration and
-verify changed-skill selection in a detached merge request, HTML and
-`skill-evaluator-ci.json` artifact retention after an intentional scan failure,
-and a full scan on the default branch. Check that the metadata records the
-release, evaluator commit, image digest, consumer commit, pipeline ID, and job
-ID. Verify that a new pipeline can pick up the promotion while a job retry keeps
-the include snapshot from its original pipeline.
+Qualify the release commit before publishing, since publication triggers
+promotion. For the first `v1.0.1` promotion, qualify the bootstrap commit before
+dispatching the workflow. In a test GitLab project, use the consumer root
+configuration from the GitLab CI guide and replace `refs/tags/stable` in its
+include URL with the full commit SHA you are qualifying.
+
+Run GitLab CI Lint and verify changed-skill selection in a detached merge
+request, HTML and `skill-evaluator-ci.json` artifact retention after an
+intentional scan failure, and a full scan on the default branch. Check that the
+metadata records the release, evaluator commit, image digest, consumer commit,
+pipeline ID, and job ID. Run a new pipeline after switching the test include to
+a different qualified release. A retry of the original job should keep its
+original release and configuration.
 [GitLab include behavior](https://docs.gitlab.com/ci/yaml/#include)
 
 If `stable` already serves a GitHub-only release, leave that release's target in

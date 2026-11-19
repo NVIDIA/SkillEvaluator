@@ -35,7 +35,7 @@ def test_stable_wrapper_pairs_the_nested_evaluator_with_its_literal_image():
     ]
     job = config["skill-evaluation"]
     assert set(config) == {"include", "skill-evaluation"}
-    assert set(job) == {"image", "before_script", "artifacts"}
+    assert set(job) == {"image", "before_script", "after_script", "artifacts"}
     assert job["image"] == {"name": RELEASE["image"]}
     assert job["artifacts"] == {"paths": [f"{REPORT}/", EVIDENCE]}
 
@@ -56,35 +56,52 @@ while [ "$#" -gt 0 ]; do
     if [ "$1" = --reports ]; then shift; report_dir=$1; fi
     shift
 done
+if [ -e "$CI_PROJECT_DIR/skill-evaluator-ci.json" ]; then
+    echo "CI metadata was present during the skill scan." >&2
+    exit 97
+fi
 printf '%s\\n' "$REPORT_IMAGE" "$REPORT_COMMIT" "$SCAN_MODE" > "$report_dir/execution.txt"
+printf '%s\\n' '{}' > "$report_dir/summary.json"
 exit "$TEST_SCANNER_EXIT"
 """,
         encoding="utf-8",
     )
     python.chmod(0o755)
-    return subprocess.run(
+    environment = {
+        "PATH": str(bin_dir) + os.pathsep + os.defpath,
+        "TEST_PYTHON": sys.executable,
+        "TEST_SCANNER_EXIT": str(scanner_exit),
+        "CI_PROJECT_DIR": str(workspace),
+        "CI_JOB_IMAGE": image,
+        "CI_JOB_ID": "9001",
+        "CI_PIPELINE_ID": "321",
+        "CI_PIPELINE_SOURCE": pipeline_source,
+        "CI_COMMIT_SHA": "c" * 40,
+        "CI_MERGE_REQUEST_DIFF_BASE_SHA": "d" * 40,
+        "SKILL_EVAL_PATHS": ".",
+        "SKILL_EVAL_MIN_SCORE": "70",
+        "SKILL_EVAL_SCAN_MODE": "auto",
+        "SKILL_EVAL_IMAGE": "override.example/other:latest",
+    }
+    result = subprocess.run(
         ["bash", "-c", script],
         cwd=workspace,
-        env={
-            "PATH": str(bin_dir) + os.pathsep + os.defpath,
-            "TEST_PYTHON": sys.executable,
-            "TEST_SCANNER_EXIT": str(scanner_exit),
-            "CI_PROJECT_DIR": str(workspace),
-            "CI_JOB_IMAGE": image,
-            "CI_JOB_ID": "9001",
-            "CI_PIPELINE_ID": "321",
-            "CI_PIPELINE_SOURCE": pipeline_source,
-            "CI_COMMIT_SHA": "c" * 40,
-            "CI_MERGE_REQUEST_DIFF_BASE_SHA": "d" * 40,
-            "SKILL_EVAL_PATHS": "skills",
-            "SKILL_EVAL_MIN_SCORE": "70",
-            "SKILL_EVAL_SCAN_MODE": "auto",
-            "SKILL_EVAL_IMAGE": "override.example/other:latest",
-        },
+        env=environment,
         capture_output=True,
         text=True,
         check=False,
     )
+    # GitLab runs after_script in a fresh shell, including after a scan failure.
+    after = subprocess.run(
+        ["bash", "-c", "\n".join(stable_job["after_script"])],
+        cwd=workspace,
+        env=environment,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert after.returncode == 0, after.stderr
+    return result
 
 
 @pytest.mark.parametrize(
@@ -96,6 +113,7 @@ def test_stable_job_records_resolved_release_and_preserves_the_scan_result(
 ):
     workspace = tmp_path / "project checkout"
     workspace.mkdir()
+    (workspace / "SKILL.md").write_text("# Root skill\n", encoding="utf-8")
     result = _run_stable_job(workspace, scanner_exit=scanner_exit, pipeline_source=pipeline_source)
 
     assert result.returncode == scanner_exit, result.stderr
@@ -125,6 +143,18 @@ def test_stable_job_rejects_an_unverified_execution_image(tmp_path, image):
     assert "does not match" in result.stderr
     assert not (workspace / EVIDENCE).exists()
     assert not (workspace / REPORT).exists()
+
+
+def test_stable_job_skips_metadata_on_report_directory_collision(tmp_path):
+    workspace = tmp_path / "checkout"
+    workspace.mkdir()
+    (workspace / REPORT).mkdir()
+
+    result = _run_stable_job(workspace)
+
+    assert result.returncode != 0
+    assert "skill-evaluator-report already exists" in result.stderr
+    assert not (workspace / EVIDENCE).exists()
 
 
 @pytest.mark.parametrize("existing", ["file", "directory", "symlink", "dangling symlink"])

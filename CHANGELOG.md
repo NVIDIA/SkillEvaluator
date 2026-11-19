@@ -52,6 +52,9 @@ All notable changes to SkillEvaluator are documented in this file.
   inspection rather than observed unsafe behavior. The Tier 3 guide lists the
   forms that are not read. Both the host checker and the bundled Harbor
   verifier apply the fix.
+- Task-list descriptions containing line breaks are saved on one line, so the
+  task is still there on the next command instead of disappearing after
+  `Added`. Whitespace-only descriptions are rejected as missing content.
 
 ## 1.0.1 - 2026-11-17
 

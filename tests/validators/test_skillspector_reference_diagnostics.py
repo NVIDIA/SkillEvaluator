@@ -34,6 +34,7 @@ from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     index_legacy_reference_reasons,
     issue_diagnostics,
+    reference_suggestion,
     reference_summary_message,
     report_path,
 )
@@ -380,13 +381,30 @@ class TestEvidenceProjection:
         assert "static_parse_limit (static_patterns_tool_misuse) at target lines 74-170:" in finding.suggestion
         reason = finding.metadata["skillspector_evidence"]["reasons"][0]
         assert (reason["start_line"], reason["end_line"]) == (74, 170)
-        assert "parser_diagnostic" not in reason
-        assert "_parser_span" not in reason
+        assert reason["line_source"] == "parser_diagnostic"
+        assert not any(key.startswith("_") for key in reason)
         assert "source_start_offset" not in json.dumps(finding.metadata)
         # The suggestion is new, so the finding_id changes once from a finding without the span.
         baseline, _ = SecurityValidator._convert_skillspector_issue(without_ledger)
         assert "at target line" not in baseline.suggestion
         assert finding.finding_id != baseline.finding_id
+
+    def test_parser_span_suggestion_does_not_depend_on_call_order(self) -> None:
+        """``issue_diagnostics`` alone has no private keys, and ``reference_suggestion`` is repeatable."""
+        completeness = _report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"]
+        metadata = issue_diagnostics(
+            self._runtime_parse_limit_issue(), normalize_path=report_path, completeness=completeness
+        )
+        evidence = metadata["skillspector_evidence"]
+        assert not any(key.startswith("_") for reason in evidence["reasons"] for key in reason)
+        before = copy.deepcopy(evidence)
+
+        first = reference_suggestion(evidence, None)
+        second = reference_suggestion(evidence, None)
+
+        assert "at target lines 74-170" in first
+        assert second == first
+        assert evidence == before
 
     def test_ledger_span_is_read_only_from_the_one_matching_row(self) -> None:
         completeness = copy.deepcopy(_report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"])
@@ -472,7 +490,7 @@ class TestEvidenceProjection:
         assert "3-7" not in finding.suggestion
         assert "at target lines" not in finding.suggestion
         assert finding.metadata["skillspector_evidence"]["reasons"][0]["end_line"] == 7
-        assert "_parser_span" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+        assert "line_source" not in finding.metadata["skillspector_evidence"]["reasons"][0]
 
         issue["evidence"]["reasons"] = [
             {"reason_code": "read_error", "start_line": 4, "end_line": 5},

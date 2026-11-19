@@ -71,9 +71,10 @@ _LIMIT_FIELDS = tuple(
 # must stay the same across runs, so it shows only the limits that the file and
 # the configuration fix; the finding's metadata keeps every limit.
 _RUN_DEPENDENT_LIMITS = frozenset(field for field, seconds in _LIMIT_FIELDS if seconds)
-# Set on a reason only while building the suggestion, then dropped. A row's own
-# end_line stays in metadata and must not change grouping or finding IDs.
-_PARSER_SPAN = "_parser_span"
+# A reason's ``line_source`` when its lines come from a ``parser_diagnostic``.
+# Only such a span is quoted as a range: a row's own end_line stays in
+# metadata and must not change grouping or finding IDs.
+_PARSER_DIAGNOSTIC = "parser_diagnostic"
 
 
 def diagnostic_text(value: object, *, max_length: int = 4096) -> str | None:
@@ -203,7 +204,7 @@ def _reasons(rows: object, text: Callable[..., str | None]) -> list[dict]:
                 if start is not None and end is not None and end >= start:
                     reason["start_line"] = start
                     reason["end_line"] = end
-                    reason[_PARSER_SPAN] = True
+                    reason["line_source"] = _PARSER_DIAGNOSTIC
         metrics = row.get("limits")
         if isinstance(metrics, dict):
             limits = {}
@@ -360,7 +361,8 @@ def issue_diagnostics(
     target's ledger rows in *completeness* (or *legacy_reason_index*), and the
     finding gets no evidence without them. A structured reason without a line
     takes the ``parser_diagnostic`` span of its one matching ledger row in
-    *completeness*. ``skillspector_occurrences`` lists
+    *completeness*; a reason whose lines come from a ``parser_diagnostic``
+    has ``line_source: "parser_diagnostic"``. ``skillspector_occurrences`` lists
     up to 128 of the issue's ``occurrences``. Any other issue gets ``{}``.
     Paths go through *normalize_path* and other text through *text*.
     """
@@ -412,8 +414,9 @@ def _reason_details(reasons: list[dict]) -> list[str]:
 
     The run time and the time budget (``observed_seconds``, ``limit_seconds``)
     are left out, so the text, and the ``finding_id`` that hashes it, is the
-    same in every run of one scan. A ``parser_diagnostic`` span is part of that
-    text; an ``end_line`` that was already on the row is not.
+    same in every run of one scan. A span whose ``line_source`` is
+    ``parser_diagnostic`` is part of that text; an ``end_line`` that was
+    already on the row is not.
     """
     grouped: dict[tuple, list[str]] = {}
     for reason in reasons:
@@ -421,7 +424,7 @@ def _reason_details(reasons: list[dict]) -> list[str]:
             (key, value) for key, value in (reason.get("limits") or {}).items() if key not in _RUN_DEPENDENT_LIMITS
         )
         start_line = reason.get("start_line")
-        parser_end = reason.get("end_line") if reason.get(_PARSER_SPAN) is True else None
+        parser_end = reason.get("end_line") if reason.get("line_source") == _PARSER_DIAGNOSTIC else None
         if parser_end == start_line:
             parser_end = None
         key = (
@@ -458,7 +461,8 @@ def reference_suggestion(
     SkillSpector's own remediation is kept unless it is missing or the generic
     text of releases before v2.12.0. A specific remedy is then chosen only from
     a complete list of reasons, because the visible part of a truncated list
-    cannot show that one remedy covers every cause.
+    cannot show that one remedy covers every cause. *evidence* is not
+    changed, so every call returns the same text.
     """
     reasons = evidence["reasons"]
     truncated = evidence.get("reasons_truncated") is True
@@ -482,10 +486,7 @@ def reference_suggestion(
             "`--format json` and review the rows for this file in "
             "`analysis_completeness.ledger_exceptions`, then address every limitation before rerunning the scan."
         )
-    details = _reason_details(reasons)
-    for reason in reasons:
-        reason.pop(_PARSER_SPAN, None)
-    return " ".join([summary, *details, action])
+    return " ".join([summary, *_reason_details(reasons), action])
 
 
 def reference_summary(findings: Iterable[object]) -> dict | None:

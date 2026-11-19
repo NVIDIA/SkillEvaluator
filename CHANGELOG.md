@@ -87,7 +87,8 @@ All notable changes to SkillEvaluator are documented in this file.
   SkillSpector leaves `parser_diagnostic` out of the finding's `evidence.reasons`,
   so the span comes from the one `analysis_completeness.ledger_exceptions` row
   with the same path and `reason_code`, and none is shown when several rows
-  match. Because the suggestion text changes, the `finding_id` of each such AE1
+  match. That reason in `skillspector_evidence.reasons` carries
+  `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
 
 ## 1.0.1 - 2026-11-17

@@ -2177,3 +2177,21 @@ def test_python_script_skill_still_needs_run_script(tmp_path):
     skill = _script_skill(tmp_path, "run.py", "Run `node scripts/run.py` and show the output.")
 
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_nested_alias_frontmatter_is_rejected_without_expanding(tmp_path: Path) -> None:
+    """A tiny frontmatter block with nested aliases must not be stringified field by field."""
+    import time
+
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+
+    started = time.perf_counter()
+    result = QualityScoreValidator().validate(skill_dir)
+
+    assert time.perf_counter() - started < 5
+    assert result is not None
+    assert not any("XML tags in frontmatter" in finding.message for finding in result.findings)

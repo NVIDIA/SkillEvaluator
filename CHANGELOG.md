@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Claude Code log recovery pairs batched and delayed tool results without repeatedly
+  scanning earlier tool calls, reducing reconstruction time for long trajectories.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,

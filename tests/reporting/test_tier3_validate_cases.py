@@ -585,6 +585,26 @@ def test_unresolved_reference_keeps_spaces_in_the_path():
     assert "scripts/run.py" not in text
 
 
+def test_unresolved_reference_still_matches_when_parse_limit_rows_have_spans():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    security = ValidationResult(validator_name="Security Scan", passed=False)
+    security.metadata["incomplete_scans"] = ["skillspector"]
+    security.metadata["scanners"] = {"skillspector": "2.13.4"}
+    security.add_error(
+        "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+        "SKILL.md:150 [reference_resolution; reference_missing]; "
+        "scripts/admission.mjs:74-170 [static; static_parse_limit; runtime_dependent command_string_runtime; "
+        "analyzers=static_patterns_tool_misuse]; security scan did not complete"
+    )
+
+    _ok, rows = summarize_tier1([security])
+    text = _text(rows)
+    assert "SkillSpector ran, but couldn't resolve the file reference at SKILL.md:150" in text
+    assert "admission.mjs" not in text
+
+
 def test_tier1_summary_counts_validators_and_their_sub_checks():
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.reporting.console_ui import summarize_tier1

@@ -919,7 +919,7 @@ Use `--hook-waivers FILE` to record approval of eligible command hooks in a spec
 
   ### Record the approval
 
-  Add the approval to the UTF-8 YAML file in the trusted location controlled by the reviewer. For CI, load it from a trusted checkout or policy repository. SkillEvaluator reads a waiver file only when the operator passes its path explicitly.
+  Add the approval to the UTF-8 YAML file in the trusted location controlled by the reviewer. For CI, load it from a trusted checkout or policy repository. Pass a direct filesystem path to the waiver file.
 
   Replace the example digests with the values from the unwaived scan for the exact package you reviewed.
 
@@ -949,7 +949,7 @@ Use `--hook-waivers FILE` to record approval of eligible command hooks in a spec
     -r json -o ./reports/hook-review
   ```
 
-  A match records the INFO finding `skillspector_hook_waiver_applied` with the waiver ID, expiry date, and package evidence. A mismatch or expiry leaves the hook gate failed. If scan setup cannot load the waiver file or capture the package, the security scan is `INCOMPLETE`.
+  A match records the INFO finding `skillspector_hook_waiver_applied` with the waiver ID, expiry date, and package evidence. A verified passive PNG exclusion in the same package gets its own coverage note. A mismatch or expiry leaves the hook gate failed. If scan setup cannot load the waiver file or capture the package, the security scan is `INCOMPLETE`.
 </Steps>
 
 Every handler in the manifest must be a command invoking one bundled script. Use `sh` or `bash` with a double-quoted `.sh` path, or `python` or `python3` with a double-quoted `.py` path. The path must start with `$CLAUDE_PLUGIN_ROOT` or `$CODEX_PLUGIN_ROOT`. Braces around the variable name are optional.

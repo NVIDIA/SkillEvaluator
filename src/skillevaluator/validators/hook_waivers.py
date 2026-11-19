@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import os
 import re
 import unicodedata
 from collections.abc import Mapping
@@ -13,7 +14,8 @@ from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 _MAX_WAIVER_BYTES = 1024 * 1024
@@ -130,8 +132,13 @@ def load_hook_waivers(path: Path) -> tuple[HookWaiver, ...]:
     waiver through its expiry date in UTC.
     """
     try:
-        with SecureRoot(path.parent) as root:
-            data, _ = root.read_bytes(Path(path.name), _MAX_WAIVER_BYTES)
+        absolute = canonicalize_trusted_root_alias(path.absolute())
+        if ".." in absolute.parts and any(stat_is_link_or_reparse(parent.lstat()) for parent in absolute.parents):
+            raise SecurePathError("unsafe_path", "Hook waiver file passes through a symlink or reparse point.")
+        normalized = Path(os.path.normpath(absolute))
+        anchor = Path(normalized.anchor)
+        with SecureRoot(anchor) as root:
+            data, _ = root.read_bytes(normalized.relative_to(anchor), _MAX_WAIVER_BYTES)
     except (OSError, SecurePathError) as exc:
         raise ValueError("cannot securely read the hook waiver file as a regular file of at most 1 MiB") from exc
     try:

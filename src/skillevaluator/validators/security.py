@@ -74,7 +74,7 @@ from skillevaluator.skillspector_references import (
     reference_summary,
 )
 from skillevaluator.spdx import is_spdx_only_html_comment
-from skillevaluator.utils.path_security import canonicalize_trusted_root_alias, matches_filesystem_name
+from skillevaluator.utils.path_security import matches_filesystem_name
 from skillevaluator.utils.scanner_install import prepare_skillspector
 from skillevaluator.utils.secure_fs import (
     MAX_SECURE_DIRECTORY_DEPTH,
@@ -1579,8 +1579,12 @@ def _read_skillspector_passive_raster(root: SecureRoot, path: str, budget: int) 
     return len(data), metadata
 
 
-def _skillspector_excluded_pngs(completeness: dict, components: list[dict], scanned_root: Path | None) -> list[str]:
+def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_root: Path | None) -> list[str]:
     """Return the verified PNGs that account for the full inventory surplus."""
+    if not isinstance(components, list) or any(
+        not isinstance(component, dict) or not isinstance(component.get("path"), str) for component in components
+    ):
+        return []
     surplus = len(components) - completeness["total_components"]
     exclusions = completeness.get("scope_exclusions")
     references = completeness.get("references")
@@ -1644,7 +1648,7 @@ def _skillspector_excluded_pngs(completeness: dict, components: list[dict], scan
         with SecureRoot(scanned_root) as root:
             for path, component in by_path.items():
                 size = component.get("size_bytes")
-                if component["executable"] is not False or type(size) is not int or not 0 < size <= budget:
+                if component.get("executable") is not False or type(size) is not int or not 0 < size <= budget:
                     return []
                 verified = _read_skillspector_passive_raster(root, path, size)
                 if verified is None or verified[0] != size:
@@ -2782,8 +2786,10 @@ def _skillspector_missing_reference_notes(
     return notes
 
 
-def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], total: int) -> bool:
-    """Whether each universal analyzer completed one work item per component and no other analyzer degraded."""
+def _skillspector_universal_analyzers_completed(
+    analyzer_statuses: list[dict], total: int, *, excluded_png_count: int = 0
+) -> bool:
+    """Check full analyzer coverage, including integrity and YARA on verified passive PNGs."""
     universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
     accounted: set[str] = set()
     for status in analyzer_statuses:
@@ -2793,11 +2799,12 @@ def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], t
             if state not in {"completed", "not_applicable", "disabled"}:
                 return False
             continue
+        expected = total + excluded_png_count if analyzer_id in {"artifact_integrity", "static_yara"} else total
         if (
             analyzer_id in accounted
             or state != "completed"
-            or status.get("planned_work") != total
-            or status.get("completed") != total
+            or status.get("planned_work") != expected
+            or status.get("completed") != expected
         ):
             return False
         accounted.add(analyzer_id)
@@ -3096,6 +3103,8 @@ def _skillspector_gaps_without_rows(
     counts: Mapping[str, int],
     limitations: list[str],
     scope_exclusions: object,
+    *,
+    excluded_png_count: int = 0,
 ) -> list[str]:
     """Describe the gaps a report without its hook rows (:func:`_skillspector_without_hook_surface`) shows outside its rows.
 
@@ -3124,7 +3133,9 @@ def _skillspector_gaps_without_rows(
             f"{counts['findings_before_filtering']} finding(s) before filtering and "
             f"{counts['findings_after_filtering']} after"
         )
-    if not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"]):
+    if not _skillspector_universal_analyzers_completed(
+        analyzer_statuses, counts["total_components"], excluded_png_count=excluded_png_count
+    ):
         unfinished = [
             f"{_skillspector_report_text(status.get('analyzer_id')) or 'unknown'} "
             f"{_skillspector_report_text(status.get('status')) or 'unknown'}"
@@ -3293,11 +3304,7 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
         )
-        self.hook_waivers = (
-            canonicalize_trusted_root_alias(Path(os.path.normpath(Path(hook_waivers).absolute())))
-            if hook_waivers is not None
-            else None
-        )
+        self.hook_waivers = Path(hook_waivers).absolute() if hook_waivers is not None else None
 
     @property
     def pii_patterns(self) -> dict:
@@ -3879,7 +3886,7 @@ class SecurityValidator(ValidatorBase):
 
     @staticmethod
     def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
-        """Drop the hook Criticals and gate failures of *enrichment* that the static stage's *result* already holds.
+        """Keep one copy of a hook finding or gate even if enrichment is incomplete.
 
         Both stages run the same static analyzers, so each reports the same
         manifests (:meth:`_report_unverified_hooks`). They are dropped before
@@ -3888,22 +3895,31 @@ class SecurityValidator(ValidatorBase):
         stage, because its rebuild would drop an incomplete stage's error.
         """
         reported = {
-            (finding.file_path, finding.message)
+            (finding.check_name, finding.file_path, finding.message)
             for finding in result.findings
-            if finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+            if finding.check_name in {_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, _SKILLSPECTOR_HOOK_WAIVER_CHECK}
         }
         kept: list[Finding] = []
         for finding in enrichment.findings:
+            if (finding.check_name, finding.file_path, finding.message) not in reported:
+                kept.append(finding)
+                continue
             legacy = finding.to_legacy_string()
             if (
                 finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
                 and finding.severity == Severity.CRITICAL
-                and (finding.file_path, finding.message) in reported
                 and legacy in enrichment.errors
             ):
                 enrichment.errors.remove(legacy)
                 enrichment.summary.errors -= 1
                 enrichment.summary.critical_count -= 1
+            elif (
+                finding.check_name == _SKILLSPECTOR_HOOK_WAIVER_CHECK
+                and finding.severity == Severity.INFO
+                and legacy in enrichment.warnings
+            ):
+                enrichment.warnings.remove(legacy)
+                enrichment.summary.warnings -= 1
             else:
                 kept.append(finding)
         enrichment.findings = kept
@@ -3983,6 +3999,7 @@ class SecurityValidator(ValidatorBase):
         incomplete_before = result.is_incomplete
         # Accepted caveats are reported only once every later check has passed.
         caveat_warnings: list[str] = []
+        excluded_pngs: list[str] = []
         png_exclusion: Finding | None = None
         accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
@@ -4587,11 +4604,15 @@ class SecurityValidator(ValidatorBase):
                         gap_notes = None if raster_note is None else [raster_note]
                     other_gaps: list[str] = []
                     if gap_notes is None and without_hooks is not None and not gap_rows:
+                        excluded_pngs = _skillspector_excluded_pngs(
+                            analysis_completeness, data.get("components"), scanned_root
+                        )
                         other_gaps = _skillspector_gaps_without_rows(
                             gap_statuses,
                             gap_counts,
                             gap_limitations,
                             analysis_completeness.get("scope_exclusions", []),
+                            excluded_png_count=len(excluded_pngs),
                         )
                         if not other_gaps:
                             gap_notes = []
@@ -4878,8 +4899,7 @@ class SecurityValidator(ValidatorBase):
                 return False
             inventory_count = len(normalized_components)
             covered_count = analysis_completeness["total_components"]
-            excluded_pngs = []
-            if inventory_count != covered_count:
+            if inventory_count != covered_count and not excluded_pngs:
                 if completeness_status == "complete":
                     excluded_pngs = _skillspector_excluded_pngs(
                         analysis_completeness, normalized_components, scanned_root

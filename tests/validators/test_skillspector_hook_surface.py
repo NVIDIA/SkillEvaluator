@@ -377,6 +377,85 @@ def test_reviewed_hook_waiver_preserves_residual_incompleteness(mock_tools, tmp_
     assert any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
 
 
+@pytest.mark.parametrize("case", ["passive-png", "invalid-png", "incomplete-yara"])
+@patch("skillevaluator.validators.security.Tools")
+def test_reviewed_hook_waiver_with_a_passive_png(mock_tools, tmp_path: Path, case: str) -> None:
+    root = _review_plugin(tmp_path)
+    image = root / "assets/logo.png"
+    image.parent.mkdir()
+    raster = _png_bytes()
+    image.write_bytes(bytes(len(raster)) if case == "invalid-png" else raster)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    report = _report(_REVIEW_REPORT)
+    png_report = _report("skillspector-2.13.4-plugin-png-no-llm.json")
+    [component] = [item for item in png_report["components"] if item["path"] == "assets/logo.png"]
+    report["components"].append(component)
+    completeness = report["analysis_completeness"]
+    completeness["scope_exclusions"] = png_report["analysis_completeness"]["scope_exclusions"]
+    for status in completeness["analyzer_statuses"]:
+        if case == "incomplete-yara" and status["analyzer_id"] == "static_yara":
+            continue
+        if status["analyzer_id"] in {"artifact_integrity", "static_yara"}:
+            status["planned_work"] += 1
+            status["completed"] += 1
+
+    result = _validate(mock_tools, root, report, SecurityValidator(hook_waivers=waiver))
+
+    verified = case == "passive-png"
+    assert result.passed is verified, result.errors
+    assert result.is_incomplete is (not verified)
+    checks = {finding.check_name for finding in result.findings}
+    assert ("skillspector_passive_png_exclusion" in checks) is verified
+    if verified:
+        assert "skillspector_hook_waiver_applied" in checks
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_incomplete_llm_stage_keeps_one_waiver_receipt(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    static = _report(_REVIEW_REPORT)
+    enriched = _report(_REVIEW_REPORT)
+    enriched["metadata"].update(llm_requested=True, llm_available=True)
+    completeness = enriched["analysis_completeness"]
+    completeness["limitations"].append("Transitive traversal stopped early.")
+    for status in completeness["analyzer_statuses"]:
+        if status["status"] == "disabled":
+            status.update(status="completed", planned_work=1, completed=1, reason_code=None)
+    reports = iter((static, enriched))
+    mock_tools.skillspector.version = "2.13.6"
+    mock_tools.skillspector.run.side_effect = lambda args, **_kwargs: _snapshot_report(args, next(reports))
+
+    result = SecurityValidator(hook_waivers=waiver, use_llm=True).validate_security_only(root)
+
+    assert mock_tools.skillspector.run.call_count == 2
+    assert result.incomplete_scans == ["skillspector-llm"] and not result.passed
+    assert any("Transitive traversal stopped early" in error for error in result.errors)
+    [receipt] = [finding for finding in result.findings if finding.check_name == "skillspector_hook_waiver_applied"]
+    assert result.warnings.count(receipt.to_legacy_string()) == 1
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_waiver_path_cannot_normalize_away_a_linked_ancestor(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    approved = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    nested = tmp_path / "external" / "nested"
+    nested.mkdir(parents=True)
+    (nested.parent / approved.name).write_text("version: 1\nwaivers: []\n", encoding="utf-8")
+    link = tmp_path / "redirect"
+    try:
+        link.symlink_to(nested, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    validator = SecurityValidator(hook_waivers=link / ".." / approved.name)
+    result = _validate(mock_tools, root, _report(_REVIEW_REPORT), validator)
+
+    assert result.is_incomplete and not result.passed
+    assert all(f.check_name != "skillspector_hook_waiver_applied" for f in result.findings)
+    mock_tools.skillspector.run.assert_not_called()
+
+
 @patch("skillevaluator.validators.security.Tools")
 def test_reviewed_package_keeps_independent_high_findings(mock_tools, tmp_path: Path) -> None:
     root = _review_plugin(tmp_path)

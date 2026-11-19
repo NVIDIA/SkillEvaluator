@@ -192,3 +192,25 @@ def test_rejects_symlinked_approval_file(tmp_path: Path) -> None:
 
     with pytest.raises(ValueError):
         load_hook_waivers(link)
+
+
+def test_rejects_approval_below_a_symlinked_ancestor(tmp_path: Path) -> None:
+    nested = tmp_path / "external" / "nested"
+    nested.mkdir(parents=True)
+    approval = _write_waivers(nested, _entry())
+    link = tmp_path / "redirect"
+    try:
+        link.symlink_to(nested.parent, target_is_directory=True)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+
+    with pytest.raises(ValueError, match="securely read"):
+        load_hook_waivers(link / nested.name / approval.name)
+
+
+def test_loads_approval_through_regular_parent_path(tmp_path: Path) -> None:
+    approval = _write_waivers(tmp_path, _entry())
+    child = tmp_path / "child"
+    child.mkdir()
+
+    assert load_hook_waivers(child / ".." / approval.name) == load_hook_waivers(approval)

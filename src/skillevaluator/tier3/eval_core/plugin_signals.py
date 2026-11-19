@@ -2809,11 +2809,11 @@ def _persistable_name(name: str, members: Sequence[str]) -> bool:
     return any(member.casefold() == folded for member in members)
 
 
-def _mcp_ident(
-    fn: str, mcp_names: _McpNames, *, agent: str, recorded: tuple[str, str] | None = None
-) -> _Ident | None:
+def _mcp_ident(fn: str, mcp_names: _McpNames, *, agent: str, recorded: tuple[str, str] | None = None) -> _Ident | None:
     """The MCP identity of a call named ``fn``, labeled ``mcp__<server>__<tool>`` (see :meth:`_McpNames.identity`)."""
-    identity = (mcp_names.match(recorded[0]) or recorded[0], recorded[1]) if recorded else mcp_names.identity(fn, agent=agent)
+    identity = (
+        (mcp_names.match(recorded[0]) or recorded[0], recorded[1]) if recorded else mcp_names.identity(fn, agent=agent)
+    )
     if identity is None:
         return None
     server, tool = identity

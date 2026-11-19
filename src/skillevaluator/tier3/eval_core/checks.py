@@ -15369,9 +15369,7 @@ def _session_input_is_text(value: Any) -> bool:
     return isinstance(value, str) and any(char.isprintable() and not char.isspace() for char in value)
 
 
-def _mcp_call_targets_root(
-    name: str, args: dict[str, Any], identity: tuple[str, str] | None = None
-) -> bool:
+def _mcp_call_targets_root(name: str, args: dict[str, Any], identity: tuple[str, str] | None = None) -> bool:
     """Whether an MCP call searches or lists the whole filesystem.
 
     Only filesystem tools count: a tool of a server whose name contains

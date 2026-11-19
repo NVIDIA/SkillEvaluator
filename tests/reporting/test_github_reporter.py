@@ -649,11 +649,31 @@ def test_advisory_duplicate_metadata_id_is_a_warning(tmp_path: Path) -> None:
     assert _summary(result.output).endswith("2 skills checked, 2 passed, 0 failed, 0 incomplete")
 
 
+def _runner_properties(command: str) -> dict[str, str]:
+    """Parse a workflow command's properties the way the Actions runner does.
+
+    Mirrors ActionCommand.TryParseV2: the property list is trimmed as a whole,
+    split on commas and then on the first ``=``, and each value is unescaped.
+    """
+    end = command.index("::", 2)
+    info = command[2:end]
+    properties: dict[str, str] = {}
+    for pair in info[info.index(" ") + 1 :].strip().split(","):
+        key, sep, value = pair.partition("=")
+        if not pair or not sep or not key or not value:
+            continue
+        for escaped, raw in (("%0D", "\r"), ("%0A", "\n"), ("%3A", ":"), ("%2C", ","), ("%25", "%")):
+            value = value.replace(escaped, raw)
+        properties[key] = value
+    return properties
+
+
 @pytest.mark.skipif(os.name == "nt", reason="creating a directory symlink needs privileges on Windows")
 @pytest.mark.parametrize("workers", [1, 2])
 @pytest.mark.parametrize("target", ["outside/external-skill", "repo/source"])
+@pytest.mark.parametrize("link_name", ["linked", "linked "])
 def test_linked_directory_discovery_error_points_at_the_link(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, target: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, target: str, link_name: str
 ) -> None:
     _inline_process_pool(monkeypatch)
     linked = tmp_path / target
@@ -661,18 +681,25 @@ def test_linked_directory_discovery_error_points_at_the_link(
     repo = tmp_path / "repo"
     catalog = repo / "skills"
     shutil.copytree(_TEXT_ANALYZER, catalog / "skill-00")
-    (catalog / "linked").symlink_to(linked, target_is_directory=True)
+    (catalog / link_name).symlink_to(linked, target_is_directory=True)
     subprocess.run(["git", "init", "-q", str(repo)], check=True)
     subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+    tracked = subprocess.run(
+        ["git", "-C", str(repo), "ls-files", "-z", "-s"], check=True, capture_output=True, text=True
+    ).stdout
+    link_path = next(entry.split("\t", 1)[1] for entry in tracked.split("\0") if entry.startswith("120000 "))
+    assert link_path == f"skills/{link_name}"
     reports = tmp_path / "reports"
     result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers))
 
     assert result.exit_code == 1, result.output
     discovery = [line for line in _commands(result.output) if "catalog/discovery" in line]
     assert len(discovery) == 1, result.output
-    properties = discovery[0].split("::", 2)[1]
-    assert properties.startswith("error "), discovery[0]
-    assert properties.endswith(",file=skills/linked"), discovery[0]
+    assert discovery[0].startswith("::error "), discovery[0]
+    parsed = _runner_properties(discovery[0])
+    assert parsed["file"] == link_path, discovery[0]
+    assert parsed["title"] == "catalog/discovery", discovery[0]
+    assert "line" not in parsed, discovery[0]
 
 
 def _collected(level: str, counts: list[int]) -> list[dict]:

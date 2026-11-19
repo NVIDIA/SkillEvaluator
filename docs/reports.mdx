@@ -406,7 +406,8 @@ when the target is not in a Git repository), using the same resolution rules
 as SARIF and JUnit. GitHub resolves it against the checkout. `line=` (and
 `endLine=` when recorded) is included when the finding has a location.
 `file` is omitted when the path is outside the repository. `title=` is the
-check group and check name. An incomplete scan is never a clean log: each
+check group and check name, and always comes last, so a path that ends in a
+space keeps it when the runner parses the command. An incomplete scan is never a clean log: each
 unfinished scanner is a warning, and the run ends with one `::notice`
 summary (skills checked, passed, failed, incomplete). The summary follows the
 required validation gate, like the JSON `overall_status` and the exit code, so

@@ -206,13 +206,17 @@ class _Annotation:
         )
 
     def format_line(self) -> str:
-        properties: list[str] = [f"title={annotation_text(self.title, property_value=True)}"]
+        # The Actions runner trims the whole property list before splitting it,
+        # so the always-present title goes last: a file path ending in a space
+        # (a tracked name may) then keeps that space.
+        properties: list[str] = []
         if self.path:
             properties.append(f"file={annotation_text(self.path, property_value=True)}")
             if self.line is not None:
                 properties.append(f"line={self.line}")
                 if self.end_line is not None and self.end_line >= self.line:
                     properties.append(f"endLine={self.end_line}")
+        properties.append(f"title={annotation_text(self.title, property_value=True)}")
         body = annotation_text(_clean_text(self.message))
         return f"::{self.level} {','.join(properties)}::{body}"
 

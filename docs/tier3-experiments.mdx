@@ -91,14 +91,24 @@ configuration and provider drift, but does not remove trial noise or changes
 within a block. Native Harbor task suites continue to use sequential execution;
 requesting interleaving for one is a usage error before model work.
 
-Interleaving keeps the same total trial budget but starts a separate evaluation
-for each configuration/case/attempt, so job startup and readiness checks can
-make it slower. Each run retains its own reports and rewards. `interaction.json`
+Interleaving keeps the same planned case/attempt count but starts a separate
+evaluation for each configuration/case/attempt. Each step runs one trial per
+agent at a time, so `--n-concurrent` has no effect. Losing within-configuration
+parallelism can make runs several times slower, in addition to job startup and
+readiness overhead. Each run retains its own reports and rewards. `interaction.json`
 records the complete schedule and each step's state before and after execution.
 Missing, duplicated or mismatched steps prevent a numeric result, as do changes
 in model, scorer, environment or evaluator identity between blocks. Attempts
 are still averaged within each case before equal-weight case aggregation and
 uncertainty estimation. The full original source remains retained once.
+Only the current case's temporary skill and fixture copies are staged at a time;
+their dataset generation provenance and case review states are preserved.
+
+Interleaving currently rejects run-wide attempt, agent-token, judge-call and
+cost caps (`harbor.max_attempts_total`, `harbor.max_agent_tokens`,
+`harbor.max_judge_calls`, `harbor.max_cost_usd`), including explicit zero limits,
+before starting any evaluation or writing results. Use sequential execution
+for budgeted experiments so the existing controller enforces each arm's cap.
 
 The terminal prints baseline, individual and combined scores, combined lift,
 and signed interaction separately for each agent/model. Add `--json` for a

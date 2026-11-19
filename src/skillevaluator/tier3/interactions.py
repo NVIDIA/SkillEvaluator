@@ -356,8 +356,9 @@ def run_interaction(
         _validate_source(evaluator, metric)
         case_entries = None
         if execution_order == "interleaved":
-            from skillevaluator.tier3.interaction_schedule import interleaved_entries
+            from skillevaluator.tier3.interaction_schedule import interleaved_entries, validate_interleaved_budgets
 
+            validate_interleaved_budgets(evaluator, options)
             case_entries = interleaved_entries(evaluator)
         frozen, identities = [], []
         for index, path in enumerate(selected):
@@ -373,11 +374,6 @@ def run_interaction(
             identities.append({"path": str(path), "name": path.name, "source_digest": digest})
             copytree_secure(evaluator / "evals", destination / "evals", allowed_root=evaluator)
             frozen.append(destination)
-        case_sources = None
-        if case_entries is not None:
-            from skillevaluator.tier3.interaction_schedule import prepare_case_sources
-
-            case_sources = prepare_case_sources(case_entries, frozen, evaluator, Path(directory) / "cases")
         run_dir = _reserve_run_dir(root, datetime.now(UTC).strftime("interaction_%Y%m%d_%H%M%S"))
         copytree_secure(evaluator / "evals", run_dir / "source" / "evals", allowed_root=evaluator)
         report: dict[str, Any] = {
@@ -401,14 +397,16 @@ def run_interaction(
         plan.extend((f"individual-{index + 1}", index, (), "with-skill") for index in range(len(frozen)))
         plan.append(("combined", 0, tuple(frozen[1:]), "with-skill"))
         try:
-            if case_sources is not None:
+            if case_entries is not None:
                 from skillevaluator.tier3.interaction_schedule import execute_interleaved
 
                 compared = execute_interleaved(
                     report,
                     plan,
-                    case_sources,
+                    case_entries,
                     options,
+                    frozen=frozen,
+                    evaluator=evaluator,
                     seed=schedule_seed,
                     on_configuration=on_configuration,
                     progress_reporter=progress_reporter,

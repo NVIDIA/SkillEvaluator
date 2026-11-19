@@ -9,7 +9,9 @@ import json
 import math
 import os
 import random
+import tempfile
 from collections.abc import Callable, Mapping, Sequence
+from contextlib import ExitStack
 from dataclasses import replace
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
@@ -28,6 +30,23 @@ from skillevaluator.tier3.interactions import (
 
 if TYPE_CHECKING:
     from skillevaluator.tier3.harbor.progress import ProgressReporter
+
+
+def validate_interleaved_budgets(source: Path, options: EvaluationOptions) -> None:
+    """Reject run-wide caps before separate steps could reset their controllers."""
+    from skillevaluator.tier3.evals_config import load_evals_config
+
+    config, _ = load_evals_config(source)
+    harbor = config.get("harbor", {})
+    limits = []
+    for name in ("max_agent_tokens", "max_judge_calls", "max_attempts_total", "max_cost_usd"):
+        override = getattr(options, name)
+        if (override if override is not None else harbor.get(name)) is not None:
+            limits.append(name)
+    if limits:
+        raise ValueError(
+            f"Interleaved execution does not support run-wide budgets ({', '.join(limits)}); use sequential execution"
+        )
 
 
 def interleaved_entries(source: Path) -> list[dict[str, Any]]:
@@ -51,9 +70,27 @@ def interleaved_entries(source: Path) -> list[dict[str, Any]]:
 def prepare_case_sources(
     entries: Sequence[dict[str, Any]], frozen: Sequence[Path], evaluator: Path, root: Path
 ) -> dict[str, list[Path]]:
-    """Keep skill bytes fixed while selecting one original normalized case."""
+    """Keep skill bytes and dataset provenance fixed while selecting each case."""
+    from skillevaluator.tier3.dataset_utils import find_eval_file
+
+    dataset = find_eval_file(evaluator)
+    document = None
+    if dataset is not None and dataset.suffix.lower() == ".json":
+        document = json.loads(dataset.read_text(encoding="utf-8"))
+    elif dataset is not None and dataset.suffix.lower() in {".yaml", ".yml"}:
+        import yaml
+
+        document = yaml.safe_load(dataset.read_text(encoding="utf-8"))
     sources = {}
     for ordinal, entry in enumerate(entries):
+        selected_document: Any = [entry]
+        if isinstance(document, dict):
+            if isinstance(document.get("evals"), list):
+                selected_document = {**document, "evals": [entry]}
+            elif isinstance(document.get("cases"), list):
+                selected_document = {**document, "cases": [entry]}
+            else:
+                selected_document = entry
         selected = []
         for index, skill in enumerate(frozen):
             destination = root / f"case-{ordinal}" / f"skill-{index}" / skill.name
@@ -63,7 +100,7 @@ def prepare_case_sources(
             copytree_secure(evaluator / "evals", destination / "evals", allowed_root=evaluator)
             # JSON takes precedence over the original supported filename. The
             # original source and fixtures are retained in the experiment root.
-            (destination / "evals" / "evals.json").write_text(json.dumps([entry]) + "\n", encoding="utf-8")
+            (destination / "evals" / "evals.json").write_text(json.dumps(selected_document) + "\n", encoding="utf-8")
             selected.append(destination)
         sources[entry["id"]] = selected
     return sources
@@ -132,7 +169,7 @@ def compare_interleaved(
 
     scores: dict[str, dict[str, list[dict[str, Any]]]] = {}
     evidence: dict[str, dict[str, dict[str, list[dict[str, Any]]]]] = {}
-    identities, contracts, errors, seen_paths = {}, {}, {}, {}
+    identities, contracts, scorers, errors, seen_paths = {}, {}, {}, {}, {}
     for case_id, attempt in sorted(expected):
         block = [
             {"id": config["id"], "condition": config["condition"], "result": index[case_id, attempt]["result"]}
@@ -158,6 +195,11 @@ def compare_interleaved(
                 for config_id, cases in score["evidence"].items():
                     rows = evidence.setdefault(agent, {}).setdefault(config_id, {}).setdefault(case_id, [])
                     for row in cases[case_id]:
+                        scorer = json.dumps(row["scorer"], sort_keys=True)
+                        if scorer != scorers.setdefault((agent, case_id), scorer):
+                            raise IncomparableInteraction(
+                                f"Outcome scorer differs across configurations or attempts: {case_id}"
+                            )
                         path = str(Path(row["reward_path"]).resolve())
                         paths = seen_paths.setdefault((agent, config_id), set())
                         if path in paths:
@@ -189,9 +231,11 @@ def compare_interleaved(
 def execute_interleaved(
     report: dict[str, Any],
     plan: Sequence[tuple[str, int, tuple[Path, ...], str]],
-    case_sources: Mapping[str, Sequence[Path]],
+    entries: Sequence[dict[str, Any]],
     options: EvaluationOptions,
     *,
+    frozen: Sequence[Path],
+    evaluator: Path,
     seed: int,
     on_configuration: Callable[[str], None] | None,
     progress_reporter: ProgressReporter | None,
@@ -205,8 +249,9 @@ def execute_interleaved(
     }
     configs["combined"]["skills"] = list(range(len(report["skills"])))
     report["configurations"] = list(configs.values())
+    entries_by_id = {entry["id"]: entry for entry in entries}
     report["schedule"] = interaction_schedule(
-        list(case_sources), list(configs), n_attempts=report["n_attempts"], seed=seed
+        list(entries_by_id), list(configs), n_attempts=report["n_attempts"], seed=seed
     )
     root = Path(report["run_dir"])
     report_path = root / "interaction.json"
@@ -216,44 +261,53 @@ def execute_interleaved(
         report_path.write_text(json.dumps(report, indent=2, allow_nan=False) + "\n", encoding="utf-8")
 
     service = EvaluationService()
-    for ordinal, step in enumerate(report["schedule"]):
-        name, case_id = step["configuration"], step["case_id"]
-        index, combined, condition = by_name[name]
-        selected = case_sources[case_id]
-        run = {"case_id": case_id, "attempt": step["attempt"]}
-        configs[name]["runs"].append(run)
-        step["status"] = "running"
-        save()
-        if on_configuration:
-            on_configuration(f"{name} ({case_id}, attempt {step['attempt']})")
-        try:
-            result = service.evaluate(
-                replace(
-                    options,
-                    skill_path=selected[index],
-                    results_dir=root / f"step-{ordinal:06d}" / name,
-                    skip_baseline=condition == "with-skill",
-                    skip_with_skill=condition == "without-skill",
-                    n_attempts=1,
-                    stop_on_pass=False,
-                    skill_workspace_mode="group" if combined else "isolated",
-                    include_skills=tuple(selected[1:]) if combined else (),
-                ),
-                progress_reporter=progress_reporter,
-            )
-            run["result"] = result
-            if failure := service.failure_reason(result):
-                run["error"] = failure
-            step["status"] = "failed" if "error" in run else "complete"
-        except KeyboardInterrupt:
-            step["status"] = "interrupted"
+    active_case = None
+    selected: Sequence[Path] = ()
+    with ExitStack() as staging:
+        for ordinal, step in enumerate(report["schedule"]):
+            name, case_id = step["configuration"], step["case_id"]
+            index, combined, condition = by_name[name]
+            if case_id != active_case:
+                staging.close()
+                case_root = Path(
+                    staging.enter_context(tempfile.TemporaryDirectory(prefix="skillevaluator-interaction-case-"))
+                )
+                selected = prepare_case_sources([entries_by_id[case_id]], frozen, evaluator, case_root)[case_id]
+                active_case = case_id
+            run = {"case_id": case_id, "attempt": step["attempt"]}
+            configs[name]["runs"].append(run)
+            step["status"] = "running"
             save()
-            raise
-        except Exception as exc:
-            message = redact_progress_detail(str(exc), secret_values=secret_values_from_environment(os.environ))
-            run["error"] = message or type(exc).__name__
-            step["status"] = "failed"
-        save()
+            if on_configuration:
+                on_configuration(f"{name} ({case_id}, attempt {step['attempt']})")
+            try:
+                result = service.evaluate(
+                    replace(
+                        options,
+                        skill_path=selected[index],
+                        results_dir=root / f"step-{ordinal:06d}" / name,
+                        skip_baseline=condition == "with-skill",
+                        skip_with_skill=condition == "without-skill",
+                        n_attempts=1,
+                        stop_on_pass=False,
+                        skill_workspace_mode="group" if combined else "isolated",
+                        include_skills=tuple(selected[1:]) if combined else (),
+                    ),
+                    progress_reporter=progress_reporter,
+                )
+                run["result"] = result
+                if failure := service.failure_reason(result):
+                    run["error"] = failure
+                step["status"] = "failed" if "error" in run else "complete"
+            except KeyboardInterrupt:
+                step["status"] = "interrupted"
+                save()
+                raise
+            except Exception as exc:
+                message = redact_progress_detail(str(exc), secret_values=secret_values_from_environment(os.environ))
+                run["error"] = message or type(exc).__name__
+                step["status"] = "failed"
+            save()
     return compare_interleaved(
-        report["configurations"], case_ids=list(case_sources), metric=report["metric"], n_attempts=report["n_attempts"]
+        report["configurations"], case_ids=list(entries_by_id), metric=report["metric"], n_attempts=report["n_attempts"]
     )

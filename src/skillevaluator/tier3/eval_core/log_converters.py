@@ -55,26 +55,24 @@ def _stringify_tool_result_content(content: Any) -> str:
 
 
 def _attach_tool_result(
-    steps: list[dict[str, Any]], tool_use_id: str, content_text: str, *, is_error: bool = False
+    steps_by_call_id: dict[str, dict[str, Any]], tool_use_id: str, content_text: str, *, is_error: bool = False
 ) -> None:
-    for step in reversed(steps):
-        if step.get("source") != "agent":
-            continue
-        for tc in step.get("tool_calls") or []:
-            if tc.get("tool_call_id") == tool_use_id:
-                step.setdefault("observation", {"results": []})
-                step["observation"].setdefault("results", [])
-                result: dict[str, Any] = {"source_call_id": tool_use_id, "content": content_text}
-                if is_error:
-                    # Match Harbor's native Claude Code ATIF result metadata.
-                    result["extra"] = {"tool_result_is_error": True}
-                step["observation"]["results"].append(result)
-                return
+    step = steps_by_call_id.get(tool_use_id)
+    if step is None:
+        return
+    step.setdefault("observation", {"results": []})
+    step["observation"].setdefault("results", [])
+    result: dict[str, Any] = {"source_call_id": tool_use_id, "content": content_text}
+    if is_error:
+        # Match Harbor's native Claude Code ATIF result metadata.
+        result["extra"] = {"tool_result_is_error": True}
+    step["observation"]["results"].append(result)
 
 
 def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] | None:
     """Parse Claude Code ``--output-format stream-json`` lines (tee'd to claude-code.txt)."""
     steps: list[dict[str, Any]] = []
+    steps_by_call_id: dict[str, dict[str, Any]] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
         if not line:
@@ -148,6 +146,10 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
                         "observation": {"results": []},
                     }
                 )
+                for call in tool_calls:
+                    if call["tool_call_id"]:
+                        # Reused IDs belong to the latest preceding step, as in the reverse scan.
+                        steps_by_call_id[call["tool_call_id"]] = steps[-1]
 
         elif et == "user":
             msg = evt.get("message")
@@ -162,7 +164,7 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
                 tid = str(block.get("tool_use_id") or "")
                 res_text = _stringify_tool_result_content(block.get("content"))
                 if tid:
-                    _attach_tool_result(steps, tid, res_text, is_error=block.get("is_error") is True)
+                    _attach_tool_result(steps_by_call_id, tid, res_text, is_error=block.get("is_error") is True)
 
         elif et == "result":
             res = evt.get("result")

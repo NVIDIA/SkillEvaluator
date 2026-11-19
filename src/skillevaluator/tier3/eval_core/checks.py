@@ -13112,6 +13112,55 @@ def _rm_targets_outside_tmp(
     return False
 
 
+def _rm_backtick_target_seen(text: str, _depth: int = 0, *, extra_chars: list[int] | None = None) -> bool:
+    """Open the existing target walk for a parsed substitution operand.
+
+    A closing backtick after an operandless rm is not an operand. Preserve
+    the original regex language and use shell words to distinguish that case.
+    """
+    if (
+        _depth > 3
+        or len(text) > 65_536
+        or ("`" not in text and "${__rm_substitution}" not in text)
+        or _rm_extra_spent(extra_chars)
+        or not _rm_may_name(text, ("rm",))
+    ):
+        return False
+    if extra_chars is None:
+        extra_chars = [0]
+    extra_chars[0] += _rm_read_cost(text)
+    if _rm_extra_spent(extra_chars):
+        return False
+    parsed = _rm_shell_words(text, wide=False)
+    if parsed is None or len(parsed[0]) > 4096:
+        return False
+    tokens, payloads, kinds = parsed
+    names = _rm_decoded_tokens(tokens, payloads, kinds) or tokens
+    for index, end in _rm_command_words(tokens, names).items():
+        words = [_rm_shown(word) for word in names[index:end]]
+        if (
+            _shell_executable(_rm_unmarked(names[index])) == "rm"
+            and _rm_leading_recursive_option(words[1:])
+            and any("${__rm_substitution}" in word for word in tokens[index + 1 : end])
+            and _RM_PATTERN.search(" ".join(words).lower())
+        ):
+            return True
+    # The lexer moves substitutions and here-documents out of the token list.
+    # Quoted scripts can already contain the substituted-output placeholder.
+    # Every nested reading shares the trace's additional-reading limit.
+    candidates = dict.fromkeys(
+        candidate
+        for candidate in [
+            *tokens,
+            *(payload for payload, kind in zip(payloads, kinds) if kind in {"heredoc", "substitution"}),  # noqa: B905
+        ]
+        if candidate != text and ("`" in candidate or "${__rm_substitution}" in candidate)
+    )
+    return any(
+        _rm_backtick_target_seen(candidate, _depth + 1, extra_chars=extra_chars) for candidate in list(candidates)[:16]
+    )
+
+
 def _rm_reading(
     pattern: Any,
     text: str,
@@ -13140,6 +13189,8 @@ def _rm_reading(
         return False
     if main_only:
         return None
+    if _rm_backtick_target_seen(text, extra_chars=extra_chars):
+        return False
     # The gate's own first test only scans the text, so it counts nothing. The rm test scans up to
     # 30 spellings of text the gate would read, so once the count is spent it is not run, and text
     # it turns away counts its length (it is not lexed, so not the per-word cost of _rm_read_cost).

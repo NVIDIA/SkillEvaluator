@@ -93,6 +93,9 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Retain destructive-command findings when a recursive `rm` receives its first
+  deletion target through a backtick substitution, while preserving force-only
+  cleanup and unrelated command arguments.
 
 ## 1.0.1 - 2026-11-17
 

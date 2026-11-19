@@ -42,6 +42,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a

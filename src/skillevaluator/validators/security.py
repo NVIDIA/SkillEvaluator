@@ -34,7 +34,7 @@ import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
@@ -3164,6 +3164,26 @@ class _HookReview:
     waivers: tuple[HookWaiver, ...]
 
 
+def _hook_waiver_rejection(
+    waiver: HookWaiver, artifact: HookReviewArtifact, scripts: set[str], today: date
+) -> dict | None:
+    """Return the first mismatch, checking specific pins before the package digest."""
+    if today < waiver.created:
+        return {"reason": "not_yet_valid", "created": waiver.created.isoformat()}
+    if today > waiver.expires:
+        return {"reason": "expired", "expires": waiver.expires.isoformat()}
+    if waiver.manifest_sha256 != artifact.hashes.get(waiver.manifest):
+        return {"reason": "manifest_sha256_mismatch"}
+    if missing := scripts - waiver.payload.keys():
+        return {"reason": "missing_payload_pins", "paths": sorted(missing)}
+    mismatched = sorted(path for path, sha256 in waiver.payload.items() if artifact.hashes.get(path) != sha256)
+    if mismatched:
+        return {"reason": "payload_sha256_mismatch", "paths": mismatched}
+    if waiver.artifact_sha256 != artifact.artifact_sha256:
+        return {"reason": "artifact_sha256_mismatch"}
+    return None
+
+
 def _reviewable_hook_scripts(manifest: bytes) -> tuple[set[str], int]:
     """Require explicit command handlers invoking one contained script."""
     raw = manifest.decode("utf-8")
@@ -5693,11 +5713,14 @@ class SecurityValidator(ValidatorBase):
             if len(entries) == 1 and _skillspector_scoring_source_scope(entries[0]) == ("", "")
         }
         today = datetime.now(UTC).date()
+        waivers = hook_review.waivers if hook_review is not None else ()
         for row in hook_rows:
             manifest = row["path"]
             manifest_bytes = _skillspector_bundled_file_bytes(manifest, components, source_root)
             digest = hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None
             evidence = {"ledger_exceptions": [dict(row)], "manifest_sha256": digest}
+            candidates = [waiver for waiver in waivers if waiver.manifest == manifest]
+            rejected = []
             try:
                 if artifact is None:
                     raise ValueError(problem or "a complete packaged plugin is required for a reviewed hook waiver")
@@ -5714,23 +5737,17 @@ class SecurityValidator(ValidatorBase):
                     raise ValueError("SkillSpector did not confirm the reviewed hook declarations and script coverage")
             except (ValueError, RecursionError) as exc:
                 evidence["coverage_problems"] = [str(exc)]
+                rejected = [{"waiver_id": waiver.id, "reason": "coverage_unconfirmed"} for waiver in candidates]
             else:
                 evidence["artifact_sha256"] = artifact.artifact_sha256
                 evidence["payload"] = [{"path": path, "sha256": artifact.hashes[path]} for path in sorted(scripts)]
-                waivers = hook_review.waivers if hook_review is not None else ()
-                waiver = next(
-                    (
-                        entry
-                        for entry in waivers
-                        if entry.manifest == manifest
-                        and entry.created <= today <= entry.expires
-                        and entry.manifest_sha256 == digest
-                        and entry.artifact_sha256 == artifact.artifact_sha256
-                        and scripts <= entry.payload.keys()
-                        and all(artifact.hashes.get(path) == sha256 for path, sha256 in entry.payload.items())
-                    ),
-                    None,
-                )
+                waiver = None
+                for candidate in candidates:
+                    rejection = _hook_waiver_rejection(candidate, artifact, scripts, today)
+                    if rejection is None:
+                        waiver = candidate
+                        break
+                    rejected.append({"waiver_id": candidate.id, **rejection})
                 if waiver is not None:
                     result.add_finding(
                         Finding(
@@ -5742,10 +5759,18 @@ class SecurityValidator(ValidatorBase):
                                 f"(expires {waiver.expires.isoformat()} UTC)."
                             ),
                             file_path=manifest,
-                            metadata={**evidence, "waiver_id": waiver.id, "expires": waiver.expires.isoformat()},
+                            metadata={
+                                **evidence,
+                                "waiver_id": waiver.id,
+                                "expires": waiver.expires.isoformat(),
+                                "owner": waiver.owner,
+                                "reason": waiver.reason,
+                            },
                         )
                     )
                     continue
+            if rejected:
+                evidence["rejected_waivers"] = rejected
             result.add_structured_finding(
                 Finding(
                     category="SECURITY",

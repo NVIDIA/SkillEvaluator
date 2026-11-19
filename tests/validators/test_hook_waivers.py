@@ -190,7 +190,7 @@ def test_rejects_symlinked_approval_file(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks unavailable")
 
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match=r"'link\.yaml' is a symlink or reparse point"):
         load_hook_waivers(link)
 
 
@@ -204,7 +204,7 @@ def test_rejects_approval_below_a_symlinked_ancestor(tmp_path: Path) -> None:
     except OSError:
         pytest.skip("symlinks unavailable")
 
-    with pytest.raises(ValueError, match="securely read"):
+    with pytest.raises(ValueError, match="'redirect' is a symlink or reparse point"):
         load_hook_waivers(link / nested.name / approval.name)
 
 

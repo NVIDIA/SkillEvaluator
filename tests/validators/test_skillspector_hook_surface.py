@@ -279,6 +279,9 @@ def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path
     root = _review_plugin(tmp_path)
     _write(root, {"skills/bundled/SKILL.md": "---\nname: bundled\ndescription: Bundled skill\n---\n"})
     waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    config = json.loads(waiver.read_text(encoding="utf-8"))
+    config["waivers"].insert(0, {**config["waivers"][0], "id": "expired-hooks", "expires": "2020-01-02"})
+    waiver.write_text(json.dumps(config), encoding="utf-8")
     report = _report(_REVIEW_REPORT)
 
     def scan(args, **_kwargs):
@@ -298,16 +301,30 @@ def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path
     assert any("BH1" in f.check_name for f in result.findings)
     note = next(f for f in result.findings if f.check_name == "skillspector_hook_waiver_applied")
     assert note.severity == Severity.INFO
-    assert note.metadata["waiver_id"] == "reviewed-hooks"
+    data = json.loads(JSONReporter(include_timestamp=False).render_all([result]))
+    [receipt] = [finding for finding in data["results"][0]["findings"] if finding["check_name"] == note.check_name]
+    assert receipt["metadata"]["waiver_id"] == "reviewed-hooks"
+    assert receipt["metadata"]["owner"] == "test-reviewer"
+    assert receipt["metadata"]["reason"] == "Reviewed both bundled hook scripts."
 
 
 @pytest.mark.parametrize(
-    "case",
-    ["changed-script", "additional-file", "expired", "missing-pin", "external-command", "unproven-count", "remote-bh1"],
+    ("case", "rejection"),
+    [
+        ("changed-script", {"reason": "payload_sha256_mismatch", "paths": ["hooks/session-start.py"]}),
+        ("additional-file", {"reason": "artifact_sha256_mismatch"}),
+        ("changed-manifest", {"reason": "manifest_sha256_mismatch"}),
+        ("expired", {"reason": "expired", "expires": "2020-01-02"}),
+        ("missing-pin", {"reason": "missing_payload_pins", "paths": ["hooks/session-start.py"]}),
+        ("external-command", {"reason": "coverage_unconfirmed"}),
+        ("unproven-count", {"reason": "coverage_unconfirmed"}),
+        ("remote-bh1", None),
+        ("other-manifest", None),
+    ],
 )
 @patch("skillevaluator.validators.security.Tools")
 def test_hook_waiver_requires_the_reviewed_package_and_contained_commands(
-    mock_tools, tmp_path: Path, case: str
+    mock_tools, tmp_path: Path, case: str, rejection: dict | None
 ) -> None:
     root = _review_plugin(tmp_path)
     if case == "external-command":
@@ -322,9 +339,17 @@ def test_hook_waiver_requires_the_reviewed_package_and_contained_commands(
         (root / "hooks/session-start.py").write_text("print('new payload')\n", encoding="utf-8")
     elif case == "additional-file":
         (root / "new.txt").write_text("Additional package content.", encoding="utf-8")
-    elif case == "missing-pin":
+    elif case == "changed-manifest":
+        manifest = root / "hooks/hooks.json"
+        new_manifest = json.loads(manifest.read_text(encoding="utf-8"))
+        new_manifest["description"] = "Updated hook description"
+        manifest.write_text(json.dumps(new_manifest), encoding="utf-8")
+    elif case in {"missing-pin", "other-manifest"}:
         config = json.loads(waiver.read_text(encoding="utf-8"))
-        config["waivers"][0]["payload"].pop()
+        if case == "missing-pin":
+            config["waivers"][0]["payload"].pop()
+        else:
+            config["waivers"][0]["manifest"] = "hooks/other.json"
         waiver.write_text(json.dumps(config), encoding="utf-8")
 
     report = _report(_REVIEW_REPORT)
@@ -338,6 +363,12 @@ def test_hook_waiver_requires_the_reviewed_package_and_contained_commands(
     assert not result.passed
     assert result.is_incomplete or _unverified(result)
     assert not any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
+    if rejection is not None:
+        [critical] = _unverified(result)
+        assert critical.metadata["rejected_waivers"] == [{"waiver_id": "reviewed-hooks", **rejection}]
+    elif case == "other-manifest":
+        [critical] = _unverified(result)
+        assert "rejected_waivers" not in critical.metadata
 
 
 @pytest.mark.parametrize("case", ["original", "snapshot", "different-report-source", "different-scanner-version"])
@@ -453,6 +484,7 @@ def test_waiver_path_cannot_normalize_away_a_linked_ancestor(mock_tools, tmp_pat
     result = _validate(mock_tools, root, _report(_REVIEW_REPORT), validator)
 
     assert result.is_incomplete and not result.passed
+    assert any("'redirect' is a symlink or reparse point" in error for error in result.errors)
     assert all(f.check_name != "skillspector_hook_waiver_applied" for f in result.findings)
     mock_tools.skillspector.run.assert_not_called()
 

@@ -15,7 +15,7 @@ from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
-from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, stat_is_link_or_reparse
+from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot, lstat_walk, stat_is_link_or_reparse
 from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 _MAX_WAIVER_BYTES = 1024 * 1024
@@ -133,12 +133,26 @@ def load_hook_waivers(path: Path) -> tuple[HookWaiver, ...]:
     """
     try:
         absolute = canonicalize_trusted_root_alias(path.absolute())
-        if ".." in absolute.parts and any(stat_is_link_or_reparse(parent.lstat()) for parent in absolute.parents):
-            raise SecurePathError("unsafe_path", "Hook waiver file passes through a symlink or reparse point.")
         normalized = Path(os.path.normpath(absolute))
         anchor = Path(normalized.anchor)
+        relative = normalized.relative_to(anchor)
+        linked_component = None
+        if ".." in absolute.parts:
+            # Inspect only real ancestors before checking a path with canceled segments.
+            linked_component = next(
+                (parent.name for parent in reversed(absolute.parents) if stat_is_link_or_reparse(parent.lstat())), None
+            )
+        if linked_component is None:
+            walk = lstat_walk(anchor, relative)
+            if walk.outcome == "link" and walk.failing_index is not None:
+                linked_component = relative.parts[walk.failing_index]
+        if linked_component is not None:
+            raise ValueError(
+                f"cannot securely read the hook waiver file because path component {linked_component!r} "
+                "is a symlink or reparse point. Use a direct path."
+            )
         with SecureRoot(anchor) as root:
-            data, _ = root.read_bytes(normalized.relative_to(anchor), _MAX_WAIVER_BYTES)
+            data, _ = root.read_bytes(relative, _MAX_WAIVER_BYTES)
     except (OSError, SecurePathError) as exc:
         raise ValueError("cannot securely read the hook waiver file as a regular file of at most 1 MiB") from exc
     try:

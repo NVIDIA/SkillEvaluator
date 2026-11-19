@@ -903,6 +903,7 @@ Use `--hook-waivers FILE` to record approval of eligible command hooks in a spec
   Start with the plugin directory you intend to distribute, including its plugin manifest, such as `.claude-plugin/plugin.json`. Keep Git metadata, generated reports, and your trusted waiver file outside that directory. Review what the hooks do with their input, including bundled dependencies and any runtime dependencies they invoke. During validation SkillEvaluator scans a private copy of the package and verifies that the package still matches afterward.
 
   Create an empty approval file in a trusted location. Passing it selects the whole package for the evidence scan without approving any hooks.
+  With `--hook-waivers`, findings in shipped paths normally filtered as generated output or outside agent control scope count toward the result. This applies even with an empty waiver list.
 
   ```yaml title="trusted/hook-waivers.yaml (before approval)"
   version: 1
@@ -919,7 +920,7 @@ Use `--hook-waivers FILE` to record approval of eligible command hooks in a spec
 
   ### Record the approval
 
-  Add the approval to the UTF-8 YAML file in the trusted location controlled by the reviewer. For CI, load it from a trusted checkout or policy repository. Pass a direct filesystem path to the waiver file.
+  SkillEvaluator reads a waiver file only when the operator supplies `--hook-waivers FILE`. Pass a direct filesystem path to the UTF-8 YAML file. A plugin author who can change the CI command or its waiver file can approve their own hooks. For independent approval, use a protected CI workflow and load the waiver file from a separate policy repository with its own reviewers.
 
   Replace the example digests with the values from the unwaived scan for the exact package you reviewed.
 
@@ -949,7 +950,7 @@ Use `--hook-waivers FILE` to record approval of eligible command hooks in a spec
     -r json -o ./reports/hook-review
   ```
 
-  A match records the INFO finding `skillspector_hook_waiver_applied` with the waiver ID, expiry date, and package evidence. A verified passive PNG exclusion in the same package gets its own coverage note. A mismatch or expiry leaves the hook gate failed. If scan setup cannot load the waiver file or capture the package, the security scan is `INCOMPLETE`.
+  A match records the INFO finding `skillspector_hook_waiver_applied` with the waiver ID, expiry date, owner, reason, and package evidence. A verified passive PNG exclusion in the same package gets its own coverage note. A mismatch or expiry leaves the hook gate failed. If scan setup cannot load the waiver file or capture the package, the security scan is `INCOMPLETE`.
 </Steps>
 
 Every handler in the manifest must be a command invoking one bundled script. Use `sh` or `bash` with a double-quoted `.sh` path, or `python` or `python3` with a double-quoted `.py` path. The path must start with `$CLAUDE_PLUGIN_ROOT` or `$CODEX_PLUGIN_ROOT`. Braces around the variable name are optional.
@@ -1054,10 +1055,12 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
 
     For an eligible command hook, review the complete packaged plugin and
     follow [Reviewed command hook waivers](#reviewed-command-hook-waivers).
-    If an existing waiver stopped applying, check its UTC expiry and compare
-    the manifest, payload, and artifact digests against a fresh JSON report
-    produced with an empty waiver file. Look for `coverage_problems` when
-    the report lacks those digests.
+    If the supplied waiver file contains entries for the manifest and none
+    apply, the Critical finding's `metadata.rejected_waivers` in the JSON
+    report lists each waiver ID and its first failed condition. An expired
+    entry includes its expiry date. Missing or stale payload pins identify
+    the affected paths. When a rejection says `coverage_unconfirmed`, check
+    `metadata.coverage_problems` for the scanner or package issue.
     A `--policy` severity override cannot clear the gate, and
     `--llm-verify` leaves the finding outside LLM review.
 

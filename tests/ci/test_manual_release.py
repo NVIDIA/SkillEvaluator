@@ -49,12 +49,13 @@ def test_release_workflows_scope_permissions_and_credentials(name):
     assert all(step["with"]["persist-credentials"] == "false" for step in checkouts)
 
 
-def test_release_dispatches_serialize_across_versions():
+def test_release_dispatches_serialize_without_replacing_pending_runs():
     source = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
     workflow = yaml.load(source, Loader=yaml.BaseLoader)
     assert workflow["concurrency"] == {
         "group": "skillevaluator-release",
         "cancel-in-progress": "false",
+        "queue": "max",
     }
 
 

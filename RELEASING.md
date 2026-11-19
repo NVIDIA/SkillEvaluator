@@ -86,9 +86,10 @@ image and consumer qualification details.
    checksums. Before creating the tag, it resolves the official GHCR digest
    and checks both package indexes for version conflicts. It verifies the
    staged bytes before publishing and verifies anonymous downloads afterward.
-   The notes show that package publication is pending. Release runs share one
-   concurrency group across versions. A backfilled version stays off **Latest**
-   when a newer release already holds it.
+   The notes show that package publication is pending. Release runs execute one
+   at a time across versions and phases. GitHub retains up to 100 pending
+   dispatches. A backfilled version stays off **Latest** when a newer release
+   already holds it.
 3. Approve `release-kitmaker-dry-run` to validate both anonymous Python asset
    URLs. Review the results and approve `release-kitmaker` after both pass. The job submits those URLs
    for both public PyPI and NVIDIA DevZone and records its request UUID in the

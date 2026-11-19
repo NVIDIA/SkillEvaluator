@@ -637,12 +637,42 @@ def test_truncated_case_names_do_not_scan_stop_on_pass_matches() -> None:
     cases = [f"case-{index:03d}-with-a-long-descriptive-name" for index in range(50)]
     agent = _agent([_trial(case[:32], 100, 20) for case in cases], [_trial(case[:32], 90, 10) for case in cases])
 
-    with patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match:
+    class CountedCases(set[str]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    class CountedAttempts(list[token_usage._Attempt]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    counted_cases = CountedCases(token_usage._known_cases(agent, frozenset(cases)))
+    counted_attempts = {}
+    collect_attempts = token_usage._agent_attempts
+
+    def collect_counted_attempts(*args, **kwargs):
+        counted_attempts.update({arm: CountedAttempts(rows) for arm, rows in collect_attempts(*args, **kwargs).items()})
+        return counted_attempts
+
+    with (
+        patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match,
+        patch.object(token_usage, "_known_cases", return_value=counted_cases),
+        patch.object(token_usage, "_agent_attempts", side_effect=collect_counted_attempts),
+    ):
         usage = build_token_usage({"codex": agent}, dataset_case_ids=cases)
 
     assert usage is not None
     assert [row["entry_id"] for row in usage["agents"]["codex"]["cases"]] == cases
     assert match.call_count == 0
+    assert counted_cases.iterations == 1
+    assert set(counted_attempts) == {"with_skill", "baseline"}
+    for arm, attempts in counted_attempts.items():
+        assert 0 < attempts.iterations < len(cases), arm
 
 
 def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() -> None:

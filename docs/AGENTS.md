@@ -25,6 +25,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `prepare-dataset.mdx` — author, generate, review, and validate cases before trials
 - `tier3-run-options.mdx` — choose an agent and attempt count for reviewed cases
 - `tier3-run-reference.mdx` — staging contracts, run settings, budgets, and repeat comparisons
+- `nemo-gym.mdx` — NeMo Gym setup, first evaluation, supported agents, and optional reference
 - `tier3-runtime.mdx` — backend compatibility, runtime contracts, and troubleshooting
 - `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback policies
 - `tier3-results.mdx` — scores, applicability, verdicts, and incomplete evidence

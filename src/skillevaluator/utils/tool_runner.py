@@ -327,14 +327,24 @@ class ExternalTool:
             "Bundled with the security extra — reinstall with: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
+        gitleaks_go = "go install github.com/zricethezav/gitleaks/v8@latest"
+        if sys.platform == "win32":
+            gitleaks_hint = f"Install with: winget install Gitleaks.Gitleaks or {gitleaks_go}"
+            semgrep_hint = "Optional; install separately with: uv tool install semgrep"
+        elif sys.platform == "darwin":
+            gitleaks_hint = f"Install with: brew install gitleaks or {gitleaks_go}"
+            semgrep_hint = "Optional; install separately with: brew install semgrep or uv tool install semgrep"
+        else:
+            gitleaks_hint = (
+                f"Install with: {gitleaks_go}, or a release binary from https://github.com/gitleaks/gitleaks/releases"
+            )
+            semgrep_hint = "Optional; install separately with: uv tool install semgrep"
         hints = {
-            "gitleaks": (
-                "Install with: brew install gitleaks (macOS) or go install github.com/gitleaks/gitleaks/v8@latest"
-            ),
+            "gitleaks": gitleaks_hint,
             "pip-audit": security_extra_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
-            "semgrep": "Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep",
+            "semgrep": semgrep_hint,
             "skillspector": f"Install with: uv tool install {SKILLSPECTOR_WHEEL_URL}",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'

@@ -49,6 +49,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
   from text-pattern coverage when the remaining coverage and the full YARA
   and artifact-integrity counts agree.
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:

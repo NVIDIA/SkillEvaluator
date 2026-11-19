@@ -601,6 +601,30 @@ def test_advisory_duplicate_metadata_id_is_a_warning(tmp_path: Path) -> None:
     assert _summary(result.output).endswith("2 skills checked, 2 passed, 0 failed, 0 incomplete")
 
 
+@pytest.mark.skipif(os.name == "nt", reason="creating a directory symlink needs privileges on Windows")
+@pytest.mark.parametrize("workers", [1, 2])
+def test_linked_directory_discovery_error_points_at_the_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    _inline_process_pool(monkeypatch)
+    outside = tmp_path / "outside" / "external-skill"
+    shutil.copytree(_TEXT_ANALYZER, outside)
+    repo = tmp_path / "repo"
+    catalog = repo / "skills"
+    shutil.copytree(_TEXT_ANALYZER, catalog / "skill-00")
+    (catalog / "linked").symlink_to(outside, target_is_directory=True)
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    reports = tmp_path / "reports"
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers))
+
+    assert result.exit_code == 1, result.output
+    discovery = [line for line in _commands(result.output) if "catalog/discovery" in line]
+    assert len(discovery) == 1, result.output
+    properties = discovery[0].split("::", 2)[1]
+    assert properties.startswith("error "), discovery[0]
+    assert properties.endswith(",file=skills/linked"), discovery[0]
+
+
 def _collected(level: str, counts: list[int]) -> list[dict]:
     from skillevaluator.reporting.github_reporter import catalog_annotation
 

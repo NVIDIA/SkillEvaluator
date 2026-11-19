@@ -1802,7 +1802,9 @@ def _print_catalog_github_annotations(
     Skills render before the catalog checks ``metadata.id`` uniqueness, so the
     per-skill counts would miss those failures. The summary is counted from the
     catalog's failures instead, and catalog-level findings join the same capped
-    stream with a file on the affected skill's manifest.
+    stream with a file on the affected skill's manifest. A discovery failure
+    points at the directory itself, without probing it: a linked directory is
+    tracked as the link, and Git has no files beneath it.
     """
     if "github" not in (ctx.params.get("report_formats") or ()):
         return
@@ -1820,13 +1822,21 @@ def _print_catalog_github_annotations(
                 return skill_dir / variant
         return skill_dir
 
-    def annotation(name: str, *, check: str, message: str, severity: str, blocking: bool) -> dict:
+    def annotation(
+        name: str,
+        *,
+        check: str,
+        message: str,
+        severity: str,
+        blocking: bool,
+        file_path: Path | None = None,
+    ) -> dict:
         return catalog_annotation(
             check=check,
             message=message,
             severity=severity,
             blocking=blocking,
-            file_path=manifest(name),
+            file_path=file_path or manifest(name),
             workspace_root=roots["repository_root"],
             scan_root=catalog_root,
         )
@@ -1834,7 +1844,17 @@ def _print_catalog_github_annotations(
     extra: list[dict] = []
     for skill_dir, reason in discovery_problems.items():
         name = skill_dir.relative_to(catalog_root).as_posix()
-        extra.append(annotation(name, check="discovery", message=f"{name}: {reason}", severity="high", blocking=True))
+        # Relative to the catalog root, so the location keeps the link instead of its target.
+        extra.append(
+            annotation(
+                name,
+                check="discovery",
+                message=f"{name}: {reason}",
+                severity="high",
+                blocking=True,
+                file_path=Path(name),
+            )
+        )
     for conflict in id_conflicts:
         members = conflict.get("skills")
         if not isinstance(members, list):

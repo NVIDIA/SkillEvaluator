@@ -90,8 +90,10 @@ from skillevaluator.validators.base import (
 from skillevaluator.validators.pii_ownership import ownership_email_spans
 from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
 from skillevaluator.validators.skillspector_scope import (
+    AGENT_CONTROL_PATH_ROLES,
     IssueScope,
     scope_skillspector_issues,
+    skillspector_file_role,
     skillspector_report_is_truncated,
     skillspector_report_serializes_every_finding,
 )
@@ -1554,6 +1556,104 @@ def _is_jpeg(data: bytes) -> bool:
     return False
 
 
+def _read_skillspector_passive_raster(root: SecureRoot, path: str, budget: int) -> tuple[int, os.stat_result] | None:
+    """Corroborate a passive image with a bounded no-follow read under the scan root."""
+    if _skillspector_report_path_key(path) is None:
+        return None
+    parts = path.split("/")
+    directories = [part.casefold() for part in parts[:-1]]
+    if (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS) or not (
+        _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
+    ):
+        return None
+    data, metadata = root.read_bytes(Path(*parts), budget)
+    is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
+    if metadata.st_mode & 0o111 or not is_image:
+        return None
+    return len(data), metadata
+
+
+def _skillspector_excluded_pngs(completeness: dict, components: list[dict], scanned_root: Path | None) -> list[str]:
+    """Return the verified PNGs that account for the full inventory surplus."""
+    surplus = len(components) - completeness["total_components"]
+    exclusions = completeness.get("scope_exclusions")
+    references = completeness.get("references")
+    if (
+        scanned_root is None
+        or not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
+        or not isinstance(exclusions, list)
+        or len(exclusions) != surplus
+        or not isinstance(references, list)
+        or any(not isinstance(reference, dict) for reference in references)
+        or _skillspector_reference_evidence_unmatched(completeness)
+    ):
+        return []
+
+    required_patterns = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS - {"static_yara"}
+    paths: set[str] = set()
+    for row in exclusions:
+        if not isinstance(row, dict):
+            return []
+        path = row.get("path")
+        analyzers = row.get("analyzers")
+        if (
+            row.get("outcome") != "out_of_scope"
+            or row.get("phase") != "static"
+            or row.get("reason_code") != "binary_content"
+            or row.get("fatal") is not False
+            or row.get("start_line") is not None
+            or row.get("end_line") is not None
+            or not isinstance(path, str)
+            or not path.lower().endswith(".png")
+            or path in paths
+            or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
+            or not isinstance(analyzers, list)
+            or len(analyzers) != len(required_patterns)
+            or not all(isinstance(analyzer, str) for analyzer in analyzers)
+            or set(analyzers) != required_patterns
+        ):
+            return []
+        paths.add(path)
+    if any(
+        reference.get("status") == "resolved"
+        and isinstance(target := reference.get("target_path"), str)
+        and target in paths
+        for reference in references
+    ):
+        return []
+
+    by_path: dict[str, dict] = {}
+    for component in components:
+        path = component["path"]
+        if path in paths:
+            if path in by_path or _skillspector_scoring_source_scope(component) != ("", ""):
+                return []
+            by_path[path] = component
+    if by_path.keys() != paths:
+        return []
+
+    budget = _PASSIVE_RASTER_MAX_BYTES
+    identities: set[tuple[int, int]] = set()
+    try:
+        with SecureRoot(scanned_root) as root:
+            for path, component in by_path.items():
+                size = component.get("size_bytes")
+                if component["executable"] is not False or type(size) is not int or not 0 < size <= budget:
+                    return []
+                verified = _read_skillspector_passive_raster(root, path, size)
+                if verified is None or verified[0] != size:
+                    return []
+                _, metadata = verified
+                identity = (metadata.st_dev, metadata.st_ino)
+                if metadata.st_ino and identity in identities:
+                    return []
+                identities.add(identity)
+                budget -= size
+    except (OSError, SecurePathError):
+        return []
+    return sorted(paths)
+
+
 def _skillspector_passive_raster_note(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -1667,23 +1767,12 @@ def _skillspector_passive_raster_note(
         with SecureRoot(scanned_root) as root:
             for path in paths:
                 matches = components_by_path.get(path, [])
-                parts = path.split("/")
-                directories = [part.casefold() for part in parts[:-1]]
-                if (
-                    len(matches) != 1
-                    or matches[0].get("executable") is not False
-                    or "\\" in path
-                    or not _is_filesystem_safe_path_text(path)
-                    or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
-                    or (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS)
-                    or not _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
-                ):
+                if len(matches) != 1 or matches[0].get("executable") is not False:
                     return None
-                data, metadata = root.read_bytes(Path(*parts), budget)
-                is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
-                if metadata.st_mode & 0o111 or not is_image:
+                verified = _read_skillspector_passive_raster(root, path, budget)
+                if verified is None:
                     return None
-                budget -= len(data)
+                budget -= verified[0]
     except (OSError, SecurePathError):
         return None
 
@@ -2808,10 +2897,10 @@ _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
 # SkillSpector reads at most this many hook, permission and settings records
 # from one manifest (``_MAX_DECLARATIONS`` in bundled_execution_surface.py).
 _SKILLSPECTOR_HOOK_DECLARATION_LIMIT = 2048
-# Findings that are facts about the scan, not judgments an LLM verifier can
-# overturn: the hook gate failure, and the reference-caveat note, which reports
-# scanner coverage, not a vulnerability. They keep their evidence unchanged.
-_LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, "skillspector_reference_caveats"})
+_SKILLSPECTOR_PASSIVE_PNG_CHECK = "skillspector_passive_png_exclusion"
+_SKILLSPECTOR_COVERAGE_CHECKS = frozenset({_SKILLSPECTOR_PASSIVE_PNG_CHECK, "skillspector_reference_caveats"})
+# The hook gate and coverage notes record scanner evidence outside LLM review.
+_LLM_VERIFY_EXEMPT_CHECKS = _SKILLSPECTOR_COVERAGE_CHECKS | {_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK}
 _SKILLSPECTOR_HOOK_COUNT_FIELDS = (
     "total_components",
     "partially_inspected_files",
@@ -3758,6 +3847,7 @@ class SecurityValidator(ValidatorBase):
         incomplete_before = result.is_incomplete
         # Accepted caveats are reported only once every later check has passed.
         caveat_warnings: list[str] = []
+        png_exclusion: Finding | None = None
         accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
@@ -3833,8 +3923,9 @@ class SecurityValidator(ValidatorBase):
                 result.add_error("skillspector reported execution_successful=false; security scan did not complete")
             return False
 
+        completeness_status: str | None = None
         findings_after_filtering: int | None = None
-        universal_analyzer_evidence_valid = True
+        universal_analyzer_ids: frozenset[str] = frozenset()
         analysis_completeness = data.get("analysis_completeness")
         if uses_versioned_completeness and "analysis_completeness" not in data:
             result.add_error(
@@ -4183,17 +4274,9 @@ class SecurityValidator(ValidatorBase):
                     or uses_statusless_completeness_schema
                     or complete_by_applicability
                     or accepted_reference_caveats is not None
-                ) and counts["total_components"]:
+                ):
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
-                    )
-                    universal_analyzer_evidence_valid = all(
-                        all(state == "completed" for state, _item in analyzer_evidence[analyzer_id])
-                        and sum(item["planned_work"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
-                        and sum(item["completed"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
-                        for analyzer_id in universal_analyzer_ids
                     )
                 actual_limitation_counts = Counter(limitations)
                 expected_limitation_counts = Counter(expected_limitations)
@@ -4647,12 +4730,6 @@ class SecurityValidator(ValidatorBase):
             )
             return False
         if uses_versioned_completeness and not result.is_incomplete:
-            if len(normalized_components) != analysis_completeness["total_components"]:
-                result.add_error(
-                    "skillspector JSON component inventory contradicts analysis completeness; "
-                    "security scan did not complete"
-                )
-                return False
             component_keys = {
                 (_skillspector_scoring_source_scope(component), component["path"])
                 for component in normalized_components
@@ -4663,12 +4740,52 @@ class SecurityValidator(ValidatorBase):
                     "security scan did not complete"
                 )
                 return False
-            if not universal_analyzer_evidence_valid:
-                result.add_error(
-                    "skillspector JSON universal analyzer evidence contradicts the "
-                    "component inventory; security scan did not complete"
+            inventory_count = len(normalized_components)
+            covered_count = analysis_completeness["total_components"]
+            excluded_pngs = []
+            if inventory_count != covered_count:
+                if completeness_status == "complete":
+                    excluded_pngs = _skillspector_excluded_pngs(
+                        analysis_completeness, normalized_components, scanned_root
+                    )
+                if not excluded_pngs:
+                    result.add_error(
+                        "skillspector JSON component inventory contradicts analysis completeness; "
+                        "security scan did not complete"
+                    )
+                    return False
+            if covered_count or excluded_pngs:
+                for analyzer_id in universal_analyzer_ids:
+                    # The PNG exclusion applies only to the text patterns.
+                    expected = inventory_count if analyzer_id in {"artifact_integrity", "static_yara"} else covered_count
+                    evidence = analyzer_evidence[analyzer_id]
+                    if (
+                        any(state != "completed" for state, _ in evidence)
+                        or sum(item["planned_work"] for _, item in evidence) != expected
+                        or sum(item["completed"] for _, item in evidence) != expected
+                    ):
+                        result.add_error(
+                            "skillspector JSON universal analyzer evidence contradicts the "
+                            "component inventory; security scan did not complete"
+                        )
+                        return False
+            if excluded_pngs:
+                count = len(excluded_pngs)
+                examples = ", ".join(_skillspector_report_text(path) for path in excluded_pngs[:5])
+                if count > 5:
+                    more = count - 5
+                    examples += f" and {more} more"
+                noun = "file" if count == 1 else "files"
+                png_exclusion = Finding(
+                    category="SCAN",
+                    severity=Severity.INFO,
+                    check_name=_SKILLSPECTOR_PASSIVE_PNG_CHECK,
+                    file_path=excluded_pngs[0],
+                    message=(
+                        f"SkillSpector's text pattern analyzers skipped {count} passive PNG {noun} ({examples}). "
+                        "YARA and artifact integrity ran on the full inventory."
+                    ),
                 )
-                return False
             for issue in issues:
                 location = issue.get("location") or {}
                 issue_key = (
@@ -4765,6 +4882,8 @@ class SecurityValidator(ValidatorBase):
 
         for note in caveat_warnings:
             result.add_warning(note)
+        if png_exclusion is not None:
+            result.add_finding(png_exclusion)
         if accepted_reference_caveats is not None:
             result.metadata["skillspector_reference_caveats"] = accepted_reference_caveats
             locations = ", ".join(
@@ -5683,7 +5802,7 @@ class SecurityValidator(ValidatorBase):
         # Coverage advisories remain visible, but are not active scanner issues
         # and cannot be suppressed by a reviewed vulnerability baseline.
         active_findings = [
-            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
+            finding for finding in result.findings if finding.check_name not in _SKILLSPECTOR_COVERAGE_CHECKS
         ]
         blocking = sum(
             1

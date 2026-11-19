@@ -41,6 +41,7 @@ from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
+    StructuredDataLimitError,
     load_bounded_yaml,
 )
 from skillevaluator.validators.base import ValidatorBase
@@ -429,7 +430,13 @@ class QualityScoreValidator(ValidatorBase):
         content = manifest.read_text(encoding="utf-8-sig")
         lines = content.split("\n")
 
-        frontmatter_data = self._parse_frontmatter(content)
+        try:
+            frontmatter_data = self._parse_frontmatter(content)
+        except StructuredDataLimitError as exc:
+            result.fail_gate(
+                f"Cannot compute quality score for {manifest}: frontmatter exceeds the YAML complexity limits ({exc})"
+            )
+            return result
         if frontmatter_data:
             qs.has_frontmatter = True
 
@@ -488,6 +495,8 @@ class QualityScoreValidator(ValidatorBase):
             # size is rejected here instead of being stringified field by field.
             data = load_bounded_yaml(fm_match.group(1), last_key_wins=True)
             return data if isinstance(data, dict) else None
+        except StructuredDataLimitError:
+            raise
         except StructuredDataError:
             return None
 

@@ -2193,5 +2193,6 @@ def test_nested_alias_frontmatter_is_rejected_without_expanding(tmp_path: Path) 
     result = QualityScoreValidator().validate(skill_dir)
 
     assert time.perf_counter() - started < 5
-    assert result is not None
-    assert not any("XML tags in frontmatter" in finding.message for finding in result.findings)
+    assert not result.passed
+    assert "quality_scores" not in result.metadata
+    assert any("frontmatter exceeds the YAML complexity limits" in failure for failure in result.gate_failures)

@@ -29,6 +29,7 @@ def _call(command):
         "find -P /tmp/cache -type f -name '*.pyc' -print0 | xargs --null --no-run-if-empty rm --force",
         'find "/tmp/cache/subdir" -type f -iname "*.log" -print0|xargs -0 -- rm -f',
         "/usr/bin/find /tmp/cache -type f -print0 | /usr/bin/xargs -0 /bin/rm -f",
+        "find /tmp/cache -type f -name foo.pyc -print0 | xargs -0 rm -f",
     ],
 )
 def test_scoped_nul_delimited_file_cleanup_is_exempt(classify, command):
@@ -48,6 +49,11 @@ def test_scoped_nul_delimited_file_cleanup_is_exempt(classify, command):
         "find /tmp/cache -type f -follow -print0 | xargs -0 rm -f",
         "find /tmp/cache -type f -printf '/workspace\\0' | xargs -0 rm -f",
         "find /tmp/cache -type f -name *.pyc -print0 | xargs -0 rm -f",
+        "find '/tmp/cache'-type f -print0 | xargs -0 rm -f",
+        'find "/tmp/cache"-type f -print0 | xargs -0 rm -f',
+        "find /tmp/cache -type f -name 'x'-print0 | xargs -0 rm -f",
+        "find /tmp/cache -type f -name '*'-name -o -name '*' -print0 | xargs -0 rm -f",
+        "find /tmp/cache -type f -name 'x'-name -follow -name '*' -print0 | xargs -0 rm -f",
         "find /tmp/cache -type f -o -print0 | xargs -0 rm -f",
         "find /workspace -type f -print0 | xargs -0 rm -f",
         "find /tmp/../workspace -type f -print0 | xargs -0 rm -f",
@@ -71,8 +77,10 @@ def test_unknown_or_unsafe_producers_and_consumers_keep_findings(classify, comma
 
 
 def test_prior_link_creation_keeps_the_conservative_policy(classify):
-    result = classify([
-        _call("ln -s /workspace /tmp/cache"),
-        _call("find /tmp/cache/subdir -type f -print0 | xargs -0 rm -f"),
-    ])
+    result = classify(
+        [
+            _call("ln -s /workspace /tmp/cache"),
+            _call("find /tmp/cache/subdir -type f -print0 | xargs -0 rm -f"),
+        ]
+    )
     assert result["score"] == 0.0

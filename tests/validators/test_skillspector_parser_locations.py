@@ -23,7 +23,7 @@ from tests.validators.test_security import (
 
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.validators.security import (
-    _SKILLSPECTOR_PARSE_LIMIT_HINT,
+    _SKILLSPECTOR_PARSE_LIMIT_ADVICE,
     _SKILLSPECTOR_REFERENCE_REJECTION_HINT,
     _skillspector_incomplete_analysis_error,
     _skillspector_ledger_exception_label,
@@ -76,7 +76,11 @@ def test_captured_mjs_rows_use_the_parser_span_and_runtime_dependent_context() -
         "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
     )
     assert labels[0] in error and labels[1] in error and labels[2] in error
-    assert error.endswith(_SKILLSPECTOR_PARSE_LIMIT_HINT)
+    assert (
+        "(for example a process spawn whose arguments come from variables) in "
+        "scripts/admission.mjs:74-170 and scripts/machine-reading.mjs:104-236. "
+    ) in error
+    assert error.endswith(_SKILLSPECTOR_PARSE_LIMIT_ADVICE)
     assert _SKILLSPECTOR_REFERENCE_REJECTION_HINT not in error
 
 
@@ -151,12 +155,12 @@ def test_runtime_dependent_hint_requires_every_parse_limit_row() -> None:
     runtime = _parse_limit_row()
     other = _parse_limit_row(path="scripts/other.mjs", parser_diagnostic=dict(_BOUNDARY_DIAGNOSTIC))
     missing = _ledger_exception("scripts/plain.mjs", "static_parse_limit")
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT in _skillspector_incomplete_analysis_error("partial", [runtime])
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE in _skillspector_incomplete_analysis_error("partial", [runtime])
     mixed = _skillspector_incomplete_analysis_error("partial", [runtime, other])
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT not in mixed
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE not in mixed
     assert "scripts/other.mjs:11 [" in mixed
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT not in _skillspector_incomplete_analysis_error("partial", [missing])
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT not in _skillspector_incomplete_analysis_error(
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE not in _skillspector_incomplete_analysis_error("partial", [missing])
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE not in _skillspector_incomplete_analysis_error(
         "partial", [_ledger_exception("scripts/render.py", "static_parse_limit") | {"start_line": 12}]
     )
 
@@ -170,15 +174,61 @@ def test_parse_limit_hint_combines_with_runtime_limit_and_not_with_reference_rej
     }
     combined = _skillspector_incomplete_analysis_error("partial", [runtime_limit, parse_limit])
     assert "SkillSpector reached a runtime limit before it finished 1 file(s)." in combined
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT in combined
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE in combined
     assert _SKILLSPECTOR_REFERENCE_REJECTION_HINT not in combined
     with_reference = _skillspector_incomplete_analysis_error("partial", [reference, parse_limit])
     assert "SKILL.md:150 [reference_resolution; reference_missing]" in with_reference
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT in with_reference
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE in with_reference
     assert _SKILLSPECTOR_REFERENCE_REJECTION_HINT not in with_reference
     only_reference = _skillspector_incomplete_analysis_error("partial", [reference])
     assert only_reference.endswith(_SKILLSPECTOR_REFERENCE_REJECTION_HINT)
-    assert _SKILLSPECTOR_PARSE_LIMIT_HINT not in only_reference
+    assert _SKILLSPECTOR_PARSE_LIMIT_ADVICE not in only_reference
+
+
+def _reference_row(line: int) -> dict:
+    return {
+        **_ledger_exception("SKILL.md", "reference_missing", analyzers=(), phase="reference_resolution"),
+        "start_line": line,
+    }
+
+
+def test_parse_limit_hint_names_locations_hidden_behind_earlier_rows() -> None:
+    rows = [_reference_row(10), _reference_row(20), _reference_row(30), _parse_limit_row()]
+    error = _skillspector_incomplete_analysis_error("partial", rows)
+    # The shown examples are the three reference rows; the helper's span is in "and 1 more".
+    assert "scripts/helper.mjs:74-170 [" not in error
+    assert "; and 1 more " in error
+    assert (
+        "(for example a process spawn whose arguments come from variables) in scripts/helper.mjs:74-170. "
+        f"{_SKILLSPECTOR_PARSE_LIMIT_ADVICE}"
+    ) in error
+
+
+def test_parse_limit_hint_caps_named_locations_and_points_to_the_json_report() -> None:
+    rows = [
+        _parse_limit_row(path=f"scripts/helper{index}.mjs", parser_diagnostic=dict(_RUNTIME_DIAGNOSTIC))
+        for index in range(5)
+    ]
+    rows.append(_parse_limit_row(path="scripts/helper0.mjs"))
+    error = _skillspector_incomplete_analysis_error("partial", rows)
+    assert (
+        "in scripts/helper0.mjs:74-170, scripts/helper1.mjs:74-170 and scripts/helper2.mjs:74-170, "
+        "and 2 more listed in parser_diagnostic on the skillspector_completeness rows of the JSON report. "
+    ) in error
+
+
+def test_parse_limit_hint_without_a_span_names_the_path_or_the_json_report() -> None:
+    no_span = {"cause": "runtime_dependent", "check": "command_string_runtime"}
+    path_only = _skillspector_incomplete_analysis_error("partial", [_parse_limit_row(parser_diagnostic=no_span)])
+    assert "come from variables) in scripts/helper.mjs. " in path_only
+    nothing = _parse_limit_row(parser_diagnostic=no_span)
+    del nothing["path"]
+    unknown = _skillspector_incomplete_analysis_error("partial", [nothing])
+    assert (
+        "come from variables) at the locations in parser_diagnostic on the skillspector_completeness rows "
+        "of the JSON report. "
+    ) in unknown
+    assert unknown.endswith(_SKILLSPECTOR_PARSE_LIMIT_ADVICE)
 
 
 @patch("skillevaluator.validators.security.Tools")
@@ -194,7 +244,7 @@ def test_partial_scan_stays_incomplete_and_projects_parser_diagnostic(mock_tools
         "scripts/helper.mjs:74-170 [static; static_parse_limit; runtime_dependent command_string_runtime; "
         "analyzers=static_patterns_tool_misuse]"
     ) in result.errors[0]
-    assert result.errors[0].endswith(_SKILLSPECTOR_PARSE_LIMIT_HINT)
+    assert result.errors[0].endswith(_SKILLSPECTOR_PARSE_LIMIT_ADVICE)
     record = json.loads(JSONReporter().render(result))["skillspector_completeness"]["records"][0]
     diagnostic = record["ledger_exceptions"][0]["parser_diagnostic"]
     assert diagnostic == {

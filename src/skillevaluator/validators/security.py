@@ -1185,15 +1185,22 @@ def _skillspector_parser_diagnostic_context(exception: Mapping[str, object]) -> 
     return " ".join(parts) or None
 
 
+def _skillspector_ledger_exception_lines(exception: Mapping[str, object]) -> str | None:
+    """``line`` or ``start-end`` from the row's ``start_line`` or its ``parser_diagnostic`` span, else ``None``."""
+    start_line = exception.get("start_line")
+    if isinstance(start_line, int) and not isinstance(start_line, bool):
+        return str(start_line)
+    if (span := _skillspector_parser_diagnostic_span(exception.get("parser_diagnostic"))) is not None:
+        start, end = span
+        return str(start) if start == end else f"{start}-{end}"
+    return None
+
+
 def _skillspector_ledger_exception_label(exception: Mapping[str, object]) -> str:
     """Describe one ledger exception as ``path[:line[-end]] [phase; reason; cause check; analyzers=...]``."""
     location = _skillspector_report_text(exception.get("path")) or "unknown"
-    start_line = exception.get("start_line")
-    if isinstance(start_line, int) and not isinstance(start_line, bool):
-        location = f"{location}:{start_line}"
-    elif (span := _skillspector_parser_diagnostic_span(exception.get("parser_diagnostic"))) is not None:
-        start, end = span
-        location = f"{location}:{start}" if start == end else f"{location}:{start}-{end}"
+    if lines := _skillspector_ledger_exception_lines(exception):
+        location = f"{location}:{lines}"
     context = [text for key in ("phase", "reason_code") if (text := _skillspector_report_text(exception.get(key)))]
     if extra := _skillspector_parser_diagnostic_context(exception):
         context.append(extra)
@@ -1265,16 +1272,19 @@ _SKILLSPECTOR_REFERENCE_REJECTION_HINT = (
     "Missing references require a standalone target with complete, matching reference and scan evidence. "
     "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
 )
-_SKILLSPECTOR_PARSE_LIMIT_HINT = (
-    "SkillSpector could not resolve a command or code string that is only known at run time "
-    "(for example a process spawn whose arguments come from variables), in the reported lines. "
-    "Review those lines, prefer fixed argument lists, and if the code is valid and safe report a "
+_SKILLSPECTOR_PARSE_LIMIT_ADVICE = (
+    "Review that code, prefer fixed argument lists, and if the code is valid and safe report a "
     "minimal reproducer to SkillSpector; updating SkillSpector does not clear this limit today."
 )
+_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER = "parser_diagnostic on the skillspector_completeness rows of the JSON report"
 
 
 def _skillspector_parse_limit_hint(ledger_exceptions: Iterable[Mapping[str, object]]) -> str | None:
-    """Explain ``runtime_dependent`` parse limits, or ``None`` when that is not every parse-limit row."""
+    """Explain ``runtime_dependent`` parse limits, or ``None`` when that is not every parse-limit row.
+
+    The hint names the affected locations itself, because the error shows only the
+    first few ledger rows and those may all be unrelated (for example missing references).
+    """
     parse_limit_rows = [row for row in ledger_exceptions if row.get("reason_code") == "static_parse_limit"]
     if not parse_limit_rows:
         return None
@@ -1285,7 +1295,27 @@ def _skillspector_parse_limit_hint(ledger_exceptions: Iterable[Mapping[str, obje
         cause = diagnostic.get("cause")
         if not isinstance(cause, str) or cause.strip() != "runtime_dependent":
             return None
-    return _SKILLSPECTOR_PARSE_LIMIT_HINT
+    locations: list[str] = []
+    for row in parse_limit_rows:
+        path = _skillspector_report_text(row.get("path"))
+        lines = _skillspector_ledger_exception_lines(row)
+        if path is None and lines is None:
+            continue
+        location = f"{path or 'unknown'}:{lines}" if lines else str(path)
+        if location not in locations:
+            locations.append(location)
+    shown = locations[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    if not shown:
+        where = f"at the locations in {_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER}"
+    else:
+        where = f"in {shown[0]}" if len(shown) == 1 else f"in {', '.join(shown[:-1])} and {shown[-1]}"
+        if remaining := len(locations) - len(shown):
+            where = f"{where}, and {remaining} more listed in {_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER}"
+    return (
+        "SkillSpector could not resolve a command or code string that is only known at run time "
+        f"(for example a process spawn whose arguments come from variables) {where}. "
+        f"{_SKILLSPECTOR_PARSE_LIMIT_ADVICE}"
+    )
 
 
 def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:

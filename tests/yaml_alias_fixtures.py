@@ -14,9 +14,9 @@ from __future__ import annotations
 
 _ANCHORS = "abcdefghij"
 
-# The reported file: 9**8 leaves, a 434-byte SKILL.md that needs gigabytes if
-# any value is stringified. Only parse it with a loader that is meant to reject
-# it, never through code that would expand it.
+# The reported size: 9**8 leaves from a SKILL.md of a few hundred bytes, which needs
+# gigabytes if any value is stringified. Only parse it with a loader that is meant to
+# reject it, never through code that would expand it.
 REPORTED_LEVELS = 8
 
 # End-to-end tests run a validator over the file, so they use a graph that is

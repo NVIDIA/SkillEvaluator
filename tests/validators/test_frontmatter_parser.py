@@ -130,6 +130,7 @@ class TestParseFrontmatterBounds:
         assert parsed is None
         assert any(error.startswith("Invalid YAML in frontmatter: ") and "line" in error for error in result.errors)
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     def test_a_yaml_directive_number_past_the_digit_limit_is_an_error_not_a_crash(self, tmp_path: Path):
         manifest = tmp_path / "SKILL.md"
         manifest.write_text(f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Body\n", encoding="utf-8")

@@ -142,7 +142,7 @@ class PluginSchemaValidator(ValidatorBase):
         """Parse the manifest YAML; record a finding and return None on failure."""
         try:
             raw = manifest_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -223,7 +223,7 @@ class PluginSchemaValidator(ValidatorBase):
         """Shallow-validate a contained ``.claude-plugin/plugin.json`` file."""
         try:
             data: Any = load_bounded_json(manifest_path.read_text(encoding="utf-8-sig"))
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -253,7 +253,7 @@ class PluginSchemaValidator(ValidatorBase):
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
                     check_name="manifest_invalid_json",
-                    message=f"Contained plugin manifest is not valid JSON: {exc}",
+                    message=f"Contained plugin manifest is not valid JSON: {exc.__cause__ or exc}",
                     file_path=str(manifest_path),
                     suggestion="Fix the JSON syntax in .claude-plugin/plugin.json.",
                 )

@@ -122,7 +122,8 @@ All notable changes to SkillEvaluator are documented in this file.
   finding changes once with this release.
 - The text-analyzer reference skill counts a sentence end only when `.`, `!` or
   `?` is followed by whitespace or the end of the text, so file names, decimals
-  and version numbers stay in one sentence. `--file` on a directory or an
+  and version numbers stay in one sentence. Closing quotes, Markdown emphasis
+  and citation markers such as `[1]` after the terminator still end it. `--file` on a directory or an
   unreadable path prints `Error:` on stderr and exits 1 instead of a traceback.
 
 ## 1.0.1 - 2026-11-17

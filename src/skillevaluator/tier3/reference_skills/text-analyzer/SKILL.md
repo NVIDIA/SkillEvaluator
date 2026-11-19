@@ -50,8 +50,10 @@ The script prints a structured report with:
 ## Limitations
 
 - Sentence detection counts a run of `.`, `!` or `?` only when it is
-  followed by whitespace or the end of the text. Abbreviations followed
-  by a space (e.g., "Dr. Smith") still split.
+  followed by whitespace or the end of the text. Closing quotes or brackets,
+  Markdown `*` / `_` emphasis and numeric citations such as `[1]` may sit
+  between the terminator and that whitespace. Abbreviations followed by a
+  space (e.g., "Dr. Smith") still split.
 - Non-UTF-8 files will be read with errors replaced.
 
 ## Troubleshooting

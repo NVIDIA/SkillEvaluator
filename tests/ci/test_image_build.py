@@ -166,6 +166,29 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
             assert caller["permissions"] == {"contents": "read", "pull-requests": "read", "statuses": "read"}
             assert caller["secrets"] == {"NVSKILLS_CI_DISPATCH_TOKEN": "${{ secrets.NVSKILLS_CI_DISPATCH_TOKEN }}"}
         if "workflow_run" in triggers:
+            if path.name == "promote-stable.yml":
+                assert set(triggers) == {"workflow_run", "workflow_dispatch"}
+                assert triggers["workflow_run"] == {
+                    "workflows": ["SkillEvaluator release published"],
+                    "types": ["completed"],
+                }
+                assert document["permissions"] == {}
+                assert set(document["jobs"]) == {"promote"}
+                promote = document["jobs"]["promote"]
+                assert promote["environment"] == "stable-channel"
+                assert promote["permissions"] == {"contents": "read"}
+                assert "github.ref == 'refs/heads/main'" in promote["if"]
+                checkout, writer, update = promote["steps"]
+                assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"])
+                assert checkout["with"] == {
+                    "ref": "refs/heads/main",
+                    "fetch-depth": "0",
+                    "persist-credentials": "false",
+                }
+                assert re.fullmatch(r"actions/create-github-app-token@[0-9a-f]{40}", writer["uses"])
+                assert writer["with"]["permission-contents"] == "write"
+                assert update["run"] == "bash ci/promote_stable.sh"
+                continue
             # The consumer listener calls only the immutable trusted publishers;
             # it has no local steps, candidate checkout or image build/cache job.
             assert path.name == "skill-feedback-all-tiers.yml"

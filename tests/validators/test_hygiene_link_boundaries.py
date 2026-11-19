@@ -215,3 +215,9 @@ def test_link_diagnostics_bound_escaped_unicode(tmp_path: Path, reporter_type: t
     assert len(result.errors[0]) < 220
     assert "\\U0001f600" in result.errors[0]
     assert len(reporter_type().render_all([result])) < 3000
+
+
+def test_nested_alias_frontmatter_does_not_block_link_extraction() -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
+
+    assert markdown_link_targets(NESTED_ALIAS_SKILL_MD) == ["guide.md"]

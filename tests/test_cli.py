@@ -1499,6 +1499,7 @@ def test_validate_github_reports_scanner_crash_as_warning(tmp_path: Path, monkey
     assert "incomplete/bandit" in result.output
     assert "did not complete" in result.output
     assert "::notice title=SkillEvaluator::" in result.output
+    assert "::error" not in result.output
 
 
 def test_validate_junit_reports_scanner_crash_as_error(tmp_path: Path, monkeypatch) -> None:

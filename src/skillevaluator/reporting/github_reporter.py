@@ -256,9 +256,11 @@ def _annotations_for_result(
         annotations.append(_finding_annotation(finding, validator, workspace_root, scan_root))
 
     gate_failures = set(result.gate_failures)
+    # An incomplete scanner's reason is reported once, as its incomplete warning below.
+    incomplete_reasons = {_incomplete_reason(result, tool) for tool in result.incomplete_scans}
     for error in result.independent_errors():
         is_gate = error in gate_failures
-        if advisory:
+        if advisory or (error in incomplete_reasons and not is_gate):
             continue
         annotations.append(
             _Annotation(

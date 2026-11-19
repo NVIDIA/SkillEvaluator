@@ -14,6 +14,7 @@ from tests.yaml_alias_fixtures import (
     OVER_LIMIT_LEVELS,
     YAML_DIRECTIVE_VALUE_ERROR,
     alias_bomb_skill_md,
+    deeply_nested_flow,
     merge_bomb_yaml,
     scalar_alias_fan_yaml,
 )
@@ -64,6 +65,7 @@ def test_case_summary_still_reads_a_plain_description(tmp_path: Path):
     assert _skill_description(skill) == "Use when demoing."
 
 
+@pytest.mark.usefixtures("default_int_digit_limit")
 def test_case_summary_reads_no_description_from_a_yaml_directive_past_the_digit_limit(tmp_path: Path):
     # PyYAML's scanner raises a plain ValueError here; the reader caught every exception before.
     skill = _skill(tmp_path, f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Demo\n")
@@ -71,16 +73,35 @@ def test_case_summary_reads_no_description_from_a_yaml_directive_past_the_digit_
     assert _skill_description(skill) == ""
 
 
+@pytest.mark.usefixtures("default_int_digit_limit")
 def test_dataset_generation_falls_back_to_the_directory_name_for_a_yaml_directive_past_the_digit_limit(tmp_path: Path):
     skill = _skill(tmp_path, f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Demo\n")
 
     assert generate_dataset._parse_skill(skill)["name"] == "demo-skill"
 
 
+@pytest.mark.usefixtures("default_int_digit_limit")
 @pytest.mark.parametrize(
     "frontmatter",
-    [merge_bomb_yaml(), scalar_alias_fan_yaml(), "name: *missing", "name: [unclosed"],
-    ids=["merge-key-bomb", "scalar-alias-fan", "undefined-alias", "invalid-yaml"],
+    [
+        merge_bomb_yaml(),
+        scalar_alias_fan_yaml(),
+        "name: *missing",
+        "name: [unclosed",
+        # These raise from plain yaml.safe_load, so reverting the reader to it fails the test.
+        "name: renamed\nreleased: 2026-13-45",
+        YAML_DIRECTIVE_VALUE_ERROR,
+        deeply_nested_flow(),
+    ],
+    ids=[
+        "merge-key-bomb",
+        "scalar-alias-fan",
+        "undefined-alias",
+        "invalid-yaml",
+        "invalid-date",
+        "yaml-directive-digits",
+        "deep-nesting",
+    ],
 )
 def test_workspace_skill_name_falls_back_to_the_directory_name(tmp_path: Path, frontmatter: str):
     from skillevaluator.tier3.harbor.runner import _workspace_skill_name
@@ -112,3 +133,17 @@ def test_create_eval_dataset_reports_over_limit_frontmatter_as_one_error_line(tm
     # A traceback would leave the ValueError as the exception; a clean error exits through SystemExit.
     assert isinstance(result.exception, SystemExit)
     assert "Traceback" not in result.output
+
+
+def test_workspace_skill_name_keeps_the_last_of_a_repeated_key(tmp_path: Path):
+    from skillevaluator.tier3.harbor.runner import _workspace_skill_name
+
+    skill = _skill(tmp_path, "---\nname: first\nname: second\n---\n# Demo\n")
+
+    assert _workspace_skill_name(skill) == "second"
+
+
+def test_case_summary_keeps_the_last_of_a_repeated_description(tmp_path: Path):
+    skill = _skill(tmp_path, "---\nname: demo-skill\ndescription: first\ndescription: second\n---\n# Demo\n")
+
+    assert _skill_description(skill) == "second"

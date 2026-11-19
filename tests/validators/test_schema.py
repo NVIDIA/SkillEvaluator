@@ -1809,6 +1809,7 @@ class TestFrontmatterComplexityLimits:
 
         assert any(f.check_name == "yaml_complexity" for f in result.findings)
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     def test_a_yaml_directive_number_past_the_digit_limit_is_a_syntax_finding_not_a_crash(self, tmp_path: Path):
         manifest = f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Demo\n"
 
@@ -1828,6 +1829,7 @@ class TestFrontmatterComplexityLimits:
         assert [f.check_name for f in result.findings if f.check_name == "duplicate_key"] == ["duplicate_key"]
         assert not any(f.check_name in {"yaml_syntax", "yaml_complexity"} for f in result.findings)
 
+    @pytest.mark.usefixtures("default_int_digit_limit")
     def test_duplicate_key_scan_survives_text_the_loader_rejects(self):
         from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 

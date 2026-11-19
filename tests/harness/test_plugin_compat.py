@@ -243,6 +243,15 @@ def test_unknown_harness_version_name_is_a_usage_error(tmp_path: Path):
     assert result.exit_code == 2 and "codeex" in result.output
 
 
+def test_json_key_count_survives_a_file_nested_past_the_parser_recursion_limit(tmp_path: Path):
+    from skillevaluator.harness.plugin import _json_keys
+
+    nested = tmp_path / "hooks.json"
+    nested.write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    assert _json_keys(nested) == 1
+
+
 def test_plugin_json_nested_past_the_parser_recursion_limit_is_an_invalid_manifest(tmp_path: Path):
     (tmp_path / ".claude-plugin").mkdir()
     (tmp_path / ".claude-plugin" / "plugin.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")

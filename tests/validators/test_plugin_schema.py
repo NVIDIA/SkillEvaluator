@@ -271,3 +271,28 @@ class TestPluginManifestComplexityLimits:
         result = PluginSchemaValidator().validate(tmp_path)
 
         assert (check_name, "HIGH") in self._findings(result)
+
+    def test_contained_plugin_json_with_undecodable_bytes_is_unreadable_not_a_crash(self, tmp_path: Path):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_bytes(b'\xff\xfe{"name": "x"}')
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_unreadable", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_with_undecodable_bytes_is_unreadable_not_a_crash(self, tmp_path: Path):
+        (tmp_path / "agent_plugin.yaml").write_bytes(b"name: \xff\xfe\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_unreadable", "HIGH") in self._findings(result)
+
+    def test_invalid_json_message_names_the_parser_position_once(self, tmp_path: Path):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": ', encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        (finding,) = [f for f in result.findings if f.check_name == "manifest_invalid_json"]
+        assert finding.message.count("not valid JSON") == 1
+        assert "line 1" in finding.message

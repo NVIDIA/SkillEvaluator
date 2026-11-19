@@ -35,7 +35,8 @@ MAX_STRUCTURED_INT_BITS = 14_000
 # reaches, aliases included. The floor is 64 full-size scalars, which covers any
 # frontmatter (a skill description is at most 1,024 characters) and the evals
 # config byte cap; a longer document may expand to four times its own length,
-# which a document without aliases never does.
+# which a document without aliases never does. The count is of decoded characters; ``repr``
+# escapes some of them, so a rendering can be several times wider.
 MAX_YAML_EXPANDED_CHARS = 4_194_304
 YAML_EXPANDED_CHARS_PER_INPUT_CHAR = 4
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
@@ -230,9 +231,8 @@ def _validate_graph(
                 stack.append((item, depth + 1))
                 stack.append((key, depth + 1))
         elif isinstance(current, Set):
-            # ``!!set`` members are scalars, but a member can be as large as any other value.
-            if len(current) > max_collection_items:
-                raise _limit(f"set size exceeds {max_collection_items}")
+            # ``!!set`` members are scalars, but a member can be as large as any other value. YAML
+            # writes a set as a mapping, which the composed-node preflight already bounds.
             stack.extend((item, depth + 1) for item in current)
         elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
             if len(current) > max_collection_items:
@@ -247,7 +247,7 @@ def _validate_graph(
                 # Hexadecimal, binary, octal and sexagesimal YAML integers skip the
                 # decimal digit limit of int(), and str() would then raise.
                 raise _limit(f"integer size exceeds {MAX_STRUCTURED_INT_BITS} bits")
-            chars += current.bit_length() // 3 + 1  # decimal digits, rounded up
+            chars += current.bit_length() // 3 + 1  # an upper bound on its decimal digits
         if max_expanded_chars is not None and chars > max_expanded_chars:
             raise _limit(f"expanded text exceeds {max_expanded_chars} characters")
 

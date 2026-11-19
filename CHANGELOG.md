@@ -79,7 +79,8 @@ All notable changes to SkillEvaluator are documented in this file.
   one-line error. Chained YAML merge keys, deeply nested YAML or JSON, an
   invalid date, or an integer past Python's digit limit in those files now
   produce a finding or a fail-closed result instead of exhausting memory or
-  ending the run with a traceback and no report.
+  ending the run with a traceback and no report. A plugin manifest with bytes
+  that are not valid UTF-8 is an unreadable-manifest finding, not a traceback.
 - The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
   which fixes false incomplete-analysis findings on valid JSON hook
   `timeout` fields.

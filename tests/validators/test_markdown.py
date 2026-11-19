@@ -306,6 +306,7 @@ def test_over_limit_frontmatter_is_read_as_markdown_without_expanding_it():
     assert markdown_link_targets(content) == ["references/guide.md"]
 
 
+@pytest.mark.usefixtures("default_int_digit_limit")
 def test_a_yaml_directive_number_past_the_digit_limit_reads_the_file_as_markdown():
     # PyYAML's scanner raises a plain ValueError here; the reader tolerated it before it used the bounded loader.
     content = f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\nSee [guide](references/guide.md).\n"

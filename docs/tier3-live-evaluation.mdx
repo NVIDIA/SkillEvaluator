@@ -101,11 +101,9 @@ and any input files. Then validate:
 skillevaluator tier3 validate ./my-skill --strict
 ```
 
-Confirm the file exists first: an absent `evals/` directory can be reported as
-missing without a failing exit code. Resolve errors and warnings before
-continuing. Passing validation checks the
-dataset's structure and flagged wording; you still need to review whether its
-tasks represent how people will use the skill.
+Resolve missing datasets, errors, and warnings before continuing. Validation
+checks the dataset's structure and flagged wording. You still need to review
+whether the tasks represent how people will use the skill.
 
 ### Check readiness
 

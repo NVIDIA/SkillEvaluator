@@ -2,8 +2,11 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import hashlib
+import importlib.util
 import io
 import json
+import shlex
+import shutil
 import subprocess
 import sys
 import threading
@@ -15,8 +18,9 @@ from urllib.error import HTTPError
 from zipfile import ZipFile
 
 import pytest
+import yaml
 
-from ci import render_templates, stable_channel
+from ci import release_bundle, stable_channel
 
 VERSION = "1.0.2"
 WHEEL = f"skillevaluator-{VERSION}-py3-none-any.whl"
@@ -53,10 +57,6 @@ def write_json(path, contents):
     path.write_text(json.dumps(contents) + "\n")
 
 
-def checksums(files):
-    return "".join(f"{digest(path.read_bytes())}  {path.name}\n" for path in sorted(files))
-
-
 def build_dist(dist, package, *, documentation="https://docs.nvidia.com/skills/skillevaluator/"):
     metadata = (
         f"Metadata-Version: 2.4\nName: skillevaluator\nVersion: {VERSION}\n"
@@ -76,34 +76,40 @@ def build_dist(dist, package, *, documentation="https://docs.nvidia.com/skills/s
 
 
 @pytest.fixture
-def release(tmp_path):
+def release(tmp_path, monkeypatch):
     repo = tmp_path / "repo"
     repo.mkdir()
     git(repo, "init", "-q")
     package = repo / "src/skillevaluator"
     package.mkdir(parents=True)
     (package / "__init__.py").write_text(f"__version__ = {VERSION!r}\n")
-    (repo / "pyproject.toml").write_text(f'[project]\nversion = "{VERSION}"\n')
-    lock = b"version = 1\n"
-    (repo / "uv.lock").write_bytes(lock)
-    write_json(package / DESCRIPTORS[1], {"capabilities": CAPABILITIES, "report_contract": "skillevaluator-ci-v1"})
-    candidate = commit(repo)
-    bundle = repo / "ci/bundles" / VERSION
-    pins = render_templates.render_templates(bundle, candidate, IMAGE)
-    observation = "b" * 64
+    (repo / "pyproject.toml").write_text(
+        '[build-system]\nrequires = ["setuptools>=77", "wheel"]\nbuild-backend = "setuptools.build_meta"\n'
+        f'[project]\nname = "skillevaluator"\nversion = "{VERSION}"\nrequires-python = ">=3.12,<3.15"\n'
+        '[project.urls]\nDocumentation = "https://docs.nvidia.com/skills/skillevaluator/"\n'
+        '[tool.setuptools.package-data]\nskillevaluator = ["ci-release.json", "ci-release-all-tiers.json"]\n',
+        encoding="utf-8",
+    )
+    (repo / "uv.lock").write_text("version = 1\n", encoding="utf-8")
     write_json(
-        bundle / "verification-receipt.json",
+        package / DESCRIPTORS[1],
+        {"schema_version": 2, "capabilities": CAPABILITIES, "report_contract": "skillevaluator-ci-v1"},
+    )
+    candidate = commit(repo)
+    smoke = tmp_path / "smoke-receipt.json"
+    write_json(
+        smoke,
         {
             "all_verified": True,
             "image": IMAGE,
-            "source_revision": candidate,
-            "platform": {"os": "linux", "architecture": "amd64"},
-            "public_manifest_matches_smoke_tested_image": True,
-            "anonymous_pull_verified": True,
-            "official_build_run": RUN,
-            "runtime_observation_sha256": observation,
-            "public_manifest_digest": IMAGE.split("@")[1],
-            "image_smoke_cases": [
+            "runtime": {
+                "id": "sha256:" + "b" * 64,
+                "digests": [IMAGE],
+                "os": "linux",
+                "architecture": "amd64",
+                "source_revision": candidate,
+            },
+            "cases": [
                 {"case": case, "verified": True, "exit_code": code, "overall_status": status}
                 for case, code, status in (
                     ("all-pass", 0, "passed"),
@@ -115,44 +121,18 @@ def release(tmp_path):
             ],
         },
     )
-    inventory = {
-        tool: {"version": "2.0.0", "command": f"{tool} --version"}
-        for tool in ("bandit", "pip-audit", "skillspector", "semgrep", "gitleaks")
-    }
-    inventory["skillevaluator"] = {"version": VERSION, "command": "skillevaluator --version"}
-    inventory["verification"] = {
-        "image": IMAGE,
-        "source_revision": candidate,
-        "build_run": RUN,
-        "runtime_observation_sha256": observation,
-    }
-    write_json(bundle / "scanner-inventory.json", inventory)
-    (bundle / "SHA256SUMS.txt").write_text(checksums(bundle.iterdir()))
-    files = sorted(bundle.iterdir())
-    with ZipFile(bundle / BUNDLE, "w") as archive:
-        for path in files:
-            archive.write(path, arcname=path.name)
-    pins.pop("caller_blob")
-    write_json(package / DESCRIPTORS[0], {**pins, "schema_version": 1})
-    write_json(
-        package / DESCRIPTORS[1],
-        {
-            **pins,
-            "schema_version": 2,
-            "capabilities": CAPABILITIES,
-            "feedback_ref": candidate,
-            "gitlab_ref": candidate,
-            "tools_ref": candidate,
-            "report_contract": "skillevaluator-ci-v1",
-            "evaluator_version": VERSION,
-            "runtime_lock_sha256": digest(lock),
-        },
-    )
-    for name, text in stable_channel.render(bundle).items():
-        output_directory = "ci/gitlab" if name == "stable-tier1.yml" else ".github/workflows"
-        output = repo / output_directory / name
-        output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_text(text)
+
+    def scanner_version(command, **_):
+        assert command[:2] == ["docker", "run"]
+        scanner = command[command.index("--entrypoint") + 1]
+        return VERSION if scanner == "skillevaluator" else "2.0.0"
+
+    generated = tmp_path / "generated"
+    with monkeypatch.context() as patch:
+        patch.setattr(release_bundle, "ROOT", repo)
+        patch.setattr(release_bundle.subprocess, "check_output", scanner_version)
+        release_bundle.build_bundle(generated, VERSION, candidate, IMAGE, smoke, RUN)
+    shutil.copytree(generated, repo, dirs_exist_ok=True)
     source = commit(repo)
     dist = tmp_path / "dist"
     dist.mkdir()
@@ -170,7 +150,21 @@ def release_command(repo, source, action, *args):
     )
 
 
-def test_assembles_manifest_and_verifies_exact_assets(release):
+def test_release_workflow_builds_only_distribution_artifacts():
+    path = SCRIPT.parents[1] / ".github/workflows/release.yml"
+    workflow = yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
+    assemble = next(
+        step["run"]
+        for step in workflow["jobs"]["prepare"]["steps"]
+        if "product_release.py assemble" in step.get("run", "")
+    )
+    command = shlex.split(
+        next(line for line in assemble.replace("\\\n", " ").splitlines() if line.startswith("uv build "))
+    )
+    assert "--no-create-gitignore" in command, "uv build adds .gitignore to the strict distribution directory"
+
+
+def test_assembles_generated_bundle_and_verifies_exact_assets(release):
     repo, source, dist, assets, candidate = release
     result = release_command(repo, source, "assemble", "--dist", dist, "--output", assets)
     assert result.returncode == 0, result.stderr
@@ -193,6 +187,37 @@ def test_assembles_manifest_and_verifies_exact_assets(release):
     verified = release_command(repo, source, "verify-assets", "--assets", assets)
     assert verified.returncode == 1
     assert "manifest" in verified.stderr
+
+
+def test_real_uv_build_output_assembles(release, tmp_path):
+    uv = shutil.which("uv")
+    if uv is None or any(importlib.util.find_spec(module) is None for module in ("setuptools", "wheel")):
+        pytest.skip("The offline package build requires uv, setuptools, and wheel")
+    repo, source, _fixture_dist, assets, _candidate = release
+    dist = tmp_path / "uv-build"
+    build = subprocess.run(
+        [
+            uv,
+            "build",
+            "--offline",
+            "--no-build-isolation",
+            "--python",
+            sys.executable,
+            "--no-sources",
+            "--no-create-gitignore",
+            "--out-dir",
+            str(dist),
+        ],
+        cwd=repo,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert build.returncode == 0, build.stderr
+    assert {path.name for path in dist.iterdir()} == {WHEEL, SDIST}
+    result = release_command(repo, source, "assemble", "--dist", dist, "--output", assets)
+    assert result.returncode == 0, result.stderr
+    assert release_command(repo, source, "verify-assets", "--assets", assets).returncode == 0
 
 
 def test_rejects_installed_package_from_before_bundle_pin(release):

@@ -11,19 +11,24 @@ The workflow accepts a bare `X.Y.Z` version, a full source commit SHA, and a
 phase. `Validate release` is the default. PRs, pushes, and tags never trigger
 the product release workflow.
 
-Before the first release, enable immutable releases in the repository and
-set the repository variable `RELEASE_DEVZONE_INDEX_URL` to the approved
-public HTTPS NVIDIA DevZone listing for `/skillevaluator/`. Configure these
-GitHub Actions environments for `main`:
+Before merging the release workflows, create the `release-image`,
+`release-github`, `release-kitmaker-dry-run`, and `release-kitmaker`
+GitHub Actions environments. For each environment, require approval from
+the repository's release maintainers, enable **Prevent self-review**, disable
+administrator bypass, and allow deployments only from the `main` branch.
 
-- `release-image` and `release-github` require maintainer approval. Grant this
-  repository's Actions token write access to the official public GHCR package.
-  The workflow needs to create the version tag and write the GitHub release.
-- `release-kitmaker-dry-run` and `release-kitmaker` run the Kitmaker jobs. Require
-  release-owner approval and prevent self-review on `release-kitmaker`. Set
-  the approved `KITMAKER_TELEPORT_VERSION`, `KITMAKER_FERRY_PROXY`, and
-  `KITMAKER_FERRY_JOIN_TOKEN` variables. Enroll the upstream release workflow
-  in Charon Ferry for the project's release POST and status GET.
+Before the first release, enable immutable releases and set
+`RELEASE_DEVZONE_INDEX_URL` to the approved public HTTPS NVIDIA DevZone
+listing for `/skillevaluator/`.
+
+- Grant this repository's Actions token write access to the official public
+  GHCR package. The workflow creates the version tag and writes the GitHub
+  release using its scoped job token.
+- Set the approved `KITMAKER_TELEPORT_VERSION`, `KITMAKER_FERRY_PROXY`, and
+  `KITMAKER_FERRY_JOIN_TOKEN` variables in both Kitmaker environments. Enroll
+  the upstream release workflow in Charon Ferry. The submission endpoint
+  validates the wheel and source distribution during a dry run and publishes
+  them during an approved upload. The status endpoint reports each result.
 - Configure `KITMAKER_VAULT_URL`, `KITMAKER_VAULT_AUTH_MOUNT`,
   `KITMAKER_VAULT_ROLE`, and `KITMAKER_VAULT_AUDIENCE` on each Kitmaker
   environment. Bind each Vault JWT role to the approved repository and
@@ -39,9 +44,6 @@ GitHub Actions environments for `main`:
   Kitmaker and run the protected dry-run job successfully before approving
   the first upload. The checked-in dry-run job sends `upload: false`.
   Apply that restriction in Ferry policy as well if the tenant supports it.
-
-See [Kitmaker onboarding](https://kitmaker.gitlab-master-pages.nvidia.com/kitmaker-docs/users/portal-api/onboarding.html)
-and the [Wheel Release API](https://kitmaker.gitlab-master-pages.nvidia.com/kitmaker-docs/users/portal-api/wheel-release-api.html).
 
 ## Prepare the CI release
 
@@ -84,9 +86,11 @@ image and consumer qualification details.
    checksums. Before creating the tag, it resolves the official GHCR digest
    and checks both package indexes for version conflicts. It verifies the
    staged bytes before publishing and verifies anonymous downloads afterward.
-   The notes show that package publication is pending.
-3. Kitmaker dry-runs both anonymous Python asset URLs. Review the results and
-   approve `release-kitmaker` only after both pass. The job submits those URLs
+   The notes show that package publication is pending. Release runs share one
+   concurrency group across versions. A backfilled version stays off **Latest**
+   when a newer release already holds it.
+3. Approve `release-kitmaker-dry-run` to validate both anonymous Python asset
+   URLs. Review the results and approve `release-kitmaker` after both pass. The job submits those URLs
    for both public PyPI and NVIDIA DevZone and records its request UUID in the
    private Vault receipt. The workflow verifies the exact index-hosted files,
    fresh pip and uv installations, a Tier 1 report, and the installed CI pins

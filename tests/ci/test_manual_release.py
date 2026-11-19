@@ -3,6 +3,7 @@
 
 import importlib.util
 import json
+import re
 from pathlib import Path
 from unittest.mock import Mock
 
@@ -30,6 +31,31 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     assert jobs["finalize"]["needs"] == ["preflight", "verify-indexes"]
     (preflight,) = [step for step in jobs["prepare"]["steps"] if "inspect-indexes" in step.get("run", "")]
     assert preflight["if"] == "inputs.phase == 'Validate release'"
+
+
+@pytest.mark.parametrize("name", ["release", "release-tier1-image", "release-kitmaker"])
+def test_release_workflows_scope_permissions_and_credentials(name):
+    source = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(source, Loader=yaml.BaseLoader)
+    assert workflow["permissions"] == {}
+    assert re.search(r"\bsecrets\s*(?:\.|\[|:)", source, re.IGNORECASE) is None
+    checkouts = [
+        step
+        for job in workflow["jobs"].values()
+        for step in job.get("steps", [])
+        if step.get("uses", "").startswith("actions/checkout@")
+    ]
+    assert checkouts
+    assert all(step["with"]["persist-credentials"] == "false" for step in checkouts)
+
+
+def test_release_dispatches_serialize_across_versions():
+    source = (ROOT / ".github/workflows/release.yml").read_text(encoding="utf-8")
+    workflow = yaml.load(source, Loader=yaml.BaseLoader)
+    assert workflow["concurrency"] == {
+        "group": "skillevaluator-release",
+        "cancel-in-progress": "false",
+    }
 
 
 @pytest.fixture

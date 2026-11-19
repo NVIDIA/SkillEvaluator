@@ -25,7 +25,7 @@ permissions: {}
 env:
   RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
 concurrency:
-  group: skillevaluator-release-${{ inputs.version }}
+  group: skillevaluator-release
   cancel-in-progress: false
 
 jobs:
@@ -102,7 +102,7 @@ jobs:
       - name: Build and assemble the launch artifacts
         if: steps.restore.outputs.restored == 'false'
         run: |
-          uv build --python 3.13 --no-sources --out-dir "$RUNNER_TEMP/dist"
+          uv build --python 3.13 --no-sources --no-create-gitignore --out-dir "$RUNNER_TEMP/dist"
           python3 ci/product_release.py assemble --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --dist "$RUNNER_TEMP/dist" --output "$RUNNER_TEMP/product-release"
       - name: Verify asset identity and package metadata
@@ -166,7 +166,7 @@ jobs:
           ref: ${{ needs.preflight.outputs.source_sha }}
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.prepare.outputs.artifact }}
           path: ${{ runner.temp }}/product-release
@@ -228,7 +228,7 @@ jobs:
         with:
           ref: ${{ needs.preflight.outputs.source_sha }}
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
         with:
           name: ${{ needs.stage.outputs.artifact }}
           path: ${{ runner.temp }}/product-release
@@ -276,3 +276,4 @@ jobs:
           assets="$RUNNER_TEMP/product-release"
           test "$(python3 ci/github_release.py restore --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets")" = true
           python3 ci/github_release.py finalize --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets"
+          printf '%s\n' 'Run **Promote stable GitHub workflows** on `main` from Actions to promote the latest verified release.' >> "$GITHUB_STEP_SUMMARY"

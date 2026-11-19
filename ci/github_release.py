@@ -43,14 +43,65 @@ def api(path: str, method: str = "GET", data: dict | None = None):
     return json.loads(response) if response else None
 
 
+def list_releases() -> list[dict]:
+    pages = json.loads(gh("api", "--paginate", "--slurp", f"{API_ROOT}/releases?per_page=100"))
+    if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
+        raise ValueError("GitHub release listing is invalid.")
+    releases = [release for page in pages for release in page]
+    if any(not isinstance(release, dict) or not isinstance(release.get("tag_name"), str) for release in releases):
+        raise ValueError("GitHub release listing is invalid.")
+    return releases
+
+
 def get_release(tag: str) -> dict | None:
     # The release-by-tag API can exclude drafts. List with authenticated access
     # so an interrupted upload resumes the same draft.
-    pages = json.loads(gh("api", "--paginate", "--slurp", f"{API_ROOT}/releases?per_page=100"))
-    matches = [release for page in pages for release in page if release["tag_name"] == tag]
+    matches = [release for release in list_releases() if release["tag_name"] == tag]
     if len(matches) > 1:
         raise ValueError(f"Multiple GitHub releases for {tag}")
     return matches[0] if matches else None
+
+
+def current_latest_version() -> tuple[int, ...] | None:
+    result = subprocess.run(
+        ["gh", "api", "--include", f"{API_ROOT}/releases/latest"], text=True, capture_output=True, check=False
+    )
+    headers, separator, body = result.stdout.partition("\n\n")
+    status_line = headers.split("\n", 1)[0]
+    match = re.fullmatch(r"HTTP/[0-9.]+ ([1-5][0-9]{2})(?: .*)?", status_line)
+    if not separator or match is None:
+        raise ValueError("GitHub Latest lookup did not return a valid HTTP response.")
+    status = match[1]
+    if status == "404" and result.returncode == 1:
+        # Confirm that the repository is accessible and has no published stable
+        # release before treating the missing Latest endpoint as a first release.
+        releases = list_releases()
+        if any(type(release.get(flag)) is not bool for release in releases for flag in ("draft", "prerelease")):
+            raise ValueError("GitHub release listing has invalid publication state.")
+        if any(not release["draft"] and not release["prerelease"] for release in releases):
+            raise ValueError("GitHub Latest is missing despite a published stable release.")
+        return None
+    if status != "200" or result.returncode:
+        raise ValueError(f"GitHub Latest lookup failed (HTTP {status}).")
+
+    release = product_release.json_object(body.encode(), "GitHub Latest response")
+    published_at = release.get("published_at")
+    if (
+        release.get("draft") is not False
+        or release.get("prerelease") is not False
+        or not isinstance(published_at, str)
+        or not published_at
+    ):
+        raise ValueError("GitHub Latest must be a published stable release.")
+    tag = release.get("tag_name")
+    if not isinstance(tag, str) or not tag.startswith("v"):
+        raise ValueError("GitHub Latest must use a canonical vX.Y.Z version tag.")
+    version = tag[1:]
+    try:
+        product_release.names_for(version)
+    except ValueError as exc:
+        raise ValueError("GitHub Latest must use a canonical vX.Y.Z version tag.") from exc
+    return tuple(map(int, version.split(".")))
 
 
 def tag_target(tag: str) -> str | None:
@@ -240,7 +291,13 @@ def stage(version: str, source_sha: str, assets: Path, run: str) -> None:
         verify_staged(draft, version, assets, complete=True)
         if check_tag(tag, source_sha) != source_sha:
             raise ValueError(f"Could not verify GitHub tag {tag}.")
-        release = api(f"releases/{release['id']}", "PATCH", {"draft": False, "body": notes})
+        current_latest = current_latest_version()
+        newer = current_latest is None or tuple(map(int, version.split("."))) > current_latest
+        release = api(
+            f"releases/{release['id']}",
+            "PATCH",
+            {"draft": False, "body": notes, "make_latest": "true" if newer else "false"},
+        )
     if release["draft"] or not release.get("immutable"):
         raise ValueError("The GitHub release is not immutable. Verify repository release settings.")
 

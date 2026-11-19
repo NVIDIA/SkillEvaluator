@@ -130,6 +130,81 @@ def test_diagnostic_text_and_lists_are_bounded_redacted_and_idempotent():
     assert sanitize_completeness(merged) == merged
 
 
+def test_parser_diagnostic_is_projected_without_source_offsets_and_survives_merge():
+    raw = {
+        "ledger_exceptions": [
+            {
+                "path": "scripts/admission.mjs",
+                "phase": "static",
+                "reason_code": "static_parse_limit",
+                "analyzers": ["static_patterns_tool_misuse"],
+                "parser_diagnostic": {
+                    "cause": "runtime_dependent",
+                    "check": "command_string_runtime",
+                    "start_line": 74,
+                    "end_line": 170,
+                    "unchecked_scope": "remaining_input",
+                    "full_input_checked": False,
+                    "source_start_offset": 3958,
+                    "source_end_offset": 8650,
+                    "location_precision": "source_span",
+                    "observed_is_lower_bound": False,
+                },
+            }
+        ]
+    }
+    record = completeness_record(raw, "skillspector")
+    diagnostic = record["ledger_exceptions"][0]["parser_diagnostic"]
+    assert diagnostic == {
+        "cause": "runtime_dependent",
+        "check": "command_string_runtime",
+        "start_line": 74,
+        "end_line": 170,
+        "unchecked_scope": "remaining_input",
+        "full_input_checked": False,
+    }
+    encoded = json.dumps(record)
+    assert "source_start_offset" not in encoded
+    assert "3958" not in encoded
+    assert "location_precision" not in encoded
+    wrapped = {"records": [record], "omitted_records": 0}
+    assert sanitize_completeness(wrapped) == wrapped
+    merged = merge_completeness({}, wrapped, prefix="spawn-helper")
+    assert merged["records"][0]["skill"] == "spawn-helper"
+    assert merged["records"][0]["ledger_exceptions"][0]["parser_diagnostic"] == diagnostic
+    assert sanitize_completeness(merged) == merged
+    record["ledger_exceptions"][0]["parser_diagnostic"]["source_start_offset"] = 3958
+    saved = sanitize_completeness({"records": [record]})
+    reprojected = saved["records"][0]["ledger_exceptions"][0]["parser_diagnostic"]
+    assert "source_start_offset" not in reprojected
+
+
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "not-a-dict",
+        True,
+        {"cause": "runtime_dependent", "start_line": "74", "end_line": 170},
+        {"cause": True, "check": False, "start_line": -1, "end_line": 10, "full_input_checked": "no"},
+        {"cause": "runtime_dependent", "start_line": 170, "end_line": 74},
+    ],
+    ids=["string", "bool", "string-line", "bool-fields", "end-before-start"],
+)
+def test_malformed_parser_diagnostic_is_dropped_or_stripped_to_safe_fields(diagnostic: object):
+    record = completeness_record(
+        {"ledger_exceptions": [{"path": "scripts/helper.mjs", "parser_diagnostic": diagnostic}]},
+        "skillspector",
+    )
+    projected = record["ledger_exceptions"][0].get("parser_diagnostic")
+    if projected is None:
+        return
+    assert "start_line" not in projected
+    assert "end_line" not in projected
+    assert projected.get("full_input_checked") is not True
+    text_keys = {key for key in projected if key not in {"start_line", "end_line", "full_input_checked"}}
+    assert all(isinstance(projected[key], str) for key in text_keys)
+
+
 def test_saved_diagnostic_metadata_is_revalidated_at_json_boundary():
     result = partial_result()
     record = result.metadata["skillspector_completeness"]["records"][0]

@@ -792,3 +792,25 @@ def test_version_parses_tool_output(tmp_path, monkeypatch):
     tool.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     assert ExternalTool("Bandit", "bandit").version == "1.9.4"
+
+
+@pytest.mark.parametrize(
+    ("platform", "gitleaks", "semgrep"),
+    [
+        ("win32", "winget install Gitleaks.Gitleaks", "uv tool install semgrep"),
+        ("darwin", "brew install gitleaks", "brew install semgrep"),
+        ("linux", "go install github.com/zricethezav/gitleaks/v8@latest", "uv tool install semgrep"),
+    ],
+)
+def test_scanner_install_hints_match_the_host_platform(monkeypatch, platform, gitleaks, semgrep):
+    gitleaks_tool = ExternalTool("Gitleaks", "gitleaks")
+    semgrep_tool = ExternalTool("Semgrep", "semgrep")
+    monkeypatch.setattr(tool_runner.sys, "platform", platform)
+
+    gitleaks_hint = gitleaks_tool.get_install_hint()
+    semgrep_hint = semgrep_tool.get_install_hint()
+
+    assert gitleaks in gitleaks_hint
+    assert semgrep in semgrep_hint
+    if platform != "darwin":
+        assert "brew" not in gitleaks_hint + semgrep_hint

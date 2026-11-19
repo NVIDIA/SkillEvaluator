@@ -418,7 +418,8 @@ GitHub shows at most 10 error, 10 warning, and 10 notice annotations per
 step (50 per job). This format emits the most severe first, in a
 deterministic order (severity, path, line, check). INFO findings stop at nine
 notices so the summary notice is always shown. The summary notice says how
-many more were not annotated and points at the other reports from the same `-r` list.
+many more were not annotated and names the file report formats requested with `-r`.
+If the run writes no requested report files, it suggests rerunning with `-r github,json`.
 A catalog run (a folder of skills, with any `--workers` value) prints one
 capped stream and one summary for the whole catalog, after every skill has
 finished, rather than one per skill. The summary counts match

@@ -107,7 +107,8 @@ def test_severity_mapping() -> None:
     assert "::notice title=SkillEvaluator::" in text
 
 
-def test_location_with_and_without_line() -> None:
+@pytest.mark.parametrize("path_without_line", ["SKILL.md", "guide.txt "])
+def test_location_with_and_without_line(path_without_line: str) -> None:
     with_line = ValidationResult(validator_name="SECRETS")
     with_line.add_finding(
         Finding(
@@ -126,7 +127,7 @@ def test_location_with_and_without_line() -> None:
             severity=Severity.MEDIUM,
             check_name="quality_reliability",
             message="No troubleshooting section documented",
-            file_path="SKILL.md",
+            file_path=path_without_line,
         )
     )
 
@@ -134,8 +135,10 @@ def test_location_with_and_without_line() -> None:
     assert "file=config/settings.py" in with_text
     assert "line=15" in with_text
     without_text = GitHubReporter().render_all([without_line])
-    assert "file=SKILL.md" in without_text
-    assert "line=" not in without_text.split("file=SKILL.md", 1)[1].split("::", 1)[0]
+    warning = next(line for line in _commands(without_text) if line.startswith("::warning "))
+    properties = _runner_properties(warning)
+    assert properties["file"] == path_without_line
+    assert "line" not in properties
 
 
 def test_end_line_when_recorded() -> None:
@@ -354,7 +357,7 @@ def test_ordering_and_ten_ten_cap() -> None:
     summary = _summary(text)
     assert "4 more were not annotated" in summary
     assert "10 errors, 10 warnings, and 10 notices" in summary
-    assert "see the other reports" in summary
+    assert "Rerun with a file report such as -r github,json" in summary
 
 
 def test_info_findings_leave_room_for_the_summary_notice() -> None:
@@ -414,16 +417,17 @@ def test_folder_of_skills_keeps_distinct_paths(tmp_path: Path) -> None:
 
 def test_emit_reports_prints_github_and_writes_sarif(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
     result = ValidationResult(validator_name="SCHEMA")
-    result.add_finding(
-        Finding(
-            category="SCHEMA",
-            severity=Severity.HIGH,
-            check_name="frontmatter",
-            message="missing name",
-            file_path="SKILL.md",
-            line_number=1,
+    for line in range(1, 12):
+        result.add_finding(
+            Finding(
+                category="SCHEMA",
+                severity=Severity.HIGH,
+                check_name="frontmatter",
+                message="missing name",
+                file_path="SKILL.md",
+                line_number=line,
+            )
         )
-    )
     output_dir = tmp_path / "reports"
     emit_reports(
         [result],
@@ -434,7 +438,7 @@ def test_emit_reports_prints_github_and_writes_sarif(tmp_path: Path, capsys: pyt
     )
     captured = capsys.readouterr()
     assert "::error" in captured.out
-    assert "title=SkillEvaluator::" in captured.out
+    assert "See the requested file reports (sarif)" in _summary(captured.out)
     matches = list(output_dir.glob("*.sarif.json"))
     assert matches == [output_dir / "skillevaluator-quality.sarif.json"]
     assert not list(output_dir.glob("*github*"))
@@ -550,6 +554,7 @@ def test_catalog_emits_one_capped_stream(tmp_path: Path, monkeypatch: pytest.Mon
     reports = tmp_path / "reports"
     result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers=1))
     _assert_one_capped_catalog_stream(result.output, 12)
+    assert "See the requested file reports (json)" in _summary(result.output)
     assert "file=" in result.output and "SKILL.md" in result.output
     assert len(list(reports.glob("skill-*/*.json"))) == 12
 
@@ -666,6 +671,40 @@ def _runner_properties(command: str) -> dict[str, str]:
             value = value.replace(escaped, raw)
         properties[key] = value
     return properties
+
+
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not distinguish files with trailing spaces")
+def test_finding_annotations_preserve_trailing_spaces_in_tracked_paths(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    skill = repo / "skills" / "text-analyzer"
+    shutil.copytree(_TEXT_ANALYZER, skill)
+    (skill / "guide.txt").touch()
+    (skill / "guide.txt ").touch()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "add", "-A"], check=True)
+
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(skill),
+            "--checks",
+            "schema",
+            "--no-autopilot",
+            "-r",
+            "github",
+            "-o",
+            str(tmp_path / "reports"),
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    warnings = [
+        _runner_properties(line)["file"]
+        for line in _commands(result.output)
+        if line.startswith("::warning ") and "/unexpected_file" in line
+    ]
+    assert sorted(warnings) == ["skills/text-analyzer/guide.txt", "skills/text-analyzer/guide.txt "]
 
 
 @pytest.mark.skipif(os.name == "nt", reason="creating a directory symlink needs privileges on Windows")

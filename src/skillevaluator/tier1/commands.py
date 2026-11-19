@@ -692,7 +692,10 @@ def emit_reports(
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
         CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
     if "github" in report_formats:
-        GitHubReporter(workspace_root=repository_root, scan_root=scan_root).print_all(results)
+        github_reporter = GitHubReporter(
+            workspace_root=repository_root, scan_root=scan_root, report_formats=report_formats
+        )
+        github_reporter.print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:

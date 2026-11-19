@@ -90,10 +90,9 @@ def _github_file_path(
     """Return a repository-relative POSIX path, or None when the path is outside the repo."""
     if not isinstance(file_path, str) or not file_path.strip():
         return None
-    raw = file_path.strip()
-    path = _resolve_artifact_path(raw, scan_root)
+    path = _resolve_artifact_path(file_path, scan_root)
     if workspace_root is not None and (path.is_absolute() or path.root):
-        relative = _workspace_relative_path(path, raw, workspace_root, scan_root)
+        relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
         if relative is None:
             return None
         return _github_path_text(relative.as_posix())
@@ -105,7 +104,7 @@ def _github_file_path(
                 return None
     if path.is_absolute() or path.root:
         return None
-    return _github_path_text(raw.replace("\\", "/"))
+    return _github_path_text(file_path.replace("\\", "/"))
 
 
 def _link_github_file_path(
@@ -357,15 +356,17 @@ def _skill_counts(results: list[ValidationResult]) -> tuple[int, int, int, int]:
     return 1, 1, 0, 0
 
 
-def _summary_message(counts: tuple[int, int, int, int], omitted: int) -> str:
+def _summary_message(counts: tuple[int, int, int, int], omitted: int, report_formats: tuple[str, ...]) -> str:
     checked, passed, failed, incomplete = counts
     skill_word = "skill" if checked == 1 else "skills"
     text = f"{checked} {skill_word} checked, {passed} passed, {failed} failed, {incomplete} incomplete"
     if omitted:
-        text += (
-            f". {omitted} more were not annotated "
-            "(GitHub limits 10 errors, 10 warnings, and 10 notices per step); see the other reports"
-        )
+        text += f". {omitted} more were not annotated (GitHub limits 10 errors, 10 warnings, and 10 notices per step)."
+        file_reports = ", ".join(fmt for fmt in report_formats if fmt not in {"cli", "github"})
+        if file_reports:
+            text += f" See the requested file reports ({file_reports})."
+        else:
+            text += " Rerun with a file report such as -r github,json to see the omitted findings."
     return text
 
 
@@ -396,7 +397,7 @@ def _select(annotations: list[_Annotation]) -> tuple[list[_Annotation], int]:
     return chosen, omitted
 
 
-def _render(annotations: list[_Annotation], counts: tuple[int, int, int, int]) -> str:
+def _render(annotations: list[_Annotation], counts: tuple[int, int, int, int], report_formats: tuple[str, ...]) -> str:
     chosen, omitted = _select(annotations)
     lines = [item.format_line() for item in chosen]
     summary = _Annotation(
@@ -408,7 +409,7 @@ def _render(annotations: list[_Annotation], counts: tuple[int, int, int, int]) -
         end_line=None,
         check="summary",
         title="SkillEvaluator",
-        message=_summary_message(counts, omitted),
+        message=_summary_message(counts, omitted, report_formats),
     )
     lines.append(summary.format_line())
     # Each finding is one command line. A leftover newline would let untrusted
@@ -509,6 +510,7 @@ def print_collected_annotations(
     failed: Collection[str] = (),
     catalog_failed: Collection[str] = (),
     catalog_annotations: list[dict] | None = None,
+    report_formats: tuple[str, ...] = (),
 ) -> None:
     """Print one capped annotation stream and one summary for a whole catalog.
 
@@ -534,7 +536,7 @@ def print_collected_annotations(
             failures += 1
         else:
             passed += 1
-    _write_stdout(_render(annotations, (len(skills), passed, failures, incomplete)))
+    _write_stdout(_render(annotations, (len(skills), passed, failures, incomplete), report_formats))
 
 
 class GitHubReporter(ReporterBase):
@@ -545,9 +547,11 @@ class GitHubReporter(ReporterBase):
         *,
         workspace_root: Path | None = None,
         scan_root: Path | None = None,
+        report_formats: tuple[str, ...] = (),
     ) -> None:
         self.workspace_root = workspace_root
         self.scan_root = scan_root
+        self.report_formats = report_formats
 
     @property
     def name(self) -> str:
@@ -567,7 +571,7 @@ class GitHubReporter(ReporterBase):
         return annotations
 
     def render_all(self, results: list[ValidationResult]) -> str:
-        return _render(self.annotations(results), _skill_counts(results))
+        return _render(self.annotations(results), _skill_counts(results), self.report_formats)
 
     def print_all(self, results: list[ValidationResult]) -> None:
         collected = _collector.get()

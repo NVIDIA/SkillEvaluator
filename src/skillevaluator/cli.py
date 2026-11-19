@@ -1806,7 +1806,8 @@ def _print_catalog_github_annotations(
     points at the directory itself, without probing it: a linked directory is
     tracked as the link, and Git has no files beneath it.
     """
-    if "github" not in (ctx.params.get("report_formats") or ()):
+    report_formats = ctx.params.get("report_formats") or ()
+    if "github" not in report_formats:
         return
     from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 
@@ -1879,6 +1880,7 @@ def _print_catalog_github_annotations(
         catalog_failed={name for name, _reason in id_failures}
         | {path.relative_to(catalog_root).as_posix() for path in discovery_problems},
         catalog_annotations=extra,
+        report_formats=report_formats,
     )
 
 

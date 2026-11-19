@@ -40,7 +40,7 @@ All notable changes to SkillEvaluator are documented in this file.
   that runs the CLI can annotate the pull request without uploading SARIF.
   Incomplete scanners are warnings, gate failures stay errors, and the run
   ends with a summary notice that records how many findings were not annotated
-  under GitHub's per-step cap.
+  under GitHub's per-step cap and how to see the omitted findings.
 
 ### Fixed
 

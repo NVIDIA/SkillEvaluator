@@ -27,7 +27,7 @@ VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OFFICIAL_IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[a-f0-9]{64}")
 
 
-def render(bundle: Path) -> dict[str, str]:
+def render(bundle: Path, *, templates: Path = TEMPLATES) -> dict[str, str]:
     if not VERSION.fullmatch(bundle.name):
         raise ValueError("A stable channel bundle must have a numeric major.minor.patch version.")
     release = github_api.strict_json((bundle / "release.json").read_bytes())
@@ -53,7 +53,7 @@ def render(bundle: Path) -> dict[str, str]:
 
     return {
         name: (
-            (TEMPLATES / name)
+            (templates / name)
             .read_text(encoding="utf-8")
             .replace("RELEASE_TAG", f"v{bundle.name}")
             .replace("RELEASE_WORKFLOW_SHA", release["workflow_ref"])
@@ -125,23 +125,24 @@ def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path, help="Versioned CI bundle directory")
     parser.add_argument("--output", type=Path, default=ROOT / ".github/workflows")
+    parser.add_argument("--templates", type=Path, default=TEMPLATES, help="Directory containing stable templates")
     parser.add_argument("--check", action="store_true", help="Verify the workflows without changing any files")
     parser.add_argument(
         "--publication", nargs=6, metavar=("MANIFEST", "COMMIT", "DIGEST", "SIZE", "ZIP_DIGEST", "ZIP_SIZE")
     )
     args = parser.parse_args()
     try:
-        workflows = render(args.bundle)
+        workflows = render(args.bundle, templates=args.templates)
         if args.publication:
             manifest, commit, digest, size, zip_digest, zip_size = args.publication
             verify_publication(args.bundle, Path(manifest), commit, digest, int(size), zip_digest, int(zip_size))
         for name, content in workflows.items():
             target = args.output / name
             if args.check:
-                if target.read_text(encoding="utf-8") != content:
+                if target.read_bytes() != content.encode("utf-8"):
                     raise ValueError(f"{name} differs from the verified release bundle.")
             else:
-                target.write_text(content, encoding="utf-8")
+                target.write_bytes(content.encode("utf-8"))
     except (OSError, ValueError, BadZipFile, subprocess.CalledProcessError) as exc:
         parser.exit(1, f"{exc}\n")
 

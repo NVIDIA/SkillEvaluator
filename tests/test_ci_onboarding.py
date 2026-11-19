@@ -344,8 +344,9 @@ def test_stable_pr_preflight_verifies_both_workflows_at_the_tag_commit(repositor
         prefix + f"contents/.github/workflows/publish-skill-reports-stable.yml?ref={revision}": response(publisher),
     }
 
-    def github_api(method, endpoint):
+    def github_api(method, endpoint, *, missing_ok=False):
         assert method == "GET"
+        assert missing_ok == endpoint.endswith("/git/ref/tags/stable")
         return requests.pop(endpoint)
 
     monkeypatch.setattr(wizard, "github_api", github_api)
@@ -355,6 +356,53 @@ def test_stable_pr_preflight_verifies_both_workflows_at_the_tag_commit(repositor
     wizard.create_setup(repository, "example-org/consumer", "trunk", {wizard.SCAN: scan}, True, plan)
     assert plan["action"] == "configured"
     assert not requests
+
+
+@pytest.mark.parametrize("status", [404, 401, 403])
+def test_stable_pr_setup_handles_tag_lookup_failures_before_writes(repository, monkeypatch, status):
+    monkeypatch.setattr(
+        wizard,
+        "remote_preflight",
+        lambda *_args: {"report_url": "https://example-org.github.io/consumer/", "verified_private_url": None},
+    )
+    real_run = subprocess.run
+    endpoint = "repos/NVIDIA/SkillEvaluator/git/ref/tags/stable"
+
+    def run(args, *extra, **kwargs):
+        if args[:2] != ["gh", "api"]:
+            return real_run(args, *extra, **kwargs)
+        assert args[args.index("--method") + 1] == "GET"
+        assert endpoint in args
+        return subprocess.CompletedProcess(args, 1, f"HTTP/2.0 {status}\n\n", "")
+
+    def unexpected_write(*_args):
+        pytest.fail("A failed stable tag lookup must stop setup before repository writes")
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    monkeypatch.setattr(wizard, "enable_hosting", unexpected_write)
+    result = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "pr")
+
+    assert result.exit_code != 0
+    if status == 404:
+        assert "stable CI channel is unavailable" in result.output
+        assert "omit --channel stable" in result.output
+    else:
+        assert f"failed (HTTP {status})" in result.output
+        assert "Check your gh login and repository permissions" in result.output
+    assert not (repository / wizard.SCAN).exists()
+    assert not (repository / wizard.PUBLISH).exists()
+
+
+def test_missing_custom_component_tag_keeps_normal_github_api_error(monkeypatch):
+    from test_ci_onboarding_existing import CALLER
+
+    def missing_tag(args, **_kwargs):
+        assert "repos/example/components/git/ref/tags/v3" in args
+        return subprocess.CompletedProcess(args, 1, "HTTP/2.0 404\n\n", "")
+
+    monkeypatch.setattr(wizard.subprocess, "run", missing_tag)
+    with pytest.raises(wizard.SetupError, match=r"git/ref/tags/v3 failed \(HTTP 404\)"):
+        wizard.component_preflight(wizard.workflow_helpers.existing_scan(CALLER))
 
 
 def test_conflicting_publisher_does_not_partially_write_scan(repository, release_file):

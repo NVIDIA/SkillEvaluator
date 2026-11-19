@@ -82,6 +82,10 @@ HTML publisher together. Use `skillevaluator ci init --channel stable` with a CL
 release that supports this option. The versioned templates above are available
 for repositories that review each evaluator upgrade separately.
 
+Use `@stable` only with the two `-stable.yml` entry points below. Pin every
+other reusable workflow to the full commit SHA supplied by the released
+template.
+
 For a new manual setup, start with the released templates. To migrate an existing
 pinned setup, apply these edits to its current workflow files in one PR.
 

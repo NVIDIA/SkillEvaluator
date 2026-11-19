@@ -687,7 +687,12 @@ def component_preflight(existing: workflow_helpers.ExistingScan | None, *, requi
     repository, path, ref = match["repository"], match["path"], match["ref"]
     stable = existing.uses == workflow_helpers.STABLE_EVALUATOR
     if stable or ref.startswith("v"):
-        tag = github_api("GET", f"repos/{repository}/git/ref/tags/{quote(ref, safe='')}")
+        tag = github_api("GET", f"repos/{repository}/git/ref/tags/{quote(ref, safe='')}", missing_ok=stable)
+        if stable and tag is None:
+            raise SetupError(
+                "The SkillEvaluator stable CI channel is unavailable. Retry after it is published, "
+                "or omit --channel stable for a new pinned setup."
+            )
         if stable and tag.get("ref") != "refs/tags/stable":
             raise SetupError("The stable CI channel must resolve to the official Git tag.")
         obj = tag.get("object", {})

@@ -150,10 +150,10 @@ def test_promotion_bootstraps_an_existing_release_and_moves_both_workflows(tmp_p
                 archive.write(path, arcname=path.name)
         return dest
 
-    initial = prepare_bundle("1.2.3", source)
+    initial = prepare_bundle("1.0.1", source)
     git("add", "ci/bundles")
     git("commit", "-m", "Immutable published release")
-    git("tag", "v1.2.3")
+    git("tag", "v1.0.1")
 
     for name in ("github_api.py", "stable_channel.py", "promote_stable.sh"):
         shutil.copyfile(ROOT / "ci" / name, repo / "ci" / name)
@@ -186,7 +186,7 @@ def test_promotion_bootstraps_an_existing_release_and_moves_both_workflows(tmp_p
     )
     fake_gh.chmod(0o755)
 
-    def promote(tag, *, source_tree=None):
+    def promote(tag, *, source_tree=None, bootstrap_sha="", event="workflow_dispatch"):
         version = tag.removeprefix("v")
         commit = git("rev-parse", f"refs/tags/{tag}^{{commit}}")
         archive = repo / "ci/bundles" / version / f"skillevaluator-ci-{version}.zip"
@@ -219,6 +219,8 @@ def test_promotion_bootstraps_an_existing_release_and_moves_both_workflows(tmp_p
                 ),
                 "TEST_MANIFEST": str(manifest),
                 "STABLE_PUSH_TOKEN": "synthetic-test-token",
+                "STABLE_BOOTSTRAP_SHA": bootstrap_sha,
+                "GITHUB_EVENT_NAME": event,
             },
             check=False,
             text=True,
@@ -226,25 +228,37 @@ def test_promotion_bootstraps_an_existing_release_and_moves_both_workflows(tmp_p
         )
 
     first = prepare_release(initial)
-    git("push", "origin", "main", "v1.2.3")
-    promoted = promote("v1.2.3")
+    next_bundle = prepare_bundle("1.0.2", first)
+    second = prepare_release(next_bundle)
+    git("push", "origin", "main", "v1.0.1")
+    for blocked in (promote("v1.0.1"), promote("v1.0.1", bootstrap_sha=first, event="workflow_run")):
+        assert blocked.returncode != 0
+        assert "bootstrap-sha" in blocked.stderr
+        assert not git("ls-remote", "origin", "refs/tags/stable")
+    promoted = promote("v1.0.1", bootstrap_sha=first)
     assert promoted.returncode == 0, promoted.stderr
     assert published_ref() == first
-    assert "already serves" in promote("v1.2.3").stdout
+    early_retry = promote("v1.0.1")
+    assert early_retry.returncode == 0, early_retry.stderr
+    assert "already serves v1.0.1" in early_retry.stdout
+    assert published_ref() == first
+    git("tag", "v1.0.2")
+    git("push", "origin", "main", "v1.0.2")
 
-    next_bundle = prepare_bundle("1.2.4", first)
-    second = prepare_release(next_bundle)
-    git("tag", "v1.2.4")
-    git("push", "origin", "main", "v1.2.4")
-    rejected = promote("v1.2.4", source_tree="f" * 40)
+    template = repo / "ci/templates/stable/skill-checks-stable.yml"
+    template.write_text(template.read_text(encoding="utf-8") + "# Unreleased template edit\n", encoding="utf-8")
+    prepare_release(prepare_bundle("1.0.3", second))
+    git("push", "origin", "main")
+    rejected = promote("v1.0.2", source_tree="f" * 40)
     assert rejected.returncode != 0 and published_ref() == first
     assert "does not match the tagged CI release" in rejected.stderr
-    promoted = promote("v1.2.4")
+    promoted = promote("v1.0.2")
     assert promoted.returncode == 0, promoted.stderr
     assert published_ref() == second
+    assert "already serves v1.0.2" in promote("v1.0.2").stdout
 
     git("checkout", "--detach", first)
-    stale = promote("v1.2.3")
+    stale = promote("v1.0.1")
     assert stale.returncode != 0
     assert "already serves a newer release" in stale.stderr
     assert published_ref() == second

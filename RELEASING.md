@@ -108,7 +108,8 @@ retention period when reviewing a publisher compatibility change.
 Publishing a stable release signals **Promote stable GitHub workflows**. The
 promotion runs from `main`, verifies the latest immutable release and checks
 its CI archive and runtime identities against the published artifact manifest.
-It updates the single `stable` tag for both workflows. Before activation, install
+It verifies the stable wrappers against the templates at the release commit and
+moves the single `stable` tag to that commit. Before activation, install
 a dedicated GitHub App on this repository with Contents write access. Allow it
 to bypass only the tag ruleset for `stable`. In the `stable-channel` Actions
 environment, restrict deployments to `main` and set the
@@ -116,12 +117,44 @@ environment, restrict deployments to `main` and set the
 secret. Reserve the name `stable` for the tag and protect the version tags
 separately.
 
-Run the same workflow on `main` to bootstrap from the currently published bundle
-or retry promotion after a release created by an automation token. For bootstrap,
-the generated workflows must already be merged into `main`, and the bundle
-files must match those in the immutable release tag. The workflow rejects a
-downgrade, so a corrected release is the normal recovery path. Consumers can
-select the previous versioned templates while a fix is prepared.
+Run the same workflow on `main` to retry promotion after a release created by an
+automation token. A retry verifies the published release even if `main` already
+has the next version's wrappers. Qualify this case with the release App on GitHub.
+If GitHub refuses to update `stable` to the older workflow tree, keep the exact
+release commit at the tip of a protected release branch and retry.
+
+The immutable `v1.0.1` release predates the stable entry points. If it is still the
+latest release at first activation, merge its generated workflows into `main`
+and dispatch promotion with the full reviewed commit SHA as `bootstrap-sha`.
+The selected commit must contain the exact published CI bundle. Later retries
+of `v1.0.1` verify the existing `stable` target. Subsequent releases include the
+generated wrappers in their version tags. The workflow rejects downgrades.
+
+## Plan a GitLab Tier 1 stable channel
+
+The proposed GitLab channel would use the same protected `stable` tag as GitHub
+Actions. Generate `ci/gitlab/stable-tier1.yml` with a literal remote URL pinned
+to the evaluator job's full commit SHA and the matching scanner image digest.
+The consumer's root `.gitlab-ci.yml` would load that file with `include:remote`
+and declare its own merge-request rules. Keep the versioned bundle available
+for consumers that control each upgrade.
+
+Have the Tier 1 report record the resolved release version, evaluator commit,
+image digest, consumer commit, pipeline ID, and job ID. GitLab snapshots the
+included configuration at pipeline creation. A job retry reuses that snapshot,
+while a new pipeline can pick up a promotion.
+[GitLab include behavior](https://docs.gitlab.com/ci/yaml/#include)
+
+Before promotion, run GitLab CI Lint and verify changed-skill selection in a
+passing detached merge request, report retention after an intentional failure,
+and a full scan on the default branch. Consumers can pin the previous verified
+bundle while a corrected release is being prepared. Publish setup instructions
+in the [GitLab CI guide](docs/gitlab-ci.mdx) after verifying the include and
+report metadata in a consumer project.
+
+Upgrade all-tier setups with trusted merge-request feedback through reviewed
+changes to the immutable configuration, tools, and image pins.
+[All-tier GitLab setup](ci/templates/all-tiers/README.md#gitlab-checks-and-feedback)
 
 ## User-facing instructions
 

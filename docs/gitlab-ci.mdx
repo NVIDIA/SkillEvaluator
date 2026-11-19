@@ -170,30 +170,6 @@ Skill result: "skills/glossary-builder" — FAILED
   </Accordion>
 </AccordionGroup>
 
-## Planned Tier 1 stable channel
-
-The opt-in GitLab channel will use the same protected `stable` tag as GitHub
-Actions. The root `.gitlab-ci.yml` will load `ci/gitlab/stable-tier1.yml` from
-that tag with `include:remote` and keep its merge-request rules. The included
-file will use a literal remote URL pinned to the evaluator job's full commit SHA
-and select the matching scanner image by digest. Use the versioned bundle above
-for a fully pinned setup today or when you want to control each upgrade.
-
-GitLab saves a snapshot of the included configuration when a pipeline starts.
-A job retry uses that snapshot, and a new pipeline can pick up a newer
-promoted release. The Tier 1 report will record the resolved release version, evaluator
-commit, image digest, consumer commit, pipeline ID, and job ID.
-[GitLab include behavior](https://docs.gitlab.com/ci/yaml/#include)
-
-Before moving `stable`, maintainers will run GitLab CI Lint and verify a passing
-scan of changed skills in a detached merge request, report retention after a
-deliberate failure, and a full scan on the default branch. Users can pin the previous
-verified bundle while maintainers prepare a corrected release.
-
-For all-tier checks with trusted merge-request feedback, update the immutable
-configuration, tools, and image pins together through a reviewed merge request.
-[All-tier GitLab setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#gitlab-checks-and-feedback)
-
 For GitHub and other CI systems, see [Repository Integration](/skills/skillevaluator/repository-integration).
 
 <div id="three-tier-checks-and-feedback">

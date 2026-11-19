@@ -27,6 +27,30 @@ def _count(value: object) -> int:
     return value if type(value) is int and 0 <= value <= 1_000_000_000 else 0
 
 
+def _line_number(value: object) -> int | None:
+    return value if type(value) is int and 0 < value <= 1_000_000_000 else None
+
+
+def parser_diagnostic_record(value: object) -> dict | None:
+    """Project ``parser_diagnostic`` without source text or byte offsets."""
+    if not isinstance(value, dict):
+        return None
+    item: dict = {}
+    for key in ("cause", "check", "unchecked_scope"):
+        raw = value.get(key)
+        if isinstance(raw, str) and raw.strip():
+            item[key] = _text(raw)
+    start = _line_number(value.get("start_line"))
+    end = _line_number(value.get("end_line"))
+    if start is not None and end is not None and end >= start:
+        item["start_line"] = start
+        item["end_line"] = end
+    checked = value.get("full_input_checked")
+    if type(checked) is bool:
+        item["full_input_checked"] = checked
+    return item or None
+
+
 def completeness_record(completeness: dict, stage: str) -> dict:
     """Project only diagnostic fields; do not copy arbitrary scanner payloads."""
     rows = completeness.get("ledger_exceptions")
@@ -45,6 +69,9 @@ def completeness_record(completeness: dict, stage: str) -> dict:
         if isinstance(analyzers, list):
             item["analyzers"] = [_text(value) for value in analyzers[:8]]
             item["omitted_analyzers"] = max(0, len(analyzers) - 8) + _count(row.get("omitted_analyzers"))
+        diagnostic = parser_diagnostic_record(row.get("parser_diagnostic"))
+        if diagnostic is not None:
+            item["parser_diagnostic"] = diagnostic
         exceptions.append(item)
     return {
         "stage": stage if isinstance(stage, str) and stage in {"skillspector", "skillspector-llm"} else "unknown",

@@ -399,7 +399,7 @@ JUnit when a CI system ingests test reports rather than workflow commands.
 | MEDIUM or LOW | `::warning` |
 | INFO | `::notice` |
 | Gate failure (for example a quality score below `--min-score`) | `::error`, even when other findings on that group are warnings |
-| Scanner that did not complete | `::warning` with a "did not complete" message |
+| Scanner that did not complete | `::warning` with a "did not complete" message; every other non-gate error on that group (such as each entry in Bandit's `errors` list) is also a `::warning` |
 
 `file=` is the path relative to the Git repository root (the scanned folder
 when the target is not in a Git repository), using the same resolution rules

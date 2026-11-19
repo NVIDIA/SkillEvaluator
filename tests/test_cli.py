@@ -1502,6 +1502,43 @@ def test_validate_github_reports_scanner_crash_as_warning(tmp_path: Path, monkey
     assert "::error" not in result.output
 
 
+def test_validate_github_reports_every_bandit_scan_error_as_warning(tmp_path: Path, monkeypatch) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Exercise the GitHub mapping for a scanner with several errors.\n---\n",
+        encoding="utf-8",
+    )
+
+    def bandit_errors(_path: Path, **_kwargs) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="Code Risk", validator_description="Code risk")
+        output = json.dumps(
+            {
+                "results": [],
+                "errors": [
+                    {"filename": "a.py", "reason": "syntax error while parsing AST from file"},
+                    {"filename": "b.py", "reason": "exception while scanning file"},
+                ],
+            }
+        )
+        CodeRiskValidator()._process_bandit_output(output, result, exit_code=0)
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", bandit_errors)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "github"],
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "::error" not in result.output
+    warnings = [line for line in result.output.splitlines() if line.startswith("::warning")]
+    assert any("syntax error while parsing AST" in line for line in warnings), result.output
+    assert any("exception while scanning file" in line for line in warnings), result.output
+    assert all("incomplete/bandit" in line for line in warnings), result.output
+
+
 def test_validate_junit_reports_scanner_crash_as_error(tmp_path: Path, monkeypatch) -> None:
     import xml.etree.ElementTree as ET
 

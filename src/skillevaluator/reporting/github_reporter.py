@@ -217,6 +217,23 @@ class _Annotation:
         return f"::{self.level} {','.join(properties)}::{body}"
 
 
+def _incomplete_diagnostic(result: ValidationResult, validator: str, error: str) -> _Annotation:
+    text = error.casefold()
+    tool = next((tool for tool in result.incomplete_scans if tool.casefold() in text), None)
+    check = f"incomplete/{tool}" if tool else "incomplete"
+    return _Annotation(
+        level="warning",
+        kind="incomplete",
+        severity="medium",
+        path="",
+        line=None,
+        end_line=None,
+        check=check,
+        title=_title(validator, check),
+        message=_clean_text(error),
+    )
+
+
 def _finding_annotation(
     finding: Finding,
     validator: str,
@@ -264,6 +281,11 @@ def _annotations_for_result(
     for error in result.independent_errors():
         is_gate = error in gate_failures
         if advisory or (error in incomplete_reasons and not is_gate):
+            continue
+        if result.incomplete_scans and not is_gate:
+            # Other diagnostics from an incomplete scan, such as a scanner's further
+            # per-file errors, are warnings like the scan's own incomplete status.
+            annotations.append(_incomplete_diagnostic(result, validator, error))
             continue
         annotations.append(
             _Annotation(

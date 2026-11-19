@@ -941,6 +941,30 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
   <Accordion title="SkillSpector reports incomplete analysis for a valid helper script">
     SkillSpector releases before v2.13.1 can stop inspecting a valid Python or Perl helper early and record a `static_parse_limit`, `obfuscated_instruction_text`, or `runtime_limit` ledger exception. The security check is then `INCOMPLETE`, often with a High **Incomplete referenced artifact analysis (AE1)** finding at each line that names the helper. The finding's suggestion names the helper and the reason, such as `static_parse_limit (static_patterns_tool_misuse)`. Check the resolved release with `skillevaluator doctor --tier 1` and follow [scanner setup](/skills/skillevaluator/installation-options#system-tools) to update an older installation. If the exception remains after the upgrade, investigate it like any other incomplete scan.
   </Accordion>
+  <Accordion title="SkillSpector reports incomplete analysis for a JavaScript helper">
+    SkillSpector 2.13.4 through 2.13.6 can stop inspecting a JavaScript helper
+    (`.js`, `.mjs`, `.cjs`) or another script when a command or code string is
+    only known at run time, for example `spawnSync(process.execPath, [helper,
+    ...process.argv.slice(2)])`. It records a `static_parse_limit` ledger
+    exception whose `start_line` is empty and whose `parser_diagnostic` names
+    the span, `cause` (`runtime_dependent`), and `check`
+    (`command_string_runtime`). The security check stays `INCOMPLETE`. The
+    error now labels that row as `scripts/helper.mjs:74-170 [static;
+    static_parse_limit; runtime_dependent command_string_runtime;
+    analyzers=static_patterns_tool_misuse]` and adds a short hint to review
+    those lines and prefer fixed argument lists. An AE1 finding for a skill
+    line that names the helper quotes the same span in its suggestion
+    (`at target lines 74-170`), read from that ledger row; the reason in
+    its `skillspector_evidence` metadata has
+    `line_source: "parser_diagnostic"`. Updating SkillSpector does
+    not clear this limit today. If the helper is valid and the command is
+    safe, report a minimal reproducer to SkillSpector. JSON reports keep a
+    bounded `parser_diagnostic` on the matching
+    `skillspector_completeness` row (`cause`, `check`, `start_line`,
+    `end_line`, `unchecked_scope`, `full_input_checked`; never source text or
+    byte offsets). These diagnostics never turn an incomplete scan into a
+    pass.
+  </Accordion>
   <Accordion title="SkillSpector could not fully model the hooks">
     With SkillSpector v2.12.0 and later, a skill, folder or hooks-only plugin
     with an ordinary command or HTTP hook fails the security check with the
@@ -976,7 +1000,7 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
 
     SkillSpector v2.13.4 also reads a hook's `"timeout"` key as a command
     wrapper it cannot resolve and records
-    `hooks/hooks.json [static; static_parse_limit; analyzers=static_patterns_tool_misuse]`.
+    `hooks/hooks.json:11 [static; static_parse_limit; boundary_unresolved command_word_boundary; analyzers=static_patterns_tool_misuse]`.
     That row is an ordinary analysis gap, so with v2.13.4 the SkillSpector
     scan of such a manifest is also recorded as incomplete (`incomplete_scans`
     in the JSON report, and publication eligibility **Incomplete**), with an

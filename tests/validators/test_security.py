@@ -10,13 +10,16 @@ import re
 import struct
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zlib
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 
+from skillevaluator.cli import cli
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.provider_config import CHAT_DEFAULT_MODELS
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
@@ -8930,6 +8933,50 @@ def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugi
     assert any("1 passive PNG file (assets/logo.png)" in warning for warning in result.warnings)
 
 
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_reports_png_exclusion_in_every_format(
+    mock_tools, plugin_with_excluded_png, tmp_path: Path
+) -> None:
+    plugin, payload = plugin_with_excluded_png
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.version = "2.13.4"
+    mock_tools.skillspector.run.return_value = ToolResult(
+        success=True, stdout=json.dumps(payload), stderr="", exit_code=0
+    )
+    reports = tmp_path / "reports"
+    runner = CliRunner()
+    args = ["validate", str(plugin), "--type", "plugin", "--tiers", "1", "--checks", "security", "--no-llm"]
+    run = runner.invoke(cli, [*args, "-r", "cli,json,html,markdown,sarif,junit", "-o", str(reports)])
+
+    assert run.exit_code == 0, run.output
+    note = "1 passive PNG file (assets/logo.png)"
+    [json_path] = [path for path in reports.glob("*.json") if not path.name.endswith(".sarif.json")]
+    [security] = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    assert security["passed"]
+    [finding] = security["findings"]
+    assert finding["severity"] == "info"
+    assert note in finding["message"]
+    assert finding["file_path"] == "assets/logo.png"
+    assert sum(note in warning for warning in security["legacy"]["warnings"]) == 1
+
+    assert " ".join(run.output.split()).count(note) == 1
+    assert note in next(reports.glob("*.html")).read_text(encoding="utf-8")
+    assert note in next(reports.glob("*.md")).read_text(encoding="utf-8")
+    [sarif_run] = json.loads(next(reports.glob("*.sarif.json")).read_text(encoding="utf-8"))["runs"]
+    [sarif_note] = sarif_run["results"]
+    assert sarif_note["level"] == "note"
+    assert note in sarif_note["message"]["text"]
+    junit = ET.parse(next(reports.glob("*.junit.xml"))).getroot()
+    assert not junit.findall(".//failure")
+    assert not junit.findall(".//error")
+    assert any(note in (entry.text or "") for entry in junit.findall(".//testcase/system-out"))
+
+    compact = runner.invoke(cli, [*args, "-o", str(tmp_path / "compact")])
+    assert compact.exit_code == 0, compact.output
+    assert "assets/logo.png" in compact.output
+    assert "YARA and artifact integrity" in " ".join(compact.output.split())
+
+
 @pytest.mark.parametrize("include_status", [False, True], ids=["statusless", "unexpected-status"])
 @patch("skillevaluator.validators.security.Tools")
 def test_legacy_skillspector_reports_cannot_use_png_exclusions(
@@ -8974,7 +9021,8 @@ def test_plugin_root_security_retains_yara_findings_on_an_excluded_png(mock_tool
     assert not result.passed
     assert not result.is_incomplete
     assert [(finding.check_name, finding.file_path) for finding in result.findings] == [
-        ("Malware (YR1)", "assets/logo.png")
+        ("skillspector_passive_png_exclusion", "assets/logo.png"),
+        ("Malware (YR1)", "assets/logo.png"),
     ]
 
 

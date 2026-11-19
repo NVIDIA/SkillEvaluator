@@ -2897,10 +2897,10 @@ _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
 # SkillSpector reads at most this many hook, permission and settings records
 # from one manifest (``_MAX_DECLARATIONS`` in bundled_execution_surface.py).
 _SKILLSPECTOR_HOOK_DECLARATION_LIMIT = 2048
-# Findings that are facts about the scan, not judgments an LLM verifier can
-# overturn: the hook gate failure, and the reference-caveat note, which reports
-# scanner coverage, not a vulnerability. They keep their evidence unchanged.
-_LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, "skillspector_reference_caveats"})
+_SKILLSPECTOR_PASSIVE_PNG_CHECK = "skillspector_passive_png_exclusion"
+_SKILLSPECTOR_COVERAGE_CHECKS = frozenset({_SKILLSPECTOR_PASSIVE_PNG_CHECK, "skillspector_reference_caveats"})
+# The hook gate and coverage notes record scanner evidence outside LLM review.
+_LLM_VERIFY_EXEMPT_CHECKS = _SKILLSPECTOR_COVERAGE_CHECKS | {_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK}
 _SKILLSPECTOR_HOOK_COUNT_FIELDS = (
     "total_components",
     "partially_inspected_files",
@@ -3847,6 +3847,7 @@ class SecurityValidator(ValidatorBase):
         incomplete_before = result.is_incomplete
         # Accepted caveats are reported only once every later check has passed.
         caveat_warnings: list[str] = []
+        png_exclusion: Finding | None = None
         accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
@@ -4775,9 +4776,15 @@ class SecurityValidator(ValidatorBase):
                     more = count - 5
                     examples += f" and {more} more"
                 noun = "file" if count == 1 else "files"
-                caveat_warnings.append(
-                    f"SkillSpector's text pattern analyzers skipped {count} passive PNG {noun} ({examples}). "
-                    "YARA and artifact integrity ran on the full inventory."
+                png_exclusion = Finding(
+                    category="SCAN",
+                    severity=Severity.INFO,
+                    check_name=_SKILLSPECTOR_PASSIVE_PNG_CHECK,
+                    file_path=excluded_pngs[0],
+                    message=(
+                        f"SkillSpector's text pattern analyzers skipped {count} passive PNG {noun} ({examples}). "
+                        "YARA and artifact integrity ran on the full inventory."
+                    ),
                 )
             for issue in issues:
                 location = issue.get("location") or {}
@@ -4875,6 +4882,8 @@ class SecurityValidator(ValidatorBase):
 
         for note in caveat_warnings:
             result.add_warning(note)
+        if png_exclusion is not None:
+            result.add_finding(png_exclusion)
         if accepted_reference_caveats is not None:
             result.metadata["skillspector_reference_caveats"] = accepted_reference_caveats
             locations = ", ".join(
@@ -5793,7 +5802,7 @@ class SecurityValidator(ValidatorBase):
         # Coverage advisories remain visible, but are not active scanner issues
         # and cannot be suppressed by a reviewed vulnerability baseline.
         active_findings = [
-            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
+            finding for finding in result.findings if finding.check_name not in _SKILLSPECTOR_COVERAGE_CHECKS
         ]
         blocking = sum(
             1

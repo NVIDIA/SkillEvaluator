@@ -88,6 +88,9 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- SARIF reports retain findings on cyclic symbolic links (which previously
+  aborted on Python 3.12), preserve the named link on expanding cycles on every
+  supported Python, and normalize parent paths before workspace containment checks.
 - Tier 2 content clustering uses much less memory on skills with many chunks;
   similarity scores and clusters are unchanged.
 - Naming checks reject a trailing newline in skill, workflow, and rule path components,

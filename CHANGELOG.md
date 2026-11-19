@@ -38,6 +38,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
+  from text-pattern coverage when the remaining coverage and the full YARA
+  and artifact-integrity counts agree.
 - Native platform CI stays enabled for package-code changes, including catalog
   I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
@@ -48,6 +51,9 @@ All notable changes to SkillEvaluator are documented in this file.
   release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Git repository-root lookups preserve trailing whitespace in directory names
+  instead of resolving a different path, keeping report links, repository context,
+  and generated-results ignore entries tied to the actual checkout.
 - Rebuilding validation results after severity overrides or scanner finding
   deduplication no longer repeatedly scans accumulated independent diagnostics;
   diagnostic order, duplicate-warning options and summary counts are preserved.
@@ -79,6 +85,19 @@ All notable changes to SkillEvaluator are documented in this file.
   inspection rather than observed unsafe behavior. The Tier 3 guide lists the
   forms that are not read. Both the host checker and the bundled Harbor
   verifier apply the fix.
+- Incomplete SkillSpector scans now quote the parser span, cause, and check from
+  `parser_diagnostic` on `static_parse_limit` rows that have no line of their own,
+  keep a bounded copy of that diagnostic in `skillspector_completeness`, and, when
+  every such row is `runtime_dependent`, explain that SkillSpector could not resolve
+  a command or code string known only at run time. The check stays `INCOMPLETE`.
+  An AE1 finding for that file now names the same lines in its suggestion, such
+  as `static_parse_limit (static_patterns_tool_misuse) at target lines 74-170`:
+  SkillSpector leaves `parser_diagnostic` out of the finding's `evidence.reasons`,
+  so the span comes from the one `analysis_completeness.ledger_exceptions` row
+  with the same path and `reason_code`, and none is shown when several rows
+  match. That reason in `skillspector_evidence.reasons` carries
+  `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
+  finding changes once with this release.
 
 ## 1.0.1 - 2026-11-17
 

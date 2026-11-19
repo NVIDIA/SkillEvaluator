@@ -91,7 +91,10 @@ _HOOK_ROW = {
     "fatal": False,
     "analyzers": ["bundled_execution_surface"],
 }
-_PARSE_LIMIT_ROW = "hooks/hooks.json [static; static_parse_limit; analyzers=static_patterns_tool_misuse]"
+_PARSE_LIMIT_ROW = (
+    "hooks/hooks.json:11 [static; static_parse_limit; boundary_unresolved command_word_boundary; "
+    "analyzers=static_patterns_tool_misuse]"
+)
 _SETTINGS_HOOK_ROW = ".claude/settings.json [static; opaque_content; analyzers=bundled_execution_surface]"
 
 # The skill scanned for the settings-hook reports.

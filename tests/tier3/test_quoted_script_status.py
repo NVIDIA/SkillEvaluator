@@ -7,10 +7,26 @@ import shlex
 import shutil
 import subprocess
 import sys
+from functools import cache
 
 import pytest
 
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
+
+
+@cache
+def _bash_supports_stderr_pipeline():
+    executable = shutil.which("bash")
+    if sys.platform == "win32" or executable is None:
+        return False
+    completed = subprocess.run(
+        [executable, "-c", 'printf %s "$BASH_VERSINFO"'],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=10,
+    )
+    return int(completed.stdout) >= 4
 
 
 @pytest.mark.parametrize(
@@ -114,8 +130,8 @@ def test_negated_quoted_script_does_not_claim_the_shell_status(
 
 
 @pytest.mark.skipif(
-    sys.platform == "win32" or shutil.which("bash") is None,
-    reason="Requires POSIX bash to record an actual stderr pipeline status",
+    not _bash_supports_stderr_pipeline(),
+    reason="Requires Bash 4 or newer for stderr pipelines",
 )
 @pytest.mark.parametrize(
     ("script_operand", "relative_script"),
@@ -180,6 +196,8 @@ def _run_and_grade_comment_command(tmp_path, shell, operand, relative_script, st
     script.parent.mkdir(parents=True)
     script.write_text("import sys\nprint('script-ran')\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8")
     command = f"{prefix}{shlex.quote(sys.executable)} {operand} {status}{suffix}"
+    if shell == "bash" and "|&" in command and not _bash_supports_stderr_pipeline():
+        pytest.skip("Requires Bash 4 or newer for stderr pipelines")
     completed = subprocess.run(
         [executable, "-c", command], cwd=tmp_path, capture_output=True, text=True, check=False, timeout=10
     )
@@ -345,7 +363,10 @@ def test_continued_expansion_openers_respect_the_recorded_shell(
     [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
 )
 @pytest.mark.parametrize("status", [0, 2])
-@pytest.mark.parametrize("argument", ['"${NAME}"', '"${_NAME2}"', '"$' + "\\\n" + '{NAME}"'])
+@pytest.mark.parametrize(
+    "argument",
+    ['"${NAME}"', '"${_NAME2}"', '"$' + "\\\n" + '{NAME}"', '"${NA' + "\\\n" + 'ME}"'],
+)
 def test_plain_braced_identifiers_keep_the_script_status(
     tmp_path, monkeypatch, shell, operand, relative_script, status, argument
 ):
@@ -376,3 +397,42 @@ def test_literal_continued_expansion_text_keeps_the_script_status(tmp_path, shel
     assert completed.returncode == status
     assert result["passed"] is (status == 0)
     assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize(
+    ("operand", "relative_script"),
+    [("scripts/plain.py", "scripts/plain.py"), ("'scripts/my task.py'", "scripts/my task.py")],
+)
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("argument", [' "$(pwd)/out.json"', " `printf x`", ' "${MODEL:-gpt}"'])
+def test_expansions_without_comments_keep_the_script_status(
+    tmp_path, shell, operand, relative_script, status, argument
+):
+    completed, result = _run_and_grade_comment_command(tmp_path, shell, operand, relative_script, status, argument)
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+def test_commentless_cd_expansion_keeps_plain_script_status(tmp_path, shell, status):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, "", 'cd "$(pwd)" && '
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+def test_split_braced_identifier_does_not_hide_a_real_pipeline(tmp_path, shell, status):
+    argument = '"${NA' + "\\\n" + 'ME}"'
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, f" {argument} |& cat # comment"
+    )
+    assert completed.returncode == 0
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]

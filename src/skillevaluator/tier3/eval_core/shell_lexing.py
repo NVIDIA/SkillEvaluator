@@ -9,7 +9,7 @@ import shlex
 from typing import Any
 
 _ATTACHED_DESCRIPTOR_RE = re.compile(r"(\d+)(>>|>\||>&|<&|<>|>|<)(?![<])")
-_BRACED_IDENTIFIER_RE = re.compile(r"\{[A-Za-z_][A-Za-z0-9_]*\}")
+_BRACED_IDENTIFIER_RE = re.compile(r"\{(?:\\\n)*[A-Za-z_](?:(?:\\\n)*[A-Za-z0-9_])*(?:\\\n)*\}")
 
 
 # Words the walk reads as shell syntax when they stand unquoted. Quoted or
@@ -206,7 +206,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
                 word_start = False
             index += 2
             continue
-        if quote not in {"'", "$'"}:
+        if quote not in {"'", "ansi-c"}:
             if char == "`":
                 return None
             if char == "$":
@@ -224,7 +224,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
                     return None
         if quote is not None:
             out.append(char)
-            if char == quote[-1]:
+            if char == ("'" if quote == "ansi-c" else quote):
                 quote = None
             index += 1
             continue
@@ -236,9 +236,9 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             index = end
             continue
         if char == "$" and text.startswith("'", index + 1):
-            quote = "$'"
+            quote = "ansi-c"
             word_start = False
-            out.append("$'")
+            out.append(text[index : index + 2])
             index += 2
             continue
         if char in "'\"`":
@@ -254,7 +254,7 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
 def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False, _shell: str | None = None) -> list[str]:
     source = str(cmd)
     normalized = source.replace("\r\n", "\n").replace("\r", "\n")
-    if strip_comment_text:
+    if strip_comment_text and "#" in normalized:
         # Comments end at physical newlines, before those become separators.
         normalized = _without_shell_comment_text(normalized, shell=_shell)
         if normalized is None:

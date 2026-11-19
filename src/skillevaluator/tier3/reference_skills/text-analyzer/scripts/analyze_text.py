@@ -73,13 +73,13 @@ def main():
 
     if args.file:
         path = Path(args.file)
-        if not path.exists():
-            print(f"Error: file not found: {args.file}", file=sys.stderr)
-            sys.exit(1)
-        if path.is_dir():
-            print(f"Error: not a file: {args.file}", file=sys.stderr)
-            sys.exit(1)
         try:
+            if not path.exists():
+                print(f"Error: file not found: {args.file}", file=sys.stderr)
+                sys.exit(1)
+            if path.is_dir():
+                print(f"Error: not a file: {args.file}", file=sys.stderr)
+                sys.exit(1)
             text = path.read_text(encoding="utf-8", errors="replace")
         except OSError as exc:
             print(f"Error: cannot read file: {args.file} ({exc.strerror})", file=sys.stderr)

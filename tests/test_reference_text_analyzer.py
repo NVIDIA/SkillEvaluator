@@ -140,3 +140,24 @@ def test_file_argument_rejects_an_unreadable_file(tmp_path: Path) -> None:
     assert result.stdout == ""
     assert result.stderr == f"Error: cannot read file: {path} (Permission denied)\n"
     assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="permission bits do not apply on Windows")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="permission bits do not apply when running as root"
+)
+def test_file_argument_rejects_a_file_under_an_unreadable_directory(tmp_path: Path) -> None:
+    directory = tmp_path / "locked"
+    directory.mkdir()
+    path = directory / "secret.txt"
+    path.write_text("hello", encoding="utf-8")
+    directory.chmod(0o000)
+    try:
+        result = _run_analyzer("--file", str(path))
+    finally:
+        directory.chmod(0o755)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: cannot read file: {path} (Permission denied)\n"
+    assert "Traceback" not in result.stderr

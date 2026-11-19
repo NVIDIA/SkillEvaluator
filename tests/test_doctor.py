@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
@@ -548,6 +549,39 @@ def test_json_stdout_parses_when_skillspector_path_is_set(scanners, monkeypatch,
     assert "SKILLEVALUATOR_SKILLSPECTOR_PATH" in spector["detail"]
     assert "WARNING" not in result.stdout
     assert "Using explicit" not in result.stdout
+
+
+def test_fresh_process_with_skillspector_path_keeps_stdout_json() -> None:
+    """Pins the import-time half: building ``Tools`` must not log to stdout."""
+    env = {**os.environ, "SKILLEVALUATOR_SKILLSPECTOR_PATH": sys.executable}
+
+    imported = subprocess.run(
+        [sys.executable, "-c", "import skillevaluator.cli"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout == ""
+
+    doctor_run = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from skillevaluator.cli import cli; "
+            "sys.argv = ['skillevaluator', 'doctor', '--tier', '1', '--checks', 'security', '--json']; cli()",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    payload = json.loads(doctor_run.stdout)
+    assert payload["command"] == "doctor"
+    assert "Using explicit" not in doctor_run.stdout
+    assert "Using explicit" in doctor_run.stderr
 
 
 def test_health_check_json_uses_command_name(scanners) -> None:

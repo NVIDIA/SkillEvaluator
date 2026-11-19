@@ -89,7 +89,7 @@ def find_git_repo_root(path: Path) -> Path | None:
             check=False,
         )
         # Raw file-name bytes: decode them the way Python encodes paths, not with the locale code page.
-        root = os.fsdecode(result.stdout).strip()
+        root = os.fsdecode(result.stdout).removesuffix("\n")
         if result.returncode == 0 and root:
             return Path(root).resolve()
     except Exception:

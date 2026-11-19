@@ -50,7 +50,6 @@ from skillevaluator.constants import (
     SCANNABLE_EXTENSIONS,
     SKILL_MANIFEST_VARIANTS,
 )
-from skillevaluator.inference.json_span import reject_duplicate_object_pairs
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
 from skillevaluator.plugin_manifest import locate_plugin_manifest
@@ -83,7 +82,7 @@ from skillevaluator.utils.secure_fs import (
     SecureRoot,
     stat_is_link_or_reparse,
 )
-from skillevaluator.utils.structured_data import preflight_json_structure
+from skillevaluator.utils.structured_data import preflight_json_structure, reject_duplicate_object_pairs
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,

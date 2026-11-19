@@ -36,6 +36,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
   reports. `skillevaluator ci init --channel stable` prepares both workflows
   with release-managed references and preserves signed scan verification.
+- Add an opt-in GitLab CI stable include for Tier 1 scans. New pipelines pick up
+  the promoted job configuration and scanner image. The report artifact
+  records the release, commit, image, pipeline, and job.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 - `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side

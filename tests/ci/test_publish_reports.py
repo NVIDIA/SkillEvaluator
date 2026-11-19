@@ -1512,6 +1512,29 @@ def test_explicit_delegation_publishes_new_pinned_leaf_from_private_wrapper(
         assert receipt["resolved_wrapper_workflows"] == [{"path": delegate, "sha": "e" * 40, "ref": "refs/tags/v3"}]
 
 
+@pytest.mark.parametrize(("wrapper_sha", "leaf_sha"), [("e" * 40, "c" * 40), ("f" * 40, "d" * 40)])
+def test_official_stable_feedback_uses_each_runs_historical_release(tmp_path, monkeypatch, wrapper_sha, leaf_sha):
+    stable = "NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable"
+    api = DelegatedAPI(delegate=stable, leaf_sha=leaf_sha)
+    reference = {"path": stable, "sha": wrapper_sha, "ref": "refs/tags/stable"}
+    api.record["referenced_workflows"][0] = reference
+    approve_delegation(monkeypatch, api)
+    monkeypatch.delenv("TRUSTED_EVALUATOR_SHA")
+
+    publisher.publish(
+        api,
+        "owner/consumer",
+        123,
+        "https://owner.github.io/consumer",
+        tmp_path / "site",
+        tmp_path / "out",
+        render=fake_render,
+    )
+    receipt = json.loads((tmp_path / "site/runs/123/1/receipt.json").read_text())
+    assert receipt["trusted_evaluator_sha"] == leaf_sha
+    assert receipt["resolved_wrapper_workflows"] == [reference]
+
+
 @pytest.mark.parametrize(
     "failure",
     [

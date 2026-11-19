@@ -33,8 +33,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
+  reports. `skillevaluator ci init --channel stable` prepares both workflows
+  with release-managed references and preserves signed scan verification.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
+  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
+  placeholder becomes one random UUID per client. Harbor verifier judges,
+  embeddings, in-container agents, and reusable CI commands use separate
+  configuration.
 
 ### Fixed
 
@@ -44,12 +52,20 @@ All notable changes to SkillEvaluator are documented in this file.
   list) now report zero tool seconds even when LLM timing is missing or invalid.
   Previously, those missing/invalid-LLM cases had no timing, so the arm's
   tool-seconds total was `N/A`.
+- Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
+  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
+  harness compatibility overlay use the
+  bounded YAML loader. A small `SKILL.md` whose anchors and aliases expand far
+  beyond its size is reported as an invalid-frontmatter finding instead of
+  exhausting memory during the quality check.
 - The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
   which fixes false incomplete-analysis findings on valid JSON hook
   `timeout` fields.
 - Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
   from text-pattern coverage when the remaining coverage and the full YARA
   and artifact-integrity counts agree.
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
@@ -63,6 +79,10 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
+  rate-limited calls stop when the requested wait exceeds the retry budget.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -110,6 +130,10 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Restore a temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline under a literal temporary root: these pipelines now
+  score Security `1.0` instead of a destructive-command finding. Unknown
+  producers, joined shell words and link traversal keep the finding.
 
 ## 1.0.1 - 2026-11-17
 

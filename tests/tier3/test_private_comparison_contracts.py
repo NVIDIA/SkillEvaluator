@@ -20,10 +20,14 @@ def reward(case, value=0.5, *, accuracy=None, judge=None):
     return row
 
 
-def arms(cases=("a", "b", "c", "d", "e")):
+def arms(cases=("a", "b", "c", "d", "e"), *, varying=False):
     return {
         arm: stats.ArmObservations(
-            "succeeded", tuple(stats.TrialObservation(case, reward(case, value)) for case in cases)
+            "succeeded",
+            tuple(
+                stats.TrialObservation(case, reward(case, value * (1 - index / 10) if varying else value))
+                for index, case in enumerate(cases)
+            ),
         )
         for arm, value in (("without_skill", 0.2), ("sum_of_parts", 0.4), ("loose_parts", 0.6), ("with_skill", 0.8))
     }
@@ -38,8 +42,20 @@ def test_ladder_uses_one_shared_bootstrap_draw_stream(monkeypatch):
         return original(self, population, *args, **kwargs)
 
     monkeypatch.setattr(stats.random.Random, "choices", choices)
-    result = stats.lift_ladder(arms(), None)
+    result = stats.lift_ladder(arms(varying=True), None)
     assert len(calls) == result["bootstrap"]["resamples"]
+    steps = result["steps"]
+    assert math.isclose(
+        sum(steps[key]["estimate"] for key in ("skill", "capability", "integration")), steps["plugin"]["estimate"]
+    )
+
+
+def test_constant_ladder_needs_no_bootstrap_draws(monkeypatch):
+    def choices(*args, **kwargs):
+        raise AssertionError("constant case deltas do not need random samples")
+
+    monkeypatch.setattr(stats.random.Random, "choices", choices)
+    result = stats.lift_ladder(arms(), None)
     steps = result["steps"]
     assert math.isclose(
         sum(steps[key]["estimate"] for key in ("skill", "capability", "integration")), steps["plugin"]["estimate"]

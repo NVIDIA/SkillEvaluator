@@ -934,7 +934,12 @@ def _clip(text: str, limit: int) -> str:
 
 
 def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
-    """Most-recent tool observations first (end-state evidence), each clipped."""
+    """Most-recent tool observations first (end-state evidence), each clipped.
+
+    A long result keeps its beginning and its end. Commands print their
+    outcome last (a test summary line, the final error, an exit status), and
+    that outcome is the end state these excerpts are here to show.
+    """
     out: list[str] = []
     for step in reversed(traj.get("steps", [])):
         if step.get("source") != "agent":
@@ -942,7 +947,7 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
             if content:
-                out.append(_clip(content, limit))
+                out.append(_truncate_for_behavior(content, limit))
     return out
 
 

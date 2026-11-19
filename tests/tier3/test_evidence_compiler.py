@@ -606,3 +606,43 @@ def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
         # reports non-required losses too, so the budget-only case names the
         # tool history while the required evidence is still complete.
         assert bundle["omitted"]["incomplete_sections"] == incomplete
+
+
+def _suite_run_trajectory() -> tuple[dict, str]:
+    """A fix, one ``pytest -v`` run of 60 tests, and a final claim. Returns (trajectory, outcome line)."""
+    outcome = "========================= 1 failed, 59 passed in 2.31s ========================="
+    log = "\n".join([
+        "collected 60 items",
+        *(f"tests/test_suite.py::test_case_{case:02d} PASSED" for case in range(60)),
+        outcome,
+    ])
+    assert len(log) > atif_helpers._BUNDLE_ITEM_CHARS
+    traj = {
+        "steps": [
+            {"source": "user", "message": "Fix the bug and run the suite."},
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": "run-1", "function_name": "bash", "arguments": {"command": "pytest -v"}}
+                ],
+                "observation": {"results": [{"source_call_id": "run-1", "content": log}]},
+            },
+            {"source": "agent", "message": "Fixed it, all 60 tests pass."},
+        ]
+    }
+    return traj, outcome
+
+
+@pytest.mark.parametrize("metric", ["accuracy", "goal_accuracy"])
+def test_long_tool_result_keeps_its_last_lines(metric: str) -> None:
+    # A test run prints its outcome on the last line. This log is longer than
+    # the per-result allowance, and keeping only its beginning showed the judge
+    # a run of PASSED lines for an attempt whose suite had failed.
+    traj, outcome = _suite_run_trajectory()
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        evidence = module.build_metric_evidence_bundles(traj, "Fix the bug and run the suite.")[metric][
+            "prompt_evidence"
+        ]
+        assert "collected 60 items" in evidence
+        assert outcome in evidence

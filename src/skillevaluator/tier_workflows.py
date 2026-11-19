@@ -75,6 +75,7 @@ def run_tier1_workflow(
     previous_version: str | None,
     pii_waivers: Path | None = None,
     skillspector_baseline: Path | None = None,
+    hook_waivers: Path | None = None,
     skip: str | None = None,
     prepare_scanners: Callable[[], None] | None = None,
 ) -> list[ValidationResult]:
@@ -108,6 +109,7 @@ def run_tier1_workflow(
         content_type="skill",
         continue_on_failure=True,
         skillspector_baseline=skillspector_baseline,
+        hook_waivers=hook_waivers,
         skip=skip,
     )
     apply_policy(results, profile)

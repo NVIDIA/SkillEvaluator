@@ -47,6 +47,11 @@ from pathlib import Path, PureWindowsPath
 import yaml
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES, SCANNABLE_EXTENSIONS
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import iter_scannable_files
 
 _AGENT_INSTRUCTION_FILES = frozenset(
@@ -785,11 +790,13 @@ def _manifest_reference_text(raw_text: str) -> str | None:
         manifest = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
         try:
-            manifest = yaml.safe_load(raw_text)
+            manifest = load_bounded_yaml(raw_text, last_key_wins=True)
+        except StructuredDataLimitError:
+            return None
+        except StructuredDataSyntaxError as exc:
+            return raw_text if isinstance(exc.__cause__, yaml.YAMLError) else None
         except (RecursionError, TypeError, ValueError):
             return None
-        except yaml.YAMLError:
-            return raw_text
     except (RecursionError, ValueError):
         return None
     if not isinstance(manifest, (dict, list)):

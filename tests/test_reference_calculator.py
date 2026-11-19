@@ -87,6 +87,33 @@ def test_oversized_results_are_rejected_quickly(expression: str) -> None:
     assert result.stderr.strip() == "Error: result is too large"
 
 
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("2**-(10**309)", "Result: 0"),
+        ("(-3)**-(10**400)", "Result: 0"),
+        ("(10**999)**-1", "Result: 0"),
+        ("2**-5000", "Result: 0"),
+        ("1**-(10**309)", "Result: 1"),
+        ("(-1)**-3", "Result: -1"),
+    ],
+)
+def test_huge_negative_integer_exponents_underflow(expression: str, expected: str) -> None:
+    result = _calc(expression)
+
+    assert result.returncode == 0, result.stderr
+    assert result.stdout.strip() == expected
+
+
+@pytest.mark.parametrize("expression", ["0.5**(10**400)", "(10**400)*0.0"])
+def test_int_operands_outside_float_range_are_reported(expression: str) -> None:
+    result = _calc(expression)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() == "Error: number is outside the floating-point range"
+
+
 def test_non_real_results_are_rejected() -> None:
     result = _calc("(-8)**(1/3)")
 

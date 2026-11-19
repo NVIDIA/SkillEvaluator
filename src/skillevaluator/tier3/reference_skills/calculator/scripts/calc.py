@@ -61,14 +61,33 @@ def _check_result(value):
     return value
 
 
+def _outside_float_range(value: object) -> bool:
+    if type(value) is not int:
+        return False
+    try:
+        float(value)
+    except OverflowError:
+        return True
+    return False
+
+
 def _apply(op, *args):
     try:
         return _check_result(op(*args))
     except OverflowError:
+        # A float operation first converts its int operands, which can overflow
+        # whatever the size of the result, as in 0.5**(10**400) or (10**400)*0.0.
+        if any(type(arg) is float for arg in args) and any(_outside_float_range(arg) for arg in args):
+            raise ValueError("number is outside the floating-point range") from None
         raise ValueError("result is too large") from None
 
 
 def _pow(base, exp):
+    if type(base) is int and type(exp) is int and exp < 0 and base != 0:
+        # |result| < 10**-1000 underflows to 0, as 2**-2000 already does.
+        if _integer_pow_exceeds_digit_budget(base, -exp):
+            return 0.0
+        return _apply(operator.truediv, 1, base**-exp)
     if _integer_pow_exceeds_digit_budget(base, exp):
         raise ValueError("result is too large")
     return _apply(operator.pow, base, exp)

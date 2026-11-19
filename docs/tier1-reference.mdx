@@ -1072,15 +1072,14 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     2,048 or more declarations does. See the `security` check under
     [The checks](#the-checks).
 
-    SkillSpector v2.13.4 also reads a hook's `"timeout"` key as a command
-    wrapper it cannot resolve and records
+    The managed SkillSpector v2.13.6 no longer reports a parse limit for a
+    valid hook `"timeout"` key. An unmodeled hook still raises
+    `skillspector_hook_payload_unverified` without a matching review waiver.
+    SkillSpector v2.13.4 misread the key as a command wrapper and recorded
     `hooks/hooks.json:11 [static; static_parse_limit; boundary_unresolved command_word_boundary; analyzers=static_patterns_tool_misuse]`.
-    That row is an ordinary analysis gap, so with v2.13.4 the SkillSpector
-    scan of such a manifest is also recorded as incomplete (`incomplete_scans`
-    in the JSON report, and publication eligibility **Incomplete**), with an
-    error that names only that row. The check itself is still reported as
-    `FAIL` when the hook gate still applies. The managed 2.13.6 scanner fixes
-    this false `timeout` diagnostic.
+    That extra analysis gap marked the scan incomplete (`incomplete_scans`
+    in the JSON report and publication eligibility **Incomplete**). The
+    check still reported `FAIL` when the hook gate applied.
   </Accordion>
   <Accordion title="SkillSpector times out">
     Each SkillSpector run (the static stage, and the LLM stage with `--llm`)

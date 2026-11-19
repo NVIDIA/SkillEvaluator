@@ -1271,7 +1271,7 @@ def validate_evals(skill_path: Path, *, as_json: bool, strict: bool, harbor_cont
         if coverage is not None:
             console.print(Text(coverage["message"]))
 
-    has_errors = any(r.status == "error" for r in results)
+    has_errors = any(r.status in ("error", "missing") for r in results)
     has_warnings = any(r.status == "warning" for r in results)
     return 1 if has_errors or (strict and has_warnings) else 0
 

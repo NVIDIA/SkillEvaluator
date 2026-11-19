@@ -93,8 +93,9 @@ Confirm that the file exists and contains your reviewed cases, then run:
 skillevaluator tier3 validate ./my-skill --strict
 ```
 
-If the entire `evals/` directory is absent, the validator can report it as
-missing with exit code `0`. Treat that as **not ready**.
+If the validator reports a missing `evals/` directory, create the dataset
+before continuing. Releases after 1.0.1 exit with code `1` in this case; 1.0.1
+and earlier can report the missing directory and still exit with code `0`.
 
 Fix errors and warnings before starting a live run. Validation checks structure
 and flagged wording; **it does not confirm that a human reviewed the cases or

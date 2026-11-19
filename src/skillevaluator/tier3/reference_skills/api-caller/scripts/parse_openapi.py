@@ -31,7 +31,10 @@ def parse_parameters(params: list) -> list:
     """Parse parameter definitions."""
     result = []
     for p in params:
-        schema = p.get("schema", {})
+        schema = p.get("schema")
+        if schema is None:
+            schema = {}
+        description = p.get("description")
         param_info = {
             "name": p.get("name"),
             "in": p.get("in"),  # path, query, header, cookie
@@ -39,9 +42,11 @@ def parse_parameters(params: list) -> list:
         }
         if isinstance(schema, bool):
             param_info["schema"] = schema
-        else:
+        elif isinstance(schema, dict):
             param_info["type"] = schema.get("type", "string")
-        param_info["description"] = p.get("description", "")[:100]  # Truncate long descriptions
+        else:
+            param_info["type"] = "string"
+        param_info["description"] = description[:100] if isinstance(description, str) else ""
         result.append(param_info)
     return result
 

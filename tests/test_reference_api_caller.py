@@ -214,6 +214,48 @@ def test_inline_boolean_schemas_preserve_operations(schema: bool) -> None:
 
 
 @pytest.mark.parametrize(
+    ("parameter", "expected"),
+    [
+        (
+            {"name": "filter", "in": "query", "description": None, "schema": {"type": "string"}},
+            {"name": "filter", "in": "query", "required": False, "type": "string", "description": ""},
+        ),
+        (
+            {"name": "filter", "in": "query", "description": "Filter items", "schema": None},
+            {
+                "name": "filter",
+                "in": "query",
+                "required": False,
+                "type": "string",
+                "description": "Filter items",
+            },
+        ),
+    ],
+    ids=["null-description", "null-schema"],
+)
+def test_inline_parameters_with_null_optional_fields_preserve_operations(
+    parameter: dict, expected: dict
+) -> None:
+    parser = _load_script("parse_openapi")
+    spec = {
+        "openapi": "3.1.0",
+        "paths": {
+            "/items": {
+                "parameters": [parameter],
+                "get": {"operationId": "listItems", "responses": {"200": {"description": "OK"}}},
+                "post": {"operationId": "createItem", "responses": {"200": {"description": "OK"}}},
+            },
+        },
+    }
+
+    operations = parser.parse_spec(spec)["operations"]
+
+    assert [operation["operation_id"] for operation in operations] == ["listItems", "createItem"]
+    for operation in operations:
+        assert operation["parameters"] == [expected]
+
+
+@pytest.mark.parametrize(
     ("path_parameters", "operation_parameters"),
     [
         (

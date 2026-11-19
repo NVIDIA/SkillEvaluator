@@ -1146,7 +1146,7 @@ def git_root_for(path: Path) -> Path | None:
     if result.returncode != 0:
         return None
     # Raw file-name bytes: decode them the way Python encodes paths, not with the locale code page.
-    root = os.fsdecode(result.stdout).strip()
+    root = os.fsdecode(result.stdout).removesuffix("\n")
     return Path(root).resolve() if root else None
 
 

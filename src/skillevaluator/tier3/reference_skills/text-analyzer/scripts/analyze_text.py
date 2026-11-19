@@ -16,7 +16,9 @@ from pathlib import Path
 # numeric citation markers directly after the terminator still count (He said
 # "go." Then / (see above.) Next / **done.** Next / 1993.[1] The). Periods
 # inside tokens such as input.txt, 3.14, or v1.2.3 are not sentence ends.
-_SENTENCE_END = re.compile("[.!?]+(?:[\"')\\]}\u201d\u2019\u00bb\u203a*_]|\\[\\d+\\])*(?:\\s+|$)")
+# The lookbehind and possessive run start a match only at the first terminator
+# of a run and never backtrack into it, so long runs split in linear time.
+_SENTENCE_END = re.compile("(?<![.!?])[.!?]++(?:[\"')\\]}\u201d\u2019\u00bb\u203a*_]|\\[\\d+\\])*(?:\\s+|$)")
 
 
 def analyze(text: str) -> dict:

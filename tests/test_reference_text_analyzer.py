@@ -9,6 +9,7 @@ import importlib.util
 import os
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import ModuleType
 
@@ -92,6 +93,16 @@ def test_starter_eval_text_statistics_are_unchanged() -> None:
 )
 def test_sentence_count_ends_only_before_whitespace_or_end(text: str, sentence_count: int) -> None:
     assert _load_analyzer().analyze(text)["sentence_count"] == sentence_count
+
+
+def test_sentence_count_is_linear_on_long_terminator_runs() -> None:
+    analyzer = _load_analyzer()
+    started = time.perf_counter()
+    result = analyzer.analyze("." * 50_000 + "x")
+    elapsed = time.perf_counter() - started
+
+    assert result["sentence_count"] == 1
+    assert elapsed < 2.0
 
 
 def _run_analyzer(*args: str) -> subprocess.CompletedProcess[str]:

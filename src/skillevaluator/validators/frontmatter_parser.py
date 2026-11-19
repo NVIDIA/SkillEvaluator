@@ -13,8 +13,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from skillevaluator.utils.structured_data import StructuredDataError, StructuredDataLimitError, load_bounded_yaml
 from skillevaluator.validators.base import ValidationResult
 
 # Regex pattern for extracting frontmatter between --- markers
@@ -61,9 +60,16 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     frontmatter_yaml, markdown_content = match.groups()
 
     try:
-        data = yaml.safe_load(frontmatter_yaml)
-    except yaml.YAMLError as e:
-        result.add_error(f"Invalid YAML in frontmatter: {e}")
+        # Bounded, not ``yaml.safe_load``: nested aliases parse cheaply but
+        # expand without limit once a caller stringifies or copies a value.
+        # A repeated key keeps its last value, as in ``safe_load``.
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+    except StructuredDataLimitError as e:
+        result.add_error(f"Frontmatter exceeds the YAML complexity limits: {e}")
+        return None, result
+    except StructuredDataError as e:
+        # The loader normalizes PyYAML errors; the original one has the reason.
+        result.add_error(f"Invalid YAML in frontmatter: {e.__cause__ or e}")
         return None, result
 
     if not data or not isinstance(data, dict):

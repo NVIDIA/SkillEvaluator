@@ -80,7 +80,7 @@ def _json_keys(path: Path, key: str | None = None) -> int:
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, ValueError, UnicodeDecodeError):
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
         return 1
     section = data.get(key, {}) if key and isinstance(data, dict) else data
     return len(section) if isinstance(section, (dict, list)) else 1
@@ -100,7 +100,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, ValueError, UnicodeDecodeError):
+        except (OSError, ValueError, UnicodeDecodeError, RecursionError):
             facts["manifest_invalid"] = True
             facts[f"fmt_{fmt}"] = False
             continue

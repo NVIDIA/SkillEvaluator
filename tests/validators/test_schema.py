@@ -9,6 +9,12 @@ Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
 from pathlib import Path
 
 import pytest
+from tests.yaml_alias_fixtures import (
+    YAML_DIRECTIVE_VALUE_ERROR,
+    alias_bomb_skill_md,
+    deeply_nested_flow,
+    scalar_alias_fan_yaml,
+)
 
 from skillevaluator.models.result import Severity
 from skillevaluator.models.skill import SkillMetadata
@@ -1527,10 +1533,13 @@ class TestMetadataIdPreviewBounds:
 
         result = SchemaValidator().validate(skill_dir)
 
-        findings = [f for f in result.findings if f.check_name == "metadata_id_format"]
+        # The bounded loader rejects the graph before any field is validated or rendered.
+        assert not result.passed
+        findings = [f for f in result.findings if f.check_name == "manifest_complexity_limit"]
         assert len(findings) == 1
-        assert "must be a string (got list)" in findings[0].message
-        assert len(findings[0].line_content) <= 32
+        assert findings[0].severity == Severity.HIGH
+        assert len(findings[0].message) <= 200
+        assert not any(f.check_name == "metadata_id_format" for f in result.findings)
 
     @pytest.mark.parametrize("id_value", ["&recursive [*recursive]", "&recursive {self: *recursive}"])
     def test_recursive_id_is_rejected_with_bounded_evidence(self, tmp_path: Path, id_value: str):
@@ -1538,10 +1547,13 @@ class TestMetadataIdPreviewBounds:
 
         result = SchemaValidator().validate(skill)
 
-        assert result.passed
-        (finding,) = [finding for finding in result.findings if finding.check_name == "metadata_id_format"]
-        assert "must be a string" in finding.message
-        assert len(finding.line_content) <= 32
+        # A self-referencing anchor has no finite expansion, so the bounded loader rejects it
+        # before the id is validated, as Tier 2 does.
+        assert not result.passed
+        (finding,) = [finding for finding in result.findings if finding.check_name == "manifest_complexity_limit"]
+        assert finding.severity == Severity.HIGH
+        assert len(finding.message) <= 200
+        assert not any(f.check_name == "metadata_id_format" for f in result.findings)
 
 
 def _write_skill(
@@ -1734,3 +1746,89 @@ class TestSchemaPortabilityChecks:
 
         assert not result.passed
         assert [f.severity for f in _checks(result, "manifest_bom")] == ["high"]
+
+
+class TestFrontmatterComplexityLimits:
+    """Frontmatter is read with the bounded YAML loader, so aliases cannot be expanded later."""
+
+    @staticmethod
+    def _skill(tmp_path: Path, manifest: str) -> Path:
+        skill_dir = tmp_path / "demo-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+        return skill_dir
+
+    def test_over_limit_alias_graph_is_a_high_finding(self, tmp_path: Path):
+        skill_dir = self._skill(tmp_path, alias_bomb_skill_md())
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert not result.passed
+        (finding,) = [f for f in result.findings if f.check_name == "manifest_complexity_limit"]
+        assert finding.severity == Severity.HIGH
+        assert "complexity limit" in finding.message
+        assert not any(f.check_name == "frontmatter_valid" for f in result.findings)
+
+    def test_aliased_name_and_description_are_rejected_before_validation(self, tmp_path: Path):
+        manifest = alias_bomb_skill_md(alias_fields=("name", "description"))
+        skill_dir = self._skill(tmp_path, manifest)
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert [f.check_name for f in result.findings if f.severity == Severity.HIGH] == ["manifest_complexity_limit"]
+
+    def test_yaml_syntax_error_keeps_its_line_and_reason(self, tmp_path: Path):
+        skill_dir = self._skill(tmp_path, "---\nname: demo-skill\ndescription: [unclosed\n---\n# Body\n")
+
+        result = SchemaValidator().validate(skill_dir)
+
+        (finding,) = [f for f in result.findings if f.check_name == "yaml_syntax"]
+        assert finding.message.startswith("Invalid YAML syntax in frontmatter: ")
+        assert finding.message != "Invalid YAML syntax in frontmatter: Input is not valid YAML"
+        assert finding.line_number > 2
+
+    def test_a_repeated_key_is_reported_once_and_keeps_its_last_value(self, tmp_path: Path):
+        skill_dir = self._skill(
+            tmp_path,
+            "---\nname: demo-skill\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            "---\n# Demo\n\n## Instructions\n\n1. Step\n",
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert [f.check_name for f in result.findings if f.check_name == "duplicate_key"] == ["duplicate_key"]
+        assert not any(f.check_name in {"yaml_syntax", "manifest_complexity_limit"} for f in result.findings)
+
+    def test_one_large_scalar_aliased_many_times_is_rejected_by_the_character_budget(self, tmp_path: Path):
+        manifest = (
+            "---\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            f"{scalar_alias_fan_yaml()}\n---\n# Demo\n"
+        )
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        (finding,) = [f for f in result.findings if f.check_name == "manifest_complexity_limit"]
+        assert "expanded text exceeds" in finding.message
+
+    def test_a_set_member_too_large_to_format_is_rejected(self, tmp_path: Path):
+        manifest = (
+            "---\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            "x: !!set {0x" + "f" * 5_000 + "}\n---\n# Demo\n"
+        )
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        assert any(f.check_name == "manifest_complexity_limit" for f in result.findings)
+
+    def test_a_yaml_directive_number_past_the_digit_limit_is_a_syntax_finding_not_a_crash(self, tmp_path: Path):
+        manifest = f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Demo\n"
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        assert [f.check_name for f in result.findings if f.severity == Severity.HIGH] == ["yaml_syntax"]
+
+    def test_duplicate_key_scan_survives_text_the_loader_rejects(self):
+        from skillevaluator.validators.schema import _duplicate_frontmatter_keys
+
+        assert _duplicate_frontmatter_keys(deeply_nested_flow()) == []
+        assert _duplicate_frontmatter_keys(YAML_DIRECTIVE_VALUE_ERROR) == []

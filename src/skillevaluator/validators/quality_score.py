@@ -24,8 +24,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-import yaml
-
 from skillevaluator.constants import (
     EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
@@ -41,6 +39,7 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -482,10 +481,19 @@ class QualityScoreValidator(ValidatorBase):
         if not fm_match:
             return None
         try:
-            data = yaml.safe_load(fm_match.group(1))
-            return data if isinstance(data, dict) else None
-        except yaml.YAMLError:
+            # Plain ``yaml.safe_load`` shares an aliased node, so a few hundred
+            # bytes of nested aliases parse cheaply, but the ``str()`` calls in
+            # the checks below expand the whole graph. The bounded loader
+            # rejects such a graph before any value is read. Agent clients keep
+            # the last value of a repeated key, as ``safe_load`` does; the
+            # schema validator reports the duplicate.
+            data = load_bounded_yaml(fm_match.group(1), last_key_wins=True)
+        except StructuredDataError as exc:
+            # Invalid YAML, or YAML over a parser limit: score the skill as
+            # having no readable frontmatter. SchemaValidator reports why.
+            logger.debug("Quality score skips unreadable frontmatter: %s", exc)
             return None
+        return data if isinstance(data, dict) else None
 
     # -----------------------------------------------------------------
     # Correctness dimension (weight: 0.35)

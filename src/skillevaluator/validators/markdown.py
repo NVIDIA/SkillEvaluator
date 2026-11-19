@@ -12,12 +12,12 @@ from inspect import signature
 from pathlib import PureWindowsPath
 from urllib.parse import unquote, urlsplit
 
-import yaml
 from markdown_it import MarkdownIt
 from markdown_it.rules_inline import html_inline
 from markdown_it.rules_inline.state_inline import StateInline
 from markdown_it.token import Token
 
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 _MARKDOWN_PARSER = MarkdownIt("commonmark", {"html": True, "linkify": False})
@@ -228,8 +228,9 @@ def markdown_link_targets(content: str, *, include_images: bool = False) -> list
     markdown_content = content
     if frontmatter:
         try:
-            frontmatter_data = yaml.safe_load(frontmatter.group(1))
-        except (yaml.YAMLError, ValueError, RecursionError):
+            frontmatter_data = load_bounded_yaml(frontmatter.group(1), last_key_wins=True)
+        except StructuredDataError:
+            # Invalid or over-limit YAML: the whole file is Markdown.
             frontmatter_data = None
         if isinstance(frontmatter_data, dict):
             markdown_content = frontmatter.group(2)

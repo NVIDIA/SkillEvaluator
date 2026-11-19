@@ -9,6 +9,7 @@ from pathlib import Path
 
 import pytest
 from click.testing import CliRunner
+from tests.yaml_alias_fixtures import alias_bomb_skill_md, alias_graph_lines, deeply_nested_flow, merge_bomb_yaml
 
 from skillevaluator.cli import cli
 from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
@@ -1281,3 +1282,52 @@ def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path
     assert facts["nested_skill_md"] is True
     assert facts["nested_skill_md_exact"] is False
     assert _status(skill)["codex"] == "loads"
+
+
+def test_over_limit_frontmatter_reads_as_no_fields(tmp_path: Path):
+    skill = tmp_path / "demo-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
+
+    *_, data = overlay._read_manifest(skill)
+
+    # ``not data`` rather than ``== {}``: a failing comparison would render the whole graph.
+    assert not data
+
+
+def test_over_limit_frontmatter_is_not_reported_as_tab_indentation():
+    # A tab inside a block scalar is valid YAML; the graph around it is over the parser limits.
+    frontmatter = "name: demo\n" + "\n".join(alias_graph_lines(5)) + "\ntext: |\n  one\n  \ttwo\n"
+
+    assert overlay._tab_indent_breaks_yaml(frontmatter) is False
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [merge_bomb_yaml(), deeply_nested_flow(), "policy:\n  allow_implicit_invocation: false\nreleased: 2026-13-45\n"],
+    ids=["merge-key-bomb", "deep-nesting", "invalid-date"],
+)
+def test_unreadable_codex_policy_file_is_not_expanded_and_does_not_abort_the_check(tmp_path: Path, policy: str):
+    skill = _rooted(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text(policy, encoding="utf-8")
+
+    assert overlay._codex_implicit_disabled(skill) is False
+    assert skill_facts(skill)["codex_implicit_disabled"] is False
+
+
+def test_codex_policy_file_still_disables_implicit_invocation(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "agents").mkdir()
+    (skill / "agents" / "openai.yaml").write_text("policy:\n  allow_implicit_invocation: false\n", encoding="utf-8")
+
+    assert overlay._codex_implicit_disabled(skill) is True
+
+
+def test_frontmatter_nested_past_the_composer_recursion_limit_does_not_abort_the_check(tmp_path: Path):
+    skill = _rooted(tmp_path)
+    (skill / "SKILL.md").write_text(f"---\nname: demo-skill\n{deeply_nested_flow()}\n---\nBody\n", encoding="utf-8")
+
+    facts = skill_facts(skill)
+
+    assert facts["frontmatter_duplicate_keys"] is False

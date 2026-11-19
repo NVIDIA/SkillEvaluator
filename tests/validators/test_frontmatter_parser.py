@@ -7,6 +7,7 @@ from pathlib import Path
 
 import pytest
 from pydantic import BaseModel
+from tests.yaml_alias_fixtures import YAML_DIRECTIVE_VALUE_ERROR, alias_bomb_skill_md
 
 from skillevaluator.validators.base import ValidationResult
 from skillevaluator.validators.frontmatter_parser import parse_frontmatter, validate_pydantic_model
@@ -105,6 +106,47 @@ title: [invalid yaml
         parsed, result = parse_frontmatter(test_file)
         assert parsed is None
         assert not result.passed
+
+
+class TestParseFrontmatterBounds:
+    """Frontmatter is read with the bounded YAML loader."""
+
+    def test_nested_alias_graph_is_rejected_not_returned(self, tmp_path: Path):
+        manifest = tmp_path / "SKILL.md"
+        manifest.write_text(alias_bomb_skill_md(), encoding="utf-8")
+
+        parsed, result = parse_frontmatter(manifest)
+
+        assert parsed is None
+        assert not result.passed
+        assert any("complexity limits" in error for error in result.errors)
+
+    def test_invalid_yaml_keeps_the_pyyaml_reason(self, tmp_path: Path):
+        manifest = tmp_path / "SKILL.md"
+        manifest.write_text("---\nname: [unclosed\n---\n# Body\n", encoding="utf-8")
+
+        parsed, result = parse_frontmatter(manifest)
+
+        assert parsed is None
+        assert any(error.startswith("Invalid YAML in frontmatter: ") and "line" in error for error in result.errors)
+
+    def test_a_yaml_directive_number_past_the_digit_limit_is_an_error_not_a_crash(self, tmp_path: Path):
+        manifest = tmp_path / "SKILL.md"
+        manifest.write_text(f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Body\n", encoding="utf-8")
+
+        parsed, result = parse_frontmatter(manifest)
+
+        assert parsed is None
+        assert any(error.startswith("Invalid YAML in frontmatter: ") for error in result.errors)
+
+    def test_a_repeated_key_keeps_its_last_value(self, tmp_path: Path):
+        manifest = tmp_path / "SKILL.md"
+        manifest.write_text("---\nname: first\nname: second\n---\n# Body\n", encoding="utf-8")
+
+        parsed, result = parse_frontmatter(manifest)
+
+        assert result.passed
+        assert parsed.yaml_data == {"name": "second"}
 
 
 class TestValidatePydanticModel:

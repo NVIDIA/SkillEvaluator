@@ -47,6 +47,7 @@ from pathlib import Path, PureWindowsPath
 import yaml
 
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES, SCANNABLE_EXTENSIONS
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 from skillevaluator.validators.base import iter_scannable_files
 
 _AGENT_INSTRUCTION_FILES = frozenset(
@@ -785,11 +786,15 @@ def _manifest_reference_text(raw_text: str) -> str | None:
         manifest = json.loads(raw_text)
     except (json.JSONDecodeError, TypeError):
         try:
-            manifest = yaml.safe_load(raw_text)
-        except (RecursionError, TypeError, ValueError):
+            # Bounded: a manifest that is not JSON can alias one large string thousands of times,
+            # and every alias is appended to the reference text below.
+            manifest = load_bounded_yaml(raw_text, last_key_wins=True)
+        except StructuredDataError as exc:
+            # Invalid YAML syntax keeps the whole text as the reference. A document that parses but
+            # cannot be loaded (an invalid date) or exceeds a limit fails the walk closed.
+            return raw_text if isinstance(exc.__cause__, yaml.YAMLError) else None
+        except (RecursionError, TypeError):
             return None
-        except yaml.YAMLError:
-            return raw_text
     except (RecursionError, ValueError):
         return None
     if not isinstance(manifest, (dict, list)):

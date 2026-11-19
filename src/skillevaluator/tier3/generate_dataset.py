@@ -59,14 +59,13 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from skillevaluator.constants import EXECUTABLE_SKILL_DIRS
 from skillevaluator.evaluation.results import DatasetGenerationError, DatasetGenerationResult
 from skillevaluator.tier3 import evals_spec
 from skillevaluator.tier3.dataset_utils import load_dataset_entries, normalize_dataset_entries
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_has_text, atif_content_text
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
+from skillevaluator.utils.structured_data import StructuredDataLimitError, StructuredDataSyntaxError, load_bounded_yaml
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
 # Output budget for generation and refinement; OpenAI reasoning models get the
@@ -159,9 +158,12 @@ def _parse_skill(skill_path: Path, prompt_file: str | None = None) -> dict[str, 
     fm_match = FRONTMATTER_PATTERN.match(content)
     if fm_match:
         try:
-            frontmatter = yaml.safe_load(fm_match.group(1))
-        except yaml.YAMLError:
+            # Bounded like Tier 2: ``str()`` below would expand nested aliases without limit.
+            frontmatter = load_bounded_yaml(fm_match.group(1), last_key_wins=True)
+        except StructuredDataSyntaxError:
             frontmatter = None
+        except StructuredDataLimitError as exc:
+            raise ValueError(f"Manifest structured-data complexity limit exceeded: {skill_md}") from exc
         if isinstance(frontmatter, dict):
             if frontmatter.get("name"):
                 name = str(frontmatter["name"]).strip()

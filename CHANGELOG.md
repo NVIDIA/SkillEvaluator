@@ -38,6 +38,25 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 no longer runs out of memory on a `SKILL.md` whose frontmatter nests YAML
+  aliases. A 434-byte file could be killed with exit 137 during the quality check,
+  because the check stringified the expanded graph. Tier 1 and the Tier 3 dataset,
+  case-summary and workspace-name readers now parse frontmatter within the Tier 2
+  structure limits, and a file over a limit fails the schema check with a HIGH
+  `manifest_complexity_limit` finding. A self-referencing anchor now fails the
+  same way instead of a `metadata_id_format` finding.
+- The structure limits now also cap the total text a document reaches through
+  YAML aliases (4 MiB, or four times the file's length if larger), so one large
+  string aliased many times can no longer expand to gigabytes. They walk `!!set`
+  members, which hid an oversized integer, and report a `%YAML` version number
+  or `\U` escape that PyYAML's scanner rejects with a plain `ValueError` as
+  invalid YAML. Tier 2 reads its frontmatter and manifests with the same limits.
+- The Tier 1 harness check, plugin schema check and SkillSpector manifest scoping
+  read `agents/openai.yaml`, `agent_plugin.yaml` and `.claude-plugin/plugin.json`
+  within the same limits. Chained YAML merge keys, deeply nested JSON or YAML, an
+  invalid date, or an integer past Python's digit limit in those files now
+  produce a finding or a fail-closed result instead of exhausting memory or
+  ending the run with a traceback and no report.
 - Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
   from text-pattern coverage when the remaining coverage and the full YARA
   and artifact-integrity counts agree.

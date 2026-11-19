@@ -241,3 +241,10 @@ def test_plugin_rows_flag_an_unverified_release(tmp_path: Path):
 def test_unknown_harness_version_name_is_a_usage_error(tmp_path: Path):
     result = CliRunner().invoke(cli, ["harness-check", str(_quoted_skill(tmp_path)), "--harness-version", "codeex=1.0"])
     assert result.exit_code == 2 and "codeex" in result.output
+
+
+def test_plugin_json_nested_past_the_parser_recursion_limit_is_an_invalid_manifest(tmp_path: Path):
+    (tmp_path / ".claude-plugin").mkdir()
+    (tmp_path / ".claude-plugin" / "plugin.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
+
+    assert plugin_facts(tmp_path)["manifest_invalid"] is True

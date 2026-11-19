@@ -206,3 +206,55 @@ skills:
         assert finding.category == "PLUGIN_SCHEMA"
         assert finding.file_path == str(tmp_path / "skills")
         assert "Cannot inspect skill manifest" in finding.message
+
+
+class TestPluginManifestComplexityLimits:
+    """Plugin manifests are read within the structured-data limits."""
+
+    @staticmethod
+    def _findings(result) -> list[tuple[str, str]]:
+        return [(finding.check_name, finding.severity.name) for finding in result.findings]
+
+    def test_agent_plugin_merge_key_bomb_is_a_complexity_finding(self, tmp_path: Path):
+        from tests.yaml_alias_fixtures import merge_bomb_yaml
+
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\n{merge_bomb_yaml()}\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        assert ("manifest_complexity_limit", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_scalar_alias_fan_is_a_complexity_finding(self, tmp_path: Path):
+        from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
+
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\n{scalar_alias_fan_yaml()}\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_complexity_limit", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_invalid_date_is_a_yaml_finding_not_a_crash(self, tmp_path: Path):
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\nreleased: 2026-13-45\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_invalid_yaml", "HIGH") in self._findings(result)
+
+    @pytest.mark.parametrize(
+        ("body", "check_name"),
+        [
+            ("[" * 3_000 + "]" * 3_000, "manifest_complexity_limit"),
+            ('{"name": ' + "9" * 5_000 + "}", "manifest_invalid_json"),
+        ],
+        ids=["deep-nesting", "integer-past-the-digit-limit"],
+    )
+    def test_contained_plugin_json_that_cannot_be_loaded_is_a_finding_not_a_crash(
+        self, tmp_path: Path, body: str, check_name: str
+    ):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_text(body, encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert (check_name, "HIGH") in self._findings(result)

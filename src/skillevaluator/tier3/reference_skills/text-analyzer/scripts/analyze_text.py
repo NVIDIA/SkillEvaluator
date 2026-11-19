@@ -13,9 +13,10 @@ from pathlib import Path
 
 # A run of .!? ends a sentence only when it is followed by whitespace or the
 # end of the text. Closing quotes or brackets directly after the terminator
-# still count (He said "go." Then / (see above.) Next). Periods inside tokens
-# such as input.txt, 3.14, or v1.2.3 are not sentence ends.
-_SENTENCE_END = re.compile("[.!?]+[\"')\\]}]*(?:\\s+|$)")
+# still count, including curly and angle quotes (He said "go." Then / (see
+# above.) Next). Periods inside tokens such as input.txt, 3.14, or v1.2.3 are
+# not sentence ends.
+_SENTENCE_END = re.compile("[.!?]+[\"')\\]}\u201d\u2019\u00bb\u203a]*(?:\\s+|$)")
 
 
 def analyze(text: str) -> dict:

@@ -44,7 +44,8 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Fixed
 
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
-  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) use the
+  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
+  harness compatibility overlay use the
   bounded YAML loader. A small `SKILL.md` whose anchors and aliases expand far
   beyond its size is reported as an invalid-frontmatter finding instead of
   exhausting memory during the quality check.

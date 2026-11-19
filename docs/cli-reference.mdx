@@ -1010,8 +1010,9 @@ An option for a tier that is not selected exits with a usage error before any ch
       "tier": "1",
       "status": "fail",
       "checks": [
+        {"check": "CLI package", "status": "pass", "detail": "skillevaluator 1.0.1"},
         {"check": "SkillSpector", "status": "pass", "detail": "2.13.4 at /usr/bin/skillspector"},
-        {"check": "Semgrep", "status": "fail", "detail": "not installed. Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep"}
+        {"check": "Semgrep", "status": "fail", "detail": "not installed. Optional; install separately with: uv tool install semgrep"}
       ]
     }
   ],

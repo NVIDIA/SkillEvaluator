@@ -52,6 +52,9 @@ All notable changes to SkillEvaluator are documented in this file.
   release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Git repository-root lookups preserve trailing whitespace in directory names
+  instead of resolving a different path, keeping report links, repository context,
+  and generated-results ignore entries tied to the actual checkout.
 - Rebuilding validation results after severity overrides or scanner finding
   deduplication no longer repeatedly scans accumulated independent diagnostics;
   diagnostic order, duplicate-warning options and summary counts are preserved.

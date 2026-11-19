@@ -204,6 +204,16 @@ def test_non_string_server_url_is_error() -> None:
         caller.build_url_from_spec(spec, "/items/{id}", {"id": 7})
 
 
+@pytest.mark.parametrize("server_url", ["", "   "])
+def test_blank_server_url_defaults_to_root(server_url: str) -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": server_url}]}
+
+    result = caller.build_url_from_spec(spec, "/pet/{petId}", {"petId": 1}, spec_url=PETSTORE_SPEC_URL)
+
+    assert result == "https://petstore3.swagger.io/pet/1"
+
+
 def test_trailing_slash_server_does_not_double_slash() -> None:
     caller = _load_script("call_api")
     spec = {"servers": [{"url": "https://example.invalid/v1/"}]}

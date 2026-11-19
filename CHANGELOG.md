@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Changed
+
+- Claude Code log recovery pairs batched and delayed tool results without repeatedly
+  scanning earlier tool calls, reducing reconstruction time for long trajectories.
+- Tier 3 lift intervals compute faster when every case has the same lift;
+  results are unchanged.
+- `EmbeddingRegistry.query` and `query_entry` no longer call the embedding provider
+  when the catalog has no eligible entries to compare against.
+  These queries return an empty result without constructing the provider
+  client, including when that provider is missing or unreachable.
+
 ### Documentation
 
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,
@@ -27,6 +38,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
@@ -36,6 +49,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Reuse occurrence indexes while merging collection finding summaries, avoiding
   repeated scans of every previously collected location when many skills share
   a finding. Finding identities, severity, ordering, and counts are preserved.
+- Git repository-root lookups preserve trailing whitespace in directory names
+  instead of resolving a different path, keeping report links, repository context,
+  and generated-results ignore entries tied to the actual checkout.
 - Rebuilding validation results after severity overrides or scanner finding
   deduplication no longer repeatedly scans accumulated independent diagnostics;
   diagnostic order, duplicate-warning options and summary counts are preserved.

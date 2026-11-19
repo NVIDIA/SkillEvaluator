@@ -47,6 +47,7 @@ SHA256 = re.compile(r"[0-9a-f]{64}")
 RUN_URL = re.compile(r"https://github\.com/NVIDIA/SkillEvaluator/actions/runs/[1-9][0-9]*")
 MAX_METADATA_BYTES = 2 * 1024 * 1024
 REQUEST_TIMEOUT = 15
+INDEX_OPENER = urllib.request.build_opener(github_api._NoRedirect())
 SMOKE_CASES = {
     "all-pass": (0, "passed"),
     "invalid-name": (1, "failed"),
@@ -426,12 +427,14 @@ class DevZoneLinks(HTMLParser):
 def get_url(url: str, limit: int, timeout: float) -> bytes:
     request = urllib.request.Request(url, headers={"User-Agent": "SkillEvaluator-Release", "Cache-Control": "no-cache"})
     try:
-        with urllib.request.urlopen(request, timeout=timeout) as response:
+        with INDEX_OPENER.open(request, timeout=timeout) as response:
             require(response.geturl() == url, f"Unexpected redirect while reading {url}.")
             return github_api.bounded_read(
                 response, limit, message=f"The response for {url} exceeds its expected size."
             )
     except urllib.error.HTTPError as exc:
+        if 300 <= exc.code < 400:
+            raise ValueError(f"Unexpected redirect while reading {url} (HTTP {exc.code}).") from exc
         if exc.code == 404:
             raise IndexMissing(f"{url} is not visible yet (HTTP 404).") from exc
         if exc.code in (408, 429) or 500 <= exc.code < 600:
@@ -519,10 +522,7 @@ def devzone_entries(version: str, timeout: float) -> list[tuple]:
     return entries
 
 
-def verify_index(
-    entries: list[tuple], expected: dict, label: str, timeout: float, *, allow_missing: bool = False
-) -> set[str]:
-    """Validate all listed files against the expected distribution bytes."""
+def verify_index_listing(entries: list[tuple], expected: dict, label: str, *, allow_missing: bool = False) -> set[str]:
     seen = set()
     for name, _url, digest, yanked, size in entries:
         require(name in expected and name not in seen, f"{label} lists an unexpected or duplicate artifact: {name}.")
@@ -532,6 +532,10 @@ def verify_index(
         require(size is None or size == expected[name]["size"], f"{label} lists the wrong size for {name}.")
     if not allow_missing and seen != expected.keys():
         raise IndexPending(f"{label} artifacts are not visible yet: {', '.join(sorted(expected.keys() - seen))}.")
+    return seen
+
+
+def verify_index_downloads(entries: list[tuple], expected: dict, label: str, timeout: float) -> None:
     for name, url, _, _, _ in entries:
         target = expected[name]
         data = get_url(url, target["size"] + 1, timeout)
@@ -539,6 +543,14 @@ def verify_index(
             len(data) == target["size"] and sha256(data) == target["sha256"],
             f"{label} download has different bytes for {name}.",
         )
+
+
+def verify_index(
+    entries: list[tuple], expected: dict, label: str, timeout: float, *, allow_missing: bool = False
+) -> set[str]:
+    """Validate all listed files against the expected distribution bytes."""
+    seen = verify_index_listing(entries, expected, label, allow_missing=allow_missing)
+    verify_index_downloads(entries, expected, label, timeout)
     return seen
 
 
@@ -564,22 +576,35 @@ def verify_indexes(version: str, assets: Path, wait_seconds: int = 0) -> None:
     manifest, _ = checked_manifest(version, assets)
     expected = {entry["filename"]: entry for entry in manifest["artifacts"]}
     deadline = time.monotonic() + wait_seconds
-    remaining = {"PyPI": pypi_entries, "DevZone": devzone_entries}
-    while remaining:
+    indexes = {"PyPI": pypi_entries, "DevZone": devzone_entries}
+
+    def request_timeout() -> float:
+        return min(REQUEST_TIMEOUT, max(1.0, deadline - time.monotonic())) if wait_seconds else REQUEST_TIMEOUT
+
+    while True:
         pending = []
-        for label, fetch in list(remaining.items()):
-            timeout = min(REQUEST_TIMEOUT, max(1.0, deadline - time.monotonic())) if wait_seconds else REQUEST_TIMEOUT
+        listings = {}
+        for label, fetch in indexes.items():
             try:
-                verify_index(fetch(version, timeout), expected, label, timeout)
+                entries = fetch(version, request_timeout())
+                verify_index_listing(entries, expected, label)
             except IndexPending as exc:
                 pending.append(str(exc))
             else:
-                del remaining[label]
-        if remaining:
-            delay = deadline - time.monotonic()
-            if delay <= 0:
-                raise IndexPending(" ".join(pending))
-            time.sleep(min(10, delay))
+                listings[label] = entries
+        if not pending:
+            try:
+                for label, entries in listings.items():
+                    verify_index_downloads(entries, expected, label, request_timeout())
+            except IndexPending as exc:
+                pending.append(str(exc))
+            else:
+                return
+
+        delay = deadline - time.monotonic()
+        if delay <= 0:
+            raise IndexPending(" ".join(pending))
+        time.sleep(min(10, delay))
 
 
 def main() -> None:

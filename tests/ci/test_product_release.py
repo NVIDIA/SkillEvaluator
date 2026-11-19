@@ -6,6 +6,8 @@ import io
 import json
 import subprocess
 import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from tarfile import TarFile, TarInfo
 from types import SimpleNamespace
@@ -296,6 +298,7 @@ class Response(io.BytesIO):
         ("extra", "unexpected"),
         ("pending", "not visible"),
         ("propagating", None),
+        ("yanked-after-lag", "yanked"),
         (None, None),
     ],
 )
@@ -308,6 +311,7 @@ def test_index_verification_checks_both_listings_and_downloads(release, monkeypa
     downloads = {name: (assets / name).read_bytes() for name in (WHEEL, SDIST)}
     listing = []
     devzone = []
+    downloads_served = []
     clock = 0
     for name, data in downloads.items():
         file_hash = digest(data)
@@ -332,12 +336,16 @@ def test_index_verification_checks_both_listings_and_downloads(release, monkeypa
         assert timeout > 0
         url = request.full_url
         if url == f"https://pypi.org/pypi/skillevaluator/{VERSION}/json":
-            return Response(url, json.dumps({"info": {"version": VERSION}, "urls": listing}).encode())
+            entries = (
+                [{**entry, "yanked": True} for entry in listing] if failure == "yanked-after-lag" and clock else listing
+            )
+            return Response(url, json.dumps({"info": {"version": VERSION}, "urls": entries}).encode())
         if url == DEVZONE_URL:
-            entries = devzone[:-1] if failure == "propagating" and clock == 0 else devzone
+            entries = devzone[:-1] if failure in {"propagating", "yanked-after-lag"} and clock == 0 else devzone
             return Response(url, "\n".join(entries).encode())
         name = url.rsplit("/", 1)[-1]
         if name in downloads and url.startswith(("https://files.pythonhosted.org/", DEVZONE_URL)):
+            downloads_served.append(url)
             data = b"corrupt" if failure == "download" and url.startswith(DEVZONE_URL) else downloads[name]
             return Response(url, data)
         raise HTTPError(url, 404, "missing", {}, None)
@@ -346,16 +354,18 @@ def test_index_verification_checks_both_listings_and_downloads(release, monkeypa
         nonlocal clock
         clock += delay
 
-    monkeypatch.setattr(product_release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
     monkeypatch.setattr(product_release, "time", SimpleNamespace(monotonic=lambda: clock, sleep=advance_clock))
     if failure == "propagating":
         product_release.verify_indexes(VERSION, assets, wait_seconds=20)
         assert 0 < clock <= 20
+        assert len(downloads_served) == len(set(downloads_served)) == 4
     elif match is None:
         product_release.verify_indexes(VERSION, assets)
     else:
         with pytest.raises(ValueError, match=match):
-            product_release.verify_indexes(VERSION, assets)
+            wait = 20 if failure == "yanked-after-lag" else 0
+            product_release.verify_indexes(VERSION, assets, wait_seconds=wait)
 
 
 def test_pre_upload_inspection_checks_partial_index_bytes(monkeypatch):
@@ -371,7 +381,7 @@ def test_pre_upload_inspection_checks_partial_index_bytes(monkeypatch):
     def urlopen(request, *, timeout):
         return Response(request.full_url, b"wheel")
 
-    monkeypatch.setattr(product_release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
     assert product_release.verify_index(entries, expected, "PyPI", 1, allow_missing=True) == {WHEEL}
     with pytest.raises(product_release.IndexPending, match="not visible"):
         product_release.verify_index(entries, expected, "PyPI", 1)
@@ -384,7 +394,7 @@ def test_absent_listing_is_distinguishable_from_an_index_outage(monkeypatch, sta
     def urlopen(request, *, timeout):
         raise HTTPError(request.full_url, status, "unavailable", {}, None)
 
-    monkeypatch.setattr(product_release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
     error = product_release.IndexMissing if status == 404 else product_release.IndexPending
     with pytest.raises(error) as raised:
         product_release.pypi_entries(VERSION, 1)
@@ -419,7 +429,7 @@ def test_prepublication_index_inspection_detects_conflicts(monkeypatch, state):
         assert url in {pypi_url, f"{DEVZONE_URL}{WHEEL}"}
         return Response(url, b"wheel")
 
-    monkeypatch.setattr(product_release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
     if state in {"one-index", "devzone-outage"}:
         with pytest.raises(ValueError, match="only one index" if state == "one-index" else "404"):
             product_release.inspect_public_indexes(VERSION, expected)
@@ -458,6 +468,36 @@ def test_devzone_rejects_a_link_to_a_different_origin(monkeypatch):
         assert request.full_url == DEVZONE_URL
         return Response(request.full_url, html.encode())
 
-    monkeypatch.setattr(product_release.urllib.request, "urlopen", urlopen)
+    monkeypatch.setattr(product_release.INDEX_OPENER, "open", urlopen)
     with pytest.raises(ValueError, match="Unexpected public download URL"):
         product_release.devzone_entries(VERSION, 1)
+
+
+def test_index_redirect_is_not_followed_or_treated_as_missing():
+    from ci import product_release
+
+    paths = []
+
+    class RedirectToMissing(BaseHTTPRequestHandler):
+        def do_GET(self):
+            paths.append(self.path)
+            if self.path == "/index":
+                self.send_response(302)
+                self.send_header("Location", "/missing")
+            else:
+                self.send_response(404)
+            self.end_headers()
+
+        def log_message(self, *_args):
+            pass
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), RedirectToMissing) as server:
+        listener = threading.Thread(target=server.serve_forever, daemon=True)
+        listener.start()
+        try:
+            with pytest.raises(ValueError, match="redirect"):
+                product_release.get_url(f"http://127.0.0.1:{server.server_port}/index", 1024, 5)
+        finally:
+            server.shutdown()
+            listener.join()
+    assert paths == ["/index"]

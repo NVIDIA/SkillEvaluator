@@ -28,6 +28,8 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     assert "Publish release" in jobs["stage"]["if"]
     assert jobs["kitmaker"]["needs"] == ["preflight", "stage"]
     assert jobs["finalize"]["needs"] == ["preflight", "verify-indexes"]
+    (preflight,) = [step for step in jobs["prepare"]["steps"] if "inspect-indexes" in step.get("run", "")]
+    assert preflight["if"] == "inputs.phase == 'Validate release'"
 
 
 @pytest.fixture
@@ -56,6 +58,7 @@ def test_partial_draft_requires_the_original_run_artifact(release, monkeypatch, 
     )
     download = Mock()
     monkeypatch.setattr(release, "gh", download)
+    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
     assert release.restore(VERSION, SHA, tmp_path)
     download.assert_called_once_with(
         "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(tmp_path)
@@ -68,6 +71,7 @@ def test_draft_with_conflicting_bytes_is_never_published(release, monkeypatch, t
     monkeypatch.setattr(release, "tag_target", lambda _: SHA)
     monkeypatch.setattr(release, "verify_local", Mock())
     monkeypatch.setattr(release, "release_notes", lambda *_: "Frozen release notes")
+    monkeypatch.setattr(release.product_release, "inspect_public_indexes", Mock())
     monkeypatch.setattr(
         release,
         "get_release",
@@ -105,6 +109,7 @@ def test_interrupted_github_upload_recovers_original_artifact(release, monkeypat
     monkeypatch.setattr(release, "get_release", lambda _: draft)
     download = Mock()
     monkeypatch.setattr(release, "gh", download)
+    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
     output = tmp_path / "release"
     assert release.restore(VERSION, SHA, output)
     download.assert_called_once_with(
@@ -123,3 +128,74 @@ def test_registry_revision_must_match_the_reviewed_digest(release, monkeypatch, 
     with pytest.raises(ValueError, match="does not match the reviewed release digest"):
         release.verify_local(VERSION, SHA, tmp_path)
     resolve.assert_called_once_with(repository, SHA)
+
+
+def release_run(**overrides):
+    return {
+        "id": 123,
+        "run_attempt": 2,
+        "head_branch": "main",
+        "event": "workflow_dispatch",
+        "path": ".github/workflows/release.yml",
+        "head_repository": {"full_name": "NVIDIA/SkillEvaluator"},
+        **overrides,
+    }
+
+
+def test_complete_draft_restores_original_actions_bytes(release, monkeypatch, tmp_path):
+    draft = {
+        "draft": True,
+        "body": "<!-- skillevaluator-stage: 123-2 -->",
+        "assets": [{"name": name, "state": "uploaded"} for name in release.expected_filenames(VERSION)],
+    }
+    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
+    monkeypatch.setattr(release, "get_release", lambda _: draft)
+    run = Mock(return_value=release_run())
+    run_download = Mock()
+    release_download = Mock()
+    monkeypatch.setattr(release, "api", run)
+    monkeypatch.setattr(release, "gh", run_download)
+    monkeypatch.setattr(release, "download_asset", release_download)
+    assert release.restore(VERSION, SHA, tmp_path / "staged")
+    run.assert_called_once_with("actions/runs/123/attempts/2")
+    run_download.assert_called_once()
+    release_download.assert_not_called()
+
+
+def test_draft_cannot_recover_artifacts_from_a_pull_request(release, monkeypatch, tmp_path):
+    draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": []}
+    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
+    monkeypatch.setattr(release, "get_release", lambda _: draft)
+    monkeypatch.setattr(release, "api", Mock(return_value=release_run(event="pull_request")))
+    run_download = Mock()
+    monkeypatch.setattr(release, "gh", run_download)
+    with pytest.raises(ValueError, match="upstream manual release run"):
+        release.restore(VERSION, SHA, tmp_path / "staged")
+    run_download.assert_not_called()
+
+
+def test_initial_publication_checks_package_conflicts_before_tagging(release, monkeypatch, tmp_path):
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
+    monkeypatch.setattr(release, "release_notes", lambda *_: "Frozen release notes")
+    inspect_indexes = Mock(side_effect=ValueError("Package indexes are inconsistent"))
+    monkeypatch.setattr(release.product_release, "inspect_public_indexes", inspect_indexes)
+    writes = Mock()
+    monkeypatch.setattr(release, "api", writes)
+    with pytest.raises(ValueError, match="Package indexes are inconsistent"):
+        release.stage(VERSION, SHA, tmp_path, "123-2")
+    inspect_indexes.assert_called_once_with(VERSION, {})
+    writes.assert_not_called()
+
+
+def test_immutable_resume_reaches_kitmaker_even_when_an_index_is_pending(release, monkeypatch, tmp_path):
+    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
+    monkeypatch.setattr(release, "get_release", lambda _: {"draft": False, "immutable": True})
+    monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
+    monkeypatch.setattr(release, "verify_staged", Mock())
+    monkeypatch.setattr(release, "release_notes", lambda *_: "Frozen release notes")
+    inspect_indexes = Mock(side_effect=ValueError("An artifact is present on only one index"))
+    monkeypatch.setattr(release.product_release, "inspect_public_indexes", inspect_indexes)
+    release.stage(VERSION, SHA, tmp_path, "123-2")
+    inspect_indexes.assert_not_called()

@@ -113,17 +113,32 @@ def restore(version: str, source_sha: str, output: Path) -> bool:
     if target is None:
         raise ValueError(f"Existing GitHub release is missing tag {tag}.")
     assets = release_assets(release, version)
-    if set(assets) == expected_filenames(version) and all(asset["state"] == "uploaded" for asset in assets.values()):
+    if not release["draft"]:
+        if (
+            not release.get("immutable")
+            or set(assets) != expected_filenames(version)
+            or any(asset["state"] != "uploaded" for asset in assets.values())
+        ):
+            raise ValueError("Expected an immutable GitHub release with all required assets.")
         output.mkdir()
         for name, asset in assets.items():
             download_asset(asset, output / name)
         return True
-    if not release["draft"]:
-        raise ValueError("Published GitHub release is missing required assets.")
+
     match = STAGING_MARKER.search(release["body"] or "")
     if match is None:
-        raise ValueError("Incomplete draft lacks its original run artifact. Reconcile the draft before retrying.")
+        raise ValueError("Draft lacks its original run artifact. Reconcile the draft before retrying.")
     run, attempt = match.groups()
+    origin = api(f"actions/runs/{run}/attempts/{attempt}")
+    if (
+        origin["id"] != int(run)
+        or origin["run_attempt"] != int(attempt)
+        or origin["event"] != "workflow_dispatch"
+        or origin["path"] != ".github/workflows/release.yml"
+        or origin["head_branch"] != "main"
+        or (origin["head_repository"] or {}).get("full_name") != REPOSITORY
+    ):
+        raise ValueError("The draft artifact must originate from an upstream manual release run.")
     gh("run", "download", run, "--name", f"product-release-{version}-{run}-{attempt}", "--dir", str(output))
     return True
 
@@ -133,13 +148,14 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def verify_local(version: str, source_sha: str, assets: Path) -> None:
+def verify_local(version: str, source_sha: str, assets: Path) -> dict:
     product_release.verify_assets(version, source_sha, assets)
     manifest = json.loads((assets / product_release.MANIFEST).read_text(encoding="utf-8"))
     image = manifest["image"]
     published = release_image.resolve_digest(image.partition("@")[0], manifest["image_source_commit"])
     if published != image:
         raise ValueError("The official public image revision does not match the reviewed release digest.")
+    return {asset["filename"]: asset for asset in manifest["artifacts"]}
 
 
 def release_notes(version: str, assets: Path) -> str:
@@ -189,11 +205,13 @@ def verify_staged(release: dict, version: str, assets: Path, *, complete: bool) 
 def stage(version: str, source_sha: str, assets: Path, run: str) -> None:
     tag = f"v{version}"
     target = check_tag(tag, source_sha)
-    verify_local(version, source_sha, assets)
-    notes = release_notes(version, assets)
+    packages = verify_local(version, source_sha, assets)
     release = get_release(tag)
     if release is not None and target is None:
         raise ValueError(f"Existing GitHub release is missing tag {tag}.")
+    if release is None or release["draft"]:
+        product_release.inspect_public_indexes(version, packages)
+        notes = release_notes(version, assets)
     if release is None:
         if target is None:
             api("git/refs", "POST", {"ref": f"refs/tags/{tag}", "sha": source_sha})

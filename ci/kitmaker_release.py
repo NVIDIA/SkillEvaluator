@@ -33,6 +33,7 @@ RELEASE_UUID = re.compile(r"[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}")
 MAX_JSON = 4 * 1024 * 1024
 MAX_ASSET = 1024**3 - 1
 FERRY_URL = "http://127.0.0.1:8888/kitmaker-portal/api/v0"
+SUCCESSFUL_JOB_STATES = frozenset({"completed", "success"})
 
 
 class ReleaseError(RuntimeError):
@@ -382,10 +383,16 @@ class PortalClient:
             raise ReleaseError("Kitmaker did not return a valid submission receipt.")
         return release_uuid
 
-    def wait(self, receipt):
+    def wait(self, receipt) -> tuple[str, dict[str, str]]:
         release_uuid = receipt.get("uuid")
         if not isinstance(release_uuid, str) or not RELEASE_UUID.fullmatch(release_uuid):
             raise ReleaseError("The stored Kitmaker submission receipt is invalid.")
+        post_response_uuid = receipt.get("post_response_uuid")
+        if post_response_uuid is not None and post_response_uuid != release_uuid:
+            raise ReleaseError("The saved Kitmaker UUID differs from its recorded POST response.")
+        if type(receipt.get("upload")) is not bool:
+            raise ReleaseError("The stored Kitmaker submission has no valid upload mode.")
+        mode_verified = post_response_uuid is not None
         deadline = time.monotonic() + 45 * 60
         while time.monotonic() < deadline:
             status = self.call(f"/status/{release_uuid}")
@@ -394,52 +401,77 @@ class PortalClient:
             result = status.get("status")
             if not isinstance(result, str) or not result:
                 raise ReleaseError("Kitmaker returned an invalid release status.")
+            reported_payload = status.get("payload")
+            if reported_payload is not None:
+                self.check_echoed_request(reported_payload, receipt)
+                mode_verified = True
             if result in {"failed", "completed"}:
-                self.check_terminal_jobs(status, receipt, result)
-                return result
+                if not mode_verified:
+                    raise ReleaseError("Kitmaker could not prove the upload mode for this manually reconciled UUID.")
+                return result, self.check_terminal_jobs(status, receipt, result)
             time.sleep(15)
         raise ReleaseError("Kitmaker is still pending. Resume this submission from its stored receipt.")
 
     @staticmethod
-    def check_terminal_jobs(status, receipt, result):
-        completed = {"completed", "success"}
-        allowed_states = completed
+    def check_echoed_request(reported_payload, receipt):
+        message = "The Kitmaker request does not match the expected upload mode and artifact URLs."
+        entries = as_object(reported_payload, "Kitmaker request payload").get("payload")
+        if not isinstance(entries, list) or len(entries) != len(receipt["urls"]):
+            raise ReleaseError(message)
+        reported_urls = []
+        for entry in entries:
+            entry = as_object(entry, "Kitmaker artifact request")
+            if entry.get("upload") is not receipt["upload"] or not isinstance(entry.get("url"), str):
+                raise ReleaseError(message)
+            reported_urls.append(entry["url"])
+        if sorted(reported_urls) != sorted(receipt["urls"]):
+            raise ReleaseError(message)
+
+    @staticmethod
+    def check_terminal_jobs(status, receipt, result) -> dict[str, str]:
+        allowed_states = SUCCESSFUL_JOB_STATES
         message = "Kitmaker completion did not cover every submitted artifact."
         if result == "failed":
-            allowed_states = completed | {"canceled", "cancelled", "failed", "skipped"}
+            allowed_states = SUCCESSFUL_JOB_STATES | {"canceled", "cancelled", "failed", "skipped"}
             message = (
                 "Kitmaker reported failure before confirming all artifact jobs are terminal. Reconcile the receipt."
             )
         jobs = status.get("jobs")
         if not isinstance(jobs, list) or len(jobs) != len(receipt["urls"]):
             raise ReleaseError(message)
-        reported_urls = []
+        outcomes = {}
         for job in jobs:
             job = as_object(job, "Kitmaker artifact status")
-            if job.get("status") not in allowed_states or not isinstance(job.get("wheel_url"), str):
+            url = job.get("wheel_url")
+            job_status = job.get("status")
+            if job_status not in allowed_states or not isinstance(url, str) or url in outcomes:
                 raise ReleaseError(message)
-            reported_urls.append(job["wheel_url"])
-        if sorted(reported_urls) != sorted(receipt["urls"]):
+            outcomes[url] = job_status
+        if outcomes.keys() != set(receipt["urls"]):
             raise ReleaseError(message)
+        return outcomes
 
 
-def finish_attempt(state, revision, attempts, urls, portal, receipts, *, upload):
+def finish_attempt(state, revision, attempts, urls, portal, receipts, *, upload, dry_run_uuids=frozenset()):
     attempt = attempts[-1] if attempts else None
     if attempt is None or attempt["status"] == "failed":
-        attempt = {"urls": list(urls), "status": "submitting"}
+        attempt = {"urls": list(urls), "upload": upload, "status": "submitting"}
         attempts.append(attempt)
         revision = receipts.write(state, revision)
         # A lost response can still mean the POST reached Kitmaker. Keep the checkpoint and never replay it.
         release_uuid = portal.submit(urls, upload=upload)
-        attempt.update(uuid=release_uuid, status="submitted")
+        if release_uuid in dry_run_uuids:
+            raise ReleaseError("Kitmaker returned a dry-run UUID for publication. Reconcile the private receipt.")
+        attempt.update(uuid=release_uuid, post_response_uuid=release_uuid, status="submitted")
         revision = receipts.write(state, revision)
     if attempt["status"] == "submitting":
         raise ReleaseError("A previous Kitmaker POST is ambiguous. Reconcile the private receipt before retrying.")
-    if attempt["status"] != "submitted":
-        raise ReleaseError("The private Kitmaker receipt contains an invalid submission state.")
-    attempt["status"] = portal.wait(attempt)
+    if attempt["status"] != "submitted" or attempt.get("upload") is not upload:
+        raise ReleaseError("The private Kitmaker receipt contains an invalid submission state or upload mode.")
+    status, job_statuses = portal.wait(attempt)
+    attempt.update(status=status, job_statuses=job_statuses)
     receipts.write(state, revision)
-    if attempt["status"] != "completed":
+    if status != "completed":
         raise ReleaseError("A release request failed in Kitmaker. Inspect the private receipt before retrying.")
 
 
@@ -458,8 +490,8 @@ def release_to_kitmaker(mode, release, portal, receipts, inventory):
     urls = release.urls(release.artifacts)
     dry_runs = state["dry_runs"]
     dry = dry_runs[-1] if dry_runs else None
-    if dry is not None and dry.get("urls") != list(urls):
-        raise ReleaseError("The saved Kitmaker dry run does not cover the approved assets.")
+    if dry is not None and (dry.get("urls") != list(urls) or dry.get("upload") is not False):
+        raise ReleaseError("The saved Kitmaker dry run does not cover the approved assets and upload mode.")
     dry_completed = dry is not None and dry.get("status") == "completed"
     if mode == "dry-run":
         if not dry_completed:
@@ -469,6 +501,12 @@ def release_to_kitmaker(mode, release, portal, receipts, inventory):
     if not dry_completed:
         raise ReleaseError("Kitmaker publication requires a completed dry run of the approved assets.")
     publications = state["publications"]
+    dry_run_uuids = {attempt["uuid"] for attempt in dry_runs if "uuid" in attempt}
+    for attempt in publications:
+        if attempt.get("uuid") in dry_run_uuids:
+            raise ReleaseError("The publication receipt uses a dry-run UUID. Reconcile the private receipt.")
+        if attempt.get("upload") is not True or not attempt.get("urls") or not set(attempt["urls"]) <= set(urls):
+            raise ReleaseError("A saved Kitmaker publication does not match the approved assets or upload mode.")
     previous = publications[-1] if publications else None
     if previous and previous["status"] == "completed":
         # The caller separately verifies index convergence and clean installs. Never replay a completed submission.
@@ -480,8 +518,21 @@ def release_to_kitmaker(mode, release, portal, receipts, inventory):
     present = inventory(release)
     if present == set(release.artifacts):
         return
-    missing_urls = release.urls(set(release.artifacts) - present)
-    finish_attempt(state, revision, publications, missing_urls, portal, receipts, upload=True)
+    already_uploaded = set()
+    for attempt in publications:
+        if attempt["status"] == "failed":
+            outcomes = attempt.get("job_statuses")
+            if not isinstance(outcomes, dict):
+                raise ReleaseError(
+                    "A failed Kitmaker receipt lacks per-artifact outcomes. Reconcile the private receipt."
+                )
+            already_uploaded.update(url for url, status in outcomes.items() if status in SUCCESSFUL_JOB_STATES)
+    # Both public listings can lag the Portal. Keep every confirmed success out of future requests.
+    missing_urls = tuple(url for url in release.urls(set(release.artifacts) - present) if url not in already_uploaded)
+    if missing_urls:
+        finish_attempt(
+            state, revision, publications, missing_urls, portal, receipts, upload=True, dry_run_uuids=dry_run_uuids
+        )
 
 
 def main() -> int:

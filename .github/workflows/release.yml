@@ -115,6 +115,7 @@ jobs:
             --archive "$wheel" --archive "$sdist"
           uvx --from twine==6.2.0 twine check --strict "$wheel" "$sdist"
       - name: Check that the package indexes can accept these release bytes
+        if: inputs.phase == 'Validate release'
         run: |
           python3 ci/product_release.py inspect-indexes --version "$VERSION" --assets "$RUNNER_TEMP/product-release"
       - name: Smoke-test fresh wheel and sdist installations
@@ -182,7 +183,6 @@ jobs:
           if [ "$restored" = false ]; then
             mv "$RUNNER_TEMP/product-release" "$assets"
           fi
-          python3 ci/product_release.py inspect-indexes --version "$VERSION" --assets "$assets"
           python3 ci/github_release.py stage --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --assets "$assets" --run "$ARTIFACT_RUN"
       - name: Verify every public GitHub download

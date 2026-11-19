@@ -93,19 +93,31 @@ image and consumer qualification details.
    before recording verification in the GitHub release notes.
 
 On interruption, use **Re-run failed jobs** or open **Run workflow** with the
-same version, product SHA, and **Publish release** phase. A draft can resume
-using its original Actions artifact. Preserve that artifact until completion.
-A completed GitHub release uses its existing verified bytes. If GitHub
+same version, product SHA, and **Publish release** phase. Draft recovery
+uses the original artifact from the recorded upstream Actions run. Preserve
+that artifact until completion. An immutable GitHub release uses its
+published bytes and resumes any recorded Kitmaker submission. If GitHub
 rejects the workflow token when creating the version tag, an authorized
 maintainer can create that tag at the exact reviewed product SHA and resume
 the same run. The workflow checks the tag target on every attempt.
 
 For a Kitmaker timeout or partial publication, inspect the private receipt,
-Kitmaker status and both public indexes. An ambiguous POST must be reconciled
-against Portal history before an operator repairs the private checkpoint.
-Once the original request has a known outcome, retry only an artifact missing
-from both indexes. Escalate a hash conflict or an artifact on only one index
-to Kitmaker. The GitHub release stays pending while verification is incomplete.
+Kitmaker status and both public indexes. The workflow polls a saved submission
+and records the terminal result for each artifact. A recorded success is
+excluded from retries while the indexes converge.
+
+For a receipt stuck at `submitting`, reconcile the exact project, URLs, and
+upload mode against Portal history. With authorized compare-and-set access,
+retain the existing `urls` and `upload` values, add the matched Portal `uuid`,
+and set `status` to `submitted`. Leave `post_response_uuid` absent so the
+workflow validates the mode and URLs echoed by Portal. If Portal confirms
+there was no accepted request and the indexes agree, use `status: failed`
+with an empty `job_statuses` map and no UUID.
+
+Retry a failed artifact only when both indexes lack it and Kitmaker has
+reported no prior success for it. Escalate a hash conflict or a file present
+on only one index after the submission finishes. The GitHub release stays
+pending while verification is incomplete.
 
 ## Promote the stable channel
 

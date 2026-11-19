@@ -19,6 +19,7 @@ MANIFEST = "b" * 64
 WHEEL = "skillevaluator-2.3.4-py3-none-any.whl"
 SDIST = "skillevaluator-2.3.4.tar.gz"
 UUID = "71234567-1234-4567-89ab-123456789abc"
+PUBLISH_UUID = "72234567-1234-4567-89ab-123456789abc"
 BASE = "https://github.com/NVIDIA/SkillEvaluator/releases/download/v2.3.4/"
 
 
@@ -49,11 +50,12 @@ class Portal:
         self.submitted.append((urls, upload))
         if self.fail_transport:
             raise kitmaker.ReleaseError("Unknown submission result")
-        return UUID
+        return PUBLISH_UUID if upload else UUID
 
     def wait(self, receipt):
-        assert receipt["uuid"] == UUID
-        return self.status
+        assert receipt["uuid"] == (PUBLISH_UUID if receipt["upload"] else UUID)
+        job_status = "success" if self.status == "completed" else "failed"
+        return self.status, dict.fromkeys(receipt["urls"], job_status)
 
 
 def release():
@@ -228,7 +230,10 @@ def test_portal_submits_exact_json_and_refreshes_auth_when_polling(monkeypatch):
     monkeypatch.setattr(kitmaker, "oidc_token", lambda _: next(oidc))
     portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
     assert portal.submit((BASE + WHEEL,), upload=False) == UUID
-    assert portal.wait({"uuid": UUID, "urls": [BASE + WHEEL]}) == "completed"
+    assert portal.wait({"uuid": UUID, "post_response_uuid": UUID, "urls": [BASE + WHEEL], "upload": False}) == (
+        "completed",
+        {BASE + WHEEL: "success"},
+    )
     assert calls[0][0] == "http://127.0.0.1:8888/kitmaker-portal/api/v0/projects/123/releases"
     assert calls[0][1]["data"] == {
         "project_name": "skillevaluator",
@@ -260,7 +265,7 @@ def test_portal_completion_must_cover_every_submitted_asset(monkeypatch):
     )
     portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
     with pytest.raises(kitmaker.ReleaseError, match="every submitted artifact"):
-        portal.wait({"uuid": UUID, "urls": [BASE + WHEEL, BASE + SDIST]})
+        portal.wait({"uuid": UUID, "post_response_uuid": UUID, "urls": [BASE + WHEEL, BASE + SDIST], "upload": False})
 
 
 def test_reusable_workflow_uses_an_environment_gate_after_validation():
@@ -343,4 +348,115 @@ def test_portal_failed_batch_with_active_job_remains_unresolved(monkeypatch):
     )
     portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
     with pytest.raises(kitmaker.ReleaseError, match="all artifact jobs are terminal"):
-        portal.wait({"uuid": UUID, "urls": [BASE + WHEEL, BASE + SDIST]})
+        portal.wait({"uuid": UUID, "post_response_uuid": UUID, "urls": [BASE + WHEEL, BASE + SDIST], "upload": False})
+
+
+def test_retry_excludes_portal_success_even_before_indexes_list_it(monkeypatch):
+    receipts = MemoryReceipts()
+    dry_run(receipts)
+    submitted = []
+
+    def call(_path, *, data=None):
+        if data is not None:
+            submitted.append(tuple(item["url"] for item in data["payload"]))
+            return {"release_uuid": PUBLISH_UUID}
+        if len(submitted) == 1:
+            return {
+                "uuid": PUBLISH_UUID,
+                "project_id": 123,
+                "status": "failed",
+                "jobs": [
+                    {"wheel_url": BASE + WHEEL, "status": "success"},
+                    {"wheel_url": BASE + SDIST, "status": "failed"},
+                ],
+            }
+        return {
+            "uuid": PUBLISH_UUID,
+            "project_id": 123,
+            "status": "completed",
+            "jobs": [{"wheel_url": url, "status": "success"} for url in submitted[-1]],
+        }
+
+    portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
+    monkeypatch.setattr(portal, "call", call)
+    with pytest.raises(kitmaker.ReleaseError, match="failed in Kitmaker"):
+        kitmaker.release_to_kitmaker("publish", release(), portal, receipts, check_absent)
+    kitmaker.release_to_kitmaker("publish", release(), portal, receipts, check_absent)
+    assert submitted == [(BASE + WHEEL, BASE + SDIST), (BASE + SDIST,)]
+
+
+def test_resume_rejects_the_known_dry_run_uuid_before_polling(monkeypatch):
+    receipts = MemoryReceipts()
+    dry_run(receipts)
+    receipts.data["publications"].append(
+        {"uuid": UUID, "urls": [BASE + WHEEL, BASE + SDIST], "upload": True, "status": "submitted"}
+    )
+    portal = Portal()
+    polled = []
+
+    def wait(receipt):
+        polled.append(receipt)
+        return "completed"
+
+    monkeypatch.setattr(portal, "wait", wait)
+    with pytest.raises(kitmaker.ReleaseError, match="dry-run UUID"):
+        kitmaker.release_to_kitmaker("publish", release(), portal, receipts, check_absent)
+    assert polled == []
+
+
+@pytest.mark.parametrize(
+    ("reported_mode", "error"),
+    [(False, "does not match the expected upload mode"), (None, "could not prove the upload mode"), (True, None)],
+)
+def test_reconciled_release_requires_portal_evidence_of_its_publish_mode(monkeypatch, reported_mode, error):
+    receipts = MemoryReceipts()
+    dry_run(receipts)
+    urls = [BASE + WHEEL, BASE + SDIST]
+    receipts.data["publications"].append({"uuid": PUBLISH_UUID, "urls": urls, "upload": True, "status": "submitted"})
+    status = {
+        "uuid": PUBLISH_UUID,
+        "project_id": 123,
+        "status": "completed",
+        "jobs": [{"wheel_url": url, "status": "success"} for url in urls],
+    }
+    if reported_mode is not None:
+        status["payload"] = {
+            "project_name": "skillevaluator",
+            "payload": [{"url": url, "upload": reported_mode} for url in urls],
+        }
+    portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
+    monkeypatch.setattr(portal, "call", lambda *_: status)
+    if error is None:
+        kitmaker.release_to_kitmaker("publish", release(), portal, receipts, check_absent)
+        assert receipts.data["publications"][-1]["status"] == "completed"
+    else:
+        with pytest.raises(kitmaker.ReleaseError, match=error):
+            kitmaker.release_to_kitmaker("publish", release(), portal, receipts, check_absent)
+        assert receipts.data["publications"][-1]["status"] == "submitted"
+
+
+def test_manual_receipt_accepts_proof_from_an_earlier_poll(monkeypatch):
+    url = BASE + WHEEL
+    responses = iter(
+        [
+            {
+                "uuid": PUBLISH_UUID,
+                "project_id": 123,
+                "status": "processing",
+                "payload": {"payload": [{"url": url, "upload": True}]},
+            },
+            {
+                "uuid": PUBLISH_UUID,
+                "project_id": 123,
+                "status": "completed",
+                "jobs": [{"wheel_url": url, "status": "success"}],
+            },
+        ]
+    )
+    portal = kitmaker.PortalClient(123, "owner@example.org", "machine-token")
+    monkeypatch.setattr(portal, "call", lambda *_: next(responses))
+    monkeypatch.setattr(kitmaker.time, "sleep", lambda *_: None)
+    assert portal.wait({"uuid": PUBLISH_UUID, "urls": [url], "upload": True}) == (
+        "completed",
+        {url: "success"},
+    )

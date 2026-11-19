@@ -75,7 +75,10 @@ def test_input_beyond_a_conversion_or_percentage_is_rejected(expression: str) ->
     assert "Traceback" not in result.stderr
 
 
-@pytest.mark.parametrize("expression", ["9**9**9", "10**10**10", "10.0**400", "1e308*10"])
+@pytest.mark.parametrize(
+    "expression",
+    ["9**9**9", "10**10**10", "10.0**400", "1e308*10", "2**4000", "2**(10**309)", "2**(10**999)"],
+)
 def test_oversized_results_are_rejected_quickly(expression: str) -> None:
     result = _calc(expression)
 

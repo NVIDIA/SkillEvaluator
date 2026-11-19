@@ -43,6 +43,10 @@ def _integer_pow_exceeds_digit_budget(base: object, exp: object) -> bool:
     abs_base = abs(base)
     if abs_base <= 1:
         return False
+    # |base| >= 2 gives at least exp * log10(2) > 0.3 * exp digits, so a large
+    # exponent is over budget without the float estimate, which would overflow.
+    if exp >= 4 * MAX_RESULT_DIGITS:
+        return True
     digits_minus_one = exp * _log10_int(abs_base)
     return not math.isfinite(digits_minus_one) or digits_minus_one >= MAX_RESULT_DIGITS
 

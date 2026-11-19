@@ -84,6 +84,8 @@ def test_ordinary_skills_keep_the_existing_validator(tmp_path, monkeypatch):
 
 
 def test_collection_v2_catalog_reuses_fresh_vectors(tmp_path, embedding):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
     root = tmp_path / "collection"
     make_plugin(root / "one", "one")
     make_plugin(root / "two", "two")
@@ -95,6 +97,8 @@ def test_collection_v2_catalog_reuses_fresh_vectors(tmp_path, embedding):
     assert len(embedding.requests) == 1
     assert sum(r.validator_name == "Inter-Plugin Deduplication" for r in result) == 2
     assert any(f.category == "INTER_PLUGIN" for r in result for f in r.findings)
+    across = tier2_scope_views(result)[1]
+    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (4, 4, 4, 4)
 
 
 def test_existing_v1_skill_catalog_can_be_used_for_a_plugin(tmp_path, embedding):

@@ -155,7 +155,7 @@ def test_html_scopes_keep_kpis_and_findings_separate():
     assert 'id="tier2-across"' in output
     assert "Within this skill" in output and "Across skills" in output
     assert "Checks completed" in output and "Duplicate findings" in output
-    assert "Affected files" in output and "Affected skills" in output
+    assert "Affected files" in output and "Affected entries" in output
     assert "Catalog entries compared" in output
     assert "No comparison catalog supplied." in output
     assert "Unavailable" in output

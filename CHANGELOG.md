@@ -4,13 +4,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-### Added
+### Changed
 
-- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
-  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
-  placeholder becomes one random UUID per client. Harbor verifier judges,
-  embeddings, in-container agents, and reusable CI commands use separate
-  configuration.
+- Claude Code log recovery pairs batched and delayed tool results without repeatedly
+  scanning earlier tool calls, reducing reconstruction time for long trajectories.
+- Tier 3 lift intervals compute faster when every case has the same lift;
+  results are unchanged.
+- `EmbeddingRegistry.query` and `query_entry` no longer call the embedding provider
+  when the catalog has no eligible entries to compare against.
+  These queries return an empty result without constructing the provider
+  client, including when that provider is missing or unreachable.
 
 ### Documentation
 
@@ -28,14 +31,29 @@ All notable changes to SkillEvaluator are documented in this file.
 - Describe the other Tier 1 checks alongside Harness Check in the README and
   include `harness` in the reference page's default check list.
 
+### Added
+
+- A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
+  with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
+  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
+  placeholder becomes one random UUID per client. Harbor verifier judges,
+  embeddings, in-container agents, and reusable CI commands use separate
+  configuration.
+
 ### Fixed
 
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
   release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Git repository-root lookups preserve trailing whitespace in directory names
+  instead of resolving a different path, keeping report links, repository context,
+  and generated-results ignore entries tied to the actual checkout.
 - Rebuilding validation results after severity overrides or scanner finding
   deduplication no longer repeatedly scans accumulated independent diagnostics;
   diagnostic order, duplicate-warning options and summary counts are preserved.
@@ -160,9 +178,9 @@ must be updated when the release is frozen.
 - Add offline pre-commit hooks: `skillevaluator-quality`,
   `skillevaluator-schema`, and `skillevaluator-lint-scripts`. These hooks need
   no API key, Docker, network access, or scanner downloads.
-- Add the experimental `tier3 evaluate --backend nemo-gym` adapter, with shared
-  evaluation cases, verifier results, and report formats. Harbor remains the
-  default backend. JSON and HTML identify the backend used.
+- 🎯 **NeMo Gym integration:** run Tier 3 evaluations through NeMo Gym with
+  SkillEvaluator’s grading and reports. [Get started](https://docs.nvidia.com/skills/skillevaluator/nemo-gym).
+  The integration is experimental; Harbor remains the default backend.
 - Add opt-in grader qualification coverage policies, risk limits, preflight
   checks, and retained assessment evidence. These tools and the synthetic pilot
   do not establish grader reliability or release qualification.

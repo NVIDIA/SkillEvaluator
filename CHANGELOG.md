@@ -33,6 +33,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
+  command hooks in an exact, reviewed plugin package. Applied waivers are
+  reported and clear only the matching unmodeled-hook gate.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 

@@ -70,6 +70,7 @@ PLUGIN = _FIXTURES / "plugins" / "bundled-script-hooks"
 _PLUGIN_REPORT = "skillspector-2.13.3-bundled-script-hooks-no-llm.json"
 _PLUGIN_REPORT_2_13_4 = "skillspector-2.13.4-bundled-script-hooks-no-llm.json"
 _TIMEOUT_REPORT = "skillspector-2.13.4-bundled-script-hooks-timeout-no-llm.json"
+_REVIEW_REPORT = "skillspector-2.13.6-bundled-script-hooks-reviewed-no-llm.json"
 _UPLOAD_REPORT = "skillspector-2.13.3-upload-hooks-no-llm.json"
 _SETTINGS_REPORT = "skillspector-2.13.3-settings-hook-no-llm.json"
 _SETTINGS_IMAGE_REPORT = "skillspector-2.13.3-settings-hook-image-no-llm.json"
@@ -177,12 +178,12 @@ _UPLOAD_SCRIPTS = {
 def _unverified_message(manifest: str) -> str:
     return (
         f"SkillSpector could not fully model the hooks in {manifest} (analyzer bundled_execution_surface could not "
-        "verify what they do with hook input), so this check cannot pass while these hooks are present."
+        "verify what they do with hook input)."
     )
 
 
 def _gate(manifest: str) -> str:
-    return f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
+    return f"{manifest}: SkillSpector could not model these hooks and no matching reviewed waiver applied"
 
 
 def _report(name: str) -> dict:
@@ -222,6 +223,185 @@ def _timeout_plugin(tmp_path: Path) -> Path:
         text = text.replace(f'{hook}"\n', f'{hook}",\n            "timeout": {seconds}\n')
     manifest.write_text(text, encoding="utf-8", newline="\n")
     return root
+
+
+def _review_plugin(tmp_path: Path) -> Path:
+    root = _plugin(tmp_path)
+    path = root / "hooks" / "hooks.json"
+    manifest = json.loads(path.read_text(encoding="utf-8"))
+    for event, timeout in (("PostToolUse", 5), ("SessionStart", 15)):
+        handler = manifest["hooks"][event][0]["hooks"][0]
+        interpreter, script = handler["command"].split()
+        handler["command"] = f'{interpreter} "{script}"'
+        handler["timeout"] = timeout
+    path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
+    return root
+
+
+def _review_waiver(root: Path, path: Path, *, expires: str = "2099-01-01") -> Path:
+    from skillevaluator.validators.hook_review_artifact import capture_hook_review_artifact
+
+    artifact = capture_hook_review_artifact(root)
+    manifest = "hooks/hooks.json"
+    payload = ["hooks/count-builds.sh", "hooks/session-start.py"]
+    approval = {
+        "version": 1,
+        "waivers": [
+            {
+                "id": "reviewed-hooks",
+                "manifest": manifest,
+                "manifest_sha256": artifact.hashes[manifest],
+                "artifact_sha256": artifact.artifact_sha256,
+                "payload": [{"path": name, "sha256": artifact.hashes[name]} for name in payload],
+                "owner": "test-reviewer",
+                "reason": "Reviewed both bundled hook scripts.",
+                "created": "2020-01-01",
+                "expires": expires,
+            }
+        ],
+    }
+    path.write_text(json.dumps(approval), encoding="utf-8")
+    return path
+
+
+def _snapshot_report(args: list[str], report: dict, *, exit_code: int = 0) -> ToolResult:
+    return ToolResult(
+        success=exit_code == 0,
+        stdout=json.dumps({**report, "skill": {**report["skill"], "source": args[1]}}),
+        stderr="",
+        exit_code=exit_code,
+    )
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_reviewed_hook_waiver_clears_only_the_manifest_gate(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    _write(root, {"skills/bundled/SKILL.md": "---\nname: bundled\ndescription: Bundled skill\n---\n"})
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    report = _report(_REVIEW_REPORT)
+
+    def scan(args, **_kwargs):
+        snapshot = Path(args[1])
+        assert snapshot != root and snapshot.name == root.name
+        assert (snapshot / "skills/bundled/SKILL.md").is_file()
+        return _snapshot_report(args, report)
+
+    mock_tools.skillspector.version = "2.13.6"
+    mock_tools.skillspector.run.side_effect = scan
+    result = SecurityValidator(hook_waivers=waiver).validate_security_only(root)
+
+    assert result.passed and not result.is_incomplete
+    mock_tools.skillspector.run.assert_called_once()
+    assert not result.gate_failures
+    assert {f.check_name for f in result.findings} >= {"skillspector_hook_waiver_applied"}
+    assert any("BH1" in f.check_name for f in result.findings)
+    note = next(f for f in result.findings if f.check_name == "skillspector_hook_waiver_applied")
+    assert note.severity == Severity.INFO
+    assert note.metadata["waiver_id"] == "reviewed-hooks"
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["changed-script", "additional-file", "expired", "missing-pin", "external-command", "unproven-count", "remote-bh1"],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_hook_waiver_requires_the_reviewed_package_and_contained_commands(
+    mock_tools, tmp_path: Path, case: str
+) -> None:
+    root = _review_plugin(tmp_path)
+    if case == "external-command":
+        manifest = root / "hooks/hooks.json"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace("${CLAUDE_PLUGIN_ROOT}/hooks/session-start.py", "/tmp/run.py"),
+            encoding="utf-8",
+        )
+    expiry = "2020-01-02" if case == "expired" else "2099-01-01"
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml", expires=expiry)
+    if case == "changed-script":
+        (root / "hooks/session-start.py").write_text("print('new payload')\n", encoding="utf-8")
+    elif case == "additional-file":
+        (root / "new.txt").write_text("Additional package content.", encoding="utf-8")
+    elif case == "missing-pin":
+        config = json.loads(waiver.read_text(encoding="utf-8"))
+        config["waivers"][0]["payload"].pop()
+        waiver.write_text(json.dumps(config), encoding="utf-8")
+
+    report = _report(_REVIEW_REPORT)
+    if case == "unproven-count":
+        _row(report).pop("observed_records")
+        _row(report).pop("limit_records")
+    elif case == "remote-bh1":
+        _bh1(report)["source_identity"] = "dependency:test-fixture"
+    result = _validate(mock_tools, root, report, SecurityValidator(hook_waivers=waiver))
+
+    assert not result.passed
+    assert result.is_incomplete or _unverified(result)
+    assert not any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
+
+
+@pytest.mark.parametrize("case", ["original", "snapshot", "different-report-source", "different-scanner-version"])
+@patch("skillevaluator.validators.security.Tools")
+def test_hook_waiver_requires_a_stable_scan_of_the_snapshot(mock_tools, tmp_path: Path, case: str) -> None:
+    root = _review_plugin(tmp_path)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    report = _report(_REVIEW_REPORT)
+
+    def scan(args, **_kwargs):
+        if case == "different-report-source":
+            return _snapshot_report(["scan", str(root)], report)
+        if case == "different-scanner-version":
+            return _snapshot_report(args, report)
+        changed = root if case == "original" else Path(args[1])
+        (changed / "hooks/session-start.py").write_text("print('changed while scanning')\n", encoding="utf-8")
+        return _snapshot_report(args, report)
+
+    mock_tools.skillspector.version = "2.13.5" if case == "different-scanner-version" else "2.13.6"
+    mock_tools.skillspector.run.side_effect = scan
+    result = SecurityValidator(hook_waivers=waiver).validate_security_only(root)
+
+    assert not result.passed and result.incomplete_scans == ["skillspector"]
+    assert all(f.check_name != "skillspector_hook_waiver_applied" for f in result.findings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_reviewed_hook_waiver_preserves_residual_incompleteness(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    report = _report(_REVIEW_REPORT)
+    report["analysis_completeness"]["limitations"].append("Transitive traversal stopped early.")
+
+    result = _validate(mock_tools, root, report, SecurityValidator(hook_waivers=waiver))
+
+    assert not result.passed and result.incomplete_scans == ["skillspector"]
+    assert any("Transitive traversal stopped early" in error for error in result.errors)
+    assert any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_reviewed_package_keeps_independent_high_findings(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    report = _report(_REVIEW_REPORT)
+    script = "results/plugin_paths.py"
+    (root / "results").mkdir()
+    (root / "scripts/plugin_paths.py").rename(root / script)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    [component] = [entry for entry in report["components"] if entry["path"] == "scripts/plugin_paths.py"]
+    component["path"] = script
+    [issue] = [entry for entry in report["issues"] if entry["id"] == "TT2"]
+    issue.update(severity="HIGH")
+    issue["location"]["file"] = script
+    issue["occurrences"][0]["file"] = script
+    report["risk_assessment"].update(
+        max_issue_severity="HIGH", score=60, severity="HIGH", recommendation="DO_NOT_INSTALL"
+    )
+
+    mock_tools.skillspector.version = "2.13.6"
+    mock_tools.skillspector.run.side_effect = lambda args, **_kwargs: _snapshot_report(args, report, exit_code=1)
+    result = SecurityValidator(content_type="plugin", hook_waivers=waiver).validate_security_only(root)
+
+    assert not result.passed and not result.is_incomplete, result.errors
+    assert any(f.severity == Severity.HIGH and f.file_path == script for f in result.findings)
+    assert any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
 
 
 def _upload_plugin(tmp_path: Path) -> Path:
@@ -291,6 +471,9 @@ def _validate(mock_tools, root: Path, report: dict, validator: SecurityValidator
     mock_tools.skillspector.run.return_value = ToolResult(
         success=True, stdout=json.dumps(report), stderr="", exit_code=0
     )
+    if validator is not None and validator.hook_waivers is not None:
+        mock_tools.skillspector.version = report["metadata"]["skillspector_version"]
+        mock_tools.skillspector.run.side_effect = lambda args, **_kwargs: _snapshot_report(args, report)
     return (validator or SecurityValidator(use_llm=False)).validate_security_only(root)
 
 
@@ -350,8 +533,8 @@ def _assert_hook_critical(result: ValidationResult, root: Path, manifest: str = 
     assert finding.file_path == manifest
     assert finding.message == _unverified_message(manifest)
     assert finding.suggestion == (
-        f"Review {manifest} and every file its hooks run. Only removing the hooks lets this check pass: neither a "
-        "--policy severity override nor --llm-verify clears it."
+        f"Review {manifest} and the complete packaged plugin. Supply a matching approval with "
+        "--hook-waivers for eligible command hooks."
     )
     [row] = finding.metadata["ledger_exceptions"]
     assert {key: row[key] for key in _HOOK_ROW} == {**_HOOK_ROW, "path": manifest}

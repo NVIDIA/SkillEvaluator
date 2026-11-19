@@ -38,6 +38,11 @@ All notable changes to SkillEvaluator are documented in this file.
   with release-managed references and preserves signed scan verification.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
+  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
+  placeholder becomes one random UUID per client. Harbor verifier judges,
+  embeddings, in-container agents, and reusable CI commands use separate
+  configuration.
 
 ### Fixed
 

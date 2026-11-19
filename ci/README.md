@@ -382,72 +382,32 @@ apply. A configured LLM run is not proof of Tier 2 or Tier 3 evaluation.
 
 ## Maintainer release procedure
 
-Start with the [product release checklist](../RELEASING.md), which covers when
-to rebuild the image, refresh templates and CLI pins, and publish through Kitmaker.
+Follow the [product release checklist](../RELEASING.md) to prepare a reviewed
+candidate, qualify its image, open the pin PR and publish the release.
 
-Release publication is deliberate and manual. Consumer files become usable
-after the official image is published and verified; source templates contain
-placeholders until then.
+**Verify Tier 1 image** builds and runs real smoke cases on pull requests,
+pushes to `main` and manual verification runs. Only runs on `main` write
+the build cache. The release workflow builds the same Dockerfile from the
+reviewed candidate without using cached layers. Image writes require approval
+in the `release-image` environment.
 
-1. Review and merge source, wrapper, scanner pins, renderer and reusable
-   workflows. Run focused selection/report/trust tests plus practical E2E
-   checks using the candidate revision. The [public examples](examples/README.md)
-   illustrate the report and feedback surfaces; they are not proof that a new
-   release has passed end-to-end verification.
-2. From a reviewed commit on upstream `main`, manually run **Build and publish
-   Tier 1 image** with `publish: true`. Publishing is allowed only from `main`
-   in `NVIDIA/SkillEvaluator`; PR runs build and smoke-test without uploading.
-   The default `publish: false` builds and verifies without publication.
-   A release run builds the image once, smoke-tests that local image and pushes
-   the same image. Pushes to `main` also build and smoke-test the image; they
-   write the GitHub Actions layer cache that later builds read. Pull request
-   runs read that cache but never write it. Release builds do not reuse cached
-   layers, so `git` and `ca-certificates` come from the Debian packages current
-   at release time.
-   Build the shared CI runtime with its required external scanners. The base
-   image digest, uv bootstrap, scanner runtime dependencies and SkillSpector
-   build dependencies are pinned; scanner installs require package hashes.
-   Confirm the resulting digest's source revision and the installed scanner
-   versions; do not promote an arbitrary feature-branch build as an upstream
-   release.
-3. Ensure the GHCR package `ghcr.io/nvidia/skillevaluator-tier1` is **Public**.
-   Repository visibility does not make a new container package public; see
-   [GitHub's container registry documentation](https://docs.github.com/en/packages/working-with-a-github-packages-registry/working-with-the-container-registry).
-   Prove an anonymous pull using a clean Docker configuration; an authenticated
-   maintainer pull is insufficient evidence for consumer onboarding. Anonymous
-   verification and template generation run in a separate `onboarding` job. If
-   the first package was private, set its visibility and **Re-run failed jobs**
-   to verify the same published digest. A fresh dispatch reuses the existing
-   revision tag after checking its source label; it never overwrites that tag.
-   Registry authentication or network failures stop publication rather than
-   being treated as an absent image.
-4. Select the reviewed immutable reusable-workflow/tools revision and the
-   verified image digest. Use `ci/render_templates.py` to generate release
-   copies of the files in `ci/templates/`, replacing
-   `RELEASE_WORKFLOW_SHA` and `RELEASE_IMAGE_DIGEST` with those identities.
-   Follow the helper's current `--help` for its CLI. Reject unresolved release
-   placeholders or mutable references in generated files. The consumer's Pages
-   URL remains their own configuration; the generated caller blob must be
-   recalculated after any scan-file edits.
-5. Download the workflow's `github-actions-onboarding` artifact (retained for
-   90 days). Commit the verified generated files under `ci/bundles/VERSION/`.
-   Use **one SkillEvaluator product release per version**: stage the Python
-   wheel, source archive, CI bundle and checksums together in that release's
-   draft, include the versioned PyPI package link in its notes, then publish
-   after all assets are ready. Do not create separate `ci-*` release entries.
-   Test those exact generated files in a clean consumer repository. Verify a
-   passing collection, an intentional failure, configuration and missing-tool
-   failures, affected-skill PR selection and `scan-mode: all`, and report
-   preservation. For the optional publisher, test deployment, matching caller
-   provenance, one updated comment, current-head/race handling and negative
-   trust cases with the consumer's real configuration.
-6. Inspect actual Actions summaries, downloaded JSON/HTML/Markdown and, where
-   configured, hosted reports and the bot comment. Keep build/source evidence,
-   local tests, real GitHub runtime and publication proof separate. Only then
-   present the release files as ready for external consumers.
+The official `ghcr.io/nvidia/skillevaluator-tier1` package must be public.
+If the initial pull fails because the package is private, a package maintainer
+can update visibility and rerun the failed job. The workflow pulls the same
+digest with a clean Docker configuration and reruns all five smoke cases.
+A fresh dispatch also reuses an existing verified candidate tag. Registry
+errors stop publication, and the workflow preserves existing tags.
 
-For a separately verified image and reviewed workflow revision, the template
-renderer can also be invoked directly (substitute the recorded release values):
+The `ci-bundle-VERSION` artifact contains the rendered CI files and ZIP, scanner
+inventory, verification receipt, both packaged CLI descriptors and the stable
+GitHub workflow files and GitLab include. Before merging the pin PR, test the
+rendered files in clean GitHub and GitLab consumer repositories. Exercise a
+passing scan, an intentional failure, affected-skill and no-change selection,
+and retained reports. For optional comments or hosted reports, check caller
+provenance and the link to the correct run from the consumer's current PR or MR.
+
+For local template review with a separately verified image and workflow
+revision, run the renderer with the recorded values:
 
 ```bash
 python3 ci/render_templates.py --workflow-ref RELEASE_WORKFLOW_SHA \
@@ -456,9 +416,8 @@ python3 ci/render_templates.py --workflow-ref RELEASE_WORKFLOW_SHA \
 ```
 
 Changing the report helper requires both a rebuilt runtime image and a reviewed
-`tools-ref` for the publisher. Merely repointing a publisher does not update the
-scan's baked code. Existing immutable run paths are not re-rendered on backfill;
-use fresh runs to verify a renderer release.
+`tools-ref` for the publisher. Existing immutable run paths are not re-rendered
+on backfill. Use fresh runs to verify a renderer release.
 
 ## Real image smoke verification
 

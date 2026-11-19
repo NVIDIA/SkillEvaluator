@@ -4,83 +4,108 @@ Publish one product release containing the Python packages and verified CI
 configuration. Users normally install the package and run `skillevaluator ci
 init`; image builds and template generation are maintainer work.
 
-## Prepare and validate
+## Configure release access
 
-1. Select the reviewed source revision and update the package version, import
-   fallback, editable lock entry, citation and documentation citation example.
-   Move the complete Unreleased changelog into the dated release section.
-2. Run the locked full test suite, lint, package build, strict distribution
-   metadata checks, OSS source/archive checks, benchmark provenance checks and
-   documentation validation. Install the built wheel and source distribution
-   in clean supported Python environments and exercise actual CLI/report output.
-3. Review edge cases, option interactions, output correctness and regressions.
-   Resolve required current-head CI failures and review threads before merging.
+Use **Actions → SkillEvaluator Release → Run workflow** and select `main`.
+The workflow accepts a bare `X.Y.Z` version, a full source commit SHA, and a
+phase. `Validate release` is the default. PRs, pushes, and tags never trigger
+the product release workflow.
 
-## Build the CI release before publishing Python packages
+Before the first release, enable immutable releases in the repository and
+set the repository variable `RELEASE_DEVZONE_INDEX_URL` to the approved
+public HTTPS NVIDIA DevZone listing for `/skillevaluator/`. Configure these
+GitHub Actions environments for `main`:
 
-For a release that changes the installed evaluator, runtime dependencies or
-scanners, build and verify a fresh official CI image. Workflow/publisher-only
-or documentation-only releases can reuse a compatible verified image; record
-the reuse and its source identity explicitly. Review the current template
-catalog and packaged CLI descriptors for every product release.
+- `release-image` and `release-github` require maintainer approval. Grant this
+  repository's Actions token write access to the official public GHCR package.
+  The workflow needs to create the version tag and write the GitHub release.
+- `release-kitmaker-dry-run` and `release-kitmaker` run the Kitmaker jobs. Require
+  release-owner approval and prevent self-review on `release-kitmaker`. Set
+  the approved `KITMAKER_TELEPORT_VERSION`, `KITMAKER_FERRY_PROXY`, and
+  `KITMAKER_FERRY_JOIN_TOKEN` variables. Enroll the upstream release workflow
+  in Charon Ferry for the project's release POST and status GET.
+- Configure `KITMAKER_VAULT_URL`, `KITMAKER_VAULT_AUTH_MOUNT`,
+  `KITMAKER_VAULT_ROLE`, and `KITMAKER_VAULT_AUDIENCE` on each Kitmaker
+  environment. Bind each Vault JWT role to the approved repository and
+  environment, `refs/heads/main`, caller workflow `release.yml`, and reusable
+  workflow `release-kitmaker.yml`. Confirm the approved Vault URL is reachable
+  from the GitHub-hosted runner. Set `KITMAKER_VAULT_NAMESPACE` and
+  `KITMAKER_VAULT_CA_PEM` where required by the Vault deployment.
+- Both roles read the KV v2 data API path in `KITMAKER_VAULT_CONFIG_PATH`.
+  The record holds `project_id`, `owner_email`, and the authorized Kitmaker
+  service `token`. Grant both roles read and compare-and-set write access
+  below the separate KV v2 data API prefix in `KITMAKER_VAULT_RECEIPT_PATH`.
+  Each version has one receipt key. Confirm the project ID and owner in
+  Kitmaker and run the protected dry-run job successfully before approving
+  the first upload. The checked-in dry-run job sends `upload: false`.
+  Apply that restriction in Ferry policy as well if the tenant supports it.
 
-1. Merge the validated release source to `main`. The publishing workflow accepts
-   only upstream `main`; ordinary PR and main-push builds verify without publishing.
-2. Run **Build and publish Tier 1 image** with `publish=true`:
+See [Kitmaker onboarding](https://kitmaker.gitlab-master-pages.nvidia.com/kitmaker-docs/users/portal-api/onboarding.html)
+and the [Wheel Release API](https://kitmaker.gitlab-master-pages.nvidia.com/kitmaker-docs/users/portal-api/wheel-release-api.html).
 
-   ```bash
-   gh workflow run publish-tier1-image.yml \
-     --repo NVIDIA/SkillEvaluator --ref main -f publish=true
-   ```
+## Prepare the CI release
 
-   Record the run's exact source SHA. Wait for image verification, publication
-   and the onboarding job's anonymous pull of the resulting immutable digest.
-3. Download `github-actions-onboarding` and the image verification evidence.
-   The onboarding job renders the templates with the reviewed workflow SHA and
-   published image digest. For separate workflow/publisher revisions, use:
-
-   ```bash
-   python3 ci/render_templates.py --workflow-ref REVIEWED_FULL_SHA \
-     --publisher-ref REVIEWED_PUBLISHER_FULL_SHA \
-     --image ghcr.io/nvidia/skillevaluator-tier1@sha256:VERIFIED_DIGEST \
-     --output /tmp/skillevaluator-onboarding
-   ```
-
-   Use a new output directory. The renderer writes configurations, README and
-   `release.json`; prepare the versioned ZIP, checksums, scanner inventory and
-   verification receipt separately.
-4. Commit the verified files under `ci/bundles/VERSION/` through a follow-up PR.
-   Update `ci/bundles/README.md`, current onboarding links and the packaged
-   `src/skillevaluator/ci-release.json` to the same verified image/workflow pins.
-   Preserve historical version folders. If releasing all-tier onboarding, review
-   its separate schema-version 2 descriptor, workflow/tools refs, capabilities,
-   evaluator version and runtime-lock hash together.
-5. Test the exact generated files in clean consumers, including pass/failure,
-   changed/all/no-change selection, missing prerequisites and retained reports.
-   Test optional trusted publishing and provider-backed tiers separately; record
-   unavailable integration checks explicitly.
-6. Merge those pin/bundle changes, freeze the final source revision, then rebuild
-   and validate the Python packages so `ci init` contains the final descriptors.
-   Keep the image's source SHA distinct from the later bundle/metadata commit.
+1. In a release-preparation PR, update the package version, its import fallback,
+   the editable lock entry, the citation and its documentation example, and any
+   version-specific starter expectations. Move the complete Unreleased changelog
+   into a dated version section. Review the changes and pass required CI before
+   merging.
+2. In the release workflow UI, choose **Build CI image and bundle** and enter
+   the version-preparation merge SHA. Approve the `release-image` job. The
+   workflow verifies the official Linux amd64 runtime and anonymously pulls and
+   retests the exact published digest. It retains the scanner inventory and
+   verification receipt.
+3. Download the `ci-bundle-VERSION` artifact. Commit its versioned files under
+   `ci/bundles/VERSION/`, both descriptors under `src/skillevaluator/`, and the
+   generated workflow wrappers under `.github/workflows/` and GitLab stable
+   include under `ci/gitlab/` through a follow-up PR. Update the bundle catalog
+   and current onboarding links. Test the exact
+   generated files in clean GitHub and GitLab consumers for pass/fail,
+   all/changed/no-change selection, missing prerequisites, and retained reports.
+   Qualify optional trusted publishing and provider-backed tiers when affected.
+4. Merge the pin PR and freeze its merge SHA as the product release source.
+   If candidate runtime, scanner, dependency, or reusable-workflow inputs
+   changed after the image build, qualify a new image source and refresh the
+   bundle first.
 
 See [CI maintainer instructions](ci/README.md#maintainer-release-procedure) for
-image publication, scanner verification and consumer qualification details.
+image and consumer qualification details.
 
 ## Publish the product release
 
-1. Create the version tag at the final reviewed source revision. Stage one draft
-   GitHub release with the reviewed notes, wheel, source distribution, CI ZIP,
-   artifact manifest and checksums. Download and verify every asset before
-   publishing; immutable release assets cannot be replaced afterward.
-2. Publish the completed GitHub release. Verify anonymous artifact downloads and
-   the exact image link/digest. Include direct versioned YAML links and the
-   versioned PyPI package URL in the notes, marking PyPI pending until verified.
-3. Use the approved Kitmaker project to dry-run both exact Python artifact URLs.
-   After both checks complete, submit those same URLs for managed publication.
-   Retain submission receipts; inspect status before retrying an ambiguous request.
-4. Verify index-hosted hashes and fresh pip/uv installations, dependencies, CLI
-   version and real reports. Then update the editable release notes from pending
-   to published and verified, with any validation limits stated.
+1. Open the workflow in the GitHub UI again, choose **Validate release**, and
+   enter the version and product release SHA from the bundle PR. Review the
+   source, wheel, sdist, and CI bundle checks. This run retains its verified
+   artifacts in Actions.
+2. Choose **Publish release** with the same inputs and approve the
+   `release-github` job when validation succeeds. The publish run qualifies
+   its exact build outputs, creates `vVERSION` at the reviewed product SHA,
+   and stages one draft with the wheel, sdist, CI ZIP, manifest, and
+   checksums. Before creating the tag, it resolves the official GHCR digest
+   and checks both package indexes for version conflicts. It verifies the
+   staged bytes before publishing and verifies anonymous downloads afterward.
+   The notes show that package publication is pending.
+3. Kitmaker dry-runs both anonymous Python asset URLs. Review the results and
+   approve `release-kitmaker` only after both pass. The job submits those URLs
+   for both public PyPI and NVIDIA DevZone and records its request UUID in the
+   private Vault receipt. The workflow verifies the exact index-hosted files,
+   fresh pip and uv installations, a Tier 1 report, and the installed CI pins
+   before recording verification in the GitHub release notes.
+
+On interruption, use **Re-run failed jobs** or open **Run workflow** with the
+same version, product SHA, and **Publish release** phase. A draft can resume
+using its original Actions artifact. Preserve that artifact until completion.
+A completed GitHub release uses its existing verified bytes. If GitHub
+rejects the workflow token when creating the version tag, an authorized
+maintainer can create that tag at the exact reviewed product SHA and resume
+the same run. The workflow checks the tag target on every attempt.
+
+For a Kitmaker timeout or partial publication, inspect the private receipt,
+Kitmaker status and both public indexes. An ambiguous POST must be reconciled
+against Portal history before an operator repairs the private checkpoint.
+Once the original request has a known outcome, retry only an artifact missing
+from both indexes. Escalate a hash conflict or an artifact on only one index
+to Kitmaker. The GitHub release stays pending while verification is incomplete.
 
 ## Promote the stable channel
 
@@ -117,9 +142,11 @@ write access. Allow it to bypass only the tag ruleset for `stable`. In the
 secret. Reserve the name `stable` for the tag and protect the version tags
 separately.
 
-Run the same workflow on `main` to retry promotion after a release created by an
-automation token. A retry verifies the published release even if `main` already
-has the next version's wrappers. Qualify this case with the release App on GitHub.
+After the manual product release finishes verification, open **Promote stable
+GitHub workflows** in Actions and select **Run workflow** on `main`. The
+product workflow's GitHub Actions token does not trigger the release relay.
+A retry verifies the published release even if `main` already has the next
+version's wrappers. Qualify this case with the release App on GitHub.
 If GitHub refuses to update `stable` to the older workflow tree, keep the exact
 release commit at the tip of a protected release branch and retry.
 

@@ -582,6 +582,73 @@ class TestCachePersistence:
 
 
 class TestQuery:
+    @pytest.mark.parametrize("full_body", [False, True])
+    @pytest.mark.parametrize("query_method", ["query", "query_entry"])
+    def test_empty_registry_does_not_request_embeddings(self, full_body: bool, query_method: str) -> None:
+        client = _make_mock_client([[1.0, 0.0]])
+        client.embed_single.side_effect = None
+        client.embed_single.return_value = [1.0, 0.0]
+        client.embed_chunked.return_value = [1.0, 0.0]
+        registry = EmbeddingRegistry(client, full_body=full_body)
+
+        if query_method == "query":
+            matches = registry.query("Candidate text", threshold=0.75)
+        else:
+            entry = ContentEntry(
+                name="candidate",
+                description="Candidate text",
+                path="candidate",
+                content_type="skill",
+                full_text="# Candidate\nCandidate text",
+            )
+            matches = registry.query_entry(entry, threshold=0.75)
+
+        assert matches == []
+        client.embed_single.assert_not_called()
+        client.embed_chunked.assert_not_called()
+
+    @pytest.mark.parametrize("full_body", [False, True])
+    def test_self_only_catalog_does_not_request_embeddings(self, full_body: bool) -> None:
+        client = _make_mock_client([[1.0, 0.0]])
+        client.embed_single.side_effect = None
+        client.embed_single.return_value = [1.0, 0.0]
+        client.embed_chunked.return_value = [1.0, 0.0]
+        registry = EmbeddingRegistry(client, full_body=full_body)
+        registry._entries["skill:candidate"] = RegistryEntry(
+            name="candidate",
+            description="Candidate text",
+            path="candidate",
+            content_type="skill",
+            entry_id="skill:candidate",
+            embedding=[1.0, 0.0],
+        )
+        entry = ContentEntry(
+            name="candidate",
+            description="Candidate text",
+            path="candidate",
+            content_type="skill",
+            full_text="# Candidate\nCandidate text",
+        )
+
+        assert registry.query_entry(entry, threshold=0.75, exclude_entry_id="skill:candidate") == []
+        client.embed_single.assert_not_called()
+        client.embed_chunked.assert_not_called()
+
+    @pytest.mark.parametrize("query_method", ["query", "query_entry"])
+    @pytest.mark.parametrize("threshold,text", [(float("nan"), "valid"), (0.75, "x" * 16_385)])
+    def test_empty_registry_still_validates_query(self, query_method: str, threshold: float, text: str) -> None:
+        client = _make_mock_client([])
+        registry = EmbeddingRegistry(client)
+
+        with pytest.raises(ValueError, match=r"threshold|character limit"):
+            if query_method == "query":
+                registry.query(text, threshold=threshold)
+            else:
+                entry = ContentEntry(name="candidate", description=text, path="candidate", content_type="skill")
+                registry.query_entry(entry, threshold=threshold)
+
+        client.embed_single.assert_not_called()
+
     def test_query_returns_matches_above_threshold(self) -> None:
         mock_client = _make_mock_client([[1.0, 0.0]])
         mock_client.embed_single.side_effect = None

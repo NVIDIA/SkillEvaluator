@@ -8,6 +8,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Claude Code log recovery pairs batched and delayed tool results without repeatedly
   scanning earlier tool calls, reducing reconstruction time for long trajectories.
+- Tier 3 lift intervals compute faster when every case has the same lift;
+  results are unchanged.
 
 ### Documentation
 

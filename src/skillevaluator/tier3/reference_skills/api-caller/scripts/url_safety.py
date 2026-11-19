@@ -63,6 +63,9 @@ def resolve_openapi_server_url(spec: dict, spec_url: str | None = None) -> str:
         server_url = server.get("url")
         if not isinstance(server_url, str):
             raise ValueError("server URL must be a string")
+        if not server_url.strip():
+            # A blank url would resolve to the spec document itself; use the OpenAPI default.
+            server_url = "/"
         variables = server.get("variables") or {}
     else:
         server_url = "/"

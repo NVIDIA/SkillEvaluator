@@ -204,6 +204,16 @@ Unknown check types and invalid fields are dataset-validation errors. On a
 without-skill baseline, checks for scripts inside the evaluated skill are not
 checked because that skill is not installed.
 
+In the unreleased checkout, runtime `output_matches` checks use isolated Python
+workers with a default 1-second limit per pattern and a shared 5-second matching
+budget per case. A timeout or an exhausted matching budget counts as a failed
+check and stays in the `behavior_check` denominator. Invalid-pattern errors
+reported by a worker and worker startup failures remain not checked. Later
+literal checks still run. Set
+`SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC` and `SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC`
+in the host environment to allow slower legitimate patterns; both accept
+positive finite seconds. See [Output-pattern check limits](/skills/skillevaluator/environment-variables#output-pattern-check-limits).
+
 For an exact final-response format, use an anchored `output_matches` check
 and keep semantic requirements in `expected_behavior` (or `assertions`). For
 example, this legacy entry checks numeric-only output without judging it:

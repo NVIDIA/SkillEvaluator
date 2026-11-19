@@ -18,6 +18,10 @@ All notable changes to SkillEvaluator are documented in this file.
   matching budget, preserving Python regex semantics and later checks. Interpreter
   startup and JSON transfer have a separate startup allowance and do not consume
   the matching budget; invalid patterns remain unscored across output encodings.
+  Pattern timeouts and exhausted matching budgets count as failed checks, so
+  slow failing patterns cannot increase the behavior score. Operators can
+  configure the per-pattern deadline and shared budget through the existing
+  verifier environment.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

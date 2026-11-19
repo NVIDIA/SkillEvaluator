@@ -4,13 +4,14 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import subprocess
 import sys
 from math import isfinite
 from pathlib import Path
 from queue import Empty, Queue
-from threading import Thread
+from threading import TIMEOUT_MAX, Thread
 from typing import Any
 
 if __package__:
@@ -71,16 +72,30 @@ def _pattern_worker_messages(worker: subprocess.Popen[str], payload: str, messag
         messages.put(None)
 
 
-def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tuple[bool | None, str | None]:
+def _pattern_limit(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    if not isfinite(value) or value <= 0:
+        return default
+    # Queue.get uses a platform lock timeout, which can overflow even for a
+    # finite Python float. Keep every configured wait within its supported range.
+    return min(value, TIMEOUT_MAX)
+
+
+def _output_pattern_matches(
+    pattern: str, text: str, budget: list[float], timeout_seconds: float
+) -> tuple[bool | None, str | None]:
     """Keep Python re semantics while bounding a pattern's compilation and matching."""
-    timeout = min(_PATTERN_TIMEOUT_SECONDS, budget[0])
+    timeout = min(timeout_seconds, budget[0])
     if timeout <= 0:
-        return None, "the regular expression time budget was exhausted"
+        return False, "the regular expression time budget was exhausted"
     if not sys.executable:
         return None, "the regular expression worker could not be started"
     timeout_reason = (
         "the regular expression time budget was exhausted"
-        if budget[0] < _PATTERN_TIMEOUT_SECONDS
+        if budget[0] < timeout_seconds
         else "the regular expression timed out"
     )
     try:
@@ -105,7 +120,7 @@ def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tup
                     output = messages.get(timeout=timeout)
                 except Empty:
                     budget[0] -= timeout
-                    return None, timeout_reason
+                    return False, timeout_reason
                 try:
                     worker.wait(timeout=_PATTERN_STARTUP_TIMEOUT_SECONDS)
                 except subprocess.TimeoutExpired:
@@ -128,7 +143,7 @@ def _output_pattern_matches(pattern: str, text: str, budget: list[float]) -> tup
         return None, "the regular expression worker returned an invalid result"
     budget[0] -= elapsed
     if elapsed > timeout:
-        return None, timeout_reason
+        return False, timeout_reason
     if kind == "match" and detail is None:
         return True, None
     if kind == "no_match" and detail is None:
@@ -288,7 +303,8 @@ def evaluate_declarative_checks(
     results = []
     if not isinstance(checks, list):
         return results
-    pattern_budget = [_PATTERN_BUDGET_SECONDS]
+    pattern_timeout = _pattern_limit("SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC", _PATTERN_TIMEOUT_SECONDS)
+    pattern_budget = [_pattern_limit("SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC", _PATTERN_BUDGET_SECONDS)]
     for check in checks:
         if not isinstance(check, dict):
             results.append({"type": None, "passed": None, "reason": "Declarative check must be an object"})
@@ -353,9 +369,13 @@ def evaluate_declarative_checks(
             )
         elif check_type == "output_matches":
             expected = check.get("pattern", "")
-            passed, problem = _output_pattern_matches(str(expected), final_response, pattern_budget)
+            passed, problem = _output_pattern_matches(str(expected), final_response, pattern_budget, pattern_timeout)
             if problem is not None:
-                reason = f"Could not check output pattern because {problem}"
+                reason = (
+                    f"Output pattern failed because {problem}"
+                    if passed is False
+                    else f"Could not check output pattern because {problem}"
+                )
             else:
                 reason = (
                     f"Final response matches /{expected}/"

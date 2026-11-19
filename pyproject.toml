@@ -113,7 +113,7 @@ dev = [
 ]
 
 [project.urls]
-Documentation = "https://github.com/NVIDIA/SkillEvaluator#readme"
+Documentation = "https://docs.nvidia.com/skills/skillevaluator/"
 Repository = "https://github.com/NVIDIA/SkillEvaluator"
 
 [project.scripts]

@@ -71,6 +71,10 @@ _LIMIT_FIELDS = tuple(
 # must stay the same across runs, so it shows only the limits that the file and
 # the configuration fix; the finding's metadata keeps every limit.
 _RUN_DEPENDENT_LIMITS = frozenset(field for field, seconds in _LIMIT_FIELDS if seconds)
+# A reason's ``line_source`` when its lines come from a ``parser_diagnostic``.
+# Only such a span is quoted as a range: a row's own end_line stays in
+# metadata and must not change grouping or finding IDs.
+_PARSER_DIAGNOSTIC = "parser_diagnostic"
 
 
 def diagnostic_text(value: object, *, max_length: int = 4096) -> str | None:
@@ -192,6 +196,15 @@ def _reasons(rows: object, text: Callable[..., str | None]) -> list[dict]:
         for field in ("start_line", "end_line"):
             if (line := _line(row.get(field))) is not None:
                 reason[field] = line
+        if "start_line" not in reason:
+            diagnostic = row.get("parser_diagnostic")
+            if isinstance(diagnostic, dict):
+                start = _line(diagnostic.get("start_line"))
+                end = _line(diagnostic.get("end_line"))
+                if start is not None and end is not None and end >= start:
+                    reason["start_line"] = start
+                    reason["end_line"] = end
+                    reason["line_source"] = _PARSER_DIAGNOSTIC
         metrics = row.get("limits")
         if isinstance(metrics, dict):
             limits = {}
@@ -284,6 +297,54 @@ def index_legacy_reference_reasons(
     return by_target
 
 
+def _with_ledger_parser_spans(
+    rows: object,
+    target: str,
+    completeness: object,
+    normalize_path: Callable[[object], str | None],
+    text: Callable[..., str | None],
+) -> object:
+    """*rows* with a ledger ``parser_diagnostic`` on each structured reason that has no line.
+
+    SkillSpector builds an AE1 finding's ``evidence.reasons`` without the
+    ``parser_diagnostic`` of the ledger row behind each reason, so the span is
+    read from ``analysis_completeness.ledger_exceptions``: the one row for the
+    same target and ``reason_code``. A reason with a line of its own, or with
+    no row or several rows to match, is left as it is.
+    """
+    if not isinstance(rows, list) or not isinstance(completeness, dict):
+        return rows
+    ledger = completeness.get("ledger_exceptions")
+    if not isinstance(ledger, list):
+        return rows
+
+    def needs_span(row: object) -> bool:
+        return (
+            isinstance(row, dict)
+            and _line(row.get("start_line")) is None
+            and not isinstance(row.get("parser_diagnostic"), dict)
+            and text(row.get("reason_code"), max_length=128) is not None
+        )
+
+    if not any(needs_span(row) for row in rows[:_MAX_REASONS]):
+        return rows
+    matches: dict[str, list[dict]] = {}
+    for entry in ledger:
+        if not isinstance(entry, dict) or normalize_path(entry.get("path")) != target:
+            continue
+        if reason_code := text(entry.get("reason_code"), max_length=128):
+            matches.setdefault(reason_code, []).append(entry)
+    filled: list[object] = []
+    for row in rows:
+        if needs_span(row):
+            candidates = matches.get(text(row.get("reason_code"), max_length=128) or "", [])
+            diagnostic = candidates[0].get("parser_diagnostic") if len(candidates) == 1 else None
+            if isinstance(diagnostic, dict):
+                row = {**row, "parser_diagnostic": diagnostic}
+        filled.append(row)
+    return filled
+
+
 def issue_diagnostics(
     issue: Mapping[str, object],
     *,
@@ -298,7 +359,10 @@ def issue_diagnostics(
     and up to 16 ``reasons``, with ``reasons_truncated`` when SkillSpector or
     this projection left some out. Before v2.12.0 the reasons come from the
     target's ledger rows in *completeness* (or *legacy_reason_index*), and the
-    finding gets no evidence without them. ``skillspector_occurrences`` lists
+    finding gets no evidence without them. A structured reason without a line
+    takes the ``parser_diagnostic`` span of its one matching ledger row in
+    *completeness*; a reason whose lines come from a ``parser_diagnostic``
+    has ``line_source: "parser_diagnostic"``. ``skillspector_occurrences`` lists
     up to 128 of the issue's ``occurrences``. Any other issue gets ``{}``.
     Paths go through *normalize_path* and other text through *text*.
     """
@@ -311,7 +375,9 @@ def issue_diagnostics(
     evidence = issue.get("evidence")
     evidence = evidence if isinstance(evidence, dict) else {}
     rows = evidence.get("reasons") if structured else None
-    if not rows:
+    if rows:
+        rows = _with_ledger_parser_spans(rows, target, completeness, normalize_path, text)
+    else:
         if legacy_reason_index is None:
             legacy_reason_index = index_legacy_reference_reasons(
                 [issue], completeness=completeness, normalize_path=normalize_path, text=text
@@ -348,22 +414,36 @@ def _reason_details(reasons: list[dict]) -> list[str]:
 
     The run time and the time budget (``observed_seconds``, ``limit_seconds``)
     are left out, so the text, and the ``finding_id`` that hashes it, is the
-    same in every run of one scan.
+    same in every run of one scan. A span whose ``line_source`` is
+    ``parser_diagnostic`` is part of that text; an ``end_line`` that was
+    already on the row is not.
     """
     grouped: dict[tuple, list[str]] = {}
     for reason in reasons:
         limits = sorted(
             (key, value) for key, value in (reason.get("limits") or {}).items() if key not in _RUN_DEPENDENT_LIMITS
         )
-        key = (reason["reason_code"], reason.get("start_line"), reason.get("message"), tuple(limits))
+        start_line = reason.get("start_line")
+        parser_end = reason.get("end_line") if reason.get("line_source") == _PARSER_DIAGNOSTIC else None
+        if parser_end == start_line:
+            parser_end = None
+        key = (
+            reason["reason_code"],
+            start_line,
+            parser_end,
+            reason.get("message"),
+            tuple(limits),
+        )
         analyzers = grouped.setdefault(key, [])
         analyzers.extend(name for name in reason.get("analyzers", []) if name not in analyzers)
     details = []
-    for (reason_code, start_line, message, limits), analyzers in grouped.items():
+    for (reason_code, start_line, parser_end, message, limits), analyzers in grouped.items():
         detail = reason_code
         if analyzers:
             detail += f" ({', '.join(analyzers)})"
-        if start_line:
+        if reason_code == "static_parse_limit" and start_line and parser_end:
+            detail += f" at target lines {start_line}-{parser_end}"
+        elif start_line:
             detail += f" at target line {start_line}"
         if message:
             detail += f": {message.rstrip('.')}"
@@ -381,7 +461,8 @@ def reference_suggestion(
     SkillSpector's own remediation is kept unless it is missing or the generic
     text of releases before v2.12.0. A specific remedy is then chosen only from
     a complete list of reasons, because the visible part of a truncated list
-    cannot show that one remedy covers every cause.
+    cannot show that one remedy covers every cause. *evidence* is not
+    changed, so every call returns the same text.
     """
     reasons = evidence["reasons"]
     truncated = evidence.get("reasons_truncated") is True

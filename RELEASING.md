@@ -82,6 +82,87 @@ image publication, scanner verification and consumer qualification details.
    version and real reports. Then update the editable release notes from pending
    to published and verified, with any validation limits stated.
 
+## Promote the stable channel
+
+Generate the GitHub entry points and GitLab stable include from the verified
+Tier 1 bundle as part of the release-bundle PR.
+
+```bash
+python3 ci/stable_channel.py ci/bundles/VERSION
+python3 ci/stable_channel.py ci/bundles/VERSION --check
+python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
+```
+
+The source-boundary check scans tracked text files across the repository,
+including the generated workflows, promotion scripts and documentation. CI runs
+it for both code and docs-only changes.
+
+Qualify the exact generated references in a disposable GitHub repository.
+Check a credentials-free scan, a failing same-repository PR scan with signed
+evidence and a successful private Pages deployment that updates **Open full
+report**. Test a publisher from the candidate release against retained evidence
+from the previous stable scanner. The scan and its feedback can resolve the
+channel at different times. Include queued scans, reruns and the full artifact
+retention period when reviewing a publisher compatibility change.
+
+Publishing a stable release signals **Promote stable GitHub workflows**. The
+promotion runs from `main`, verifies the latest immutable release and checks
+its CI archive and runtime identities against the published artifact manifest.
+It verifies the GitHub and GitLab stable configurations against the templates
+at the release commit and moves the single `stable` tag to that commit. Before
+activation, install a dedicated GitHub App on this repository with Contents
+write access. Allow it to bypass only the tag ruleset for `stable`. In the
+`stable-channel` Actions environment, restrict deployments to `main` and set the
+`STABLE_CHANNEL_APP_CLIENT_ID` variable and `STABLE_CHANNEL_APP_PRIVATE_KEY`
+secret. Reserve the name `stable` for the tag and protect the version tags
+separately.
+
+Run the same workflow on `main` to retry promotion after a release created by an
+automation token. A retry verifies the published release even if `main` already
+has the next version's wrappers. Qualify this case with the release App on GitHub.
+If GitHub refuses to update `stable` to the older workflow tree, keep the exact
+release commit at the tip of a protected release branch and retry.
+
+The immutable `v1.0.1` release predates the stable entry points. If it is still the
+latest release at first activation, merge its generated configurations into
+`main` and dispatch promotion with the full reviewed commit SHA as
+`bootstrap-sha`. The selected commit must contain the GitLab stable include
+and the exact published CI bundle. Later retries of `v1.0.1` verify the existing
+`stable` target. Subsequent releases include the generated configurations in
+their version tags. The workflow rejects downgrades.
+
+## Qualify the GitLab Tier 1 stable include
+
+The release generator writes `ci/gitlab/stable-tier1.yml` from the immutable
+evaluator commit and scanner image digest in the same Tier 1 bundle used for
+GitHub. Include that file and its source template in the release commit. The
+consumer's root `.gitlab-ci.yml` retains the merge-request rules.
+[GitLab CI setup](docs/gitlab-ci.mdx#follow-the-latest-stable-release)
+
+Qualify the release commit before publishing, since publication triggers
+promotion. For the first `v1.0.1` promotion, qualify the bootstrap commit before
+dispatching the workflow. In a test GitLab project, use the consumer root
+configuration from the GitLab CI guide and replace `refs/tags/stable` in its
+include URL with the full commit SHA you are qualifying.
+
+Run GitLab CI Lint and verify changed-skill selection in a detached merge
+request, HTML and `skill-evaluator-ci.json` artifact retention after an
+intentional scan failure, and a full scan on the default branch. Check that the
+metadata records the release, evaluator commit, image digest, consumer commit,
+pipeline ID, and job ID. Run a new pipeline after switching the test include to
+a different qualified release. A retry of the original job should keep its
+original release and configuration.
+[GitLab include behavior](https://docs.gitlab.com/ci/yaml/#include)
+
+If `stable` already serves a GitHub-only release, leave that release's target in
+place. GitLab starts with the next qualifying release. Once published through
+the channel, later stable promotions must retain the GitLab include. Consumers
+can pin a previous verified bundle while a corrected release is prepared.
+
+Upgrade all-tier setups with trusted merge-request feedback through reviewed
+changes to the immutable configuration, tools, and image pins.
+[All-tier GitLab setup](ci/templates/all-tiers/README.md#gitlab-checks-and-feedback)
+
 ## User-facing instructions
 
 Keep normal GitHub onboarding short:

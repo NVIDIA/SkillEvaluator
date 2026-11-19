@@ -206,3 +206,16 @@ skills:
         assert finding.category == "PLUGIN_SCHEMA"
         assert finding.file_path == str(tmp_path / "skills")
         assert "Cannot inspect skill manifest" in finding.message
+
+
+def test_nested_alias_manifest_is_reported_as_yaml_complexity(tmp_path: Path) -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_FRONTMATTER
+
+    _write_manifest(tmp_path, NESTED_ALIAS_FRONTMATTER + "\n")
+
+    result = PluginSchemaValidator().validate(tmp_path)
+
+    assert not result.passed
+    finding = next(f for f in result.findings if f.check_name == "manifest_yaml_complexity")
+    assert "complexity limits" in finding.message
+    assert "Simplify the manifest" in finding.suggestion

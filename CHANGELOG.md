@@ -14,8 +14,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
-- LLM retries retain the innermost parsable `Retry-After` header through exception
-  wrappers, so malformed inner values do not discard a valid outer delay and
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
   rate-limited calls stop when the requested wait exceeds the retry budget.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.

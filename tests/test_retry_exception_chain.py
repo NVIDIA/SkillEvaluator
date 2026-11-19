@@ -113,9 +113,12 @@ def test_empty_inner_retry_after_keeps_usable_outer_header(link, header):
 
 
 @pytest.mark.parametrize("link", ["__cause__", "__context__"])
-@pytest.mark.parametrize("value", ["garbage", " \t "])
-def test_malformed_inner_retry_after_keeps_parsable_outer_header(link, value):
-    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "60"}, None)
+@pytest.mark.parametrize(
+    ("value", "outer_value"),
+    [("garbage", "60"), (" \t ", "60"), ("NaN", "60"), ("-inf", "60"), ("-5", "60"), ("inf", "0"), ("1e999", "0")],
+)
+def test_invalid_inner_retry_after_keeps_valid_outer_header(link, value, outer_value):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": outer_value}, None)
     underlying = httpx.HTTPStatusError(
         "rate limited",
         request=httpx.Request("POST", "http://localhost/"),
@@ -123,7 +126,7 @@ def test_malformed_inner_retry_after_keeps_parsable_outer_header(link, value):
     )
     setattr(wrapper, link, underlying)
 
-    assert extract_retry_after(wrapper) == "60"
+    assert extract_retry_after(wrapper) == outer_value
 
 
 @pytest.mark.parametrize("link", ["__cause__", "__context__"])

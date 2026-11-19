@@ -152,9 +152,22 @@ def _server(statuses, tls_context=None, *, retry_after=None):
         worker.join(timeout=5)
 
 
-@pytest.mark.parametrize("inner_retry_after", ["garbage", "", "0"])
-def test_wrapped_retry_after_preserves_parsable_delay_over_http(
-    isolated_provider_environment, inner_retry_after, record_property
+@pytest.mark.parametrize(
+    ("inner_retry_after", "outer_retry_after", "should_retry"),
+    [
+        ("garbage", "60", False),
+        ("", "60", False),
+        ("NaN", "60", False),
+        ("-inf", "60", False),
+        ("-5", "60", False),
+        ("inf", "0", True),
+        ("1e999", "0", True),
+        ("0", "60", True),
+        ("Wed, 21 Oct 2015 07:28:00 GMT", "60", True),
+    ],
+)
+def test_wrapped_retry_after_preserves_valid_delay_over_http(
+    isolated_provider_environment, inner_retry_after, outer_retry_after, should_retry, record_property
 ):
     with _server([429, 200], retry_after=inner_retry_after) as server:
         url = f"http://127.0.0.1:{server.server_port}"
@@ -165,7 +178,7 @@ def test_wrapped_retry_after_preserves_parsable_delay_over_http(
                 with urllib.request.urlopen(request, timeout=2) as response:
                     return response.status
             except urllib.error.HTTPError as inner:
-                outer = urllib.error.HTTPError(url, 503, "wrapper", {"Retry-After": "60"}, None)
+                outer = urllib.error.HTTPError(url, 503, "wrapper", {"Retry-After": outer_retry_after}, None)
                 raise outer from inner
 
         result = None
@@ -176,8 +189,9 @@ def test_wrapped_retry_after_preserves_parsable_delay_over_http(
             error = caught
 
         record_property("inner_retry_after", inner_retry_after)
+        record_property("outer_retry_after", outer_retry_after)
         record_property("http_statuses", server.requests)
-        if inner_retry_after == "0":
+        if should_retry:
             assert result == 200
             assert error is None
             assert server.requests == [429, 200]

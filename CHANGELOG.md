@@ -65,6 +65,7 @@ All notable changes to SkillEvaluator are documented in this file.
   I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
+- OpenAPI discovery inherits inline Path Item parameters and applies operation overrides by name and location; parameter lists containing references retain operation-only parsing.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a

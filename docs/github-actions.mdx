@@ -75,6 +75,29 @@ reusable workflow and actions.
   onboarding; do not substitute `main` or `latest` for its immutable versions.
 </Accordion>
 
+## Follow the latest stable release
+
+For new Tier 1 setups, the opt-in stable channel updates the scan and optional
+HTML publisher together. Use `skillevaluator ci init --channel stable` with a CLI
+release that supports this option. The versioned templates above are available
+for repositories that review each evaluator upgrade separately.
+
+To configure stable manually, start with the released templates and make these edits:
+
+1. In `skill-checks.yml`, set the scan job's `uses` to
+   `NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable`.
+   Remove the job's `image` input. Keep your paths and scan policy.
+2. For hosted feedback, follow the [Pages setup](#enable-hosted-reports). In
+   `publish-skill-reports.yml`, set the publisher job's `uses` to
+   `NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports-stable.yml@stable`.
+   Remove its `trusted-evaluator-shas`, `tools-ref` and `tools-repository` inputs,
+   and set `trusted-caller-blobs` to the Git blob of your edited scan file.
+
+Use the maintained tag after its first promotion. A new run picks up later
+stable releases without a caller edit. Published reports verify the scan's
+historically resolved workflow and signed receipt. The first switch adds a
+reusable job level, so check any required status-check names on a new PR.
+
 ## See what happened
 
 | Start here | Then open |

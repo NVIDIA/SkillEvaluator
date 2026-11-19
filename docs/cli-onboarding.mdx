@@ -19,6 +19,12 @@ skillevaluator ci init
 Adding reports to an existing shared component and using private Pages require
 SkillEvaluator **0.7.2 or later**.
 
+For a new GitHub Tier 1 setup, use `skillevaluator ci init --channel stable` with
+a CLI release that supports this option. The generated workflows follow verified
+stable releases after the channel's first promotion. See
+[stable GitHub workflows](/skills/skillevaluator/github-actions#follow-the-latest-stable-release)
+for manual setup and migration.
+
 <CardGroup cols={3}>
   <Card title="1. Choose" icon="terminal" href="#run-the-wizard">
     Select skill folders, a score threshold and feedback.

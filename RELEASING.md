@@ -82,6 +82,42 @@ image publication, scanner verification and consumer qualification details.
    version and real reports. Then update the editable release notes from pending
    to published and verified, with any validation limits stated.
 
+## Promote the GitHub stable channel
+
+Generate the two stable workflows from the verified Tier 1 bundle as part of the
+release-bundle PR:
+
+```bash
+python3 ci/stable_channel.py ci/bundles/VERSION
+python3 ci/stable_channel.py ci/bundles/VERSION --check
+```
+
+Qualify the exact generated references in a disposable GitHub repository.
+Check a credentials-free scan, a failing same-repository PR scan with signed
+evidence and a successful private Pages deployment that updates **Open full
+report**. Test a publisher from the candidate release against retained evidence
+from the previous stable scanner. The scan and its feedback can resolve the
+channel at different times. Include queued scans, reruns and the full artifact
+retention period when reviewing a publisher compatibility change.
+
+Publishing a stable release signals **Promote stable GitHub workflows**. The
+promotion runs from `main`, verifies the latest immutable release and checks
+its CI archive and runtime identities against the published artifact manifest.
+It updates the single `stable` tag for both workflows. Before activation, install
+a dedicated GitHub App on this repository with Contents write access. Allow it
+to bypass only the tag ruleset for `stable`. In the `stable-channel` Actions
+environment, restrict deployments to `main` and set the
+`STABLE_CHANNEL_APP_CLIENT_ID` variable and `STABLE_CHANNEL_APP_PRIVATE_KEY`
+secret. Reserve the name `stable` for the tag and protect the version tags
+separately.
+
+Run the same workflow on `main` to bootstrap from the currently published bundle
+or retry promotion after a release created by an automation token. For bootstrap,
+the generated workflows must already be merged into `main`, and the bundle
+files must match those in the immutable release tag. The workflow rejects a
+downgrade, so a corrected release is the normal recovery path. Consumers can
+select the previous versioned templates while a fix is prepared.
+
 ## User-facing instructions
 
 Keep normal GitHub onboarding short:

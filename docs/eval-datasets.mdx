@@ -177,7 +177,8 @@ The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
 `evals.yml` — `tier3 evaluate` accepts all four. A YAML dataset is read within the
 [structure limits](/skills/skillevaluator/tier2-reference#defaults-and-safety-limits):
 at most 1,024 items in one list or mapping, 20,000 values in all, and 65,536
-characters in one value, with aliases and merge keys counted after expansion.
+characters in one value, and 4,194,304 characters in total, with aliases and merge keys
+counted after expansion (a value reached through an alias counts once per reference).
 A dataset over a limit is rejected as invalid.
 
 ### Deterministic checks

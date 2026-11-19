@@ -1209,6 +1209,29 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
+def _result_evidence_incomplete_sections(traj: dict[str, Any], evidence: str) -> list[str]:
+    """Name the accuracy or goal evidence sections that did not reach the judge whole.
+
+    As for the behavior bundle, every section is compared against its complete
+    source. A write body or tool result shortened to its own per-entry
+    allowance and a tool result past the bundle's count cap are named, as well
+    as a section the budget dropped or clipped. Nothing here withholds a score.
+    """
+
+    def reaches_judge(source: str) -> bool:
+        text = source.strip()
+        # A source longer than the evidence cannot be inside it, which also
+        # keeps the search short for a very large tool result.
+        return not text or (len(text) <= len(evidence) and _source_reaches_judge(text, evidence))
+
+    sources = (
+        ("final response", [get_final_response(traj)]),
+        ("file changes", ["\n\n".join(_collect_file_change_evidence(traj, full=True))]),
+        ("tool results", _late_observation_excerpts(traj, 10**9)),
+    )
+    return [label for label, texts in sources if not all(reaches_judge(str(text or "")) for text in texts)]
+
+
 # Clause separators for an expectation. A dot only separates when whitespace
 # follows it, so an artifact path such as ``report.py`` is never split apart.
 _BEHAVIOR_CLAUSE_SPLIT_RE = re.compile(
@@ -1332,13 +1355,15 @@ def build_metric_evidence_bundles(
         ],
         budgets["accuracy"],
     )
+    acc_evidence = _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"]))
     bundles["accuracy"] = {
-        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
+        "prompt_evidence": acc_evidence,
         "evidence_refs": refs["accuracy"],
         "omitted": {
             "count": acc_drop,
             "truncated": acc_trunc,
             "reason": "low-relevance sections dropped to fit budget" if acc_trunc else "",
+            "incomplete_sections": _result_evidence_incomplete_sections(traj, acc_evidence),
         },
         "verified": facts,
     }
@@ -1351,13 +1376,15 @@ def build_metric_evidence_bundles(
         ],
         budgets["goal_accuracy"],
     )
+    goal_evidence = _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"]))
     bundles["goal_accuracy"] = {
-        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
+        "prompt_evidence": goal_evidence,
         "evidence_refs": refs["goal_accuracy"],
         "omitted": {
             "count": goal_drop,
             "truncated": goal_trunc,
             "reason": "older/low-relevance tool results dropped to fit budget" if goal_trunc else "",
+            "incomplete_sections": _result_evidence_incomplete_sections(traj, goal_evidence),
         },
         "verified": facts,
     }

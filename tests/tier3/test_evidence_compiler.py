@@ -646,3 +646,111 @@ def test_long_tool_result_keeps_its_last_lines(metric: str) -> None:
         ]
         assert "collected 60 items" in evidence
         assert outcome in evidence
+
+
+def _tool_result_steps(results: list[str]) -> dict:
+    steps: list[dict] = [{"source": "user", "message": "Run the checks and report."}]
+    for idx, content in enumerate(results):
+        steps.append({
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": f"check-{idx}",
+                "function_name": "bash",
+                "arguments": {"command": f"./check.sh {idx}"},
+            }],
+            "observation": {"results": [{"source_call_id": f"check-{idx}", "content": content}]},
+        })
+    steps.append({"source": "agent", "message": "Done."})
+    return {"steps": steps}
+
+
+@pytest.mark.parametrize("budget", [None, "100000"], ids=["default-budgets", "raised-budgets"])
+def test_accuracy_and_goal_bundles_report_a_tool_result_cut_to_its_allowance(
+    monkeypatch: pytest.MonkeyPatch, budget: str | None
+) -> None:
+    # The per-result allowance is not a budget. The middle of a long tool
+    # result is cut whatever the budget is, the bundle is not "truncated", and
+    # the record used to say nothing at all about it.
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.delenv(name, raising=False)
+        if budget:
+            monkeypatch.setenv(name, budget)
+    traj, _outcome = _suite_run_trajectory()
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Fix the bug and run the suite.")
+        for metric in ("accuracy", "goal_accuracy"):
+            bundle = bundles[metric]
+            assert "test_case_30 PASSED" not in bundle["prompt_evidence"]
+            assert bundle["omitted"]["truncated"] is False
+            assert bundle["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+def test_accuracy_bundle_reports_tool_results_past_its_count_cap() -> None:
+    # Accuracy reads the six newest tool results and goal accuracy the twelve
+    # newest, so the oldest of seven is missing from one bundle only.
+    traj = _tool_result_steps([f"RESULT_{idx}: ok" for idx in range(7)])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        assert "RESULT_0: ok" not in bundles["accuracy"]["prompt_evidence"]
+        assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["tool results"]
+        assert "RESULT_0: ok" in bundles["goal_accuracy"]["prompt_evidence"]
+        assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == []
+
+
+def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() -> None:
+    content = "HEAD_MARK " + "a" * 2000 + " MIDDLE_MARK " + "b" * 2000 + " TAIL_MARK"
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": "/workspace/output/x.txt", "content": content},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, wrote the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Write x")
+        for metric in ("accuracy", "goal_accuracy"):
+            bundle = bundles[metric]
+            assert "MIDDLE_MARK" not in bundle["prompt_evidence"]
+            assert bundle["omitted"]["truncated"] is False
+            assert bundle["omitted"]["incomplete_sections"] == ["file changes"]
+
+
+def test_accuracy_and_goal_bundles_report_a_final_response_the_budget_clipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.setenv(name, "400")
+    traj = {"steps": [{"source": "agent", "message": _distinct_text(2000)}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Explain the migration.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert bundles[metric]["omitted"]["truncated"] is True
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["final response"]
+
+
+def test_accuracy_and_goal_bundles_with_complete_evidence_report_nothing_incomplete() -> None:
+    traj = _tool_result_steps(["3 passed in 0.10s"])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert "3 passed in 0.10s" in bundles[metric]["prompt_evidence"]
+            assert bundles[metric]["omitted"] == {
+                "count": 0,
+                "truncated": False,
+                "reason": "",
+                "incomplete_sections": [],
+            }

@@ -14,8 +14,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
   any independently measured component, instead of stopping report collection with `OverflowError`.
-  An explicit absence of tool calls remains a known zero tool duration,
-  even when LLM timing is absent or invalid.
+  Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
+  list) now report zero tool seconds even when LLM timing is missing or invalid.
+  Previously, those missing/invalid-LLM cases had no timing, so the arm's
+  tool-seconds total was `N/A`.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

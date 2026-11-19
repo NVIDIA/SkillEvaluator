@@ -105,8 +105,9 @@ All notable changes to SkillEvaluator are documented in this file.
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
 - The bundled api-caller skill resolves relative OpenAPI `servers` URLs against
-  the spec URL, substitutes server variable defaults, and reports missing path
-  parameters as an input error instead of requesting a placeholder path.
+  the final spec URL after redirects, builds Swagger 2.0 base URLs from `schemes`,
+  `host` and `basePath`, substitutes server variable defaults, and reports missing
+  path parameters as an input error instead of requesting a placeholder path.
 
 ## 1.0.1 - 2026-11-17
 

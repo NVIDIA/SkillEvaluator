@@ -54,6 +54,7 @@ def make_request(
         # validate_http_url() rejects non-HTTP schemes before this request.
         with urlopen(req, timeout=timeout) as response:  # nosec B310
             result["status_code"] = response.status
+            result["final_url"] = getattr(response, "url", None) or url
             result["headers"] = dict(response.headers)
 
             # Read and parse response
@@ -92,12 +93,12 @@ def make_request(
     return result
 
 
-def fetch_openapi_spec(spec_url: str) -> dict:
-    """Fetch and parse an OpenAPI spec."""
+def fetch_openapi_spec(spec_url: str) -> tuple[dict | None, str]:
+    """Fetch and parse an OpenAPI spec. Returns the spec and its final URL after redirects."""
     result = make_request(spec_url)
     if result["success"] and isinstance(result["data"], dict):
-        return result["data"]
-    return None
+        return result["data"], result.get("final_url") or spec_url
+    return None, spec_url
 
 
 def find_operation(spec: dict, operation_id: str) -> tuple:
@@ -200,7 +201,7 @@ def main():
 
     # If using OpenAPI spec
     if args.spec and args.operation:
-        spec = fetch_openapi_spec(args.spec)
+        spec, spec_final_url = fetch_openapi_spec(args.spec)
         if not spec:
             _print_json({"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr)
             sys.exit(1)
@@ -225,7 +226,7 @@ def main():
             sys.exit(1)
 
         try:
-            url = build_url_from_spec(spec, path, params, spec_url=args.spec)
+            url = build_url_from_spec(spec, path, params, spec_url=spec_final_url)
         except ValueError as exc:
             _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
             sys.exit(1)

@@ -70,13 +70,51 @@ def _run_script(script: str, *args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+SWAGGER2_SPEC = {
+    "swagger": "2.0",
+    "info": {"title": "Petstore", "version": "1.0.0"},
+    "basePath": "/v2",
+    "paths": PETSTORE_SPEC["paths"],
+}
+
+REDIRECTED_SPEC = {
+    "openapi": "3.0.0",
+    "info": {"title": "Catalog", "version": "1.0.0"},
+    "servers": [{"url": "v2"}],
+    "paths": {
+        "/books/{id}": {
+            "get": {
+                "operationId": "getBook",
+                "parameters": [{"name": "id", "in": "path", "required": True, "schema": {"type": "integer"}}],
+            }
+        }
+    },
+}
+
+_ROUTES = {
+    "/api/v3/openapi.json": PETSTORE_SPEC,
+    "/api/v3/pet/1": PET_BODY,
+    "/v2/swagger.json": SWAGGER2_SPEC,
+    "/v2/pet/1": PET_BODY,
+    "/current/openapi/catalog.json": REDIRECTED_SPEC,
+    "/current/openapi/v2/books/7": {"id": 7},
+}
+_REDIRECTS = {"/docs/catalog.json": "/current/openapi/catalog.json"}
+
+
 class _PetstoreHandler(BaseHTTPRequestHandler):
     def log_message(self, _format: str, *args: object) -> None:
         del args
 
     def do_GET(self) -> None:
         path = self.path.split("?", 1)[0]
-        payload = {"/api/v3/openapi.json": PETSTORE_SPEC, "/api/v3/pet/1": PET_BODY}.get(path)
+        if path in _REDIRECTS:
+            self.send_response(302)
+            self.send_header("Location", _REDIRECTS[path])
+            self.send_header("Content-Length", "0")
+            self.end_headers()
+            return
+        payload = _ROUTES.get(path)
         if payload is None:
             self.send_error(404)
             return
@@ -196,7 +234,7 @@ def test_server_variable_without_default_reports_json_error(
         ],
         "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}},
     }
-    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda _url: spec)
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda url: (spec, url))
     monkeypatch.setattr(
         sys,
         "argv",
@@ -232,7 +270,7 @@ def test_missing_path_parameter_reports_json_error_and_makes_no_request(
         "paths": {"/pet/{petId}": {"get": {"operationId": "getPetById"}}},
     }
     requests: list[object] = []
-    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda _url: spec)
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda url: (spec, url))
     monkeypatch.setattr(caller, "make_request", lambda *args, **kwargs: requests.append((args, kwargs)))
     monkeypatch.setattr(
         sys,
@@ -298,3 +336,80 @@ def test_parse_openapi_subprocess_reports_absolute_urls() -> None:
     assert payload["operations"][0]["full_url"] == f"{origin}/api/v3/pet/{{petId}}"
     assert payload["operations"][0]["path"] == "/pet/{petId}"
     assert payload["operations"][0]["operation_id"] == "getPetById"
+
+
+def test_swagger2_base_url_uses_schemes_host_and_base_path() -> None:
+    caller = _load_script("call_api")
+    spec = {"swagger": "2.0", "host": "api.example.com", "basePath": "/v2", "schemes": ["http", "https"]}
+
+    result = caller.build_url_from_spec(
+        spec, "/pet/{petId}", {"petId": 1}, spec_url="https://docs.example.org/v2/swagger.json"
+    )
+
+    assert result == "https://api.example.com/v2/pet/1"
+
+
+def test_swagger2_defaults_to_spec_url_scheme_and_host() -> None:
+    caller = _load_script("call_api")
+    spec = {"swagger": "2.0"}
+
+    result = caller.build_url_from_spec(spec, "/pet/{petId}", {"petId": 1}, spec_url="http://127.0.0.1:8080/x/s.json")
+
+    assert result == "http://127.0.0.1:8080/pet/1"
+
+
+def test_swagger2_without_http_scheme_is_error() -> None:
+    caller = _load_script("call_api")
+
+    with pytest.raises(ValueError, match="no HTTP or HTTPS scheme"):
+        caller.build_url_from_spec({"swagger": "2.0", "schemes": ["ws"]}, "/pet", {}, spec_url=PETSTORE_SPEC_URL)
+
+
+def test_swagger2_subprocesses_use_base_path() -> None:
+    server, thread = _serve_petstore()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    try:
+        parsed = _run_script("parse_openapi.py", f"{origin}/v2/swagger.json")
+        called = _run_script(
+            "call_api.py",
+            "--spec",
+            f"{origin}/v2/swagger.json",
+            "--operation",
+            "getPetById",
+            "--params",
+            json.dumps({"petId": 1}),
+        )
+    finally:
+        _stop_petstore(server, thread)
+
+    assert parsed.returncode == 0, parsed.stderr
+    assert json.loads(parsed.stdout)["operations"][0]["full_url"] == f"{origin}/v2/pet/{{petId}}"
+    assert called.returncode == 0, called.stderr
+    assert json.loads(called.stdout)["url"] == f"{origin}/v2/pet/1"
+
+
+def test_relative_server_resolves_against_final_spec_url_after_redirect() -> None:
+    server, thread = _serve_petstore()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    try:
+        parsed = _run_script("parse_openapi.py", f"{origin}/docs/catalog.json")
+        called = _run_script(
+            "call_api.py",
+            "--spec",
+            f"{origin}/docs/catalog.json",
+            "--operation",
+            "getBook",
+            "--params",
+            json.dumps({"id": 7}),
+        )
+    finally:
+        _stop_petstore(server, thread)
+
+    assert parsed.returncode == 0, parsed.stderr
+    payload = json.loads(parsed.stdout)
+    assert payload["base_url"] == f"{origin}/current/openapi/v2"
+    assert payload["operations"][0]["full_url"] == f"{origin}/current/openapi/v2/books/{{id}}"
+    assert called.returncode == 0, called.stderr
+    result = json.loads(called.stdout)
+    assert result["url"] == f"{origin}/current/openapi/v2/books/7"
+    assert result["data"] == {"id": 7}

@@ -1281,3 +1281,18 @@ def test_lowercase_nested_manifest_is_not_a_second_skill_in_codex(tmp_path: Path
     assert facts["nested_skill_md"] is True
     assert facts["nested_skill_md_exact"] is False
     assert _status(skill)["codex"] == "loads"
+
+
+def test_nested_alias_frontmatter_reads_as_empty_manifest(tmp_path):
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
+
+    skill = tmp_path / "demo-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+
+    from skillevaluator.harness import overlay
+
+    _manifest, _raw, _text, fm_yaml, data = overlay._read_manifest(skill)
+
+    assert data == {}
+    assert overlay._tab_indent_breaks_yaml(fm_yaml) is False

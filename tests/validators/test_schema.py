@@ -1527,10 +1527,12 @@ class TestMetadataIdPreviewBounds:
 
         result = SchemaValidator().validate(skill_dir)
 
-        findings = [f for f in result.findings if f.check_name == "metadata_id_format"]
-        assert len(findings) == 1
-        assert "must be a string (got list)" in findings[0].message
-        assert len(findings[0].line_content) <= 32
+        # The bounded loader stops the alias graph before any field is read,
+        # so the finding names the frontmatter, not metadata.id.
+        assert not result.passed
+        (finding,) = [f for f in result.findings if f.check_name == "yaml_complexity"]
+        assert "complexity limits" in finding.message
+        assert not any(f.check_name == "metadata_id_format" for f in result.findings)
 
     @pytest.mark.parametrize("id_value", ["&recursive [*recursive]", "&recursive {self: *recursive}"])
     def test_recursive_id_is_rejected_with_bounded_evidence(self, tmp_path: Path, id_value: str):
@@ -1538,10 +1540,11 @@ class TestMetadataIdPreviewBounds:
 
         result = SchemaValidator().validate(skill)
 
-        assert result.passed
-        (finding,) = [finding for finding in result.findings if finding.check_name == "metadata_id_format"]
-        assert "must be a string" in finding.message
-        assert len(finding.line_content) <= 32
+        # A self-referencing alias is rejected by the bounded loader before
+        # metadata.id is read; the run reports it instead of recursing.
+        assert not result.passed
+        (finding,) = [finding for finding in result.findings if finding.check_name == "yaml_complexity"]
+        assert "complexity limits" in finding.message
 
 
 def _write_skill(
@@ -1734,3 +1737,30 @@ class TestSchemaPortabilityChecks:
 
         assert not result.passed
         assert [f.severity for f in _checks(result, "manifest_bom")] == ["high"]
+
+
+def test_nested_alias_frontmatter_reports_complexity_finding(tmp_path: Path) -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+
+    result = SchemaValidator().validate(skill_dir)
+
+    assert not result.passed
+    finding = next(f for f in result.findings if f.check_name == "yaml_complexity")
+    assert "complexity limits" in finding.message
+    assert finding.line_number == 2
+
+
+def test_yaml_syntax_finding_keeps_the_parser_line(tmp_path: Path) -> None:
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text("---\nname: demo-skill\ndescription: [unclosed\n---\n# Demo\n", encoding="utf-8")
+
+    result = SchemaValidator().validate(skill_dir)
+
+    finding = next(f for f in result.findings if f.check_name == "yaml_syntax")
+    assert "Invalid YAML syntax in frontmatter" in finding.message
+    assert finding.line_number >= 2

@@ -35,9 +35,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
+  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
+  placeholder becomes one random UUID per client. Harbor verifier judges,
+  embeddings, in-container agents, and reusable CI commands use separate
+  configuration.
 
 ### Fixed
 
+- The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
+  which fixes false incomplete-analysis findings on valid JSON hook
+  `timeout` fields.
 - Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
   from text-pattern coverage when the remaining coverage and the full YARA
   and artifact-integrity counts agree.
@@ -49,6 +57,11 @@ All notable changes to SkillEvaluator are documented in this file.
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
   release binary.
+- The managed SkillSpector runtime now runs on a compatible Python 3.12 or 3.13,
+  so an installed 3.12 also works offline. uv otherwise
+  picked its newest Python, 3.14, for which yara-python publishes no wheels, so
+  the Tier 1 security scan failed to install on hosts without a C toolchain,
+  including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Git repository-root lookups preserve trailing whitespace in directory names

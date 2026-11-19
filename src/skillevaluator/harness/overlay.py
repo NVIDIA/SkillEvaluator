@@ -22,6 +22,11 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
     SKILL_NOT_SHIPPED_DIRS,
 )
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
@@ -234,8 +239,8 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     match = FRONTMATTER_PATTERN.match(text)
     fm_yaml = match.group(1) if match else ""
     try:
-        data = yaml.safe_load(fm_yaml) if match else None
-    except yaml.YAMLError:
+        data = load_bounded_yaml(fm_yaml, last_key_wins=True) if match else None
+    except StructuredDataError:
         data = None
     return manifest, raw, text, fm_yaml, data if isinstance(data, dict) else {}
 
@@ -250,9 +255,11 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     if not any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()):
         return False
     try:
-        yaml.safe_load(fm_yaml)
-    except yaml.YAMLError:
-        return True
+        load_bounded_yaml(fm_yaml, last_key_wins=True)
+    except StructuredDataSyntaxError as exc:
+        return isinstance(exc.__cause__, yaml.YAMLError)
+    except StructuredDataError:
+        return False
     return False
 
 

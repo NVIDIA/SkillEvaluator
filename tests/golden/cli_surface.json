@@ -71,6 +71,16 @@
             },
             {
               "choices": [
+                "stable"
+              ],
+              "name": "channel",
+              "opts": [
+                "--channel"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
                 "docker",
                 "local"
               ],

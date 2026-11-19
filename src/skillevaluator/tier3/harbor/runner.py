@@ -4841,22 +4841,31 @@ def _run_budgeted_variants(
     attempt_job_dirs: dict[str, dict[tuple[int, int], Path]] = {variant: {} for variant, _, _ in jobs}
     result_lock = threading.Lock()
 
-    def run_unit(task_index: int, task_name: str, attempt: int) -> bool:
+    def run_unit(
+        task_index: int, task_name: str, attempt: int, unit_jobs: list[tuple[str, Path, str | None]]
+    ) -> set[str]:
+        """Admit one attempt of each arm in ``unit_jobs`` as one unit; return the arms that passed."""
         if cancellation is not None:
             cancellation.raise_if_requested()
         admissions = [
-            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in jobs
+            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in unit_jobs
         ]
         with ExitStack() as reservations:
             if not budget.admit_many(admissions):
-                return False
+                return set()
             for admission in admissions:
                 reservations.callback(budget.release, admission)
-            return run_admitted(task_index, task_name, attempt, admissions)
+            return run_admitted(task_index, task_name, attempt, admissions, unit_jobs)
 
-    def run_admitted(task_index: int, task_name: str, attempt: int, admissions: list[dict[str, Any]]) -> bool:
-        passed = True
-        for admission, (variant, dataset, job_import_path) in zip(admissions, jobs, strict=True):
+    def run_admitted(
+        task_index: int,
+        task_name: str,
+        attempt: int,
+        admissions: list[dict[str, Any]],
+        unit_jobs: list[tuple[str, Path, str | None]],
+    ) -> set[str]:
+        passed: set[str] = set()
+        for admission, (variant, dataset, job_import_path) in zip(admissions, unit_jobs, strict=True):
             if cancellation is not None:
                 cancellation.raise_if_requested()
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
@@ -4899,12 +4908,19 @@ def _run_budgeted_variants(
                     errors[variant][(task_index, attempt)] = (
                         f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}"
                     )
-            passed = passed and ok and _job_passed(job_dir, pass_threshold)
+            if ok and _job_passed(job_dir, pass_threshold):
+                passed.add(variant)
         return passed
 
     def run_case(task_index: int, task_name: str) -> None:
+        # Each arm stops after its own first pass, as it does without a budget,
+        # because the collector expects no attempt of an arm after that. The
+        # arms that still need an attempt are admitted together.
+        pending = jobs
         for attempt in range(1, n_attempts + 1):
-            if run_unit(task_index, task_name, attempt) and stop_on_pass:
+            passed = run_unit(task_index, task_name, attempt, pending)
+            pending = [job for job in pending if job[0] not in passed]
+            if not pending:
                 break
 
     worker_count = max(1, min(n_concurrent, len(task_names) or 1))
@@ -4917,7 +4933,7 @@ def _run_budgeted_variants(
                 futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
             else:
                 futures = [
-                    executor.submit(run_unit, index, task_name, attempt)
+                    executor.submit(run_unit, index, task_name, attempt, jobs)
                     for index, task_name in enumerate(task_names)
                     for attempt in range(1, n_attempts + 1)
                 ]

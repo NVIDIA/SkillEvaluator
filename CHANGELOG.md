@@ -101,6 +101,11 @@ All notable changes to SkillEvaluator are documented in this file.
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and
   rate-limited calls stop when the requested wait exceeds the retry budget.
+- `--stop-on-pass` combined with a run budget (`--max-agent-tokens`,
+  `--max-judge-calls`, `--max-attempts-total` or `--max-cost-usd`) now stops
+  each arm after its own first pass, as it does without a budget. An arm that
+  had already passed was run again until the other arm passed in the same
+  attempt, and the run then failed with `Excess scored attempts`.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.

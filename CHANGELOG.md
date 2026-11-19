@@ -52,6 +52,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
+  any independently measured component, instead of stopping report collection with `OverflowError`.
+  Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
+  list) now report zero tool seconds even when LLM timing is missing or invalid.
+  Previously, those missing/invalid-LLM cases had no timing, so the arm's
+  tool-seconds total was `N/A`.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the

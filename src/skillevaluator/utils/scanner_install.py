@@ -30,6 +30,15 @@ SKILLSPECTOR_WHEEL_URL = (
     f"https://github.com/NVIDIA/SkillSpector/releases/download/v{SKILLSPECTOR_VERSION}/{SKILLSPECTOR_WHEEL}"
 )
 SKILLSPECTOR_WHEEL_SHA256 = "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0"
+# SkillSpector needs Python 3.12+, and its yara-python dependency publishes wheels only
+# through CPython 3.13. Left unpinned, uv picks its newest Python and has to compile
+# yara-python, which fails on hosts without a C toolchain such as a default Windows install.
+# The range lets uv use any compatible installed Python 3.12 or 3.13, so an installed 3.12 also
+# works offline; uv downloads a Python only when neither is installed. It travels in UV_PYTHON,
+# not --python: on Windows uv can be a .cmd shim, and cmd.exe reads < and > in an argument as
+# redirection.
+SKILLSPECTOR_PYTHON = ">=3.12,<3.14"
+SKILLSPECTOR_UV_ENV = MappingProxyType({"UV_PYTHON": SKILLSPECTOR_PYTHON})
 GITLEAKS_VERSION = "8.30.0"
 
 _GITLEAKS_SHA256 = MappingProxyType(
@@ -110,17 +119,26 @@ def ensure_skillspector_wheel() -> str | None:
     return None
 
 
+def skillspector_uv_run_args(wheel: Path) -> tuple[str, ...]:
+    """Arguments after ``uv`` that run the pinned SkillSpector wheel; pair them with ``SKILLSPECTOR_UV_ENV``."""
+    return ("tool", "run", "--quiet", "--from", str(wheel), "skillspector")
+
+
 def prepare_skillspector(uv: str) -> str | None:
     """Download the SkillSpector wheel and build its uv environment; return an error or None."""
     error = ensure_skillspector_wheel()
     if error:
         return error
+    wheel = managed_skillspector_wheel()
+    if wheel is None:
+        return "SkillEvaluator runtime directory is invalid"
     try:
         proc = subprocess.run(
-            [uv, "tool", "run", "--quiet", "--from", str(managed_skillspector_wheel()), "skillspector", "--version"],
+            [uv, *skillspector_uv_run_args(wheel), "--version"],
             capture_output=True,
             text=True,
             timeout=900,
+            env={**os.environ, **SKILLSPECTOR_UV_ENV},
             check=False,
         )
     except (OSError, subprocess.TimeoutExpired) as exc:

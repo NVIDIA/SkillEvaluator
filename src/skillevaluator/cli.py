@@ -2965,7 +2965,11 @@ def validate(
     tier1_raw_failed = any(not r.passed for r in results)
     if quiet:
         apply_policy(results, policy)
-    tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    # The compact view carries coverage notes when it is the only terminal report.
+    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
+    tier1_ok, tier1_rows = summarize_tier1(
+        results, lineup=check_lineup, show_coverage_notes="cli" not in effective_formats
+    )
     harness_rows = harness_block(results)
     if harness_rows:
         view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
@@ -3175,11 +3179,6 @@ def validate(
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
 
-    # Quiet mode defaults the reports to html+json (the terminal shows only
-    # the summary; the files carry the findings) and points at them from the
-    # footer. An EXPLICIT -r is a contract and is honored exactly — including
-    # "cli", which renders the full Rich report below the pipeline view.
-    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
     from skillevaluator.reporting.presentation import build_final_render_context
 

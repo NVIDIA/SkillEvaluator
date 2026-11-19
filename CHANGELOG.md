@@ -32,6 +32,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
@@ -113,8 +115,6 @@ All notable changes to SkillEvaluator are documented in this file.
   as `url_safety.py`, as a case's `expected_script` when the skill has a script
   that does something when run. A skill with one script, or only helpers, keeps
   its previous choice.
-- Native platform CI stays enabled for package-code changes, including catalog
-  I/O and rubric validators with macOS-specific filesystem behavior.
 
 - Tier 3 security grading now reads `rm` that `eval`, `env -S` or a
   `git grep -O` pager runs, with `$'...'` words decoded and joined, so

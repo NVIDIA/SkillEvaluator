@@ -29,9 +29,10 @@ skillevaluator tier3 validate ./my-skill --strict
 skillevaluator doctor --env-mode docker
 ```
 
-Treat a missing dataset as **not ready**, even if validation exits `0`. Fix
-errors and warnings before continuing. Native task bundles use
-the [task workflow](/skills/skillevaluator/custom-graders) instead of `evals.json`.
+Fix missing datasets, errors, and warnings before continuing. The
+[dataset guide](/skills/skillevaluator/prepare-dataset) explains the validation
+exit codes. For native Harbor task bundles, follow the
+[task workflow](/skills/skillevaluator/custom-graders).
 
 ## Choose a run
 

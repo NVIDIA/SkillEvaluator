@@ -41,12 +41,23 @@ All notable changes to SkillEvaluator are documented in this file.
 - Keep file, check, and severity totals when validation results are merged with
   member prefixes. Collection file totals include passing and failing members,
   without double-counting schema findings.
+- The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
+  which fixes false incomplete-analysis findings on valid JSON hook
+  `timeout` fields.
+- Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
+  from text-pattern coverage when the remaining coverage and the full YARA
+  and artifact-integrity counts agree.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
   release binary.
+- The managed SkillSpector runtime now runs on a compatible Python 3.12 or 3.13,
+  so an installed 3.12 also works offline. uv otherwise
+  picked its newest Python, 3.14, for which yara-python publishes no wheels, so
+  the Tier 1 security scan failed to install on hosts without a C toolchain,
+  including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Git repository-root lookups preserve trailing whitespace in directory names

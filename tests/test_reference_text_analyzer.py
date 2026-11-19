@@ -6,8 +6,13 @@
 from __future__ import annotations
 
 import importlib.util
+import os
+import subprocess
+import sys
 from pathlib import Path
 from types import ModuleType
+
+import pytest
 
 ANALYZE_TEXT = (
     Path(__file__).resolve().parents[1]
@@ -54,3 +59,66 @@ def test_starter_eval_text_statistics_are_unchanged() -> None:
         {"word": "fox", "count": 3},
         {"word": "dog", "count": 2},
     ]
+
+
+@pytest.mark.parametrize(
+    ("text", "sentence_count"),
+    [
+        ("Open input.txt and report the totals.", 1),
+        ("Pi is 3.14. Done!", 2),
+        ("Ship v1.2.3 today.", 1),
+        ("See https://example.com/index.html for details.", 1),
+        ("Write to user@example.com.", 1),
+        ('He said "go." Then left.', 2),
+        ("(see above.) Next", 2),
+        ("Wait... what?", 2),
+        ("Really?! Yes.", 2),
+        ("hello world", 1),
+        ("", 0),
+        ("  \n  ", 0),
+        ("First.\nSecond.", 2),
+        (
+            "The quick brown fox jumps over the lazy dog. The dog barked at the fox. The fox ran away quickly.",
+            3,
+        ),
+    ],
+)
+def test_sentence_count_ends_only_before_whitespace_or_end(text: str, sentence_count: int) -> None:
+    assert _load_analyzer().analyze(text)["sentence_count"] == sentence_count
+
+
+def _run_analyzer(*args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(ANALYZE_TEXT), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+def test_file_argument_rejects_a_directory(tmp_path: Path) -> None:
+    result = _run_analyzer("--file", str(tmp_path))
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: not a file: {tmp_path}\n"
+    assert "Traceback" not in result.stderr
+
+
+@pytest.mark.skipif(os.name == "nt", reason="permission bits do not apply on Windows")
+@pytest.mark.skipif(
+    hasattr(os, "geteuid") and os.geteuid() == 0, reason="permission bits do not apply when running as root"
+)
+def test_file_argument_rejects_an_unreadable_file(tmp_path: Path) -> None:
+    path = tmp_path / "secret.txt"
+    path.write_text("hello", encoding="utf-8")
+    path.chmod(0)
+    try:
+        result = _run_analyzer("--file", str(path))
+    finally:
+        path.chmod(0o644)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: cannot read file: {path} (Permission denied)\n"
+    assert "Traceback" not in result.stderr

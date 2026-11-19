@@ -49,13 +49,16 @@ The script prints a structured report with:
 
 ## Limitations
 
-- Sentence detection uses simple period/question/exclamation splitting;
-  may be inaccurate for abbreviations (e.g., "U.S.A.").
+- Sentence detection counts a run of `.`, `!` or `?` only when it is
+  followed by whitespace or the end of the text. Abbreviations followed
+  by a space (e.g., "Dr. Smith") still split.
 - Non-UTF-8 files will be read with errors replaced.
 
 ## Troubleshooting
 
 | Problem | Fix |
 |---------|-----|
-| `FileNotFoundError` | Check the `--file` path exists |
+| `Error: file not found: <path>` | Check the `--file` path exists |
+| `Error: not a file: <path>` | Pass a regular file, not a directory |
+| `Error: cannot read file: <path> (...)` | Check that the file is readable |
 | Empty output | Ensure `--text` or `--file` is provided |

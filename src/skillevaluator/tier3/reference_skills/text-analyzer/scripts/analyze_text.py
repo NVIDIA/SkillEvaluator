@@ -11,6 +11,12 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# A run of .!? ends a sentence only when it is followed by whitespace or the
+# end of the text. Closing quotes or brackets directly after the terminator
+# still count (He said "go." Then / (see above.) Next). Periods inside tokens
+# such as input.txt, 3.14, or v1.2.3 are not sentence ends.
+_SENTENCE_END = re.compile("[.!?]+[\"')\\]}]*(?:\\s+|$)")
+
 
 def analyze(text: str) -> dict:
     lines = text.splitlines()
@@ -19,8 +25,7 @@ def analyze(text: str) -> dict:
     word_count = len(words)
     line_count = len(lines)
 
-    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-    sentence_count = len(sentences)
+    sentence_count = len([part for part in _SENTENCE_END.split(text) if part.strip()])
 
     avg_word_len = round(sum(len(w) for w in words) / max(word_count, 1), 2)
 
@@ -68,7 +73,14 @@ def main():
         if not path.exists():
             print(f"Error: file not found: {args.file}", file=sys.stderr)
             sys.exit(1)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        if path.is_dir():
+            print(f"Error: not a file: {args.file}", file=sys.stderr)
+            sys.exit(1)
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except OSError as exc:
+            print(f"Error: cannot read file: {args.file} ({exc.strerror})", file=sys.stderr)
+            sys.exit(1)
     else:
         text = args.text
 

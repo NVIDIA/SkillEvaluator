@@ -104,6 +104,10 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- The text-analyzer reference skill counts a sentence end only when `.`, `!` or
+  `?` is followed by whitespace or the end of the text, so file names, decimals
+  and version numbers stay in one sentence. `--file` on a directory or an
+  unreadable path prints `Error:` on stderr and exits 1 instead of a traceback.
 
 ## 1.0.1 - 2026-11-17
 

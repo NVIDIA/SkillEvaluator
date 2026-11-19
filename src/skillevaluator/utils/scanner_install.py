@@ -33,9 +33,10 @@ SKILLSPECTOR_WHEEL_SHA256 = "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2
 # SkillSpector needs Python 3.12+, and its yara-python dependency publishes wheels only
 # through CPython 3.13. Left unpinned, uv picks its newest Python and has to compile
 # yara-python, which fails on hosts without a C toolchain such as a default Windows install.
-# The range keeps an installed 3.12 usable offline; uv prefers 3.13 and downloads it only when
-# neither is installed. It travels in UV_PYTHON, not --python: on Windows uv can be a .cmd shim,
-# and cmd.exe reads < and > in an argument as redirection.
+# The range lets uv use any compatible installed Python 3.12 or 3.13, so an installed 3.12 also
+# works offline; uv downloads a Python only when neither is installed. It travels in UV_PYTHON,
+# not --python: on Windows uv can be a .cmd shim, and cmd.exe reads < and > in an argument as
+# redirection.
 SKILLSPECTOR_PYTHON = ">=3.12,<3.14"
 SKILLSPECTOR_UV_ENV = MappingProxyType({"UV_PYTHON": SKILLSPECTOR_PYTHON})
 GITLEAKS_VERSION = "8.30.0"

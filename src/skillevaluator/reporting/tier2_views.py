@@ -12,6 +12,11 @@ if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
 
 
+_CANONICAL_CATEGORIES = {
+    category.casefold(): category for category in ("DUPLICATE", "SIMILARITY", "INTER_SKILL", "INTER_PLUGIN")
+}
+
+
 @dataclass(frozen=True)
 class Tier2SkipView:
     reason: str
@@ -193,16 +198,16 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         paths_known = True
         for result in members:
             for finding in result.findings:
-                category = finding.category.casefold()
+                category = _CANONICAL_CATEGORIES.get(finding.category.casefold())
                 if category not in (
-                    {"duplicate"} if scope == "within" else {"similarity", "inter_skill", "inter_plugin"}
+                    {"DUPLICATE"} if scope == "within" else {"SIMILARITY", "INTER_SKILL", "INTER_PLUGIN"}
                 ):
                     continue
                 duplicates.append(finding)
                 metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
                 if scope == "within":
                     recorded = metadata.get("source_files")
-                elif category in {"inter_skill", "inter_plugin"}:
+                elif category in {"INTER_SKILL", "INTER_PLUGIN"}:
                     recorded = [finding.file_path, metadata.get("catalog_path")]
                 else:
                     recorded = [metadata.get("path_a"), metadata.get("path_b")]
@@ -212,8 +217,8 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                     or any(not isinstance(p, str) or not p for p in recorded)
                 ):
                     paths_known = False
-                elif category in {"inter_skill", "inter_plugin"}:
-                    check = "skill_catalog_comparison" if category == "inter_skill" else "plugin_catalog_comparison"
+                elif category in {"INTER_SKILL", "INTER_PLUGIN"}:
+                    check = "skill_catalog_comparison" if category == "INTER_SKILL" else "plugin_catalog_comparison"
                     comparison = next(
                         (detail.metadata for detail in result.success_details if detail.check_name == check), None
                     )
@@ -223,7 +228,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                     target = result.metadata.get("plugin_catalog_target")
                     indexed_target = (
                         finding.file_path
-                        if category == "inter_skill"
+                        if category == "INTER_SKILL"
                         else (target.get("path") if isinstance(target, dict) else None)
                     )
                     catalog_namespace = f"{category}:catalog"

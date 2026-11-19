@@ -128,6 +128,34 @@ def test_real_catalog_findings_remain_recorded_when_a_comparison_is_incomplete(t
     assert any("incomplete" in note for note in across.notes)
 
 
+@pytest.mark.parametrize(
+    "skill_category,plugin_category,duplicates",
+    [
+        ("inter_skill", "inter_plugin", 2),
+        ("InTeR_sKiLl", "InTeR_pLuGiN", 2),
+        ("INTER_\u017fKILL", "INTER_PLUGIN", 2),
+        ("INTER_SKILL_extra", "INTER_PLUGIN_extra", 0),
+        ("INTER_SK\u0131LL", "INTER_PLUG\u0131N", 0),
+    ],
+)
+def test_catalog_category_matching_preserves_casefold_and_unknown_categories(
+    tmp_path, skill_category, plugin_category, duplicates
+):
+    profile, catalog = _catalog_results(tmp_path, matches=True)
+    results = [
+        check_catalog_skills(profile, catalog, threshold=0.9),
+        check_catalog_plugins(profile, catalog, threshold=0.9),
+    ]
+    results[0].findings[0].category = skill_category
+    results[1].findings[0].category = plugin_category
+    before = deepcopy(results)
+
+    across = tier2_scope_views(results)[1]
+
+    assert (across.completed, across.duplicates) == (2, duplicates)
+    assert results == before
+
+
 def test_catalog_and_target_entries_with_the_same_relative_path_remain_distinct(tmp_path):
     profile, catalog = _catalog_results(tmp_path, matches=True)
     external = replace(catalog.skills[1], path="skills/member", entry_id="skill:skills/member")

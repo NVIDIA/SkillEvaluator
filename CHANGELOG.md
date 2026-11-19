@@ -35,6 +35,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- Add opt-in case/attempt interleaving for structured skill-interaction suites,
+  with a reproducible rotated configuration schedule, retained step evidence,
+  and cross-block checks of the actual retained outcome scorer. Stage only the
+  current case and retain dataset generation/review provenance. Native task
+  suites and runs with run-wide budget caps require sequential execution.
+- Report an advisory paired case-bootstrap interval and contributing case counts
+  for Tier 3 skill interactions, without changing their scores or verdicts.
 
 ### Fixed
 

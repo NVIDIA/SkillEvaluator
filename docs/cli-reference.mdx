@@ -573,7 +573,9 @@ skillevaluator tier3 interact ./skills/a ./skills/b \
 | `--env-mode` | `docker` | Existing Harbor environment backend. |
 | `--environment-kwarg`, `--ek` | None | Repeatable backend `KEY=VALUE`; never pass secrets. |
 | `--n-attempts` | `1` | Positive fixed attempt budget for every case; disables early stopping. |
-| `--n-concurrent` | Source config or `4` | Concurrent trials within a configuration. |
+| `--n-concurrent` | Source config or `4` | Concurrent trials within a configuration in sequential mode; has no effect in interleaved mode, which runs one trial per agent at a time. |
+| `--execution-order` | `sequential` | `interleaved` rotates configurations within each case/attempt block; requires a structured dataset without run-wide budget caps. Runs one trial per agent at a time, so it can take several times longer. |
+| `--schedule-seed` | `0` | Reproducible initial configuration order for interleaving. |
 | `--metric` | `goal_accuracy` | Outcome metric: `goal_accuracy`, `accuracy`, or `overall` for `custom_only` grading. |
 | `--results-dir` | `SKILLEVALUATOR_RESULTS_DIR` or `interaction-results` beside the source | Output root outside all inputs; home shortcuts and symlinked parents are resolved. |
 | `--harbor-keep-jobs` | Off | Retain raw Harbor jobs alongside collected evidence. |

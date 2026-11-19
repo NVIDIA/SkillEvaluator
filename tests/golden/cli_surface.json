@@ -4062,6 +4062,27 @@
             },
             {
               "choices": [
+                "sequential",
+                "interleaved"
+              ],
+              "default": "sequential",
+              "name": "execution_order",
+              "opts": [
+                "--execution-order"
+              ],
+              "param_type": "option"
+            },
+            {
+              "default": "0",
+              "name": "schedule_seed",
+              "opts": [
+                "--schedule-seed"
+              ],
+              "param_type": "option",
+              "type": "integer range"
+            },
+            {
+              "choices": [
                 "goal_accuracy",
                 "accuracy",
                 "overall"

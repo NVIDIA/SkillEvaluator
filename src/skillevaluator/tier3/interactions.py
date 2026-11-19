@@ -220,23 +220,39 @@ def compare_configurations(
                     )
                 means = [math.fsum(row["score"] for row in rows[case_id]) / n_attempts for rows in outcomes]
                 per_case[case_id] = interaction_scores(means[0], means[1:-1], means[-1])
-            means = [
-                math.fsum(math.fsum(row["score"] for row in rows[case]) / n_attempts for case in per_case)
-                / len(per_case)
-                for rows in outcomes
-            ]
-            compared[agent] = {
-                "status": "complete",
-                **interaction_scores(means[0], means[1:-1], means[-1]),
-                "cases": per_case,
-                "evidence": {config["id"]: rows for config, rows in zip(configurations, outcomes, strict=True)},
-            }
+            compared[agent] = _summarize_case_interactions(
+                per_case, {config["id"]: rows for config, rows in zip(configurations, outcomes, strict=True)}
+            )
         except (OSError, ValueError, KeyError, TypeError) as exc:
             compared[agent] = {"status": "incomparable", "reasons": [str(exc)]}
     if not compared:
         return {"status": "incomplete", "reasons": ["No agent results were retained"], "agents": {}}
     complete = all(agent["status"] == "complete" for agent in compared.values())
     return {"status": "complete" if complete else "incomparable", "agents": compared}
+
+
+def _summarize_case_interactions(per_case: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
+    """Use the same equally weighted case summary for either execution order."""
+    from skillevaluator.tier3.harbor.stats import case_mean_bootstrap
+
+    cases = list(per_case.values())
+    baseline = math.fsum(case["baseline"] for case in cases) / len(cases)
+    combined = math.fsum(case["combined"] for case in cases) / len(cases)
+    individuals = [
+        math.fsum(case["individuals"][index] for case in cases) / len(cases)
+        for index in range(len(cases[0]["individuals"]))
+    ]
+    case_interactions = [case["interaction"] for case in cases]
+    uncertainty = case_mean_bootstrap(case_interactions)
+    uncertainty["method"] = "paired_case_interaction_bootstrap"
+    uncertainty["nonzero_cases"] = sum(value != 0.0 for value in case_interactions)
+    return {
+        "status": "complete",
+        **interaction_scores(baseline, individuals, combined),
+        "uncertainty": uncertainty,
+        "cases": dict(per_case),
+        "evidence": dict(evidence),
+    }
 
 
 def _selected_skills(skills: Sequence[Path]) -> list[Path]:
@@ -291,6 +307,8 @@ def run_interaction(
     eval_source: Path,
     options: EvaluationOptions,
     metric: str = "goal_accuracy",
+    execution_order: str = "sequential",
+    schedule_seed: int = 0,
     on_configuration: Callable[[str], None] | None = None,
     progress_reporter: ProgressReporter | None = None,
 ) -> dict[str, Any]:
@@ -304,6 +322,10 @@ def run_interaction(
     from skillevaluator.tier3.results_location import ENV_RESULTS_DIR
     from skillevaluator.tier3.workflow import _validate_skill_root
 
+    if execution_order not in {"sequential", "interleaved"}:
+        raise ValueError("execution_order must be sequential or interleaved")
+    if type(schedule_seed) is not int or not 0 <= schedule_seed < 2**32:
+        raise ValueError("schedule_seed must be an integer between 0 and 4294967295")
     selected = _selected_skills(skills)
     _validate_skill_root(eval_source)
     source = eval_source.resolve()
@@ -332,6 +354,12 @@ def run_interaction(
         tempfile.TemporaryDirectory(prefix="skillevaluator-interaction-") as directory,
     ):
         _validate_source(evaluator, metric)
+        case_entries = None
+        if execution_order == "interleaved":
+            from skillevaluator.tier3.interaction_schedule import interleaved_entries, validate_interleaved_budgets
+
+            validate_interleaved_budgets(evaluator, options)
+            case_entries = interleaved_entries(evaluator)
         frozen, identities = [], []
         for index, path in enumerate(selected):
             isolated_root = Path(directory) / f"skill-{index + 1}"
@@ -355,6 +383,8 @@ def run_interaction(
             "interpretation": "Total departure from additive individual gains; not an isolated higher-order interaction.",
             "metric": metric,
             "n_attempts": attempts,
+            "execution_order": execution_order,
+            "schedule_seed": schedule_seed if execution_order == "interleaved" else None,
             "source": {"path": str(source), "fingerprint": tree_content_fingerprint_secure(evaluator / "evals")},
             "skill_digest_algorithm": DECOY_SOURCE_DIGEST_ALGORITHM,
             "skills": identities,
@@ -367,49 +397,65 @@ def run_interaction(
         plan.extend((f"individual-{index + 1}", index, (), "with-skill") for index in range(len(frozen)))
         plan.append(("combined", 0, tuple(frozen[1:]), "with-skill"))
         try:
-            for config_id, index, companions, condition in plan:
-                config: dict[str, Any] = {
-                    "id": config_id,
-                    "condition": condition,
-                    "skills": []
-                    if config_id == "baseline"
-                    else [index]
-                    if config_id != "combined"
-                    else list(range(len(frozen))),
-                }
-                report["configurations"].append(config)
-                report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
-                if on_configuration:
-                    on_configuration(config_id)
-                try:
-                    result = service.evaluate(
-                        replace(
-                            options,
-                            skill_path=frozen[index],
-                            results_dir=run_dir / config_id,
-                            skip_baseline=condition == "with-skill",
-                            skip_with_skill=condition == "without-skill",
-                            n_attempts=attempts,
-                            stop_on_pass=False,
-                            skill_workspace_mode="group" if companions else "isolated",
-                            include_skills=companions,
-                        ),
-                        progress_reporter=progress_reporter,
-                    )
-                    config["result"] = result
-                    if failure := service.failure_reason(result):
-                        config["error"] = failure
-                except Exception as exc:
-                    from skillevaluator.tier3.harbor.progress import (
-                        redact_progress_detail,
-                        secret_values_from_environment,
-                    )
+            if case_entries is not None:
+                from skillevaluator.tier3.interaction_schedule import execute_interleaved
 
-                    redacted = redact_progress_detail(
-                        str(exc), secret_values=secret_values_from_environment(os.environ)
-                    )
-                    config["error"] = redacted or type(exc).__name__
-            report.update(compare_configurations(report["configurations"], metric=metric, n_attempts=attempts))
+                compared = execute_interleaved(
+                    report,
+                    plan,
+                    case_entries,
+                    options,
+                    frozen=frozen,
+                    evaluator=evaluator,
+                    seed=schedule_seed,
+                    on_configuration=on_configuration,
+                    progress_reporter=progress_reporter,
+                )
+            else:
+                for config_id, index, companions, condition in plan:
+                    config: dict[str, Any] = {
+                        "id": config_id,
+                        "condition": condition,
+                        "skills": []
+                        if config_id == "baseline"
+                        else [index]
+                        if config_id != "combined"
+                        else list(range(len(frozen))),
+                    }
+                    report["configurations"].append(config)
+                    report_path.write_text(json.dumps(report, indent=2) + "\n", encoding="utf-8")
+                    if on_configuration:
+                        on_configuration(config_id)
+                    try:
+                        result = service.evaluate(
+                            replace(
+                                options,
+                                skill_path=frozen[index],
+                                results_dir=run_dir / config_id,
+                                skip_baseline=condition == "with-skill",
+                                skip_with_skill=condition == "without-skill",
+                                n_attempts=attempts,
+                                stop_on_pass=False,
+                                skill_workspace_mode="group" if companions else "isolated",
+                                include_skills=companions,
+                            ),
+                            progress_reporter=progress_reporter,
+                        )
+                        config["result"] = result
+                        if failure := service.failure_reason(result):
+                            config["error"] = failure
+                    except Exception as exc:
+                        from skillevaluator.tier3.harbor.progress import (
+                            redact_progress_detail,
+                            secret_values_from_environment,
+                        )
+
+                        redacted = redact_progress_detail(
+                            str(exc), secret_values=secret_values_from_environment(os.environ)
+                        )
+                        config["error"] = redacted or type(exc).__name__
+                compared = compare_configurations(report["configurations"], metric=metric, n_attempts=attempts)
+            report.update(compared)
         except KeyboardInterrupt:
             report["reasons"] = ["Interaction evaluation interrupted before all configurations completed"]
             raise

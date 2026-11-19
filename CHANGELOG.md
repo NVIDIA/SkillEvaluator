@@ -28,6 +28,9 @@ All notable changes to SkillEvaluator are documented in this file.
   release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Rebuilding validation results after severity overrides or scanner finding
+  deduplication no longer repeatedly scans accumulated independent diagnostics;
+  diagnostic order, duplicate-warning options and summary counts are preserved.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

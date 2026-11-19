@@ -12,7 +12,7 @@ import sys
 import urllib.error
 import urllib.request
 
-from url_safety import validate_http_url
+from url_safety import join_url_path, resolve_openapi_server_url, validate_http_url
 
 
 def fetch_spec(url: str) -> dict:
@@ -71,15 +71,10 @@ def parse_request_body(body: dict) -> dict:
     return {"type": schema.get("type", "object")}
 
 
-def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
+def parse_spec(spec: dict, filter_path: str | None = None, spec_url: str | None = None) -> dict:
     """Parse OpenAPI spec and extract operations."""
     info = spec.get("info", {})
-    base_url = ""
-
-    # Get base URL from servers
-    servers = spec.get("servers", [])
-    if servers:
-        base_url = servers[0].get("url", "")
+    base_url = resolve_openapi_server_url(spec, spec_url)
 
     paths = spec.get("paths", {})
     operations = []
@@ -94,7 +89,7 @@ def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
                 op = {
                     "method": method.upper(),
                     "path": path,
-                    "full_url": f"{base_url}{path}" if base_url else path,
+                    "full_url": join_url_path(base_url, path),
                     "operation_id": details.get("operationId", ""),
                     "summary": details.get("summary", "")[:100],
                     "parameters": parse_parameters(details.get("parameters", [])),
@@ -141,7 +136,11 @@ def main():
         sys.exit(1)
 
     # Parse and return operations
-    result = parse_spec(spec, filter_path)
+    try:
+        result = parse_spec(spec, filter_path, spec_url=spec_url)
+    except ValueError as exc:
+        print(json.dumps({"error": f"Invalid input: {exc}"}, indent=2), file=sys.stderr)
+        sys.exit(1)
     print(json.dumps(result, indent=2))
 
 

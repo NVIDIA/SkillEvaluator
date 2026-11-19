@@ -104,6 +104,7 @@ python scripts/call_api.py --spec "https://api.example.com/openapi.json" --opera
 - For APIs requiring authentication, pass API keys via `--headers`
 - The skill automatically parses JSON responses
 - Timeout is 30 seconds by default
+- Relative OpenAPI `servers` URLs are resolved against the spec URL. Missing path parameters are reported as an input error before any request.
 - For complex API workflows, consider using `code-generator` skill instead
 - **Limiting results**: Try common params like `?_limit=N`, `?limit=N`, `?per_page=N`. If unsupported, fetch all and filter with `code-generator`
 

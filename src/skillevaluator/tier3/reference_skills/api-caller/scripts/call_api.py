@@ -11,7 +11,7 @@ from urllib.error import HTTPError, URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
-from url_safety import validate_http_url
+from url_safety import join_url_path, resolve_openapi_server_url, validate_http_url
 
 _UNSET = object()
 
@@ -112,10 +112,9 @@ def find_operation(spec: dict, operation_id: str) -> tuple:
     return None, None, None
 
 
-def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
+def build_url_from_spec(spec: dict, path: str, params: dict, spec_url: str | None = None) -> str:
     """Build a URL from OpenAPI spec and parameters."""
-    servers = spec.get("servers", [])
-    base_url = servers[0]["url"] if servers else ""
+    base_url = resolve_openapi_server_url(spec, spec_url)
 
     # Replace path parameters
     url_path = path
@@ -131,7 +130,13 @@ def build_url_from_spec(spec: dict, path: str, params: dict) -> str:
         else:
             query_params[key] = value
 
-    url = base_url + url_path
+    leftover = url_path.find("{")
+    if leftover != -1:
+        closing = url_path.find("}", leftover)
+        name = url_path[leftover + 1 : closing] if closing != -1 else url_path[leftover + 1 :]
+        raise ValueError(f"missing path parameter '{name}'")
+
+    url = join_url_path(base_url, url_path)
 
     if query_params:
         url += "?" + urlencode(query_params)
@@ -220,7 +225,7 @@ def main():
             sys.exit(1)
 
         try:
-            url = build_url_from_spec(spec, path, params)
+            url = build_url_from_spec(spec, path, params, spec_url=args.spec)
         except ValueError as exc:
             _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
             sys.exit(1)

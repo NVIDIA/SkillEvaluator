@@ -1,0 +1,300 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+"""OpenAPI server URL resolution and missing path-parameter checks for api-caller."""
+
+from __future__ import annotations
+
+import importlib.util
+import json
+import subprocess
+import sys
+import threading
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
+
+import pytest
+
+SCRIPTS_DIR = (
+    Path(__file__).resolve().parents[1]
+    / "src"
+    / "skillevaluator"
+    / "tier3"
+    / "reference_skills"
+    / "api-caller"
+    / "scripts"
+)
+
+PETSTORE_SPEC_URL = "https://petstore3.swagger.io/api/v3/openapi.json"
+PET_BODY = {"id": 1, "name": "doggie", "status": "available"}
+PETSTORE_SPEC = {
+    "openapi": "3.0.0",
+    "info": {"title": "Petstore", "version": "1.0.0"},
+    "servers": [{"url": "/api/v3"}],
+    "paths": {
+        "/pet/{petId}": {
+            "get": {
+                "operationId": "getPetById",
+                "parameters": [
+                    {
+                        "name": "petId",
+                        "in": "path",
+                        "required": True,
+                        "schema": {"type": "integer"},
+                    }
+                ],
+            }
+        }
+    },
+}
+
+
+def _load_script(module_name: str):
+    spec = importlib.util.spec_from_file_location(module_name, SCRIPTS_DIR / f"{module_name}.py")
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    sys.path.insert(0, str(SCRIPTS_DIR))
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        sys.path.remove(str(SCRIPTS_DIR))
+    return module
+
+
+def _run_script(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        [sys.executable, str(SCRIPTS_DIR / script), *args],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+
+class _PetstoreHandler(BaseHTTPRequestHandler):
+    def log_message(self, _format: str, *args: object) -> None:
+        del args
+
+    def do_GET(self) -> None:
+        path = self.path.split("?", 1)[0]
+        payload = {"/api/v3/openapi.json": PETSTORE_SPEC, "/api/v3/pet/1": PET_BODY}.get(path)
+        if payload is None:
+            self.send_error(404)
+            return
+        body = json.dumps(payload).encode("utf-8")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.send_header("Content-Length", str(len(body)))
+        self.end_headers()
+        self.wfile.write(body)
+
+
+def _serve_petstore():
+    server = ThreadingHTTPServer(("127.0.0.1", 0), _PetstoreHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    return server, thread
+
+
+def _stop_petstore(server: ThreadingHTTPServer, thread: threading.Thread) -> None:
+    server.shutdown()
+    thread.join(timeout=5)
+    server.server_close()
+
+
+def test_relative_server_is_resolved_against_spec_url() -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": "/api/v3"}]}
+
+    result = caller.build_url_from_spec(spec, "/pet/{petId}", {"petId": 1}, spec_url=PETSTORE_SPEC_URL)
+
+    assert result == "https://petstore3.swagger.io/api/v3/pet/1"
+
+
+def test_spec_without_servers_uses_spec_origin() -> None:
+    caller = _load_script("call_api")
+
+    result = caller.build_url_from_spec({}, "/pet/{petId}", {"petId": 1}, spec_url=PETSTORE_SPEC_URL)
+
+    assert result == "https://petstore3.swagger.io/pet/1"
+
+
+def test_absolute_server_url_is_unchanged() -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": "https://example.invalid/v1"}]}
+
+    result = caller.build_url_from_spec(spec, "/items/{id}", {"id": 7}, spec_url="https://other.example/openapi.json")
+
+    assert result == "https://example.invalid/v1/items/7"
+
+
+def test_server_variables_use_defaults() -> None:
+    caller = _load_script("call_api")
+    spec = {
+        "servers": [
+            {
+                "url": "https://{region}.example.com/v1",
+                "variables": {"region": {"default": "us"}},
+            }
+        ]
+    }
+
+    result = caller.build_url_from_spec(spec, "/items/{id}", {"id": 7})
+
+    assert result == "https://us.example.com/v1/items/7"
+
+
+def test_server_variable_without_default_is_error() -> None:
+    caller = _load_script("call_api")
+    spec = {
+        "servers": [
+            {
+                "url": "https://{region}.example.com/v1",
+                "variables": {"region": {"enum": ["us", "eu"]}},
+            }
+        ]
+    }
+
+    with pytest.raises(ValueError, match=r"server variable 'region' has no default"):
+        caller.build_url_from_spec(spec, "/items/{id}", {"id": 7})
+
+
+def test_non_string_server_url_is_error() -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": 123}]}
+
+    with pytest.raises(ValueError, match=r"server URL must be a string"):
+        caller.build_url_from_spec(spec, "/items/{id}", {"id": 7})
+
+
+def test_trailing_slash_server_does_not_double_slash() -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": "https://example.invalid/v1/"}]}
+
+    result = caller.build_url_from_spec(spec, "/items/{id}", {"id": 7})
+
+    assert result == "https://example.invalid/v1/items/7"
+
+
+def test_missing_path_parameter_is_error() -> None:
+    caller = _load_script("call_api")
+    spec = {"servers": [{"url": "https://example.invalid/v1"}]}
+
+    with pytest.raises(ValueError, match=r"missing path parameter 'petId'"):
+        caller.build_url_from_spec(spec, "/pet/{petId}", {})
+
+
+def test_server_variable_without_default_reports_json_error(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    caller = _load_script("call_api")
+    spec = {
+        "servers": [
+            {
+                "url": "https://{region}.example.com/v1",
+                "variables": {"region": {"enum": ["us", "eu"]}},
+            }
+        ],
+        "paths": {"/items/{id}": {"get": {"operationId": "getItem"}}},
+    }
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda _url: spec)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "call_api.py",
+            "--spec",
+            "https://example.invalid/spec",
+            "--operation",
+            "getItem",
+            "--params",
+            json.dumps({"id": 7}),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        caller.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert captured.out == ""
+    assert json.loads(captured.err) == {
+        "success": False,
+        "error": "Invalid input: server variable 'region' has no default",
+    }
+
+
+def test_missing_path_parameter_reports_json_error_and_makes_no_request(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    caller = _load_script("call_api")
+    spec = {
+        "servers": [{"url": "https://example.invalid/v1"}],
+        "paths": {"/pet/{petId}": {"get": {"operationId": "getPetById"}}},
+    }
+    requests: list[object] = []
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda _url: spec)
+    monkeypatch.setattr(caller, "make_request", lambda *args, **kwargs: requests.append((args, kwargs)))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "call_api.py",
+            "--spec",
+            "https://example.invalid/spec",
+            "--operation",
+            "getPetById",
+            "--params",
+            "{}",
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        caller.main()
+
+    captured = capsys.readouterr()
+    assert exc.value.code == 1
+    assert captured.out == ""
+    assert requests == []
+    assert json.loads(captured.err) == {
+        "success": False,
+        "error": "Invalid input: missing path parameter 'petId'",
+    }
+
+
+def test_call_api_subprocess_resolves_relative_server() -> None:
+    server, thread = _serve_petstore()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _run_script(
+            "call_api.py",
+            "--spec",
+            f"{origin}/api/v3/openapi.json",
+            "--operation",
+            "getPetById",
+            "--params",
+            json.dumps({"petId": 1}),
+        )
+    finally:
+        _stop_petstore(server, thread)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["success"] is True
+    assert payload["data"] == PET_BODY
+    assert payload["url"] == f"{origin}/api/v3/pet/1"
+
+
+def test_parse_openapi_subprocess_reports_absolute_urls() -> None:
+    server, thread = _serve_petstore()
+    origin = f"http://127.0.0.1:{server.server_port}"
+    try:
+        result = _run_script("parse_openapi.py", f"{origin}/api/v3/openapi.json")
+    finally:
+        _stop_petstore(server, thread)
+
+    assert result.returncode == 0, result.stderr
+    payload = json.loads(result.stdout)
+    assert payload["base_url"] == f"{origin}/api/v3"
+    assert payload["operations"][0]["full_url"] == f"{origin}/api/v3/pet/{{petId}}"
+    assert payload["operations"][0]["path"] == "/pet/{petId}"
+    assert payload["operations"][0]["operation_id"] == "getPetById"

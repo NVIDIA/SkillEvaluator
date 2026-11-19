@@ -76,6 +76,10 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
+  rate-limited calls stop when the requested wait exceeds the retry budget.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -123,6 +127,10 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Restore a temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline under a literal temporary root: these pipelines now
+  score Security `1.0` instead of a destructive-command finding. Unknown
+  producers, joined shell words and link traversal keep the finding.
 
 ## 1.0.1 - 2026-11-17
 

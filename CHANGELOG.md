@@ -99,7 +99,10 @@ All notable changes to SkillEvaluator are documented in this file.
   exponentiation before computing it, so integer results of 1001 to 4300
   digits, which printed before, now return
   `Error: result is too large`. Larger, infinite or non-real results report an
-  error instead of hanging or raising a cryptic conversion error.
+  error instead of hanging or raising a cryptic conversion error. The limits
+  apply to intermediate values as well as the final result, so
+  `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
+  `Error: result is too large` because each power has 1001 digits.
 
 ## 1.0.1 - 2026-11-17
 

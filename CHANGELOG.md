@@ -52,6 +52,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
+  repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
   any independently measured component, instead of stopping report collection with `OverflowError`.
   Native-timed trajectories without tool calls (an empty or omitted `tool_calls`

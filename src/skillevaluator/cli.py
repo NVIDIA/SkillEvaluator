@@ -407,7 +407,7 @@ def _reject_linked_tier2_root(path: Path) -> None:
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
 
 
-def _hook_review_target(path: Path) -> Path:
+def _require_hook_review_target(path: Path) -> None:
     from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
     path = canonicalize_trusted_root_alias(path.absolute())
@@ -416,7 +416,7 @@ def _hook_review_target(path: Path) -> Path:
             raise SecurePathError("unsafe_root", "Plugin root passes through a symlink or reparse point.")
         path = Path(os.path.normpath(path))
         with SecureRoot(path):
-            return path
+            pass
     except SecurePathError as exc:
         raise click.UsageError(f"--hook-waivers requires a secure packaged plugin directory: {exc}") from exc
 
@@ -2637,7 +2637,7 @@ def validate(
     if dedup:
         _reject_linked_tier2_root(target_path)
     if hook_waivers is not None:
-        target_path = _hook_review_target(target_path)
+        _require_hook_review_target(target_path)
     target_path = target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 
@@ -3341,8 +3341,10 @@ def security_scan(
     output_dir: Path,
 ) -> None:
     """Scan for security vulnerabilities."""
-    target_path = _hook_review_target(target_path) if hook_waivers is not None else target_path.resolve()
-    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
+    if hook_waivers is not None:
+        _require_hook_review_target(target_path)
+    target_path = target_path.resolve()
+    output_dir = _resolve_file_report_output_location(target_path, output_dir, report_formats)
     if not emit_reports(
         run_security_scan(
             target_path,
@@ -3685,7 +3687,9 @@ def _tier1_workflow(
     # validate does: a relative root leaves finding paths relative to the working
     # directory, and the report roots would then prefix the skill folder twice.
     target_label = str(skill_path)
-    skill_path = _hook_review_target(skill_path) if hook_waivers is not None else skill_path.resolve()
+    if hook_waivers is not None:
+        _require_hook_review_target(skill_path)
+    skill_path = skill_path.resolve()
     results = run_tier1_workflow(
         skill_path,
         checks=checks,

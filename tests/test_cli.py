@@ -911,6 +911,18 @@ def test_tier3_doctor_json_uses_tier3_rows(doctor_json_rows) -> None:
     ]
 
 
+def test_tier3_doctor_json_strips_terminal_controls(doctor_json_rows) -> None:
+    model = "m\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07\x9b2Jz"
+    doctor_json_rows["3"][1] = ("Public LLM provider", "pass", f"openai / {model}")
+
+    result = CliRunner().invoke(cli, ["tier3", "doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert not any(char in result.output for char in ("\x1b", "\x07", "\x9b"))
+    checks = json.loads(result.output)["tiers"][0]["checks"]
+    assert checks[1] == {"check": "Public LLM provider", "status": "pass", "detail": "openai / mclick2Jz"}
+
+
 def test_doctor_json_without_the_tier3_extra_is_a_fail_tier(monkeypatch) -> None:
     _fail_tier3_commands_import(monkeypatch, missing="harbor")
 

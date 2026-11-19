@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from skillevaluator import __version__
-from skillevaluator.utils.rich_markup import escape_markup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
 Row = tuple[str, str, str]
 
@@ -269,7 +269,14 @@ def readiness_payload(*, command: str, tiers: Sequence[tuple[str, Sequence[Row]]
             {
                 "tier": tier,
                 "status": worst_readiness_status(status for _, status, _ in rows),
-                "checks": [{"check": name, "status": status, "detail": detail} for name, status, detail in rows],
+                "checks": [
+                    {
+                        "check": strip_terminal_controls(str(name)),
+                        "status": status,
+                        "detail": strip_terminal_controls(str(detail)),
+                    }
+                    for name, status, detail in rows
+                ],
             }
         )
     return {

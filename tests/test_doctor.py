@@ -432,6 +432,14 @@ def test_readiness_payload_rolls_up_worst_status() -> None:
     }
 
 
+def test_readiness_payload_strips_terminal_controls() -> None:
+    hostile = "\x1b]8;;https://example.invalid\x1b\\click\x1b]8;;\x1b\\\x9b2J\x1b[31mred\tok"
+    payload = readiness.readiness_payload(command="doctor", tiers=[("2", [(f"LLM {hostile}", "warn", hostile)])])
+
+    check = payload["tiers"][0]["checks"][0]
+    assert check == {"check": "LLM click2Jred\tok", "status": "warn", "detail": "click2Jred\tok"}
+
+
 def test_default_table_output_matches_shared_renderer(scanners, capsys) -> None:
     rows = readiness.readiness_rows(tier="1", checks="code")
 

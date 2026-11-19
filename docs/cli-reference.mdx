@@ -999,7 +999,7 @@ An option for a tier that is not selected exits with a usage error before any ch
 | `--verify-models` | off | Tier 3: live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. Tier 2: one embedding and one chat request. |
 | `--json` | off | Write one JSON object to stdout instead of the table. Nothing else is written to stdout, including when a check fails. Click usage errors still exit `2` and print to stderr, not JSON. |
 
-`--json` uses this shape. `status` on each tier is the worst row (`fail` over `warn` over `pass`). The top-level `status` is the worst tier. `detail` is the same sanitized text the table shows.
+`--json` uses this shape. `status` on each tier is the worst row (`fail` over `warn` over `pass`). The top-level `status` is the worst tier. `check` and `detail` have terminal escape sequences and control characters removed (tab and newline are kept), as in the table.
 
 ```json
 {

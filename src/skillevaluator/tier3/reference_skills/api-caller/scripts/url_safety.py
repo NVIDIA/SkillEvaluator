@@ -17,8 +17,46 @@ def validate_http_url(url: str) -> str:
     return url
 
 
+def _swagger2_base_url(spec: dict, spec_url: str | None) -> str:
+    """Build a Swagger 2.0 base URL from schemes, host and basePath, defaulting to the spec URL."""
+    origin = urlparse(spec_url) if spec_url else None
+    schemes = spec.get("schemes") or []
+    if not isinstance(schemes, list):
+        raise ValueError("Swagger 2.0 schemes must be a list")
+    http_schemes = [scheme for scheme in schemes if scheme in {"http", "https"}]
+    if schemes and not http_schemes:
+        raise ValueError("Swagger 2.0 spec declares no HTTP or HTTPS scheme")
+    if origin and origin.scheme in http_schemes:
+        scheme = origin.scheme
+    elif "https" in http_schemes:
+        scheme = "https"
+    elif http_schemes:
+        scheme = http_schemes[0]
+    else:
+        scheme = origin.scheme if origin else ""
+
+    host = spec.get("host") or (origin.netloc if origin else "")
+    if not isinstance(host, str):
+        raise ValueError("Swagger 2.0 host must be a string")
+    base_path = spec.get("basePath") or "/"
+    if not isinstance(base_path, str):
+        raise ValueError("Swagger 2.0 basePath must be a string")
+    if not base_path.startswith("/"):
+        base_path = "/" + base_path
+
+    if not scheme or not host:
+        return base_path
+    return f"{scheme}://{host}{base_path}"
+
+
 def resolve_openapi_server_url(spec: dict, spec_url: str | None = None) -> str:
-    """Return servers[0].url resolved against the spec URL, with variable defaults applied."""
+    """Return the API base URL: servers[0].url (OpenAPI 3) or schemes/host/basePath (Swagger 2.0).
+
+    Relative URLs are resolved against the spec URL, which should be the final URL
+    after redirects. Server variable defaults are applied.
+    """
+    if str(spec.get("swagger", "")).startswith("2"):
+        return _swagger2_base_url(spec, spec_url)
     servers = spec.get("servers") or []
     if servers:
         server = servers[0] if isinstance(servers[0], dict) else {}

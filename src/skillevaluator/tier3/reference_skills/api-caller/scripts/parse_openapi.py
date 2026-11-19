@@ -15,16 +15,16 @@ import urllib.request
 from url_safety import join_url_path, resolve_openapi_server_url, validate_http_url
 
 
-def fetch_spec(url: str) -> dict:
-    """Fetch OpenAPI spec from URL."""
+def fetch_spec(url: str) -> tuple[dict, str]:
+    """Fetch OpenAPI spec from URL. Returns the spec and its final URL after redirects."""
     try:
         req = urllib.request.Request(validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
         # validate_http_url() rejects non-HTTP schemes before this request.
         with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
             content = response.read().decode("utf-8")
-            return json.loads(content)
+            return json.loads(content), getattr(response, "url", None) or url
     except Exception as e:
-        return {"error": f"Failed to fetch spec: {e!s}"}
+        return {"error": f"Failed to fetch spec: {e!s}"}, url
 
 
 def parse_parameters(params: list) -> list:
@@ -130,14 +130,14 @@ def main():
     filter_path = sys.argv[2] if len(sys.argv) > 2 else None
 
     # Fetch the spec
-    spec = fetch_spec(spec_url)
+    spec, final_url = fetch_spec(spec_url)
     if "error" in spec:
         print(json.dumps(spec, indent=2), file=sys.stderr)
         sys.exit(1)
 
     # Parse and return operations
     try:
-        result = parse_spec(spec, filter_path, spec_url=spec_url)
+        result = parse_spec(spec, filter_path, spec_url=final_url)
     except ValueError as exc:
         print(json.dumps({"error": f"Invalid input: {exc}"}, indent=2), file=sys.stderr)
         sys.exit(1)

@@ -417,6 +417,8 @@ class EmbeddingRegistry:
         _validate_scalar_work(len(entries), vector_dimension, self._max_scalar_comparisons)
         unit_vectors = _normalized_registry_vectors(entries, vector_dimension)
         _validate_embedding_text(text, full_body=self._full_body)
+        if not entries:
+            return []
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
 
@@ -533,6 +535,8 @@ class EmbeddingRegistry:
         unit_vectors = _normalized_registry_vectors(catalog_entries, vector_dimension)
         text = entry.full_text if self._full_body else entry.embedding_text
         _validate_embedding_text(text, full_body=self._full_body)
+        if not any(catalog_entry.entry_id != exclude_entry_id for catalog_entry in catalog_entries):
+            return []
         vector = self._client.embed_chunked(text) if self._full_body else self._client.embed_single(text)
         query_vector = _normalized_vector(vector, vector_dimension or self._vector_dimension)
         target_path = Path(entry.path).name or "."

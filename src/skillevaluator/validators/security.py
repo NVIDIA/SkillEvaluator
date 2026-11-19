@@ -33,6 +33,8 @@ import unicodedata
 import zlib
 from collections import Counter
 from collections.abc import Callable, Iterable, Mapping
+from dataclasses import dataclass
+from datetime import UTC, date, datetime
 from pathlib import Path, PurePosixPath
 from urllib.parse import unquote
 
@@ -50,6 +52,7 @@ from skillevaluator.constants import (
 )
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.skill import SEMVER_RE
+from skillevaluator.plugin_manifest import locate_plugin_manifest
 from skillevaluator.provider_config import (
     SKILLSPECTOR_DEFAULT_MODELS,
     ProviderConfigurationError,
@@ -79,6 +82,7 @@ from skillevaluator.utils.secure_fs import (
     SecureRoot,
     stat_is_link_or_reparse,
 )
+from skillevaluator.utils.structured_data import preflight_json_structure, reject_duplicate_object_pairs
 from skillevaluator.utils.tool_runner import Tools, parse_json_output
 from skillevaluator.validators.base import (
     Finding,
@@ -87,11 +91,15 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_scannable_files,
 )
+from skillevaluator.validators.hook_review_artifact import HookReviewArtifact, capture_hook_review_artifact
+from skillevaluator.validators.hook_waivers import HookWaiver, load_hook_waivers
 from skillevaluator.validators.pii_ownership import ownership_email_spans
 from skillevaluator.validators.pii_waivers import PIIWaiverSet, configured_pii_categories, pii_evidence_sha256
 from skillevaluator.validators.skillspector_scope import (
+    AGENT_CONTROL_PATH_ROLES,
     IssueScope,
     scope_skillspector_issues,
+    skillspector_file_role,
     skillspector_report_is_truncated,
     skillspector_report_serializes_every_finding,
 )
@@ -1161,13 +1169,49 @@ def _skillspector_report_text(value: object) -> str | None:
     return text or None
 
 
-def _skillspector_ledger_exception_label(exception: Mapping[str, object]) -> str:
-    """Describe one ledger exception as ``path[:line] [phase; reason; analyzers=...]``."""
-    location = _skillspector_report_text(exception.get("path")) or "unknown"
+def _skillspector_parser_diagnostic_span(diagnostic: object) -> tuple[int, int] | None:
+    """Inclusive ``(start, end)`` from a well-formed ``parser_diagnostic``, else ``None``."""
+    if not isinstance(diagnostic, Mapping):
+        return None
+    start = diagnostic.get("start_line")
+    end = diagnostic.get("end_line")
+    if type(start) is not int or type(end) is not int:
+        return None
+    if not 0 < start <= end <= 1_000_000_000:
+        return None
+    return start, end
+
+
+def _skillspector_parser_diagnostic_context(exception: Mapping[str, object]) -> str | None:
+    """Sanitized ``cause check`` text for a ``static_parse_limit`` row, else ``None``."""
+    if exception.get("reason_code") != "static_parse_limit":
+        return None
+    diagnostic = exception.get("parser_diagnostic")
+    if not isinstance(diagnostic, Mapping):
+        return None
+    parts = [text for key in ("cause", "check") if (text := _skillspector_report_text(diagnostic.get(key)))]
+    return " ".join(parts) or None
+
+
+def _skillspector_ledger_exception_lines(exception: Mapping[str, object]) -> str | None:
+    """``line`` or ``start-end`` from the row's ``start_line`` or its ``parser_diagnostic`` span, else ``None``."""
     start_line = exception.get("start_line")
     if isinstance(start_line, int) and not isinstance(start_line, bool):
-        location = f"{location}:{start_line}"
+        return str(start_line)
+    if (span := _skillspector_parser_diagnostic_span(exception.get("parser_diagnostic"))) is not None:
+        start, end = span
+        return str(start) if start == end else f"{start}-{end}"
+    return None
+
+
+def _skillspector_ledger_exception_label(exception: Mapping[str, object]) -> str:
+    """Describe one ledger exception as ``path[:line[-end]] [phase; reason; cause check; analyzers=...]``."""
+    location = _skillspector_report_text(exception.get("path")) or "unknown"
+    if lines := _skillspector_ledger_exception_lines(exception):
+        location = f"{location}:{lines}"
     context = [text for key in ("phase", "reason_code") if (text := _skillspector_report_text(exception.get(key)))]
+    if extra := _skillspector_parser_diagnostic_context(exception):
+        context.append(extra)
     analyzers = exception.get("analyzers")
     if isinstance(analyzers, list) and (
         analyzer_text := _skillspector_report_text(",".join(name for name in analyzers if isinstance(name, str)))
@@ -1236,10 +1280,54 @@ _SKILLSPECTOR_REFERENCE_REJECTION_HINT = (
     "Missing references require a standalone target with complete, matching reference and scan evidence. "
     "See https://docs.nvidia.com/skills/skillevaluator/tier1-validation."
 )
+_SKILLSPECTOR_PARSE_LIMIT_ADVICE = (
+    "Review that code, prefer fixed argument lists, and if the code is valid and safe report a "
+    "minimal reproducer to SkillSpector; updating SkillSpector does not clear this limit today."
+)
+_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER = "parser_diagnostic on the skillspector_completeness rows of the JSON report"
+
+
+def _skillspector_parse_limit_hint(ledger_exceptions: Iterable[Mapping[str, object]]) -> str | None:
+    """Explain ``runtime_dependent`` parse limits, or ``None`` when that is not every parse-limit row.
+
+    The hint names the affected locations itself, because the error shows only the
+    first few ledger rows and those may all be unrelated (for example missing references).
+    """
+    parse_limit_rows = [row for row in ledger_exceptions if row.get("reason_code") == "static_parse_limit"]
+    if not parse_limit_rows:
+        return None
+    for row in parse_limit_rows:
+        diagnostic = row.get("parser_diagnostic")
+        if not isinstance(diagnostic, Mapping):
+            return None
+        cause = diagnostic.get("cause")
+        if not isinstance(cause, str) or cause.strip() != "runtime_dependent":
+            return None
+    locations: list[str] = []
+    for row in parse_limit_rows:
+        path = _skillspector_report_text(row.get("path"))
+        lines = _skillspector_ledger_exception_lines(row)
+        if path is None and lines is None:
+            continue
+        location = f"{path or 'unknown'}:{lines}" if lines else str(path)
+        if location not in locations:
+            locations.append(location)
+    shown = locations[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
+    if not shown:
+        where = f"at the locations in {_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER}"
+    else:
+        where = f"in {shown[0]}" if len(shown) == 1 else f"in {', '.join(shown[:-1])} and {shown[-1]}"
+        if remaining := len(locations) - len(shown):
+            where = f"{where}, and {remaining} more listed in {_SKILLSPECTOR_PARSE_LIMIT_JSON_POINTER}"
+    return (
+        "SkillSpector could not resolve a command or code string that is only known at run time "
+        f"(for example a process spawn whose arguments come from variables) {where}. "
+        f"{_SKILLSPECTOR_PARSE_LIMIT_ADVICE}"
+    )
 
 
 def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list[dict]) -> str:
-    """Describe a partial SkillSpector analysis with example gaps and, for runtime limits, a remedy."""
+    """Describe a partial SkillSpector analysis with example gaps and, where known, a remedy."""
     message = f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}')"
     if ledger_exceptions:
         shown = ledger_exceptions[:_SKILLSPECTOR_INCOMPLETE_EXAMPLES]
@@ -1252,10 +1340,17 @@ def _skillspector_incomplete_analysis_error(status: str, ledger_exceptions: list
                 f"(incomplete files by reason: {_skillspector_incomplete_files_by_reason(ledger_exceptions)})"
             )
     message = f"{message}; security scan did not complete"
-    hint = _skillspector_runtime_limit_hint(ledger_exceptions)
-    if not hint and ledger_exceptions and all(row.get("phase") == "reference_resolution" for row in ledger_exceptions):
-        hint = _SKILLSPECTOR_REFERENCE_REJECTION_HINT
-    return f"{message}. {hint}" if hint else message
+    hints = [
+        hint
+        for hint in (
+            _skillspector_runtime_limit_hint(ledger_exceptions),
+            _skillspector_parse_limit_hint(ledger_exceptions),
+        )
+        if hint
+    ]
+    if not hints and ledger_exceptions and all(row.get("phase") == "reference_resolution" for row in ledger_exceptions):
+        hints.append(_SKILLSPECTOR_REFERENCE_REJECTION_HINT)
+    return f"{message}. {' '.join(hints)}" if hints else message
 
 
 # SkillSpector's static pattern analyzers read text, so each records a referenced
@@ -1467,6 +1562,108 @@ def _is_jpeg(data: bytes) -> bool:
     return False
 
 
+def _read_skillspector_passive_raster(root: SecureRoot, path: str, budget: int) -> tuple[int, os.stat_result] | None:
+    """Corroborate a passive image with a bounded no-follow read under the scan root."""
+    if _skillspector_report_path_key(path) is None:
+        return None
+    parts = path.split("/")
+    directories = [part.casefold() for part in parts[:-1]]
+    if (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS) or not (
+        _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
+    ):
+        return None
+    data, metadata = root.read_bytes(Path(*parts), budget)
+    is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
+    if metadata.st_mode & 0o111 or not is_image:
+        return None
+    return len(data), metadata
+
+
+def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_root: Path | None) -> list[str]:
+    """Return the verified PNGs that account for the full inventory surplus."""
+    if not isinstance(components, list) or any(
+        not isinstance(component, dict) or not isinstance(component.get("path"), str) for component in components
+    ):
+        return []
+    surplus = len(components) - completeness["total_components"]
+    exclusions = completeness.get("scope_exclusions")
+    references = completeness.get("references")
+    if (
+        scanned_root is None
+        or not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
+        or not isinstance(exclusions, list)
+        or len(exclusions) != surplus
+        or not isinstance(references, list)
+        or any(not isinstance(reference, dict) for reference in references)
+        or _skillspector_reference_evidence_unmatched(completeness)
+    ):
+        return []
+
+    required_patterns = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS - {"static_yara"}
+    paths: set[str] = set()
+    for row in exclusions:
+        if not isinstance(row, dict):
+            return []
+        path = row.get("path")
+        analyzers = row.get("analyzers")
+        if (
+            row.get("outcome") != "out_of_scope"
+            or row.get("phase") != "static"
+            or row.get("reason_code") != "binary_content"
+            or row.get("fatal") is not False
+            or row.get("start_line") is not None
+            or row.get("end_line") is not None
+            or not isinstance(path, str)
+            or not path.lower().endswith(".png")
+            or path in paths
+            or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
+            or not isinstance(analyzers, list)
+            or len(analyzers) != len(required_patterns)
+            or not all(isinstance(analyzer, str) for analyzer in analyzers)
+            or set(analyzers) != required_patterns
+        ):
+            return []
+        paths.add(path)
+    if any(
+        reference.get("status") == "resolved"
+        and isinstance(target := reference.get("target_path"), str)
+        and target in paths
+        for reference in references
+    ):
+        return []
+
+    by_path: dict[str, dict] = {}
+    for component in components:
+        path = component["path"]
+        if path in paths:
+            if path in by_path or _skillspector_scoring_source_scope(component) != ("", ""):
+                return []
+            by_path[path] = component
+    if by_path.keys() != paths:
+        return []
+
+    budget = _PASSIVE_RASTER_MAX_BYTES
+    identities: set[tuple[int, int]] = set()
+    try:
+        with SecureRoot(scanned_root) as root:
+            for path, component in by_path.items():
+                size = component.get("size_bytes")
+                if component.get("executable") is not False or type(size) is not int or not 0 < size <= budget:
+                    return []
+                verified = _read_skillspector_passive_raster(root, path, size)
+                if verified is None or verified[0] != size:
+                    return []
+                _, metadata = verified
+                identity = (metadata.st_dev, metadata.st_ino)
+                if metadata.st_ino and identity in identities:
+                    return []
+                identities.add(identity)
+                budget -= size
+    except (OSError, SecurePathError):
+        return []
+    return sorted(paths)
+
+
 def _skillspector_passive_raster_note(
     ledger_exceptions: list[dict],
     analyzer_statuses: list[dict],
@@ -1580,23 +1777,12 @@ def _skillspector_passive_raster_note(
         with SecureRoot(scanned_root) as root:
             for path in paths:
                 matches = components_by_path.get(path, [])
-                parts = path.split("/")
-                directories = [part.casefold() for part in parts[:-1]]
-                if (
-                    len(matches) != 1
-                    or matches[0].get("executable") is not False
-                    or "\\" in path
-                    or not _is_filesystem_safe_path_text(path)
-                    or any(part in {"", ".", ".."} or Path(part).anchor for part in parts)
-                    or (directories and directories[0] in _PASSIVE_RASTER_CONTROL_ROOTS)
-                    or not _PASSIVE_RASTER_CONTROL_DIRS.isdisjoint(directories)
-                ):
+                if len(matches) != 1 or matches[0].get("executable") is not False:
                     return None
-                data, metadata = root.read_bytes(Path(*parts), budget)
-                is_image = _is_png(data) if path.lower().endswith(".png") else _is_jpeg(data)
-                if metadata.st_mode & 0o111 or not is_image:
+                verified = _read_skillspector_passive_raster(root, path, budget)
+                if verified is None:
                     return None
-                budget -= len(data)
+                budget -= verified[0]
     except (OSError, SecurePathError):
         return None
 
@@ -2600,8 +2786,10 @@ def _skillspector_missing_reference_notes(
     return notes
 
 
-def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], total: int) -> bool:
-    """Whether each universal analyzer completed one work item per component and no other analyzer degraded."""
+def _skillspector_universal_analyzers_completed(
+    analyzer_statuses: list[dict], total: int, *, excluded_png_count: int = 0
+) -> bool:
+    """Check full analyzer coverage, including integrity and YARA on verified passive PNGs."""
     universal = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | {"artifact_integrity"}
     accounted: set[str] = set()
     for status in analyzer_statuses:
@@ -2611,11 +2799,12 @@ def _skillspector_universal_analyzers_completed(analyzer_statuses: list[dict], t
             if state not in {"completed", "not_applicable", "disabled"}:
                 return False
             continue
+        expected = total + excluded_png_count if analyzer_id in {"artifact_integrity", "static_yara"} else total
         if (
             analyzer_id in accounted
             or state != "completed"
-            or status.get("planned_work") != total
-            or status.get("completed") != total
+            or status.get("planned_work") != expected
+            or status.get("completed") != expected
         ):
             return False
         accounted.add(analyzer_id)
@@ -2718,13 +2907,21 @@ def _skillspector_reference_caveat_error(ledger_exceptions: list[dict]) -> str:
 _SKILLSPECTOR_HOOK_ANALYZER = "bundled_execution_surface"
 _SKILLSPECTOR_HOOK_LIMITATION = f"Analyzer {_SKILLSPECTOR_HOOK_ANALYZER} status: degraded."
 _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK = "skillspector_hook_payload_unverified"
+_SKILLSPECTOR_HOOK_WAIVER_CHECK = "skillspector_hook_waiver_applied"
+_REVIEWABLE_HOOK_COMMAND = re.compile(
+    r'(?P<interpreter>sh|bash|python|python3)[ \t]+"'
+    r'(?:\$\{(?:CLAUDE|CODEX)_PLUGIN_ROOT\}|\$(?:CLAUDE|CODEX)_PLUGIN_ROOT)/'
+    r'(?P<path>[A-Za-z0-9_. /-]+)"'
+)
 # SkillSpector reads at most this many hook, permission and settings records
 # from one manifest (``_MAX_DECLARATIONS`` in bundled_execution_surface.py).
 _SKILLSPECTOR_HOOK_DECLARATION_LIMIT = 2048
-# Findings that are facts about the scan, not judgments an LLM verifier can
-# overturn: the hook gate failure, and the reference-caveat note, which reports
-# scanner coverage, not a vulnerability. They keep their evidence unchanged.
-_LLM_VERIFY_EXEMPT_CHECKS = frozenset({_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, "skillspector_reference_caveats"})
+_SKILLSPECTOR_PASSIVE_PNG_CHECK = "skillspector_passive_png_exclusion"
+_SKILLSPECTOR_COVERAGE_CHECKS = frozenset(
+    {_SKILLSPECTOR_PASSIVE_PNG_CHECK, _SKILLSPECTOR_HOOK_WAIVER_CHECK, "skillspector_reference_caveats"}
+)
+# The hook gate and coverage notes record scanner evidence outside LLM review.
+_LLM_VERIFY_EXEMPT_CHECKS = _SKILLSPECTOR_COVERAGE_CHECKS | {_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK}
 _SKILLSPECTOR_HOOK_COUNT_FIELDS = (
     "total_components",
     "partially_inspected_files",
@@ -2906,6 +3103,8 @@ def _skillspector_gaps_without_rows(
     counts: Mapping[str, int],
     limitations: list[str],
     scope_exclusions: object,
+    *,
+    excluded_png_count: int = 0,
 ) -> list[str]:
     """Describe the gaps a report without its hook rows (:func:`_skillspector_without_hook_surface`) shows outside its rows.
 
@@ -2934,7 +3133,9 @@ def _skillspector_gaps_without_rows(
             f"{counts['findings_before_filtering']} finding(s) before filtering and "
             f"{counts['findings_after_filtering']} after"
         )
-    if not _skillspector_universal_analyzers_completed(analyzer_statuses, counts["total_components"]):
+    if not _skillspector_universal_analyzers_completed(
+        analyzer_statuses, counts["total_components"], excluded_png_count=excluded_png_count
+    ):
         unfinished = [
             f"{_skillspector_report_text(status.get('analyzer_id')) or 'unknown'} "
             f"{_skillspector_report_text(status.get('status')) or 'unknown'}"
@@ -2955,6 +3156,74 @@ def _skillspector_gaps_without_rows_error(status: str, gaps: list[str]) -> str:
         f"skillspector JSON field 'analysis_completeness' reports incomplete analysis (status '{status}'): "
         f"{'; '.join(gaps)}; security scan did not complete"
     )
+
+
+@dataclass(frozen=True)
+class _HookReview:
+    artifact: HookReviewArtifact
+    waivers: tuple[HookWaiver, ...]
+
+
+def _hook_waiver_rejection(
+    waiver: HookWaiver, artifact: HookReviewArtifact, scripts: set[str], today: date
+) -> dict | None:
+    """Return the first mismatch, checking specific pins before the package digest."""
+    if today < waiver.created:
+        return {"reason": "not_yet_valid", "created": waiver.created.isoformat()}
+    if today > waiver.expires:
+        return {"reason": "expired", "expires": waiver.expires.isoformat()}
+    if waiver.manifest_sha256 != artifact.hashes.get(waiver.manifest):
+        return {"reason": "manifest_sha256_mismatch"}
+    if missing := scripts - waiver.payload.keys():
+        return {"reason": "missing_payload_pins", "paths": sorted(missing)}
+    mismatched = sorted(path for path, sha256 in waiver.payload.items() if artifact.hashes.get(path) != sha256)
+    if mismatched:
+        return {"reason": "payload_sha256_mismatch", "paths": mismatched}
+    if waiver.artifact_sha256 != artifact.artifact_sha256:
+        return {"reason": "artifact_sha256_mismatch"}
+    return None
+
+
+def _reviewable_hook_scripts(manifest: bytes) -> tuple[set[str], int]:
+    """Require explicit command handlers invoking one contained script."""
+    raw = manifest.decode("utf-8")
+    preflight_json_structure(raw, max_depth=12, max_collection_items=2048)
+    data = json.loads(raw, object_pairs_hook=reject_duplicate_object_pairs)
+    hooks = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks, dict) or not hooks or data.keys() - {"hooks", "description"}:
+        raise ValueError("the manifest is outside the supported command-hook format")
+    scripts: set[str] = set()
+    count = 0
+    for event in hooks.values():
+        if not isinstance(event, list) or not event:
+            raise ValueError("the manifest contains an unsupported hook group")
+        for group in event:
+            if not isinstance(group, dict) or group.keys() - {"matcher", "hooks"}:
+                raise ValueError("the manifest contains an unsupported hook group")
+            if not isinstance(group.get("matcher", ""), str):
+                raise ValueError("the manifest contains an invalid hook matcher")
+            handlers = group.get("hooks")
+            if not isinstance(handlers, list) or not handlers:
+                raise ValueError("the manifest contains an unsupported hook group")
+            for handler in handlers:
+                if (
+                    not isinstance(handler, dict)
+                    or handler.keys() - {"type", "command", "timeout"}
+                    or handler.get("type") != "command"
+                ):
+                    raise ValueError("only command handlers with a bundled script can use a hook waiver")
+                timeout = handler.get("timeout", 1)
+                command = handler.get("command")
+                if type(timeout) is not int or timeout < 1 or not isinstance(command, str):
+                    raise ValueError("the manifest contains an invalid hook handler")
+                match = _REVIEWABLE_HOOK_COMMAND.fullmatch(command)
+                path = _skillspector_report_path_key(match["path"]) if match else None
+                suffix = ".py" if match and match["interpreter"].startswith("python") else ".sh"
+                if path is None or not path.endswith(suffix):
+                    raise ValueError("each command must invoke one quoted plugin-root Python or shell script")
+                scripts.add(path)
+                count += 1
+    return scripts, count
 
 
 class SecurityValidator(ValidatorBase):
@@ -2984,6 +3253,7 @@ class SecurityValidator(ValidatorBase):
         skillspector_reference_root: Path | None = None,
         skillspector_baseline: Path | str | None = None,
         target_root: Path | str | None = None,
+        hook_waivers: Path | None = None,
     ):
         """Initialize with optional LLM analysis for deeper inspection.
 
@@ -3028,6 +3298,7 @@ class SecurityValidator(ValidatorBase):
                 references are judged against, so a skill inside it accepts
                 none, also when that skill is a plugin of its own. Finding
                 scoping is unchanged.
+            hook_waivers: Explicit trusted approval file for a reviewed plugin snapshot.
         """
         self._pii_patterns: dict | None = None
         self._submitter_override: set[str] | None = (
@@ -3053,6 +3324,7 @@ class SecurityValidator(ValidatorBase):
         self.skillspector_baseline = (
             Path(skillspector_baseline).expanduser().resolve() if skillspector_baseline is not None else None
         )
+        self.hook_waivers = Path(hook_waivers).absolute() if hook_waivers is not None else None
 
     @property
     def pii_patterns(self) -> dict:
@@ -3278,7 +3550,11 @@ class SecurityValidator(ValidatorBase):
         target_root = self.target_root or skill_path.resolve()
         previous_target_root, self._scan_target_root = self._scan_target_root, target_root
         try:
-            result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
+            if self.hook_waivers is not None:
+                # Review binds the packaged root, including any nested skills.
+                result = validate_one(skill_path)
+            else:
+                result = self._validate_folder_or_skill(skill_path, validate_one, action_description=action_description)
         finally:
             self._scan_target_root = previous_target_root
         if blocks:
@@ -3337,7 +3613,30 @@ class SecurityValidator(ValidatorBase):
         original_root = skill_path.resolve()
         scan_root = original_root
         staged: tempfile.TemporaryDirectory | None = None
-        if skill_path.is_dir() and _tree_contains_artifact_dirs(skill_path):
+        hook_review: _HookReview | None = None
+        if self.hook_waivers is not None:
+            try:
+                if not skill_path.is_dir() or stat_is_link_or_reparse(skill_path.lstat()):
+                    raise ValueError("hook waivers require a packaged plugin directory")
+                if (self._scan_target_root or self.target_root or self.skillspector_reference_root) != original_root:
+                    raise ValueError("hook waivers require a scan of the complete plugin root")
+                if any(ancestor.samefile(original_root) for ancestor in self.hook_waivers.parents):
+                    raise ValueError("store the trusted hook waiver file outside the reviewed plugin")
+                waivers = load_hook_waivers(self.hook_waivers)
+                staged = tempfile.TemporaryDirectory(prefix="skillspector-hook-review-")
+                scan_root = Path(staged.name) / original_root.name
+                scan_root.mkdir(mode=0o700)
+                artifact = capture_hook_review_artifact(skill_path, scan_root)
+                if locate_plugin_manifest(scan_root) is None:
+                    raise ValueError("hook waivers require a packaged plugin manifest")
+                hook_review = _HookReview(artifact, waivers)
+            except (OSError, ValueError) as exc:
+                if staged is not None:
+                    staged.cleanup()
+                result.add_error(f"Could not prepare reviewed hooks: {exc}")
+                result.mark_scan_incomplete("skillspector")
+                return result
+        elif skill_path.is_dir() and _tree_contains_artifact_dirs(skill_path):
             staged = tempfile.TemporaryDirectory(prefix="skillspector-scan-")
             try:
                 copy_root = Path(staged.name) / original_root.name
@@ -3350,27 +3649,20 @@ class SecurityValidator(ValidatorBase):
 
         try:
             baseline = _skillspector_baseline_for_scan(original_root, scan_root, self.skillspector_baseline)
+            scan_options = {"original_root": original_root if staged is not None else None, "baseline": baseline}
+            if hook_review is not None:
+                scan_options["hook_review"] = hook_review
             # The deterministic stage is authoritative and always runs, even
             # when LLM enrichment was requested. Enrichment is additive and
             # cannot erase static findings.
-            result = self._run_skillspector_once(
-                scan_root,
-                original_root=original_root if staged is not None else None,
-                use_llm=False,
-                baseline=baseline,
-            )
+            result = self._run_skillspector_once(scan_root, use_llm=False, **scan_options)
             # Merging the enrichment stage overwrites this metadata, so keep
             # each stage's own suppression count for the baseline outcome.
             static_suppressed = result.metadata.get("skillspector_suppressed_count")
             static_summary = result.metadata.get("skillspector_suppressed_summary")
             llm_suppressed = None
             if self.use_llm and not result.is_incomplete:
-                enrichment = self._run_skillspector_once(
-                    scan_root,
-                    original_root=original_root if staged is not None else None,
-                    use_llm=True,
-                    baseline=baseline,
-                )
+                enrichment = self._run_skillspector_once(scan_root, use_llm=True, **scan_options)
                 if not enrichment.is_incomplete:
                     llm_suppressed = enrichment.metadata.get("skillspector_suppressed_count")
                 # Both stages run the same static analyzers, so a note such as
@@ -3408,6 +3700,15 @@ class SecurityValidator(ValidatorBase):
                     llm_suppressed=llm_suppressed,
                     static_summary=static_summary,
                 )
+            if hook_review is not None:
+                try:
+                    unchanged = capture_hook_review_artifact(skill_path) == hook_review.artifact
+                except (OSError, ValueError):
+                    unchanged = False
+                if not unchanged:
+                    self._discard_applied_hook_waivers(result)
+                    result.add_error("The reviewed plugin changed during the SkillSpector scan")
+                    result.mark_scan_incomplete("skillspector")
             return result
         finally:
             if staged is not None:
@@ -3420,6 +3721,7 @@ class SecurityValidator(ValidatorBase):
         original_root: Path | None,
         use_llm: bool,
         baseline: Path | None = None,
+        hook_review: _HookReview | None = None,
     ) -> ValidationResult:
         """Run one SkillSpector stage and validate its process/report contract."""
         result = ValidationResult()
@@ -3512,9 +3814,33 @@ class SecurityValidator(ValidatorBase):
             result.add_error(f"{stage_name} JSON output was not an object; security scan did not complete")
             result.mark_scan_incomplete(stage_name)
             return result
-        result.record_scanner("skillspector", Tools.skillspector.version)
+        scanner_version = Tools.skillspector.version
+        result.record_scanner("skillspector", scanner_version)
 
-        if original_root is not None:
+        if hook_review is not None:
+            report_metadata = data.get("metadata")
+            skill = data.get("skill")
+            source = skill.get("source") if isinstance(skill, dict) else None
+            try:
+                if (
+                    not scanner_version
+                    or not isinstance(report_metadata, dict)
+                    or report_metadata.get("skillspector_version") != scanner_version
+                ):
+                    raise ValueError("SkillSpector report version does not match the scanner used for the review")
+                if not isinstance(source, str) or not _is_filesystem_safe_path_text(source):
+                    raise ValueError("SkillSpector did not identify the reviewed package snapshot")
+                source_path = Path(source)
+                if not source_path.is_absolute() or source_path.resolve() != scan_root.resolve():
+                    raise ValueError("SkillSpector did not scan the reviewed package snapshot")
+                if capture_hook_review_artifact(scan_root) != hook_review.artifact:
+                    raise ValueError("The reviewed package snapshot changed during the SkillSpector scan")
+            except (OSError, RuntimeError, ValueError) as exc:
+                result.add_error(f"Could not verify the reviewed package scan: {exc}")
+                result.mark_scan_incomplete(stage_name)
+                return result
+
+        if original_root is not None and hook_review is None:
             try:
                 data = _rewrite_path_prefix(data, str(scan_root), str(original_root))
             except RecursionError:
@@ -3522,6 +3848,12 @@ class SecurityValidator(ValidatorBase):
                 result.mark_scan_incomplete(stage_name)
                 return result
 
+        verification_root = scan_root if hook_review is not None else original_root or scan_root
+        reference_root = (
+            scan_root
+            if hook_review is not None
+            else self.target_root or self.skillspector_reference_root or self._scan_target_root
+        )
         if not self._validate_skillspector_report(
             data,
             tool_result.exit_code,
@@ -3529,10 +3861,8 @@ class SecurityValidator(ValidatorBase):
             stage_name,
             result,
             baseline_requested=baseline is not None,
-            scanned_root=original_root if original_root is not None else scan_root,
-            # The whole target comes first: a skill of a folder that is typed as
-            # a plugin is still only part of the folder.
-            reference_root=self.target_root or self.skillspector_reference_root or self._scan_target_root,
+            scanned_root=verification_root,
+            reference_root=reference_root,
         ):
             result.mark_scan_incomplete(stage_name)
             return result
@@ -3545,8 +3875,23 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        self._process_skillspector_cli_result(data, result, source_root=original_root or scan_root)
+        self._process_skillspector_cli_result(
+            data,
+            result,
+            source_root=verification_root,
+            report_target=original_root if hook_review is not None else None,
+            hook_review=hook_review,
+        )
         return result
+
+    @staticmethod
+    def _discard_applied_hook_waivers(result: ValidationResult) -> None:
+        """Withdraw receipts if the package no longer matches the scan target."""
+        receipts = [finding for finding in result.findings if finding.check_name == _SKILLSPECTOR_HOOK_WAIVER_CHECK]
+        result.findings = [finding for finding in result.findings if finding.check_name != _SKILLSPECTOR_HOOK_WAIVER_CHECK]
+        for finding in receipts:
+            result.summary.warnings -= 1
+            result.warnings.remove(finding.to_legacy_string())
 
     @staticmethod
     def _deduplicate_skillspector_findings(result: ValidationResult) -> None:
@@ -3567,7 +3912,7 @@ class SecurityValidator(ValidatorBase):
 
     @staticmethod
     def _drop_repeated_hook_reports(result: ValidationResult, enrichment: ValidationResult) -> None:
-        """Drop the hook Criticals and gate failures of *enrichment* that the static stage's *result* already holds.
+        """Keep one copy of a hook finding or gate even if enrichment is incomplete.
 
         Both stages run the same static analyzers, so each reports the same
         manifests (:meth:`_report_unverified_hooks`). They are dropped before
@@ -3576,22 +3921,31 @@ class SecurityValidator(ValidatorBase):
         stage, because its rebuild would drop an incomplete stage's error.
         """
         reported = {
-            (finding.file_path, finding.message)
+            (finding.check_name, finding.file_path, finding.message)
             for finding in result.findings
-            if finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
+            if finding.check_name in {_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK, _SKILLSPECTOR_HOOK_WAIVER_CHECK}
         }
         kept: list[Finding] = []
         for finding in enrichment.findings:
+            if (finding.check_name, finding.file_path, finding.message) not in reported:
+                kept.append(finding)
+                continue
             legacy = finding.to_legacy_string()
             if (
                 finding.check_name == _SKILLSPECTOR_HOOK_UNVERIFIED_CHECK
                 and finding.severity == Severity.CRITICAL
-                and (finding.file_path, finding.message) in reported
                 and legacy in enrichment.errors
             ):
                 enrichment.errors.remove(legacy)
                 enrichment.summary.errors -= 1
                 enrichment.summary.critical_count -= 1
+            elif (
+                finding.check_name == _SKILLSPECTOR_HOOK_WAIVER_CHECK
+                and finding.severity == Severity.INFO
+                and legacy in enrichment.warnings
+            ):
+                enrichment.warnings.remove(legacy)
+                enrichment.summary.warnings -= 1
             else:
                 kept.append(finding)
         enrichment.findings = kept
@@ -3671,6 +4025,8 @@ class SecurityValidator(ValidatorBase):
         incomplete_before = result.is_incomplete
         # Accepted caveats are reported only once every later check has passed.
         caveat_warnings: list[str] = []
+        excluded_pngs: list[str] = []
+        png_exclusion: Finding | None = None
         accepted_reference_caveats = None
         if "error" in data and data["error"] is not None:
             result.add_error("skillspector reported an error; security scan did not complete")
@@ -3746,8 +4102,9 @@ class SecurityValidator(ValidatorBase):
                 result.add_error("skillspector reported execution_successful=false; security scan did not complete")
             return False
 
+        completeness_status: str | None = None
         findings_after_filtering: int | None = None
-        universal_analyzer_evidence_valid = True
+        universal_analyzer_ids: frozenset[str] = frozenset()
         analysis_completeness = data.get("analysis_completeness")
         if uses_versioned_completeness and "analysis_completeness" not in data:
             result.add_error(
@@ -4096,17 +4453,9 @@ class SecurityValidator(ValidatorBase):
                     or uses_statusless_completeness_schema
                     or complete_by_applicability
                     or accepted_reference_caveats is not None
-                ) and counts["total_components"]:
+                ):
                     universal_analyzer_ids = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS | (
                         {"artifact_integrity"} if uses_completeness_schema else set()
-                    )
-                    universal_analyzer_evidence_valid = all(
-                        all(state == "completed" for state, _item in analyzer_evidence[analyzer_id])
-                        and sum(item["planned_work"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
-                        and sum(item["completed"] for _state, item in analyzer_evidence[analyzer_id])
-                        == counts["total_components"]
-                        for analyzer_id in universal_analyzer_ids
                     )
                 actual_limitation_counts = Counter(limitations)
                 expected_limitation_counts = Counter(expected_limitations)
@@ -4281,11 +4630,15 @@ class SecurityValidator(ValidatorBase):
                         gap_notes = None if raster_note is None else [raster_note]
                     other_gaps: list[str] = []
                     if gap_notes is None and without_hooks is not None and not gap_rows:
+                        excluded_pngs = _skillspector_excluded_pngs(
+                            analysis_completeness, data.get("components"), scanned_root
+                        )
                         other_gaps = _skillspector_gaps_without_rows(
                             gap_statuses,
                             gap_counts,
                             gap_limitations,
                             analysis_completeness.get("scope_exclusions", []),
+                            excluded_png_count=len(excluded_pngs),
                         )
                         if not other_gaps:
                             gap_notes = []
@@ -4560,12 +4913,6 @@ class SecurityValidator(ValidatorBase):
             )
             return False
         if uses_versioned_completeness and not result.is_incomplete:
-            if len(normalized_components) != analysis_completeness["total_components"]:
-                result.add_error(
-                    "skillspector JSON component inventory contradicts analysis completeness; "
-                    "security scan did not complete"
-                )
-                return False
             component_keys = {
                 (_skillspector_scoring_source_scope(component), component["path"])
                 for component in normalized_components
@@ -4576,12 +4923,51 @@ class SecurityValidator(ValidatorBase):
                     "security scan did not complete"
                 )
                 return False
-            if not universal_analyzer_evidence_valid:
-                result.add_error(
-                    "skillspector JSON universal analyzer evidence contradicts the "
-                    "component inventory; security scan did not complete"
+            inventory_count = len(normalized_components)
+            covered_count = analysis_completeness["total_components"]
+            if inventory_count != covered_count and not excluded_pngs:
+                if completeness_status == "complete":
+                    excluded_pngs = _skillspector_excluded_pngs(
+                        analysis_completeness, normalized_components, scanned_root
+                    )
+                if not excluded_pngs:
+                    result.add_error(
+                        "skillspector JSON component inventory contradicts analysis completeness; "
+                        "security scan did not complete"
+                    )
+                    return False
+            if covered_count or excluded_pngs:
+                for analyzer_id in universal_analyzer_ids:
+                    # The PNG exclusion applies only to the text patterns.
+                    expected = inventory_count if analyzer_id in {"artifact_integrity", "static_yara"} else covered_count
+                    evidence = analyzer_evidence[analyzer_id]
+                    if (
+                        any(state != "completed" for state, _ in evidence)
+                        or sum(item["planned_work"] for _, item in evidence) != expected
+                        or sum(item["completed"] for _, item in evidence) != expected
+                    ):
+                        result.add_error(
+                            "skillspector JSON universal analyzer evidence contradicts the "
+                            "component inventory; security scan did not complete"
+                        )
+                        return False
+            if excluded_pngs:
+                count = len(excluded_pngs)
+                examples = ", ".join(_skillspector_report_text(path) for path in excluded_pngs[:5])
+                if count > 5:
+                    more = count - 5
+                    examples += f" and {more} more"
+                noun = "file" if count == 1 else "files"
+                png_exclusion = Finding(
+                    category="SCAN",
+                    severity=Severity.INFO,
+                    check_name=_SKILLSPECTOR_PASSIVE_PNG_CHECK,
+                    file_path=excluded_pngs[0],
+                    message=(
+                        f"SkillSpector's text pattern analyzers skipped {count} passive PNG {noun} ({examples}). "
+                        "YARA and artifact integrity ran on the full inventory."
+                    ),
                 )
-                return False
             for issue in issues:
                 location = issue.get("location") or {}
                 issue_key = (
@@ -4678,6 +5064,8 @@ class SecurityValidator(ValidatorBase):
 
         for note in caveat_warnings:
             result.add_warning(note)
+        if png_exclusion is not None:
+            result.add_finding(png_exclusion)
         if accepted_reference_caveats is not None:
             result.metadata["skillspector_reference_caveats"] = accepted_reference_caveats
             locations = ", ".join(
@@ -5086,6 +5474,8 @@ class SecurityValidator(ValidatorBase):
         result: ValidationResult,
         *,
         source_root: Path | None = None,
+        report_target: Path | None = None,
+        hook_review: _HookReview | None = None,
     ) -> None:
         """Convert a validated SkillSpector JSON report into ValidationResult entries.
 
@@ -5094,6 +5484,8 @@ class SecurityValidator(ValidatorBase):
         :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
         Each manifest whose hooks SkillSpector could not model gets a Critical
         gate failure (:meth:`_report_unverified_hooks`), whatever the scoping.
+        A reviewed scan uses the original *report_target* for aggregate risk
+        findings while inspecting files under the private *source_root*.
         """
         self._store_skillspector_metadata(data, result, score_message=False)
 
@@ -5110,7 +5502,7 @@ class SecurityValidator(ValidatorBase):
         for issue in issues:
             if not isinstance(issue, dict):
                 continue
-            if self._is_generated_artifact_issue(issue, source_root=source_root):
+            if hook_review is None and self._is_generated_artifact_issue(issue, source_root=source_root):
                 removed_issues.append(issue)
                 skipped_generated += 1
                 continue
@@ -5129,11 +5521,17 @@ class SecurityValidator(ValidatorBase):
                 continue
             candidate_issues.append(issue)
 
-        scopes = self._skillspector_issue_scopes(
-            candidate_issues,
-            report_components,
-            source_root=source_root,
-            report_truncated=skillspector_report_is_truncated(data),
+        # A package review includes shipped helpers even under paths normally
+        # treated as generated output or outside the agent's control surface.
+        scopes = (
+            [None] * len(candidate_issues)
+            if hook_review is not None
+            else self._skillspector_issue_scopes(
+                candidate_issues,
+                report_components,
+                source_root=source_root,
+                report_truncated=skillspector_report_is_truncated(data),
+            )
         )
         scanned_issues = []
         skipped_inapplicable = 0
@@ -5257,7 +5655,7 @@ class SecurityValidator(ValidatorBase):
                     severity=Severity.HIGH,
                     check_name="skillspector_risk_score",
                     message=f"SkillSpector aggregate risk score {effective_score}/100 exceeds the policy threshold",
-                    file_path=str((data.get("skill") or {}).get("source") or "SKILL.md"),
+                    file_path=str(report_target or (data.get("skill") or {}).get("source") or "SKILL.md"),
                     suggestion="Review and resolve the contributing security findings",
                 ),
                 is_error=True,
@@ -5270,6 +5668,8 @@ class SecurityValidator(ValidatorBase):
             result,
             report_components,
             source_root,
+            hook_review,
+            data,
         )
 
         if not result.is_incomplete:
@@ -5282,31 +5682,95 @@ class SecurityValidator(ValidatorBase):
                 suppressed_inapplicable_issues=skipped_inapplicable,
             )
 
-    @staticmethod
     def _report_unverified_hooks(
+        self,
         hook_rows: list[dict],
         result: ValidationResult,
         components: object,
         source_root: Path | None,
+        hook_review: _HookReview | None,
+        report: dict,
     ) -> list[str]:
-        """Fail the gate for each manifest whose hooks SkillSpector could not model, and return the manifests.
-
-        *hook_rows* come from :func:`_skillspector_without_hook_surface`. The
-        scan completed, but the absence of findings does not show that such
-        hooks are safe: a hook script that sends its input over a socket gets
-        no blocking SkillSpector finding. Each manifest gets a Critical and a
-        gate failure, so neither a ``--policy`` severity override nor
-        ``--llm-verify`` can clear it; SkillEvaluator has no way to record a
-        review of the hooks, so only removing them passes the check. The
-        Critical does not stop a folder scan at this skill
-        (:attr:`_FAIL_FAST_EXEMPT_CHECKS`). The finding records the manifest's
-        SHA-256 when it is a bundled file
-        (:func:`_skillspector_bundled_file_bytes`), else ``None``.
-        """
+        """Emit the manifest gate or an informational receipt for a matching review."""
         manifests: list[str] = []
+        if not hook_rows:
+            return manifests
+        artifact = hook_review.artifact if hook_review is not None else None
+        problem = None
+        if artifact is None and source_root is not None and source_root == self._scan_target_root:
+            try:
+                if locate_plugin_manifest(source_root) is not None:
+                    artifact = capture_hook_review_artifact(source_root)
+            except (OSError, ValueError) as exc:
+                problem = str(exc)
+        components_by_path: dict[str, list[dict]] = {}
+        for component in components if isinstance(components, list) else []:
+            if isinstance(component, dict) and isinstance(path := component.get("path"), str):
+                components_by_path.setdefault(path, []).append(component)
+        local_components = {
+            path
+            for path, entries in components_by_path.items()
+            if len(entries) == 1 and _skillspector_scoring_source_scope(entries[0]) == ("", "")
+        }
+        today = datetime.now(UTC).date()
+        waivers = hook_review.waivers if hook_review is not None else ()
         for row in hook_rows:
             manifest = row["path"]
             manifest_bytes = _skillspector_bundled_file_bytes(manifest, components, source_root)
+            digest = hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None
+            evidence = {"ledger_exceptions": [dict(row)], "manifest_sha256": digest}
+            candidates = [waiver for waiver in waivers if waiver.manifest == manifest]
+            rejected = []
+            try:
+                if artifact is None:
+                    raise ValueError(problem or "a complete packaged plugin is required for a reviewed hook waiver")
+                if (
+                    manifest_bytes is None
+                    or manifest not in local_components
+                    or artifact.hashes.get(manifest) != digest
+                ):
+                    raise ValueError("the manifest does not match the captured plugin inventory")
+                scripts, declaration_count = _reviewable_hook_scripts(manifest_bytes)
+                if manifest in scripts or not scripts <= artifact.hashes.keys() or not scripts <= local_components:
+                    raise ValueError("a hook script is missing from the captured and scanned plugin inventory")
+                if not self._hook_review_evidence_matches(report, row, scripts, declaration_count):
+                    raise ValueError("SkillSpector did not confirm the reviewed hook declarations and script coverage")
+            except (ValueError, RecursionError) as exc:
+                evidence["coverage_problems"] = [str(exc)]
+                rejected = [{"waiver_id": waiver.id, "reason": "coverage_unconfirmed"} for waiver in candidates]
+            else:
+                evidence["artifact_sha256"] = artifact.artifact_sha256
+                evidence["payload"] = [{"path": path, "sha256": artifact.hashes[path]} for path in sorted(scripts)]
+                waiver = None
+                for candidate in candidates:
+                    rejection = _hook_waiver_rejection(candidate, artifact, scripts, today)
+                    if rejection is None:
+                        waiver = candidate
+                        break
+                    rejected.append({"waiver_id": candidate.id, **rejection})
+                if waiver is not None:
+                    result.add_finding(
+                        Finding(
+                            category="SCAN",
+                            severity=Severity.INFO,
+                            check_name=_SKILLSPECTOR_HOOK_WAIVER_CHECK,
+                            message=(
+                                f"Applied reviewed hook waiver {waiver.id} to {manifest} "
+                                f"(expires {waiver.expires.isoformat()} UTC)."
+                            ),
+                            file_path=manifest,
+                            metadata={
+                                **evidence,
+                                "waiver_id": waiver.id,
+                                "expires": waiver.expires.isoformat(),
+                                "owner": waiver.owner,
+                                "reason": waiver.reason,
+                            },
+                        )
+                    )
+                    continue
+            if rejected:
+                evidence["rejected_waivers"] = rejected
             result.add_structured_finding(
                 Finding(
                     category="SECURITY",
@@ -5314,25 +5778,19 @@ class SecurityValidator(ValidatorBase):
                     check_name=_SKILLSPECTOR_HOOK_UNVERIFIED_CHECK,
                     message=(
                         f"SkillSpector could not fully model the hooks in {manifest} (analyzer "
-                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input), so this "
-                        "check cannot pass while these hooks are present."
+                        f"{_SKILLSPECTOR_HOOK_ANALYZER} could not verify what they do with hook input)."
                     ),
                     file_path=manifest,
                     suggestion=(
-                        f"Review {manifest} and every file its hooks run. Only removing the hooks lets this check "
-                        "pass: neither a --policy severity override nor --llm-verify clears it."
+                        f"Review {manifest} and the complete packaged plugin. Supply a matching approval with "
+                        "--hook-waivers for eligible command hooks."
                     ),
-                    metadata={
-                        "ledger_exceptions": [dict(row)],
-                        "manifest_sha256": (
-                            hashlib.sha256(manifest_bytes).hexdigest() if manifest_bytes is not None else None
-                        ),
-                    },
+                    metadata=evidence,
                 ),
                 is_error=True,
             )
             result.fail_gate(
-                f"{manifest}: SkillSpector could not model these hooks; this check cannot pass while they are present"
+                f"{manifest}: SkillSpector could not model these hooks and no matching reviewed waiver applied"
             )
             # The gate is a confirmed failure, so it outranks another gap that
             # records the scan as incomplete, also when a --policy override
@@ -5341,6 +5799,43 @@ class SecurityValidator(ValidatorBase):
             result.metadata["confirmed_failure"] = True
             manifests.append(manifest)
         return manifests
+
+    @staticmethod
+    def _hook_review_evidence_matches(report: dict, row: dict, scripts: set[str], declaration_count: int) -> bool:
+        """Confirm direct declaration identity and coverage for a reviewed manifest and its scripts."""
+        if row.get("observed_records") != declaration_count or row.get("limit_records") != (
+            _SKILLSPECTOR_HOOK_DECLARATION_LIMIT
+        ):
+            return False
+        manifest = row["path"]
+        matches = []
+        for field in ("issues", "suppressed"):
+            for issue in report.get(field) or []:
+                if not isinstance(issue, dict) or issue.get("id") != "BH1":
+                    continue
+                location = issue.get("location")
+                if isinstance(location, dict) and location.get("file") == manifest:
+                    matches.append(issue)
+        if len(matches) != 1 or _skillspector_scoring_source_scope(matches[0]) != ("", ""):
+            return False
+        if _skillspector_unmodeled_hook_manifests(matches) != {manifest: declaration_count}:
+            return False
+
+        completeness = report["analysis_completeness"]
+        reviewed_paths = scripts | {manifest}
+        for gap in completeness["ledger_exceptions"]:
+            if gap is not row and gap.get("path") in reviewed_paths:
+                return False
+        exclusions = completeness.get("scope_exclusions", [])
+        if not isinstance(exclusions, list):
+            return False
+        for exclusion in exclusions:
+            if not isinstance(exclusion, dict):
+                return False
+            path = _skillspector_report_path_key(exclusion.get("path"))
+            if path is None or any(name == path or name.startswith(f"{path}/") for name in reviewed_paths):
+                return False
+        return True
 
     def _skillspector_issue_scopes(
         self,
@@ -5596,7 +6091,7 @@ class SecurityValidator(ValidatorBase):
         # Coverage advisories remain visible, but are not active scanner issues
         # and cannot be suppressed by a reviewed vulnerability baseline.
         active_findings = [
-            finding for finding in result.findings if finding.check_name != "skillspector_reference_caveats"
+            finding for finding in result.findings if finding.check_name not in _SKILLSPECTOR_COVERAGE_CHECKS
         ]
         blocking = sum(
             1

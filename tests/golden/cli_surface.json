@@ -71,6 +71,16 @@
             },
             {
               "choices": [
+                "stable"
+              ],
+              "name": "channel",
+              "opts": [
+                "--channel"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
                 "docker",
                 "local"
               ],
@@ -1931,6 +1941,14 @@
           "type": "file"
         },
         {
+          "name": "hook_waivers",
+          "opts": [
+            "--hook-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
@@ -2345,6 +2363,14 @@
               "type": "file"
             },
             {
+              "name": "hook_waivers",
+              "opts": [
+                "--hook-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
@@ -2466,6 +2492,14 @@
               "name": "skillspector_baseline",
               "opts": [
                 "--skillspector-baseline"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
+              "name": "hook_waivers",
+              "opts": [
+                "--hook-waivers"
               ],
               "param_type": "option",
               "type": "file"
@@ -2594,6 +2628,14 @@
             "name": "skillspector_baseline",
             "opts": [
               "--skillspector-baseline"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
+            "name": "hook_waivers",
+            "opts": [
+              "--hook-waivers"
             ],
             "param_type": "option",
             "type": "file"
@@ -4983,6 +5025,14 @@
           "name": "skillspector_baseline",
           "opts": [
             "--skillspector-baseline"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
+          "name": "hook_waivers",
+          "opts": [
+            "--hook-waivers"
           ],
           "param_type": "option",
           "type": "file"

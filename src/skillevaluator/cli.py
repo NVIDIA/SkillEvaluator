@@ -9,6 +9,7 @@ import copy
 import json
 import logging
 import math
+import os
 import sys
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from contextvars import ContextVar
@@ -77,7 +78,7 @@ from skillevaluator.tier3_environments import all_env_modes
 from skillevaluator.tier_group import TierGroup
 from skillevaluator.utils.helpers import resolve_git_root
 from skillevaluator.utils.json_output import json_needs_ascii
-from skillevaluator.utils.path_security import resolve_repo_context_root
+from skillevaluator.utils.path_security import canonicalize_trusted_root_alias, resolve_repo_context_root
 from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 from skillevaluator.utils.tier2_paths import (
     is_link_or_reparse,
@@ -161,6 +162,9 @@ SKILLSPECTOR_BASELINE_PATH = click.Path(exists=True, dir_okay=False, readable=Tr
 _SKILLSPECTOR_BASELINE_HELP = (
     "Apply an audited SkillSpector YAML/JSON suppression baseline. Never discovered from the scanned skill."
 )
+# Keep the lexical path so the waiver loader can reject links.
+HOOK_WAIVERS_PATH = click.Path(exists=True, dir_okay=False, readable=True, path_type=Path)
+_HOOK_WAIVERS_HELP = "Apply explicit, reviewed command hook waivers from this file."
 
 
 class _PIIWaiversPath(click.Path):
@@ -408,6 +412,20 @@ def _tier2_skill_argument(func):
 def _reject_linked_tier2_root(path: Path) -> None:
     if is_link_or_reparse(path):
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
+
+
+def _require_hook_review_target(path: Path) -> None:
+    from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+
+    path = canonicalize_trusted_root_alias(path.absolute())
+    try:
+        if any(is_link_or_reparse(parent) for parent in path.parents):
+            raise SecurePathError("unsafe_root", "Plugin root passes through a symlink or reparse point.")
+        path = Path(os.path.normpath(path))
+        with SecureRoot(path):
+            pass
+    except SecurePathError as exc:
+        raise click.UsageError(f"--hook-waivers requires a secure packaged plugin directory: {exc}") from exc
 
 
 _FILE_REPORT_EXTENSIONS = {
@@ -1438,6 +1456,8 @@ def _catalog_child_argv_from_ctx(
         argv.append("--llm-verify")
     if params.get("skillspector_baseline"):
         argv.extend(["--skillspector-baseline", str(params["skillspector_baseline"])])
+    if params.get("hook_waivers"):
+        argv.extend(["--hook-waivers", str(Path(params["hook_waivers"]).absolute())])
     if not params.get("dedup", True):
         argv.append("--no-dedup")
     block_on_dedup = params.get("block_on_dedup")
@@ -2214,6 +2234,13 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help=_SKILLSPECTOR_BASELINE_HELP,
 )
 @click.option(
+    "--hook-waivers",
+    type=HOOK_WAIVERS_PATH,
+    cls=GroupedOption,
+    help_group=_TIER1_GROUP,
+    help=_HOOK_WAIVERS_HELP,
+)
+@click.option(
     "--min-score",
     type=int,
     default=QUALITY_DEFAULT_MIN_SCORE,
@@ -2542,6 +2569,7 @@ def validate(
     llm: bool,
     llm_verify: bool,
     skillspector_baseline: Path | None,
+    hook_waivers: Path | None,
     min_score: int,
     quality_config: Path | None,
     pii_waivers: Path | None,
@@ -2615,6 +2643,8 @@ def validate(
             raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
+    if hook_waivers is not None:
+        _require_hook_review_target(target_path)
     target_path = target_path.resolve()
     from skillevaluator.publication_identity import publication_target_name
 
@@ -2816,6 +2846,7 @@ def validate(
         use_llm=llm,
         llm_verify=llm_verify,
         skillspector_baseline=skillspector_baseline,
+        hook_waivers=hook_waivers,
         min_score=min_score,
         quality_config=quality_config,
         pii_waivers=pii_waivers,
@@ -2837,7 +2868,11 @@ def validate(
     tier1_raw_failed = any(not r.passed for r in results)
     if quiet:
         apply_policy(results, policy)
-    tier1_ok, tier1_rows = summarize_tier1(results, lineup=check_lineup)
+    # The compact view carries coverage notes when it is the only terminal report.
+    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
+    tier1_ok, tier1_rows = summarize_tier1(
+        results, lineup=check_lineup, show_coverage_notes="cli" not in effective_formats
+    )
     harness_rows = harness_block(results)
     if harness_rows:
         view.set_harness(harness_panel(harness_rows, width=view.width, verbose=verbose), harness_note(harness_rows))
@@ -3047,11 +3082,6 @@ def validate(
     }.get(resolved_type, "Skill")
     target_display = resolve_git_remote_url(target_path) or str(target_path)
 
-    # Quiet mode defaults the reports to html+json (the terminal shows only
-    # the summary; the files carry the findings) and points at them from the
-    # footer. An EXPLICIT -r is a contract and is honored exactly — including
-    # "cli", which renders the full Rich report below the pipeline view.
-    effective_formats = _effective_report_formats(report_formats, quiet=quiet)
     report_basename_value = make_timestamped_basename(f"{REPORT_PREFIX}-output")
     from skillevaluator.reporting.presentation import build_final_render_context
 
@@ -3300,25 +3330,36 @@ def rubric_eval(target_path: Path, min_score: int, report_formats: tuple[str, ..
 
 
 @cli.command("security-scan")
-@_target_argument
+@_validate_target_argument
 @click.option("--llm/--no-llm", default=False, show_default=True, help="Enable LLM security analysis.")
 @click.option("--llm-verify", is_flag=True, help="Use LLM verification to reduce false positives.")
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
 )
+@click.option("--hook-waivers", type=HOOK_WAIVERS_PATH, help=_HOOK_WAIVERS_HELP)
 @_report_options
 def security_scan(
     target_path: Path,
     llm: bool,
     llm_verify: bool,
     skillspector_baseline: Path | None,
+    hook_waivers: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
     """Scan for security vulnerabilities."""
-    output_dir = _resolve_file_report_output_location(target_path.resolve(), output_dir, report_formats)
+    if hook_waivers is not None:
+        _require_hook_review_target(target_path)
+    target_path = target_path.resolve()
+    output_dir = _resolve_file_report_output_location(target_path, output_dir, report_formats)
     if not emit_reports(
-        run_security_scan(target_path, use_llm=llm, llm_verify=llm_verify, skillspector_baseline=skillspector_baseline),
+        run_security_scan(
+            target_path,
+            use_llm=llm,
+            llm_verify=llm_verify,
+            skillspector_baseline=skillspector_baseline,
+            hook_waivers=hook_waivers,
+        ),
         report_formats=report_formats,
         output_dir=output_dir,
         basename=report_basename("security"),
@@ -3623,6 +3664,7 @@ def _workflow_report_options(func):
 @click.option(
     "--skillspector-baseline", type=SKILLSPECTOR_BASELINE_PATH, default=None, help=_SKILLSPECTOR_BASELINE_HELP
 )
+@click.option("--hook-waivers", type=HOOK_WAIVERS_PATH, help=_HOOK_WAIVERS_HELP)
 @_workflow_report_options
 def _tier1_workflow(
     skill_path: Path,
@@ -3636,6 +3678,7 @@ def _tier1_workflow(
     policy_path: Path | None,
     previous_version: str | None,
     skillspector_baseline: Path | None,
+    hook_waivers: Path | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -3651,6 +3694,8 @@ def _tier1_workflow(
     # validate does: a relative root leaves finding paths relative to the working
     # directory, and the report roots would then prefix the skill folder twice.
     target_label = str(skill_path)
+    if hook_waivers is not None:
+        _require_hook_review_target(skill_path)
     skill_path = skill_path.resolve()
     results = run_tier1_workflow(
         skill_path,
@@ -3663,6 +3708,7 @@ def _tier1_workflow(
         profile=policy,
         previous_version=previous_version,
         skillspector_baseline=skillspector_baseline,
+        hook_waivers=hook_waivers,
         prepare_scanners=lambda: _offer_scanner_install(checks, skip),
     )
     # Resolved after the run so configuration errors still leave no output.

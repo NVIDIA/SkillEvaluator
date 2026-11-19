@@ -52,6 +52,7 @@ import pytest
 from skillevaluator.reporting.console_ui import summarize_tier1
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.run_status import Status, resolve_run_status
+from skillevaluator.reporting.sarif_reporter import SARIFReporter
 from skillevaluator.utils.tool_runner import ToolResult
 from skillevaluator.validators.base import Severity, ValidationResult
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
@@ -481,6 +482,27 @@ def test_reviewed_package_keeps_independent_high_findings(mock_tools, tmp_path: 
     assert not result.passed and not result.is_incomplete, result.errors
     assert any(f.severity == Severity.HIGH and f.file_path == script for f in result.findings)
     assert any(f.check_name == "skillspector_hook_waiver_applied" for f in result.findings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_waived_scan_reports_aggregate_risk_at_the_original_package(mock_tools, tmp_path: Path) -> None:
+    root = _review_plugin(tmp_path)
+    waiver = _review_waiver(root, tmp_path / "trusted-waivers.yaml")
+    report = _report(_REVIEW_REPORT)
+    report["risk_assessment"].update(score=60, severity="HIGH", recommendation="DO_NOT_INSTALL")
+    mock_tools.skillspector.version = "2.13.6"
+    mock_tools.skillspector.run.side_effect = lambda args, **_kwargs: _snapshot_report(args, report, exit_code=1)
+
+    result = SecurityValidator(hook_waivers=waiver).validate_security_only(root)
+
+    assert not result.passed and not result.is_incomplete, result.errors
+    snapshot = Path(mock_tools.skillspector.run.call_args.args[0][1])
+    assert not snapshot.exists()
+    [finding] = [item for item in result.findings if item.check_name == "skillspector_risk_score"]
+    assert finding.file_path == str(root.resolve())
+    sarif = json.loads(SARIFReporter(workspace_root=tmp_path, scan_root=root).render(result))
+    [risk] = [item for item in sarif["runs"][0]["results"] if item["ruleId"].endswith("/skillspector_risk_score")]
+    assert risk["locations"][0]["physicalLocation"]["artifactLocation"]["uri"] == root.name
 
 
 def _upload_plugin(tmp_path: Path) -> Path:

@@ -3855,7 +3855,13 @@ class SecurityValidator(ValidatorBase):
             result.mark_scan_incomplete(stage_name)
             return result
 
-        self._process_skillspector_cli_result(data, result, source_root=verification_root, hook_review=hook_review)
+        self._process_skillspector_cli_result(
+            data,
+            result,
+            source_root=verification_root,
+            report_target=original_root if hook_review is not None else None,
+            hook_review=hook_review,
+        )
         return result
 
     @staticmethod
@@ -5448,6 +5454,7 @@ class SecurityValidator(ValidatorBase):
         result: ValidationResult,
         *,
         source_root: Path | None = None,
+        report_target: Path | None = None,
         hook_review: _HookReview | None = None,
     ) -> None:
         """Convert a validated SkillSpector JSON report into ValidationResult entries.
@@ -5457,6 +5464,8 @@ class SecurityValidator(ValidatorBase):
         :func:`~skillevaluator.validators.skillspector_scope.scope_skillspector_issues`).
         Each manifest whose hooks SkillSpector could not model gets a Critical
         gate failure (:meth:`_report_unverified_hooks`), whatever the scoping.
+        A reviewed scan uses the original *report_target* for aggregate risk
+        findings while inspecting files under the private *source_root*.
         """
         self._store_skillspector_metadata(data, result, score_message=False)
 
@@ -5626,7 +5635,7 @@ class SecurityValidator(ValidatorBase):
                     severity=Severity.HIGH,
                     check_name="skillspector_risk_score",
                     message=f"SkillSpector aggregate risk score {effective_score}/100 exceeds the policy threshold",
-                    file_path=str((data.get("skill") or {}).get("source") or "SKILL.md"),
+                    file_path=str(report_target or (data.get("skill") or {}).get("source") or "SKILL.md"),
                     suggestion="Review and resolve the contributing security findings",
                 ),
                 is_error=True,

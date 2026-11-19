@@ -84,13 +84,18 @@ image publication, scanner verification and consumer qualification details.
 
 ## Promote the GitHub stable channel
 
-Generate the two stable workflows from the verified Tier 1 bundle as part of the
-release-bundle PR:
+Use the verified Tier 1 bundle to prepare the release-bundle PR from the
+repository root.
 
 ```bash
 python3 ci/stable_channel.py ci/bundles/VERSION
 python3 ci/stable_channel.py ci/bundles/VERSION --check
+python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
 ```
+
+The source-boundary check scans tracked text files across the repository,
+including the generated workflows, promotion scripts and documentation. CI runs
+it for both code and docs-only changes.
 
 Qualify the exact generated references in a disposable GitHub repository.
 Check a credentials-free scan, a failing same-repository PR scan with signed

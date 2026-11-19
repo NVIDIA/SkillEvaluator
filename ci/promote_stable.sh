@@ -3,7 +3,7 @@
 set -euo pipefail
 
 stable_ref=refs/tags/stable
-version_pattern='^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$'
+version_pattern="^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$"
 scanner=.github/workflows/skill-checks-stable.yml
 publisher=.github/workflows/publish-skill-reports-stable.yml
 

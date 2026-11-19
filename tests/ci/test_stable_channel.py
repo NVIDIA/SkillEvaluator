@@ -53,6 +53,13 @@ def test_stable_workflows_pair_the_release_with_delegated_provenance(bundle):
     assert job["with"]["image"] == IMAGE
     assert "image" not in scan["on"]["workflow_call"]["inputs"]
     publisher = yaml.load(files["publish-skill-reports-stable.yml"], Loader=yaml.BaseLoader)
+    assert publisher["permissions"] == {
+        "actions": "read",
+        "contents": "write",
+        "id-token": "write",
+        "pages": "write",
+        "pull-requests": "write",
+    }
     job = publisher["jobs"]["publish"]
     assert job["uses"] == f"NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports.yml@{PUBLISHER_REF}"
     assert job["with"]["tools-ref"] == PUBLISHER_REF

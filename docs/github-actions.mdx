@@ -82,14 +82,18 @@ HTML publisher together. Use `skillevaluator ci init --channel stable` with a CL
 release that supports this option. The versioned templates above are available
 for repositories that review each evaluator upgrade separately.
 
-To configure stable manually, start with the released templates and make these edits:
+For a new manual setup, start with the released templates. To migrate an existing
+pinned setup, apply these edits to its current workflow files in one PR.
 
 1. In `skill-checks.yml`, set the scan job's `uses` to
    `NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable`.
-   Remove the job's `image` input. Keep your paths and scan policy.
+   Remove the job's `image` input and any explicit `artifact-name`. The channel
+   supplies the image and uses `skill-evaluator-tier1`. Keep your paths, scan
+   policy, and `contents: read` permission. Add `id-token: write` for hosted feedback.
 2. For hosted feedback, follow the [Pages setup](#enable-hosted-reports). In
    `publish-skill-reports.yml`, set the publisher job's `uses` to
    `NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports-stable.yml@stable`.
+   Keep the publisher template's `permissions` block.
    Remove its `trusted-evaluator-shas`, `tools-ref` and `tools-repository` inputs,
    and set `trusted-caller-blobs` to the Git blob of your edited scan file.
 
@@ -246,8 +250,9 @@ or let the [CLI](/skills/skillevaluator/cli-onboarding) handle it.
        `gh-pages` report-history branch. For private reports, an administrator
        must also select **Private** site visibility in GitHub's settings; see
        the private-hosting requirements below. Preserve any existing site or history.
-    2. Add `publish-skill-reports.yml` with your Pages URL. Keep the evaluator
-       and publisher versions supplied by the release.
+    2. Add `publish-skill-reports.yml` with your Pages URL. For a pinned setup,
+       keep the evaluator and publisher versions supplied by the release. For a
+       stable setup, use the [stable workflow references and inputs](#follow-the-latest-stable-release).
     3. Grant the scan workflow `id-token: write`, then approve its exact contents
        in the publisher's `trusted-caller-blobs` input. Compute the value with
        `git hash-object .github/workflows/skill-checks.yml`; refresh it whenever

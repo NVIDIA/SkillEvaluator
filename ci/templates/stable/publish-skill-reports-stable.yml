@@ -21,7 +21,14 @@ on:
         type: number
         default: 100
 
-# The consumer grants the publisher's permissions in its caller.
+# Match the scopes required by the pinned publisher. The consumer grants these in its caller.
+permissions:
+  actions: read
+  contents: write
+  id-token: write
+  pages: write
+  pull-requests: write
+
 jobs:
   publish:
     uses: NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports.yml@RELEASE_PUBLISHER_SHA

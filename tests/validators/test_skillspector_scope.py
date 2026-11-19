@@ -1834,3 +1834,9 @@ class TestTier1Plumbing:
 
         (kwargs,) = _RecordingSecurityValidator.instances
         assert "content_type" not in kwargs
+
+
+def test_nested_alias_manifest_fails_closed() -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_FRONTMATTER
+
+    assert scope_module._manifest_reference_text(NESTED_ALIAS_FRONTMATTER) is None

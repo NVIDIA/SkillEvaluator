@@ -24,6 +24,7 @@ contributors making non-trivial edits.
 - `prepare-dataset.mdx` — author, generate, review, and validate cases before trials
 - `tier3-run-options.mdx` — choose an agent and attempt count for reviewed cases
 - `tier3-run-reference.mdx` — staging contracts, run settings, budgets, and repeat comparisons
+- `nemo-gym.mdx` — NeMo Gym setup, first evaluation, supported agents, and optional reference
 - `tier3-runtime.mdx` — runtime contracts, backend compatibility, and troubleshooting
 - `tier3-grading.mdx` — judges, evidence budgets, retries, and fallback models
 - `tier3-results.mdx` — scores, applicability, verdicts, and incomplete results

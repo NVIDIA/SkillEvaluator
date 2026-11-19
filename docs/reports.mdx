@@ -389,7 +389,8 @@ formats, for example `-r cli,github,sarif`.
 Use this when the reusable SkillEvaluator workflow is not in the job and
 GitHub Code Scanning is unavailable (private repositories without code
 scanning, or a plain `run:` step). Prefer SARIF when you can upload to code
-scanning: it is not capped at ten errors and ten warnings per step. Prefer
+scanning: it is not capped at ten errors, ten warnings, and ten notices per
+step. Prefer
 JUnit when a CI system ingests test reports rather than workflow commands.
 
 | Finding | Workflow command |
@@ -409,10 +410,11 @@ check group and check name. An incomplete scan is never a clean log: each
 unfinished scanner is a warning, and the run ends with one `::notice`
 summary (skills checked, passed, failed, incomplete).
 
-GitHub shows at most 10 error and 10 warning annotations per step (50 per
-job). This format emits the most severe first, in a deterministic order
-(severity, path, line, check). The summary notice says how many more were
-not annotated and points at the other reports from the same `-r` list.
+GitHub shows at most 10 error, 10 warning, and 10 notice annotations per
+step (50 per job). This format emits the most severe first, in a
+deterministic order (severity, path, line, check). INFO findings stop at nine
+notices so the summary notice is always shown. The summary notice says how
+many more were not annotated and points at the other reports from the same `-r` list.
 A catalog run (a folder of skills, with any `--workers` value) prints one
 capped stream and one summary for the whole catalog, after every skill has
 finished, rather than one per skill. The summary counts match

@@ -326,8 +326,29 @@ def test_ordering_and_ten_ten_cap() -> None:
     assert paths == sorted(paths) or paths[0] <= paths[-1]
     summary = _summary(text)
     assert "4 more were not annotated" in summary
-    assert "10 errors and 10 warnings" in summary
+    assert "10 errors, 10 warnings, and 10 notices" in summary
     assert "see the other reports" in summary
+
+
+def test_info_findings_leave_room_for_the_summary_notice() -> None:
+    result = ValidationResult(validator_name="QUALITY")
+    for index in range(12):
+        result.add_finding(
+            Finding(
+                category="QUALITY",
+                severity=Severity.INFO,
+                check_name=f"info-{index:02d}",
+                message=f"info {index}",
+                file_path="SKILL.md",
+                line_number=index + 1,
+            )
+        )
+    text = GitHubReporter().render_all([result])
+    notices = [line for line in _commands(text) if line.startswith("::notice")]
+    assert len(notices) == 10
+    assert notices[-1].startswith("::notice title=SkillEvaluator::")
+    assert "3 more were not annotated" in notices[-1]
+    assert "10 notices" in notices[-1]
 
 
 def test_folder_of_skills_keeps_distinct_paths(tmp_path: Path) -> None:

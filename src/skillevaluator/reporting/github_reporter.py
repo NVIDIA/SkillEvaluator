@@ -7,8 +7,9 @@ Prints ``::error``, ``::warning``, and ``::notice`` lines for Tier 1 findings so
 workflow that runs the CLI directly can annotate the pull request without uploading
 SARIF. Output goes to stdout only; this format is not a report file.
 
-GitHub shows at most 10 error and 10 warning annotations per step. Extra findings
-are counted on the closing notice rather than omitted silently.
+GitHub shows at most 10 error, 10 warning, and 10 notice annotations per step.
+Finding notices stop at 9 so the closing summary notice is always shown, and
+extra findings are counted on that summary rather than omitted silently.
 """
 
 from __future__ import annotations
@@ -38,6 +39,8 @@ if TYPE_CHECKING:
 
 _ERROR_CAP = 10
 _WARNING_CAP = 10
+# GitHub's notice cap is 10 per step; one slot is kept for the closing summary.
+_NOTICE_CAP = 9
 _MESSAGE_MAX = 4000
 _TITLE_MAX = 256
 _LEVEL_RANK = {"error": 0, "warning": 1, "notice": 2}
@@ -331,7 +334,7 @@ def _summary_message(counts: tuple[int, int, int, int], omitted: int) -> str:
     if omitted:
         text += (
             f". {omitted} more were not annotated "
-            "(GitHub limits 10 errors and 10 warnings per step); see the other reports"
+            "(GitHub limits 10 errors, 10 warnings, and 10 notices per step); see the other reports"
         )
     return text
 
@@ -340,6 +343,7 @@ def _select(annotations: list[_Annotation]) -> tuple[list[_Annotation], int]:
     chosen: list[_Annotation] = []
     errors = 0
     warnings = 0
+    notices = 0
     omitted = 0
     for item in sorted(annotations, key=lambda row: row.sort_key()):
         if item.level == "error":
@@ -354,8 +358,11 @@ def _select(annotations: list[_Annotation]) -> tuple[list[_Annotation], int]:
                 warnings += 1
             else:
                 omitted += 1
-        else:
+        elif notices < _NOTICE_CAP:
             chosen.append(item)
+            notices += 1
+        else:
+            omitted += 1
     return chosen, omitted
 
 

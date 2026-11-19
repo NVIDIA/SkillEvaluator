@@ -22,6 +22,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Scanner install hints in `health-check` and `doctor` now match the host:
+  Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
+  instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
+  release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

@@ -6,6 +6,8 @@ stable_ref=refs/tags/stable
 version_pattern="^v(0|[1-9][0-9]*)[.](0|[1-9][0-9]*)[.](0|[1-9][0-9]*)$"
 scanner=.github/workflows/skill-checks-stable.yml
 publisher=.github/workflows/publish-skill-reports-stable.yml
+gitlab=ci/gitlab/stable-tier1.yml
+gitlab_template=ci/templates/stable/${gitlab##*/}
 
 latest_release() {
     gh api repos/NVIDIA/SkillEvaluator/releases/latest --jq \
@@ -53,6 +55,7 @@ if [[ $previous ]]; then
 fi
 
 candidate=$release_commit
+bootstrapping=false
 if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
    ! git cat-file -e "$release_commit:$publisher" 2>/dev/null; then
     if [[ $release != v1.0.1 ]]; then
@@ -66,6 +69,7 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
         echo "The v1.0.1 bootstrap requires that stable does not exist yet." >&2
         exit 1
     else
+        bootstrapping=true
         candidate=${STABLE_BOOTSTRAP_SHA:-}
         if [[ ${GITHUB_EVENT_NAME:-} != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
               $(git cat-file -t "$candidate" 2>/dev/null) != commit ]]; then
@@ -82,7 +86,7 @@ git diff --exit-code "$release_commit" "$candidate" -- "$bundle"
 # Run the validator from main and read the chosen commit's files as data.
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-mkdir -p "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable"
+mkdir -p "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable" "$scratch/ci/gitlab"
 for file in release.json verification-receipt.json "skillevaluator-ci-${release#v}.zip"; do
     git cat-file blob "$release_commit:$bundle/$file" > "$scratch/$bundle/$file"
 done
@@ -91,9 +95,25 @@ for workflow in "$scanner" "$publisher"; do
     git cat-file blob "$candidate:$template" > "$scratch/$template"
     git cat-file blob "$candidate:$workflow" > "$scratch/$workflow"
 done
+for file in "$gitlab_template" "$gitlab"; do
+    if git cat-file -e "$candidate:$file" 2>/dev/null; then
+        git cat-file blob "$candidate:$file" > "$scratch/$file"
+    fi
+done
+if [[ ! -f "$scratch/$gitlab" ]]; then
+    if [[ $bootstrapping == true ]]; then
+        echo "The reviewed bootstrap commit must contain the GitLab stable include." >&2
+        exit 1
+    fi
+    if [[ $previous ]] && git cat-file -e "$previous_commit:$gitlab" 2>/dev/null; then
+        echo "The next stable release must retain the GitLab stable include." >&2
+        exit 1
+    fi
+fi
 gh release download "$release" --repo NVIDIA/SkillEvaluator --pattern artifact-manifest.json --dir "$scratch"
 python3 ci/stable_channel.py "$scratch/$bundle" --check \
     --templates "$scratch/ci/templates/stable" --output "$scratch/.github/workflows" \
+    --gitlab-output "$scratch/$gitlab" \
     --publication "$scratch/artifact-manifest.json" "$release_commit" "$manifest_digest" "$manifest_size" \
     "$zip_digest" "$zip_size"
 

@@ -25,6 +25,8 @@ from skillevaluator.validators.version import VersionValidator
         "!!bool maybe",
         "!!float invalid",
         "!!timestamp invalid",
+        r'"\U00110000"',
+        r'"\UFFFFFFFF"',
         pytest.param("[" * 2000 + "leaf" + "]" * 2000, id="excessive-nesting"),
     ]
 )
@@ -82,6 +84,25 @@ def test_native_scalar_error_keeps_value_and_actual_source_location(tmp_path, ra
     finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
     assert finding.line_number == 4
     assert f"invalid {kind} value {value!r}" in finding.message
+
+
+@pytest.mark.parametrize("raw_value", [r'"\U00110000"', r'"\UFFFFFFFF"'])
+def test_native_scanner_error_keeps_actual_source_location(tmp_path, raw_value):
+    skill = tmp_path / "invalid-escape"
+    skill.mkdir()
+    raw = f"name: invalid-escape\ndescription: Test a source location\nextra: {raw_value}"
+    (skill / "SKILL.md").write_text(f"---\n{raw}\n---\n# Example\n", encoding="utf-8")
+
+    with pytest.raises(yaml.scanner.ScannerError) as error:
+        load_frontmatter_yaml(raw)
+    assert error.value.problem_mark.line == 2
+    assert error.value.problem_mark.column == 10
+    assert "invalid escape sequence" in error.value.problem
+
+    result = SchemaValidator().validate(skill)
+    finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
+    assert finding.line_number == 4
+    assert "invalid escape sequence" in finding.message
 
 
 def test_version_reports_the_parse_error(malformed_skill: Path) -> None:

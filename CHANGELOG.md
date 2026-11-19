@@ -13,9 +13,10 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Fixed
 
 - Tier 1 frontmatter checks report impossible YAML dates, malformed tagged scalar
-  values, and excessive nesting through their existing parse-error paths instead
-  of aborting schema, version, quality, harness, or Markdown link analysis.
-  Invalid scalar values include their source location.
+  values, out-of-range Unicode escapes, and excessive nesting through their
+  existing parse-error paths instead of aborting schema, version, quality,
+  harness, or Markdown link analysis.
+  Invalid scalar values and Unicode escapes include their source location.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining

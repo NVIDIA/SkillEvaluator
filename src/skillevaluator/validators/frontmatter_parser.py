@@ -50,10 +50,16 @@ class _FrontmatterLoader(yaml.SafeLoader):
 
 def load_frontmatter_yaml(raw: str) -> Any:
     """Load frontmatter while reporting native loading failures as YAML errors."""
+    loader = _FrontmatterLoader(raw)
     try:
-        return yaml.load(raw, Loader=_FrontmatterLoader)
+        return loader.get_single_data()
     except RecursionError as exc:
         raise yaml.YAMLError("frontmatter nesting exceeds the parser recursion limit") from exc
+    except (ValueError, OverflowError) as exc:
+        # Invalid Unicode escapes can fail in the scanner before a node exists.
+        raise yaml.scanner.ScannerError(None, None, f"invalid escape sequence: {exc}", loader.get_mark()) from exc
+    finally:
+        loader.dispose()
 
 
 def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, ValidationResult]:

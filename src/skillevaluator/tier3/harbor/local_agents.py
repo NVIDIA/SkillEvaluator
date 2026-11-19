@@ -39,6 +39,8 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
 )
+from skillevaluator.tier3.output_provenance import write_output_file_atomically
+from skillevaluator.utils.secure_fs import SecureRoot, discover_secure_files
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
@@ -52,6 +54,8 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+_BRIDGE_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+_BRIDGE_ARTIFACT_MAX_PATHS = 10_000
 # Local mode runs the CLI installed on the host, not the release Harbor installs
 # in other environments. These are the oldest releases that run each model family.
 _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
@@ -59,6 +63,35 @@ _CODEX_MIN_VERSION_FOR_GPT_6 = (0, 159, 1)
 _CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 logger = logging.getLogger(__name__)
+
+
+def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> None:
+    """Remove generated capabilities from contained native artifacts after download."""
+    if not tokens:
+        return
+    try:
+        logs_dir.lstat()
+    except FileNotFoundError:
+        return
+    files = discover_secure_files(
+        logs_dir,
+        selected=lambda _path: True,
+        max_paths=_BRIDGE_ARTIFACT_MAX_PATHS,
+        allow_context_alias=False,
+        refuse_selected_dirs=False,
+    )
+    values = sorted((token.encode("utf-8") for token in tokens), key=len, reverse=True)
+    with SecureRoot(logs_dir) as secure_root:
+        for entry in files:
+            raw, _metadata = secure_root.read_bytes(
+                entry.relative_path, _BRIDGE_ARTIFACT_MAX_BYTES, expected=entry.metadata
+            )
+            safe = raw
+            for value in values:
+                # Equal-length masking also preserves offsets in opaque artifacts.
+                safe = safe.replace(value, b"*" * len(value))
+            if safe != raw:
+                write_output_file_atomically(entry.path, safe)
 
 
 async def _await_task_uninterruptibly(
@@ -956,6 +989,9 @@ class _NvidiaBuildBridgeAgent:
         run_failed = False
         try:
             await self._start_bridge(environment)
+            tokens = getattr(self, "_nvidia_build_artifact_tokens", set())
+            tokens.add(self._bridge_client_token())
+            self._nvidia_build_artifact_tokens = tokens
             self._nvidia_build_bridge_client_env = self._bridge_client_environment()
             await self._prepare_bridge_client(environment)
             await super().run(instruction=instruction, environment=environment, context=context)
@@ -971,6 +1007,19 @@ class _NvidiaBuildBridgeAgent:
                 except BaseException:
                     if not run_failed:
                         raise
+
+    def populate_context_post_run(self, context: Any) -> None:
+        # Harbor downloads native logs after run() has already cleaned up the
+        # bridge. Keep its capabilities private until that retention boundary.
+        tokens = getattr(self, "_nvidia_build_artifact_tokens", set())
+        try:
+            _redact_bridge_artifacts(self.logs_dir, tokens)
+            try:
+                super().populate_context_post_run(context)
+            finally:
+                _redact_bridge_artifacts(self.logs_dir, tokens)
+        finally:
+            self._nvidia_build_artifact_tokens = set()
 
 
 class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCodex):

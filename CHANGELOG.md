@@ -52,6 +52,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Rebuilding validation results after severity overrides or scanner finding
   deduplication no longer repeatedly scans accumulated independent diagnostics;
   diagnostic order, duplicate-warning options and summary counts are preserved.
+- Reject malformed NVIDIA Build backend tool-call names before Anthropic or
+  Responses streams start, so invalid model output cannot poison replayed tool history.
+
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
@@ -80,6 +83,9 @@ All notable changes to SkillEvaluator are documented in this file.
   inspection rather than observed unsafe behavior. The Tier 3 guide lists the
   forms that are not read. Both the host checker and the bundled Harbor
   verifier apply the fix.
+
+- Report completed plugin skill and bundle catalog comparisons with their recorded
+  Tier 2 match, affected-entry and catalog counts, including clean zero-match results.
 
 ## 1.0.1 - 2026-11-17
 
@@ -263,6 +269,9 @@ reviewed source revision.
   `environment`.
 - `report.html` shows the Tier 3 execution backend (Harbor or NeMo Gym) beside the
   sandbox environment, in the agent evaluation summary and the evaluation dataset header.
+- Bounded plugin context resource options on `validate` and Tier 2 context
+  commands, with unchanged defaults, actual remaining aggregate work accounting,
+  consistent embedding dimensions, and configured/consumed budgets in reports.
 - Document measured real-provider saved-catalog scale separately from 5,000-entry
   in-memory qualification, as fixture-dependent examples rather than guarantees.
 - `harness` results flag a project skill that has a same-named copy in a user-level
@@ -435,6 +444,15 @@ reviewed source revision.
   alone does not establish better Efficiency or quality, pairing does not certify
   equal concurrency/budget or judge-model agreement, and reused telemetry is
   historical. Scoring, raw deltas and reuse eligibility are unchanged.
+
+- Complete the public plugin workflow: supported-format detection, bounded component
+  checks and bundled-skill validation, advisory deduplication and compatible local
+  catalogs, shared runtime options and loading adapters, MCP/behavior evidence,
+  multi-arm comparisons, and static/runtime report hooks. Add `tier3 evaluate-plugin`
+  and base-install `tier3 report-plugin` replay of retained snapshots, with setup-only
+  retry controls and published usage documentation. Skill and rule references that
+  Tier 3 does not stage (same-repository, external, unresolved, or not bundled) mark
+  the run incomplete, so a plugin with nothing else to load fails closed.
 
 ### Changed
 
@@ -718,6 +736,8 @@ reviewed source revision.
   nodes, so valid long operator or attribute chains no longer abort advisory
   checks for that script and subsequent files.
 
+- Redact generated NVIDIA Build bridge credentials from retained agent logs,
+  session files, and trajectories while preserving recorded usage metrics.
 - GitLab JUnit collection includes nested skill folders in catalog reports.
 - Tier 3 OpenCode with-skill trials no longer exit 1 with `EPIPE: broken pipe, write` after a
   finished answer (#757). OpenCode's snapshot passed the workspace file list to
@@ -1554,6 +1574,46 @@ reviewed source revision.
   in text escaped twice; a value-less credential flag no longer hides the next
   command's password, and shell `apply_patch` evidence is masked before its
   400-character cut. The Tier 3 live evaluation guide lists the exact forms.
+
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations; plugin projections
+  preserve incomplete-only status.
+
+- CI bootstrap rejects unsupported Tier 3 environment modes before importing
+  optional runtime dependencies, preserving the isolated consumer-path check
+  without paying for unnecessary Harbor initialization.
+
+- Local directory downloads disable macOS-generated AppleDouble tar entries
+  so extended attributes do not create nonexistent source-file errors. Real
+  user-authored `._` files and existing containment checks are preserved.
+
+- Optional plugin catalog comparisons are recorded as skipped when no catalog
+  is supplied, rather than as successful checks. Publication accepts those
+  skips only alongside trustworthy executed semantic analysis; requested
+  catalog failures, contradictory errors and required-tier skips still block.
+  Retained reports preserve the typed optional-skip flag.
+
+- Plugin context analysis reports work-budget and collection-limit stops as
+  incomplete, rather than advisory passes. Disabled or inapplicable analysis
+  records explicit skips; malformed dependency parsing remains non-green.
+  Aggregate limits are unchanged and reported with their observed counts.
+
+
+- Plugin context analysis shares measured aggregate work budgets across members
+  instead of dividing them equally. Explicit bounded chunk and scalar-comparison
+  allowances support larger bundles without changing the default limits, and
+  retained reports record configured and consumed work.
+- Retained aggregate Harbor jobs include a provenance log identifying their real
+  source jobs, allowing Harbor analysis to discover the merged trials without
+  implying an independent execution.
+- Plugin runtime preparation applies effective policy severity overrides. Saved
+  reports retain preparation limitations without live engine state, and MCP
+  environment grants are validated as CLI options before work starts. Plugin
+  documentation explains scoped grants and runtime output locations.
+
+- Custom grader reward validation keeps numeric range checks compatible with
+  Python 3.9 while continuing to reject boolean, non-finite and out-of-range
+  scores.
 
 ## 0.9.0 - 2026-11-13
 

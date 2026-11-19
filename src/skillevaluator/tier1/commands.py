@@ -58,7 +58,6 @@ from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.hygiene import HygieneValidator
 from skillevaluator.validators.license import LicenseValidator
-from skillevaluator.validators.plugin_schema import PluginSchemaValidator
 from skillevaluator.validators.policy import ValidationPolicy, apply_policy
 from skillevaluator.validators.quality_score import QualityScoreValidator
 from skillevaluator.validators.rubric_eval import RubricEvalValidator
@@ -280,18 +279,17 @@ def runs_security_scan(checks: str | None, skip: str | None) -> bool:
 def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | None):
     """Return the schema validator matching the (forced or detected) content type.
 
-    Rules, workflows, and plugins use their dedicated schema validators; skill
-    content, ``None`` and an ``unknown`` folder that holds an artifact
-    manifest entry fall back to the skill :class:`SchemaValidator` (the
-    historical default). ``run_validation`` records the schema check as not
-    applicable for any other ``unknown`` target instead of calling this.
+    Rules and workflows use their dedicated schema validators; skill content,
+    ``None`` and an ``unknown`` folder that holds an artifact manifest entry
+    fall back to the skill :class:`SchemaValidator` (the historical default).
+    ``run_validation`` records the schema check as not applicable for any
+    other ``unknown`` target instead of calling this, and hands a plugin to
+    the bounded plugin checks, which validate its manifest and components.
     """
     if content_type == CONTENT_TYPE_RULES:
         return RulesSchemaValidator()
     if content_type == CONTENT_TYPE_WORKFLOWS:
         return WorkflowsSchemaValidator()
-    if content_type == CONTENT_TYPE_PLUGIN:
-        return PluginSchemaValidator()
     return SchemaValidator(policy=policy)
 
 
@@ -326,6 +324,9 @@ def run_validation(
     harness_profiles: Path | None = None,
     skillspector_baseline: Path | None = None,
     skip: str | None = None,
+    repo_root: Path | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
 
@@ -338,8 +339,11 @@ def run_validation(
 
     *content_type* (``skill`` | ``rules`` | ``workflows`` | ``plugin`` |
     ``unknown`` | ``None``) selects the schema validator and gates skill-only
-    checks (``quality`` and ``lint`` are skipped for rules, workflows, and
-    plugins). For ``unknown`` (``--type auto`` found no supported artifact) the
+    checks (``quality`` and ``lint`` are skipped for rules and workflows). A
+    ``plugin`` target goes to the bounded plugin checks of
+    :func:`~skillevaluator.tier1.plugin_public.run_public_plugin_validation`,
+    which run ``quality`` and ``lint`` on each skill the plugin declares. For
+    ``unknown`` (``--type auto`` found no supported artifact) the
     manifest checks ``schema``, ``version`` and ``quality`` are recorded as not
     applicable instead of run, and every result carries the
     ``tier1_applicability`` record, while the content scans still run. A target
@@ -365,6 +369,29 @@ def run_validation(
     missing reference in the skill, because its instructions may name a file
     elsewhere in the folder that its scan did not inspect.
     """
+    if content_type == CONTENT_TYPE_PLUGIN:
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        return run_public_plugin_validation(
+            target_path,
+            checks=checks,
+            skip=skip,
+            use_llm=use_llm,
+            llm_verify=llm_verify,
+            min_score=min_score,
+            quality_config=quality_config,
+            pii_waivers=pii_waivers,
+            previous_version=previous_version,
+            policy=policy,
+            fail_fast=fail_fast,
+            continue_on_failure=continue_on_failure,
+            on_check=on_check,
+            skillspector_baseline=skillspector_baseline,
+            repo_root=repo_root,
+            resolve_endpoints=resolve_endpoints,
+            claude_validate=claude_validate,
+            target_root=target_root,
+        )
     enabled = _enabled_checks(checks)
     skipped = skipped_checks(skip)
     results: list[ValidationResult] = []
@@ -422,7 +449,6 @@ def run_validation(
             use_llm=use_llm,
             verify_llm=llm_verify,
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
-            skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
             target_root=target_root,
         )

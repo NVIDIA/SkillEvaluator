@@ -91,3 +91,19 @@ skills:
         assert "[1/1] schema ..." in output
         assert "quality" not in output
         assert "lint" not in output
+
+    def test_plugin_progress_covers_bundled_checks_and_duration(self, tmp_path, progress_capture):
+        manifest = tmp_path / ".claude-plugin/plugin.json"
+        manifest.parent.mkdir()
+        manifest.write_text('{"name":"demo"}', encoding="utf-8")
+        member = tmp_path / "skills/a/SKILL.md"
+        member.parent.mkdir(parents=True)
+        member.write_text("---\nname: a\ndescription: Follow the workflow.\n---\nBody.\n", encoding="utf-8")
+
+        commands.run_validation(tmp_path, checks="schema,quality", content_type=CONTENT_TYPE_PLUGIN, min_score=0)
+
+        output = progress_capture.getvalue()
+        assert "[1/3] schema ..." in output
+        assert "[2/3] schema ..." in output
+        assert "[3/3] quality ..." in output
+        assert output.count("done in") == 3

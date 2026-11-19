@@ -21,7 +21,7 @@ from skillevaluator.cli_help import render_help
 def terminal(monkeypatch):
     monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
     monkeypatch.setattr(sys.stderr, "isatty", lambda: True)
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((120, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((120, 40)))  # noqa: ARG005
     monkeypatch.setenv("TERM", "xterm-256color")
     monkeypatch.setenv("COLORTERM", "truecolor")
     monkeypatch.delenv("NO_COLOR", raising=False)
@@ -35,7 +35,7 @@ def root_help(width=80, *, color=False):
 
 @pytest.mark.parametrize("terminal_width", [115, 120])
 def test_interactive_root_help_has_wordmark_and_installed_version(terminal, monkeypatch, terminal_width):
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((terminal_width, 40)))  # noqa: ARG005
     output = root_help()
     banner, help_text = output.split("Usage:", 1)
 
@@ -50,7 +50,7 @@ def test_interactive_root_help_has_wordmark_and_installed_version(terminal, monk
 
 @pytest.mark.parametrize("terminal_width", [76, 114])
 def test_medium_help_stacks_the_full_wordmark(terminal, monkeypatch, terminal_width):
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((terminal_width, 40)))  # noqa: ARG005
     banner = root_help(78).split("Usage:", 1)[0]
 
     assert len([line for line in banner.splitlines() if "█" in line]) == 10
@@ -61,7 +61,7 @@ def test_medium_help_stacks_the_full_wordmark(terminal, monkeypatch, terminal_wi
 
 @pytest.mark.parametrize("terminal_width", [60, 75])
 def test_small_help_uses_two_row_wordmark(terminal, monkeypatch, terminal_width):
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((terminal_width, 40)))  # noqa: ARG005
     banner = root_help(78).split("Usage:", 1)[0]
 
     assert len([line for line in banner.splitlines() if "█" in line]) == 2
@@ -72,7 +72,7 @@ def test_small_help_uses_two_row_wordmark(terminal, monkeypatch, terminal_width)
 
 @pytest.mark.parametrize("formatter_width,terminal_width", [(78, 40), (78, 57), (78, 58), (78, 59)])
 def test_narrow_help_uses_compact_banner(terminal, monkeypatch, formatter_width, terminal_width):
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((terminal_width, 40)))  # noqa: ARG005
     banner = root_help(formatter_width).split("Usage:", 1)[0]
 
     assert "█" not in banner
@@ -92,7 +92,7 @@ class _TtyTextStream(io.TextIOWrapper):
 )
 def test_wordmark_must_fit_the_stdout_encoding(terminal, monkeypatch, encoding, terminal_width, art_rows):
     monkeypatch.setattr(sys, "stdout", _TtyTextStream(io.BytesIO(), encoding=encoding))
-    monkeypatch.setattr(shutil, "get_terminal_size", lambda: os.terminal_size((terminal_width, 40)))
+    monkeypatch.setattr(shutil, "get_terminal_size", lambda fallback=(80, 24): os.terminal_size((terminal_width, 40)))  # noqa: ARG005
     banner = root_help(78).split("Usage:", 1)[0]
 
     assert len([line for line in banner.splitlines() if "█" in line]) == art_rows

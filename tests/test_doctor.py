@@ -133,6 +133,23 @@ def test_tier1_reports_an_explicit_executable_override(scanners, monkeypatch, tm
     assert rows["Bandit"] == ("pass", f"1.9.4 at {executable.resolve()} (from SKILLEVALUATOR_BANDIT_PATH)")
 
 
+@pytest.mark.parametrize(
+    ("name", "label", "check", "source", "version"),
+    [
+        ("skillspector", "SkillSpector", "security", "uv tool run", "2.13.4"),
+        ("gitleaks", "Gitleaks", "code", "managed", "8.30.0"),
+    ],
+)
+def test_tier1_reports_managed_scanner_source(scanners, monkeypatch, name, label, check, source, version) -> None:
+    tool = getattr(Tools, name)
+    monkeypatch.setattr(tool, "resolution_source", source)
+    scanners.output[name] = version
+
+    rows = _rows(tier="1", checks=check)
+
+    assert rows[label] == ("pass", f"{version} at /doctor-tools/{name} ({source})")
+
+
 def test_tier1_reports_managed_provisioning_without_naming_an_override(scanners, monkeypatch, tmp_path) -> None:
     """No scanner is installed, so SkillSpector runs through uv and Gitleaks is the managed binary."""
     monkeypatch.setenv("SKILLEVALUATOR_RUNTIME_DIR", str(tmp_path))

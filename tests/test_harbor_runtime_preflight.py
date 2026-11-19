@@ -74,6 +74,20 @@ def _dataset(tmp_path: Path) -> Path:
     return dataset
 
 
+def _probe_bedrock_fixture(
+    provider: ProviderConfig,
+    *,
+    timeout_seconds: float,
+) -> runtime_preflight.ModelProbeResult:
+    """Keep real SDK work inside the lifetime of mutable AWS fixtures.
+
+    These tests check SDK configuration and local transport behavior. The public
+    wrapper's deadline and worker cap have separate tests; using it here could
+    leave a timed-out worker reading another test's environment or files.
+    """
+    return runtime_preflight._probe_bedrock_model(provider, timeout_seconds=timeout_seconds)
+
+
 def _configure_isolated_aws_profile(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -1423,7 +1437,7 @@ def test_bedrock_catalog_success_only_verifies_native_catalog_and_runtime_endpoi
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.ok is True
     assert runtime_preflight.credential_probe_disposition(provider, result) == expected_disposition
@@ -1493,7 +1507,7 @@ aws_secret_access_key = test-secret-key
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert clients["bedrock"].meta.endpoint_url == "https://catalog.attacker.invalid"
     assert clients["bedrock-runtime"].meta.endpoint_url == "https://runtime.attacker.invalid"
@@ -1573,7 +1587,7 @@ aws_secret_access_key = test-secret-key
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     routed_urls = {
         clients[service_name]
@@ -1645,7 +1659,7 @@ def test_bedrock_bearer_token_only_uses_real_catalog_transport(
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             worker.join(timeout=5)
@@ -1675,7 +1689,7 @@ def test_bedrock_model_probe_rejects_unsafe_bearer_token_characters(
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -1810,7 +1824,7 @@ def test_bedrock_model_probe_degrades_when_active_imds_is_unavailable(
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "unavailable"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
@@ -1839,7 +1853,7 @@ def test_bedrock_model_probe_fails_when_credentials_are_absent_and_imds_is_disab
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "authentication"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -1896,7 +1910,7 @@ def test_bedrock_model_probe_distinguishes_transient_imds_from_no_role(
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             worker.join(timeout=5)
@@ -1955,7 +1969,7 @@ def test_bedrock_model_probe_degrades_malformed_imds_credential_responses(
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             worker.join(timeout=5)
@@ -2011,7 +2025,7 @@ def test_bedrock_model_probe_degrades_malformed_imds_role_listing(
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             worker.join(timeout=5)
@@ -2050,7 +2064,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=2)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2078,7 +2092,7 @@ aws_secret_access_key = test-secret-key
     monkeypatch.setenv("NO_PROXY", "")
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=2)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=2)
 
     assert result.failure_kind == "unavailable"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
@@ -2124,7 +2138,7 @@ aws_secret_access_key = test-secret-key
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             worker.join(timeout=5)
@@ -2338,10 +2352,7 @@ def test_bedrock_model_probe_classifies_real_invalid_region_as_fatal(
         region="not a region",
     )
 
-    # Real SDK initialization counts against the probe deadline. The invalid region
-    # is rejected before any request is sent, so allow the same setup budget as the
-    # other real-SDK classification tests instead of measuring one-second throughput.
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2389,7 +2400,7 @@ def test_bedrock_model_probe_classifies_real_invalid_aws_environment_as_fatal(
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2425,7 +2436,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2460,7 +2471,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2497,7 +2508,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2536,7 +2547,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2572,7 +2583,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2636,7 +2647,7 @@ def test_bedrock_model_probe_classifies_invalid_local_credential_token_encoding_
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2705,7 +2716,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2746,7 +2757,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2788,7 +2799,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2823,7 +2834,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2865,7 +2876,7 @@ sso_role_name = TestRole
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2925,7 +2936,7 @@ sso_role_name = TestRole
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "authentication"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -2980,7 +2991,7 @@ login_session = {session_name}
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "authentication"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3017,7 +3028,7 @@ credential_process = "{sys.executable}" "{credential_process}"
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3069,7 +3080,7 @@ aws_secret_access_key = test-secret-key
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3132,7 +3143,7 @@ aws_secret_access_key = test-secret-key
     monkeypatch.setattr(runtime_preflight.boto3.session, "Session", Session)
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3161,7 +3172,7 @@ credential_process = private-command "unterminated
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3194,7 +3205,7 @@ credential_process = {credential_process}
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3256,7 +3267,7 @@ credential_process = "{sys.executable}" "{credential_process}"
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == expected_kind
     assert runtime_preflight.credential_probe_disposition(provider, result) == expected_disposition
@@ -3297,7 +3308,7 @@ credential_process = private-command
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "unavailable"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "degraded"
@@ -3345,7 +3356,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3382,7 +3393,7 @@ aws_secret_access_key = test-secret-key
         region="us-west-2",
     )
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=5)
 
     assert result.failure_kind == "invalid_configuration"
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -3441,7 +3452,7 @@ aws_secret_access_key = test-secret-key
         thread.start()
         try:
             provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             thread.join(timeout=2)
@@ -3490,7 +3501,7 @@ def test_bedrock_model_probe_degrades_malformed_container_credential_timestamp(
         thread.start()
         try:
             provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=5)
         finally:
             server.shutdown()
             thread.join(timeout=2)

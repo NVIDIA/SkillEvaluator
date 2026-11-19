@@ -77,6 +77,9 @@ navigation:
       - page: Grader Validation
         path: ../docs/grader-validation.mdx
         slug: grader-validation
+      - page: Assess Plugins
+        path: ../docs/plugin-assessment.mdx
+        slug: plugin-assessment
       - page: Trace Datasets
         path: ../docs/trace-datasets.mdx
         slug: trace-datasets

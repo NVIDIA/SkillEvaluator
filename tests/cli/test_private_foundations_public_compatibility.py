@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Private format/policy foundations must preserve the installed public workflow."""
+"""Public format activation preserves the legacy direct validator contract."""
 
 from __future__ import annotations
 
@@ -52,7 +52,7 @@ def test_existing_contained_validation_does_not_enable_private_policy(tmp_path: 
 
 
 @pytest.mark.parametrize("relative", [".codex-plugin/plugin.json", ".cursor-plugin/plugin.json", "plugin.json"])
-def test_private_formats_do_not_change_detection_or_forced_validation(tmp_path: Path, relative: str) -> None:
+def test_public_formats_are_detected_while_the_legacy_validator_stays_compatible(tmp_path: Path, relative: str) -> None:
     manifest = tmp_path / relative
     manifest.parent.mkdir(parents=True, exist_ok=True)
     manifest.write_text(
@@ -60,8 +60,8 @@ def test_private_formats_do_not_change_detection_or_forced_validation(tmp_path: 
         encoding="utf-8",
     )
 
-    assert detect_content_type(tmp_path) == "unknown"
-    assert detect_content_type(manifest) == "unknown"
+    assert detect_content_type(tmp_path) == "plugin"
+    assert detect_content_type(manifest) == "plugin"
     result = PluginSchemaValidator().validate(tmp_path)
     assert not result.passed
     assert [finding.check_name for finding in result.findings] == ["manifest_missing"]
@@ -69,17 +69,17 @@ def test_private_formats_do_not_change_detection_or_forced_validation(tmp_path: 
     skill = tmp_path / "skills" / "demo" / "SKILL.md"
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo\ndescription: Example\n---\n", encoding="utf-8")
-    assert detect_content_type(tmp_path) == "skill"
+    assert detect_content_type(tmp_path) == "plugin"
 
 
 @pytest.mark.parametrize("relative", [".codex-plugin/plugin.json", ".cursor-plugin/plugin.json", "plugin.json"])
-def test_forced_private_format_cli_preserves_failure_and_all_reports(
+def test_forced_invalid_format_cli_fails_closed_and_keeps_all_reports(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
 ) -> None:
     root = tmp_path / "input"
     manifest = root / relative
     manifest.parent.mkdir(parents=True)
-    manifest.write_text('{"name":"example"}', encoding="utf-8")
+    manifest.write_text("{broken", encoding="utf-8")
     monkeypatch.setenv("SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE", str(tmp_path / "state" / "key"))
     reports = tmp_path / "reports"
     args = ["validate", str(root), "--type", "plugin", "--tiers", "1", "--checks", "schema", "--no-llm"]
@@ -91,21 +91,23 @@ def test_forced_private_format_cli_preserves_failure_and_all_reports(
 
     assert result.exit_code == 1, result.output
     files = list(reports.iterdir())
-    assert len(files) == 4
+    assert len(files) == 5
     assert len(list(reports.glob("*.html"))) == 1
-    assert len(list(reports.glob("*.md"))) == 1
+    assert len(list(reports.glob("*.md"))) == 2
+    assert (reports / "BENCHMARK.md").is_file()
     payload = json.loads(
         next(path for path in files if path.suffix == ".json" and ".sarif." not in path.name).read_text()
     )
     assert payload["overall_passed"] is False
-    assert payload["total_errors"] == 1
-    assert payload["results"][0]["findings"][0]["check_name"] == "manifest_missing"
+    assert payload["total_errors"] >= 1
+    checks = {finding["check_name"] for row in payload["results"] for finding in row["findings"]}
+    assert checks & {"manifest_missing_or_unsafe", "manifest_unreadable", "plugin_manifest_unreadable"}
     sarif = json.loads(next(reports.glob("*.sarif.json")).read_text())
-    assert len(sarif["runs"][0]["results"]) == 1
-    assert sarif["runs"][0]["results"][0]["ruleId"].endswith("/manifest_missing")
+    assert sarif["runs"][0]["results"]
+    assert any(row["ruleId"].endswith("/" + check) for row in sarif["runs"][0]["results"] for check in checks)
 
 
-def test_private_policy_keys_do_not_change_public_policy(tmp_path: Path) -> None:
+def test_plugin_policy_keys_are_explicit_and_redacted_in_the_public_summary(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text("{}\n", encoding="utf-8")
     candidate = tmp_path / "candidate.yaml"
@@ -119,4 +121,11 @@ def test_private_policy_keys_do_not_change_public_policy(tmp_path: Path) -> None
     actual = load_policy_file(candidate).to_dict()
     expected.pop("source")
     actual.pop("source")
+    assert actual["digest"] != expected["digest"]
+    assert actual.pop("mcp_allowed_private_host_count") == 1
+    assert actual.pop("hook_allowed_url_count") == 1
+    assert actual.pop("resolve_endpoints") is True
+    actual.pop("digest")
+    expected.pop("digest")
     assert actual == expected
+    assert "10.0.0.1" not in json.dumps(actual) and "example.com" not in json.dumps(actual)

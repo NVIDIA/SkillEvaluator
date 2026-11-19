@@ -184,11 +184,15 @@ def test_agent_setup_uses_the_shared_discovery_budget(tmp_path, monkeypatch):
 
 def test_long_token_free_log_lines_finish_without_quadratic_key_scanning():
     program = """
+import time
 from ci.diagnostics import _mask_text
 from skillevaluator.utils.secret_redaction import Redactor
+started = time.monotonic()
 redactor = Redactor(set())
 for text in ('a' * 100_000, 'a-' * 50_000):
     assert _mask_text(text, redactor) == text
+elapsed = time.monotonic() - started
+assert elapsed < 5, f"Credential masking exceeded its 5-second budget: {elapsed:.3f}s"
 print('unchanged')
 """
     completed = subprocess.run(
@@ -196,7 +200,9 @@ print('unchanged')
         cwd=Path(__file__).resolve().parents[2],
         capture_output=True,
         text=True,
-        timeout=5,
+        # Imports can be slow on loaded CI hosts; the child still enforces the
+        # original processing budget, while this watchdog bounds startup/hangs.
+        timeout=30,
         check=True,
     )
     assert completed.stdout == "unchanged\n"

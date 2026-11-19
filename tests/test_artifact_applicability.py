@@ -293,7 +293,13 @@ def test_validate_folder_with_a_dangling_manifest_symlink_still_fails(tmp_path: 
     payload = _json_report(reports)
     assert payload["overall_status"] == "failed"
     assert "tier1_applicability" not in payload
-    schema = next(entry for entry in payload["results"] if entry["validator"] == "Schema & Repository Governance")
+    # A plugin manifest, even a dangling link to one, routes the folder to the plugin checks.
+    schema_check = (
+        "Plugin Schema & Component Checks"
+        if manifest == ".claude-plugin/plugin.json"
+        else "Schema & Repository Governance"
+    )
+    schema = next(entry for entry in payload["results"] if entry["validator"] == schema_check)
     assert schema["status"] == "failed"
 
 

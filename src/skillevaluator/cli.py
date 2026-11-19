@@ -398,6 +398,48 @@ def _tier2_skill_argument(func):
     return click.argument("skill_path", type=click.Path(exists=True, resolve_path=False, path_type=Path))(func)
 
 
+def _plugin_context_options(*, grouped=False):
+    from skillevaluator.deduplication.plugin.context_budget import (
+        PLUGIN_CONTEXT_CHUNK_CEILING,
+        PLUGIN_CONTEXT_SCALAR_CEILING,
+    )
+
+    def decorate(func):
+        style = {"cls": GroupedOption, "help_group": _TIER2_GROUP} if grouped else {}
+        func = click.option(
+            "--plugin-context-max-chunks",
+            type=click.IntRange(1, PLUGIN_CONTEXT_CHUNK_CEILING),
+            default=None,
+            help="Maximum context chunks across plugin members (default: 512).",
+            **style,
+        )(func)
+        return click.option(
+            "--plugin-context-max-scalar-comparisons",
+            type=click.IntRange(1, PLUGIN_CONTEXT_SCALAR_CEILING),
+            default=None,
+            help="Maximum aggregate plugin context pair comparisons times vector dimensions (default: 25000000).",
+            **style,
+        )(func)
+
+    return decorate
+
+
+def _plugin_context_overrides(max_chunks, max_scalar_comparisons):
+    return {
+        name: value
+        for name, value in (("max_chunks", max_chunks), ("max_scalar_comparisons", max_scalar_comparisons))
+        if value is not None
+    }
+
+
+def _require_plugin_context_target(path, options):
+    if options:
+        from skillevaluator.cli_core import detect_content_type
+
+        if detect_content_type(path) != "plugin":
+            raise click.UsageError("Plugin context limits require a plugin target.")
+
+
 def _reject_linked_tier2_root(path: Path) -> None:
     if is_link_or_reparse(path):
         raise click.UsageError(f"Tier 2 target root is a symlink or reparse point: {path.name or '.'}")
@@ -507,6 +549,91 @@ def _report_options(func):
         "(-r cli,json,html or -r cli json html) and may be repeated. "
         "The compact default view writes html+json unless -r is passed "
         "explicitly, which is honored exactly (including cli).",
+    )(func)
+
+
+def _check_probe_mcp_env(ctx: click.Context, param: click.Parameter, values: tuple[str, ...]) -> tuple[str, ...]:
+    """Refuse malformed or unbounded MCP environment grants before any tier runs."""
+    if not values:
+        return values
+    from skillevaluator.evaluation.options import MAX_PROBE_MCP_ENV_GRANT_CHARS, MAX_PROBE_MCP_ENV_GRANTS
+    from skillevaluator.tier3.mcp_proof import parse_env_grant
+
+    if len(values) > MAX_PROBE_MCP_ENV_GRANTS:
+        raise click.BadParameter(f"at most {MAX_PROBE_MCP_ENV_GRANTS} grants are accepted; got {len(values)}.")
+    for value in values:
+        if len(value) > MAX_PROBE_MCP_ENV_GRANT_CHARS:
+            raise click.BadParameter(
+                f"each grant is at most {MAX_PROBE_MCP_ENV_GRANT_CHARS} characters; got one of {len(value)}."
+            )
+        try:
+            parse_env_grant(value)
+        except ValueError as exc:
+            raise click.BadParameter(str(exc)) from exc
+    return values
+
+
+def _require_probe_mcp_for_grants(probe_mcp: bool | None, probe_mcp_env: tuple[str, ...]) -> None:
+    """Refuse MCP environment grants without ``--probe-mcp`` before any tier runs.
+
+    Only the flag turns host probes on; an evals config cannot, so a grant
+    without it would never be used.
+    """
+    if probe_mcp_env and probe_mcp is not True:
+        raise click.UsageError("--probe-mcp-env requires --probe-mcp")
+
+
+def _plugin_run_options(func):
+    """Reuse the same plugin controls for combined and standalone runs."""
+    options = (
+        (
+            ("--plugin-load",),
+            {
+                "type": click.Choice(["wrapper", "native", "auto"]),
+                "help": "Plugin loading mode [default: wrapper or evals config].",
+            },
+        ),
+        (
+            ("--lift-mode",),
+            {
+                "type": click.Choice(["effectiveness", "integration", "both", "ladder"]),
+                "help": "Plugin comparison arms [default: effectiveness or evals config].",
+            },
+        ),
+        (("--probe-mcp/--no-probe-mcp",), {"help": "Opt into policy-checked MCP host probes."}),
+        (
+            ("--probe-mcp-env",),
+            {
+                "multiple": True,
+                "callback": _check_probe_mcp_env,
+                "help": "Grant a host environment variable to MCP host probe headers (repeatable; requires "
+                "--probe-mcp). NAME=HOST limits it to URL servers at HOST and NAME@SERVER to the named "
+                "server; a bare NAME goes to every URL server whose headers reference ${NAME}.",
+            },
+        ),
+        (
+            ("--trial-retries",),
+            {"type": click.IntRange(0, 5), "help": "Retry setup-only failures, 0-5 [default: 0 or evals config]."},
+        ),
+    )
+    for names, settings in reversed(options):
+        settings.setdefault("default", () if settings.get("multiple") else None)
+        func = click.option(*names, cls=GroupedOption, help_group=_TIER3_GROUP, **settings)(func)
+    return func
+
+
+def _plugin_static_options(func):
+    func = click.option(
+        "--repo-root",
+        type=click.Path(exists=True, file_okay=False, path_type=Path),
+        default=None,
+        help="Repository context for same-repository plugin references.",
+    )(func)
+    func = click.option(
+        "--resolve-endpoints", is_flag=True, help="Opt into bounded plugin endpoint DNS/redirect checks."
+    )(func)
+    return click.option(
+        "--claude-validate", is_flag=True, help="Compare the manifest with installed Claude Code validation (advisory)."
     )(func)
 
 
@@ -740,7 +867,7 @@ def _report_formats_explicit() -> bool:
     return False
 
 
-def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
+def _run_dedup_or_skip(target_path: Path, **context_options) -> list[ValidationResult]:
     """Run Tier 2 dedup when possible, else return a non-failing skipped result.
 
     Dedup is on by default for ``validate`` but needs the ``tier2`` extra and an
@@ -749,6 +876,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
     """
     import importlib.util
 
+    # Plugins share this setup guard; run_dedup_scan routes them to plugin dedup.
     def _skip(message: str) -> list[ValidationResult]:
         from skillevaluator.publication_identity import stamp_publication_target
 
@@ -781,7 +909,7 @@ def _run_dedup_or_skip(target_path: Path) -> list[ValidationResult]:
         resolve_embedding_provider()
     except ProviderConfigurationError as exc:
         return _skip(f"Tier 2 skipped: embedding setup is required.\n\n{exc}\n\nTo skip Tier 2, pass --no-dedup.")
-    return run_dedup_scan(target_path)
+    return run_dedup_scan(target_path, **context_options)
 
 
 def _partial_agent_eval_result(
@@ -791,6 +919,7 @@ def _partial_agent_eval_result(
     failure: str,
     results_dir: Path | None,
     env_mode: str,
+    plugin_run: bool = False,
 ) -> ValidationResult | None:
     """Normalize an engine run that produced usable results alongside errors.
 
@@ -800,7 +929,8 @@ def _partial_agent_eval_result(
     report, but never gate the exit code. Returns ``None`` unless the engine
     mapping can be proven to be THIS run's fresh output (in-memory agents data
     plus a ``latest`` results dir matching the engine's ``run_dir``), so a
-    stale earlier run is never reported as fresh.
+    stale earlier run is never reported as fresh. Plugin runs instead normalize
+    the exact returned directory, preserving partial scores when latest moves.
     """
     from skillevaluator.evaluation.tier3_report import agent_eval_result_from_run
     from skillevaluator.tier3.results_location import resolve_latest_results
@@ -811,16 +941,21 @@ def _partial_agent_eval_result(
     if not run_dir_value or not Path(str(run_dir_value)).is_dir():
         return None
     try:
-        latest = resolve_latest_results(target_path, results_dir)
-        latest = latest.resolve() if latest.is_symlink() else latest
-        if latest.resolve() != Path(str(run_dir_value)).resolve():
-            return None
-        result = agent_eval_result_from_run(
-            target_path,
-            results_dir=results_dir,
-            env_mode=env_mode,
-            engine_result=engine_result,
-        )
+        if plugin_run:
+            from skillevaluator.cli_plugin import plugin_result_from_execution
+
+            result = plugin_result_from_execution(target_path, engine_result, env_mode=env_mode)
+        else:
+            latest = resolve_latest_results(target_path, results_dir)
+            latest = latest.resolve() if latest.is_symlink() else latest
+            if latest.resolve() != Path(str(run_dir_value)).resolve():
+                return None
+            result = agent_eval_result_from_run(
+                target_path,
+                results_dir=results_dir,
+                env_mode=env_mode,
+                engine_result=engine_result,
+            )
     except Exception:
         return None
     if result is None:
@@ -830,7 +965,8 @@ def _partial_agent_eval_result(
         errors = [errors]
     error_messages = [str(error) for error in errors if str(error).strip()] if isinstance(errors, list) else []
     for message in dict.fromkeys(error_messages or [failure]):
-        result.add_error(message)
+        if message not in result.errors:
+            result.add_error(message)
     return result
 
 
@@ -1014,6 +1150,7 @@ def _run_agent_eval_or_skip(
     repo_context_exclude_paths: tuple[Path, ...] = (),
     evaluated_source: dict[str, str] | None = None,
     progress_reporter=None,
+    plugin_options=None,
 ) -> ValidationResult:
     """Run Tier 3 live agent evaluation and fold the result into the combined report.
 
@@ -1026,6 +1163,13 @@ def _run_agent_eval_or_skip(
 
     # Persist the entry name that publication targets record, not a lexical
     # alias that a case- or normalization-insensitive filesystem accepted.
+    source_path = target_path
+    if plugin_options is not None:
+        from skillevaluator.cli_core import resolve_plugin_path
+        from skillevaluator.tier3.results_location import plugin_results_directory
+
+        target_path = resolve_plugin_path(target_path)
+        results_dir = plugin_results_directory(target_path, results_dir)
     skill_name = publication_target_name(target_path) or target_path.name
     if validate_source:
         from skillevaluator.evaluation.tier3_report import dataset_required_result
@@ -1049,7 +1193,7 @@ def _run_agent_eval_or_skip(
     )
 
     options = EvaluationOptions(
-        skill_path=target_path,
+        skill_path=source_path if plugin_options is not None else target_path,
         agents=agents,
         env_mode=env_mode,
         environment_kwarg=environment_kwarg,
@@ -1080,7 +1224,11 @@ def _run_agent_eval_or_skip(
     )
     try:
         service = EvaluationService()
-        if progress_reporter is not None:
+        if plugin_options is not None:
+            engine_result = service.evaluate_plugin(
+                options, plugin_options=plugin_options, progress_reporter=progress_reporter
+            )
+        elif progress_reporter is not None:
             engine_result = service.evaluate(options, progress_reporter=progress_reporter)
         else:
             engine_result = service.evaluate(options)
@@ -1100,31 +1248,63 @@ def _run_agent_eval_or_skip(
             failure=failure,
             results_dir=results_dir,
             env_mode=env_mode,
+            plugin_run=plugin_options is not None,
         )
         if partial is not None:
-            return partial
-        return advisory_skip_result(
-            f"Tier 3 live evaluation did not complete: {failure}",
-            skill_name=skill_name,
+            return _attach_plugin_report(partial, engine_result)
+        return _attach_plugin_report(
+            advisory_skip_result(
+                f"Tier 3 live evaluation did not complete: {failure}",
+                skill_name=skill_name,
+            ),
+            engine_result,
         )
 
     try:
-        result = agent_eval_result_from_run(
-            target_path,
-            results_dir=results_dir,
-            env_mode=env_mode,
-            engine_result=engine_result if isinstance(engine_result, dict) else None,
-        )
+        if plugin_options is not None:
+            from skillevaluator.cli_plugin import plugin_result_from_execution
+
+            result = plugin_result_from_execution(target_path, engine_result, env_mode=env_mode)
+        else:
+            result = agent_eval_result_from_run(
+                target_path,
+                results_dir=results_dir,
+                env_mode=env_mode,
+                engine_result=engine_result if isinstance(engine_result, dict) else None,
+            )
     except Exception as exc:
-        return advisory_skip_result(
-            f"Tier 3 result normalization failed: {exc}",
-            skill_name=skill_name,
+        return _attach_plugin_report(
+            advisory_skip_result(
+                f"Tier 3 result normalization failed: {exc}",
+                skill_name=skill_name,
+            ),
+            engine_result,
         )
     if result is None:
-        return advisory_skip_result(
-            "Tier 3 live evaluation produced no parseable results.",
-            skill_name=skill_name,
+        return _attach_plugin_report(
+            advisory_skip_result(
+                "Tier 3 live evaluation produced no parseable results.",
+                skill_name=skill_name,
+            ),
+            engine_result,
         )
+    return _attach_plugin_report(result, engine_result)
+
+
+def _attach_plugin_report(result: ValidationResult, engine_result: object) -> ValidationResult:
+    """Keep passive plugin evidence even when canonical score normalization fails.
+
+    A prepared package that was incomplete makes the result incomplete too.
+    """
+    from skillevaluator.reporting.plugin_reports import mark_incomplete_plugin_package
+
+    if isinstance(engine_result, dict):
+        if "plugin_runtime_report" in engine_result:
+            result.metadata["plugin_runtime_report"] = engine_result["plugin_runtime_report"]
+        if isinstance(engine_result.get("plugin_inventory"), dict):
+            result.metadata.setdefault("plugin", engine_result["plugin_inventory"])
+    # Advisory skips are built without the run directory, so mark them here too.
+    mark_incomplete_plugin_package(result, engine_result)
     return result
 
 
@@ -2026,8 +2206,11 @@ def _finish_pipeline_view(
     if len(failed) == 1:
         only = failed[0]
         tier_no = (only.metadata.get("gating") or {}).get("tier")
-        ran = all(scan.removesuffix("-llm") in only.scanners for scan in only.incomplete_scans)
-        state = ("was incomplete" if ran else "didn't run") if only.is_incomplete else "failed"
+        from skillevaluator.reporting.console_ui import _scanner_setup_issue
+
+        state = "failed"
+        if context.result_statuses[id(only)] == "incomplete":
+            state = "didn't run" if _scanner_setup_issue(only) else "was incomplete"
         headline = f"{only.validator_name or 'validation'} {state}" + (
             f" in Tier {tier_no}" if tier_no is not None else ""
         )
@@ -2037,10 +2220,10 @@ def _finish_pipeline_view(
             by_tier.setdefault((result.metadata.get("gating") or {}).get("tier"), []).append(result)
         parts = []
         for tier_no, results in by_tier.items():
-            broken = sum(1 for r in results if not r.is_incomplete)
+            broken = sum(1 for r in results if context.result_statuses[id(r)] != "incomplete")
             counts = [
                 f"{broken} failed" if broken else "",
-                f"{len(results) - broken} didn't run" if broken < len(results) else "",
+                f"{len(results) - broken} incomplete" if broken < len(results) else "",
             ]
             parts.append((f"Tier {tier_no}: " if tier_no is not None else "") + ", ".join(c for c in counts if c))
         headline = " · ".join(parts) or "validation failed"
@@ -2520,6 +2703,9 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     help_group=_RUN_GROUP,
     help="Digest-pinned evaluator image reference recorded beside the evaluated source.",
 )
+@_plugin_static_options
+@_plugin_run_options
+@_plugin_context_options(grouped=True)
 @_report_options
 def validate(
     target_path: Path,
@@ -2542,6 +2728,8 @@ def validate(
     external: bool,
     policy_path: Path | None,
     dedup: bool,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     block_on_dedup: bool | None,
     agent_eval: bool | None,
     block_on_agent_eval: bool | None,
@@ -2576,6 +2764,14 @@ def validate(
     evaluated_source_repository: str | None,
     evaluated_source_revision: str | None,
     evaluator_container_revision: str | None,
+    repo_root: Path | None,
+    resolve_endpoints: bool,
+    claude_validate: bool,
+    plugin_load: str | None,
+    lift_mode: str | None,
+    probe_mcp: bool | None,
+    probe_mcp_env: tuple[str, ...],
+    trial_retries: int | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
     harness: str | None = None,
@@ -2592,10 +2788,8 @@ def validate(
     Rules, workflows, and plugins retain Tier 1/2 by default; their Tier 3
     evaluation requires an explicit --tier3, --autopilot, or --full request.
 
-    A plugin (a bundle-reference ``agent_plugin.yaml``/``.yml`` manifest or a
-    contained ``.claude-plugin/plugin.json`` manifest) is auto-detected and
-    validated against its public contract. Quality/lint/version checks are
-    skill-only and skipped for plugins.
+    Plugins are auto-detected from the supported client manifests. Whole-tree
+    checks and applicable bundled-skill quality/lint/version checks are included.
     """
     _record_validate_json_report(None)
     requested_path = target_path
@@ -2608,7 +2802,39 @@ def validate(
             raise click.BadParameter(str(exc), param_hint="--harness") from exc
     if dedup:
         _reject_linked_tier2_root(target_path)
-    target_path = target_path.resolve()
+    from skillevaluator.cli_core import detect_content_type
+    from skillevaluator.constants import (
+        CONTENT_TYPE_PLUGIN,
+        CONTENT_TYPE_RULES,
+        CONTENT_TYPE_SKILL,
+        CONTENT_TYPE_WORKFLOWS,
+        SKILL_MANIFEST_FILE,
+        WORKFLOWS_MANIFEST_FILE,
+    )
+
+    # A file passed as SKILL.md or workflow-rules.mdc is a manifest by the name it was passed
+    # under. Auto-detection must not read the file a link points to: SKILL.md may be a link
+    # to shared/guide.md, which names no content type.
+    manifest_type = None
+    if target_path.is_file():
+        if requested_path.name.upper() == SKILL_MANIFEST_FILE.upper():
+            manifest_type = CONTENT_TYPE_SKILL
+        elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
+            manifest_type = CONTENT_TYPE_WORKFLOWS
+    resolved_type = content_type
+    if content_type == "auto":
+        if manifest_type is not None:
+            resolved_type = manifest_type
+        else:
+            # Folder-name detection needs a resolved path, while the authored
+            # plugin path must still expose links to the plugin safety checks.
+            resolved_type = detect_content_type(target_path.resolve())
+            if resolved_type != CONTENT_TYPE_PLUGIN and detect_content_type(target_path) == CONTENT_TYPE_PLUGIN:
+                resolved_type = CONTENT_TYPE_PLUGIN
+    target_path = target_path.absolute() if resolved_type == CONTENT_TYPE_PLUGIN else target_path.resolve()
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    if context_options and resolved_type != CONTENT_TYPE_PLUGIN:
+        raise click.UsageError("Plugin context limits require a plugin target.")
     from skillevaluator.publication_identity import publication_target_name
 
     # A case- or normalization-insensitive filesystem lets an alias such as
@@ -2621,15 +2847,6 @@ def validate(
         evaluator_container_revision,
     )
 
-    from skillevaluator.cli_core import detect_content_type
-    from skillevaluator.constants import (
-        CONTENT_TYPE_PLUGIN,
-        CONTENT_TYPE_RULES,
-        CONTENT_TYPE_SKILL,
-        CONTENT_TYPE_WORKFLOWS,
-        SKILL_MANIFEST_FILE,
-        WORKFLOWS_MANIFEST_FILE,
-    )
     from skillevaluator.reporting import CLIReporter
     from skillevaluator.reporting.naming import REPORT_PREFIX
     from skillevaluator.utils.helpers import make_timestamped_basename, resolve_git_remote_url
@@ -2646,16 +2863,34 @@ def validate(
     block_on_dedup_effective = True if block_on_dedup is None else block_on_dedup
     block_on_agent_eval_effective = False if block_on_agent_eval is None else block_on_agent_eval
 
-    # A file passed as SKILL.md or workflow-rules.mdc is a manifest by the name it was passed
-    # under. Auto-detection must not read the file a link points to: SKILL.md may be a link
-    # to shared/guide.md, which names no content type.
-    manifest_type = None
-    if target_path.is_file():
-        if requested_path.name.upper() == SKILL_MANIFEST_FILE.upper():
-            manifest_type = CONTENT_TYPE_SKILL
-        elif requested_path.name == WORKFLOWS_MANIFEST_FILE:
-            manifest_type = CONTENT_TYPE_WORKFLOWS
-    resolved_type = content_type if content_type != "auto" else manifest_type or detect_content_type(target_path)
+    plugin_options = None
+    plugin_source_path = target_path
+    if resolved_type == CONTENT_TYPE_PLUGIN:
+        # A non-plugin target reports the plugin-target error below instead.
+        _require_probe_mcp_for_grants(probe_mcp, probe_mcp_env)
+        from skillevaluator.cli_core import resolve_plugin_path
+        from skillevaluator.evaluation.options import PluginOptions
+
+        target_path = resolve_plugin_path(target_path)
+        publication_name = publication_target_name(target_path) or target_path.name
+        plugin_options = PluginOptions(
+            plugin_load=plugin_load,
+            lift_mode=lift_mode,
+            probe_mcp=probe_mcp,
+            probe_mcp_env=probe_mcp_env,
+            trial_retries=trial_retries,
+            repo_root=repo_root,
+            allowed_private_hosts=policy.mcp_allowed_private_hosts,
+            hook_allowed_urls=policy.hook_allowed_urls,
+            policy=policy,
+        )
+    elif (
+        any(value is not None for value in (plugin_load, lift_mode, probe_mcp, trial_retries, repo_root))
+        or probe_mcp_env
+        or resolve_endpoints
+        or claude_validate
+    ):
+        raise click.UsageError("Plugin controls require a plugin target (--type plugin).")
     # Only skills own an evals/ task source. Plugins, rules, and workflows can
     # still run Tier 3, but must bypass the skill-directory source preflight.
     preflight_tier3_source = resolved_type == CONTENT_TYPE_SKILL
@@ -2688,8 +2923,12 @@ def validate(
         # --tiers is authoritative in both directions: an explicit selection
         # turns Tier 3 off even when --full/--autopilot/--tier3 turned it on.
         agent_eval = "3" in selected
-    autopilot = autopilot and agent_eval
-    tier3_path = target_path.parent if preflight_tier3_source and target_path.is_file() else target_path
+    autopilot = autopilot and agent_eval and resolved_type != CONTENT_TYPE_PLUGIN
+    tier3_path = (
+        plugin_source_path
+        if resolved_type == CONTENT_TYPE_PLUGIN
+        else (target_path.parent if preflight_tier3_source and target_path.is_file() else target_path)
+    )
 
     from skillevaluator.constants import CONTENT_TYPE_UNKNOWN, SKILL_MANIFEST_VARIANTS
     from skillevaluator.utils.helpers import find_skills_in_directory
@@ -2712,7 +2951,9 @@ def validate(
     file_report_required = any(report_format in _FILE_REPORT_EXTENSIONS for report_format in report_formats) or (
         quiet and not _report_formats_explicit()
     )
-    report_output_required = resolved_type == CONTENT_TYPE_SKILL or is_catalog or file_report_required
+    report_output_required = (
+        resolved_type in {CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN} or is_catalog or file_report_required
+    )
     if report_output_required:
         output_dir = _resolve_report_output_location(target_path, output_dir)
         _reject_copy_repo_root_output(
@@ -2804,7 +3045,7 @@ def validate(
         checks_done.append(name)
 
     results = run_validation(
-        target_path,
+        plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path,
         checks=checks,
         use_llm=llm,
         llm_verify=llm_verify,
@@ -2822,6 +3063,11 @@ def validate(
         harness=harness,
         harness_profiles=harness_profiles,
         skip=skip,
+        **(
+            {"repo_root": repo_root, "resolve_endpoints": resolve_endpoints, "claude_validate": claude_validate}
+            if resolved_type == CONTENT_TYPE_PLUGIN
+            else {}
+        ),
     )
     # The raw pass/fail signal drives --fail-fast identically in both modes;
     # the DISPLAYED tier summary must reflect policy-finalized severities or
@@ -2843,7 +3089,9 @@ def validate(
             _print_tier_banner(_TIER_BANNERS["tier2"])
         view.tier_start(tier2_index)
         view.tier_progress(tier2_index, [stage_hint_row("stages", "chunk · embed · cluster · llm-judge")])
-        tier2_results = _run_dedup_or_skip(target_path)
+        tier2_results = _run_dedup_or_skip(
+            plugin_source_path if resolved_type == CONTENT_TYPE_PLUGIN else target_path, **context_options
+        )
         results.extend(tier2_results)
         tier2_gate_results.extend(tier2_results)
         if quiet:
@@ -2966,6 +3214,7 @@ def validate(
             evaluated_source=evaluated_source,
             progress_reporter=reporter,
             repo_context_exclude_paths=tuple(repo_context_exclude_paths),
+            **({"plugin_options": plugin_options} if plugin_options is not None else {}),
         )
         results.append(tier3_result)
         if autopilot_error:
@@ -3078,7 +3327,7 @@ def validate(
     # BENCHMARK.md is generated compulsorily for skills (matches SkillEvaluator), even on
     # failure, so the publication card always reflects the latest evaluation --
     # now including Tier 3 results when --agent-eval ran.
-    if resolved_type == CONTENT_TYPE_SKILL:
+    if resolved_type in {CONTENT_TYPE_SKILL, CONTENT_TYPE_PLUGIN}:
         from skillevaluator.reporting import BenchmarkReporter
         from skillevaluator.reporting.naming import BENCHMARK_FILENAME
         from skillevaluator.source_identity import EvaluatedSourceConflict
@@ -3388,7 +3637,9 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 
 @cli.command("similarity-check")
 @click.argument("content_path", type=click.Path(exists=True, path_type=Path))
-@click.option("--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "auto"]))
+@click.option(
+    "--type", "content_type", default="auto", type=click.Choice(["skill", "rules", "workflows", "plugin", "auto"])
+)
 @click.option("--threshold", type=float, default=0.75, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--full-body", is_flag=True, help="Embed full file bodies instead of descriptions.")
 @click.option("--model", default=None, help="Embedding model override.")
@@ -3410,7 +3661,7 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
     "--catalog",
     type=click.Path(file_okay=True, dir_okay=False, path_type=Path),
     default=None,
-    help="Compare exactly one skill against a local catalog.",
+    help="Compare one skill or plugin against a local catalog.",
 )
 @click.option(
     "--save-catalog",
@@ -3420,6 +3671,8 @@ def precommit_run(min_score: int, quality_config: Path | None, check: str, paths
 )
 @click.option("--cache", type=click.Path(path_type=Path), default=None, hidden=True)
 @click.option("--save-cache", type=click.Path(path_type=Path), default=None, hidden=True)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@click.option("--llm-model", default=None, help="Plugin catalog verdict model override.")
 @_report_options
 def similarity_check(
     content_path: Path,
@@ -3433,6 +3686,8 @@ def similarity_check(
     save_catalog: Path | None,
     cache: Path | None,
     save_cache: Path | None,
+    llm_verdict: bool,
+    llm_model: str | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -3447,6 +3702,11 @@ def similarity_check(
     resolved_save_catalog = save_catalog or save_cache
     if resolved_catalog and resolved_save_catalog:
         raise click.UsageError("--catalog and --save-catalog cannot be used together")
+    if llm_verdict or llm_model:
+        from skillevaluator.tier2.plugin_commands import plugin_target
+
+        if plugin_target(content_path, content_type) is None:
+            raise click.UsageError("--llm and --llm-model require a plugin target (--type plugin).")
 
     _reject_linked_tier2_root(content_path)
     output_dir = _resolve_file_report_output_location(content_path.resolve(), output_dir, report_formats)
@@ -3474,6 +3734,7 @@ def similarity_check(
         max_scalar_comparisons=max_scalar_comparisons,
         catalog=resolved_catalog,
         save_catalog=resolved_save_catalog,
+        **({"llm_verdict": llm_verdict, "llm_model": llm_model} if llm_verdict or llm_model else {}),
     )
     sanitize_tier2_results(results, content_path, resolved_catalog, resolved_save_catalog)
 
@@ -3492,12 +3753,15 @@ def similarity_check(
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--model", default=None, help="Embedding model override.")
 @click.option("--llm-model", default=None, help="LLM model override.")
+@_plugin_context_options()
 @_report_options
 def context_optimization_check(
     skill_path: Path,
     threshold: float,
     model: str | None,
     llm_model: str | None,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
@@ -3505,8 +3769,12 @@ def context_optimization_check(
     from skillevaluator.tier2.commands import run_context_optimization_check
 
     _reject_linked_tier2_root(skill_path)
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    _require_plugin_context_target(skill_path, context_options)
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
-    results = run_context_optimization_check(skill_path, threshold=threshold, model=model, llm_model=llm_model)
+    results = run_context_optimization_check(
+        skill_path, threshold=threshold, model=model, llm_model=llm_model, **context_options
+    )
     sanitize_tier2_results(results, skill_path)
     if not emit_reports(
         results,
@@ -3524,27 +3792,51 @@ def context_optimization_check(
 @click.option("--threshold", type=float, default=0.80, show_default=True, callback=_validate_similarity_threshold)
 @click.option("--llm-model", default=None, help="LLM model override.")
 @click.option("--model", default=None, help="Embedding model override.")
+@click.option(
+    "--catalog",
+    type=click.Path(dir_okay=False, path_type=Path),
+    default=None,
+    help="Compare plugin members against a local catalog.",
+)
+@click.option("--llm", "llm_verdict", is_flag=True, help="Request advisory LLM verdicts for plugin catalog matches.")
+@_plugin_context_options()
 @_report_options
 def dedup_scan(
     skill_path: Path,
     threshold: float,
     llm_model: str | None,
     model: str | None,
+    catalog: Path | None,
+    llm_verdict: bool,
+    plugin_context_max_chunks: int | None,
+    plugin_context_max_scalar_comparisons: int | None,
     report_formats: tuple[str, ...],
     output_dir: Path,
 ) -> None:
     """Detect semantically redundant content within one skill."""
     from skillevaluator.tier2.commands import run_dedup_scan
 
+    if catalog is not None or llm_verdict:
+        from skillevaluator.tier2.plugin_commands import plugin_target
+
+        if plugin_target(skill_path) is None:
+            raise click.UsageError("--catalog and --llm require a plugin target.")
     _reject_linked_tier2_root(skill_path)
+    context_options = _plugin_context_overrides(plugin_context_max_chunks, plugin_context_max_scalar_comparisons)
+    _require_plugin_context_target(skill_path, context_options)
     output_dir = _resolve_file_report_output_location(skill_path.resolve(), output_dir, report_formats)
+    _reject_catalog_report_collisions(
+        catalog, report_formats=report_formats, output_dir=output_dir, basename=report_basename("dedup")
+    )
     results = run_dedup_scan(
         skill_path,
         threshold=threshold,
         llm_model=llm_model,
         model=model,
+        **context_options,
+        **({"catalog": catalog, "llm_verdict": llm_verdict} if catalog is not None or llm_verdict else {}),
     )
-    sanitize_tier2_results(results, skill_path)
+    sanitize_tier2_results(results, skill_path, catalog)
     if not emit_reports(
         results,
         report_formats=report_formats,
@@ -3943,6 +4235,9 @@ def evaluate(
     progress: str,
     progress_interval: float | None,
     verbose: bool,
+    plugin_options=None,
+    plugin_report_formats: tuple[str, ...] = ("cli",),
+    plugin_output_dir: Path | None = None,
 ) -> None:
     """Run Tier 3 live agent evaluation."""
     from skillevaluator.evaluation import EvaluationOptions, EvaluationService
@@ -3958,7 +4253,13 @@ def evaluate(
     from skillevaluator.tier3.evals_config import EvalsConfigError, load_evals_config
 
     try:
-        merged_config, _ = load_evals_config(skill_path)
+        if plugin_options is not None:
+            from skillevaluator.cli_core import resolve_plugin_path
+            from skillevaluator.tier3.plugin_workflow import _load_config
+
+            merged_config, _ = _load_config(resolve_plugin_path(skill_path))
+        else:
+            merged_config, _ = load_evals_config(skill_path)
     except EvalsConfigError as exc:
         raise click.UsageError(str(exc)) from exc
     harbor_config = merged_config.get("harbor", {})
@@ -3981,6 +4282,8 @@ def evaluate(
         _offer_local_runtime_install(agents)
         local_runtime_offered = True
 
+    if autopilot and plugin_options is not None:
+        raise click.UsageError("Author a plugin dataset or member datasets before running evaluate-plugin")
     if autopilot:
         _ensure_autopilot_dataset(
             skill_path,
@@ -4079,7 +4382,11 @@ def evaluate(
             stream=click.get_text_stream("stderr"),
             refresh_interval=progress_interval,
         )
-        engine_result = service.evaluate(options, progress_reporter=progress_reporter)
+        engine_result = (
+            service.evaluate_plugin(options, plugin_options=plugin_options, progress_reporter=progress_reporter)
+            if plugin_options is not None
+            else service.evaluate(options, progress_reporter=progress_reporter)
+        )
         failure = service.failure_reason(engine_result)
         display_result = engine_result
         if failure and (
@@ -4095,6 +4402,18 @@ def evaluate(
             from skillevaluator.tier3.result_display import render_evaluation_result
 
             render_evaluation_result(display_result, console=console, verbose=verbose, skill_path=skill_path)
+        if plugin_options is not None:
+            from skillevaluator.cli_plugin import emit_plugin_run_reports
+
+            emit_plugin_run_reports(
+                skill_path,
+                engine_result,
+                report_formats=plugin_report_formats,
+                output_dir=plugin_output_dir or Path("reports"),
+                results_dir=results_dir,
+                env_mode=env_mode,
+                console=console,
+            )
         if failure:
             raise click.exceptions.Exit(1)
     except (click.ClickException, click.exceptions.Exit):
@@ -4665,6 +4984,13 @@ _tier3_evaluate_visible = copy.copy(evaluate)
 _tier3_evaluate_visible.params = list(evaluate.params)
 _tier3_evaluate_visible.hidden = False
 tier3.add_command(_tier3_evaluate_visible, "evaluate")
+
+from skillevaluator.cli_plugin import build_plugin_commands
+
+for _plugin_command in build_plugin_commands(
+    evaluate, run_options=_plugin_run_options, report_options=_report_options, console=console
+):
+    tier3.add_command(_plugin_command)
 tier3.add_command(create_dataset, "create-eval-dataset")
 tier3.add_command(init_custom_grader, "init-custom-grader")
 tier3.add_command(init_harbor_task, "init-harbor-task")

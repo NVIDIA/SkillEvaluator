@@ -1618,6 +1618,44 @@ def test_merge_attempt_jobs_preserves_regular_trial_artifacts(tmp_path: Path) ->
     assert parsed_config.job_name == aggregate_dir.name
 
 
+def test_merge_attempt_jobs_is_discoverable_by_installed_harbor_analyzer(tmp_path: Path) -> None:
+    from harbor.analyze.analyzer import _resolve_trial_dirs
+    from harbor.viewer.scanner import JobScanner
+
+    attempts = [tmp_path / "attempt-001", tmp_path / "attempt-002"]
+    for index, job_dir in enumerate(attempts, start=1):
+        _write_current_harbor_attempt(
+            job_dir,
+            trial_name=f"case-{index:03d}__trial",
+            root_completed=1,
+            result_id=index * 10,
+        )
+        (job_dir / f"case-{index:03d}__trial" / "trial.log").write_text("Retained source trial log\n", encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs(attempts, aggregate_dir)
+
+    scanner = JobScanner(tmp_path)
+    expected_trials = [aggregate_dir / name for name in scanner.list_trials(aggregate_dir.name)]
+    assert len(expected_trials) == 2
+    assert _resolve_trial_dirs(aggregate_dir, filter_passing=None, n_trials=None) == expected_trials
+    aggregate_result = scanner.get_job_result(aggregate_dir.name)
+    assert aggregate_result is not None
+    provenance = json.loads((aggregate_dir / "job.log").read_text(encoding="utf-8"))
+    assert provenance["kind"] == "skillevaluator_retained_aggregate"
+    assert provenance["job_name"] == aggregate_dir.name
+    assert provenance["job_id"] == str(aggregate_result.id)
+    assert provenance["execution"] == "Trials retained from source jobs; no independent Harbor execution."
+    assert provenance["n_total_trials"] == aggregate_result.n_total_trials
+    assert provenance["source_jobs"] == [
+        {
+            "name": job_dir.name,
+            "id": json.loads((job_dir / "result.json").read_text(encoding="utf-8"))["id"],
+        }
+        for job_dir in attempts
+    ]
+
+
 def test_merge_attempt_jobs_normalizes_mixed_naive_and_aware_timestamps(tmp_path: Path) -> None:
     from harbor.viewer.scanner import JobScanner
 

@@ -547,6 +547,33 @@ you intend to skip Tier 2 entirely.
 
 ## Defaults and safety limits
 
+For a plugin, context analysis shares one work budget across its member skills.
+`validate`, `tier2 dedup-scan` and `tier2 context-optimization-check` accept
+`--plugin-context-max-chunks` (default `512`, range `1–32768`) and
+`--plugin-context-max-scalar-comparisons` (default `25000000`, range
+`1–536346624`). These resource allowances apply only to plugin context analysis;
+they do not change similarity thresholds, findings, or catalog comparisons.
+
+```bash title="Explicit resource allowance for a larger plugin"
+skillevaluator tier2 dedup-scan ./my-plugin \
+  --plugin-context-max-chunks 1024 \
+  --plugin-context-max-scalar-comparisons 100000000
+```
+
+Work is the sum of each member's pair count multiplied by its embedding width.
+Members draw from the remaining budget rather than equal slices. All members
+must return the same embedding width; the first response establishes it, and
+later members that cannot fit stop before another embedding request. The
+32-member, 256-file, 8-MiB, 100-cluster-review and 1,000,000-prompt-character
+aggregate limits still apply, as do the per-skill limits below. Reaching any
+limit records an incomplete scan. No content or cluster is silently discarded.
+
+JSON records configured limits and consumed work in `plugin_context_budget`;
+HTML shows the chunk and scalar budget. `chunks_embedded` counts validated
+embedding vectors, and `llm_clusters_submitted` and `prompt_chars_submitted`
+count submitted cluster reviews and their prompt characters. They do not measure
+provider billing or internal transport retries.
+
 | Setting | Default | Purpose |
 | --- | --- | --- |
 | Inter-skill reporting threshold | `0.75` | Reports `SIMILAR` and stronger matches |

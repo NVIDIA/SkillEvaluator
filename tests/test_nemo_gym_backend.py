@@ -1574,7 +1574,9 @@ def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, inte
                 cwd=tmp_path,
                 env=dict(os.environ),
                 log=log,
-                timeout_s=1,
+                # A delayed first SIGINT must not race timeout cleanup and
+                # accidentally exercise the second-interrupt abort path.
+                timeout_s=30 if interrupt else 1,
                 reporter=reporter,
             )
 

@@ -30,6 +30,13 @@ def test_dataset_result_and_error_are_public_runtime_types() -> None:
     assert get_type_hints(EvaluationService.create_dataset)["return"] is evaluation.DatasetGenerationResult
 
 
+def test_plugin_policy_annotation_is_a_resolvable_public_runtime_type() -> None:
+    from skillevaluator.evaluation import PluginOptions
+    from skillevaluator.validators.policy import ValidationPolicy
+
+    assert get_type_hints(PluginOptions)["policy"] == ValidationPolicy | None
+
+
 def test_service_preserves_dataset_generation_failure_without_printing(
     tmp_path: Path,
     capsys: pytest.CaptureFixture[str],

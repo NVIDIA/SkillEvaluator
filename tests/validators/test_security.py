@@ -8903,6 +8903,154 @@ def _referenced_image_report(name: str) -> dict:
     return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
 
 
+@pytest.fixture
+def plugin_with_excluded_png(tmp_path: Path) -> tuple[Path, dict]:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name":"example","version":"1.0.0","description":"Example plugin."}', encoding="utf-8")
+    (plugin / "README.md").write_text("![Logo](assets/logo.png)\n", encoding="utf-8")
+    logo = plugin / "assets" / "logo.png"
+    logo.parent.mkdir()
+    logo.write_bytes(_png_bytes())
+
+    payload = _skillspector_json_report()
+    payload["metadata"]["skillspector_version"] = "2.13.4"
+    payload["components"] = [
+        {"path": path, "executable": False, "size_bytes": (plugin / path).stat().st_size}
+        for path in (".claude-plugin/plugin.json", "README.md", "assets/logo.png")
+    ]
+    completeness = payload["analysis_completeness"]
+    # SkillSpector reports the full inventory, but the PNG is outside the
+    # coverage denominator. YARA and artifact integrity still inspected it.
+    completeness.update(total_components=2, scanned_components=2, fully_inspected_files=2, references=[])
+    statuses = completeness["analyzer_statuses"]
+    statuses.append({**statuses[0], "analyzer_id": "bundled_execution_surface"})
+    patterns = []
+    for status in statuses:
+        analyzer = status["analyzer_id"]
+        if analyzer.startswith("static_patterns_"):
+            patterns.append(analyzer)
+            status.update(planned_work=2, completed=2)
+        elif analyzer in {"artifact_integrity", "static_yara"}:
+            status.update(planned_work=3, completed=3)
+    completeness["scope_exclusions"] = [
+        {
+            "outcome": "out_of_scope",
+            "phase": "static",
+            "reason_code": "binary_content",
+            "path": "assets/logo.png",
+            "start_line": None,
+            "end_line": None,
+            "fatal": False,
+            "analyzers": patterns,
+        }
+    ]
+    return plugin, payload
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugin_with_excluded_png) -> None:
+    plugin, payload = plugin_with_excluded_png
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.passed, result.errors
+    assert not result.incomplete_scans
+    assert any("1 passive PNG file (assets/logo.png)" in warning for warning in result.warnings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_retains_yara_findings_on_an_excluded_png(mock_tools, plugin_with_excluded_png) -> None:
+    plugin, payload = plugin_with_excluded_png
+    payload["issues"] = _skillspector_json_report(
+        [
+            {
+                "id": "YR1",
+                "severity": "HIGH",
+                "pattern": "Malware",
+                "finding": "Test finding",
+                "category": "Malware",
+                "location": {"file": "assets/logo.png"},
+            }
+        ]
+    )["issues"]
+    payload["risk_assessment"].update(score=60, severity="HIGH", recommendation="DO_NOT_INSTALL")
+    payload["analysis_completeness"].update(findings_before_filtering=1, findings_after_filtering=1)
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload, exit_code=1)
+
+    assert not result.passed
+    assert not result.is_incomplete
+    assert [(finding.check_name, finding.file_path) for finding in result.findings] == [
+        ("Malware (YR1)", "assets/logo.png")
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing-file",
+        "invalid-bytes",
+        "executable-mode",
+        "executable-inventory",
+        "duplicate-exclusion",
+        "extra-component",
+        "incomplete-analyzers",
+        "uninspected-image",
+        "control-path",
+        "output-style-path",
+        "resolved-reference",
+        "missing-reference",
+        "ambiguous-reference",
+    ],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_rejects_unverified_png_exclusions(
+    mock_tools, plugin_with_excluded_png, case: str
+) -> None:
+    plugin, payload = plugin_with_excluded_png
+    completeness = payload["analysis_completeness"]
+    row = completeness["scope_exclusions"][0]
+    logo = plugin / row["path"]
+    if case == "missing-file":
+        logo.unlink()
+    elif case == "invalid-bytes":
+        logo.write_bytes(b"x" * logo.stat().st_size)
+    elif case == "executable-mode":
+        if os.name == "nt":
+            pytest.skip("POSIX executable mode")
+        logo.chmod(0o755)
+    elif case == "executable-inventory":
+        payload["components"][-1]["executable"] = payload["metadata"]["has_executable_scripts"] = True
+    elif case == "duplicate-exclusion":
+        completeness["scope_exclusions"].append(dict(row))
+    elif case == "extra-component":
+        payload["components"].append({"path": "another.py", "executable": False})
+    elif case in {"incomplete-analyzers", "uninspected-image"}:
+        analyzer_id = "static_patterns_tool_misuse" if case == "incomplete-analyzers" else "static_yara"
+        analyzer = next(status for status in completeness["analyzer_statuses"] if status["analyzer_id"] == analyzer_id)
+        analyzer["planned_work"] -= 1
+        analyzer["completed"] -= 1
+    elif case in {"control-path", "output-style-path"}:
+        directory = "hooks" if case == "control-path" else "output-styles"
+        (plugin / directory).mkdir()
+        destination = f"{directory}/logo.png"
+        logo.rename(plugin / destination)
+        row["path"] = payload["components"][-1]["path"] = destination
+    elif case == "resolved-reference":
+        completeness["references"].append({"status": "resolved", "target_path": row["path"]})
+    elif case in {"missing-reference", "ambiguous-reference"}:
+        completeness["references"].append(
+            {"status": case.removesuffix("-reference"), "source_path": "README.md", "line": 1}
+        )
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.is_incomplete
+    assert not any("text pattern" in warning for warning in result.warnings)
+
+
 class TestSkillspectorReferencedImages:
     """SkillSpector records a referenced image it cannot read as a ``partial`` analysis."""
 

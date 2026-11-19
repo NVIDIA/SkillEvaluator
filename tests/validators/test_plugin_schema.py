@@ -208,6 +208,19 @@ skills:
         assert "Cannot inspect skill manifest" in finding.message
 
 
+def test_nested_alias_manifest_is_reported_as_yaml_complexity(tmp_path: Path) -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_FRONTMATTER
+
+    _write_manifest(tmp_path, NESTED_ALIAS_FRONTMATTER + "\n")
+
+    result = PluginSchemaValidator().validate(tmp_path)
+
+    assert not result.passed
+    finding = next(f for f in result.findings if f.check_name == "manifest_yaml_complexity")
+    assert "complexity limits" in finding.message
+    assert "Simplify the manifest" in finding.suggestion
+
+
 class TestPluginManifestComplexityLimits:
     """Plugin manifests are read within the structured-data limits."""
 
@@ -223,7 +236,7 @@ class TestPluginManifestComplexityLimits:
         result = PluginSchemaValidator().validate(tmp_path)
 
         assert not result.passed
-        assert ("manifest_complexity_limit", "HIGH") in self._findings(result)
+        assert ("manifest_yaml_complexity", "HIGH") in self._findings(result)
 
     def test_agent_plugin_scalar_alias_fan_is_a_complexity_finding(self, tmp_path: Path):
         from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
@@ -232,7 +245,7 @@ class TestPluginManifestComplexityLimits:
 
         result = PluginSchemaValidator().validate(tmp_path)
 
-        assert ("manifest_complexity_limit", "HIGH") in self._findings(result)
+        assert ("manifest_yaml_complexity", "HIGH") in self._findings(result)
 
     def test_agent_plugin_invalid_date_is_a_yaml_finding_not_a_crash(self, tmp_path: Path):
         _write_manifest(tmp_path, f"{_VALID_MANIFEST}\nreleased: 2026-13-45\n")
@@ -244,7 +257,7 @@ class TestPluginManifestComplexityLimits:
     @pytest.mark.parametrize(
         ("body", "check_name"),
         [
-            ("[" * 3_000 + "]" * 3_000, "manifest_complexity_limit"),
+            ("[" * 3_000 + "]" * 3_000, "manifest_json_complexity"),
             ('{"name": ' + "9" * 5_000 + "}", "manifest_invalid_json"),
         ],
         ids=["deep-nesting", "integer-past-the-digit-limit"],

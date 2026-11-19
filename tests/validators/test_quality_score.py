@@ -7,16 +7,12 @@ from pathlib import Path
 
 import pytest
 import yaml
-from tests.yaml_alias_fixtures import (
-    OVER_LIMIT_LEVELS,
-    REPORTED_LEVELS,
-    alias_bomb_skill_md,
-    scalar_alias_fan_yaml,
-)
+from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
 from skillevaluator.quality_config import load_quality_config, quality_config_digest
 from skillevaluator.tier1.commands import run_validation
+from skillevaluator.utils.structured_data import StructuredDataLimitError
 from skillevaluator.validators.quality_score import QualityScoreValidator
 
 
@@ -2185,25 +2181,46 @@ def test_python_script_skill_still_needs_run_script(tmp_path):
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
 
 
-class TestNestedAliasFrontmatter:
-    """A few hundred bytes of nested YAML aliases must not be expanded by the quality checks."""
+def test_nested_alias_frontmatter_is_rejected_without_expanding(tmp_path: Path) -> None:
+    """A tiny frontmatter block with nested aliases must not be stringified field by field."""
+    import time
 
-    def test_reported_file_is_unreadable_not_expanded(self):
-        # The 434-byte file from the PSIRT report. Only the parse is run here: a reader that
-        # still returned the shared graph would be caught by this assertion before any
-        # ``str()`` could expand it.
-        assert QualityScoreValidator._parse_frontmatter(alias_bomb_skill_md(REPORTED_LEVELS)) is None
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
-    def test_validator_scores_the_skill_without_expanding_the_graph(self, tmp_path: Path):
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+
+    started = time.perf_counter()
+    result = QualityScoreValidator().validate(skill_dir)
+
+    assert time.perf_counter() - started < 5
+    assert not result.passed
+    assert "quality_scores" not in result.metadata
+    assert any("frontmatter exceeds the YAML complexity limits" in failure for failure in result.gate_failures)
+
+
+class TestFrontmatterParseLimits:
+    """The frontmatter parse behind the quality score, beyond the nested-alias case above."""
+
+    def test_one_large_scalar_aliased_many_times_exceeds_the_character_budget(self):
+        content = f"---\nname: demo-skill\ndescription: Use when demoing.\n{scalar_alias_fan_yaml()}\n---\n# Body\n"
+
+        with pytest.raises(StructuredDataLimitError, match="expanded text exceeds"):
+            QualityScoreValidator._parse_frontmatter(content)
+
+    def test_a_set_member_too_large_to_format_fails_the_gate_instead_of_crashing(self, tmp_path: Path):
         skill = tmp_path / "demo-skill"
         skill.mkdir()
-        (skill / "SKILL.md").write_text(alias_bomb_skill_md(OVER_LIMIT_LEVELS), encoding="utf-8")
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo-skill\ndescription: Use when demoing.\nx: !!set {0x" + "f" * 5_000 + "}\n---\n# Demo\n",
+            encoding="utf-8",
+        )
 
         result = QualityScoreValidator().validate(skill)
 
-        scores = result.metadata["quality_scores"]
-        assert scores["metrics"]["has_frontmatter"] is False
-        assert not any("XML tags in frontmatter" in finding.message for finding in result.findings)
+        assert not result.passed
+        assert any("exceeds the YAML complexity limits" in failure for failure in result.gate_failures)
 
     def test_unreadable_yaml_is_still_scored_without_frontmatter(self):
         assert QualityScoreValidator._parse_frontmatter("---\nname: [unclosed\n---\n# Body\n") is None
@@ -2220,20 +2237,3 @@ class TestNestedAliasFrontmatter:
         content = "---\nname: demo\nbase: &b [x, y]\nextra: *b\n---\n# Body\n"
 
         assert QualityScoreValidator._parse_frontmatter(content)["extra"] == ["x", "y"]
-
-    def test_one_large_scalar_aliased_many_times_is_unreadable_not_expanded(self):
-        content = f"---\nname: demo-skill\ndescription: Use when demoing.\n{scalar_alias_fan_yaml()}\n---\n# Body\n"
-
-        assert QualityScoreValidator._parse_frontmatter(content) is None
-
-    def test_a_set_member_too_large_to_format_does_not_crash_the_validator(self, tmp_path: Path):
-        skill = tmp_path / "demo-skill"
-        skill.mkdir()
-        (skill / "SKILL.md").write_text(
-            "---\nname: demo-skill\ndescription: Use when demoing.\nx: !!set {0x" + "f" * 5_000 + "}\n---\n# Demo\n",
-            encoding="utf-8",
-        )
-
-        result = QualityScoreValidator().validate(skill)
-
-        assert result.metadata["quality_scores"]["metrics"]["has_frontmatter"] is False

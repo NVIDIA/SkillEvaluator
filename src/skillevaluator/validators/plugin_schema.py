@@ -32,6 +32,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.structured_data import (
+    StructuredDataError,
     StructuredDataLimitError,
     StructuredDataSyntaxError,
     load_bounded_json,
@@ -156,18 +157,23 @@ class PluginSchemaValidator(ValidatorBase):
 
         try:
             data = load_bounded_yaml(raw, last_key_wins=True)
-        except StructuredDataLimitError as exc:
-            result.add_finding(self._complexity_finding(manifest_path, exc))
-            return None
-        except StructuredDataSyntaxError as exc:
+        except StructuredDataError as exc:
+            if isinstance(exc, StructuredDataLimitError):
+                check_name = "manifest_yaml_complexity"
+                message = f"Plugin manifest exceeds the YAML complexity limits: {exc}"
+                suggestion = "Simplify the manifest by reducing collection sizes, nesting, or alias expansion."
+            else:
+                check_name = "manifest_invalid_yaml"
+                message = f"Plugin manifest is not valid YAML: {exc.__cause__ or exc}"
+                suggestion = "Fix the YAML syntax in the plugin manifest."
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
-                    check_name="manifest_invalid_yaml",
-                    message=f"Plugin manifest is not valid YAML: {exc.__cause__ or exc}",
+                    check_name=check_name,
+                    message=message,
                     file_path=str(manifest_path),
-                    suggestion="Fix the YAML syntax in the plugin manifest.",
+                    suggestion=suggestion,
                 )
             )
             return None
@@ -186,17 +192,6 @@ class PluginSchemaValidator(ValidatorBase):
             return None
 
         return data
-
-    @staticmethod
-    def _complexity_finding(manifest_path: Path, exc: StructuredDataLimitError) -> Finding:
-        return Finding(
-            category="PLUGIN_SCHEMA",
-            severity=Severity.HIGH,
-            check_name="manifest_complexity_limit",
-            message=f"Plugin manifest exceeds the structured-data complexity limits: {exc}",
-            file_path=str(manifest_path),
-            suggestion="Remove nested aliases, merge keys, or oversized values from the plugin manifest.",
-        )
 
     def _add_validation_findings(
         self,
@@ -241,7 +236,16 @@ class PluginSchemaValidator(ValidatorBase):
             )
             return
         except StructuredDataLimitError as exc:
-            result.add_finding(self._complexity_finding(manifest_path, exc))
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_json_complexity",
+                    message=f"Contained plugin manifest exceeds the JSON complexity limits: {exc}",
+                    file_path=str(manifest_path),
+                    suggestion="Simplify the manifest by reducing collection sizes, nesting, or oversized values.",
+                )
+            )
             return
         except StructuredDataSyntaxError as exc:
             result.add_finding(

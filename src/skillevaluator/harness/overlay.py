@@ -24,7 +24,6 @@ from skillevaluator.constants import (
 )
 from skillevaluator.utils.structured_data import (
     StructuredDataError,
-    StructuredDataLimitError,
     StructuredDataSyntaxError,
     load_bounded_yaml,
 )
@@ -240,7 +239,6 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     match = FRONTMATTER_PATTERN.match(text)
     fm_yaml = match.group(1) if match else ""
     try:
-        # Bounded, not ``yaml.safe_load``: nested aliases must not expand in a later ``str()``.
         data = load_bounded_yaml(fm_yaml, last_key_wins=True) if match else None
     except StructuredDataError:
         data = None
@@ -258,10 +256,9 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
         return False
     try:
         load_bounded_yaml(fm_yaml, last_key_wins=True)
-    except StructuredDataSyntaxError:
-        return True
-    except StructuredDataLimitError:
-        # Over the parser limits is not a tab problem; the schema check reports it.
+    except StructuredDataSyntaxError as exc:
+        return isinstance(exc.__cause__, yaml.YAMLError)
+    except StructuredDataError:
         return False
     return False
 

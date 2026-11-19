@@ -33,6 +33,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
+  reports. `skillevaluator ci init --channel stable` prepares both workflows
+  with release-managed references and preserves signed scan verification.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 - `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
@@ -43,25 +46,26 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 1 no longer runs out of memory on a `SKILL.md` whose frontmatter nests YAML
-  aliases. A 434-byte file could be killed with exit 137 during the quality check,
-  because the check stringified the expanded graph. Tier 1 and the Tier 3 dataset,
-  case-summary and workspace-name readers now parse frontmatter within the Tier 2
-  structure limits, and a file over a limit fails the schema check with a HIGH
-  `manifest_complexity_limit` finding. A self-referencing anchor now fails the
-  same way instead of a `metadata_id_format` finding.
-- The structure limits now also cap the total text a document reaches through
-  YAML aliases (4 MiB, or four times the file's length if larger), so one large
-  string aliased many times can no longer expand to gigabytes. They walk `!!set`
-  members, which hid an oversized integer, and report a `%YAML` version number
-  or `\U` escape that PyYAML's scanner rejects with a plain `ValueError` as
-  invalid YAML. Tier 2 reads its frontmatter and manifests with the same limits.
-- The Tier 1 harness check, plugin schema check and SkillSpector manifest scoping
-  read `agents/openai.yaml`, `agent_plugin.yaml` and `.claude-plugin/plugin.json`
-  within the same limits. Chained YAML merge keys, deeply nested JSON or YAML, an
-  invalid date, or an integer past Python's digit limit in those files now
-  produce a finding or a fail-closed result instead of exhausting memory or
-  ending the run with a traceback and no report.
+- Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
+  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
+  harness compatibility overlay use the
+  bounded YAML loader. A small `SKILL.md` whose anchors and aliases expand far
+  beyond its size is reported as an invalid-frontmatter finding instead of
+  exhausting memory during the quality check.
+- The bounded YAML loader also caps the total text a document reaches through
+  aliases (4 MiB, or four times the document's length if larger), so one large
+  string aliased many times no longer expands to gigabytes when a reader
+  stringifies it. It walks `!!set` members, which hid an oversized integer, and
+  reports a `%YAML` version number or `\U` escape that PyYAML's scanner rejects
+  with a plain `ValueError` as invalid YAML. Tier 2 reads its frontmatter and
+  manifests with the same loader, so it gets the same protection.
+- The Tier 3 dataset generator, case summary and workspace skill-name readers,
+  the harness check's `agents/openai.yaml` read, and the contained
+  `.claude-plugin/plugin.json` read use the same limits. Chained YAML merge
+  keys, deeply nested YAML or JSON, an invalid date, or an integer past
+  Python's digit limit in those files now produce a finding or a fail-closed
+  result instead of exhausting memory or ending the run with a traceback and
+  no report.
 - The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
   which fixes false incomplete-analysis findings on valid JSON hook
   `timeout` fields.
@@ -83,6 +87,10 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
+  rate-limited calls stop when the requested wait exceeds the retry budget.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -130,6 +138,10 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Restore a temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline under a literal temporary root: these pipelines now
+  score Security `1.0` instead of a destructive-command finding. Unknown
+  producers, joined shell words and link traversal keep the finding.
 
 ## 1.0.1 - 2026-11-17
 

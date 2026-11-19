@@ -177,3 +177,15 @@ class TestValidatePydanticModel:
         assert model is None
         assert not result.passed
         assert any("count" in err.lower() for err in result.errors)
+
+
+def test_nested_alias_frontmatter_is_an_error_not_a_parse(tmp_path: Path) -> None:
+    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
+
+    test_file = tmp_path / "SKILL.md"
+    test_file.write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+
+    parsed, result = parse_frontmatter(test_file)
+
+    assert parsed is None
+    assert any("complexity limits" in error for error in result.errors)

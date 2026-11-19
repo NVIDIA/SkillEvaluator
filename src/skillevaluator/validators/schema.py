@@ -37,7 +37,11 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
 from skillevaluator.utils.path_security import matches_filesystem_name
-from skillevaluator.utils.structured_data import StructuredDataLimitError, StructuredDataSyntaxError, load_bounded_yaml
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
 from skillevaluator.validators.policy import AUTHOR_SHAPE_PATTERN, ValidationPolicy, default_policy
@@ -467,26 +471,21 @@ class SchemaValidator(ValidatorBase):
         frontmatter_yaml, markdown_content = match.groups()
 
         try:
-            # Bounded, not ``yaml.safe_load``: a few hundred bytes of nested
-            # aliases parse cheaply but expand to gigabytes once any value is
-            # stringified. A repeated key keeps its last value, as in
-            # ``safe_load``; the duplicate-key check below reports it.
             data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
         except StructuredDataLimitError as e:
             result.add_finding(
                 Finding(
                     category="SCHEMA",
                     severity=Severity.HIGH,
-                    check_name="manifest_complexity_limit",
+                    check_name="yaml_complexity",
                     message=f"Frontmatter exceeds the YAML complexity limits: {e}",
                     file_path=file_path,
                     line_number=2,
-                    suggestion="Remove nested aliases and merge keys, or shrink the frontmatter",
+                    suggestion="Remove nested anchors, aliases, merge keys or very large values from the frontmatter",
                 )
             )
             return result
         except StructuredDataSyntaxError as e:
-            # The loader normalizes PyYAML errors; the original one has the position and reason.
             cause = e.__cause__ or e
             # Extract line number from YAML error if available
             line_num = getattr(cause, "problem_mark", None)

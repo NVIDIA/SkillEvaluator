@@ -33,9 +33,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
+  command hooks in an exact, reviewed plugin package. Applied waivers are
+  reported and clear only the matching unmodeled-hook gate.
 - Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
   reports. `skillevaluator ci init --channel stable` prepares both workflows
   with release-managed references and preserves signed scan verification.
+- Add an opt-in GitLab CI stable include for Tier 1 scans. New pipelines pick up
+  the promoted job configuration and scanner image. The report artifact
+  records the release, commit, image, pipeline, and job.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 - `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
@@ -46,14 +52,21 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with a
-  skill, and the `--policy` and `--quality-config` files are read within the
-  structured-data limits. Chained YAML merge keys no longer take memory and time that
-  double with each level (a 943-byte file took over a gigabyte), and nested aliases no longer
-  expand when a dataset is staged or a policy value is stringified. A file over a limit
-  is an invalid dataset, policy or config, not an out-of-memory kill. JSON datasets
-  nested past the parser's recursion limit are invalid datasets, not a traceback. A
-  YAML dataset must stay within 1,024 items per list or mapping and 20,000 nodes.
+- Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
+  any independently measured component, instead of stopping report collection with `OverflowError`.
+  Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
+  list) now report zero tool seconds even when LLM timing is missing or invalid.
+  Previously, those missing/invalid-LLM cases had no timing, so the arm's
+  tool-seconds total was `N/A`.
+- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with
+  a skill, and the `--policy` and `--quality-config` files are read within the
+  structured-data limits. Chained YAML merge keys no longer take memory and time
+  that double with each level (a 943-byte file took over a gigabyte), and nested
+  aliases no longer expand when a dataset is staged or a policy value is
+  stringified. A file over a limit is an invalid dataset, policy or config, not
+  an out-of-memory kill. JSON datasets nested past the parser's recursion limit
+  are invalid datasets, not a traceback. A YAML dataset must stay within 1,024
+  items per list or mapping and 20,000 nodes.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the
@@ -65,15 +78,17 @@ All notable changes to SkillEvaluator are documented in this file.
   string aliased many times no longer expands to gigabytes when a reader
   stringifies it. It walks `!!set` members, which hid an oversized integer, and
   reports a `%YAML` version number or `\U` escape that PyYAML's scanner rejects
-  with a plain `ValueError` as invalid YAML. Tier 2 reads its frontmatter and
-  manifests with the same loader, so it gets the same protection.
+  with a plain `ValueError` (an `OverflowError` on Python 3.12) as invalid YAML.
+  Tier 2 reads its frontmatter and manifests with the same loader, so it gets
+  the same protection.
 - The Tier 3 dataset generator, case summary and workspace skill-name readers,
   the harness check's `agents/openai.yaml` read, and the contained
-  `.claude-plugin/plugin.json` read use the same limits. Chained YAML merge
-  keys, deeply nested YAML or JSON, an invalid date, or an integer past
-  Python's digit limit in those files now produce a finding or a fail-closed
-  result instead of exhausting memory or ending the run with a traceback and
-  no report.
+  `.claude-plugin/plugin.json` read use the same limits, and
+  `tier3 create-eval-dataset` reports over-limit `SKILL.md` frontmatter as a
+  one-line error. Chained YAML merge keys, deeply nested YAML or JSON, an
+  invalid date, or an integer past Python's digit limit in those files now
+  produce a finding or a fail-closed result instead of exhausting memory or
+  ending the run with a traceback and no report.
 - The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
   which fixes false incomplete-analysis findings on valid JSON hook
   `timeout` fields.
@@ -84,6 +99,7 @@ All notable changes to SkillEvaluator are documented in this file.
   I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
+- OpenAPI discovery inherits inline Path Item parameters and applies operation overrides by name and location; parameter lists containing references retain operation-only parsing.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
@@ -95,6 +111,10 @@ All notable changes to SkillEvaluator are documented in this file.
   including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
+- Tier 2 content clustering uses much less memory on skills with many chunks;
+  similarity scores and clusters are unchanged.
+- Naming checks reject a trailing newline in skill, workflow, and rule path components,
+  instead of treating the name before that newline as a complete kebab-case match.
 - LLM retries retain the innermost valid `Retry-After` header through exception
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and

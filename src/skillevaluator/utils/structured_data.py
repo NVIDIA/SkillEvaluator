@@ -196,11 +196,12 @@ def _preflight_yaml(raw: str) -> None:
                 raise _limit(f"parsed node count exceeds {MAX_STRUCTURED_NODES}")
     except StructuredDataLimitError:
         raise
-    except (RecursionError, OverflowError) as exc:
-        raise _limit("parser recursion or numeric range") from exc
-    except (yaml.YAMLError, ValueError) as exc:
-        # The scanner converts ``%YAML`` version digits and ``\U`` escapes itself, so an
-        # over-long number or an out-of-range code point raises a plain ValueError.
+    except RecursionError as exc:
+        raise _limit("parser recursion") from exc
+    except (yaml.YAMLError, ValueError, OverflowError) as exc:
+        # The scanner converts ``%YAML`` version digits and ``\U`` escapes itself, so an over-long
+        # number or an out-of-range code point raises a plain ValueError, or on Python 3.12 an
+        # OverflowError for a code point above a C int. All of them are invalid YAML.
         raise StructuredDataSyntaxError("Input is not valid YAML") from exc
 
 
@@ -439,6 +440,16 @@ def preflight_json_structure(
         else:
             preflight.close()
     preflight.run(raw, position, len(raw))
+
+
+def reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build an object while rejecting ambiguous duplicate members."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object member")
+        result[key] = value
+    return result
 
 
 def load_bounded_json(

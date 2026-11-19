@@ -1837,9 +1837,9 @@ class TestTier1Plumbing:
 
 
 def test_nested_alias_manifest_fails_closed() -> None:
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_FRONTMATTER
+    from tests.yaml_alias_fixtures import alias_bomb_frontmatter
 
-    assert scope_module._manifest_reference_text(NESTED_ALIAS_FRONTMATTER) is None
+    assert scope_module._manifest_reference_text(alias_bomb_frontmatter()) is None
 
 
 class TestManifestReferenceTextIsBounded:

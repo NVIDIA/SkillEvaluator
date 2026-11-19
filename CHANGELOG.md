@@ -10,6 +10,10 @@ All notable changes to SkillEvaluator are documented in this file.
   scanning earlier tool calls, reducing reconstruction time for long trajectories.
 - Tier 3 lift intervals compute faster when every case has the same lift;
   results are unchanged.
+- `EmbeddingRegistry.query` and `query_entry` no longer call the embedding provider
+  when the catalog has no eligible entries to compare against.
+  These queries return an empty result without constructing the provider
+  client, including when that provider is missing or unreachable.
 
 ### Documentation
 
@@ -40,6 +44,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a

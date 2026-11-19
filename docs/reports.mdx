@@ -408,7 +408,10 @@ as SARIF and JUnit. GitHub resolves it against the checkout. `line=` (and
 `file` is omitted when the path is outside the repository. `title=` is the
 check group and check name. An incomplete scan is never a clean log: each
 unfinished scanner is a warning, and the run ends with one `::notice`
-summary (skills checked, passed, failed, incomplete).
+summary (skills checked, passed, failed, incomplete). The summary follows the
+required validation gate, like the JSON `overall_status` and the exit code, so
+a failed advisory group (such as Tier 2 dedup with `--no-block-on-dedup`) does
+not count the skill as failed.
 
 GitHub shows at most 10 error, 10 warning, and 10 notice annotations per
 step (50 per job). This format emits the most severe first, in a

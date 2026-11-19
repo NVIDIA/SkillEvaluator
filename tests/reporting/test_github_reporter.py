@@ -231,6 +231,33 @@ def test_incomplete_scan_is_warning() -> None:
     assert "1 skill checked, 0 passed, 0 failed, 1 incomplete" in _summary(text)
 
 
+def _advisory_dedup_failure() -> ValidationResult:
+    result = ValidationResult(validator_name="Tier 2 Dedup")
+    result.add_error("SKILL.md duplicates an existing skill")
+    result.metadata["gating"] = {"tier": 2, "blocking": False}
+    return result
+
+
+def test_advisory_failure_does_not_fail_the_skill() -> None:
+    schema = ValidationResult(validator_name="SCHEMA")
+    schema.metadata["gating"] = {"tier": 1, "blocking": True}
+
+    text = GitHubReporter().render_all([schema, _advisory_dedup_failure()])
+
+    assert "::error" not in text
+    assert "1 skill checked, 1 passed, 0 failed, 0 incomplete" in _summary(text)
+
+
+def test_advisory_failure_keeps_required_incomplete_scan() -> None:
+    scan = ValidationResult(validator_name="Security Scan")
+    scan.mark_scan_incomplete("skillspector")
+    scan.metadata["gating"] = {"tier": 1, "blocking": True}
+
+    text = GitHubReporter().render_all([scan, _advisory_dedup_failure()])
+
+    assert "1 skill checked, 0 passed, 0 failed, 1 incomplete" in _summary(text)
+
+
 def test_escaping_percent_cr_lf_colon_comma() -> None:
     result = ValidationResult(validator_name="SCHEMA:group,name")
     result.add_finding(

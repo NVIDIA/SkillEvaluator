@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped, passes_required_gate
-from skillevaluator.reporting.run_status import Status, result_status
+from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.sarif_reporter import (
     _finding_severity_value,
     _positive_start_line,
@@ -338,13 +338,17 @@ def _annotations_for_result(
 
 
 def _skill_counts(results: list[ValidationResult]) -> tuple[int, int, int, int]:
-    """Return (checked, passed, failed, incomplete) for this render."""
+    """Return (checked, passed, failed, incomplete) for this render.
+
+    Counts follow the required validation gate, as the JSON ``overall_status``
+    and the exit code do, so an advisory group's result cannot fail the skill.
+    """
     if not results:
         return 0, 0, 0, 0
-    statuses = [result_status(result) for result in results]
-    if any(status == Status.FAILED for status in statuses):
+    headline = resolve_run_status(results).headline
+    if headline == Status.FAILED:
         return 1, 0, 1, 0
-    if any(status == Status.INCOMPLETE for status in statuses):
+    if headline == Status.INCOMPLETE:
         return 1, 0, 0, 1
     return 1, 1, 0, 0
 

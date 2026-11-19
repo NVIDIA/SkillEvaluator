@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 # ruff: noqa: INP001 -- standalone release helper.
 
-"""Render the GitHub stable workflows from a verified Tier 1 release bundle."""
+"""Render the stable GitHub and GitLab configurations from a verified Tier 1 release bundle."""
 
 from __future__ import annotations
 
@@ -21,13 +21,15 @@ except ModuleNotFoundError:
 
 ROOT = Path(__file__).resolve().parents[1]
 TEMPLATES = ROOT / "ci/templates/stable"
+GITHUB_OUTPUT = ROOT / ".github/workflows"
+GITLAB_INCLUDE = "stable-tier1.yml"
 WORKFLOWS = ("skill-checks-stable.yml", "publish-skill-reports-stable.yml")
 RELEASE_HEADER = "# SkillEvaluator release: "
 VERSION = re.compile(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)")
 OFFICIAL_IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier1@sha256:[a-f0-9]{64}")
 
 
-def render(bundle: Path, *, templates: Path = TEMPLATES) -> dict[str, str]:
+def render(bundle: Path, *, templates: Path = TEMPLATES, include_gitlab: bool = True) -> dict[str, str]:
     if not VERSION.fullmatch(bundle.name):
         raise ValueError("A stable channel bundle must have a numeric major.minor.patch version.")
     release = github_api.strict_json((bundle / "release.json").read_bytes())
@@ -51,6 +53,7 @@ def render(bundle: Path, *, templates: Path = TEMPLATES) -> dict[str, str]:
     ):
         raise ValueError("The image must match the release's public verification receipt.")
 
+    names = (*WORKFLOWS, GITLAB_INCLUDE) if include_gitlab else WORKFLOWS
     return {
         name: (
             (templates / name)
@@ -60,12 +63,20 @@ def render(bundle: Path, *, templates: Path = TEMPLATES) -> dict[str, str]:
             .replace("RELEASE_PUBLISHER_SHA", release["publisher_ref"])
             .replace("RELEASE_IMAGE", image)
         )
-        for name in WORKFLOWS
+        for name in names
     }
 
 
 def verify_publication(
-    bundle: Path, manifest_path: Path, release_commit: str, digest: str, size: int, zip_digest: str, zip_size: int
+    bundle: Path,
+    manifest_path: Path,
+    release_commit: str,
+    digest: str,
+    size: int,
+    zip_digest: str,
+    zip_size: int,
+    *,
+    include_gitlab: bool = False,
 ) -> None:
     """Tie the verified CI bundle and its runtime refs to the immutable GitHub release."""
     raw = manifest_path.read_bytes()
@@ -109,11 +120,14 @@ def verify_publication(
             ):
                 raise ValueError(f"The published CI archive's {name} differs from the tagged CI bundle.")
 
-    for ref, path in (
+    sources = [
         (release["workflow_ref"], ".github/workflows/evaluate-skills.yml"),
         (release["publisher_ref"], ".github/workflows/publish-skill-reports.yml"),
         (receipt["source_revision"], "ci/Dockerfile.tier1"),
-    ):
+    ]
+    if include_gitlab:
+        sources.append((release["workflow_ref"], "ci/gitlab/skill-evaluation.yml"))
+    for ref, path in sources:
         try:
             git("merge-base", "--is-ancestor", ref, release_commit)
             git("cat-file", "-e", f"{ref}:{path}")
@@ -124,20 +138,41 @@ def verify_publication(
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("bundle", type=Path, help="Versioned CI bundle directory")
-    parser.add_argument("--output", type=Path, default=ROOT / ".github/workflows")
+    parser.add_argument("--output", type=Path, default=GITHUB_OUTPUT, help="GitHub workflow output directory")
     parser.add_argument("--templates", type=Path, default=TEMPLATES, help="Directory containing stable templates")
-    parser.add_argument("--check", action="store_true", help="Verify the workflows without changing any files")
+    parser.add_argument(
+        "--gitlab-output", type=Path, help="GitLab include path (defaults to ci/gitlab or the custom output directory)"
+    )
+    parser.add_argument("--check", action="store_true", help="Verify the outputs without changing any files")
     parser.add_argument(
         "--publication", nargs=6, metavar=("MANIFEST", "COMMIT", "DIGEST", "SIZE", "ZIP_DIGEST", "ZIP_SIZE")
     )
     args = parser.parse_args()
+    gitlab_dir = ROOT / "ci/gitlab" if args.output == GITHUB_OUTPUT else args.output
+    gitlab_output = args.gitlab_output or gitlab_dir / GITLAB_INCLUDE
+    gitlab_template = (args.templates / GITLAB_INCLUDE).is_file()
+    # Historical published releases can predate GitLab support. Verify both files
+    # when either is present, and require both in normal release preparation.
+    historical = args.check and args.publication is not None and not (gitlab_template or gitlab_output.is_file())
+    include_gitlab = not historical
     try:
-        workflows = render(args.bundle, templates=args.templates)
+        if include_gitlab and args.check and not (gitlab_template and gitlab_output.is_file()):
+            raise ValueError("The GitLab stable template and generated include are both required.")
+        workflows = render(args.bundle, templates=args.templates, include_gitlab=include_gitlab)
         if args.publication:
             manifest, commit, digest, size, zip_digest, zip_size = args.publication
-            verify_publication(args.bundle, Path(manifest), commit, digest, int(size), zip_digest, int(zip_size))
+            verify_publication(
+                args.bundle,
+                Path(manifest),
+                commit,
+                digest,
+                int(size),
+                zip_digest,
+                int(zip_size),
+                include_gitlab=include_gitlab,
+            )
         for name, content in workflows.items():
-            target = args.output / name
+            target = gitlab_output if name == GITLAB_INCLUDE else args.output / name
             if args.check:
                 if target.read_bytes() != content.encode("utf-8"):
                     raise ValueError(f"{name} differs from the verified release bundle.")

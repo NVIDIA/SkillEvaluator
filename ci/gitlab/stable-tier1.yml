@@ -1,0 +1,45 @@
+# SPDX-License-Identifier: Apache-2.0
+# SkillEvaluator release: v1.0.1
+# Keep merge-request rules in the consumer's root .gitlab-ci.yml.
+include:
+  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/c9369a7811bde083b550f2ac488222e8c388d7fd/ci/gitlab/skill-evaluation.yml
+
+skill-evaluation:
+  image:
+    name: ghcr.io/nvidia/skillevaluator-tier1@sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a
+  before_script:
+    - |
+      set -eu
+      if [ "${CI_JOB_IMAGE:-}" != 'ghcr.io/nvidia/skillevaluator-tier1@sha256:fbff256df8f760019539d442b7cb533d7ec50efab37f4482b7b670e2e4b4189a' ]; then
+        echo "The GitLab job image does not match the promoted SkillEvaluator image." >&2
+        exit 1
+      fi
+      # The inherited job uses this variable to identify the image in its reports.
+      export SKILL_EVAL_IMAGE="$CI_JOB_IMAGE"
+      python -I - 'v1.0.1' 'c9369a7811bde083b550f2ac488222e8c388d7fd' <<'PYTHON'
+      import json
+      import os
+      import sys
+      from pathlib import Path
+
+      release, evaluator_sha = sys.argv[1:]
+      evidence = Path(os.environ['CI_PROJECT_DIR']) / 'skill-evaluator-ci.json'
+      metadata = {
+          'channel': 'stable',
+          'release': release,
+          'evaluator_sha': evaluator_sha,
+          'image': os.environ['SKILL_EVAL_IMAGE'],
+          'consumer_commit': os.environ['CI_COMMIT_SHA'],
+          'pipeline_id': os.environ['CI_PIPELINE_ID'],
+          'job_id': os.environ['CI_JOB_ID'],
+      }
+      try:
+          with evidence.open('x', encoding='utf-8') as stream:
+              stream.write(json.dumps(metadata, indent=2) + '\n')
+      except FileExistsError:
+          sys.exit('skill-evaluator-ci.json already exists in the checkout.')
+      PYTHON
+  artifacts:
+    paths:
+      - skill-evaluator-report/
+      - skill-evaluator-ci.json

@@ -67,11 +67,47 @@ A compatible runner must be able to pull the image and run Linux containers.
 If it requires tags, add them to `skill-evaluation`. Static scanning needs no
 model key, but dependency vulnerability checks may contact external services.
 
+## Follow the latest stable release
+
+Use this opt-in Tier 1 recipe once the first stable promotion includes GitLab.
+The stable include pins the shared job configuration to a commit and the
+scanner image to a digest. Keep the merge-request, default-branch, and manual
+pipeline rules in your root `.gitlab-ci.yml`.
+
+```yaml title=".gitlab-ci.yml"
+include:
+  - remote: https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/refs/tags/stable/ci/gitlab/stable-tier1.yml
+variables:
+  SKILL_EVAL_PATHS: "skills"
+  SKILL_EVAL_MIN_SCORE: "70"
+skill-evaluation:
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
+    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    - if: '$CI_PIPELINE_SOURCE == "web"'
+```
+
+To migrate an existing Tier 1 setup, replace its pinned SkillEvaluator include
+with the stable include. Remove `SKILL_EVAL_IMAGE` and any `skill-evaluation`
+`image` override so the stable include selects the image. Keep your skill paths,
+minimum score, scan settings, and root job rules. Use a Docker executor that
+reports the job image through `CI_JOB_IMAGE`, and keep the included
+`before_script` when customizing the job.
+
+New pipelines use the latest promoted release. Retrying a job uses the
+configuration saved when its pipeline was created. Use the versioned setup above
+to review each upgrade before adopting it.
+
 ## See the results
 
 Open the `skill-evaluation` job and download its `skill-evaluator-report`
 artifact. Open `index.html` for the consolidated view, then select a skill for
 its detailed HTML report. JSON, Markdown and SARIF are included.
+
+Stable-channel jobs also include `skill-evaluator-ci.json` alongside the HTML
+in the artifact. It records the SkillEvaluator release, the pinned job
+configuration commit, the image digest, the commit scanned, and the GitLab
+pipeline and job IDs.
 
 <Frame caption="Real demo result: the skill scored 98.2 and failed a 100-point threshold. The score and the scan verdict are separate.">
   <img src="./assets/repository-ci-results-example.png" alt="Example report table showing a failed skill with a quality score of 98.2 and a link to its report" />

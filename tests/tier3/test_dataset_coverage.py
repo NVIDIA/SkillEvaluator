@@ -105,6 +105,19 @@ def test_validate_text_json_and_strict_info(skill):
     assert not any(row["status"] == "warning" for row in payload)
 
 
+@pytest.mark.parametrize("strict", [False, True], ids=["default", "strict"])
+def test_validate_missing_evals_exits_nonzero_and_reports_missing(tmp_path, strict):
+    skill = tmp_path / "missing-evals"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text("# Missing evals\n")
+    args = ["tier3", "validate", str(skill), "--json", *(["--strict"] if strict else [])]
+
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1, result.output
+    assert any(row["path"] == "evals/" and row["status"] == "missing" for row in json.loads(result.output))
+
+
 @pytest.mark.parametrize("content", ["{invalid", '{"evals": []}', '["bad"]'])
 def test_invalid_source_keeps_failure_exit(skill, content):
     (skill / "evals/evals.json").write_text(content)

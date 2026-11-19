@@ -155,7 +155,7 @@ def resolve_git_root(local_path: Path) -> Path | None:
             subprocess.check_output(
                 ["git", "rev-parse", "--show-toplevel"], cwd=str(working_dir), stderr=subprocess.DEVNULL
             )
-        ).strip()
+        ).removesuffix("\n")
     except (subprocess.CalledProcessError, FileNotFoundError, OSError):
         return None
     return Path(root).resolve() if root else None

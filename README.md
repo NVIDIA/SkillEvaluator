@@ -56,18 +56,27 @@ Then check skills from your terminal, CI, or agent:
 
 <p><img src="https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/928cc9d483fe9fef2d5011c3ca8f132cda46730a/docs/assets/get-started-cli.svg" width="250" alt="Run the CLI directly"></p>
 
-Quickly check your skill without an LLM key:
+Run checks backed by **500+ static rules and detection patterns**, without an
+LLM key. Complete [scanner setup](https://docs.nvidia.com/skills/skillevaluator/installation-options#system-tools)
+for full coverage:
 
 ```bash
-skillevaluator quality-check ./my-skill
+skillevaluator validate \
+  ./my-skill --tiers 1
 ```
 
-After [all-tier setup with NVIDIA Build](#run-all-three-tiers-with-a-free-nvidia-build-key), run the combined pipeline:
+<details><summary>Run all three tiers</summary>
+
+After [all-tier setup with NVIDIA Build](#run-all-three-tiers-with-a-free-nvidia-build-key),
+remove `--tiers 1` to add deduplication and live agent evaluation to measure
+skill lift:
 
 ```bash
 skillevaluator validate \
   ./my-skill
 ```
+
+</details>
 
 </td>
 <td width="33%">
@@ -80,7 +89,7 @@ Check every skill change. Run in your GitHub repo to open a setup PR:
 skillevaluator ci init
 ```
 
-GitLab details: [repository guide](https://docs.nvidia.com/skills/skillevaluator/repository-integration).
+[Guided setup and CI templates](#bring-skill-evaluation-to-your-repository) for GitHub and GitLab.
 
 </td>
 <td width="33%">
@@ -102,7 +111,7 @@ See the [agent guide](https://docs.nvidia.com/skills/skillevaluator/agent-skill)
 
 ### ⚡ [Harness check](https://docs.nvidia.com/skills/skillevaluator/harness-check): will your agent load your skill?
 
-Included in SkillEvaluator 1.0.1; see [Installation](https://docs.nvidia.com/skills/skillevaluator/installation) for package availability. No model key or agent run.
+🔑 **No API key** · 🤖 **No agent run**
 
 ```bash
 skillevaluator harness-check ./my-skill
@@ -121,7 +130,13 @@ Illustrative summary of versioned profiles. Full output can include notes and sc
 ╰────────────────────────────────────────────────────────────────── ❌ 2 of 6 not loaded ─╯
 ```
 
-`validate` in 1.0.1 includes it in Tier 1. 🧪 **Ready to go deeper?** Try a
+`skillevaluator validate` includes Harness Check in Tier 1 alongside **quality,
+schema, version, PII, license, Unicode and script linting**. Security and code
+integrity checks use **SkillSpector, Gitleaks, Bandit and optional Semgrep**.
+[See all Tier 1 checks](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#the-checks);
+use `--tiers 1` to run only this tier.
+
+🧪 **Ready to go deeper?** Try a
 [live agent evaluation](https://docs.nvidia.com/skills/skillevaluator/tier3-live-evaluation) (Tier 3).
 
 ## Quickstart
@@ -163,6 +178,48 @@ needs Docker running; add `--tiers 1,2` to skip it. More in
 [Run the combined pipeline](#run-the-combined-pipeline), the
 [Build walkthrough](docs/quickstart.mdx#use-nvidia-build) and [provider configuration](docs/configuration.mdx).
 
+## Bring skill evaluation to your repository
+
+**Minimal setup. No evaluation code to write or maintain.** Choose your skill
+folders and thresholds to get automated validation, security scanning and
+downloadable reports for changed skills in GitHub or GitLab.
+
+**[11 CI checks](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#the-checks) backed by 500+ static rules and detection patterns:**
+quality, schema, version, PII, license, Unicode, script linting,
+[Harness Check](https://docs.nvidia.com/skills/skillevaluator/harness-check),
+security, code integrity and dependency auditing.<br>
+**Scanners:** [SkillSpector](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#security--vulnerability-scanning),
+[Gitleaks, Bandit and Semgrep](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#code-integrity--code-risk-secrets-and-hygiene),
+and [pip-audit](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#dependency--cve-audit-opt-in).
+
+**GitHub guided setup:** after [installing the CLI](#get-started), run inside
+your checked-out repository:
+
+```bash
+skillevaluator ci init
+```
+
+Choose checks and optional hosted feedback, then review the setup PR.
+[CLI setup guide](https://docs.nvidia.com/skills/skillevaluator/cli-onboarding).
+
+**Manual setup:** copy a filled-in template from [CI templates](ci/bundles/README.md).
+No local CLI needed.
+
+| Your repository | Ready-to-use template | Copy destination |
+| --- | --- | --- |
+| GitHub | [Skill checks](ci/bundles/1.0.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](ci/bundles/1.0.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub PR comments without hosting | [Optional comments](ci/bundles/1.0.1/comment-skill-checks.yml) | Second workflow; complete [comment setup](ci/bundles/1.0.1/README.md#pr-comment-setup) |
+| GitHub hosted reports and PR comments | [Optional publisher](ci/bundles/1.0.1/publish-skill-reports.yml) | Second workflow; complete [publisher setup](ci/bundles/1.0.1/README.md#one-time-publisher-setup) |
+
+Choose one optional feedback workflow. These templates run Tier 1 quality and
+security checks without a model key; see [all-tier CI setup](https://docs.nvidia.com/skills/skillevaluator/advanced-ci)
+to add deduplication and live agent evaluation.
+
+See [GitHub](https://docs.nvidia.com/skills/skillevaluator/github-actions) and
+[GitLab](https://docs.nvidia.com/skills/skillevaluator/gitlab-ci) setup,
+[template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
+
 ## Three-tier overview
 
 ![Three-tier pipeline: skill, validation, deduplication, live evaluation, reports](https://raw.githubusercontent.com/NVIDIA/SkillEvaluator/ad2815fe78c045db91d230681d32863698da08cf/docs/assets/three-tier-overview.svg)
@@ -172,7 +229,7 @@ Each tier is independent. Use the [all-tier installation](https://docs.nvidia.co
 | Tier | Question | Example after setup | Additional setup |
 | --- | --- | --- | --- |
 | Tier 1: Validation | Is the skill safe, well-formed and [harness-compatible](docs/tier1-reference.mdx#the-checks)? | `skillevaluator tier1 ./my-skill --no-llm` | External scanners for full static coverage; a provider and model clients enable LLM checks |
-| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | SkillEvaluator 1.0.1; no API key or agent run |
+| Tier 1: Harness Check | Will the agent load the skill? | `skillevaluator harness-check ./my-skill` | No API key or agent run |
 | Tier 2: Deduplication | Does guidance repeat or overlap? | `skillevaluator tier2 ./my-skill` | Embeddings and chat; add `--catalog ./skill-catalog.json` for inter-skill comparison |
 | Tier 3: Live Agent Evaluation | Does the skill help the agent? | `skillevaluator tier3 ./my-skill` | Provider access, a supported agent, and a running sandbox (Docker by default) |
 

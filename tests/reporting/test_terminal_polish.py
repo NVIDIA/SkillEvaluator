@@ -8,7 +8,7 @@ import pytest
 from rich.console import Console
 from rich.text import Text
 
-from skillevaluator.models import ValidationResult
+from skillevaluator.models import Finding, Severity, ValidationResult
 from skillevaluator.reporting.cli import CLIReporter
 from skillevaluator.reporting.console_ui import ValidateView, Verdict, detail_row, lift_row, summarize_tier1
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
@@ -23,6 +23,34 @@ def test_compact_quality_grade_has_semantic_color(grade, style):
     )
     rows = summarize_tier1([result])[1]
     assert style in next(row for row in rows if row.label == "quality").segments[0][1]
+
+
+@pytest.mark.parametrize("show_coverage_notes", [True, False])
+def test_compact_tier1_discloses_passive_png_coverage(show_coverage_notes):
+    result = ValidationResult(validator_name="Security Scan")
+    result.add_finding(
+        Finding(
+            category="SCAN",
+            severity=Severity.INFO,
+            check_name="skillspector_passive_png_exclusion",
+            message=(
+                "SkillSpector's text pattern analyzers skipped 1 passive PNG file (assets/logo.png). "
+                "YARA and artifact integrity ran on the full inventory."
+            ),
+            file_path="assets/logo.png",
+        )
+    )
+    output = io.StringIO()
+    view = ValidateView(
+        "demo", [(1, "Static & Security", "static")], console=Console(file=output, width=100, color_system=None)
+    )
+    options = {} if show_coverage_notes else {"show_coverage_notes": False}
+    passed, rows = summarize_tier1([result], lineup=["security"], **options)
+    view.tier_done(0, failed=not passed, rows=rows)
+
+    assert passed
+    assert ("assets/logo.png" in output.getvalue()) is show_coverage_notes
+    assert ("YARA and artifact integrity" in output.getvalue()) is show_coverage_notes
 
 
 @pytest.mark.parametrize("lift", [0.0, 0.004, -0.004])

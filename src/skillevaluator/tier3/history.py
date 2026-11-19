@@ -311,6 +311,10 @@ def collect_history(skill_path: Path, results_dir: Path | None = None, agent: st
     for directory in directories:
         try:
             observed = _run_rows(directory, agent)
+            # Some retained values are copied without an identity walk. Check
+            # the export path while an invalid value can still be isolated to
+            # its own run, before adding any rows to the shared history.
+            export_history({"rows": [row for row, _ in observed]}, ".json")
         except (OSError, ValueError, RecursionError, SecurePathError) as exc:
             observed = [
                 (

@@ -16,7 +16,8 @@ All notable changes to SkillEvaluator are documented in this file.
   and no longer abort fresh or reused Tier 3 result collection.
 - Keep deeply nested retained JSON from aborting run discovery and Tier 3
   history. Undecodable runs are excluded from the latest-run fallback; history
-  also isolates recursive comparison metadata, while keeping healthy runs readable.
+  also isolates recursive retained metadata during JSON export, while keeping
+  healthy runs readable.
 - Allow GitHub all-tier CI to opt out of deployment records while retaining
   environment secrets. Existing consumers keep deployment tracking by default.
 - Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub

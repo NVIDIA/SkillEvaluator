@@ -203,6 +203,39 @@ def test_decodable_nested_identity_does_not_hide_other_history_runs(tmp_path, fi
     assert rows[1]["lift_reasons"]
 
 
+@pytest.mark.parametrize("field", ["evaluated_source", "publication_target", "evaluated_at"])
+@pytest.mark.parametrize("output", ["stdout", "file"])
+def test_unexportable_retained_values_do_not_hide_other_history_runs(tmp_path, field, output):
+    skill = tmp_path / "demo"
+    root = skill / "evals/results"
+    _run(root, 1)
+    broken = _run(root, 2)
+    _run(root, 3, score=0.9)
+    path = broken / "result.json"
+    payload = json.loads(path.read_text())
+    if field == "evaluated_at":
+        payload[field] = "nested-export-placeholder"
+    else:
+        payload.pop(field, None)
+        payload["comparison_identity"]["skill"][field] = "nested-export-placeholder"
+    nested = "[" * 2_000 + "0" + "]" * 2_000
+    text = json.dumps(payload).replace('"nested-export-placeholder"', nested)
+    assert isinstance(json.loads(text), dict)  # Valid JSON whose indented export exceeds the recursion limit.
+    path.write_text(text)
+    destination = tmp_path / "history.json"
+    options = ["--json"] if output == "stdout" else ["--output", str(destination)]
+
+    result = CliRunner().invoke(cli, ["tier3", "history", str(skill), *options])
+
+    assert result.exit_code == 0, result.output
+    rows = json.loads(result.output if output == "stdout" else destination.read_text())["rows"]
+    assert [row["run_id"] for row in rows] == ["20260101_010000", "20260101_020000", "20260101_030000"]
+    assert [row["lift_delta"] for row in rows] == [0.3, None, 0.4]
+    assert rows[1]["status"] == "corrupt"
+    assert rows[1]["lift_status"] == "unavailable"
+    assert rows[1]["lift_reasons"]
+
+
 def test_unknown_old_identity_does_not_create_a_trend(tmp_path):
     skill = tmp_path / "demo"
     first = _run(skill / "evals/results", 1)

@@ -14,7 +14,7 @@ are counted on the closing notice rather than omitted silently.
 from __future__ import annotations
 
 import sys
-from collections.abc import Iterator
+from collections.abc import Collection, Iterator
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
@@ -389,14 +389,86 @@ def collect_annotations() -> Iterator[list[dict]]:
         _collector.reset(token)
 
 
-def print_collected_annotations(entries: list[dict]) -> None:
-    """Print one capped annotation stream and one summary for collected per-skill entries."""
-    annotations = [_Annotation(**item) for entry in entries for item in entry["annotations"]]
-    totals = [0, 0, 0, 0]
-    for entry in entries:
-        for index, value in enumerate(entry["counts"]):
-            totals[index] += value
-    _write_stdout(_render(annotations, (totals[0], totals[1], totals[2], totals[3])))
+def _collected_status(entries: list[dict]) -> str | None:
+    """Return the status one skill's own collected renders reported, or None when it rendered nothing."""
+    if not entries:
+        return None
+    totals = [sum(entry["counts"][index] for entry in entries) for index in range(4)]
+    if totals[2]:
+        return "failed"
+    if totals[3]:
+        return "incomplete"
+    return "passed"
+
+
+def catalog_annotation(
+    *,
+    check: str,
+    message: str,
+    severity: str,
+    blocking: bool,
+    file_path: Path | None = None,
+    workspace_root: Path | None = None,
+    scan_root: Path | None = None,
+) -> dict:
+    """Return a collected-annotation entry for a finding the catalog itself made.
+
+    A catalog checks some policies, such as ``metadata.id`` uniqueness, across
+    skills after each skill has rendered, so those findings exist in no skill's
+    own stream. Blocking findings are errors; advisory ones follow severity but
+    never error.
+    """
+    level = "error" if blocking else _level_for_severity(severity)
+    if level == "error" and not blocking:
+        level = "warning"
+    path = _github_file_path(str(file_path), workspace_root, scan_root) if file_path is not None else None
+    return asdict(
+        _Annotation(
+            level=level,
+            kind="finding",
+            severity=severity,
+            path=path or "",
+            line=None,
+            end_line=None,
+            check=_clean_text(check, max_len=_TITLE_MAX),
+            title=_title("catalog", check),
+            message=_clean_text(message),
+        )
+    )
+
+
+def print_collected_annotations(
+    skills: dict[str, list[dict]],
+    *,
+    failed: Collection[str] = (),
+    catalog_failed: Collection[str] = (),
+    catalog_annotations: list[dict] | None = None,
+) -> None:
+    """Print one capped annotation stream and one summary for a whole catalog.
+
+    *skills* maps every catalog skill to the entries its own renders collected.
+    The summary counts follow the catalog's final outcomes, not the per-skill
+    renders: *failed* names every skill the catalog failed and *catalog_failed*
+    the ones failed by a catalog-level check, which no skill render saw. A skill
+    the catalog failed only because its own scan did not complete stays
+    incomplete. *catalog_annotations* join the per-skill ones before the cap.
+    """
+    annotations = [
+        _Annotation(**item) for entries in skills.values() for entry in entries for item in entry["annotations"]
+    ]
+    annotations.extend(_Annotation(**item) for item in catalog_annotations or [])
+    passed = failures = incomplete = 0
+    for name, entries in skills.items():
+        own = _collected_status(entries)
+        if name in catalog_failed:
+            failures += 1
+        elif own == "incomplete":
+            incomplete += 1
+        elif name in failed:
+            failures += 1
+        else:
+            passed += 1
+    _write_stdout(_render(annotations, (len(skills), passed, failures, incomplete)))
 
 
 class GitHubReporter(ReporterBase):

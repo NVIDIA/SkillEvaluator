@@ -46,7 +46,11 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier2,
     summarize_tier3,
 )
-from skillevaluator.reporting.github_reporter import collect_annotations, print_collected_annotations
+from skillevaluator.reporting.github_reporter import (
+    catalog_annotation,
+    collect_annotations,
+    print_collected_annotations,
+)
 from skillevaluator.reporting.naming import report_basename
 
 # Tier 1 (static validation) is the base install surface and is safe to import
@@ -1782,6 +1786,79 @@ def _record_metadata_id_failures(
     return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
+def _print_catalog_github_annotations(
+    ctx: click.Context,
+    *,
+    catalog_root: Path,
+    skill_dirs: list[Path],
+    skill_annotations: dict[str, list[dict]],
+    failures: list[tuple[str, str]],
+    id_conflicts: list[dict[str, object]],
+    id_failures: list[tuple[str, str]],
+    discovery_problems: dict[Path, str],
+) -> None:
+    """Print the catalog's one GitHub annotation stream from its final outcomes.
+
+    Skills render before the catalog checks ``metadata.id`` uniqueness, so the
+    per-skill counts would miss those failures. The summary is counted from the
+    catalog's failures instead, and catalog-level findings join the same capped
+    stream with a file on the affected skill's manifest.
+    """
+    if "github" not in (ctx.params.get("report_formats") or ()):
+        return
+    from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+
+    roots = _report_roots(catalog_root)
+    names = {skill_dir.relative_to(catalog_root).as_posix(): skill_dir for skill_dir in skill_dirs}
+
+    def manifest(name: str) -> Path | None:
+        skill_dir = names.get(name)
+        if skill_dir is None:
+            return None
+        for variant in SKILL_MANIFEST_VARIANTS:
+            if (skill_dir / variant).is_file():
+                return skill_dir / variant
+        return skill_dir
+
+    def annotation(name: str, *, check: str, message: str, severity: str, blocking: bool) -> dict:
+        return catalog_annotation(
+            check=check,
+            message=message,
+            severity=severity,
+            blocking=blocking,
+            file_path=manifest(name),
+            workspace_root=roots["repository_root"],
+            scan_root=catalog_root,
+        )
+
+    extra: list[dict] = []
+    for skill_dir, reason in discovery_problems.items():
+        name = skill_dir.relative_to(catalog_root).as_posix()
+        extra.append(annotation(name, check="discovery", message=f"{name}: {reason}", severity="high", blocking=True))
+    for conflict in id_conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list):
+            continue
+        for member in map(str, members):
+            others = ", ".join(str(other) for other in members if str(other) != member)
+            extra.append(
+                annotation(
+                    member,
+                    check="metadata_id_duplicate",
+                    message=f"{member}: metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+                    severity=str(conflict.get("severity") or ""),
+                    blocking=bool(conflict.get("blocking")),
+                )
+            )
+    print_collected_annotations(
+        {name: skill_annotations.get(name, []) for name in names},
+        failed={name for name, _reason in failures},
+        catalog_failed={name for name, _reason in id_failures}
+        | {path.relative_to(catalog_root).as_posix() for path in discovery_problems},
+        catalog_annotations=extra,
+    )
+
+
 def _validate_catalog(
     ctx: click.Context,
     *,
@@ -1823,7 +1900,7 @@ def _validate_catalog(
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
-    github_annotations: list[dict] = []
+    github_annotations: dict[str, list[dict]] = {}
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
             skill_name = skill_dir.relative_to(resolved_target).as_posix()
@@ -1845,7 +1922,7 @@ def _validate_catalog(
                     try:
                         ctx.invoke(validate, **overrides)
                     finally:
-                        github_annotations.extend(skill_annotations)
+                        github_annotations[skill_name] = skill_annotations
             except click.ClickException as exc:
                 reason = str(getattr(exc, "message", exc))
                 failures.append((skill_name, reason))
@@ -1878,8 +1955,16 @@ def _validate_catalog(
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
-    if github_annotations:
-        print_collected_annotations(github_annotations)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=resolved_target,
+        skill_dirs=skill_dirs,
+        skill_annotations=github_annotations,
+        failures=failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -1947,8 +2032,6 @@ def _validate_catalog_parallel(
     failures = _record_metadata_id_failures(failures, id_failures)
     failures.sort(key=lambda item: item[0])
     failure_map = dict(failures)
-    # Workers finish in any order; skill order keeps the annotation stream stable.
-    github_annotations = [entry for name in sorted(worker_annotations) for entry in worker_annotations[name]]
     skill_entries = [
         _catalog_skill_entry(
             skill_name,
@@ -1960,8 +2043,16 @@ def _validate_catalog_parallel(
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
-    if github_annotations:
-        print_collected_annotations(github_annotations)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=catalog_root,
+        skill_dirs=skill_dirs,
+        skill_annotations=worker_annotations,
+        failures=failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:

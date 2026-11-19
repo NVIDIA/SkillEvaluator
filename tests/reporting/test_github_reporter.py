@@ -507,13 +507,22 @@ def test_catalog_emits_one_capped_stream(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_parallel_catalog_returns_worker_annotations_to_parent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("skillevaluator.cli.run_validation", _bad_schema)
+    _inline_process_pool(monkeypatch)
+    catalog = _catalog(tmp_path, 12)
+    reports = tmp_path / "reports"
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers=2))
+    _assert_one_capped_catalog_stream(result.output, 12)
+    assert len(list(reports.glob("skill-*/*.json"))) == 12
+
+
+def _inline_process_pool(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Run parallel catalog jobs in-process so worker results reach the parent unchanged."""
     from concurrent.futures import Future
 
     import skillevaluator.cli as cli_module
 
     class InlineExecutor:
-        """Run worker jobs in-process so the test can patch the validator."""
-
         def __init__(self, max_workers: int) -> None:
             self.max_workers = max_workers
 
@@ -528,13 +537,111 @@ def test_parallel_catalog_returns_worker_annotations_to_parent(tmp_path: Path, m
             future.set_result(fn(job))
             return future
 
-    monkeypatch.setattr("skillevaluator.cli.run_validation", _bad_schema)
     monkeypatch.setattr(cli_module, "ProcessPoolExecutor", InlineExecutor)
-    catalog = _catalog(tmp_path, 12)
+
+
+def _catalog_with_ids(tmp_path: Path, ids: list[str]) -> Path:
+    catalog = tmp_path / "skills"
+    for index, metadata_id in enumerate(ids):
+        skill = catalog / f"skill-{index:02d}"
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: skill-{index:02d}\n"
+            "description: Use when a test needs a valid skill that declares a registry metadata id.\n"
+            f"metadata:\n  author: Test Team <team@example.com>\n  id: {metadata_id}\n---\n\n# Skill\n",
+            encoding="utf-8",
+        )
+    return catalog
+
+
+@pytest.mark.parametrize("workers", [1, 2])
+def test_catalog_summary_counts_duplicate_metadata_id_failures(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    import json
+
+    _inline_process_pool(monkeypatch)
+    catalog = _catalog_with_ids(tmp_path, ["shared-id", "shared-id"])
     reports = tmp_path / "reports"
-    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers=2))
-    _assert_one_capped_catalog_stream(result.output, 12)
-    assert len(list(reports.glob("skill-*/*.json"))) == 12
+    args = [*_validate_catalog_args(catalog, reports, workers), "--profile", "registry"]
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 1, result.output
+    summary = json.loads((reports / "catalog-summary.json").read_text(encoding="utf-8"))
+    assert (summary["passed"], summary["failed"]) == (0, 2)
+    commands = _commands(result.output)
+    duplicates = [line for line in commands if "metadata_id_duplicate" in line]
+    assert len(duplicates) == 2
+    assert all(line.startswith("::error") for line in duplicates)
+    assert any("file=skill-00/SKILL.md" in line and "skill-01" in line for line in duplicates)
+    summaries = [line for line in commands if line.startswith("::notice title=SkillEvaluator::")]
+    assert summaries == ["::notice title=SkillEvaluator::2 skills checked, 0 passed, 2 failed, 0 incomplete"]
+
+
+def test_catalog_unique_metadata_ids_still_pass(tmp_path: Path) -> None:
+    catalog = _catalog_with_ids(tmp_path, ["first-id", "second-id"])
+    reports = tmp_path / "reports"
+    args = [*_validate_catalog_args(catalog, reports, 1), "--profile", "registry"]
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 0, result.output
+    assert "metadata_id_duplicate" not in result.output
+    assert _summary(result.output).endswith("2 skills checked, 2 passed, 0 failed, 0 incomplete")
+
+
+def test_advisory_duplicate_metadata_id_is_a_warning(tmp_path: Path) -> None:
+    catalog = _catalog_with_ids(tmp_path, ["shared-id", "shared-id"])
+    reports = tmp_path / "reports"
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, 1))
+
+    assert result.exit_code == 0, result.output
+    duplicates = [line for line in _commands(result.output) if "metadata_id_duplicate" in line]
+    assert len(duplicates) == 2
+    assert all(line.startswith("::warning") for line in duplicates)
+    assert _summary(result.output).endswith("2 skills checked, 2 passed, 0 failed, 0 incomplete")
+
+
+def _collected(level: str, counts: list[int]) -> list[dict]:
+    from skillevaluator.reporting.github_reporter import catalog_annotation
+
+    item = catalog_annotation(check="c", message="m", severity="high", blocking=level == "error")
+    return [{"annotations": [item], "counts": counts}]
+
+
+def test_catalog_counts_keep_incomplete_and_apply_catalog_failures(capsys: pytest.CaptureFixture[str]) -> None:
+    from skillevaluator.reporting.github_reporter import print_collected_annotations
+
+    print_collected_annotations(
+        {
+            "incomplete": _collected("warning", [1, 0, 0, 1]),
+            "incomplete-and-duplicate": _collected("warning", [1, 0, 0, 1]),
+            "passed-then-duplicate": _collected("warning", [1, 1, 0, 0]),
+            "own-failure": _collected("error", [1, 0, 1, 0]),
+            "crashed": [],
+            "passed": _collected("warning", [1, 1, 0, 0]),
+        },
+        failed={"incomplete", "incomplete-and-duplicate", "passed-then-duplicate", "own-failure", "crashed"},
+        catalog_failed={"incomplete-and-duplicate", "passed-then-duplicate"},
+    )
+    assert _summary(capsys.readouterr().out).endswith("6 skills checked, 1 passed, 4 failed, 1 incomplete")
+
+
+def test_catalog_findings_share_the_annotation_cap(capsys: pytest.CaptureFixture[str]) -> None:
+    from skillevaluator.reporting.github_reporter import catalog_annotation, print_collected_annotations
+
+    extra = [
+        catalog_annotation(check="metadata_id_duplicate", message=f"dup {index}", severity="high", blocking=True)
+        for index in range(4)
+    ]
+    print_collected_annotations(
+        {f"skill-{index}": _collected("error", [1, 0, 1, 0]) for index in range(8)},
+        failed={f"skill-{index}" for index in range(8)},
+        catalog_failed={"skill-0", "skill-1"},
+        catalog_annotations=extra,
+    )
+    out = capsys.readouterr().out
+    assert sum(line.startswith("::error") for line in _commands(out)) == 10
+    assert "2 more were not annotated" in _summary(out)
 
 
 @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")

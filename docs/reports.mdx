@@ -415,7 +415,11 @@ job). This format emits the most severe first, in a deterministic order
 not annotated and points at the other reports from the same `-r` list.
 A catalog run (a folder of skills, with any `--workers` value) prints one
 capped stream and one summary for the whole catalog, after every skill has
-finished, rather than one per skill.
+finished, rather than one per skill. The summary counts match
+`catalog-summary.json`, and catalog-level findings such as a duplicate
+`metadata.id` are annotated on each affected skill's `SKILL.md` within the same
+caps. A skill whose only problem is an incomplete scan stays counted as
+incomplete.
 Finding text is escaped per GitHub's workflow-command rules and stripped of
 control characters; credential-shaped values are masked like the other
 reporters. A planted newline or `::add-mask` / `::stop-commands` payload

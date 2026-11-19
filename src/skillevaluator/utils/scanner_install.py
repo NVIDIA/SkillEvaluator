@@ -24,12 +24,12 @@ import urllib.request
 from pathlib import Path
 from types import MappingProxyType
 
-SKILLSPECTOR_VERSION = "2.13.4"
+SKILLSPECTOR_VERSION = "2.13.6"
 SKILLSPECTOR_WHEEL = f"skillspector-{SKILLSPECTOR_VERSION}-py3-none-any.whl"
 SKILLSPECTOR_WHEEL_URL = (
     f"https://github.com/NVIDIA/SkillSpector/releases/download/v{SKILLSPECTOR_VERSION}/{SKILLSPECTOR_WHEEL}"
 )
-SKILLSPECTOR_WHEEL_SHA256 = "c5e7f290897c65018013a6e37022fabdd2ba1aeeb4994b65df2de8b0d536bea0"
+SKILLSPECTOR_WHEEL_SHA256 = "e7b46c55e726405b2a068d375d1ee8e799e15d86f3fc05f84feb5ba962198b15"
 # SkillSpector needs Python 3.12+, and its yara-python dependency publishes wheels only
 # through CPython 3.13. Left unpinned, uv picks its newest Python and has to compile
 # yara-python, which fails on hosts without a C toolchain such as a default Windows install.

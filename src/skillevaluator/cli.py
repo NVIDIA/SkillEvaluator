@@ -1830,6 +1830,7 @@ def _print_catalog_github_annotations(
         severity: str,
         blocking: bool,
         file_path: Path | None = None,
+        follow_links: bool = True,
     ) -> dict:
         return catalog_annotation(
             check=check,
@@ -1839,12 +1840,13 @@ def _print_catalog_github_annotations(
             file_path=file_path or manifest(name),
             workspace_root=roots["repository_root"],
             scan_root=catalog_root,
+            follow_links=follow_links,
         )
 
     extra: list[dict] = []
     for skill_dir, reason in discovery_problems.items():
         name = skill_dir.relative_to(catalog_root).as_posix()
-        # Relative to the catalog root, so the location keeps the link instead of its target.
+        # The link itself, never its target, even when the target is inside the repository.
         extra.append(
             annotation(
                 name,
@@ -1853,6 +1855,7 @@ def _print_catalog_github_annotations(
                 severity="high",
                 blocking=True,
                 file_path=Path(name),
+                follow_links=False,
             )
         )
     for conflict in id_conflicts:

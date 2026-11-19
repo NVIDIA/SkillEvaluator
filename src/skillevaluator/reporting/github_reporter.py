@@ -105,6 +105,26 @@ def _github_file_path(
     return _github_path_text(raw.replace("\\", "/"))
 
 
+def _link_github_file_path(
+    file_path: Path,
+    workspace_root: Path | None,
+    scan_root: Path | None,
+) -> str | None:
+    """Return the repository-relative path of *file_path* itself, or None.
+
+    Only the parent directory is resolved, so a symlink keeps its own path
+    even when its target is inside the repository.
+    """
+    if workspace_root is None or scan_root is None or ".." in file_path.parts:
+        return None
+    path = file_path if file_path.is_absolute() else scan_root / file_path
+    try:
+        relative = (path.parent.resolve() / path.name).relative_to(workspace_root.resolve())
+    except ValueError:
+        return None
+    return _github_path_text(relative.as_posix())
+
+
 def _end_line(finding: Finding) -> int | None:
     metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
     for key in ("end_line", "endLine"):
@@ -410,18 +430,25 @@ def catalog_annotation(
     file_path: Path | None = None,
     workspace_root: Path | None = None,
     scan_root: Path | None = None,
+    follow_links: bool = True,
 ) -> dict:
     """Return a collected-annotation entry for a finding the catalog itself made.
 
     A catalog checks some policies, such as ``metadata.id`` uniqueness, across
     skills after each skill has rendered, so those findings exist in no skill's
     own stream. Blocking findings are errors; advisory ones follow severity but
-    never error.
+    never error. With ``follow_links=False`` a symlinked *file_path* is
+    annotated on the link, not on its target.
     """
     level = "error" if blocking else _level_for_severity(severity)
     if level == "error" and not blocking:
         level = "warning"
-    path = _github_file_path(str(file_path), workspace_root, scan_root) if file_path is not None else None
+    if file_path is None:
+        path = None
+    elif follow_links:
+        path = _github_file_path(str(file_path), workspace_root, scan_root)
+    else:
+        path = _link_github_file_path(file_path, workspace_root, scan_root)
     return asdict(
         _Annotation(
             level=level,

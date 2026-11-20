@@ -52,6 +52,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 code risk no longer lets a skill configure its own Bandit scan. A
+  `.bandit` file shipped in the skill (at the root or nested, for example
+  `scripts/.bandit`) with `skips` or `tests`, or `# nosec` comments on risky
+  lines, previously removed findings such as `subprocess.call(..., shell=True)`
+  (B602) and `eval()` (B307) so the check passed. Bandit now runs with a
+  packaged empty `--ini` and `--ignore-nosec`, the findings are reported, and
+  a `.bandit` file in the skill is flagged as ignored.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

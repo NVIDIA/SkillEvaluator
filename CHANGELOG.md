@@ -66,6 +66,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Authorization: Bearer` header, and host inference failed with an illegal
   header value. This includes models called through the Bedrock Responses
   route.
+- Bedrock inference checks HTTPS on the endpoint selected for the request,
+  so an unused HTTP override no longer blocks a valid HTTPS route.
 - Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to

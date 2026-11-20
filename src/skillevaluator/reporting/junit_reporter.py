@@ -40,6 +40,7 @@ from skillevaluator.reporting.sarif_reporter import (
     _positive_start_line,
     _quote_uri_path,
     _resolve_artifact_path,
+    _resolve_for_reporting,
     _workspace_relative_path,
 )
 
@@ -102,7 +103,9 @@ def _junit_file_path(
             return _quote_uri_path(relative.as_posix())
     if scan_root is not None:
         try:
-            return _quote_uri_path(path.resolve().relative_to(scan_root.resolve()).as_posix())
+            return _quote_uri_path(
+                _resolve_for_reporting(path).relative_to(_resolve_for_reporting(scan_root)).as_posix()
+            )
         except ValueError:
             pass
     if path.is_absolute() or path.root:

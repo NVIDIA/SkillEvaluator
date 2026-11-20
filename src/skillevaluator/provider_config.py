@@ -103,7 +103,7 @@ _HEX_DIGITS = frozenset("0123456789abcdefABCDEF")
 _HEX_DIGIT_BYTES = frozenset(b"0123456789abcdefABCDEF")
 _UNRESERVED_BYTES = frozenset(b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~")
 _NO_CUSTOM_TEMPERATURE_MODEL_IDS = frozenset({"claude-mythos-preview"})
-_ANTHROPIC_BEDROCK_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?anthropic\.")
+_BEDROCK_VENDOR_PREFIX_RE = re.compile(r"^(?:(?:[a-z]{2}|global)\.)?(?:anthropic|openai)\.")
 # Gateway catalogs can put vendor words before the model name, as in
 # ``aws/anthropic/bedrock-claude-opus-5-5``.
 _GATEWAY_LEAF_PREFIX_RE = re.compile(r"^(?:[a-z]+-)+?(?=(?:claude|gpt)-)")
@@ -150,7 +150,7 @@ def _model_leaf(model: str) -> str:
     """Return a normalized model ID for capability checks only."""
     leaf = str(model or "").strip().casefold().rsplit("/", 1)[-1]
     leaf = _GATEWAY_LEAF_PREFIX_RE.sub("", leaf, count=1)
-    return _ANTHROPIC_BEDROCK_PREFIX_RE.sub("", leaf, count=1)
+    return _BEDROCK_VENDOR_PREFIX_RE.sub("", leaf, count=1)
 
 
 def _claude_version(model: str) -> tuple[int, int] | None:

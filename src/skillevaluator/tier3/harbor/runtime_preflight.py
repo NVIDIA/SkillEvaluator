@@ -83,6 +83,7 @@ from skillevaluator.tier3.harbor.runner import (
     _harbor_launch_cwd,
     _harbor_launch_environment,
     _nvidia_build_key_handoff,
+    _pi_custom_endpoint_agent_kwargs,
     build_harbor_run_command,
 )
 from skillevaluator.tier3_environments import HARBOR_DOCKER_ENGINE_ENV_MODES
@@ -2011,6 +2012,7 @@ def run_agent_runtime_preflight(
         override_storage_mb=override_storage_mb,
         agent_import_path=agent_import_path,
         environment_kwargs=environment_kwargs,
+        agent_kwargs_overrides=_pi_custom_endpoint_agent_kwargs(run_env),
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)

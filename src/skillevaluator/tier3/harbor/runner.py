@@ -1882,6 +1882,20 @@ def _harbor_agent_kwargs(agent: str, model: str | None, env_mode: str) -> dict[s
     return kwargs
 
 
+def _pi_custom_endpoint_agent_kwargs(run_env: Mapping[str, str]) -> dict[str, dict[str, str]]:
+    """Give pi the explicit API style its OpenAI-shaped custom endpoints need.
+
+    Harbor's Pi agent routes a custom base URL through models.json, and building
+    that file requires the ``model_api`` agent option; without it the launch
+    fails with "Pi custom endpoints require the model_api agent argument". The
+    Anthropic provider has no pi custom-endpoint path and is rejected by the
+    credential gate instead.
+    """
+    if run_env.get("OPENAI_BASE_URL", "").strip():
+        return {"pi": {"model_api": "openai-completions"}}
+    return {}
+
+
 def build_harbor_run_command(
     *,
     dataset_path: str | Path,
@@ -1901,6 +1915,7 @@ def build_harbor_run_command(
     agent_import_path: str | None = None,
     verifier_env: Mapping[str, str] | None = None,
     environment_kwargs: Mapping[str, Any] | None = None,
+    agent_kwargs_overrides: Mapping[str, Mapping[str, str]] | None = None,
 ) -> list[str]:
     """Build a Harbor invocation for a built-in or backend environment, or local mode."""
     if not is_env_mode(env_mode):
@@ -1987,7 +2002,9 @@ def build_harbor_run_command(
         command.extend(["--env", backend.import_path])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
-    for name, value in sorted(_harbor_agent_kwargs(agent, model, env_mode).items()):
+    agent_kwargs = _harbor_agent_kwargs(agent, model, env_mode)
+    agent_kwargs.update((agent_kwargs_overrides or {}).get(agent, {}))
+    for name, value in sorted(agent_kwargs.items()):
         command.extend(["--ak", encode_environment_kwarg(name, value)])
     for name, value in sorted(validated_environment_kwargs.items()):
         # A SkillEvaluator GKE wrapper option, not a Harbor constructor kwarg.
@@ -2191,6 +2208,12 @@ def _validate_agent_provider_credentials(
                 ]
 
         if provider.provider == "anthropic":
+            if provider.base_url and "pi" in agents:
+                return [
+                    "pi with the Anthropic evaluator provider requires the public Anthropic endpoint; "
+                    "pi has no custom-endpoint path for Anthropic base URLs. Select claude-code, or route "
+                    "the gateway through the OpenAI-compatible provider."
+                ]
             if "opencode" in agents and model_sources.get("opencode", "public provider default") == (
                 "public provider default"
             ):
@@ -2213,12 +2236,12 @@ def _validate_agent_provider_credentials(
                     ]
         return []
 
-    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes", "pi"}]
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes"}]
     if unsupported:
         return [
             "nv_build does not support live agent(s): "
             + ", ".join(unsupported)
-            + ". Choose opencode, claude-code, codex, or pi."
+            + ". Choose opencode, claude-code, codex, or hermes."
         ]
 
     if env_mode == ENV_MODE_LOCAL:
@@ -3650,6 +3673,11 @@ def _model_for_agent(
         selected = _NVIDIA_BUILD_AGENT_DEFAULT_MODEL
     if agent == "hermes" and source == "public provider default" and provider.provider == "nv_build":
         selected = "nvidia/nemotron-3.5-super-vl-120b-a12b"
+    if agent == "pi" and provider.provider == "anthropic" and source not in {"CLI", "evals/config.yml"}:
+        # Harbor's Pi resolves its model connection through the OPENAI_* pair, so an
+        # unqualified Anthropic default never reaches pi as a provider choice; the
+        # anthropic/ prefix restores the provider flag and the API key.
+        selected = f"anthropic/{selected}"
     if agent == "opencode":
         namespace = {
             "anthropic": "anthropic",
@@ -4184,6 +4212,7 @@ def _run_harbor(
         agent_import_path=agent_import_path,
         verifier_env=verifier_env,
         environment_kwargs=environment_kwargs,
+        agent_kwargs_overrides=_pi_custom_endpoint_agent_kwargs(run_env),
     )
     try:
         handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)

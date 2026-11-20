@@ -45,6 +45,7 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
 
 _CODEX_MODEL_ARG_RE = re.compile(r"(?P<prefix>(?:^|\s)--model(?:=|\s+))(?P<model>[^\s]+)(?P<suffix>(?=\s|$))")
 
@@ -687,10 +688,11 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
 
     _PI_CONFIG_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-agent")
     _PI_MCP_ADAPTER_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-mcp-adapter")
+    _quoted_instruction: str | None = None
 
     async def install(self, environment: BaseEnvironment) -> None:
         if self.mcp_servers:
-            # pi 1.5.2 reads mcp.json natively; the no-op shim only satisfies
+            # pi reads mcp.json natively; the no-op shim only satisfies
             # the adapter path Harbor's launch line references.
             adapter_dir = (self._PI_MCP_ADAPTER_DIR / "node_modules" / "pi-mcp-adapter").as_posix()
             await self.exec_as_agent(environment, command=f"mkdir -p {shlex.quote(adapter_dir)}")
@@ -712,13 +714,30 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
     def get_version_command(self) -> str | None:
         return "pi --version"
 
+    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+        # Harbor embeds the shlex-quoted instruction inside the launch command;
+        # the config-path rewrite must never touch it, or a task quoting a
+        # literal /tmp/harbor-pi-agent path is evaluated on different text in
+        # local and Docker mode.
+        self._quoted_instruction = shlex.quote(instruction)
+        try:
+            await super().run(instruction, environment, context)
+        finally:
+            self._quoted_instruction = None
+
     def _local_config_path(self, command: str) -> str:
         # Harbor writes pi's isolated config under /tmp, which the local sandbox
-        # keeps outside its allowed roots; keep it in the trial's agent dir.
-        command = command.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
-        return command.replace(
-            _REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix()
-        )
+        # keeps outside its allowed roots; keep it in the trial's agent dir —
+        # everywhere except inside the quoted task instruction.
+        def repoint(part: str) -> str:
+            part = part.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+            return part.replace(_REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix())
+
+        quoted = self._quoted_instruction
+        if quoted and quoted in command:
+            before, _, after = command.partition(quoted)
+            return repoint(before) + quoted + repoint(after)
+        return repoint(command)
 
     async def _upload_config_text(
         self,

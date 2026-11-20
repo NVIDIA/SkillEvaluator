@@ -2152,25 +2152,26 @@ class HermesAdapter(HarnessAdapter):
 
 
 class PiAdapter(HarnessAdapter):
-    """pi: native skills in $HOME/.agents/skills; rules stay in the wrapper skill; MCP plugin components unstaged.
+    """pi: native skills in $HOME/.agents/skills; rules stay in the wrapper skill; MCP plugin components staged by the agent.
 
     Harbor's pi agent copies the task skills directory to ``$HOME/.agents/skills``,
     which pi reads natively, so member skills are labeled ``native`` with a census
     check. pi has no native plugin path for rules, so the rules keep the generated
-    wrapper skill. MCP plugin components are not staged in the native arm; agent
-    MCP servers themselves are supported in the docker/local arms through pi's
-    native config-dir mcp.json.
+    wrapper skill. Plugin MCP servers ride Harbor's task list, and the pinned pi
+    wrapper stages them into pi's config-dir mcp.json, so they are labeled
+    ``native`` with a census check on the staged file.
     """
 
     agent = "pi"
     adapter_id = "pi-agents-home"
     description = (
         "member skills in $HOME/.agents/skills (pi reads that directory natively, and Harbor's pi agent "
-        "copies the task skills there); the rules stay in the generated wrapper skill; MCP plugin components "
-        "are not staged in the native arm"
+        "copies the task skills there); the rules stay in the generated wrapper skill; MCP plugin "
+        "components are staged by the agent into pi's config-dir mcp.json"
     )
-    components: ClassVar[Mapping[str, str]] = {"skill": "native", "rule": "wrapper", "mcp": "unsupported"}
+    components: ClassVar[Mapping[str, str]] = {"skill": "native", "rule": "wrapper", "mcp": "native"}
     stage_wrapper_skill = True
+    plugin_mcp_via_task = True
 
     def build(self, source: NativePluginSource) -> NativeBundle:
         bundle = self._base_bundle()
@@ -2184,6 +2185,17 @@ class PiAdapter(HarnessAdapter):
             )
             for name in _skill_names(source)
         ]
+        checks.extend(
+            CensusCheck(
+                "mcp",
+                server["name"],
+                "contains",
+                "/tmp/harbor-pi-agent/mcp.json",
+                needle="mcpServers",
+                label="pi config-dir mcp.json mcpServers key",
+            )
+            for server in _redacted_servers(source)
+        )
         return self._finish(bundle, source, setup_lines=[], checks=checks)
 
 

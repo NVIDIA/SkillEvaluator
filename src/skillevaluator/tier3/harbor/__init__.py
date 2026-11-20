@@ -35,6 +35,7 @@ LOCAL_AGENT_IMPORT_PATHS = {
 }
 CONTAINER_AGENT_IMPORT_PATHS = {
     "claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode",
+    "pi": "skillevaluator.tier3.harbor.pi_agent:SkillEvaluatorPi",
 }
 
 # Per-trial runtime dirs local-mode Codex creates under Harbor's agent log dir.

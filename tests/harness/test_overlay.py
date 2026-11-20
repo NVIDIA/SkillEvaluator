@@ -790,6 +790,41 @@ def test_pi_hidden_disable_model_invocation(tmp_path: Path):
     assert "PI-HIDDEN" in _ids(rows, "pi")
 
 
+def test_pi_drops_non_string_descriptions(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "numeric", desc="42"))
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-DESC-MISSING" in _ids(rows, "pi")
+
+
+def test_pi_ignores_non_exact_manifest_names(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").rename(skill / "skill.md")
+
+    rows = _rows(skill)
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-CASING" in _ids(rows, "pi")
+
+
+def test_pi_name_collision_is_a_warning_not_a_drop(tmp_path: Path):
+    skills = tmp_path / "skills"
+    for folder in ("first", "second"):
+        skill = skills / folder
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: same\ndescription: Use when testing collisions.\n---\n{BODY}", encoding="utf-8"
+        )
+    first = _rows(skills / "first")
+    second = _rows(skills / "second")
+
+    # The loader keeps the first skill it scans; the check cannot know the scan
+    # order, so both sides report the collision as degraded, never as loaded.
+    assert "PI-NAME-COLLISION" in _ids(first, "pi")
+    assert "PI-NAME-COLLISION" in _ids(second, "pi")
+    assert first["pi"]["status"] == second["pi"]["status"] == "degraded"
+
+
 def test_pi_name_falls_back_to_the_folder(tmp_path: Path):
     skill = tmp_path / "skills" / "folder-name"
     skill.mkdir(parents=True)

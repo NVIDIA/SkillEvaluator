@@ -1,7 +1,7 @@
 ---
 title: "Tier 1: Harness Check"
 sidebar-title: "Tier 1: Harness Check"
-description: "See whether Claude Code, Codex and four other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
+description: "See whether Claude Code, Codex and five other agent harnesses load your skill, cut it short, or drop it. No LLM, no agent run, no API key."
 ---
 
 No LLM. No agent run. No API key. In about a second, the harness check predicts
@@ -30,8 +30,8 @@ before your users do.
   <Card title="Static" icon="bolt">
     It reads the files on disk. No model, no agent, no sandbox, no key.
   </Card>
-  <Card title="Six harnesses" icon="layer-group">
-    Claude Code, Codex, Copilot CLI, Hermes, OpenClaw and OpenCode in one run.
+  <Card title="Seven harnesses" icon="layer-group">
+    Claude Code, Codex, Copilot CLI, Hermes, OpenClaw, OpenCode and pi in one run.
   </Card>
   <Card title="Fixes included" icon="wrench">
     Every finding names the rule, what the harness does, and the change that fixes it.
@@ -44,23 +44,27 @@ This example skill has two small problems. The front matter has `license` twice,
 and the body uses `$ARGUMENTS`.
 
 ```text title="skillevaluator harness-check ./my-skill"
-╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
-│  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
-│                                                                                  │
-│  ✓ claude-code  loads                                                    1 note  │
-│  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
-│                 or duplicate keys).                                              │
-│  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
-│                 parsing is strict.                                               │
-│  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
-│                 model sees the literal text.                                     │
-│  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
-│                 duplicate keys).                                                 │
-│  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
-│                 keys.                                                            │
-│                                                                                  │
-│  Doesn't change pass/fail.  Details and fixes: -v                                │
-╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────╮
+│  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗        │
+│  opencode   ✗ pi                                                             │
+│                                                                              │
+│  ✓ claude-code  loads                                                1 note  │
+│  ✗ codex        NOT LOADED  Skill dropped: invalid YAML             +1 more  │
+│                 (tabs or duplicate keys).                                    │
+│  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML   +1 more, 1 note  │
+│                 parsing is strict.                                           │
+│  ! hermes       degraded  $ARGUMENTS is not substituted:             1 note  │
+│                 the model sees the literal text.                             │
+│  ✗ openclaw     rejected  Skill dropped: invalid YAML               +1 more  │
+│                 (tabs or duplicate keys).                                    │
+│  ✗ opencode     rejected  Skill dropped: duplicate          +1 more, 1 note  │
+│                 frontmatter keys.                                            │
+│  ✗ pi           dropped  Skill dropped: duplicate                            │
+│                 frontmatter keys make the YAML                               │
+│                 unparseable.                                                 │
+│                                                                              │
+│  Doesn't change pass/fail.  Details and fixes: -v                            │
+╰──────────────────────────────────────────────────────────── ✗ 5 of 7 not loaded ─╯
 Tier 1 schema also fails for my-skill: [SCHEMA-HIGH] Duplicate frontmatter key 'license': YAML parsers disagree on it (Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value). Run `skillevaluator validate --tiers 1` for details.
 ```
 
@@ -70,7 +74,7 @@ Read it from the top:
 - **Each line below** is one harness: its verdict and its most serious finding.
   `+1 more` means it has more findings. `1 note` counts notes that don't change the verdict.
   A harness with nothing to report gets no line.
-- **The bottom corner** is the tally, here 4 of 6 not loaded.
+- **The bottom corner** is the tally, here 5 of 7 not loaded.
 - **The line under the panel** appears when the same problem also fails a Tier 1
   schema check, and points you to `validate --tiers 1`.
 
@@ -137,14 +141,15 @@ The detailed view adds:
 Remove the duplicate key, replace `$ARGUMENTS` with words, and run it again:
 
 ```text title="skillevaluator harness-check ./my-skill"
-╭─ Harness compatibility · my-skill ───────────────────────────────────────────────╮
-│  ✓ claude-code   ✓ codex   ✓ copilot-cli   ✓ hermes   ✓ openclaw   ✓ opencode    │
-│                                                                                  │
-│  ✓ copilot-cli  loads                                                    1 note  │
-│  ✓ opencode     loads                                                    1 note  │
-│                                                                                  │
-│  Doesn't change pass/fail.  Details and fixes: -v                                │
-╰────────────────────────────────────────────────────────────────── ✓ 6 of 6 load ─╯
+╭─ Harness compatibility · my-skill ───────────────────────────────────────────╮
+│  ✓ claude-code   ✓ codex   ✓ copilot-cli   ✓ hermes   ✓ openclaw   ✓        │
+│  opencode   ✓ pi                                                             │
+│                                                                              │
+│  ✓ copilot-cli  loads                                                1 note  │
+│  ✓ opencode     loads                                                1 note  │
+│                                                                              │
+│  Doesn't change pass/fail.  Details and fixes: -v                            │
+╰────────────────────────────────────────────────────────────── ✓ 7 of 7 load ─╯
 ```
 
 ## Fix what it finds
@@ -165,7 +170,7 @@ until they are fixed. Then work through `! degraded`. Notes are optional.
 
 ### Run it again
 
-Repeat until the tally reads `6 of 6 load`. One change often clears several
+Repeat until the tally reads `7 of 7 load`. One change often clears several
 harnesses at once, because the same problem trips more than one loader.
 
 </Steps>
@@ -215,7 +220,7 @@ These are the findings you are most likely to meet:
     ```
   </Tab>
   <Tab title="Inside validate">
-    `validate` runs the harness check as part of Tier 1, for all six harnesses.
+    `validate` runs the harness check as part of Tier 1, for all seven harnesses.
     You don't have to ask for it.
 
     ```bash
@@ -377,7 +382,7 @@ with the description as that harness lists it.
 
 ## When it helps
 
-- **Before you publish.** One skill, six harnesses, about a second. Fix what gets dropped before anyone installs it.
+- **Before you publish.** One skill, seven harnesses, about a second. Fix what gets dropped before anyone installs it.
 - **When a skill never triggers.** Check first that the harness loads it and how much of the description reaches the model's skill list.
 - **When you move a skill to another harness.** A skill written for Claude Code often relies on placeholders and fields that other harnesses ignore.
 - **When the skills folder grows.** Harnesses give the skill list a budget. Past it, descriptions get shortened and skills get left out.

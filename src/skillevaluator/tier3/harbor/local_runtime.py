@@ -65,7 +65,7 @@ _AGENT_PACKAGES: dict[str, str] = {
     "pi": "@earendil-works/pi-coding-agent",
 }
 PINNED_RUNTIME_VERSIONS: Mapping[str, str] = MappingProxyType(
-    {"claude-code": "2.1.292", "codex": "0.161.0", "opencode": "1.19.5", "pi": "1.5.2"}
+    {"claude-code": "2.1.292", "codex": "0.161.0", "opencode": "1.19.5", "pi": "1.6.0"}
 )
 RUNTIME_INSTALL_TIMEOUT_SECONDS = 600
 

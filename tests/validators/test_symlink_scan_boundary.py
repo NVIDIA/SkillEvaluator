@@ -130,3 +130,48 @@ def test_default_tier1_reports_do_not_contain_content_behind_an_outside_junction
     assert [f["file_path"] for f in skipped] == ["references"]
     assert skipped[0]["severity"] == "low"
     assert hygiene["passed"] is True
+
+
+def test_outside_license_symlink_is_reported_but_never_supplies_the_license(tmp_path: Path) -> None:
+    """A skill with no declared license must not pick one up from a LICENSE symlink that leaves the skill."""
+    host_dir = tmp_path / "host-private"
+    host_dir.mkdir()
+    (host_dir / "host_license.txt").write_text(
+        "Apache License\nVersion 2.0, January 2004\nhttp://www.apache.org/licenses/\n"
+        "TERMS AND CONDITIONS FOR USE, REPRODUCTION, AND DISTRIBUTION\n",
+        encoding="utf-8",
+    )
+    skill = tmp_path / "demo-skill"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n---\n# Demo\n",
+        encoding="utf-8",
+    )
+    try:
+        (skill / "LICENSE").symlink_to(host_dir / "host_license.txt")
+    except OSError as exc:
+        pytest.skip(f"symlinks unavailable: {exc}")
+
+    results = run_validation(skill, checks="license,code-integrity", content_type="skill")
+
+    license_result = next(r for r in results if r.validator_name == "License Compliance")
+    assert license_result.metadata.get("license") is None
+    assert license_result.metadata.get("license_status") != "allowed"
+    assert license_result.metadata.get("license_source") != "license_file"
+
+    rendered = [
+        JSONReporter(include_timestamp=False).render_all(results),
+        MarkdownReporter().render_all(results),
+        HTMLReporter().render_all(results),
+    ]
+    for report in rendered:
+        assert "host-private" not in report
+        assert "LICENSE" in report
+    # The HTML report carries its own SPDX header, so only the data reports are checked for the id.
+    assert "Apache-2.0" not in rendered[0]
+    assert "Apache-2.0" not in rendered[1]
+
+    report = json.loads(rendered[0])
+    hygiene = next(r for r in report["results"] if r["validator"] == "Code Integrity & Hygiene")
+    skipped = [f for f in hygiene["findings"] if f["check_name"] == "symlink_outside_skill"]
+    assert [f["file_path"] for f in skipped] == ["LICENSE"]

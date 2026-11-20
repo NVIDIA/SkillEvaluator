@@ -52,15 +52,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 1 file walkers skip symlinks whose target resolves outside the skill
-  directory (or is missing), so the PII, secrets, Unicode, license and link
-  checks no longer read or quote files from elsewhere on the host through a
-  symlinked `references/` entry. Symlinks that resolve inside the skill still
-  scan as before. Code Integrity & Hygiene records a low-severity
-  `symlink_outside_skill` finding naming each skipped link by its path inside
-  the skill, never by its target. The hygiene dependency audit applies the same
-  boundary to `requirements*.txt` and quotes only the package name in its
-  unpinned-dependency warnings, never the whole line.
+- Tier 1 file walkers skip symlinks and Windows directory junctions whose
+  target resolves outside the skill directory (or is missing), so the PII,
+  secrets, Unicode, license and link checks no longer read or quote files from
+  elsewhere on the host through a symlinked `references/` entry. The
+  dependency audit and the license check apply the same rule to root
+  `requirements.txt`, `requirements-dev.txt` and `LICENSE`/`COPYING` files, and
+  the unpinned-dependency warning quotes only the package name, never the whole
+  line. Symlinks that resolve inside the skill still scan as before. Code
+  Integrity & Hygiene records a low-severity `symlink_outside_skill` finding
+  naming each skipped link by its path inside the skill, never by its target.
 - The LLM finding verifier's prompt now keeps skill content out of instruction
   space. File context is wrapped in a backtick fence longer than any backtick
   run in the file, so a skill cannot close the fence early or leave it open to

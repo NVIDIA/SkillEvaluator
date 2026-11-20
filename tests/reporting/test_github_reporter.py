@@ -914,3 +914,97 @@ def test_pathless_finding_falls_back_to_catalog_skill_path_outside_workspace(tmp
     assert "::group/alpha: No license information found" in alpha_warning
     assert "::group/bravo: No license information found" in bravo_warning
     assert alpha_warning != bravo_warning
+
+
+def test_merged_plugin_finding_annotates_real_workspace_path(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    plugin = repo / "plugin"
+    skill_md = plugin / "skills" / "demo" / "SKILL.md"
+    skill_md.parent.mkdir(parents=True)
+    skill_md.write_text("# Missing frontmatter\n", encoding="utf-8")
+
+    skill_result = ValidationResult(validator_name="SCHEMA")
+    skill_result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.HIGH,
+            check_name="frontmatter_missing",
+            message="Missing YAML frontmatter",
+            file_path=str(skill_md),
+            line_number=1,
+        )
+    )
+    plugin_result = ValidationResult(validator_name="PLUGIN_SCHEMA")
+    plugin_result.merge_with_prefix(skill_result, "demo")
+    assert plugin_result.findings[0].file_path == f"[demo] {skill_md}"
+
+    text = GitHubReporter(workspace_root=repo, scan_root=plugin).render_all([plugin_result])
+    error = next(line for line in _commands(text) if line.startswith("::error "))
+    props = _runner_properties(error)
+    assert props["file"] == "plugin/skills/demo/SKILL.md"
+    assert props["line"] == "1"
+    assert "[demo]" not in error
+
+    nested_result = ValidationResult(validator_name="PLUGIN_SCHEMA")
+    nested_result.merge_with_prefix(plugin_result, "bundle")
+    nested_text = GitHubReporter(workspace_root=repo, scan_root=repo).render_all([nested_result])
+    nested_error = next(line for line in _commands(nested_text) if line.startswith("::error "))
+    nested_props = _runner_properties(nested_error)
+    assert nested_props["file"] == "plugin/skills/demo/SKILL.md"
+    assert nested_props["line"] == "1"
+    assert "[bundle]" not in nested_error
+    assert "[demo]" not in nested_error
+
+
+def test_merged_plugin_finding_outside_workspace_omits_bogus_file(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    plugin = repo / "plugin"
+    plugin.mkdir(parents=True)
+    outside = tmp_path / "outside" / "skills" / "demo" / "SKILL.md"
+    outside.parent.mkdir(parents=True)
+    outside.write_text("# Missing frontmatter\n", encoding="utf-8")
+
+    skill_result = ValidationResult(validator_name="SCHEMA")
+    skill_result.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.HIGH,
+            check_name="frontmatter_missing",
+            message="Missing YAML frontmatter",
+            file_path=str(outside),
+            line_number=4,
+        )
+    )
+    skill_result.add_finding(
+        Finding(
+            category="SECRET",
+            severity=Severity.MEDIUM,
+            check_name="relative_member_path",
+            message="Relative path inside member",
+            file_path="SKILL.md",
+            line_number=2,
+        )
+    )
+    plugin_result = ValidationResult(validator_name="PLUGIN_SCHEMA")
+    plugin_result.merge_with_prefix(skill_result, "demo")
+
+    text = GitHubReporter(workspace_root=repo, scan_root=plugin).render_all([plugin_result])
+    error = next(line for line in _commands(text) if line.startswith("::error "))
+    warning = next(line for line in _commands(text) if line.startswith("::warning "))
+    for command in (error, warning):
+        props = _runner_properties(command)
+        assert "file" not in props
+        assert "line" not in props
+        assert "[demo]" not in command
+    assert "::plugin/demo: Missing YAML frontmatter" in error
+    assert "::plugin/demo: Relative path inside member" in warning
+
+    anchor_skill = repo / "skills" / "parent"
+    anchor_skill.mkdir(parents=True)
+    (anchor_skill / "SKILL.md").write_text("---\nname: parent\ndescription: parent\n---\n", encoding="utf-8")
+    anchored_text = GitHubReporter(workspace_root=repo, scan_root=anchor_skill).render_all([plugin_result])
+    anchored_error = next(line for line in _commands(anchored_text) if line.startswith("::error "))
+    anchored_props = _runner_properties(anchored_error)
+    assert anchored_props["file"] == "skills/parent/SKILL.md"
+    assert "line" not in anchored_props
+    assert "::demo: Missing YAML frontmatter" in anchored_error

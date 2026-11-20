@@ -218,6 +218,32 @@ def _catalog_skill_label(
     return ""
 
 
+def _combine_labels(outer: str, inner: str) -> str:
+    if not outer:
+        return inner
+    if not inner or inner == outer or inner.startswith(f"{outer}/"):
+        return inner or outer
+    return f"{outer}/{inner}"
+
+
+def _prefixed_artifact_github_path(
+    artifact_path: object,
+    workspace_root: Path | None,
+    scan_root: Path | None,
+) -> str | None:
+    """Resolve an unprefixed member artifact path when its repo location is unambiguous.
+
+    A relative member path is relative to the child member rather than *scan_root*,
+    so it cannot be placed on a repository file without guessing where the member lives.
+    """
+    if not isinstance(artifact_path, str) or not artifact_path.strip():
+        return None
+    raw = Path(artifact_path.replace("\\", "/"))
+    if not (raw.is_absolute() or raw.root):
+        return None
+    return _github_file_path(artifact_path, workspace_root, scan_root)
+
+
 def _qualify_message(message: object, skill_label: str) -> str:
     cleaned = _clean_text(message)
     if not skill_label:
@@ -356,21 +382,42 @@ def _finding_annotation(
     skill_label: str = "",
 ) -> _Annotation:
     severity = _finding_severity_value(finding)
+    metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
+    artifact_path = metadata.get("artifact_path")
+    has_artifact_path = isinstance(artifact_path, str) and bool(artifact_path.strip())
+    raw_member_label = metadata.get("member_label")
+    member_label = raw_member_label.strip() if isinstance(raw_member_label, str) else ""
     has_file_path = isinstance(finding.file_path, str) and bool(finding.file_path.strip())
-    if has_file_path:
-        path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
-        line = _positive_start_line(finding.line_number) if path else None
-        end_line = _end_line(finding) if path else None
-    else:
+
+    fallback_to_anchor = False
+    if has_artifact_path:
+        resolved = _prefixed_artifact_github_path(artifact_path, workspace_root, scan_root)
+        if resolved:
+            path = resolved
+            line = _positive_start_line(finding.line_number)
+            end_line = _end_line(finding)
+        else:
+            path = default_path
+            line = None
+            end_line = None
+            fallback_to_anchor = True
+    elif member_label or not has_file_path:
         path = default_path
         line = None
         end_line = None
+        fallback_to_anchor = True
+    else:
+        path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
+        line = _positive_start_line(finding.line_number) if path else None
+        end_line = _end_line(finding) if path else None
+
     suggestion = _clean_text(finding.suggestion) if finding.suggestion else ""
     message = _clean_text(finding.message)
     if suggestion:
         message = f"{message} Suggestion: {suggestion}"
-    if not has_file_path and not path:
-        message = _qualify_message(message, skill_label)
+    if fallback_to_anchor:
+        label = _combine_labels("" if path else skill_label, member_label)
+        message = _qualify_message(message, label)
     return _Annotation(
         level=_level_for_severity(severity),
         kind="finding",

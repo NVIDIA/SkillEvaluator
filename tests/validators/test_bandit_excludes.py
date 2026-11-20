@@ -89,12 +89,38 @@ def test_commas_and_pattern_characters_in_a_name_keep_the_same_files(plain_root:
 
 @needs_bandit
 def test_parse_errors_in_test_files_do_not_leave_the_scan_incomplete(plain_root: Path) -> None:
-    # Test files outside tests/ are scanned and left out of the report, so
-    # one that Bandit cannot parse must not count either.
     skill = _skill(plain_root / "skills" / "webapp-checks")
     (skill / "scripts" / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
 
     assert _flagged_files(skill) == LIVE_FILES
+
+
+@needs_bandit
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs a named pipe")
+def test_test_files_are_not_opened(plain_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Bandit waits for ever on a named pipe that it opens. Without the exclude
+    # entries that only ends when the scan is stopped, sooner here than usual.
+    run = Tools.bandit.run
+    monkeypatch.setattr(Tools.bandit, "run", lambda args, timeout: run(args, timeout=min(timeout, 20)))
+    skill = _skill(plain_root / "skills" / "webapp-checks")
+    os.mkfifo(plain_root / "pipe")
+    os.mkfifo(skill / "scripts" / "pipe_test.py")
+    (skill / "scripts" / "test_pipe.py").symlink_to(plain_root / "pipe")
+
+    assert _flagged_files(skill) == LIVE_FILES
+
+
+@needs_bandit
+def test_folder_named_like_a_test_file_keeps_its_other_files(plain_root: Path) -> None:
+    # A pattern for test_*.py would also match test_tools/launch.py, so here
+    # those test files are read and left out of the report, parse errors too.
+    skill = _skill(plain_root / "skills" / "webapp-checks")
+    (skill / "test_tools").mkdir()
+    (skill / "test_tools" / "launch.py").write_text(RISKY, encoding="utf-8")
+    (skill / "test_tools" / "test_launch.py").write_text(RISKY, encoding="utf-8")
+    (skill / "scripts" / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    assert _flagged_files(skill) == LIVE_FILES | {"test_tools/launch.py"}
 
 
 @needs_bandit
@@ -126,12 +152,14 @@ def test_exclude_entries_are_anchored_at_the_skill(mock_run, tmp_path: Path) -> 
 
     entries = _exclude_entries(mock_run, skill)
 
-    # Two patterns for each name, one right below the skill and one for any
-    # depth. No entry is a bare name that could match above the skill.
-    assert len(entries) == 2 * (len(SCAN_EXCLUDED_DIRS) + 2)
+    # Two patterns for each folder name, one right below the skill and one
+    # for any depth, and three for test files. No entry is a bare name that
+    # could match above the skill.
+    assert len(entries) == 2 * (len(SCAN_EXCLUDED_DIRS) + 2) + 3
     assert all(entry.startswith(str(skill.resolve()) + os.sep) for entry in entries)
     assert str(skill.resolve() / "tests" / "*") in entries
     assert str(skill.resolve() / "*" / "tests" / "*") in entries
+    assert {str(skill.resolve() / name) for name in ("test_*.py", "*/test_*.py", "*_test.py")} <= set(entries)
 
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")

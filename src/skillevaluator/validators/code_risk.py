@@ -211,8 +211,8 @@ class CodeRiskValidator(ValidatorBase):
         therefore written as two patterns anchored at *root*, one for a
         directory of that name right below it and one for any depth, so the
         option has the same size for a small skill and a large tree. Test
-        files outside those directories are left out of the report by name,
-        see ``_is_test_file``.
+        files outside those directories are matched by name, see
+        ``_bandit_test_file_patterns``.
         """
         # Bandit splits the option at every comma, so a comma in the path is
         # written as "?". Every scanned path starts with this same root.
@@ -231,7 +231,38 @@ class CodeRiskValidator(ValidatorBase):
         for name in names:
             for parent in (prefix, f"{prefix}{os.sep}*"):
                 patterns.append(self._bandit_pattern(f"{parent}{os.sep}{name}"))
+        if self.exclude_tests:
+            patterns.extend(self._bandit_test_file_patterns(root, prefix))
         return sorted(patterns)
+
+    def _bandit_test_file_patterns(self, root: Path, prefix: str) -> list[str]:
+        """Patterns for the ``test_*.py`` and ``*_test.py`` files below *root*, so that Bandit does not open them.
+
+        A pattern is listed only where it hides nothing else. A test file
+        that is then not covered is read by Bandit and left out of the
+        report, see ``_is_test_file``. Bandit's ``*`` also matches a path
+        separator, so ``test_*.py`` matches every Python file below a
+        directory such as ``test_tools``. Bandit also matches an entry as
+        plain text, and adds its own ``*`` to one that is a directory, so a
+        pattern is left out when a path begins with its text.
+        """
+        patterns = [f"{prefix}{os.sep}*_test.py"]
+        if not self._has_code_below_test_named_directory(root):
+            patterns += [f"{prefix}{os.sep}test_*.py", f"{prefix}{os.sep}*{os.sep}test_*.py"]
+        return [
+            pattern for pattern in patterns if not any(Path(pattern).parent.glob(f"{glob.escape(Path(pattern).name)}*"))
+        ]
+
+    def _has_code_below_test_named_directory(self, root: Path) -> bool:
+        """Whether a directory whose name starts with ``test_`` holds a Python file that is not a test."""
+        skipped = {"tests", "test", *SCAN_EXCLUDED_DIRS}
+        for current, directories, files in os.walk(root):
+            directories[:] = [name for name in directories if name not in skipped]
+            if not any(fnmatch(part, "test_*") for part in Path(current).relative_to(root).parts):
+                continue
+            if any(fnmatch(name, "*.py") and not self._is_test_name(name) for name in files):
+                return True
+        return False
 
     @staticmethod
     def _ignores_case(root: Path) -> bool:
@@ -243,15 +274,20 @@ class CodeRiskValidator(ValidatorBase):
             return False
 
     @staticmethod
-    def _is_test_file(entry: object) -> bool:
+    def _is_test_name(name: str) -> bool:
+        return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+
+    @classmethod
+    def _is_test_file(cls, entry: object) -> bool:
         """Whether a Bandit finding or scan error is about a ``test_*.py`` or ``*_test.py`` file.
 
-        These are dropped from the report and not listed in ``--exclude``.
-        One entry per file made the option grow with the number of test
-        files, past what a Windows command line holds.
+        These are dropped from the report. Most never get there, because
+        ``_bandit_test_file_patterns`` keeps Bandit from opening them. One
+        ``--exclude`` entry per file would cover the rest, and made the
+        option grow with the number of test files, past what a Windows
+        command line holds.
         """
-        name = Path(str(entry.get("filename") or "")).name if isinstance(entry, dict) else ""
-        return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+        return cls._is_test_name(Path(str(entry.get("filename") or "")).name if isinstance(entry, dict) else "")
 
     @staticmethod
     def _bandit_pattern(directory: str) -> str:

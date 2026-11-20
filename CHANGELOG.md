@@ -55,6 +55,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Invalid YAML scalar values and Unicode escapes retain their actual source
   location in diagnostics. Frontmatter keeps the existing bounded-loader
   complexity checks, and duplicate-key inspection handles scanner range errors.
+  Unconstructible scalars still fail manifest scoping closed, keep evals config
+  values out of error messages, and do not make valid block-scalar tabs invalid.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains

@@ -10,7 +10,11 @@ import yaml
 
 from skillevaluator.harness.overlay import _tab_indent_breaks_yaml
 from skillevaluator.tier1.commands import run_validation
-from skillevaluator.utils.structured_data import StructuredDataSyntaxError, load_bounded_yaml
+from skillevaluator.utils.structured_data import (
+    ScalarConstructionError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.frontmatter_parser import parse_frontmatter
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -77,7 +81,7 @@ def test_native_scalar_error_keeps_value_and_actual_source_location(tmp_path, ra
     with pytest.raises(StructuredDataSyntaxError) as error:
         load_bounded_yaml(raw, last_key_wins=True)
     cause = error.value.__cause__
-    assert isinstance(cause, yaml.constructor.ConstructorError)
+    assert isinstance(cause, ScalarConstructionError)
     assert cause.problem_mark.line == 2
     assert cause.problem_mark.column == 7
     assert cause.problem == f"invalid {kind} value {value!r}"
@@ -136,12 +140,22 @@ def test_schema_and_harness_finish_with_a_yaml_finding(malformed_skill: Path) ->
     assert len(harness.metadata[HARNESS_METADATA_KEY][str(malformed_skill)]) == 6
 
 
-def test_harness_tab_check_handles_scalar_errors(malformed_skill: Path) -> None:
-    content = (malformed_skill / "SKILL.md").read_text(encoding="utf-8")
-    raw_yaml = content.split("---", 2)[1]
+@pytest.mark.parametrize(
+    ("raw_value", "syntax_error"),
+    [
+        ("2026-02-30", False),
+        ('!!int ""', False),
+        ("!!bool maybe", False),
+        ("!!float invalid", False),
+        ("!!timestamp invalid", False),
+        (r'"\U00110000"', True),
+        (r'"\UFFFFFFFF"', True),
+    ],
+)
+def test_harness_tab_check_distinguishes_scalar_construction_from_syntax(raw_value: str, syntax_error: bool) -> None:
     # A tab inside a block scalar is valid YAML, so construction reaches the
-    # invalid explicitly tagged value rather than failing during scanning.
-    assert _tab_indent_breaks_yaml("note: |\n  \ttext\n" + raw_yaml)
+    # invalid scalar without making that tab a syntax error.
+    assert _tab_indent_breaks_yaml(f"note: |\n  \ttext\nextra: {raw_value}\n") is syntax_error
 
 
 def test_ordinary_nested_yaml_keeps_values_and_body_links(tmp_path: Path) -> None:

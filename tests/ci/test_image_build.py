@@ -37,8 +37,8 @@ def _arguments(stage: list[tuple[str, str]], keyword: str) -> list[str]:
     return [arguments for name, arguments in stage if name == keyword]
 
 
-def _workflow() -> dict:
-    path = ROOT / ".github/workflows/publish-tier1-image.yml"
+def _workflow(name: str = "publish-tier1-image") -> dict:
+    path = ROOT / ".github/workflows" / f"{name}.yml"
     return yaml.load(path.read_text(encoding="utf-8"), Loader=yaml.BaseLoader)
 
 
@@ -136,12 +136,13 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
     workflow = _workflow()
     assert workflow["on"]["push"]["branches"] == ["main"]
     assert workflow["on"]["push"]["paths"] == workflow["on"]["pull_request"]["paths"]
+    assert ".github/workflows/release-tier1-image.yml" in workflow["on"]["pull_request"]["paths"]
     (verify,) = _build_steps(workflow["jobs"]["verify"])
     assert verify["with"]["cache-from"] == "type=gha,scope=tier1-image"
     cache_to = verify["with"]["cache-to"]
     assert "github.event_name != 'pull_request'" in cache_to and "github.ref == 'refs/heads/main'" in cache_to
     assert "'type=gha,scope=tier1-image,mode=max,ignore-error=true' || ''" in cache_to
-    (release,) = _build_steps(workflow["jobs"]["publish"])
+    (release,) = _build_steps(_workflow("release-tier1-image")["jobs"]["publish"])
     for step in (verify, release):
         assert step["with"]["context"] == "."
         assert step["with"]["file"] == "ci/Dockerfile.tier1"
@@ -220,7 +221,7 @@ def test_release_builds_reuse_no_cached_layers():
     # A cached apt layer would ship the git and ca-certificates of whichever main build first wrote it.
     workflow = _workflow()
     (verify,) = _build_steps(workflow["jobs"]["verify"])
-    (release,) = _build_steps(workflow["jobs"]["publish"])
+    (release,) = _build_steps(_workflow("release-tier1-image")["jobs"]["publish"])
     assert "cache-from" not in release["with"]
     assert release["with"]["no-cache"] == "true"
     # The release still refreshes the cache that later verify builds read.
@@ -229,23 +230,33 @@ def test_release_builds_reuse_no_cached_layers():
 
 
 def test_release_builds_once_and_pushes_the_image_it_verified():
-    jobs = _workflow()["jobs"]
+    verify_workflow = _workflow()
+    assert set(verify_workflow["jobs"]) == {"verify"}
+    assert verify_workflow["permissions"] == {"contents": "read"}
+    workflow = _workflow("release-tier1-image")
+    assert set(workflow["on"]) == {"workflow_call"}
+    assert set(workflow["on"]["workflow_call"]["inputs"]) == {"version", "source_sha"}
+    jobs = workflow["jobs"]
     publish = jobs["publish"]
-    # Exactly one of the two building jobs runs for any event.
-    assert jobs["verify"]["if"] == "${{ !(" + publish["if"] + ") }}"
+    assert publish["environment"] == "release-image"
+    assert "github.repository == 'NVIDIA/SkillEvaluator'" in publish["if"]
+    assert "github.ref == 'refs/heads/main'" in publish["if"]
+    assert "github.event_name == 'workflow_dispatch'" in publish["if"]
+    assert "NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main" in publish["if"]
     assert "needs" not in publish
     (build,) = _build_steps(publish)
-    assert build["with"]["tags"] == "${{ env.IMAGE }}:sha-${{ github.sha }}"
+    assert build["with"]["platforms"] == "linux/amd64"
+    assert build["with"]["tags"] == "${{ env.IMAGE }}:sha-${{ inputs.source_sha }}"
     assert build["with"]["labels"].splitlines() == [
         "org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator",
-        "org.opencontainers.image.revision=${{ github.sha }}",
+        "org.opencontainers.image.revision=${{ inputs.source_sha }}",
         "org.opencontainers.image.description=SkillEvaluator complete Tier 1 CI runtime",
     ]
     steps = publish["steps"]
     smoke = next(index for index, step in enumerate(steps) if "ci/smoke_image.py" in step.get("run", ""))
     release = next(index for index, step in enumerate(steps) if step.get("id") == "release")
     assert steps.index(build) < smoke < release
-    assert '--image "$IMAGE:sha-$GITHUB_SHA"' in steps[smoke]["run"]
-    assert 'docker push "$IMAGE:sha-$GITHUB_SHA"' in steps[release]["run"]
+    assert '--image "$IMAGE:sha-$SOURCE_SHA"' in steps[smoke]["run"]
+    assert 'docker push "$IMAGE:sha-$SOURCE_SHA"' in steps[release]["run"]
     runs = [step.get("run", "") for job in jobs.values() for step in job["steps"]]
     assert not any("docker build" in run for run in runs)

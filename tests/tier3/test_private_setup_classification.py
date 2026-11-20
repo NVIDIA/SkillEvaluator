@@ -37,7 +37,7 @@ def test_private_wrapper_retains_base_methods_and_has_no_native_launcher(key: tu
         assert issubclass(cls, import_symbol(key[1]))
     else:
         module = key[0].replace("-", "_")
-        stock_name = {"claude-code": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes"}[key[0]]
+        stock_name = {"claude-code": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes", "pi": "Pi"}[key[0]]
         assert base is import_symbol(f"harbor.agents.installed.{module}:{stock_name}")
     for method in ("install", "run", "exec_as_agent"):
         assert getattr(cls, method) is getattr(base, method)

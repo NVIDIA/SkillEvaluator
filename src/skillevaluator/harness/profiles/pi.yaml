@@ -16,6 +16,11 @@ rules:
   - {id: PI-HIDDEN, when: "disable_model_invocation", effect: degraded, outcome: hidden, message: "Kept out of the model's skill list; only the user can load it (/skill:name).", fix: "Remove disable-model-invocation to let the model use this skill on its own.", confidence: high}
   - {id: PI-NAME-FALLBACK, when: "name_missing", effect: advisory, outcome: renamed, message: "Loads under the folder name; the frontmatter name is optional.", fix: "Add a name field to control the listed name explicitly.", confidence: high}
   - {id: PI-DESC-LONG, when: "description_codepoints > 1024", effect: advisory, message: "pi warns about descriptions over 1024 characters but delivers the full text; nothing is truncated.", fix: "Keep the description under 1024 characters.", confidence: medium}
+
+plugin:
+  rules:
+    - {id: PI-PLUGIN-NONE, when: "always", effect: not_loaded, outcome: rejected, message: "pi has no plugin package format; it loads skills from ~/.agents/skills and rules from its own config only.", fix: "Ship the work as plain skill directories under a skills root.", confidence: high}
+  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: not_observed, lsp: not_observed}
 notes:
   - "First folder wins a name collision; later same-name skills are dropped with a warning."
   - "Tolerant of BOM, CRLF and tabs inside values; a loose .md file loads only under a skills root."

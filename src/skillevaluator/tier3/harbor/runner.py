@@ -2216,12 +2216,12 @@ def _validate_agent_provider_credentials(
                     ]
         return []
 
-    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes"}]
+    unsupported = [agent for agent in agents if agent not in {"claude-code", "codex", "opencode", "hermes", "pi"}]
     if unsupported:
         return [
             "nv_build does not support live agent(s): "
             + ", ".join(unsupported)
-            + ". Choose opencode, claude-code, or codex."
+            + ". Choose opencode, claude-code, codex, or pi."
         ]
 
     if env_mode == ENV_MODE_LOCAL:

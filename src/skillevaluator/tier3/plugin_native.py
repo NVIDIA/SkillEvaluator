@@ -2151,8 +2151,44 @@ class HermesAdapter(HarnessAdapter):
         return self._finish(bundle, source, setup_lines=setup_lines, checks=checks)
 
 
+class PiAdapter(HarnessAdapter):
+    """pi: native skills in $HOME/.agents/skills; rules stay in the wrapper skill; MCP unsupported.
+
+    Harbor's pi agent copies the task skills directory to ``$HOME/.agents/skills``,
+    which pi reads natively, so member skills are labeled ``native`` with a census
+    check. pi has no native plugin path for rules, so the rules keep the generated
+    wrapper skill. MCP servers are not staged: pi-mcp-adapter targets pi 0.85.x,
+    and the validated pi runtime does not ship a compatible adapter.
+    """
+
+    agent = "pi"
+    adapter_id = "pi-agents-home"
+    description = (
+        "member skills in $HOME/.agents/skills (pi reads that directory natively, and Harbor's pi agent "
+        "copies the task skills there); the rules stay in the generated wrapper skill; MCP servers are not "
+        "staged (pi-mcp-adapter targets pi 0.85.x)"
+    )
+    components: ClassVar[Mapping[str, str]] = {"skill": "native", "rule": "wrapper", "mcp": "unsupported"}
+    stage_wrapper_skill = True
+
+    def build(self, source: NativePluginSource) -> NativeBundle:
+        bundle = self._base_bundle()
+        checks = [
+            CensusCheck(
+                "skill",
+                name,
+                "file",
+                f"$HOME/.agents/skills/{name}/SKILL.md",
+                label="pi $HOME/.agents/skills listing",
+            )
+            for name in _skill_names(source)
+        ]
+        return self._finish(bundle, source, setup_lines=[], checks=checks)
+
+
 HARNESS_ADAPTERS: dict[str, HarnessAdapter] = {
-    adapter.agent: adapter for adapter in (ClaudeCodeAdapter(), CodexAdapter(), OpenCodeAdapter(), HermesAdapter())
+    adapter.agent: adapter
+    for adapter in (ClaudeCodeAdapter(), CodexAdapter(), OpenCodeAdapter(), HermesAdapter(), PiAdapter())
 }
 
 
@@ -2306,6 +2342,10 @@ NATIVE_AGENT_IMPORT_PATHS: dict[tuple[str, str | None], str] = {
         "hermes",
         "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
     ): f"{_NATIVE_AGENTS}:NativeNvidiaBuildHermes",
+    (
+        "pi",
+        "skillevaluator.tier3.harbor.pi_agent:SkillEvaluatorPi",
+    ): f"{_NATIVE_AGENTS}:NativePi",
 }
 
 

@@ -156,3 +156,27 @@ def test_local_exec_rewrites_container_assumptions(monkeypatch):
     assert "/tmp/harbor-pi-agent" not in command
     assert "stdbuf" not in command  # hosts may lack GNU coreutils
     assert "grep -v" in command and "tee /logs/agent/pi.txt" in command
+
+
+def test_nvidia_build_accepts_pi_in_docker_and_local():
+    from skillevaluator.tier3.harbor.runner import _validate_agent_provider_credentials
+
+    provider = ProviderConfig(
+        provider="nv_build",
+        model="openai/gpt-oss-120b",
+        api_key="nvidia-build-key",
+        base_url="https://integrate.api.nvidia.com/v1",
+        litellm_model="openai/openai/gpt-oss-120b",
+    )
+
+    assert _validate_agent_provider_credentials(provider, ["pi"], {}, env_mode="docker") == []
+    assert _validate_agent_provider_credentials(provider, ["pi"], {}, env_mode="local") == []
+
+
+def test_native_and_private_pi_are_registered_for_plugin_arms():
+    from skillevaluator.tier3.plugin_native import PRIVATE_AGENT_IMPORT_PATHS, native_agent_import_path
+
+    base = "skillevaluator.tier3.harbor.pi_agent:SkillEvaluatorPi"
+    assert native_agent_import_path("pi", base) == "skillevaluator.tier3.harbor.native_agents:NativePi"
+    assert PRIVATE_AGENT_IMPORT_PATHS[("pi", base)].endswith("PrivatePi")
+    assert ("pi", None) not in PRIVATE_AGENT_IMPORT_PATHS

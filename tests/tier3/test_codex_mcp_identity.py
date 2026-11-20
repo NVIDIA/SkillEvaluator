@@ -8,7 +8,7 @@ import json
 import pytest
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_tool_efficiency
+from skillevaluator.tier3.eval_core.checks import _NEUTRAL_TOOL_NAMES, check_tool_efficiency
 from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import recorded_mcp_identity
 from skillevaluator.tier3.eval_core.log_converters import (
     load_trajectory_with_fallback,
@@ -36,7 +36,7 @@ def _call(server, tool="lookup", arguments=None):
 
 
 @pytest.mark.parametrize("server", ["reference", "project.docs"])
-@pytest.mark.parametrize("tool", ["lookup", "task"])
+@pytest.mark.parametrize("tool", ["lookup", "task", "update_plan", "spawn_agent", "wait"])
 def test_codex_mcp_server_and_tool_are_preserved_and_counted(server, tool):
     call = _call(server, tool, {"query": "requirements"})
 
@@ -47,6 +47,17 @@ def test_codex_mcp_server_and_tool_are_preserved_and_counted(server, tool):
     assert result["score"] == 1.0
     assert result["details"]["productive"] == 1
     assert result["details"]["neutral"] == 0
+
+
+@pytest.mark.parametrize("tool", sorted(_NEUTRAL_TOOL_NAMES))
+def test_every_neutral_bare_name_is_mcp_work_when_recorded_as_an_mcp_tool(tool):
+    bare = check_tool_efficiency([{"action": tool, "action_input": {}}])
+    assert bare["details"]["neutral"] == 1
+
+    result = check_tool_efficiency([_call("docs", tool)])
+    assert result["score"] == 1.0
+    assert result["details"]["neutral"] == 0
+    assert result["details"]["productive"] == 1
 
 
 @pytest.mark.parametrize(
@@ -78,7 +89,7 @@ def test_tool_name_cannot_replace_its_recorded_server_identity():
     assert check_tool_efficiency([call])["score"] == 0.0
 
 
-def _load_native_mcp_log(tmp_path, server, tool, path):
+def _load_native_mcp_log(tmp_path, server, tool, path=None, *, arguments=None):
     logs = tmp_path / "agent"
     logs.mkdir()
     event = {
@@ -88,7 +99,7 @@ def _load_native_mcp_log(tmp_path, server, tool, path):
             "id": "mcp-1",
             "server": server,
             "tool": tool,
-            "arguments": {"path": path},
+            "arguments": {"path": path} if arguments is None else arguments,
             "result": {"content": [{"type": "text", "text": "recorded result"}]},
             "status": "completed",
         },
@@ -132,6 +143,19 @@ def test_native_log_keeps_ambiguous_labels_attributed_to_recorded_server(tmp_pat
     assert signals["activations"][0]["server"] == server
     assert signals["activations"][0]["name"] == server
     assert calls[0]["extra"] == {"mcp_server": server, "mcp_tool": tool}
+
+
+def test_mcp_tool_named_skill_is_an_mcp_call_not_a_skill_activation(tmp_path):
+    trajectory = _load_native_mcp_log(tmp_path, "docs", "skill", arguments={"skill": "my-skill"})
+    calls = extract_tool_calls_as_dicts(trajectory)
+    assert calls[0]["action"] == "mcp__docs__skill"
+    assert check_tool_efficiency(calls)["details"]["productive"] == 1
+
+    signals = compute_plugin_signals(trajectory, {}, declared={"skill": ["my-skill"], "mcp": ["docs"]})
+
+    assert [(item["type"], item["name"]) for item in signals["activations"]] == [("mcp", "docs")]
+    assert signals["activation_coverage"]["exercised"] == ["mcp:docs"]
+    assert signals["activation_coverage"]["unverified"] == ["skill:my-skill"]
 
 
 @pytest.mark.parametrize(

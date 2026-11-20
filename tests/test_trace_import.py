@@ -188,6 +188,32 @@ def test_reconstruct_log_and_unknown_agent():
     assert doc["candidates"][0]["observed"]["tool_calls"] == []
 
 
+@pytest.mark.parametrize(
+    ("server", "label"),
+    [("docs", "mcp__docs__lookup"), ("project__docs", "mcp__project__docs__lookup")],
+)
+def test_codex_mcp_candidates_use_qualified_tool_labels(server, label):
+    event = {
+        "type": "item.completed",
+        "item": {
+            "type": "mcp_tool_call",
+            "id": "mcp-1",
+            "server": server,
+            "tool": "lookup",
+            "arguments": {"query": "requirements"},
+            "result": {"content": [{"type": "text", "text": "recorded result"}]},
+            "status": "completed",
+        },
+    }
+    doc, _ = build_candidates(
+        json.dumps(session(agent="codex", agent_log=json.dumps(event))).encode(), "export", "sample"
+    )
+
+    observed = doc["candidates"][0]["observed"]
+    assert observed["trajectory_source"] == "codex log"
+    assert observed["tool_calls"] == [f'{label}: {{"query": "requirements"}}']
+
+
 def test_prompt_recovered_from_trajectory():
     doc, _ = build_candidates(
         json.dumps(

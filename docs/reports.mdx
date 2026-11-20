@@ -983,8 +983,9 @@ reason names how many calls were not counted. A trial whose only calls are
 neutral did no work: it scores tool efficiency 0.0, so its `skill_efficiency`
 is 0.0, the same as a trial with no tool calls.
 
-In rebuilt Codex logs, MCP tools whose bare name is `task`, `update_plan`,
-`spawn_agent`, or `wait` count as MCP work instead of neutral planning. An MCP
+In rebuilt Codex logs, MCP tools count as MCP work instead of neutral planning
+even when their bare name is a neutral planning or bookkeeping name, such as
+`task`, `update_plan`, `spawn_agent`, `wait`, `agent` or `todowrite`. An MCP
 tool named `skill` also remains an MCP call; it does not count as a Skill-tool
 activation. These rules do not change Harbor-provided Codex trajectories.
 Candidates created by `tier3 import-traces` from Codex exports likewise retain

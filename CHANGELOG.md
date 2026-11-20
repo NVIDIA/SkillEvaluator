@@ -57,11 +57,13 @@ All notable changes to SkillEvaluator are documented in this file.
   reports. Full identities are checked before display-label truncation, and
   oversized names and names containing control characters are not trusted for
   identity matching.
-  In rebuilt logs, MCP tools named `task`, `update_plan`, `spawn_agent`, or `wait`
-  count as MCP work rather than neutral planning; an MCP tool named `skill` no
-  longer produces a false Skill-tool activation. Codex `tier3 import-traces`
-  candidates also use `mcp__server__tool` labels. Harbor-provided Codex
-  trajectories and their existing MCP classification are unchanged.
+  In rebuilt logs, MCP tools count as MCP work rather than neutral planning even
+  when their bare name is one of the neutral planning or bookkeeping names (for
+  example `task`, `update_plan`, `spawn_agent`, `wait`, `agent`, or `todowrite`);
+  an MCP tool named `skill` no longer produces a false Skill-tool activation.
+  Codex `tier3 import-traces` candidates also use `mcp__server__tool` labels.
+  Harbor-provided Codex trajectories and their existing MCP classification are
+  unchanged.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

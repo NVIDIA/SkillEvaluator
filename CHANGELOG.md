@@ -127,7 +127,7 @@ All notable changes to SkillEvaluator are documented in this file.
   the whole path, so a name containing `test`, `evals`, `results`, `versions`
   or `.git`, such as `webapp-testing` or `.github/skills/`, left no file to
   scan and the check passed. Only real test and artifact folders and test
-  files inside the skill are skipped now.
+  files inside the skill are skipped now, and the Tier 1 reference says which.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.

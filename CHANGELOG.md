@@ -12,6 +12,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
   installs to include upstream security fixes.
 - Raise the Tier 3 MCP Python SDK floor to 1.30.0 for upstream security fixes.
+- Update filelock, multidict, and pip in the optional LLM, Tier 2, Tier 3,
+  and dependency audit installs to include upstream security fixes.
 
 ### Changed
 

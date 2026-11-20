@@ -63,8 +63,11 @@ llm = [
     "anthropic>=0.83.0",
     # Botocore 1.44 introduced HTTPS enforcement for bearer authentication.
     "boto3>=1.44.0",
+    # The LLM stack and Harbor use filelock; aiohttp uses multidict.
+    "filelock>=4.2.1,<5",
     "fsspec>=2026.6.0",
     "litellm>=1.110.2,<1.111.0.dev0",
+    "multidict>=6.9.1,<7",
     "openai>=2.21.0",
     "urllib3>=2.8.0,<3",
 ]
@@ -87,8 +90,12 @@ tier3 = [
 ]
 # Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
+    # Security floor for CacheControl's file-backed cache.
+    "filelock>=4.2.1,<5",
     # CVE-2026-114613 fixed floor for pip-audit's CacheControl dependency.
     "msgpack>=1.2.3",
+    # pip 26.2.2 removes trust for the affected eMudhra certificate chain.
+    "pip>=26.2.2",
     "pip-audit>=2.10.0",
     "urllib3>=2.8.0,<3",
 ]

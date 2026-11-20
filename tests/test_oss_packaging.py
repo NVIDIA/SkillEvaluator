@@ -539,6 +539,8 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     assert "oauthlib>=4.0.1" in tier3
     assert {"aiohttp>=3.14.4,<4", "fsspec>=2026.6.0", "urllib3>=2.8.0,<3"} <= set(extras["llm"])
     assert {"msgpack>=1.2.3", "urllib3>=2.8.0,<3"} <= set(extras["security"])
+    assert {"filelock>=4.2.1,<5", "multidict>=6.9.1,<7"} <= set(extras["llm"])
+    assert {"filelock>=4.2.1,<5", "pip>=26.2.2"} <= set(extras["security"])
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -548,6 +550,9 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     )
     assert all(version >= Version("1.30.0") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
+    assert all(version >= Version("4.2.1") for version in all_lock_versions["filelock"])
+    assert all(version >= Version("6.9.1") for version in all_lock_versions["multidict"])
+    assert all(version >= Version("26.2.2") for version in all_lock_versions["pip"])
     # The optional dashboard uses Streamlit's protobuf transport. It does not
     # restore the removed evaluator telemetry integration or its dependencies.
     protobuf_consumers = {

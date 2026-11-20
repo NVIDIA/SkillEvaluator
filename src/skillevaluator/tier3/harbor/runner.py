@@ -3426,9 +3426,8 @@ def _workspace_skills(skill_path: Path, values: list[str | Path]) -> list[Path]:
 
 def _workspace_skill_name(path: Path) -> str:
     """Reserve the effective skill name without requiring an embedding description."""
-    import yaml
-
     from skillevaluator.constants import CONTENT_DEDUP_MAX_FILE_BYTES
+    from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
     from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 
     content = _read_regular_evals_file(
@@ -3440,8 +3439,8 @@ def _workspace_skill_name(path: Path) -> str:
     match = FRONTMATTER_PATTERN.match(content)
     if match is not None:
         try:
-            metadata = yaml.safe_load(match.group(1))
-        except yaml.YAMLError:
+            metadata = load_bounded_yaml(match.group(1), last_key_wins=True)
+        except StructuredDataError:
             metadata = None
         name = metadata.get("name") if isinstance(metadata, dict) else None
         if isinstance(name, str) and name.strip():

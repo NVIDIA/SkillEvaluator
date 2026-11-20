@@ -11,7 +11,12 @@ import urllib.error
 import httpx
 import pytest
 
-from skillevaluator.inference.retry import extract_http_status, is_retriable_exception
+from skillevaluator.inference.retry import (
+    extract_http_status,
+    extract_retry_after,
+    is_retriable_exception,
+    retry_call_with_backoff,
+)
 
 
 def _status(code):
@@ -81,3 +86,111 @@ def test_status_without_http_response_keeps_wrapper_status():
     outer.__cause__ = OSError("connection reset")
     assert extract_http_status(outer) == 502
     assert is_retriable_exception(outer)
+
+
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+def test_retry_after_comes_from_innermost_provider_response(link):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "1"}, None)
+    intermediate = RuntimeError("provider wrapper")
+    underlying = httpx.HTTPStatusError(
+        "rate limited",
+        request=httpx.Request("POST", "http://localhost/"),
+        response=httpx.Response(429, headers={"Retry-After": "10"}),
+    )
+    setattr(wrapper, link, intermediate)
+    setattr(intermediate, link, underlying)
+    assert extract_retry_after(wrapper) == "10"
+
+
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize("header", ["Retry-After", "retry-after"])
+def test_empty_inner_retry_after_keeps_usable_outer_header(link, header):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "31"}, None)
+    underlying = urllib.error.HTTPError("http://localhost/", 429, "rate limited", {header: ""}, None)
+    setattr(wrapper, link, underlying)
+
+    assert extract_retry_after(wrapper) == "31"
+
+
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize(
+    ("value", "outer_value"),
+    [("garbage", "60"), (" \t ", "60"), ("NaN", "60"), ("-inf", "60"), ("-5", "60"), ("inf", "0"), ("1e999", "0")],
+)
+def test_invalid_inner_retry_after_keeps_valid_outer_header(link, value, outer_value):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": outer_value}, None)
+    underlying = httpx.HTTPStatusError(
+        "rate limited",
+        request=httpx.Request("POST", "http://localhost/"),
+        response=httpx.Response(429, headers={"Retry-After": value}),
+    )
+    setattr(wrapper, link, underlying)
+
+    assert extract_retry_after(wrapper) == outer_value
+
+
+@pytest.mark.parametrize("link", ["__cause__", "__context__"])
+@pytest.mark.parametrize("value", ["0", "Wed, 21 Oct 2015 07:28:00 GMT"])
+def test_parsable_inner_retry_after_with_zero_delay_wins(link, value):
+    wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "60"}, None)
+    underlying = urllib.error.HTTPError("http://localhost/", 429, "rate limited", {"Retry-After": value}, None)
+    setattr(wrapper, link, underlying)
+
+    assert extract_retry_after(wrapper) == value
+
+
+def test_empty_inner_retry_after_does_not_bypass_outer_delay_limit(monkeypatch):
+    calls = 0
+    sleeps = []
+    monkeypatch.setattr("skillevaluator.inference.retry.time.sleep", sleeps.append)
+
+    def operation():
+        nonlocal calls
+        calls += 1
+        wrapper = urllib.error.HTTPError("http://localhost/", 503, "wrapper", {"Retry-After": "31"}, None)
+        inner = urllib.error.HTTPError("http://localhost/", 429, "rate limited", {"Retry-After": ""}, None)
+        raise wrapper from inner
+
+    with pytest.raises(urllib.error.HTTPError, match="wrapper"):
+        retry_call_with_backoff(operation, max_retries=2, max_delay=30)
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_retry_after_explicit_cause_wins_over_context():
+    wrapper = RuntimeError("provider wrapper")
+    wrapper.__context__ = urllib.error.HTTPError("http://localhost/", 429, "old", {"Retry-After": "50"}, None)
+    wrapper.__cause__ = urllib.error.HTTPError("http://localhost/", 429, "current", {"Retry-After": "5"}, None)
+    assert extract_retry_after(wrapper) == "5"
+
+
+def test_retry_after_ignores_suppressed_context():
+    wrapper = _status(503)
+    wrapper.__context__ = urllib.error.HTTPError("http://localhost/", 429, "old", {"Retry-After": "50"}, None)
+    wrapper.__suppress_context__ = True
+    assert extract_retry_after(wrapper) is None
+
+
+def test_retry_after_handles_cyclic_chain():
+    wrapper = _status(503)
+    underlying = urllib.error.HTTPError("http://localhost/", 429, "current", {"Retry-After": "5"}, None)
+    wrapper.__cause__ = underlying
+    underlying.__context__ = wrapper
+    assert extract_retry_after(wrapper) == "5"
+
+
+def test_wrapped_retry_after_above_limit_does_not_send_another_request(monkeypatch):
+    calls = 0
+    sleeps = []
+    monkeypatch.setattr("skillevaluator.inference.retry.time.sleep", sleeps.append)
+
+    def operation():
+        nonlocal calls
+        calls += 1
+        inner = urllib.error.HTTPError("http://localhost/", 429, "rate limited", {"Retry-After": "3600"}, None)
+        raise RuntimeError("provider wrapper") from inner
+
+    with pytest.raises(RuntimeError, match="provider wrapper"):
+        retry_call_with_backoff(operation, max_retries=2, max_delay=30)
+    assert calls == 1
+    assert sleeps == []

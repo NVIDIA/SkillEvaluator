@@ -595,16 +595,23 @@ def test_publish_docs_installs_the_fern_cli_from_the_committed_lockfile() -> Non
 def test_workflows_declare_permissions_or_inherit_the_explicit_scan_caller() -> None:
     """A job-level permissions: block overrides the workflow-level one, so check both.
 
-    The callable-only scanner inherits its explicit consumer permissions so
+    Callable-only scan workflows inherit their explicit consumer permissions so
     hosting can opt into OIDC without requiring that permission for basic scans.
-    All event-triggered workflows still declare their scope; no job uses write-all.
+    Other workflows declare their scope; no job uses write-all.
     """
     for workflow_name in _workflow_names():
         workflow = _load(workflow_name)
-        if workflow_name == "evaluate-skills.yml":
+        if workflow_name in {"evaluate-skills.yml", "skill-checks-stable.yml"}:
             assert set(workflow["on"]) == {"workflow_call"}
             assert "permissions" not in workflow
             assert all("permissions" not in job for job in workflow["jobs"].values())
+            if workflow_name == "skill-checks-stable.yml":
+                (job,) = workflow["jobs"].values()
+                assert re.fullmatch(
+                    r"NVIDIA/SkillEvaluator/\.github/workflows/evaluate-skills\.yml@[0-9a-f]{40}",
+                    job["uses"],
+                )
+                assert "steps" not in job
             for template in ("skill-checks.yml", "skill-checks-llm.yml"):
                 caller = yaml.load((ROOT / "ci/templates" / template).read_text(), Loader=yaml.BaseLoader)
                 assert caller["permissions"] == {"contents": "read"}

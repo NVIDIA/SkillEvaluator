@@ -9,7 +9,9 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 
 from __future__ import annotations
 
+import glob
 import os
+from fnmatch import fnmatch
 from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
@@ -174,20 +176,13 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("bandit")
             return result
 
-        # Tier 1 artifact dirs (evals/, results/, versions/, ...) hold
-        # snapshot copies of the live skill; scanning them produces
-        # duplicate findings. Bandit takes a single comma-separated
-        # ``--exclude`` arg that combines the test exclusion (when on)
-        # with the artifact exclusion list.
-        excludes: list[str] = []
-        if self.exclude_tests:
-            excludes.extend(["tests", "test", "*_test.py", "test_*.py"])
-        excludes.extend(sorted(SCAN_EXCLUDED_DIRS))
-
         # resolve() so a skill dir named like an option token (e.g.
         # "--exclude=*") cannot be parsed as a scanner flag.
-        args = ["-r", str(skill_path.resolve()), "-f", "json", "-q", "-ll"]
-        args.extend(["--exclude", ",".join(excludes)])
+        root = skill_path.resolve()
+        args = ["-r", str(root), "-f", "json", "-q", "-ll"]
+        # Always passed, also when empty, because Bandit's own default list
+        # is matched the same way and has ".git" in it.
+        args.extend(["--exclude", ",".join(self._bandit_excludes(root))])
 
         tool_result = Tools.bandit.run(args, timeout=120)
 
@@ -204,6 +199,47 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("bandit")
 
         return result
+
+    def _bandit_excludes(self, root: Path) -> list[str]:
+        """Patterns for the artifact directories Bandit skips below *root*, and for tests when they are excluded.
+
+        Tier 1 artifact dirs (evals/, results/, versions/, ...) hold snapshot
+        copies of the live skill, and scanning them produces duplicate
+        findings. Bandit drops a file when an ``--exclude`` entry is a
+        substring of its whole path, so a bare name such as "test" also hid
+        every file of a skill called "webapp-testing". Each entry is
+        therefore the path of a directory or file that exists, written as a
+        pattern that matches only below that directory or only that file.
+        """
+        test_dirs = {"tests", "test"} if self.exclude_tests else set()
+        patterns: list[str] = []
+        for dirpath, dirnames, filenames in os.walk(root):
+            base = Path(dirpath)
+            excluded = [
+                name
+                for name in dirnames
+                if name in test_dirs or matches_filesystem_name(base / name, SCAN_EXCLUDED_DIRS)
+            ]
+            dirnames[:] = [name for name in dirnames if name not in excluded]
+            patterns.extend(f"{self._bandit_pattern(base / name)}{os.sep}*" for name in excluded)
+            if self.exclude_tests:
+                patterns.extend(
+                    self._bandit_pattern(base / name)
+                    for name in filenames
+                    if fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+                )
+        return sorted(patterns)
+
+    @staticmethod
+    def _bandit_pattern(path: Path) -> str:
+        """*path* as a pattern for one ``--exclude`` entry.
+
+        Bandit splits the option at every comma, so a comma in the path is
+        written as ``?``. The entries only name tests and artifact
+        directories, and a path that differs in that one character is one of
+        those as well.
+        """
+        return glob.escape(str(path)).replace(",", "?")
 
     def _process_bandit_output(
         self,

@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from types import ModuleType
@@ -52,6 +53,19 @@ def _isolate_operator_judge_policies(monkeypatch: pytest.MonkeyPatch) -> None:
 # =============================================================================
 # SKILLS FIXTURES
 # =============================================================================
+
+
+@pytest.fixture
+def default_int_digit_limit():
+    """Pin Python's default 4,300-digit limit for converting text to an int.
+
+    A test built on ``YAML_DIRECTIVE_VALUE_ERROR`` needs it: with ``PYTHONINTMAXSTRDIGITS`` changed,
+    the over-long ``%YAML`` number is a valid directive and the scanner raises no ``ValueError``.
+    """
+    previous = sys.get_int_max_str_digits()
+    sys.set_int_max_str_digits(4_300)
+    yield
+    sys.set_int_max_str_digits(previous)
 
 
 @pytest.fixture

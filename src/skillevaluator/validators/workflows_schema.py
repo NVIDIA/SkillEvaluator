@@ -360,9 +360,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
         elif "workflows" in folder_path.parts or "team-workflows" in folder_path.parts:
             result.add_message("Validating workflows within standard folder structure")
         else:
-            result.add_warning(
-                "Folder doesn't follow SkillEvaluator structure (missing workflows/ or team-workflows/)"
-            )
+            result.add_warning("Folder doesn't follow SkillEvaluator structure (missing workflows/ or team-workflows/)")
 
         return result
 

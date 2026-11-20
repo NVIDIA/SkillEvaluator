@@ -1689,7 +1689,7 @@ def test_bedrock_preflight_requires_https_for_bearer_endpoints(
     monkeypatch.setenv(endpoint_variable, "http://127.0.0.1:1")
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
-    result = runtime_preflight.probe_model(provider, timeout_seconds=15)
+    result = _probe_bedrock_fixture(provider, timeout_seconds=15)
 
     assert result.failure_kind == "invalid_configuration", result.detail
     assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
@@ -1764,7 +1764,7 @@ aws_secret_access_key = test-secret-key
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=15)
+            result = _probe_bedrock_fixture(provider, timeout_seconds=15)
             clients["bedrock-runtime"].converse(
                 modelId="test-model",
                 messages=[{"role": "user", "content": [{"text": "hello"}]}],

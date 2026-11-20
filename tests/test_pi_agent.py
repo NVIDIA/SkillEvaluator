@@ -15,7 +15,13 @@ pytest.importorskip("harbor")
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.commands import validate_agents
-from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS, HARBOR_AGENTS_EXPERIMENTAL
+from skillevaluator.tier3.harbor import (
+    DOCKER_AGENT_IMPORT_PATHS,
+    HARBOR_AGENTS_EXPERIMENTAL,
+    LOCAL_AGENT_IMPORT_PATHS,
+    LOCAL_HARBOR_AGENTS,
+)
+from skillevaluator.tier3.harbor.local_agents import SkillEvaluatorLocalPi
 from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.pi_agent import SkillEvaluatorPi
 from skillevaluator.tier3.harbor.runner import (
@@ -88,3 +94,65 @@ def test_install_rejects_mcp_servers_on_the_pinned_version(tmp_path):
     with pytest.raises(ValueError, match="pi-mcp-adapter"):
         asyncio.run(_agent(tmp_path, mcp_servers=[server]).install(SimpleNamespace()))
 
+
+
+def _local_agent(tmp_path, **kwargs):
+    agent = SkillEvaluatorLocalPi(logs_dir=tmp_path, model_name=_provider().model, **kwargs)
+    agent.ensure_system_dependencies = AsyncMock()
+    agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout="1.5.2\n"))
+    return agent
+
+
+def test_local_registration_and_command(tmp_path):
+    assert "pi" in LOCAL_HARBOR_AGENTS
+    assert LOCAL_AGENT_IMPORT_PATHS["pi"].endswith("SkillEvaluatorLocalPi")
+    command = build_harbor_run_command(dataset_path=tmp_path, agent="pi", job_name="j", env_mode="local")
+    assert command[command.index("--agent") + 1] == LOCAL_AGENT_IMPORT_PATHS["pi"]
+    joined = " ".join(command)
+    assert "runtime_agent=pi" in joined
+    assert "version=" not in joined  # local mode runs the operator-installed CLI
+
+
+def test_local_install_records_the_installed_cli(tmp_path):
+    agent = _local_agent(tmp_path)
+    agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout="1.4.0\n"))
+    asyncio.run(agent.install(object()))  # soft check: drift from the pin warns, never raises
+    assert agent._version == "1.4.0"
+
+
+def test_local_install_rejects_mcp_servers(tmp_path):
+    from harbor.models.task.config import MCPServerConfig
+
+    server = MCPServerConfig(name="context7", transport="stdio", command="npx", args=["-y", "@upstash/context7-mcp"])
+    agent = _local_agent(tmp_path, mcp_servers=[server])
+    with pytest.raises(ValueError, match="pi-mcp-adapter"):
+        asyncio.run(agent.install(object()))
+
+
+def test_local_exec_rewrites_container_assumptions(monkeypatch):
+    from harbor.agents.installed.pi import Pi
+
+    agent = object.__new__(SkillEvaluatorLocalPi)
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            ". ~/.nvm/nvm.sh; PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent pi --print "
+            "--mode json 2>&1 </dev/null | grep -v '\"type\":\"message_update\"' "
+            "| stdbuf -oL tee /logs/agent/pi.txt",
+        )
+    )
+
+    command = str(captured["command"])
+    assert ". ~/.nvm/nvm.sh" not in command  # host CLI resolved from PATH
+    assert "PI_CODING_AGENT_DIR=/logs/agent/pi-agent" in command  # inside the sandbox roots
+    assert "/tmp/harbor-pi-agent" not in command
+    assert "stdbuf" not in command  # hosts may lack GNU coreutils
+    assert "grep -v" in command and "tee /logs/agent/pi.txt" in command

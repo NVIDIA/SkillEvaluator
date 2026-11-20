@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
+from harbor.agents.installed.pi import _REMOTE_PI_CONFIG_DIR
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
@@ -30,11 +31,13 @@ from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
     start_in_process_bridge,
 )
+from skillevaluator.tier3.harbor.pi_agent import SkillEvaluatorPi
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -670,6 +673,71 @@ class SkillEvaluatorLocalOpenCode(SkillEvaluatorOpenCode):
             "| tee /logs/agent/opencode.txt",
         ).replace(" --dangerously-skip-permissions", "", 1)
         env = self._confined_project_env(env)
+        return await super().exec_as_agent(
+            environment,
+            command=command,
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+
+class SkillEvaluatorLocalPi(SkillEvaluatorPi):
+    """Use the installed local pi CLI without the container's nvm/npm bootstrap."""
+
+    _PI_CONFIG_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-agent")
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        if self.mcp_servers:
+            # Same pin policy as the docker arm: pi-mcp-adapter targets pi 0.85.x.
+            raise ValueError(
+                "pi MCP servers require pi 0.85.x; the validated pi runtime does not ship a compatible "
+                "pi-mcp-adapter. Drop --mcp-server/--mcp for pi."
+            )
+        result = await self.exec_as_agent(environment, command="pi --version")
+        self._version = self.parse_version(result.stdout or "")
+        if self._version and self._version != PINNED_RUNTIME_VERSIONS["pi"]:
+            # Soft check: local mode runs the operator's CLI; only warn on drift.
+            self.logger.warning(
+                f"Local pi {self._version} differs from the validated pin "
+                f"{PINNED_RUNTIME_VERSIONS['pi']}; docker mode pins the runtime instead."
+            )
+
+    def get_version_command(self) -> str | None:
+        return "pi --version"
+
+    def _local_config_path(self, command: str) -> str:
+        # Harbor writes pi's isolated config under /tmp, which the local sandbox
+        # keeps outside its allowed roots; keep it in the trial's agent dir.
+        return command.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+
+    async def _upload_config_text(
+        self,
+        environment: BaseEnvironment,
+        *,
+        content: str,
+        remote_path: str,
+        filename: str,
+    ) -> None:
+        await super()._upload_config_text(
+            environment,
+            content=content,
+            remote_path=self._local_config_path(remote_path),
+            filename=filename,
+        )
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        command = command.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
+        command = self._local_config_path(command)
+        # Hosts may lack GNU coreutils' stdbuf; plain tee keeps the log capture.
+        command = command.replace("| stdbuf -oL tee ", "| tee ")
         return await super().exec_as_agent(
             environment,
             command=command,

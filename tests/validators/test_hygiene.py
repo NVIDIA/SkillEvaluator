@@ -4,12 +4,18 @@
 """Tests for hygiene validator."""
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 
 from skillevaluator.reporting import SARIFReporter
 from skillevaluator.validators.hygiene import HygieneValidator
+
+
+def _pkg(requirement: str) -> str:
+    """Package name the audit quotes for an unpinned requirement line."""
+    return re.match(r"^([a-zA-Z0-9_-]+)", requirement).group(1).lower()
 
 
 class TestHygieneValidator:
@@ -292,7 +298,7 @@ Check the [config file](./config/settings.yaml) for settings.
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
             '---\ndescription: "[metadata](frontmatter.md)"\n---\n\n'
-            '`[inline](inline.md)`\n\n'
+            "`[inline](inline.md)`\n\n"
             "```markdown\n[fenced](fenced.md)\n```\n\n"
             "<!-- <a href='comment.md'>comment</a> -->\n"
             "<template><a href='template.md'>template</a></template>\n",
@@ -311,8 +317,7 @@ Check the [config file](./config/settings.yaml) for settings.
         (skill_dir / "guide.md").write_text("# Existing\n", encoding="utf-8")
         (skill_dir / "docs").mkdir()
         (skill_dir / "SKILL.md").write_text(
-            "[space](<my file.md>)\n[query](guide.md?view=1)\n"
-            "[fragment](guide.md#overview)\n[directory](docs/)\n",
+            "[space](<my file.md>)\n[query](guide.md?view=1)\n[fragment](guide.md#overview)\n[directory](docs/)\n",
             encoding="utf-8",
         )
 
@@ -350,8 +355,7 @@ Check the [config file](./config/settings.yaml) for settings.
         skill_dir = tmp_path / "duplicate-links"
         skill_dir.mkdir()
         (skill_dir / "SKILL.md").write_text(
-            "[first](missing.md), [second](./missing.md#part), and [third][same].\n\n"
-            "[same]: missing.md?view=1\n",
+            "[first](missing.md), [second](./missing.md#part), and [third][same].\n\n[same]: missing.md?view=1\n",
             encoding="utf-8",
         )
 
@@ -466,7 +470,7 @@ pandas
         result = HygieneValidator()._check_requirements_file(requirements)
 
         assert result.errors == []
-        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {_pkg(requirement)}"]
 
     @pytest.mark.parametrize(
         "requirement",
@@ -484,7 +488,7 @@ pandas
         result = HygieneValidator()._check_requirements_file(requirements)
 
         assert result.errors == []
-        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {_pkg(requirement)}"]
 
     @pytest.mark.parametrize(
         "requirement",
@@ -502,7 +506,7 @@ pandas
         result = HygieneValidator()._check_requirements_file(requirements)
 
         assert result.errors == []
-        assert result.warnings == [f"requirements.txt:1 - Unpinned: {requirement}"]
+        assert result.warnings == [f"requirements.txt:1 - Unpinned: {_pkg(requirement)}"]
 
     @pytest.mark.parametrize(
         "requirement",
@@ -577,3 +581,44 @@ subprocess32==3.5.4
         # Should not error if no requirements.txt
         req_errors = [e for e in result.errors if "requirements" in e.lower()]
         assert len(req_errors) == 0
+
+
+class TestRequirementsSymlinkBoundary:
+    def test_requirements_symlink_outside_skill_is_not_read(self, tmp_path: Path):
+        outside = tmp_path / "outside"
+        outside.mkdir()
+        secret = outside / "secret.txt"
+        secret.write_text("FAKEKEYLINEabcdef0123456789\nmachine example login bob password hunter2\n")
+
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill. Use when demoing.\n---\n# Demo\n")
+        (skill / "requirements.txt").symlink_to(secret)
+
+        result = HygieneValidator()._validate_single_skill(skill)
+
+        text = "\n".join([*result.warnings, *result.errors, *(f.message for f in result.findings)])
+        assert "FAKEKEYLINE" not in text
+        assert "hunter2" not in text
+        assert any(f.check_name == "symlink_outside_skill" for f in result.findings)
+        assert not any(s.check_name == "dependency_audit" for s in result.success_details)
+
+    def test_requirements_symlink_inside_skill_is_audited(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        (skill / "deps").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: demo\ndescription: Demo skill. Use when demoing.\n---\n# Demo\n")
+        (skill / "deps" / "base.txt").write_text("requests\n")
+        (skill / "requirements.txt").symlink_to(skill / "deps" / "base.txt")
+
+        result = HygieneValidator()._audit_dependencies(skill)
+
+        assert result.warnings == ["requirements.txt:1 - Unpinned: requests"]
+
+    def test_unpinned_warning_quotes_only_the_package_name(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "requirements.txt").write_text("requests  # some long trailing text that should not be echoed\n")
+
+        result = HygieneValidator()._audit_dependencies(skill)
+
+        assert result.warnings == ["requirements.txt:1 - Unpinned: requests"]

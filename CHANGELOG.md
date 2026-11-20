@@ -58,7 +58,9 @@ All notable changes to SkillEvaluator are documented in this file.
   symlinked `references/` entry. Symlinks that resolve inside the skill still
   scan as before. Code Integrity & Hygiene records a low-severity
   `symlink_outside_skill` finding naming each skipped link by its path inside
-  the skill, never by its target.
+  the skill, never by its target. The hygiene dependency audit applies the same
+  boundary to `requirements*.txt` and quotes only the package name in its
+  unpinned-dependency warnings, never the whole line.
 - The LLM finding verifier's prompt now keeps skill content out of instruction
   space. File context is wrapped in a backtick fence longer than any backtick
   run in the file, so a skill cannot close the fence early or leave it open to

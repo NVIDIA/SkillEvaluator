@@ -19,6 +19,7 @@ from skillevaluator.validators.base import (
     ValidatorBase,
     iter_outside_symlinks,
     iter_scannable_files,
+    path_resolves_inside,
 )
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
@@ -171,9 +172,14 @@ class HygieneValidator(ValidatorBase):
 
         for req_name in ("requirements.txt", "requirements-dev.txt"):
             req_file = skill_path / req_name
-            if req_file.exists():
-                found_any = True
-                result.merge(self._check_requirements_file(req_file))
+            if not req_file.exists():
+                continue
+            if req_file.is_symlink() and not path_resolves_inside(req_file, skill_path):
+                # Reported by _check_symlink_boundaries; never read or quote
+                # a file that lives outside the skill.
+                continue
+            found_any = True
+            result.merge(self._check_requirements_file(req_file))
 
         pyproject = skill_path / "pyproject.toml"
         if pyproject.exists():
@@ -235,7 +241,7 @@ class HygieneValidator(ValidatorBase):
             if pkg_name in banned_lower:
                 result.add_error(f"{req_file.name}:{line_num} - Banned package: {pkg_name}")
             elif not is_direct_reference and not re.search(r"[=<>!]", requirement_part):
-                result.add_warning(f"{req_file.name}:{line_num} - Unpinned: {line}")
+                result.add_warning(f"{req_file.name}:{line_num} - Unpinned: {pkg_name}")
 
         if not result.errors and not result.warnings:
             result.add_success(

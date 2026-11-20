@@ -55,6 +55,8 @@ All notable changes to SkillEvaluator are documented in this file.
   `Authorization: Bearer` header, and host inference failed with an illegal
   header value. This includes models called through the Bedrock Responses
   route.
+- Bedrock inference checks HTTPS on the endpoint selected for the request,
+  so an unused HTTP override no longer blocks a valid HTTPS route.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:

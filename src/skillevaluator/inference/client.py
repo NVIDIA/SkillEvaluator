@@ -107,29 +107,82 @@ class _BedrockTokenWindow:
 
 _bedrock_token_window = _BedrockTokenWindow()
 
-# Endpoint overrides that LiteLLM's Bedrock routes send the bearer token to.
-_BEDROCK_BEARER_ENDPOINT_VARIABLES = (
-    "AWS_BEDROCK_RUNTIME_ENDPOINT",  # bedrock-runtime routes, such as Converse and Responses
-    "BEDROCK_MANTLE_API_BASE",  # the mantle/ route
-    # The hosted-platform route sends the token only when its own API key is not set.
-    "ANTHROPIC_AWS_BASE_URL",
-    "ANTHROPIC_AWS_API_BASE",
-)
+_BEDROCK_RUNTIME_ENDPOINT = "AWS_BEDROCK_RUNTIME_ENDPOINT"
+_BEDROCK_MANTLE_ENDPOINT = "BEDROCK_MANTLE_API_BASE"
+_BEDROCK_PLATFORM_ENDPOINTS = ("ANTHROPIC_AWS_BASE_URL", "ANTHROPIC_AWS_API_BASE")
 
 
-def _require_https_for_bedrock_bearer_endpoints() -> None:
-    """Refuse to send a Bedrock bearer token to a plain HTTP endpoint override."""
-    for variable in _BEDROCK_BEARER_ENDPOINT_VARIABLES:
-        endpoint = os.environ.get(variable)
-        if not endpoint:
-            continue
-        try:
-            target = urlsplit(endpoint)
-            uses_https = target.scheme == "https" and target.hostname is not None
-        except ValueError:
-            uses_https = False
-        if not uses_https:
-            raise LLMClientError(f"{variable} must use HTTPS with a Bedrock bearer token.")
+def _require_https_for_bedrock_bearer_endpoint(setting: str, endpoint: str | None) -> None:
+    """Reject an active override before LiteLLM can send bearer credentials."""
+    if not endpoint:
+        return
+    try:
+        target = urlsplit(endpoint)
+        uses_https = target.scheme == "https" and target.hostname is not None
+    except ValueError:
+        uses_https = False
+    if not uses_https:
+        raise LLMClientError(f"{setting} must use HTTPS with a Bedrock bearer token.")
+
+
+def _bedrock_bearer_runtime_override(
+    model: str,
+    *,
+    aliases: Mapping[str, str],
+    sdk_api_base: str | None,
+    has_fallbacks: bool,
+) -> str | None:
+    """Validate the active LiteLLM route and return its explicit runtime override."""
+    from litellm.llms.bedrock.common_utils import BedrockModelInfo
+    from litellm.responses.bridge_check import responses_api_bridge_check
+    from litellm.secret_managers.main import get_secret_str
+    from litellm.utils import ProviderConfigManager, get_llm_provider
+
+    if has_fallbacks:
+        # A LiteLLM fallback can select a different route from the initial request.
+        for setting in (_BEDROCK_RUNTIME_ENDPOINT, _BEDROCK_MANTLE_ENDPOINT, *_BEDROCK_PLATFORM_ENDPOINTS):
+            _require_https_for_bedrock_bearer_endpoint(setting, get_secret_str(setting))
+        _require_https_for_bedrock_bearer_endpoint("LiteLLM api_base", sdk_api_base)
+
+    model, provider, _, api_base = get_llm_provider(model=aliases.get(model, model))
+    if provider not in {"bedrock", "bedrock_mantle"}:
+        return None
+
+    # LiteLLM can select Responses first and fall back to chat for a chat-only model.
+    model_info, model = responses_api_bridge_check(model, provider, api_base=api_base)
+    native_responses = False
+    if model_info.get("mode") == "responses":
+        model, provider, _, api_base = get_llm_provider(model=model, custom_llm_provider=provider, api_base=api_base)
+        native_responses = (
+            ProviderConfigManager.get_provider_responses_api_config(provider, model=model, api_base=api_base)
+            is not None
+        )
+        if not native_responses and model in aliases:
+            # The reverse bridge calls completion again with the stripped model and provider.
+            model, provider, _, api_base = get_llm_provider(
+                model=aliases[model], custom_llm_provider=provider, api_base=api_base
+            )
+    route = BedrockModelInfo.get_bedrock_route(model) if not native_responses else None
+
+    if provider == "bedrock_mantle" or route == "mantle":
+        settings = (_BEDROCK_MANTLE_ENDPOINT,)
+        if provider == "bedrock_mantle" and not native_responses:
+            api_base = api_base or sdk_api_base
+    elif route == "claude_platform":
+        settings = _BEDROCK_PLATFORM_ENDPOINTS
+        api_base = api_base or sdk_api_base
+    else:
+        settings = (_BEDROCK_RUNTIME_ENDPOINT,)
+
+    if api_base:
+        _require_https_for_bedrock_bearer_endpoint("LiteLLM api_base", api_base)
+        return None
+    for setting in settings:
+        if endpoint := get_secret_str(setting):
+            _require_https_for_bedrock_bearer_endpoint(setting, endpoint)
+            # Leave URL normalization to the SDK for Mantle and Claude Platform.
+            return endpoint if setting == _BEDROCK_RUNTIME_ENDPOINT else None
+    return None
 
 
 def _effective_openai_base_url(explicit_base_url: str | None) -> str:
@@ -842,21 +895,23 @@ class LLMClient:
                 return _checked_content(content.strip(), getattr(response, "stop_reason", None))
             if config.provider == "bedrock":
                 try:
-                    from litellm import completion
+                    import litellm
+
+                    completion = litellm.completion
                 except ImportError as exc:
                     raise LLMClientError(
                         "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
                     ) from exc
                 # LiteLLM can load environment variables on its first import.
                 has_bearer_token = has_bedrock_bearer_token()
+                endpoint = None
                 if has_bearer_token:
-                    _require_https_for_bedrock_bearer_endpoints()
-                # Mantle resolves its own endpoint. An explicit runtime override takes precedence in LiteLLM.
-                endpoint = (
-                    os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT")
-                    if has_bearer_token and "/mantle/" not in f"/{config.model}"
-                    else None
-                )
+                    endpoint = _bedrock_bearer_runtime_override(
+                        config.litellm_model,
+                        aliases=litellm.model_alias_map or {},
+                        sdk_api_base=litellm.api_base,
+                        has_fallbacks=bool(litellm.model_fallbacks),
+                    )
                 # LiteLLM sends a whitespace-only AWS_BEARER_TOKEN_BEDROCK as a blank Bearer header.
                 # An empty key makes it sign with the IAM credentials, as it does for an unset variable.
                 # The Responses route also reads the variable itself, so hide it for the call.

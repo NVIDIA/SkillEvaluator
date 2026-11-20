@@ -90,11 +90,13 @@ tier3 = [
 ]
 # Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
+    # pip-audit uses the installed CA bundle for the eMudhra trust fix.
+    "certifi>=2026.10.19",
     # Security floor for CacheControl's file-backed cache.
     "filelock>=4.2.1,<5",
     # CVE-2026-114613 fixed floor for pip-audit's CacheControl dependency.
     "msgpack>=1.2.3",
-    # pip 26.2.2 removes trust for the affected eMudhra certificate chain.
+    # pip needs the same eMudhra fix in its vendored CA bundle.
     "pip>=26.2.2",
     "pip-audit>=2.10.0",
     "urllib3>=2.8.0,<3",

@@ -724,7 +724,7 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
         # the config-path rewrite must never touch it, or a task quoting a
         # literal /tmp/harbor-pi-agent path is evaluated on different text in
         # local and Docker mode.
-        self._quoted_instruction = shlex.quote(instruction)
+        self._quoted_instruction = shlex.quote(self.render_instruction(instruction))
         try:
             await super().run(instruction, environment, context)
         finally:

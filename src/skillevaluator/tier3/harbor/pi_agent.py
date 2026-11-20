@@ -24,10 +24,6 @@ _PI_MCP_SHIM_FILENAME = "index.ts"
 
 
 class SkillEvaluatorPi(Pi):
-    # pi resolves staged mcp.json headers from its own environment; the header
-    # variables are forwarded to the launch command by exec_as_agent below.
-    capabilities = Pi.capabilities.model_copy(update={"mcp_http_headers": True})
-
     """Pin the pi CLI Harbor installs so Docker trials stay reproducible.
 
     Harbor's stock agent would install @latest; the pin keeps scores
@@ -37,6 +33,10 @@ class SkillEvaluatorPi(Pi):
     is staged at the path Harbor's launch line references, and the staged
     config is verified with ``pi mcp list`` before the trial launches.
     """
+
+    # pi resolves staged mcp.json headers from its own environment; the header
+    # variables are forwarded to the launch command by exec_as_agent below.
+    capabilities = Pi.capabilities.model_copy(update={"mcp_http_headers": True})
 
     async def install(self, environment: BaseEnvironment) -> None:
         from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS

@@ -2191,8 +2191,8 @@ class PiAdapter(HarnessAdapter):
                 server["name"],
                 "contains",
                 "/tmp/harbor-pi-agent/mcp.json",
-                needle="mcpServers",
-                label="pi config-dir mcp.json mcpServers key",
+                needle=json.dumps(str(server["name"])) + ":",
+                label="pi config-dir mcp.json server entry",
             )
             for server in _redacted_servers(source)
         )

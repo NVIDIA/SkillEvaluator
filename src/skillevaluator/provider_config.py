@@ -692,6 +692,14 @@ def _environment(environ: Mapping[str, str] | None) -> Mapping[str, str]:
     return os.environ if environ is None else environ
 
 
+def has_bedrock_bearer_token(environ: Mapping[str, str] | None = None) -> bool:
+    """Return whether AWS_BEARER_TOKEN_BEDROCK holds a real token.
+
+    An unset, empty, or whitespace-only value means no token, so Bedrock calls use IAM credentials.
+    """
+    return bool(_environment(environ).get("AWS_BEARER_TOKEN_BEDROCK", "").strip())
+
+
 def _required(environ: Mapping[str, str], variable: str) -> str:
     value = environ.get(variable, "").strip()
     if not value:

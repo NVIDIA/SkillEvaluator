@@ -56,6 +56,7 @@ from skillevaluator.provider_config import (
     anthropic_refusal_fallback_model,
     completion_token_limit,
     effective_reasoning_effort,
+    has_bedrock_bearer_token,
     is_claude_5_5_or_later,
     is_openai_reasoning_model,
     resolve_extra_headers,
@@ -793,11 +794,8 @@ class LLMClient:
                         "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
                     ) from exc
                 # LiteLLM can load environment variables on its first import.
-                endpoint = (
-                    os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT")
-                    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-                    else None
-                )
+                has_bearer_token = has_bedrock_bearer_token()
+                endpoint = os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT") if has_bearer_token else None
                 if endpoint:
                     try:
                         target = urlsplit(endpoint)
@@ -806,11 +804,15 @@ class LLMClient:
                         uses_https = False
                     if not uses_https:
                         raise LLMClientError("AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS with a Bedrock bearer token.")
+                # LiteLLM sends a whitespace-only AWS_BEARER_TOKEN_BEDROCK as a blank Bearer header.
+                # An empty key makes it sign with the IAM credentials, as it does for an unset variable.
+                ignore_blank_token = "AWS_BEARER_TOKEN_BEDROCK" in os.environ and not has_bearer_token
                 response = completion(
                     model=config.litellm_model,
                     messages=_chat_messages(system_prompt, turns),
                     aws_region_name=config.region,
                     **({"aws_bedrock_runtime_endpoint": endpoint} if endpoint else {}),
+                    **({"api_key": ""} if ignore_blank_token else {}),
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                     **({"timeout": self._timeout} if self._timeout is not None else {}),

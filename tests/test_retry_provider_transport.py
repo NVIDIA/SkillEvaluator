@@ -78,6 +78,7 @@ class _Server(ThreadingHTTPServer):
         self.retry_after = retry_after
         self.requests: list[int] = []
         self.bearer_requests = 0
+        self.authorizations: list[str] = []
         self.connections = 0
         self.tls_context = tls_context
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -99,6 +100,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         status = self.server.statuses[min(len(self.server.requests), len(self.server.statuses) - 1)]
         self.server.requests.append(status)
+        self.server.authorizations.append(self.headers.get("Authorization", ""))
         self.server.bearer_requests += self.headers.get("Authorization", "").startswith("Bearer ")
         payload = {"message": "loopback response"}
         if status == 200:
@@ -258,6 +260,20 @@ def test_bedrock_inference_rejects_http_bearer_override(isolated_provider_enviro
         with pytest.raises(LLMClientError, match="AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS"):
             client.completions("system", "user")
         assert server.connections == 0
+
+
+@pytest.mark.parametrize("bearer_token", ["", "   ", " \t "])
+def test_bedrock_inference_signs_with_sigv4_when_bearer_token_is_blank(
+    isolated_provider_environment, monkeypatch, bearer_token
+):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        assert client.completions("system", "user") == "recovered"
+        assert server.requests == [200]
+        assert len(server.authorizations) == 1
+        assert server.authorizations[0].startswith("AWS4-HMAC-SHA256 ")
+        assert "Bearer" not in server.authorizations[0]
 
 
 def test_bedrock_inference_validates_credentials_loaded_at_sdk_import(isolated_provider_environment, monkeypatch):

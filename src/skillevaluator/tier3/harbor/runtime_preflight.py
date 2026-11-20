@@ -753,6 +753,7 @@ from skillevaluator.provider_config import (
     _get_google_access_token,
     _is_vertex_openapi_endpoint,
     _parse_vertex_openapi_metadata,
+    has_bedrock_bearer_token,
 )
 
 
@@ -1292,7 +1293,7 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
         session = boto3.session.Session()
         _validate_bedrock_local_sdk_configuration(session)
         bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
-        has_bearer_token = bool(bearer_token.strip())
+        has_bearer_token = has_bedrock_bearer_token()
         if has_bearer_token and any(not 0x21 <= ord(character) <= 0x7E for character in bearer_token):
             raise InvalidConfigError(error_msg="Bedrock bearer token contains invalid characters")
         if not has_bearer_token:

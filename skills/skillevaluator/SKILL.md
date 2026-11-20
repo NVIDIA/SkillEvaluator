@@ -5,7 +5,7 @@ license: Apache-2.0
 compatibility: Requires Python 3.12-3.14 and the skillevaluator CLI; live evaluation also needs Docker (or another backend) and an LLM provider key.
 metadata:
   author: Christopher Kevin <christopherk@nvidia.com>
-  version: "1.0.0"
+  version: "1.0.1"
   domain: [evaluation, ai-ml]
   tags: [skills, evaluation, benchmarking, ci, security]
 ---

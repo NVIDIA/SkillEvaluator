@@ -285,7 +285,76 @@ def test_context_skill_limit_refuses_work_before_provider(modules, tmp_path, mon
     monkeypatch.setattr(modules.commands, "MAX_PLUGIN_DEDUP_SKILLS", 1)
     result = modules.commands.run_plugin_skill_context_dedup(profile)[0]
     assert result.metadata["work_limit_exceeded"]
-    assert result.metadata["scan_status"] == "skipped"
+    assert result.status == "incomplete"
+    assert result.metadata["scan_status"] == "incomplete"
+    assert result.metadata["optional_skip"] is False
+    assert not result.passed
+    assert result.summary.checks_performed == 0
+    assert result.metadata["work_limit"] == {
+        "check_name": "plugin_skill_count_limit",
+        "actual_skills": 2,
+        "skill_limit": 1,
+    }
+
+
+@pytest.mark.parametrize("mode", ["no-skills", "disabled"])
+def test_context_not_run_is_canonical_and_not_optional(modules, tmp_path, monkeypatch, mode):
+    from skillevaluator.reporting.base import get_skip_reason, is_cleanly_skipped
+    from skillevaluator.reporting.run_status import result_status
+
+    inv = inventory(tmp_path / "bundle", skill_paths=() if mode == "no-skills" else ("skills/a",))
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    if mode == "no-skills":
+        result = modules.commands.run_plugin_skill_context_dedup(modules.profile.load_plugin_profile(inv.root))[0]
+        assert "not applicable" in get_skip_reason(result).casefold()
+    else:
+        result = modules.commands.run_plugin_dedup_scan(inv.root, run_context=False)[1]
+        assert get_skip_reason(result) == "Context comparison disabled"
+    assert is_cleanly_skipped(result)
+    assert result_status(result).value == "skipped"
+    assert result.metadata["optional_skip"] is False
+    assert result.summary.checks_performed == 0
+
+
+def test_unparseable_dependency_manifest_is_incomplete(tmp_path):
+    from skillevaluator.deduplication.plugin.intra_plugin_validator import IntraPluginValidator
+
+    (tmp_path / "agent_plugin.yaml").write_text("[]\n")
+    result = IntraPluginValidator().validate(tmp_path)
+    assert result.status == "incomplete"
+    assert not result.passed
+    assert result.metadata["optional_skip"] is False
+    assert result.summary.checks_performed == 0
+
+
+@pytest.mark.parametrize(
+    ("setting", "limit", "check_name"),
+    [
+        ("CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 0, "path_count_limit"),
+        ("CONTENT_DEDUP_MAX_FILES", 0, "file_count_limit"),
+        ("CONTENT_DEDUP_MAX_FILE_BYTES", 1, "file_size_limit"),
+        ("CONTENT_DEDUP_MAX_TOTAL_BYTES", 1, "total_size_limit"),
+    ],
+)
+def test_context_collection_limit_cannot_become_advisory_pass(
+    modules, tmp_path, monkeypatch, setting, limit, check_name
+):
+    from skillevaluator.deduplication.utils import skill_collector
+    from skillevaluator.reporting.run_status import result_status
+
+    inv = inventory(tmp_path / "bundle")
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    profile = modules.profile.load_plugin_profile(inv.root)
+    monkeypatch.setattr(skill_collector, setting, limit)
+
+    result = modules.commands.run_plugin_skill_context_dedup(profile)[0]
+
+    assert not result.passed
+    assert result.status == "incomplete"
+    assert result_status(result).value == "incomplete"
+    assert not result.metadata.get("optional_skip")
+    assert result.summary.checks_performed == 0
+    assert any(finding.check_name == check_name for finding in result.findings)
 
 
 def test_incomplete_inventory_never_reports_clean_comparison(modules, tmp_path, monkeypatch):
@@ -447,19 +516,34 @@ def test_clustering_normalizes_once_and_checks_aggregate_scalar_work(monkeypatch
         core.build_clusters(chunks)
 
 
-def test_context_aggregate_chunk_budget_refuses_all_provider_work(modules, tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    ("setting", "limit", "actual_key", "limit_key"),
+    [
+        ("MAX_PLUGIN_DEDUP_CHUNKS", 3, "actual_chunks", "chunk_limit"),
+        ("MAX_PLUGIN_DEDUP_TEXT_BYTES", 1, "actual_text_bytes", "text_byte_limit"),
+        ("MAX_PLUGIN_DEDUP_FILES", 1, "actual_files", "file_limit"),
+    ],
+)
+def test_context_aggregate_budget_is_incomplete_before_provider_work(
+    modules, tmp_path, monkeypatch, setting, limit, actual_key, limit_key
+):
     inv = inventory(tmp_path / "bundle", skill_paths=("skills/a", "skills/b"))
     monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
     profile = modules.profile.load_plugin_profile(inv.root)
     for skill in profile.bundled_skills:
         (skill.path / "SKILL.md").write_text("\n".join(f"## Section {i}\n" + "words " * 40 for i in range(2)))
-    monkeypatch.setattr(modules.commands, "MAX_PLUGIN_DEDUP_CHUNKS", 3, raising=False)
+    monkeypatch.setattr(modules.commands, setting, limit)
     from skillevaluator.deduplication.intra_skill import intra_skill_validator as core
 
     monkeypatch.setattr(core, "EmbeddingClient", lambda **_kwargs: FakeEmbedding())
     result = modules.commands.run_plugin_skill_context_dedup(profile)[0]
     assert result.metadata["work_limit_exceeded"]
-    assert result.metadata["actual_chunks"] == 4
+    assert result.status == "incomplete"
+    assert result.metadata["optional_skip"] is False
+    assert not result.passed
+    assert result.summary.checks_performed == 0
+    assert result.metadata["work_limit"]["check_name"] == "plugin_content_limit"
+    assert result.metadata["work_limit"][actual_key] > result.metadata["work_limit"][limit_key] == limit
 
 
 def test_unsafe_context_content_remains_blocking(modules, tmp_path, monkeypatch):

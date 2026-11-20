@@ -195,6 +195,7 @@ def retained_results(
         "publication_evidence": "publication_evidence",
         "llm_analysis": "llm_analysis",
         "work_limit": "work_limit",
+        "plugin_context_budget": "plugin_context_budget",
         "tier3": "agent_eval",
         "skillspector_applicability": "skillspector_applicability",
         "skillspector_baseline": "skillspector_baseline",

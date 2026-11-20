@@ -6,38 +6,21 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from skillevaluator.constants import SIMILARITY_DEFAULT_MAX_ENTRIES, SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS
 from skillevaluator.deduplication.intra_skill.intra_skill_validator import IntraSkillValidator
 from skillevaluator.embedding.limits import validate_max_entries, validate_max_scalar_comparisons
-from skillevaluator.models.result import ValidationResult
-from skillevaluator.publication_evidence import stamp_publication_evidence
-from skillevaluator.publication_identity import finalize_publication_target, publication_target_from_path
 from skillevaluator.tier1.commands import emit_reports
+from skillevaluator.tier2.results import guarded_results
 from skillevaluator.validators.similarity import SimilarityValidator
+
+if TYPE_CHECKING:
+    from skillevaluator.models.result import ValidationResult
 
 
 def _guarded_result(title: str, target_path: Path, callback, *, check_id: str) -> list[ValidationResult]:
-    initial_target = publication_target_from_path(target_path)
-    try:
-        result = callback()
-    except Exception as exc:  # validators convert expected failures; this protects CLI UX
-        result = ValidationResult(validator_name=title, validator_description="Tier 2 check")
-        result.mark_scan_incomplete(title)
-        # SDK exceptions may contain response bodies, request data, or credentials.
-        # Expected provider failures are explained by the validators themselves.
-        result.add_error(
-            f"{title} could not complete because of an unexpected error ({type(exc).__name__}). "
-            "Check the provider configuration and connectivity, then rerun Tier 2. "
-            "If the problem persists, report this error type to the maintainers."
-        )
-    if not result.validator_name:
-        result.validator_name = title
-    if not result.validator_description:
-        result.validator_description = f"Tier 2 check for {target_path}"
-    stamp_publication_evidence([result], tier=2, check_id=check_id)
-    finalize_publication_target([result], target_path, initial_target)
-    return [result]
+    return guarded_results(title, target_path, lambda: [callback()], check_id=check_id)
 
 
 def run_similarity_check(

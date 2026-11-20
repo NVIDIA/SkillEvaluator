@@ -14,6 +14,7 @@ import re
 from collections import Counter
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from skillevaluator.constants import (
     CONTENT_DEDUP_EMBEDDING_BATCH_SIZE,
@@ -41,6 +42,9 @@ from skillevaluator.inference.diagnostics import llm_failure_diagnostic, safe_ll
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.utils.tier2_paths import safe_path_label
 from skillevaluator.validators.base import ValidatorBase
+
+if TYPE_CHECKING:
+    from skillevaluator.deduplication.plugin.context_budget import ContextWorkBudget
 
 logger = logging.getLogger(__name__)
 
@@ -169,8 +173,10 @@ class IntraSkillValidator(ValidatorBase):
         max_llm_clusters: int | None = None,
         _max_scalar_comparisons: int | None = None,
         _max_total_prompt_chars: int | None = None,
+        _aggregate_budget: ContextWorkBudget | None = None,
     ) -> None:
         self._threshold = threshold
+        self._aggregate_budget = _aggregate_budget
         # None defers to provider resolution (SKILL_EVAL_EMBEDDING_MODEL);
         # pinning SIMILARITY_DEFAULT_MODEL here would override the env var.
         self._embedding_model = embedding_model
@@ -263,14 +269,49 @@ class IntraSkillValidator(ValidatorBase):
             result.add_success("context_dedup", "Not enough content to compare")
             return result
 
+        budget = self._aggregate_budget
+        pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
+        scalar_limit = (
+            min(self._max_scalar_comparisons, budget.remaining_scalars) if budget else self._max_scalar_comparisons
+        )
+
+        def scalar_limit_exceeded(dimension):
+            scalar_work = pair_count * dimension
+            if scalar_work <= scalar_limit:
+                return False
+            chunk_limit = effective_chunk_limit(dimension, scalar_limit) if scalar_limit else 1
+            _mark_work_limit_incomplete(
+                result,
+                "scalar_comparison_limit",
+                f"scalar comparison work of {scalar_work} exceeds the limit of {scalar_limit}; "
+                f"the effective chunk limit is {chunk_limit} for {dimension}-dimensional embeddings; "
+                f"this skill has {len(all_chunks)} chunks.",
+                (
+                    "Use an explicit bounded plugin context allowance or reduce/split the skill content before running Tier 2."
+                    if budget
+                    else "Reduce or split the skill content before running Tier 2."
+                ),
+                pair_count=pair_count,
+                vector_dimension=dimension,
+                scalar_work=scalar_work,
+                limit=scalar_limit,
+                effective_chunk_limit=chunk_limit,
+                chunk_count=len(all_chunks),
+            )
+            return True
+
+        # A prior member established the dimension, so refuse excess work before
+        # another provider request. The first member is checked after its first batch.
+        if budget and budget.vector_dimension and scalar_limit_exceeded(budget.vector_dimension):
+            return result
+
         # Step 3: Batch embed all chunks
         logger.info("Embedding %d chunk(s) via the configured public provider...", len(all_chunks))
         try:
             client = EmbeddingClient(model=self._embedding_model)
             texts = [c.text for c in all_chunks]
 
-            vector_dimension: int | None = None
-            pair_count = len(all_chunks) * (len(all_chunks) - 1) // 2
+            vector_dimension: int | None = budget.vector_dimension if budget else None
             for i in range(0, len(texts), CONTENT_DEDUP_EMBEDDING_BATCH_SIZE):
                 batch = texts[i : i + CONTENT_DEDUP_EMBEDDING_BATCH_SIZE]
                 vectors = client.embed(batch)
@@ -281,25 +322,13 @@ class IntraSkillValidator(ValidatorBase):
                 for chunk, vector in zip(all_chunks[i : i + len(batch)], vectors, strict=True):
                     vector_dimension = validate_embedding_vector(vector, vector_dimension, context="Embedding provider")
                     chunk.embedding = vector
+                    if budget:
+                        budget.chunks_embedded += 1
+                if budget:
+                    budget.vector_dimension = vector_dimension
                 # The first validated response establishes the dimension. Refuse
                 # excess pairwise work before requesting another provider batch.
-                scalar_work = pair_count * (vector_dimension or 0)
-                if scalar_work > self._max_scalar_comparisons:
-                    chunk_limit = effective_chunk_limit(vector_dimension, self._max_scalar_comparisons)
-                    _mark_work_limit_incomplete(
-                        result,
-                        "scalar_comparison_limit",
-                        f"scalar comparison work of {scalar_work} exceeds the limit of {self._max_scalar_comparisons}; "
-                        f"the effective chunk limit is {chunk_limit} for {vector_dimension}-dimensional embeddings; "
-                        f"this skill has {len(all_chunks)} chunks.",
-                        "Reduce or split the skill content before running Tier 2.",
-                        pair_count=pair_count,
-                        vector_dimension=vector_dimension,
-                        scalar_work=scalar_work,
-                        limit=self._max_scalar_comparisons,
-                        effective_chunk_limit=chunk_limit,
-                        chunk_count=len(all_chunks),
-                    )
+                if scalar_limit_exceeded(vector_dimension):
                     return result
 
             logger.info("Embedding complete")
@@ -312,17 +341,19 @@ class IntraSkillValidator(ValidatorBase):
         # Step 4: Cluster by similarity
         logger.info("Clustering %d chunks (threshold: %.2f)...", len(all_chunks), self._threshold)
         clusters = build_clusters(all_chunks, self._threshold)
+        if budget:
+            budget.scalar_comparisons += pair_count * vector_dimension
         logger.info("Found %d cluster(s)", len(clusters))
 
-        if len(clusters) > self._max_llm_clusters:
+        cluster_limit = min(self._max_llm_clusters, budget.remaining_llm_calls) if budget else self._max_llm_clusters
+        if len(clusters) > cluster_limit:
             _mark_work_limit_incomplete(
                 result,
                 "llm_cluster_count_limit",
-                f"{len(clusters)} content clusters require LLM review, more than the limit of "
-                f"{self._max_llm_clusters}.",
+                f"{len(clusters)} content clusters require LLM review, more than the limit of {cluster_limit}.",
                 "Reduce duplicated content or split the skill before rerunning Tier 2.",
                 actual=len(clusters),
-                limit=self._max_llm_clusters,
+                limit=cluster_limit,
             )
             return result
 
@@ -334,6 +365,9 @@ class IntraSkillValidator(ValidatorBase):
             return result
 
         total_prompt_chars = 0
+        prompt_limit = (
+            min(self._max_total_prompt_chars, budget.remaining_prompt_chars) if budget else self._max_total_prompt_chars
+        )
         for cluster in clusters:
             prompt_chars = len(SYSTEM_PROMPT) + len(build_user_prompt(cluster))
             total_prompt_chars += prompt_chars
@@ -354,7 +388,7 @@ class IntraSkillValidator(ValidatorBase):
                 ),
                 (
                     total_prompt_chars,
-                    self._max_total_prompt_chars,
+                    prompt_limit,
                     "llm_total_prompt_size_limit",
                     "LLM review prompts total {actual} characters, more than the limit of {limit}.",
                 ),
@@ -406,7 +440,12 @@ class IntraSkillValidator(ValidatorBase):
         max_workers = min(len(clusters), 5)
 
         with ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = {executor.submit(analyze_one, c): c for c in clusters}
+            futures = {}
+            for cluster in clusters:
+                futures[executor.submit(analyze_one, cluster)] = cluster
+                if budget:
+                    budget.llm_clusters_submitted += 1
+                    budget.prompt_chars_submitted += len(SYSTEM_PROMPT) + len(build_user_prompt(cluster))
             for future in as_completed(futures):
                 cluster_results.append(future.result())
 

@@ -174,7 +174,13 @@ whitespace-only values are treated as `null`; exact matching keeps real script
 names such as `none.sh` intact.
 
 The dataset file can be named `evals.json`, `evals.jsonl`, `evals.yaml`, or
-`evals.yml` — `tier3 evaluate` accepts all four.
+`evals.yml` — `tier3 evaluate` accepts all four. A YAML dataset is read within the
+[structure limits](/skills/skillevaluator/tier2-reference#defaults-and-safety-limits):
+at most 1,024 items in one list or mapping, 20,000 values in all, and 65,536
+characters in one value, and in total 4,194,304 characters or four times the length of the
+YAML text, whichever is larger, with aliases and merge keys counted after expansion (a value
+reached through an alias counts once per reference).
+A dataset over a limit is rejected as invalid.
 
 ### Deterministic checks
 

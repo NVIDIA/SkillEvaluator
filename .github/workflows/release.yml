@@ -20,6 +20,12 @@ on:
           - Validate release
           - Build CI image and bundle
           - Publish release
+      validation_run:
+        description: Run ID and attempt from the successful Validate release summary (e.g. 123-1)
+        type: string
+      validation_manifest_sha256:
+        description: Manifest SHA-256 from the successful Validate release summary
+        type: string
 
 permissions: {}
 env:
@@ -71,7 +77,7 @@ jobs:
 
   prepare:
     needs: preflight
-    if: inputs.phase == 'Validate release' || inputs.phase == 'Publish release'
+    if: inputs.phase == 'Validate release'
     runs-on: ubuntu-24.04
     timeout-minutes: 35
     permissions:
@@ -80,9 +86,6 @@ jobs:
     env:
       VERSION: ${{ needs.preflight.outputs.version }}
       SOURCE_SHA: ${{ needs.preflight.outputs.source_sha }}
-    outputs:
-      artifact: ${{ steps.artifact.outputs.name }}
-      run: ${{ steps.artifact.outputs.run }}
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
@@ -107,16 +110,18 @@ jobs:
           python3 ci/product_release.py assemble --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --dist "$RUNNER_TEMP/dist" --output "$RUNNER_TEMP/product-release"
       - name: Verify asset identity and package metadata
+        id: verified
         run: |
           assets="$RUNNER_TEMP/product-release"
           wheel="$assets/skillevaluator-$VERSION-py3-none-any.whl"
           sdist="$assets/skillevaluator-$VERSION.tar.gz"
-          python3 ci/product_release.py verify-assets --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets"
+          manifest_sha256="$(python3 ci/product_release.py verify-assets --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$assets")"
           python3 scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json \
             --archive "$wheel" --archive "$sdist"
           uvx --from twine==6.2.0 twine check --strict "$wheel" "$sdist"
+          printf 'manifest_sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
       - name: Check that the package indexes can accept these release bytes
-        if: inputs.phase == 'Validate release'
         run: |
           python3 ci/product_release.py inspect-indexes --version "$VERSION" --assets "$RUNNER_TEMP/product-release"
       - name: Smoke-test fresh wheel and sdist installations
@@ -137,7 +142,7 @@ jobs:
         id: artifact
         run: |
           run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
-          printf 'name=product-release-%s-%s\nrun=%s\n' "$VERSION" "$run" "$run" >> "$GITHUB_OUTPUT"
+          printf 'name=validated-release-%s-%s\nrun=%s\n' "$VERSION" "$run" "$run" >> "$GITHUB_OUTPUT"
       - name: Retain the reviewed release bytes
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
@@ -145,13 +150,29 @@ jobs:
           path: ${{ runner.temp }}/product-release
           if-no-files-found: error
           retention-days: 90
+      - name: Record the Publish release inputs
+        env:
+          VALIDATION_RUN: ${{ steps.artifact.outputs.run }}
+          MANIFEST_SHA256: ${{ steps.verified.outputs.manifest_sha256 }}
+        run: |
+          {
+            printf '### Publish release inputs\n\n'
+            printf '| Input | Value |\n| --- | --- |\n'
+            printf '| `version` | `%s` |\n' "$VERSION"
+            printf '| `source_sha` | `%s` |\n' "$SOURCE_SHA"
+            printf '| `validation_run` | `%s` |\n' "$VALIDATION_RUN"
+            printf '| `validation_manifest_sha256` | `%s` |\n' "$MANIFEST_SHA256"
+          } >> "$GITHUB_STEP_SUMMARY"
 
   stage:
-    needs: [preflight, prepare]
+    needs: preflight
     if: inputs.phase == 'Publish release'
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     environment: release-github
+    defaults:
+      run:
+        working-directory: source
     permissions:
       actions: read
       contents: write
@@ -164,28 +185,44 @@ jobs:
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
         with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
           ref: ${{ needs.preflight.outputs.source_sha }}
+          path: source
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+      - name: Restore a staged release or acquire the validated artifacts
+        id: acquire
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VALIDATION_RUN: ${{ inputs.validation_run }}
+          MANIFEST_SHA256: ${{ inputs.validation_manifest_sha256 }}
+        run: |
+          # A draft can be invisible to read-only tokens. Check after approval.
+          new_release="$(python3 ../release-control/ci/github_release.py acquire --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/staged-release" \
+            --validation-run "$VALIDATION_RUN" --validation-manifest-sha256 "$MANIFEST_SHA256")"
+          run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'new_release=%s\nname=product-release-%s-%s\nrun=%s\n' \
+            "$new_release" "$VERSION" "$run" "$run" >> "$GITHUB_OUTPUT"
+      - name: Retain the validated bytes for draft recovery
+        if: steps.acquire.outputs.new_release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ${{ needs.prepare.outputs.artifact }}
-          path: ${{ runner.temp }}/product-release
+          name: ${{ steps.acquire.outputs.name }}
+          path: ${{ runner.temp }}/staged-release
+          if-no-files-found: error
+          retention-days: 90
       - name: Stage and publish the full immutable GitHub release
         env:
           GH_TOKEN: ${{ github.token }}
-          ARTIFACT_RUN: ${{ needs.prepare.outputs.run }}
+          ARTIFACT_RUN: ${{ steps.acquire.outputs.run }}
         run: |
-          # Drafts may be invisible to the read-only preparation token.
-          # Once approved, recover the original run's exact bytes if a draft exists.
-          assets="$RUNNER_TEMP/staged-release"
-          restored="$(python3 ci/github_release.py restore --version "$VERSION" \
-            --source-sha "$SOURCE_SHA" --assets "$assets")"
-          if [ "$restored" = false ]; then
-            mv "$RUNNER_TEMP/product-release" "$assets"
-          fi
           python3 ci/github_release.py stage --version "$VERSION" --source-sha "$SOURCE_SHA" \
-            --assets "$assets" --run "$ARTIFACT_RUN"
+            --assets "$RUNNER_TEMP/staged-release" --run "$ARTIFACT_RUN"
       - name: Verify every public GitHub download
         id: public
         env:

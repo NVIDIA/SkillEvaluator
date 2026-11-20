@@ -556,6 +556,7 @@ def test_excluded_binary_is_named_in_what_to_fix():
     _, rows = summarize_tier1([security])
     text = _text(rows)
     assert "binary exclusion for data.dat" in text
+    assert "or skip it: --skip security" in text
     assert "not installed" not in text
 
 

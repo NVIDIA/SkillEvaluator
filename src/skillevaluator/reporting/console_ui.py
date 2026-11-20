@@ -1296,7 +1296,7 @@ def summarize_tier1(
         # A rejected scanner report has a concrete error; installation help is misleading.
         report_error = next((str(e) for e in r.errors if str(e).endswith("security scan did not complete")), None)
         if set(r.incomplete_scans) == {"skillspector"} and report_error:
-            items.append(FixItem(_short_name(r.validator_name), report_error, []))
+            items.append(FixItem(_short_name(r.validator_name), report_error, ["or skip it: --skip security"]))
         else:
             setup.append(r)
     if setup:

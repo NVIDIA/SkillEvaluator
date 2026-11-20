@@ -11,6 +11,7 @@ from subprocess import CompletedProcess
 from unittest.mock import patch
 
 import pytest
+from packaging.specifiers import SpecifierSet
 
 from skillevaluator.utils import scanner_install, tool_runner
 from skillevaluator.utils.tool_runner import ExternalTool, Tools
@@ -44,13 +45,14 @@ class TestSkillSpectorWheel:
         monkeypatch.setattr(scanner_install, "SKILLSPECTOR_WHEEL_SHA256", hashlib.sha256(payload).hexdigest())
         with (
             patch("urllib.request.urlopen", return_value=io.BytesIO(payload)),
-            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.4", "")) as run,
+            patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.6", "")) as run,
         ):
             assert scanner_install.prepare_skillspector("/opt/uv") is None
         wheel = scanner_install.managed_skillspector_wheel()
         assert wheel.read_bytes() == payload
         assert run.call_args.args[0][-2:] == ["skillspector", "--version"]
         assert str(wheel) in run.call_args.args[0]
+        assert run.call_args.kwargs["env"]["UV_PYTHON"] == scanner_install.SKILLSPECTOR_PYTHON
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_prepare_reports_environment_failure(self, monkeypatch):
@@ -90,6 +92,7 @@ class TestSkillSpectorWheel:
             "scan",
             "y",
         ]
+        assert run.call_args.kwargs["env"]["UV_PYTHON"] == scanner_install.SKILLSPECTOR_PYTHON
 
     @pytest.mark.usefixtures("runtime_dir")
     def test_checksum_mismatch_never_runs(self):
@@ -100,7 +103,7 @@ class TestSkillSpectorWheel:
             patch("subprocess.run") as run,
         ):
             result = tool.run(["scan", "x"])
-        assert result.error_message == "SkillSpector 2.13.4 download failed checksum verification"
+        assert result.error_message == "SkillSpector 2.13.6 download failed checksum verification"
         run.assert_not_called()
 
     def test_pinned_wheel_url_matches_version(self):
@@ -113,7 +116,7 @@ class TestSkillSpectorWheel:
         found = {"uv": "/opt/uv", "skillspector": "/usr/bin/skillspector"}
         with patch.object(tool_runner, "resolve_tool_path", _resolver(found)):
             tool = ExternalTool("skillspector", "skillspector", managed=True)
-        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.4", "")) as run:
+        with patch("subprocess.run", return_value=CompletedProcess([], 0, "SkillSpector v2.13.6", "")) as run:
             tool.run(["--version"])
         assert run.call_args.args[0] == ["/usr/bin/skillspector", "--version"]
 
@@ -228,3 +231,19 @@ class TestManagedGitleaks:
     def test_unsupported_platform(self, monkeypatch):
         monkeypatch.setattr(scanner_install, "gitleaks_platform", lambda: None)
         assert "no pinned Gitleaks" in scanner_install.install_gitleaks()
+
+
+@pytest.mark.usefixtures("runtime_dir")
+def test_isolated_scan_env_keeps_python_range(monkeypatch):
+    monkeypatch.setattr(tool_runner, "ensure_skillspector_wheel", lambda: None)
+    with patch.object(tool_runner, "resolve_tool_path", _resolver({"uv": "/opt/uv"})):
+        tool = ExternalTool("skillspector", "skillspector", managed=True)
+    with patch("subprocess.run", return_value=CompletedProcess([], 0, "{}", "")) as run:
+        tool.run(["scan", "x"], env={"PATH": "/bin"}, replace_env=True)
+    assert run.call_args.kwargs["env"] == {"PATH": "/bin", "UV_PYTHON": ">=3.12,<3.14"}
+
+
+def test_managed_python_range_excludes_wheelless_314():
+    spec = SpecifierSet(scanner_install.SKILLSPECTOR_PYTHON)
+    assert "3.12.0" in spec and "3.13.9" in spec
+    assert "3.14.0" not in spec

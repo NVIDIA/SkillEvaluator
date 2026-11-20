@@ -77,9 +77,12 @@ image and consumer qualification details.
 
 1. Open the workflow in the GitHub UI again, choose **Validate release**, and
    enter the version and product release SHA from the bundle PR. Review the
-   source, wheel, sdist, and CI bundle checks. On the successful run's
-   **Summary** page, copy `validation_run` (the run ID and attempt, such as
-   `123-1`) and `validation_manifest_sha256` from **Publish release inputs**.
+   source, wheel, sdist, and CI bundle checks. Validation checks the selected
+   commit for a dated changelog entry and matches the live public GHCR digest
+   against the bundle. On the successful run's **Summary** page, copy both
+   values from **Publish release inputs**. `validation_run` includes the run ID
+   and attempt (such as `123-1`), and `validation_manifest_sha256` is the
+   manifest hash.
 2. Choose **Publish release** with the same version and product SHA, enter the
    two values from the summary, and approve the `release-github` job. The
    publish run verifies the selected validation attempt and uses its exact
@@ -87,7 +90,7 @@ image and consumer qualification details.
    artifact has expired or is missing before the first draft is staged, run
    **Validate release** again and use both values from the new summary.
    Before creating `vVERSION` at the reviewed product SHA, the workflow
-   checks the release notes, the official GHCR digest, and both package
+   rechecks the release notes and official GHCR digest and checks both package
    indexes for version conflicts. It verifies the staged bytes before
    publishing and verifies anonymous downloads afterward. The notes show that
    package publication is pending. Release runs execute one at a time across
@@ -177,7 +180,9 @@ If the DevZone URL is unset or invalid, package verification stops promotion
 before the `stable` tag can move.
 
 After the manual product release finishes verification, open **Promote stable
-GitHub workflows** in Actions and select **Run workflow** on `main`. The
+GitHub workflows** in Actions and select **Run workflow** on `main`. Set
+`expected-release` to the reviewed `vX.Y.Z` tag shown in the release workflow
+summary. Manual promotion stops if GitHub Latest differs from that tag. The
 product workflow's GitHub Actions token does not trigger the release relay.
 If a promotion ran before both indexes served the verified files, rerun it
 after package verification finishes. A retry verifies the published release
@@ -188,11 +193,12 @@ release commit at the tip of a protected release branch and retry.
 
 The immutable `v1.0.1` release predates the stable entry points. If it is still the
 latest release at first activation, merge its generated configurations into
-`main` and dispatch promotion with the full reviewed commit SHA as
-`bootstrap-sha`. The selected commit must contain the GitLab stable include
-and the exact published CI bundle. Later retries of `v1.0.1` verify the existing
-`stable` target. Subsequent releases include the generated configurations in
-their version tags. The workflow rejects downgrades.
+`main` and dispatch promotion with `expected-release` set to `v1.0.1` and
+`bootstrap-sha` set to the full reviewed commit SHA. The selected commit must
+contain the GitLab stable include and the exact published CI bundle. Later
+retries of `v1.0.1` verify the existing `stable` target. Subsequent releases
+include the generated configurations in their version tags. The workflow
+rejects downgrades.
 
 ## Qualify the GitLab Tier 1 stable include
 

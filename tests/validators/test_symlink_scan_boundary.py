@@ -13,6 +13,7 @@ from skillevaluator.tier1.commands import run_validation
 
 HOST_MARKER = "HOSTMARKER-7f3a"
 HOST_EMAIL = "alice.host@acme-widgets.net"
+HOST_PACKAGE = "leakedhostpkg-7f3a"
 
 
 @pytest.fixture

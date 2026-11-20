@@ -1292,9 +1292,10 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
         session = boto3.session.Session()
         _validate_bedrock_local_sdk_configuration(session)
         bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
-        if bearer_token and any(not 0x21 <= ord(character) <= 0x7E for character in bearer_token):
+        has_bearer_token = bool(bearer_token.strip())
+        if has_bearer_token and any(not 0x21 <= ord(character) <= 0x7E for character in bearer_token):
             raise InvalidConfigError(error_msg="Bedrock bearer token contains invalid characters")
-        if not bearer_token:
+        if not has_bearer_token:
             metadata_unavailable = _monitor_bedrock_metadata_unavailability(session)
             get_credentials = getattr(session, "get_credentials", None)
             if callable(get_credentials):
@@ -1322,7 +1323,7 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
         )
         catalog_uses_tls = _bedrock_client_uses_tls(bedrock)
         runtime_uses_tls = _bedrock_client_uses_tls(bedrock_runtime)
-        if bearer_token and not (catalog_uses_tls and runtime_uses_tls):
+        if has_bearer_token and not (catalog_uses_tls and runtime_uses_tls):
             raise InvalidConfigError(error_msg="Bedrock bearer authentication requires HTTPS endpoints")
         if (catalog_uses_tls or runtime_uses_tls) and _is_invalid_bedrock_ca_bundle(session):
             raise InvalidConfigError(error_msg="configured AWS CA bundle cannot be loaded")

@@ -56,8 +56,10 @@ All notable changes to SkillEvaluator are documented in this file.
   observation and response strings instead of treating them as record boundaries.
   Previously, a Claude Code log whose skill-read record held such a separator lost
   that record and could score `skill_execution` 0 instead of 1.
-  Raw CR-only JSONL strings supplied directly to `import-traces` are no
-  longer split into records; file imports still normalize line endings.
+  A CR-only `agent_log` string in an `import-traces` export is no longer split into
+  records and is reported as an unsupported agent log format; agent log files read
+  from a trial directory are unaffected because they are read with newline
+  normalization.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

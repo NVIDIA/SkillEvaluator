@@ -58,6 +58,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Bedrock preflight and host inference now sign requests with IAM credentials
+  when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
+  a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
+  `Authorization: Bearer` header, and host inference failed with an illegal
+  header value. This includes models called through the Bedrock Responses
+  route.
 - Tier 1 code risk no longer lets a skill configure its own Bandit scan. A
   `.bandit` file shipped in the skill (at the root or nested, for example
   `scripts/.bandit`) with `skips` or `tests`, or `# nosec` comments on risky

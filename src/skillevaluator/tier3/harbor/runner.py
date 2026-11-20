@@ -4550,8 +4550,10 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         merged_trial_results: list[TrialResult] = []
         source_started_at: list[datetime] = []
         source_updated_at: list[datetime] = []
+        source_job_provenance: list[dict[str, str]] = []
         used_trial_names: set[str] = set()
         for source_index, (job_name, job_dir) in enumerate(snapshots):
+            source_identity = {"name": job_name}
             try:
                 source_job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -4562,12 +4564,14 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 except Exception:
                     source_job_model = None
                 if source_job_model is not None:
+                    source_identity["id"] = str(source_job_model.id)
                     source_started_at.append(_utc_aware_datetime(source_job_model.started_at))
                     source_updated_at.append(
                         _utc_aware_datetime(
                             source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
                         )
                     )
+            source_job_provenance.append(source_identity)
             root_trial_results: dict[str, dict[str, Any]] = {}
             if isinstance(source_job_result, dict) and isinstance(source_job_result.get("trial_results"), list):
                 for candidate in source_job_result["trial_results"]:
@@ -4735,6 +4739,23 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         )
         (staged_aggregate / "result.json").write_text(
             aggregate_result.model_dump_json(indent=2),
+            encoding="utf-8",
+        )
+        # Harbor's analyzer identifies job directories by job.log. Record the
+        # real aggregation provenance without implying another agent execution.
+        (staged_aggregate / "job.log").write_text(
+            json.dumps(
+                {
+                    "kind": "skillevaluator_retained_aggregate",
+                    "job_name": aggregate_path.name,
+                    "job_id": str(aggregate_job_id),
+                    "execution": "Trials retained from source jobs; no independent Harbor execution.",
+                    "n_total_trials": aggregate_total_trials,
+                    "source_jobs": source_job_provenance,
+                },
+                indent=2,
+            )
+            + "\n",
             encoding="utf-8",
         )
         copytree_secure(

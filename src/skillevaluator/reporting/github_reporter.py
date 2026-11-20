@@ -304,6 +304,23 @@ def _annotations_for_result(
             )
         )
 
+    for warning in result.independent_warnings():
+        if warning in incomplete_reasons:
+            continue
+        annotations.append(
+            _Annotation(
+                level="warning",
+                kind="finding",
+                severity="medium",
+                path="",
+                line=None,
+                end_line=None,
+                check="warning",
+                title=_title(validator, "warning"),
+                message=_clean_text(warning),
+            )
+        )
+
     for tool in result.incomplete_scans:
         annotations.append(
             _Annotation(

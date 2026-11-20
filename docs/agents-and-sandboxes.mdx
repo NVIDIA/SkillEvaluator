@@ -27,6 +27,7 @@ with Hermes available as an explicit experimental option:
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
 | `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
 | `hermes` | Experimental. Hermes v2026.9.24, Docker with NVIDIA Build only; no OpenRouter fallback. |
+| `pi` | Experimental. pi Coding Agent 1.5.2, Docker/local/NVIDIA Build; MCP servers are not staged. |
 
 ### Experimental Hermes
 
@@ -98,6 +99,28 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
+### Experimental pi
+
+pi, the Earendil Works pi Coding Agent, runs as an explicit experimental option
+in every arm: Docker, [local mode](#local-mode), NVIDIA Build, and the native
+plugin arm. SkillEvaluator pins pi 1.5.2 wherever it installs the agent; in
+local mode the host CLI's version is checked against that pin and drift is
+reported as a warning, never a hard failure.
+
+```bash title="Run pi on the OpenAI provider"
+skillevaluator doctor --agents pi
+skillevaluator tier3 evaluate ./my-skill --agents pi
+```
+
+pi works on the OpenAI, OpenAI-compatible, and Anthropic providers; other
+providers, including Bedrock, reject it before execution. Skills are staged to
+`$HOME/.agents/skills`, which pi reads natively, so in the native plugin arm
+member skills load without a wrapper and only rules stay in the wrapper skill.
+Retained jobs include `trajectory.json` and `pi.txt`.
+
+pi 1.5.2 has no MCP server adapter compatible with SkillEvaluator's validated
+stack (the community pi-mcp-adapter targets pi 0.85.x), so runs that request
+MCP servers for pi are rejected instead of silently skipping them.
 In Docker and Kata, SkillEvaluator reruns a Claude Code or Codex install that
 fails, for example on a dropped download or a package mirror error. It makes up
 to three attempts, waiting 2 and then 4 seconds, all within Harbor's agent setup

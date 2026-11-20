@@ -2346,7 +2346,7 @@ def _print_run_banner(target_path: Path, content_type: str, profile: str | None)
     cls=GroupedOption,
     help_group=_TIER3_GROUP,
     help=(
-        "Comma-separated Harbor agents (hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
+        "Comma-separated Harbor agents (hermes is experimental, Docker/NVIDIA Build only; pi is experimental). Default follows the provider: "
         "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
@@ -3797,8 +3797,8 @@ def _tier2_workflow(
     "--agents",
     default=None,
     help=(
-        "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
-        "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+        "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only; pi is experimental). "
+        "Default follows the provider: NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
     ),
 )
 @click.option("--env-mode", default="docker", show_default=True, type=ENV_MODE_CHOICE)
@@ -4398,8 +4398,8 @@ def _tier3_doctor_options(func):
         "--agents",
         default=None,
         help=(
-            "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only). Default follows the provider: "
-            "NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
+            "Comma-separated Harbor agents (claude aliases claude-code; hermes is experimental, Docker/NVIDIA Build only; pi is experimental). "
+            "Default follows the provider: NVIDIA Build=opencode, OpenAI=codex, Anthropic=claude-code."
         ),
     )(func)
 

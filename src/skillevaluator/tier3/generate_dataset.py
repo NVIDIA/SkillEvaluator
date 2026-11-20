@@ -1109,6 +1109,7 @@ def _discover_trajectories(
         "aider",
         "gemini-cli",
         "hermes",
+        "pi",
     ]
     for agent_name in agent_priority:
         trials_dir = results_dir / agent_name / "with-skill" / "trials"

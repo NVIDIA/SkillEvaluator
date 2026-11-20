@@ -33,6 +33,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Experimental `pi` Tier 3 agent (the Earendil Works pi Coding Agent, pinned
+  to 1.5.2) for Docker, local, NVIDIA Build, and the native plugin arm. Ships a
+  Tier 1 `pi` profile for `harness-check`, stages skills to the agent-native
+  `$HOME/.agents/skills`, rejects MCP servers (pi 1.5.x has no compatible
+  pi-mcp-adapter), and keeps existing agent defaults unchanged. The OpenAI,
+  OpenAI-compatible, and Anthropic providers accept it; other providers fail early.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
   command hooks in an exact, reviewed plugin package. Applied waivers are
   reported and clear only the matching unmodeled-hook gate.

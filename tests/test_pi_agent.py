@@ -180,3 +180,64 @@ def test_native_and_private_pi_are_registered_for_plugin_arms():
     assert native_agent_import_path("pi", base) == "skillevaluator.tier3.harbor.native_agents:NativePi"
     assert PRIVATE_AGENT_IMPORT_PATHS[("pi", base)].endswith("PrivatePi")
     assert ("pi", None) not in PRIVATE_AGENT_IMPORT_PATHS
+
+
+@pytest.mark.integration
+@pytest.mark.skipif(
+    __import__("os").environ.get("SKILL_EVAL_PI_INTEGRATION") != "1",
+    reason="Opt in with SKILL_EVAL_PI_INTEGRATION=1; installs pi and makes paid provider calls",
+)
+def test_real_pi_docker_matched_arms(tmp_path):
+    import json
+    import os
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    provider = os.environ.get("SKILL_EVAL_PI_PROVIDER", "openai")
+    api_key = {
+        "openai": "OPENAI_API_KEY",
+        "anthropic": "ANTHROPIC_API_KEY",
+        "openai_compatible": "OPENAI_COMPATIBLE_API_KEY",
+    }.get(provider, f"{provider.upper()}_API_KEY")
+    if not os.environ.get(api_key):
+        pytest.skip(f"{api_key} is required")
+
+    skill = Path(__file__).parent / "fixtures" / "skills" / "lookup-code"
+    completed = subprocess.run(
+        [
+            str(Path(sys.executable).with_name("skillevaluator")),
+            "tier3",
+            "evaluate",
+            str(skill),
+            "--agents",
+            "pi",
+            "--env-mode",
+            "docker",
+            "--n-attempts",
+            "1",
+            "--n-concurrent",
+            "2",
+            "--max-agents",
+            "1",
+            "--no-stop-on-pass",
+            "--harbor-keep-jobs",
+            "--results-dir",
+            str(tmp_path / "results"),
+        ],
+        env={**os.environ, "SKILL_EVAL_LLM_PROVIDER": provider},
+        capture_output=True,
+        timeout=3600,
+        check=False,
+    )
+    assert completed.returncode == 0, completed.stdout[-2000:] + completed.stderr[-2000:]
+
+    results = tmp_path / "results"
+    trials = list(results.glob("**/_harbor-jobs/*/*/result.json"))
+    assert len(trials) == 4
+    for result_path in trials:
+        result = json.loads(result_path.read_text())
+        assert result.get("exception_info") is None
+        agent_dir = result_path.parent / "agent"
+        assert (agent_dir / "pi.txt").is_file()
+        assert (agent_dir / "trajectory.json").is_file()

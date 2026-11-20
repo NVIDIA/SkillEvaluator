@@ -137,6 +137,7 @@ AGENT_LOG_ARTIFACTS = (
     "cline.txt",
     "opencode.txt",
     "hermes.txt",
+    "pi.txt",
 )
 GENERATED_AGENT_ARTIFACTS = (
     "lift.json",

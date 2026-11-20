@@ -302,6 +302,66 @@ def test_bedrock_inference_rejects_http_override_after_model_alias(
         assert sink.connections == 0
 
 
+@pytest.mark.parametrize("scheme", ["http", "https"])
+def test_bedrock_claude_platform_checks_global_api_base(
+    isolated_provider_environment, monkeypatch, loopback_tls, scheme
+):
+    litellm = pytest.importorskip("litellm")
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("ANTHROPIC_AWS_WORKSPACE_ID", "loopback-workspace")
+    monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    monkeypatch.setattr(litellm, "drop_params", True)
+    with _server([200], tls_context if scheme == "https" else None) as sink, _server([200]) as unused:
+        monkeypatch.setattr(litellm, "api_base", f"{scheme}://127.0.0.1:{sink.server_port}")
+        client = _client(
+            monkeypatch,
+            f"http://127.0.0.1:{unused.server_port}",
+            model=_PLATFORM_MODEL,
+            endpoint_variable="ANTHROPIC_AWS_BASE_URL",
+        )
+        if scheme == "http":
+            with pytest.raises(LLMClientError, match="LiteLLM api_base must use HTTPS"):
+                client.completions("system", "user")
+            assert sink.connections == 0
+        else:
+            assert client.completions("system", "user") == "recovered"
+            assert sink.paths == ["/v1/messages"]
+            assert sink.bearer_requests == 1
+        assert unused.connections == 0
+
+
+def test_bedrock_inference_checks_http_override_for_a_global_fallback(isolated_provider_environment, monkeypatch):
+    litellm = pytest.importorskip("litellm")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setattr(litellm, "model_fallbacks", ["bedrock/mantle/example"])
+    with _server([200]) as sink:
+        monkeypatch.setenv("BEDROCK_MANTLE_API_BASE", f"http://127.0.0.1:{sink.server_port}")
+        client = _client(monkeypatch, "https://127.0.0.1:9")
+        with pytest.raises(LLMClientError, match="BEDROCK_MANTLE_API_BASE must use HTTPS"):
+            client.completions("system", "user")
+        assert sink.connections == 0
+        assert not isolated_provider_environment
+
+
+def test_bedrock_mantle_provider_checks_http_override_after_alias(isolated_provider_environment, monkeypatch):
+    litellm = pytest.importorskip("litellm")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    model = "anthropic.claude-3-haiku-20240307-v1:0"
+    monkeypatch.setattr(litellm, "model_alias_map", {f"bedrock/{model}": "bedrock_mantle/openai.gpt-5.5"})
+    with _server([200]) as sink:
+        monkeypatch.setenv("BEDROCK_MANTLE_API_BASE", f"http://127.0.0.1:{sink.server_port}")
+        client = _client(monkeypatch, "https://127.0.0.1:9", model=model)
+        # LiteLLM resolves the distinct Mantle provider's override as api_base.
+        with pytest.raises(LLMClientError, match="LiteLLM api_base must use HTTPS"):
+            client.completions("system", "user")
+        assert sink.connections == 0
+        assert not isolated_provider_environment
+
+
 def test_bedrock_responses_bridge_checks_runtime_instead_of_chat_route(isolated_provider_environment, monkeypatch):
     litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")

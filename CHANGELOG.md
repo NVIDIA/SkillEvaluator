@@ -96,6 +96,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - OpenAPI discovery inherits inline Path Item parameters and applies operation overrides by name and location; parameter lists containing references retain operation-only parsing.
+- The task list trims leading and trailing whitespace and collapses internal
+  whitespace runs to a single space, so descriptions stay on one line and
+  remain available on the next command. Whitespace-only descriptions are
+  rejected as missing content.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a

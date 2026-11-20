@@ -806,14 +806,11 @@ def _dataset_generation_provenance(skill_path: Path) -> dict[str, Any] | None:
     source = find_evals_file(skill_path)
     if source is None or source.suffix.lower() not in {".json", ".yaml", ".yml"}:
         return None
-    import yaml
+    from skillevaluator.tier3.dataset_utils import parse_dataset_text
 
     try:
-        if source.suffix.lower() == ".json":
-            document = json.loads(source.read_text(encoding="utf-8"))
-        else:
-            document = yaml.safe_load(source.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError, yaml.YAMLError):
+        document = parse_dataset_text(source.read_text(encoding="utf-8"), source.suffix)
+    except (OSError, UnicodeError, ValueError):
         return None
     if not isinstance(document, dict):
         return None
@@ -1825,15 +1822,15 @@ def _staged_task_environment_error(env_mode: str, task_dirs: Iterable[Path]) -> 
         return None
     if env_mode != "kata":
         return None
-    import yaml
+    from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
     for task_dir in task_dirs:
         compose_path = task_dir / "environment" / "docker-compose.yaml"
         if not compose_path.is_file():
             continue
         try:
-            compose = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeDecodeError, yaml.YAMLError):
+            compose = load_bounded_yaml(compose_path.read_text(encoding="utf-8"), last_key_wins=True)
+        except (OSError, UnicodeDecodeError, StructuredDataError):
             return f"Could not read the Docker Compose model of task '{task_dir.name}'"
         services = compose.get("services") if isinstance(compose, dict) else None
         if sidecars := sorted(str(name) for name in services or {} if name != "main"):

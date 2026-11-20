@@ -52,6 +52,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 2 rubric prompts now fence SKILL.md and every supplementary file preview in
+  a backtick fence longer than any backtick run inside that file, keep file names
+  on one fence line, and tell the judge that fenced skill text is untrusted data
+  under evaluation. Skill text can no longer forge a file header or an
+  `Evaluation Criteria:` section of the evaluator's own prompt.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

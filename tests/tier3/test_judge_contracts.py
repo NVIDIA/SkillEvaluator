@@ -1932,6 +1932,106 @@ def test_credential_across_the_cut_of_a_long_tool_result_is_not_saved(tmp_path: 
     assert goal_prompt.count("exit status 0.") == len(results)
 
 
+def test_key_header_with_no_end_line_does_not_hide_the_end_of_a_tool_result(tmp_path: Path) -> None:
+    # The masking of saved evidence reads a key header that has no END line as
+    # a key that runs to the end of the text. A long tool result is masked
+    # before it is cut, so a header that a grep only mentions would take the
+    # rest of the result with it, the last lines included. A key that was cut
+    # off is still masked, to the last line that holds its data.
+    verifier = _stage_verifier(tmp_path)
+    private_key = "PRIVATE " + "KEY"
+    header = f"-----BEGIN RSA {private_key}-----"
+    rng = random.Random(816)
+    key_lines = ["".join(rng.choices(string.ascii_letters + string.digits + "+/", k=64)) for _ in range(25)]
+    key_lines.append("Ab3x9Q==")
+    context = [f"./src/app/module_{index:02d}.py:{index + 3}: a line of grep context" for index in range(60)]
+    log = [f"log line {index}" for index in range(200)]
+    results = [
+        "\n".join([
+            f"./docs/setup.md:14:{header}",
+            f'./keys.py:7:HEADER = "{header}"',
+            *context,
+            "Found 2 matches in 3 files.",
+        ]),
+        "\n".join([*log, f"./docs/setup.md:14:{header}", "Found 1 match."]),
+        "\n".join([*log, f'no "{header}" in the repo, check passed.']),
+        "\n".join(["cat id_rsa", header, *key_lines, *log, "exit status 0."]),
+        "\n".join([*(f"{number:6d}\t{line}" for number, line in enumerate([header, *key_lines], 1)), *log, "Done."]),
+    ]
+    assert all(len(result) > atif_helpers._BUNDLE_ITEM_CHARS for result in results)
+    steps: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        call = {"tool_call_id": f"run-{index}", "function_name": "bash", "arguments": {"command": f"./step-{index}.sh"}}
+        observation = {"results": [{"source_call_id": f"run-{index}", "content": result}]}
+        steps.append({"source": "agent", "tool_calls": [call], "observation": observation})
+    steps.append({"source": "agent", "message": "I completed the task."})
+    verifier.ATIF_PATH.write_text(json.dumps({"steps": steps}), encoding="utf-8")
+    prompts: list[str] = []
+    route = _routed(prompts, accuracy=_ACCURACY_RESPONSE, goal=_GOAL_RESPONSE, behavior=_BEHAVIOR_RESPONSE)
+    verifier.call_public_llm = route
+    verifier._call_public_llm_with_provenance = lambda prompt, **kwargs: (*route(prompt, **kwargs), {})
+
+    verifier.main()
+
+    accuracy_prompt = next(prompt for prompt in prompts if "FORMAT_FOLLOWED" in prompt)
+    goal_prompt = next(prompt for prompt in prompts if "EXPECTED BEHAVIORS" not in prompt and "FORMAT_FOLLOWED" not in prompt)
+    for prompt in (accuracy_prompt, goal_prompt):
+        for last_line in (
+            "Found 2 matches in 3 files.",
+            "Found 1 match.",
+            " in the repo, check passed.",
+            "exit status 0.",
+            "Done.",
+        ):
+            assert last_line in prompt
+    saved_text = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for text in (accuracy_prompt, goal_prompt, saved_text):
+        assert not any(line in text for line in key_lines)
+        assert verifier._PRIVATE_KEY_CLOSING_LINE not in text
+
+
+@pytest.mark.parametrize(
+    ("result", "masked"),
+    [
+        ("grep hit {begin}\nFound 1 match.", "grep hit <key>\nFound 1 match."),
+        ('no "{begin}" here, check passed.', 'no "<key>" here, check passed.'),
+        ("{begin}\n{data}\n{data}\nAb3x9Q==\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\nVersion: 2\n\n{data}\n{data}\n=Zk3a\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\\n{data}\\n{data}\nexit status 0.", "<key>\nexit status 0."),
+        ("id_rsa:1:{begin}\nid_rsa:2:{data}\nid_rsa:3:Ab3x9Q==\nexit status 0.", "id_rsa:1:<key>\nexit status 0."),
+        ("{begin}\n{data}\ngrep hit {begin}\nFound 1 match.", "<key>\ngrep hit <key>\nFound 1 match."),
+        ("{begin}\n{data}\n{end}\ngrep hit {begin}\nFound 1 match.", "<key>\ngrep hit <key>\nFound 1 match."),
+        ("grep hit {begin}\n{begin}\n{data}\n{end}\nexit status 0.", "grep hit <key>\nexit status 0."),
+        ("{begin}\n{data}", "<key>"),
+    ],
+    ids=[
+        "mention",
+        "mention-inside-a-line",
+        "cut-off-key",
+        "cut-off-pgp-block",
+        "cut-off-key-with-escaped-line-breaks",
+        "cut-off-key-with-line-numbers",
+        "cut-off-key-then-mention",
+        "whole-key-then-mention",
+        "mention-then-whole-key",
+        "cut-off-key-at-the-end",
+    ],
+)
+def test_tool_result_masking_ends_an_open_key_block_where_its_data_ends(result: str, masked: str) -> None:
+    private_key = "PRIVATE " + "KEY"
+    forms = {
+        "begin": f"-----BEGIN RSA {private_key}-----",
+        "end": f"-----END RSA {private_key}-----",
+        "data": "Zm9v" * 16,
+    }
+    result = result.format(**forms)
+
+    assert eval_template._redact_tool_result(result) == masked.replace("<key>", "<redacted private key>")
+    # Saved evidence keeps reading an open block to the end of the text.
+    if forms["end"] not in result:
+        assert eval_template._redact_judge_evidence(result).endswith("<redacted private key>")
+
+
 def test_judge_evidence_write_failure_never_changes_the_score(tmp_path: Path, monkeypatch) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

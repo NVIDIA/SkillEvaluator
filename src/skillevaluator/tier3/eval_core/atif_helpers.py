@@ -1384,7 +1384,8 @@ def build_metric_evidence_bundles(
     and records what it dropped (never silent). Deterministic verified facts are
     prepended at the top when any checkable tokens are found. ``redact`` masks
     a tool result that is longer than its excerpt before it is cut; the
-    verifier passes the masking it applies to saved judge evidence.
+    verifier passes the masking it applies to saved judge evidence, which for
+    a tool result ends a key block that has no END line where its data ends.
     """
     if not isinstance(expected_behavior, list):
         expected_behavior = []

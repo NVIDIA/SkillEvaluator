@@ -8,6 +8,13 @@ scanner=.github/workflows/skill-checks-stable.yml
 publisher=.github/workflows/publish-skill-reports-stable.yml
 gitlab=ci/gitlab/stable-tier1.yml
 gitlab_template=ci/templates/stable/${gitlab##*/}
+event=${GITHUB_EVENT_NAME:-}
+expected_release=${STABLE_EXPECTED_RELEASE:-}
+
+if [[ $event == workflow_dispatch && ! $expected_release =~ $version_pattern ]]; then
+    echo "Manual promotion requires expected-release to be a canonical vX.Y.Z tag." >&2
+    exit 1
+fi
 
 latest_release() {
     gh api repos/NVIDIA/SkillEvaluator/releases/latest --jq \
@@ -25,6 +32,10 @@ if [[ ! $release =~ $version_pattern || ! $manifest_digest =~ ^sha256:[a-f0-9]{6
       ! $manifest_size =~ ^[0-9]{1,7}$ || ! $zip_digest =~ ^sha256:[a-f0-9]{64}$ ||
       ! $zip_size =~ ^[0-9]{1,8}$ || $latest == *$'\n'* ]]; then
     echo "The latest release must be a published, immutable stable version with an artifact manifest." >&2
+    exit 1
+fi
+if [[ $event == workflow_dispatch && $release != "$expected_release" ]]; then
+    echo "GitHub Latest is $release, but the expected release is $expected_release." >&2
     exit 1
 fi
 
@@ -71,7 +82,7 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
     else
         bootstrapping=true
         candidate=${STABLE_BOOTSTRAP_SHA:-}
-        if [[ ${GITHUB_EVENT_NAME:-} != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
+        if [[ $event != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
               $(git cat-file -t "$candidate" 2>/dev/null) != commit ]]; then
             echo "Bootstrap v1.0.1 by dispatching this workflow with a reviewed main commit as bootstrap-sha." >&2
             exit 1

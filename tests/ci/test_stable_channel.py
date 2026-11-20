@@ -282,7 +282,11 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     assets = tmp_path / "assets"
     assets.mkdir()
 
-    def promote(tag, *, source_tree=None, bootstrap_sha="", event="workflow_dispatch", index_problem=None):
+    def promote(
+        tag, *, source_tree=None, bootstrap_sha="", event="workflow_dispatch", index_problem=None, expected_release=None
+    ):
+        if expected_release is None:
+            expected_release = tag if event == "workflow_dispatch" else ""
         version = tag.removeprefix("v")
         commit = git("rev-parse", f"refs/tags/{tag}^{{commit}}")
         archive = repo / "ci/bundles" / version / f"skillevaluator-ci-{version}.zip"
@@ -332,6 +336,7 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
                 "RELEASE_DEVZONE_INDEX_URL": DEVZONE_URL,
                 "STABLE_PUSH_TOKEN": "synthetic-test-token",
                 "STABLE_BOOTSTRAP_SHA": bootstrap_sha,
+                "STABLE_EXPECTED_RELEASE": expected_release,
                 "GITHUB_EVENT_NAME": event,
             },
             check=False,
@@ -373,13 +378,20 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         template.write_text(template.read_text(encoding="utf-8") + "# Unreleased template edit\n", encoding="utf-8")
     prepare_release(prepare_bundle("1.0.3", second))
     git("push", "origin", "main")
+    mismatch = promote("v1.0.2", expected_release="v1.0.1")
+    assert mismatch.returncode != 0 and published_ref() == first
+    assert "GitHub Latest is v1.0.2, but the expected release is v1.0.1." in mismatch.stderr
+    for invalid_tag in ("", "1.0.2", "v01.0.2", "v1.0.2-rc1"):
+        invalid = promote("v1.0.2", expected_release=invalid_tag)
+        assert invalid.returncode != 0 and published_ref() == first
+        assert "Manual promotion requires expected-release to be a canonical vX.Y.Z tag." in invalid.stderr
     rejected = promote("v1.0.2", source_tree="f" * 40)
     assert rejected.returncode != 0 and published_ref() == first
     assert "does not match the tagged CI release" in rejected.stderr
     corrupt = promote("v1.0.2", index_problem="wrong-bytes")
     assert corrupt.returncode != 0 and published_ref() == first
     assert "PyPI download has different bytes" in corrupt.stderr
-    promoted = promote("v1.0.2")
+    promoted = promote("v1.0.2", event="workflow_run")
     assert promoted.returncode == 0, promoted.stderr
     assert "Verified SkillEvaluator 1.0.2 wheel and source distribution on PyPI and DevZone" in promoted.stdout
     assert published_ref() == second

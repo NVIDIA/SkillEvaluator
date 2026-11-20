@@ -432,6 +432,7 @@ def test_relative_server_resolves_against_final_spec_url_after_redirect() -> Non
     result = json.loads(called.stdout)
     assert result["url"] == f"{origin}/current/openapi/v2/books/7"
     assert result["data"] == {"id": 7}
+    assert "final_url" not in result
 
 
 def test_operation_relative_servers_without_document_servers() -> None:

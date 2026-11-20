@@ -189,6 +189,7 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
                 assert re.fullmatch(r"actions/create-github-app-token@[0-9a-f]{40}", writer["uses"])
                 assert writer["with"]["permission-contents"] == "write"
                 assert update["run"] == "bash ci/promote_stable.sh"
+                assert update["env"]["RELEASE_DEVZONE_INDEX_URL"] == "${{ vars.RELEASE_DEVZONE_INDEX_URL }}"
                 continue
             # The consumer listener calls only the immutable trusted publishers;
             # it has no local steps, candidate checkout or image build/cache job.

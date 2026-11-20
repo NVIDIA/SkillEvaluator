@@ -151,9 +151,13 @@ Publishing a stable release signals **Promote stable GitHub workflows**. The
 promotion runs from `main`, verifies the latest immutable release and checks
 its CI archive and runtime identities against the published artifact manifest.
 It verifies the GitHub and GitLab stable configurations against the templates
-at the release commit and moves the single `stable` tag to that commit. Before
-activation, install a dedicated GitHub App on this repository with Contents
-write access. Allow it to bypass only the tag ruleset for `stable`. In the
+at the release commit. Before moving the `stable` tag, it verifies that public
+PyPI and NVIDIA DevZone serve the unyanked wheel and source distribution with
+the exact filenames, SHA-256 digests, and sizes in that same manifest.
+
+Before activation, set the repository variable `RELEASE_DEVZONE_INDEX_URL`
+and install a dedicated GitHub App on this repository with Contents write
+access. Allow it to bypass only the tag ruleset for `stable`. In the
 `stable-channel` Actions environment, restrict deployments to `main` and set the
 `STABLE_CHANNEL_APP_CLIENT_ID` variable and `STABLE_CHANNEL_APP_PRIVATE_KEY`
 secret. Reserve the name `stable` for the tag and protect the version tags
@@ -162,8 +166,10 @@ separately.
 After the manual product release finishes verification, open **Promote stable
 GitHub workflows** in Actions and select **Run workflow** on `main`. The
 product workflow's GitHub Actions token does not trigger the release relay.
-A retry verifies the published release even if `main` already has the next
-version's wrappers. Qualify this case with the release App on GitHub.
+If a promotion ran before both indexes served the verified files, rerun it
+after package verification finishes. A retry verifies the published release
+even if `main` already has the next version's wrappers. Qualify this case with
+the release App on GitHub.
 If GitHub refuses to update `stable` to the older workflow tree, keep the exact
 release commit at the tip of a protected release branch and retry.
 

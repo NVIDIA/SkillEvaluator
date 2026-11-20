@@ -744,31 +744,42 @@ def test_tool_result_repeated_in_the_final_response_does_not_hide_a_dropped_sect
             assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
-@pytest.mark.parametrize("after", [1500, 40_000], ids=["over-the-allowance", "far-over-the-allowance"])
-def test_long_tool_result_is_masked_before_it_is_cut(after: int) -> None:
-    # A value that the cut would go through is masked while it is still whole.
+@pytest.mark.parametrize("length", [3000, 60_000], ids=["over-the-allowance", "far-over-the-allowance"])
+def test_long_tool_result_is_masked_before_it_is_cut(length: int) -> None:
+    # A value that a cut would go through is masked while it is still whole,
+    # one where the kept beginning ends and one where the kept end starts.
     # The masking gets the whole result however long it is, because a first
-    # cut can drop the line that marks what follows it as a credential. A
-    # result that fits its allowance is left as it is, because it reaches the
-    # saved evidence whole and is masked there.
-    secret = "S3CRET-" + "v" * 40
-    head = (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n")) * 2 // 3
-    across_the_cut = "a" * (head - 20) + secret + "b" * after
-    traj = _tool_result_steps([across_the_cut, f"short result with {secret}"])
+    # cut can drop the line that marks what follows it as a credential, and
+    # the outcome line at the end of a very long log still reaches the judge.
+    # A result that fits its allowance is left as it is, because it reaches
+    # the saved evidence whole and is masked there.
+    first, second = "S3CRET-" + "v" * 40, "T0KEN-" + "w" * 40
+    outcome = "1 failed, 59 passed in 2.31s"
+    limit = atif_helpers._BUNDLE_ITEM_CHARS
+    head = (limit - len("\n...[truncated]...\n")) * 2 // 3
+    tail = limit - len("\n...[truncated]...\n") - head
+    beginning = "a" * (head - 20) + first
+    ending = second + "c" * (tail - len(second) + 20 - len(outcome) - 1) + "\n" + outcome
+    across_the_cuts = beginning + "b" * (length - len(beginning) - len(ending)) + ending
+    assert len(across_the_cuts) == length
+    assert across_the_cuts[head - 20 :].startswith(first) and across_the_cuts[-tail - 20 :].startswith(second)
+    traj = _tool_result_steps([across_the_cuts, f"short result with {first}"])
     masked: list[str] = []
 
     def redact(text: str) -> str:
         masked.append(text)
-        return text.replace(secret, "<masked>")
+        return text.replace(first, "<masked>").replace(second, "<masked>")
 
     for module in (atif_helpers, _load_harbor_template_module()):
         masked.clear()
         bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.", redact=redact)
-        assert masked == [across_the_cut]
+        assert masked == [across_the_cuts]
         for metric in ("accuracy", "goal_accuracy"):
             evidence = bundles[metric]["prompt_evidence"]
-            assert "<masked>" in evidence
-            assert evidence.count(secret) == 1  # only the short result still shows it
+            assert evidence.count("<masked>") == 2
+            assert evidence.count("S3CRET-") == 1  # only the short result still shows it
+            assert "w" * 8 not in evidence
+            assert outcome in evidence
             assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
 
 

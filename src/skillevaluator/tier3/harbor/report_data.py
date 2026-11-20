@@ -1272,7 +1272,7 @@ def load_dataset(skill_path: Path | None) -> list[dict[str, Any]]:
         candidate = evals_dir / name
         if candidate.exists():
             try:
-                from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
+                from skillevaluator.tier3.dataset_utils import normalize_dataset_entries, parse_dataset_text
 
                 if candidate.suffix.lower() == ".json":
                     payload = _load_bounded_json(candidate, diagnostics, artifact="dataset")
@@ -1285,9 +1285,7 @@ def load_dataset(skill_path: Path | None) -> list[dict[str, Any]]:
                     if candidate.suffix.lower() == ".jsonl":
                         payload = _load_bounded_jsonl(raw, diagnostics)
                     else:
-                        import yaml
-
-                        payload = yaml.safe_load(raw)
+                        payload = parse_dataset_text(raw.decode("utf-8"), candidate.suffix)
                         try:
                             _validate_json_tree(payload)
                         except _JSONLimitError as exc:

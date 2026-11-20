@@ -169,20 +169,15 @@ def test_custom_policy_wraps_read_errors(tmp_path: Path, monkeypatch: pytest.Mon
     assert isinstance(exc_info.value.__cause__, PermissionError)
 
 
-def test_policy_yaml_wraps_recursion_errors(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_policy_yaml_nested_past_the_structure_limit_is_an_invalid_policy(tmp_path: Path) -> None:
     policy = tmp_path / "deeply-nested-policy.yaml"
-    policy.write_text("severity_overrides: []\n", encoding="utf-8")
-
-    def exhaust_parser(_stream: object) -> object:
-        raise RecursionError("maximum recursion depth exceeded")
-
-    monkeypatch.setattr(policy_module.yaml, "safe_load", exhaust_parser)
+    policy.write_text("severity_overrides: " + "[" * 5_000 + "]" * 5_000 + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError) as exc_info:
         policy_module._load_policy_yaml(policy)
 
     assert f"Invalid policy YAML in {policy}" in str(exc_info.value)
-    assert isinstance(exc_info.value.__cause__, RecursionError)
+    assert "complexity limit exceeded" in str(exc_info.value)
 
 
 def test_bundled_profile_wraps_malformed_yaml(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

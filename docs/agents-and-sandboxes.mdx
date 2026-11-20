@@ -27,7 +27,7 @@ with Hermes available as an explicit experimental option:
 | `codex` | OpenAI's Codex CLI. The OpenAI-provider default. Harbor installs Codex 0.161.0. Runs with `reasoning_effort=high` so scores and cost stay comparable across Harbor releases. |
 | `opencode` | The OpenCode CLI. Harbor installs OpenCode 1.19.5. |
 | `hermes` | Experimental. Hermes v2026.9.24, Docker with NVIDIA Build only; no OpenRouter fallback. |
-| `pi` | Experimental. pi Coding Agent 1.5.2, Docker/local/NVIDIA Build; MCP servers are not staged. |
+| `pi` | Experimental. pi Coding Agent 1.5.2, Docker/local/NVIDIA Build; MCP servers are staged through pi's native mcp.json. |
 
 ### Experimental Hermes
 
@@ -118,9 +118,11 @@ providers, including Bedrock, reject it before execution. Skills are staged to
 member skills load without a wrapper and only rules stay in the wrapper skill.
 Retained jobs include `trajectory.json` and `pi.txt`.
 
-pi 1.5.2 has no MCP server adapter compatible with SkillEvaluator's validated
-stack (the community pi-mcp-adapter targets pi 0.85.x), so runs that request
-MCP servers for pi are rejected instead of silently skipping them.
+MCP servers work through pi's native config: pi 1.5.2 reads the mcp.json
+Harbor stages in the isolated config dir. Harbor 0.25.0's own pi-mcp-adapter
+path targets pi 0.85.x only, so SkillEvaluator skips the adapter install and
+stages a no-op extension at the path the launch line references; the servers
+themselves load natively from mcp.json.
 In Docker and Kata, SkillEvaluator reruns a Claude Code or Codex install that
 fails, for example on a dropped download or a package mirror error. It makes up
 to three attempts, waiting 2 and then 4 seconds, all within Harbor's agent setup

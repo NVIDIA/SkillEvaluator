@@ -23,7 +23,7 @@ from urllib.parse import urlsplit
 
 from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
-from harbor.agents.installed.pi import _REMOTE_PI_CONFIG_DIR
+from harbor.agents.installed.pi import _REMOTE_PI_CONFIG_DIR, _REMOTE_PI_MCP_ADAPTER_DIR
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
@@ -37,7 +37,7 @@ from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     RunningBridge,
     start_in_process_bridge,
 )
-from skillevaluator.tier3.harbor.pi_agent import SkillEvaluatorPi
+from skillevaluator.tier3.harbor.pi_agent import _PI_MCP_SHIM, _PI_MCP_SHIM_FILENAME, SkillEvaluatorPi
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -686,13 +686,19 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
     """Use the installed local pi CLI without the container's nvm/npm bootstrap."""
 
     _PI_CONFIG_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-agent")
+    _PI_MCP_ADAPTER_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-mcp-adapter")
 
     async def install(self, environment: BaseEnvironment) -> None:
         if self.mcp_servers:
-            # Same pin policy as the docker arm: pi-mcp-adapter targets pi 0.85.x.
-            raise ValueError(
-                "pi MCP servers require pi 0.85.x; the validated pi runtime does not ship a compatible "
-                "pi-mcp-adapter. Drop --mcp-server/--mcp for pi."
+            # pi 1.5.2 reads mcp.json natively; the no-op shim only satisfies
+            # the adapter path Harbor's launch line references.
+            adapter_dir = (self._PI_MCP_ADAPTER_DIR / "node_modules" / "pi-mcp-adapter").as_posix()
+            await self.exec_as_agent(environment, command=f"mkdir -p {shlex.quote(adapter_dir)}")
+            await self._upload_config_text(
+                environment,
+                content=_PI_MCP_SHIM,
+                remote_path=f"{adapter_dir}/{_PI_MCP_SHIM_FILENAME}",
+                filename=_PI_MCP_SHIM_FILENAME,
             )
         result = await self.exec_as_agent(environment, command="pi --version")
         self._version = self.parse_version(result.stdout or "")
@@ -709,7 +715,10 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
     def _local_config_path(self, command: str) -> str:
         # Harbor writes pi's isolated config under /tmp, which the local sandbox
         # keeps outside its allowed roots; keep it in the trial's agent dir.
-        return command.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+        command = command.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+        return command.replace(
+            _REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix()
+        )
 
     async def _upload_config_text(
         self,

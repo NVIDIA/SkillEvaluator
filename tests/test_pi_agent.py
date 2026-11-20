@@ -87,12 +87,21 @@ def test_install_rejects_a_foreign_version(tmp_path):
         asyncio.run(_agent(tmp_path, version="0.85.1").install(SimpleNamespace()))
 
 
-def test_install_rejects_mcp_servers_on_the_pinned_version(tmp_path):
+def test_install_allows_mcp_servers_through_the_native_config(tmp_path):
     from harbor.models.task.config import MCPServerConfig
 
     server = MCPServerConfig(name="context7", transport="stdio", command="npx", args=["-y", "@upstash/context7-mcp"])
-    with pytest.raises(ValueError, match="pi-mcp-adapter"):
-        asyncio.run(_agent(tmp_path, mcp_servers=[server]).install(SimpleNamespace()))
+    agent = _agent(tmp_path, mcp_servers=[server])
+    agent._upload_config_text = AsyncMock()
+    asyncio.run(agent.install(SimpleNamespace()))
+    commands = [call.kwargs["command"] for call in agent.exec_as_agent.call_args_list]
+    npm = next(command for command in commands if "npm install -g" in command)
+    assert "pi-mcp-adapter" not in npm  # pi 1.5.2 reads mcp.json natively
+    assert any("mkdir -p" in command and "pi-mcp-adapter" in command for command in commands)
+    kwargs = agent._upload_config_text.call_args.kwargs
+    assert kwargs["remote_path"] == "/tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
+    assert kwargs["content"].startswith("export default function")
+    assert agent.mcp_servers == [server]  # restored for Harbor's mcp.json upload
 
 
 
@@ -120,13 +129,18 @@ def test_local_install_records_the_installed_cli(tmp_path):
     assert agent._version == "1.4.0"
 
 
-def test_local_install_rejects_mcp_servers(tmp_path):
+def test_local_install_stages_the_mcp_shim_in_the_agent_dir(tmp_path):
     from harbor.models.task.config import MCPServerConfig
 
     server = MCPServerConfig(name="context7", transport="stdio", command="npx", args=["-y", "@upstash/context7-mcp"])
     agent = _local_agent(tmp_path, mcp_servers=[server])
-    with pytest.raises(ValueError, match="pi-mcp-adapter"):
-        asyncio.run(agent.install(object()))
+    agent._upload_config_text = AsyncMock()
+    asyncio.run(agent.install(object()))
+    commands = [call.kwargs["command"] for call in agent.exec_as_agent.call_args_list]
+    assert any("mkdir -p /logs/agent/pi-mcp-adapter" in command for command in commands)
+    kwargs = agent._upload_config_text.call_args.kwargs
+    assert kwargs["remote_path"] == "/logs/agent/pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts"
+    assert kwargs["content"].startswith("export default function")
 
 
 def test_local_exec_rewrites_container_assumptions(monkeypatch):
@@ -145,13 +159,16 @@ def test_local_exec_rewrites_container_assumptions(monkeypatch):
         agent.exec_as_agent(
             object(),
             ". ~/.nvm/nvm.sh; PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent pi --print "
+            "--extension /tmp/harbor-pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts "
             "--mode json 2>&1 </dev/null | grep -v '\"type\":\"message_update\"' "
             "| stdbuf -oL tee /logs/agent/pi.txt",
         )
     )
 
     command = str(captured["command"])
-    assert ". ~/.nvm/nvm.sh" not in command  # host CLI resolved from PATH
+    assert ". ~/.nvm/nvm.sh" not in command
+    assert "/logs/agent/pi-mcp-adapter/node_modules/pi-mcp-adapter/index.ts" in command
+    assert "/tmp/harbor-pi-mcp-adapter" not in command  # host CLI resolved from PATH
     assert "PI_CODING_AGENT_DIR=/logs/agent/pi-agent" in command  # inside the sandbox roots
     assert "/tmp/harbor-pi-agent" not in command
     assert "stdbuf" not in command  # hosts may lack GNU coreutils

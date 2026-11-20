@@ -2152,21 +2152,22 @@ class HermesAdapter(HarnessAdapter):
 
 
 class PiAdapter(HarnessAdapter):
-    """pi: native skills in $HOME/.agents/skills; rules stay in the wrapper skill; MCP unsupported.
+    """pi: native skills in $HOME/.agents/skills; rules stay in the wrapper skill; MCP plugin components unstaged.
 
     Harbor's pi agent copies the task skills directory to ``$HOME/.agents/skills``,
     which pi reads natively, so member skills are labeled ``native`` with a census
     check. pi has no native plugin path for rules, so the rules keep the generated
-    wrapper skill. MCP servers are not staged: pi-mcp-adapter targets pi 0.85.x,
-    and the validated pi runtime does not ship a compatible adapter.
+    wrapper skill. MCP plugin components are not staged in the native arm; agent
+    MCP servers themselves are supported in the docker/local arms through pi's
+    native config-dir mcp.json.
     """
 
     agent = "pi"
     adapter_id = "pi-agents-home"
     description = (
         "member skills in $HOME/.agents/skills (pi reads that directory natively, and Harbor's pi agent "
-        "copies the task skills there); the rules stay in the generated wrapper skill; MCP servers are not "
-        "staged (pi-mcp-adapter targets pi 0.85.x)"
+        "copies the task skills there); the rules stay in the generated wrapper skill; MCP plugin components "
+        "are not staged in the native arm"
     )
     components: ClassVar[Mapping[str, str]] = {"skill": "native", "rule": "wrapper", "mcp": "unsupported"}
     stage_wrapper_skill = True

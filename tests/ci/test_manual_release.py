@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import importlib.util
+import io
 import json
 import re
 from pathlib import Path
 from unittest.mock import Mock
+from zipfile import ZipFile
 
 import pytest
 import yaml
@@ -29,8 +32,31 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     assert "Publish release" in jobs["stage"]["if"]
     assert jobs["kitmaker"]["needs"] == ["preflight", "stage"]
     assert jobs["finalize"]["needs"] == ["preflight", "verify-indexes"]
-    (preflight,) = [step for step in jobs["prepare"]["steps"] if "inspect-indexes" in step.get("run", "")]
-    assert preflight["if"] == "inputs.phase == 'Validate release'"
+    assert any("inspect-indexes" in step.get("run", "") for step in jobs["prepare"]["steps"])
+
+
+def test_validate_checks_release_metadata_with_the_current_workflow_from_the_reviewed_checkout():
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["prepare"]
+    steps = job["steps"]
+    metadata = [i for i, step in enumerate(steps) if "github_release.py verify-release-metadata" in step.get("run", "")]
+    assert len(metadata) == 1
+    (metadata_index,) = metadata
+    assert "../release-control/ci/github_release.py" in steps[metadata_index]["run"]
+    assert job["defaults"]["run"]["working-directory"] == "source"
+    assert job["permissions"] == {"actions": "read", "contents": "read"}
+    checkout_refs = {
+        step["with"]["path"]: step["with"]["ref"]
+        for step in steps[:metadata_index]
+        if step.get("uses", "").startswith("actions/checkout@")
+    }
+    assert checkout_refs == {
+        "release-control": "${{ github.workflow_sha }}",
+        "source": "${{ needs.preflight.outputs.source_sha }}",
+    }
+    verify = next(i for i, step in enumerate(steps) if "product_release.py verify-assets" in step.get("run", ""))
+    retain = next(i for i, step in enumerate(steps) if "upload-artifact@" in step.get("uses", ""))
+    assert verify < metadata_index < retain
 
 
 @pytest.mark.parametrize("name", ["release", "release-tier1-image", "release-kitmaker"])
@@ -76,22 +102,6 @@ def test_conflicting_tag_blocks_all_release_writes(release, monkeypatch, tmp_pat
     publish.assert_not_called()
 
 
-def test_partial_draft_requires_the_original_run_artifact(release, monkeypatch, tmp_path):
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(
-        release,
-        "get_release",
-        lambda _: {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": []},
-    )
-    download = Mock()
-    monkeypatch.setattr(release, "gh", download)
-    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
-    assert release.restore(VERSION, SHA, tmp_path)
-    download.assert_called_once_with(
-        "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(tmp_path)
-    )
-
-
 def test_draft_with_conflicting_bytes_is_never_published(release, monkeypatch, tmp_path):
     tag = f"v{VERSION}"
     (tmp_path / "SHA256SUMS.txt").write_bytes(b"verified checksums")
@@ -127,34 +137,22 @@ def test_public_verification_rejects_a_mutable_release(release, monkeypatch, tmp
     download.assert_not_called()
 
 
-def test_interrupted_github_upload_recovers_original_artifact(release, monkeypatch, tmp_path):
-    names = sorted(release.expected_filenames(VERSION))
-    assets = [{"name": name, "state": "uploaded"} for name in names]
-    assets[0].update(state="starter", size=0)
-    draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": assets}
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(release, "get_release", lambda _: draft)
-    download = Mock()
-    monkeypatch.setattr(release, "gh", download)
-    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
-    output = tmp_path / "release"
-    assert release.restore(VERSION, SHA, output)
-    download.assert_called_once_with(
-        "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(output)
-    )
-
-
-def test_registry_revision_must_match_the_reviewed_digest(release, monkeypatch, tmp_path):
+def test_publish_rechecks_the_public_image_before_tagging(release, monkeypatch, tmp_path):
     repository = "ghcr.io/nvidia/skillevaluator-tier1"
     (tmp_path / "artifact-manifest.json").write_text(
         json.dumps({"image": f"{repository}@sha256:{'a' * 64}", "image_source_commit": SHA})
     )
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
     monkeypatch.setattr(release.product_release, "verify_assets", Mock())
     resolve = Mock(return_value=f"{repository}@sha256:{'b' * 64}")
     monkeypatch.setattr(release.release_image, "resolve_digest", resolve)
+    writes = Mock()
+    monkeypatch.setattr(release, "api", writes)
     with pytest.raises(ValueError, match="does not match the reviewed release digest"):
-        release.verify_local(VERSION, SHA, tmp_path)
+        release.stage(VERSION, SHA, tmp_path, "123-2")
     resolve.assert_called_once_with(repository, SHA)
+    writes.assert_not_called()
 
 
 def release_run(**overrides):
@@ -164,29 +162,214 @@ def release_run(**overrides):
         "head_branch": "main",
         "event": "workflow_dispatch",
         "path": ".github/workflows/release.yml",
-        "head_repository": {"full_name": "NVIDIA/SkillEvaluator"},
+        "head_sha": SHA,
+        "head_repository": {"id": 42, "full_name": "NVIDIA/SkillEvaluator"},
+        "repository": {"id": 42, "full_name": "NVIDIA/SkillEvaluator"},
+        "display_title": f"Validate release · SkillEvaluator {VERSION}",
+        "status": "completed",
+        "conclusion": "success",
         **overrides,
     }
 
 
-def test_complete_draft_restores_original_actions_bytes(release, monkeypatch, tmp_path):
-    draft = {
-        "draft": True,
-        "body": "<!-- skillevaluator-stage: 123-2 -->",
-        "assets": [{"name": name, "state": "uploaded"} for name in release.expected_filenames(VERSION)],
+def test_validation_is_the_only_phase_that_builds_and_smoke_tests_release_assets():
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    inputs = workflow["on"]["workflow_dispatch"]["inputs"]
+    assert {"validation_run", "validation_manifest_sha256"} <= inputs.keys()
+    jobs = workflow["jobs"]
+    assert jobs["prepare"]["if"] == "inputs.phase == 'Validate release'"
+    assert "prepare" not in jobs["stage"]["needs"]
+    steps = jobs["stage"]["steps"]
+    retain = next(i for i, step in enumerate(steps) if "upload-artifact@" in step.get("uses", ""))
+    stage = next(i for i, step in enumerate(steps) if "github_release.py stage" in step.get("run", ""))
+    assert retain < stage
+
+
+@pytest.mark.parametrize("run_ref, manifest", [("", "a" * 64), ("123", "a" * 64), ("123-2", "A" * 64)])
+def test_new_release_requires_a_validation_attempt_and_manifest_digest(
+    release, monkeypatch, tmp_path, run_ref, manifest
+):
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    origin = Mock()
+    monkeypatch.setattr(release, "api", origin)
+    with pytest.raises(ValueError, match="successful Validate release"):
+        release.acquire_publication(VERSION, SHA, tmp_path / "assets", run_ref, manifest)
+    origin.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"conclusion": "failure"},
+        {"status": "in_progress"},
+        {"display_title": f"Publish release · SkillEvaluator {VERSION}"},
+        {"display_title": "Validate release · SkillEvaluator 9.9.9"},
+        {"run_attempt": 3},
+        {"id": 456},
+        {"path": ".github/workflows/other.yml"},
+        {"event": "pull_request"},
+        {"head_branch": "feature"},
+        {"head_repository": {"full_name": "fork/SkillEvaluator"}},
+        {"repository": {"full_name": "fork/SkillEvaluator"}},
+    ],
+)
+def test_new_release_rejects_unqualified_validation_attempts(release, monkeypatch, tmp_path, metadata):
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    origin = Mock(return_value=release_run(**metadata))
+    monkeypatch.setattr(release, "api", origin)
+    download = Mock()
+    monkeypatch.setattr(release.subprocess, "run", download)
+    with pytest.raises(ValueError, match="successful Validate release"):
+        release.acquire_publication(VERSION, SHA, tmp_path / "assets", "123-2", "a" * 64)
+    origin.assert_called_once_with("actions/runs/123/attempts/2")
+    download.assert_not_called()
+
+
+@pytest.mark.parametrize("retained", [False, True], ids=["missing", "expired"])
+def test_missing_or_expired_validation_artifact_requires_revalidation(release, monkeypatch, tmp_path, retained):
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    artifact = {
+        "id": 789,
+        "name": f"validated-release-{VERSION}-123-2",
+        "expired": True,
+        "size_in_bytes": 1000,
+        "digest": "sha256:" + "a" * 64,
+        "workflow_run": {
+            "id": 123,
+            "repository_id": 42,
+            "head_repository_id": 42,
+            "head_branch": "main",
+            "head_sha": SHA,
+        },
     }
+    artifacts = [artifact] if retained else []
+    requests = Mock(side_effect=[release_run(), {"total_count": len(artifacts), "artifacts": artifacts}])
+    monkeypatch.setattr(release, "api", requests)
+    download = Mock()
+    monkeypatch.setattr(release.subprocess, "run", download)
+    with pytest.raises(ValueError, match="Run Validate release again"):
+        release.acquire_publication(VERSION, SHA, tmp_path / "assets", "123-2", "a" * 64)
+    assert [call.args for call in requests.call_args_list] == [
+        ("actions/runs/123/attempts/2",),
+        (f"actions/runs/123/artifacts?name=validated-release-{VERSION}-123-2",),
+    ]
+    download.assert_not_called()
+
+
+@pytest.fixture
+def draft_recovery(release, monkeypatch):
+    def configure(state="empty", fault=None):
+        contents = {
+            "artifact-manifest.json": b"original manifest",
+            "SHA256SUMS.txt": b"original checksums",
+            f"skillevaluator-{VERSION}-py3-none-any.whl": b"original wheel",
+            f"skillevaluator-{VERSION}.tar.gz": b"original sdist",
+            f"skillevaluator-ci-{VERSION}.zip": b"original CI bundle",
+        }
+        staged = [{"name": name, "state": "uploaded"} for name in contents] if state != "empty" else []
+        if state == "interrupted":
+            staged[0].update(state="starter", size=0)
+        draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": staged}
+        monkeypatch.setattr(release, "tag_target", lambda _: SHA)
+        monkeypatch.setattr(release, "get_release", lambda _: draft)
+
+        archive = io.BytesIO()
+        with ZipFile(archive, "w") as files:
+            for name, data in contents.items():
+                files.writestr(name, data)
+            if fault == "extra-file":
+                files.writestr("unexpected.bin", b"extra file")
+        zipped = archive.getvalue()
+        artifact = {
+            "id": 789,
+            "name": f"product-release-{VERSION}-123-2",
+            "expired": fault == "expired",
+            "size_in_bytes": len(zipped) + (fault == "size"),
+            "digest": "sha256:" + hashlib.sha256(b"different bytes" if fault == "digest" else zipped).hexdigest(),
+            "workflow_run": {
+                "id": 456 if fault == "lineage" else 123,
+                "repository_id": 42,
+                "head_repository_id": 42,
+                "head_branch": "main",
+                "head_sha": SHA,
+            },
+        }
+        artifacts = {
+            "missing": [],
+            "duplicate": [artifact, {**artifact, "id": 790}],
+            "name": [{**artifact, "name": f"product-release-{VERSION}-123-1"}],
+        }.get(fault, [artifact])
+        requests = Mock(
+            side_effect=[
+                release_run(conclusion="failure", display_title=f"Publish release · SkillEvaluator {VERSION}"),
+                {"total_count": len(artifacts), "artifacts": artifacts},
+            ]
+        )
+        monkeypatch.setattr(release, "api", requests)
+
+        def download(command, *, check, stdout):
+            assert command == ["gh", "api", "repos/NVIDIA/SkillEvaluator/actions/artifacts/789/zip"]
+            assert check
+            assert fault in (None, "size", "digest", "extra-file")
+            stdout.write(zipped)
+
+        monkeypatch.setattr(release.subprocess, "run", download)
+        legacy_download = Mock(side_effect=AssertionError("Recover draft archives by numeric artifact ID"))
+        monkeypatch.setattr(release, "gh", legacy_download)
+        return contents, requests
+
+    return configure
+
+
+@pytest.mark.parametrize("draft_state", ["empty", "interrupted", "complete"])
+def test_publish_recovers_the_original_draft_without_a_validation_artifact(
+    release, draft_recovery, tmp_path, draft_state
+):
+    contents, requests = draft_recovery(state=draft_state)
+    output = tmp_path / "assets"
+    assert release.acquire_publication(VERSION, SHA, output, "", "") is False
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == contents
+    assert [call.args for call in requests.call_args_list] == [
+        ("actions/runs/123/attempts/2",),
+        (f"actions/runs/123/artifacts?name=product-release-{VERSION}-123-2",),
+    ]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "duplicate", "name", "expired", "lineage", "size", "digest", "extra-file"],
+)
+def test_draft_rejects_an_unverified_recovery_archive(release, draft_recovery, tmp_path, fault):
+    draft_recovery(fault=fault)
+    output = tmp_path / "assets"
+    with pytest.raises(ValueError, match=r"original draft artifact.*Reconcile the draft before retrying"):
+        release.acquire_publication(VERSION, SHA, output, "", "")
+    assert not output.exists()
+
+
+def test_publish_recovers_immutable_bytes_without_a_validation_artifact(release, monkeypatch, tmp_path):
+    names = release.expected_filenames(VERSION)
     monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(release, "get_release", lambda _: draft)
-    run = Mock(return_value=release_run())
-    run_download = Mock()
-    release_download = Mock()
-    monkeypatch.setattr(release, "api", run)
-    monkeypatch.setattr(release, "gh", run_download)
-    monkeypatch.setattr(release, "download_asset", release_download)
-    assert release.restore(VERSION, SHA, tmp_path / "staged")
-    run.assert_called_once_with("actions/runs/123/attempts/2")
-    run_download.assert_called_once()
-    release_download.assert_not_called()
+    monkeypatch.setattr(
+        release,
+        "get_release",
+        lambda _: {
+            "draft": False,
+            "immutable": True,
+            "assets": [{"name": name, "state": "uploaded"} for name in names],
+        },
+    )
+    monkeypatch.setattr(release, "download_asset", lambda asset, path: path.write_text(asset["name"], encoding="utf-8"))
+    checkout_run = Mock()
+    monkeypatch.setattr(release, "api", checkout_run)
+    output = tmp_path / "assets"
+
+    assert release.acquire_publication(VERSION, SHA, output, "", "") is False
+    assert {path.name: path.read_text(encoding="utf-8") for path in output.iterdir()} == {name: name for name in names}
+    checkout_run.assert_not_called()
 
 
 def test_draft_cannot_recover_artifacts_from_a_pull_request(release, monkeypatch, tmp_path):
@@ -195,7 +378,7 @@ def test_draft_cannot_recover_artifacts_from_a_pull_request(release, monkeypatch
     monkeypatch.setattr(release, "get_release", lambda _: draft)
     monkeypatch.setattr(release, "api", Mock(return_value=release_run(event="pull_request")))
     run_download = Mock()
-    monkeypatch.setattr(release, "gh", run_download)
+    monkeypatch.setattr(release.subprocess, "run", run_download)
     with pytest.raises(ValueError, match="upstream manual release run"):
         release.restore(VERSION, SHA, tmp_path / "staged")
     run_download.assert_not_called()
@@ -216,13 +399,39 @@ def test_initial_publication_checks_package_conflicts_before_tagging(release, mo
     writes.assert_not_called()
 
 
+def test_publish_rechecks_the_dated_changelog_before_tagging(release, monkeypatch, tmp_path):
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(f"## {VERSION}\n\nPublished changes.\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    git = release.product_release.git
+    git("init", "-q")
+    git("add", "CHANGELOG.md")
+    git("-c", "user.name=Release tests", "-c", "user.email=test@example.com", "commit", "-qm", "Undated changelog")
+    source = git("rev-parse", "HEAD").decode().strip()
+    changelog.write_text(f"## {VERSION} - 2026-11-20\n\nWorktree changes.\n", encoding="utf-8")
+    (tmp_path / "artifact-manifest.json").write_text(
+        json.dumps({"image": f"ghcr.io/nvidia/skillevaluator-tier1@sha256:{'a' * 64}"}), encoding="utf-8"
+    )
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
+    monkeypatch.setattr(release.product_release, "inspect_public_indexes", Mock())
+    writes = Mock()
+    monkeypatch.setattr(release, "api", writes)
+    with pytest.raises(ValueError, match="no dated entry"):
+        release.stage(VERSION, source, tmp_path, "123-2")
+    writes.assert_not_called()
+
+
 def test_immutable_resume_reaches_kitmaker_even_when_an_index_is_pending(release, monkeypatch, tmp_path):
     monkeypatch.setattr(release, "tag_target", lambda _: SHA)
     monkeypatch.setattr(release, "get_release", lambda _: {"draft": False, "immutable": True})
     monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
     monkeypatch.setattr(release, "verify_staged", Mock())
-    monkeypatch.setattr(release, "release_notes", lambda *_: "Frozen release notes")
+    notes = Mock(side_effect=ValueError("CHANGELOG.md has no dated release entry."))
+    monkeypatch.setattr(release, "release_notes", notes)
     inspect_indexes = Mock(side_effect=ValueError("An artifact is present on only one index"))
     monkeypatch.setattr(release.product_release, "inspect_public_indexes", inspect_indexes)
     release.stage(VERSION, SHA, tmp_path, "123-2")
+    notes.assert_not_called()
     inspect_indexes.assert_not_called()

@@ -63,7 +63,14 @@ def test_only_explicit_registry_not_found_permits_new_build(monkeypatch):
 def test_authentication_and_transient_failures_do_not_allow_overwrite(monkeypatch, status):
     error = urllib.error.HTTPError("https://ghcr.io", status, "failed", {}, io.BytesIO(b""))
     registry(monkeypatch, error)
-    with pytest.raises(release.ReleaseImageError, match="refusing to overwrite"):
+    with pytest.raises(release.ReleaseImageError, match=rf"^Registry lookup failed with HTTP {status}\.$"):
+        release.resolve_digest(IMAGE, REVISION)
+
+
+@pytest.mark.parametrize("error", [TimeoutError(), urllib.error.URLError("unreachable")])
+def test_network_failures_report_incomplete_registry_lookup(monkeypatch, error):
+    registry(monkeypatch, error)
+    with pytest.raises(release.ReleaseImageError, match=r"^Registry lookup could not verify the image revision\.$"):
         release.resolve_digest(IMAGE, REVISION)
 
 

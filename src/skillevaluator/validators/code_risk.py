@@ -80,6 +80,27 @@ def _semgrep_file_excludes(skill_path: Path) -> list[str]:
 
 REQUIRE_SEMGREP_ENV = "SKILLEVALUATOR_REQUIRE_SEMGREP"
 
+# Empty Bandit INI passed as ``--ini`` so Bandit never discovers a ``.bandit``
+# file inside the scanned skill. Bandit only searches the target tree for
+# ``.bandit`` when ``--ini`` is not given.
+BANDIT_INI_PATH = (CONFIG_DIR / "bandit.ini").resolve()
+_BANDIT_INI_REPORT_LIMIT = 5
+
+
+def _skill_bandit_ini_files(skill_path: Path) -> list[str]:
+    """Return skill-relative paths of ``.bandit`` files that Bandit would otherwise apply."""
+    found: list[str] = []
+    try:
+        for root, dirs, filenames in os.walk(skill_path):
+            dirs[:] = [d for d in dirs if d not in SCAN_EXCLUDED_DIRS]
+            if ".bandit" in filenames and Path(root, ".bandit").is_file():
+                found.append(Path(root, ".bandit").relative_to(skill_path).as_posix())
+                if len(found) >= _BANDIT_INI_REPORT_LIMIT:
+                    break
+    except OSError:
+        pass
+    return sorted(found)
+
 
 class CodeRiskValidator(ValidatorBase):
     """Static code analysis for security risks.
@@ -183,6 +204,18 @@ class CodeRiskValidator(ValidatorBase):
         # This also replaces Bandit's own default list, which is matched as
         # substrings and has ".git" in it.
         args.extend(["--exclude", ",".join(self._bandit_excludes(root))])
+        # Without --ini, Bandit walks the scanned tree for a ``.bandit`` file and
+        # applies its ``skips`` / ``tests`` / ``configfile`` settings, so a skill
+        # could switch off the checks that would flag it. Point Bandit at a
+        # packaged, empty INI instead, and keep ``# nosec`` comments from
+        # suppressing findings.
+        args.extend(["--ini", str(BANDIT_INI_PATH), "--ignore-nosec"])
+
+        for ini_file in _skill_bandit_ini_files(skill_path):
+            result.add_warning(
+                f"Bandit configuration file {ini_file} is ignored: skill-supplied "
+                "Bandit settings and # nosec comments are not applied"
+            )
 
         tool_result = Tools.bandit.run(args, timeout=120)
 

@@ -8922,6 +8922,36 @@ def plugin_with_excluded_png(tmp_path: Path) -> tuple[Path, dict]:
     return plugin, json.loads(report.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("exclusion", ["documented", "missing", "wrong-path"])
+@patch("skillevaluator.validators.security.Tools")
+def test_unaccepted_binary_scope_exclusion(mock_tools, tmp_path: Path, exclusion: str) -> None:
+    # Scan fixture captured from these three files with SkillSpector 2.13.6.
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill. Use when testing.\n---\n\n# Demo\n", encoding="utf-8"
+    )
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/hello.py").write_text('print("hello")\n', encoding="utf-8")
+    (tmp_path / "data.dat").write_bytes(bytes(range(192, 256)))
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    exclusions = payload["analysis_completeness"]["scope_exclusions"]
+    if exclusion == "missing":
+        exclusions.clear()
+    elif exclusion == "wrong-path":
+        exclusions[0]["path"] = "other.dat"
+
+    result = _validate_skillspector_payload(mock_tools, tmp_path, payload)
+
+    assert not result.passed
+    assert result.is_incomplete
+    if exclusion == "documented":
+        assert any("binary exclusion for data.dat" in error for error in result.errors)
+        assert not any("inventory contradicts" in error for error in result.errors)
+    else:
+        assert any("inventory contradicts analysis completeness" in error for error in result.errors)
+
+
 @patch("skillevaluator.validators.security.Tools")
 def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugin_with_excluded_png) -> None:
     plugin, payload = plugin_with_excluded_png

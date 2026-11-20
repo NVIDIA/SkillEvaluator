@@ -1289,7 +1289,17 @@ def summarize_tier1(
     items = [item for r in broken for item in _tier1_fixes(r)]
     items += [item for r in failed for item in _unresolved_reference_fixes(r)]
     items += [item for r in broken for item in _later_gate_fixes(r)]
-    if setup := [r for r in incomplete if not _only_llm_stages_missing(r) and not _unresolved_reference_fixes(r)]:
+    setup = []
+    for r in incomplete:
+        if _only_llm_stages_missing(r) or _unresolved_reference_fixes(r):
+            continue
+        # A rejected scanner report has a concrete error; installation help is misleading.
+        report_error = next((str(e) for e in r.errors if str(e).endswith("security scan did not complete")), None)
+        if set(r.incomplete_scans) == {"skillspector"} and report_error:
+            items.append(FixItem(_short_name(r.validator_name), report_error, []))
+        else:
+            setup.append(r)
+    if setup:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))

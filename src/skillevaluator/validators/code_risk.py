@@ -201,19 +201,20 @@ class CodeRiskValidator(ValidatorBase):
         return result
 
     def _bandit_excludes(self, root: Path) -> list[str]:
-        """Patterns for the artifact directories Bandit skips below *root*, and for tests when they are excluded.
+        """Patterns for the artifact directories Bandit skips below *root*, and for test directories when tests are excluded.
 
         Tier 1 artifact dirs (evals/, results/, versions/, ...) hold snapshot
         copies of the live skill, and scanning them produces duplicate
         findings. Bandit drops a file when an ``--exclude`` entry is a
         substring of its whole path, so a bare name such as "test" also hid
         every file of a skill called "webapp-testing". Each entry is
-        therefore the path of a directory or file that exists, written as a
-        pattern that matches only below that directory or only that file.
+        therefore the path of a directory that exists, written as a pattern
+        that matches only below it. Test files outside those directories are
+        left out of the report by name, see ``_is_test_file``.
         """
         test_dirs = {"tests", "test"} if self.exclude_tests else set()
         patterns: list[str] = []
-        for dirpath, dirnames, filenames in os.walk(root):
+        for dirpath, dirnames, _ in os.walk(root):
             base = Path(dirpath)
             excluded = [
                 name
@@ -221,25 +222,33 @@ class CodeRiskValidator(ValidatorBase):
                 if name in test_dirs or matches_filesystem_name(base / name, SCAN_EXCLUDED_DIRS)
             ]
             dirnames[:] = [name for name in dirnames if name not in excluded]
-            patterns.extend(f"{self._bandit_pattern(base / name)}{os.sep}*" for name in excluded)
-            if self.exclude_tests:
-                patterns.extend(
-                    self._bandit_pattern(base / name)
-                    for name in filenames
-                    if fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
-                )
+            patterns.extend(self._bandit_pattern(base / name) for name in excluded)
         return sorted(patterns)
 
     @staticmethod
-    def _bandit_pattern(path: Path) -> str:
-        """*path* as a pattern for one ``--exclude`` entry.
+    def _is_test_file(entry: object) -> bool:
+        """Whether a Bandit finding or scan error is about a ``test_*.py`` or ``*_test.py`` file.
 
-        Bandit splits the option at every comma, so a comma in the path is
-        written as ``?``. The entries only name tests and artifact
-        directories, and a path that differs in that one character is one of
-        those as well.
+        These are dropped from the report and not listed in ``--exclude``.
+        One entry per file made the option grow with the number of test
+        files, past what a Windows command line holds.
         """
-        return glob.escape(str(path)).replace(",", "?")
+        name = Path(str(entry.get("filename") or "")).name if isinstance(entry, dict) else ""
+        return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+
+    @staticmethod
+    def _bandit_pattern(path: Path) -> str:
+        """The directory *path* as one ``--exclude`` entry.
+
+        Bandit excludes everything below an entry that is a directory, so a
+        plain path goes in as it is. A path with pattern characters is
+        escaped and ends in ``*``. Bandit also splits the option at every
+        comma, so a comma is written as ``?``. The entries only name test and
+        artifact directories, and a path that differs in that one character
+        is one of those as well.
+        """
+        pattern = glob.escape(str(path)).replace(",", "?")
+        return pattern if pattern == str(path) else f"{pattern}{os.sep}*"
 
     def _process_bandit_output(
         self,
@@ -266,6 +275,8 @@ class CodeRiskValidator(ValidatorBase):
             result.add_error("Bandit JSON field 'errors' must be a list; scan did not complete")
             result.mark_scan_incomplete("bandit")
             return
+        if self.exclude_tests:
+            errors = [error for error in errors if not self._is_test_file(error)]
         if errors:
             for error in errors[:3]:
                 detail = error.get("reason") or error.get("message") if isinstance(error, dict) else str(error)
@@ -279,6 +290,9 @@ class CodeRiskValidator(ValidatorBase):
         if exit_code == 0 and issues:
             result.add_error("Bandit returned findings with clean exit code 0; scanner status is inconsistent")
             result.mark_scan_incomplete("bandit")
+        # After the exit code checks, which are about everything Bandit found.
+        if self.exclude_tests:
+            issues = [issue for issue in issues if not self._is_test_file(issue)]
 
         if not issues:
             if not errors:

@@ -85,18 +85,67 @@ def test_commas_and_pattern_characters_in_a_name_keep_the_same_files(plain_root:
     assert _flagged_files(_skill(plain_root / "skills" / name)) == LIVE_FILES
 
 
+@needs_bandit
+def test_parse_errors_in_test_files_do_not_leave_the_scan_incomplete(plain_root: Path) -> None:
+    # Test files outside tests/ are scanned and left out of the report, so
+    # one that Bandit cannot parse must not count either.
+    skill = _skill(plain_root / "skills" / "webapp-checks")
+    (skill / "scripts" / "test_broken.py").write_text("def broken(:\n", encoding="utf-8")
+
+    assert _flagged_files(skill) == LIVE_FILES
+
+
+@needs_bandit
+def test_skill_passes_when_only_its_test_files_have_findings(plain_root: Path) -> None:
+    skill = plain_root / "skills" / "webapp-checks"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "scripts" / "run.py").write_text("print('ok')\n", encoding="utf-8")
+    (skill / "scripts" / "test_run.py").write_text(RISKY, encoding="utf-8")
+
+    result = CodeRiskValidator(use_semgrep=False).validate(skill)
+
+    assert result.passed and not result.is_incomplete
+    assert result.findings == []
+
+
+def _exclude_entries(mock_run, skill: Path) -> list[str]:
+    mock_run.return_value = ToolResult(success=True, stdout=json.dumps({"results": []}), stderr="", exit_code=0)
+    CodeRiskValidator()._run_bandit(skill)
+    args = mock_run.call_args.args[0]
+    return args[args.index("--exclude") + 1].split(",")
+
+
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_exclude_entries_are_paths_below_the_skill(mock_run, tmp_path: Path) -> None:
-    mock_run.return_value = ToolResult(success=True, stdout=json.dumps({"results": []}), stderr="", exit_code=0)
+def test_exclude_entries_are_folders_below_the_skill(mock_run, tmp_path: Path) -> None:
     skill = _skill(tmp_path / "webapp-testing")
 
-    CodeRiskValidator()._run_bandit(skill)
+    entries = _exclude_entries(mock_run, skill)
 
-    args = mock_run.call_args.args[0]
-    entries = args[args.index("--exclude") + 1].split(",")
-    assert len(entries) == 6
-    assert all(Path(entry).is_absolute() and entry.startswith(str(skill.resolve())) for entry in entries)
+    root = skill.resolve()
+    # A plain folder goes in as it is, and Bandit skips everything below it.
+    # The comma in "pkg,one" cannot, because Bandit splits the option there.
+    assert sorted(entries) == sorted(
+        [
+            str(root / "evals"),
+            str(root / "tests"),
+            str(root / "versions"),
+            str(root / "pkg?one" / "test" / "*"),
+        ]
+    )
+
+
+@patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
+@patch.object(Tools.bandit, "run")
+def test_exclude_does_not_grow_with_the_number_of_test_files(mock_run, tmp_path: Path) -> None:
+    # One entry per test file would not fit a Windows command line for a
+    # skill that ships a few hundred of them.
+    skill = _skill(tmp_path / "webapp-testing")
+    before = _exclude_entries(mock_run, skill)
+    for index in range(300):
+        (skill / "scripts" / f"test_case_{index}.py").write_text(RISKY, encoding="utf-8")
+
+    assert _exclude_entries(mock_run, skill) == before
 
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")

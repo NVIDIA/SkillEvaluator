@@ -7,7 +7,9 @@ import tracemalloc
 from collections.abc import Callable
 
 import pytest
+from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
 
+from skillevaluator.utils import structured_data
 from skillevaluator.utils.structured_data import (
     StructuredDataLimitError,
     StructuredDataSyntaxError,
@@ -372,3 +374,118 @@ def test_bounded_yaml_accepts_an_integer_at_the_size_limit() -> None:
 def test_bounded_yaml_reports_invalid_tagged_scalars_as_syntax_errors(raw: str, last_key_wins: bool) -> None:
     with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML"):
         load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+
+def test_bounded_yaml_budgets_the_characters_reached_through_aliases() -> None:
+    # 65 KB of YAML, 7,776 visits of one 65,000-character scalar: under the node, alias and scalar
+    # limits, but ``str()`` of it is 505 MB. Only the walk is run here; the test never stringifies.
+    raw = scalar_alias_fan_yaml(levels=4, fan=6, size=65_000)
+
+    with pytest.raises(StructuredDataLimitError, match=r"expanded text exceeds 4194304 characters"):
+        load_bounded_yaml(raw)
+
+
+def test_bounded_yaml_expanded_character_budget_is_a_parameter() -> None:
+    raw = 'a: &a "' + "x" * 600 + '"\nb: *a\n'
+
+    assert load_bounded_yaml(raw)["b"] == "x" * 600
+    with pytest.raises(StructuredDataLimitError, match=r"expanded text exceeds 1000 characters"):
+        load_bounded_yaml(raw, max_expanded_chars=1_000)
+
+
+def test_bounded_yaml_allows_exactly_four_times_the_input_length_above_the_floor(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(structured_data, "MAX_YAML_EXPANDED_CHARS", 1)
+    scalar = "x" * 300
+
+    def document(uses: int) -> str:
+        return f'a: &a "{scalar}"\n' + "".join(f"k{i}: *a\n" for i in range(uses))
+
+    def reached(uses: int) -> int:
+        # Each key and each value the walk visits: the anchor's own key and value, then a key and an alias per use.
+        return len("a") + len(scalar) + sum(len(f"k{i}") + len(scalar) for i in range(uses))
+
+    # The most uses that stay within four times the document's own length.
+    uses = 0
+    while reached(uses + 1) <= structured_data.YAML_EXPANDED_CHARS_PER_INPUT_CHAR * len(document(uses + 1)):
+        uses += 1
+    assert 1 < uses < 40
+
+    assert len(load_bounded_yaml(document(uses))) == uses + 1
+    with pytest.raises(StructuredDataLimitError, match=r"expanded text exceeds"):
+        load_bounded_yaml(document(uses + 1))
+
+
+def test_bounded_yaml_counts_the_decimal_digits_of_an_integer_reached_through_aliases() -> None:
+    # An integer of 14,000 bits counts as about 4,700 characters, so 1,000 references pass a 4.2 MB
+    # budget as 3,500-character strings but not as integers of the same hexadecimal length.
+    as_string = 'n: &n "' + "f" * 3_500 + '"\n' + "".join(f"k{i}: *n\n" for i in range(1_000))
+    as_integer = "n: &n 0x" + "f" * 3_500 + "\n" + "".join(f"k{i}: *n\n" for i in range(1_000))
+
+    assert len(load_bounded_yaml(as_string)) == 1_001
+    with pytest.raises(StructuredDataLimitError, match=r"expanded text exceeds"):
+        load_bounded_yaml(as_integer)
+
+
+def test_bounded_yaml_counts_the_decoded_bytes_of_a_binary_scalar_reached_through_aliases() -> None:
+    # 64,000 base64 characters decode to 48,000 bytes: 80 references fit the budget, 100 do not.
+    def document(uses: int) -> str:
+        return "b: &b !!binary " + "QUFB" * 16_000 + "\n" + "".join(f"k{i}: *b\n" for i in range(uses))
+
+    assert len(load_bounded_yaml(document(80))) == 81
+    with pytest.raises(StructuredDataLimitError, match=r"expanded text exceeds"):
+        load_bounded_yaml(document(100))
+
+
+def test_bounded_yaml_accepts_a_document_without_aliases_at_the_per_scalar_limit() -> None:
+    raw = "".join(f'k{i}: "{"y" * 65_000}"\n' for i in range(8))
+
+    assert len(load_bounded_yaml(raw)) == 8
+
+
+def test_bounded_json_has_no_expanded_character_budget() -> None:
+    # JSON has no aliases, so its expanded size is its input size.
+    raw = "[" + ",".join(['"' + "z" * 60_000 + '"'] * 80) + "]"
+
+    assert len(load_bounded_json(raw, max_nodes=200)) == 80
+
+
+def test_bounded_yaml_walks_the_members_of_a_set() -> None:
+    # A set member is a scalar like any other: a 5,000-digit integer in it would make ``str()`` raise.
+    with pytest.raises(StructuredDataLimitError, match=r"integer size exceeds"):
+        load_bounded_yaml("skills: !!set {0x" + "f" * 5_000 + "}")
+    assert load_bounded_yaml("skills: !!set {a, b}") == {"skills": {"a", "b"}}
+
+
+@pytest.mark.usefixtures("default_int_digit_limit")
+@pytest.mark.parametrize("last_key_wins", [False, True])
+@pytest.mark.parametrize(
+    "raw",
+    ["%YAML 1." + "1" * 4_301 + "\n---\na: 1\n", 'a: "\\UFFFFFFFF"\n', 'a: "\\U00110000"\n'],
+    ids=["yaml-directive-digits", "escape-above-a-c-int", "escape-above-unicode"],
+)
+def test_bounded_yaml_reports_a_scanner_value_error_as_a_syntax_error(raw: str, last_key_wins: bool) -> None:
+    # PyYAML's scanner converts these itself and raises a plain ValueError, not a YAMLError.
+    with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML"):
+        load_bounded_yaml(raw, last_key_wins=last_key_wins)
+
+
+def test_bounded_yaml_reports_a_scanner_overflow_error_as_a_syntax_error(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Python 3.12's ``chr()`` raises OverflowError, not ValueError, for a code point above a C int.
+    # Simulate it, so the case does not depend on the interpreter running the tests.
+    def overflow(*args: object, **kwargs: object) -> object:
+        raise OverflowError("Python int too large to convert to C int")
+
+    monkeypatch.setattr(structured_data.yaml, "parse", overflow)
+
+    with pytest.raises(StructuredDataSyntaxError, match=r"not valid YAML") as caught:
+        load_bounded_yaml("a: 1\n")
+    assert isinstance(caught.value.__cause__, OverflowError)
+
+
+def test_bounded_yaml_rejects_the_reported_alias_graph_at_its_reported_size() -> None:
+    # Nine levels of nine-way fan-out in a few hundred bytes. Only the loader runs here, and it
+    # never stringifies the graph, so this stays cheap if the limit regresses.
+    from tests.yaml_alias_fixtures import REPORTED_LEVELS, alias_bomb_frontmatter
+
+    with pytest.raises(StructuredDataLimitError, match=r"expanded node or edge count"):
+        load_bounded_yaml(alias_bomb_frontmatter(REPORTED_LEVELS), last_key_wins=True)

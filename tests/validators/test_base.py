@@ -559,6 +559,32 @@ class TestIterScannableFiles:
         assert [p.relative_to(skill).as_posix() for p in out] == ["SKILL.md"]
         assert iter_outside_symlinks(skill) == [skill / "linked"]
 
+    def test_junction_to_outside_directory_is_not_descended_and_is_reported(self, tmp_path: Path, make_junction):
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("x")
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.md").write_text("outside")
+        make_junction(skill / "linked", outside_dir)
+
+        out = iter_scannable_files(skill, {".md"})
+
+        assert [p.relative_to(skill).as_posix() for p in out] == ["SKILL.md"]
+        assert iter_outside_symlinks(skill) == [skill / "linked"]
+
+    def test_junction_to_directory_inside_root_is_not_descended_or_reported(self, tmp_path: Path, make_junction):
+        skill = tmp_path / "skill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("x")
+        (skill / "references" / "real.md").write_text("inside")
+        make_junction(skill / "alias", skill / "references")
+
+        out = iter_scannable_files(skill, {".md"})
+
+        assert sorted(p.relative_to(skill).as_posix() for p in out) == ["SKILL.md", "references/real.md"]
+        assert iter_outside_symlinks(skill) == []
+
     def test_path_resolves_inside(self, tmp_path: Path):
         skill = tmp_path / "skill"
         (skill / "sub").mkdir(parents=True)

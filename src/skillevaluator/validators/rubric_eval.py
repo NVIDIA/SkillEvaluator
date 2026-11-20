@@ -365,13 +365,10 @@ class RubricJudge(LLMClient):
     def create_user_prompt(self, **kwargs: Any) -> str:
         """Build the judge's user message, fencing every piece of skill text.
 
-        SKILL.md and each supplementary file go inside a backtick fence longer
-        than any backtick run in that file, so the file cannot close its own
-        fence or forge a section header such as ``Evaluation Criteria:``.  File
-        names and the skill name stay on one line (``\\r`` and ``\\n`` are
-        escaped), and backticks in a file name are written as ``&#96;`` so the
-        fence header stays a valid CommonMark fence.  The evaluator's own
-        framing, including the criteria, appears only outside the fences.
+        SKILL.md and each supplementary file use a fence longer than any
+        backtick run in that file. Fence headers and the Skill Name line carry
+        escaped, length-limited labels. Evaluator framing and criteria are
+        written outside the fenced file contents.
         """
         skill_name: str = kwargs["skill_name"]
         skill_content: str = kwargs["skill_content"]

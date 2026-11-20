@@ -52,13 +52,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- Tier 2 rubric prompts now fence SKILL.md and every supplementary file preview in
-  a backtick fence longer than any backtick run inside that file, keep file names
-  on one fence line, and tell the judge that fenced skill text is untrusted data
-  under evaluation. File names on fence lines and the skill name are
-  percent-encoded and length-capped, so skill text can no longer forge a file
-  header, an `Evaluation Criteria:` section, or evaluator prose anywhere in the
-  prompt.
+- Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
+  The fence length exceeds any backtick run in the file, and file and skill
+  labels are escaped and length-limited. The judge is instructed to treat the
+  fenced content and labels as skill data and follow the surrounding rubric.
 - Tier 1 file walkers skip symlinks and Windows directory junctions whose
   target resolves outside the skill directory (or is missing), so the PII,
   secrets, Unicode, license and link checks no longer read or quote files from

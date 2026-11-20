@@ -1328,7 +1328,15 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
         catalog_uses_tls = _bedrock_client_uses_tls(bedrock)
         runtime_uses_tls = _bedrock_client_uses_tls(bedrock_runtime)
         if has_bearer_token and not (catalog_uses_tls and runtime_uses_tls):
-            raise InvalidConfigError(error_msg="Bedrock bearer authentication requires HTTPS endpoints")
+            # A constant detail names the cause and keeps the token and endpoint out of the output.
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                "Bedrock bearer authentication (AWS_BEARER_TOKEN_BEDROCK) requires https:// Bedrock endpoints; "
+                "use an HTTPS endpoint override or unset the token",
+                failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+            )
         if (catalog_uses_tls or runtime_uses_tls) and _is_invalid_bedrock_ca_bundle(session):
             raise InvalidConfigError(error_msg="configured AWS CA bundle cannot be loaded")
         region_name = provider.region or "us-west-2"

@@ -680,13 +680,13 @@ def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
     rows = _rows(skill)
 
     flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
-    assert flagged == set(HARNESSES) - {"codex", "pi"}  # pi has no implicit-invocation policy mechanism
+    assert flagged == set(HARNESSES) - {"codex"}  # pi has no implicit-invocation policy mechanism either
 
 
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
     rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
 
-    for harness in set(HARNESSES) - {"claude-code", "pi"}:  # pi substitutes neither; no pi rule exists
+    for harness in set(HARNESSES) - {"claude-code"}:  # pi substitutes neither placeholder
         assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
         assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
     assert not rows["claude-code"]["findings"]
@@ -799,6 +799,23 @@ def test_pi_project_root_loads_for_pi_and_gates_the_others(tmp_path: Path):
     assert "CC-ROOT" in _ids(rows, "claude-code")
 
 
+def test_pi_casing_rule_covers_only_the_dotpi_roots(tmp_path: Path):
+    # .agents/skills roots accept any .md manifest name (collectSkillEntries
+    # mode "agents" in pi 1.6.0), so skill.md loads there without a finding.
+    agents_skill = _skill(tmp_path / "proj" / ".agents")
+    (agents_skill / "SKILL.md").rename(agents_skill / "skill.md")  # rename, not copy: case-insensitive FS
+    rows = _rows(agents_skill)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
+
+    # The .pi roots compare the exact entry name; skill.md is dropped.
+    dotpi_skill = _skill(tmp_path / "proj2" / ".pi" / "skills")
+    (dotpi_skill / "SKILL.md").rename(dotpi_skill / "skill.md")
+    rows = _rows(dotpi_skill)
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-CASING" in _ids(rows, "pi")
+
+
 def test_claude_root_is_not_a_pi_root(tmp_path: Path):
     rows = _rows(_skill(tmp_path / "proj" / ".claude" / "skills"))
 
@@ -811,16 +828,6 @@ def test_pi_drops_non_string_descriptions(tmp_path: Path):
 
     assert rows["pi"]["status"] == "not_loaded"
     assert "PI-DESC-MISSING" in _ids(rows, "pi")
-
-
-def test_pi_ignores_non_exact_manifest_names(tmp_path: Path):
-    skill = _skill(tmp_path)
-    (skill / "SKILL.md").rename(skill / "skill.md")
-
-    rows = _rows(skill)
-
-    assert rows["pi"]["status"] == "not_loaded"
-    assert "PI-CASING" in _ids(rows, "pi")
 
 
 def test_pi_name_collision_is_a_warning_not_a_drop(tmp_path: Path):

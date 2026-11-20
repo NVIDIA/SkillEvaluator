@@ -107,7 +107,10 @@ class SkillEvaluatorPi(Pi):
             f"{_PI_CONFIG_DIR_ENV}={shlex.quote(_REMOTE_PI_CONFIG_DIR.as_posix())} pi mcp list --json; true"
         )
         try:
-            result = await self.exec_as_agent(environment, command=command)
+            # env={} (not None) so exec_as_agent merges the approved header
+            # variables into the probe: without them pi cannot resolve the
+            # staged mcp.json headers and reports every authed server failed.
+            result = await self.exec_as_agent(environment, command=command, env={})
         except RuntimeError as exc:
             raise RuntimeError(f"pi mcp list failed after staging mcp.json: {exc}") from exc
         try:

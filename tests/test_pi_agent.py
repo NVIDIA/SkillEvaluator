@@ -195,6 +195,31 @@ def test_header_variables_reach_the_launch_command(monkeypatch, tmp_path):
     assert captured["env"] == {"DOCS_TOKEN": "secret-token", "OPENAI_API_KEY": "k"}
 
 
+def test_mcp_probe_carries_the_header_variables(monkeypatch, tmp_path):
+    from harbor.agents.installed.pi import Pi
+    from harbor.models.task.config import MCPServerConfig
+
+    server = MCPServerConfig(name="docs", transport="streamable-http", url="https://docs.example/mcp")
+    agent = _agent(tmp_path, mcp_servers=[server])
+    agent.mcp_header_env = SimpleNamespace(refs={"DOCS_TOKEN": "x"}, env={"DOCS_TOKEN": "secret-token"})
+    agent.__delattr__("exec_as_agent")  # run the real override, not the helper's mock
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        captured["env"] = env
+        return SimpleNamespace(stdout='{"servers": [{"name": "docs", "state": "connected"}]}')
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(agent._verify_mcp_config(object()))
+
+    # Without the header variables pi cannot resolve the staged mcp.json
+    # headers and reports every authed server failed at startup.
+    assert captured["command"].endswith("pi mcp list --json; true")
+    assert captured["env"] == {"DOCS_TOKEN": "secret-token"}
+
+
 def test_local_version_probe_with_empty_output_stays_a_warning(tmp_path):
     agent = _local_agent(tmp_path)
     agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout=""))
@@ -356,10 +381,8 @@ def test_custom_endpoints_wire_the_model_api_agent_option(tmp_path):
     overrides = _pi_custom_endpoint_agent_kwargs({"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://gw.example/v1"})
     assert overrides == {"pi": {"model_api": "openai-completions"}}
     # The OpenAI provider exports its default endpoint as a base URL too; the
-    # official endpoint keeps its native Responses API.
-    assert _pi_custom_endpoint_agent_kwargs({"OPENAI_BASE_URL": "https://api.openai.com/v1"}) == {
-        "pi": {"model_api": "openai-responses"}
-    }
+    # public endpoint stays on pi's built-in provider (no models.json entry).
+    assert _pi_custom_endpoint_agent_kwargs({"OPENAI_BASE_URL": "https://api.openai.com/v1"}) == {}
     command = build_harbor_run_command(
         dataset_path=tmp_path,
         agent="pi",
@@ -369,6 +392,19 @@ def test_custom_endpoints_wire_the_model_api_agent_option(tmp_path):
         agent_kwargs_overrides=overrides,
     )
     assert 'model_api="openai-completions"' in " ".join(command)
+
+
+def test_public_openai_endpoint_keeps_pi_on_the_builtin_provider():
+    from skillevaluator.tier3.harbor.runner import _pi_launch_run_env
+
+    run_env = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://api.openai.com/v1"}
+    # Without OPENAI_BASE_URL pi launches --provider openai with the built-in
+    # catalog; a models.json entry would run the model on generic metadata.
+    assert _pi_launch_run_env(run_env, "pi") == {"OPENAI_API_KEY": "k"}
+    # Other agents and real gateways keep the variable.
+    assert _pi_launch_run_env(run_env, "codex") == run_env
+    gateway = {**run_env, "OPENAI_BASE_URL": "https://gw.example/v1"}
+    assert _pi_launch_run_env(gateway, "pi") == gateway
 
 
 def test_anthropic_default_model_is_qualified_for_pi():

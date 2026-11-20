@@ -234,38 +234,42 @@ These are the findings you are most likely to meet:
     ```
 
     ```text
-    ╭─ Tier 1 · Static & Security ─────────────────────────────────────────────────────╮
-    │    checks      ! harness                                                         │
-    │    summary     1/1 checks passed                                                 │
-    │    harness     4 not loaded · 1 degraded  (see below)                            │
-    ╰────────────────────────────────────────────────────────────────── ✓ pass · 0.1s ─╯
-    ╭─ Harness compatibility ──────────────────────────────────────────────────────────╮
-    │  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗ opencode    │
-    │                                                                                  │
-    │  ✓ claude-code  loads                                                    1 note  │
-    │  ✗ codex        NOT LOADED  Skill dropped: invalid YAML (tabs           +1 more  │
-    │                 or duplicate keys).                                              │
-    │  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML       +1 more, 1 note  │
-    │                 parsing is strict.                                               │
-    │  ! hermes       degraded  $ARGUMENTS is not substituted: the             1 note  │
-    │                 model sees the literal text.                                     │
-    │  ✗ openclaw     rejected  Skill dropped: invalid YAML (tabs or          +1 more  │
-    │                 duplicate keys).                                                 │
-    │  ✗ opencode     rejected  Skill dropped: duplicate frontmatter  +1 more, 1 note  │
-    │                 keys.                                                            │
-    │                                                                                  │
-    │  Doesn't change pass/fail.  Details and fixes: -v                                │
-    ╰──────────────────────────────────────────────────────────── ✗ 4 of 6 not loaded ─╯
-    ╭──────────────────────────────────────────────────────────────────────────────────╮
-    │   ✓ PASS   Passed required checks  ·  exit 0                                     │
-    │  Tier 1: 1 of 1 checks passed; 0 failed, 0 incomplete, 0 skipped, 0 N/A          │
-    │  Tier 2: Not run (not requested)                                                 │
-    │  Tier 3: Not run (not requested)                                                 │
-    │  Publication eligibility: Incomplete                                             │
-    │                                                                                  │
-    │  ! harness: skill won't load in codex, copilot-cli, openclaw, opencode · skill   │
-    │  loads degraded in hermes                                                        │
-    ╰──────────────────────────────────────────────────────────────────────────────────╯
+    ╭─ Tier 1 · Static & Security ─────────────────────────────────────────────────╮
+│    checks      ! harness                                                     │
+│    summary     1/1 checks passed                                             │
+│    harness     5 not loaded · 1 degraded  (see below)                        │
+╰────────────────────────────────────────────────────────────── ✓ pass · 0.0s ─╯
+╭─ Harness compatibility ──────────────────────────────────────────────────────╮
+│  ✓ claude-code   ✗ codex   ✗ copilot-cli   ! hermes   ✗ openclaw   ✗         │
+│  opencode   ✗ pi                                                             │
+│                                                                              │
+│  ✓ claude-code  loads                                                1 note  │
+│  ✗ codex        NOT LOADED  Skill dropped: invalid YAML             +1 more  │
+│                 (tabs or duplicate keys).                                    │
+│  ✗ copilot-cli  NOT LOADED  Skill dropped: Copilot's YAML   +1 more, 1 note  │
+│                 parsing is strict.                                           │
+│  ! hermes       degraded  $ARGUMENTS is not substituted:             1 note  │
+│                 the model sees the literal text.                             │
+│  ✗ openclaw     rejected  Skill dropped: invalid YAML               +1 more  │
+│                 (tabs or duplicate keys).                                    │
+│  ✗ opencode     rejected  Skill dropped: duplicate          +1 more, 1 note  │
+│                 frontmatter keys.                                            │
+│  ✗ pi           dropped  Skill dropped: duplicate                   +1 more  │
+│                 frontmatter keys make the YAML                               │
+│                 unparseable.                                                 │
+│                                                                              │
+│  Doesn't change pass/fail.  Details and fixes: -v                            │
+╰──────────────────────────────────────────────────────── ✗ 5 of 7 not loaded ─╯
+╭──────────────────────────────────────────────────────────────────────────────╮
+│   ✓ PASS   Passed required checks  ·  exit 0                                 │
+│  Tier 1: 1 of 1 checks passed; 0 failed, 0 incomplete, 0 skipped, 0 N/A      │
+│  Tier 2: Not run (not requested)                                             │
+│  Tier 3: Not run (not requested)                                             │
+│  Publication eligibility: Incomplete                                         │
+│                                                                              │
+│  ! harness: skill won't load in codex, copilot-cli, openclaw, opencode, pi   │
+│  · skill loads degraded in hermes                                            │
+╰──────────────────────────────────────────────────────────────────────────────╯
     ```
 
     The run still passes. The harness check shows up in four places: `! harness`
@@ -310,6 +314,7 @@ The full rule list, harness by harness, is in
 | Hermes Agent | `hermes` |
 | OpenClaw | `openclaw` |
 | OpenCode | `opencode` |
+| pi Coding Agent | `pi` |
 
 ## Where the rules come from
 
@@ -398,7 +403,7 @@ with the description as that harness lists it.
     raises those severities. `harness-check` exits `0` whatever it finds.
   </Accordion>
   <Accordion title="Is there a score?">
-    No. You get a verdict per harness and a tally such as 4 of 6 not loaded. For a
+    No. You get a verdict per harness and a tally such as 5 of 7 not loaded. For a
     quality score, run `skillevaluator quality-check`.
   </Accordion>
   <Accordion title="Does it replace a live evaluation?">

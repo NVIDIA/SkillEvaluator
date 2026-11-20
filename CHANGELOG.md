@@ -6,8 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Security
 
-- Update LiteLLM in the optional LLM and Tier 3 installs. Bedrock reports
-  invalid bearer-token endpoints as configuration errors.
+- Update LiteLLM and the minimum AWS SDK version in the optional LLM and
+  Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
+  overrides when bearer authentication is configured.
 
 ### Changed
 

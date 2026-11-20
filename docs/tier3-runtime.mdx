@@ -167,8 +167,10 @@ The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
 and environment/agent subclass interfaces form one compatibility surface. This
 release targets stable Harbor 0.25.0 rather than unreleased `main`. Harbor stays
 behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
-it in. The shared LLM client uses `litellm>=1.110.2,<1.111.0.dev0`. Bedrock
-bearer-token authentication requires HTTPS, including for custom endpoints.
+it in. The shared LLM client uses `litellm>=1.110.2,<1.111.0.dev0` with
+`boto3>=1.44.0`. When you set `AWS_BEARER_TOKEN_BEDROCK`, use HTTPS for the
+Bedrock catalog and runtime endpoints checked by preflight and for the
+`AWS_BEDROCK_RUNTIME_ENDPOINT` override used by the LiteLLM client.
 
 The integration preserves SkillEvaluator's runtime and artifact contracts while
 using Harbor 0.25:

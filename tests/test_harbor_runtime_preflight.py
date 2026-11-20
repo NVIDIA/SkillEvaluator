@@ -1664,6 +1664,24 @@ def test_bedrock_bearer_token_only_uses_real_catalog_transport(
     assert "private rejected bearer" not in result.detail
 
 
+@pytest.mark.parametrize("endpoint_variable", ["AWS_ENDPOINT_URL_BEDROCK", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"])
+def test_bedrock_preflight_requires_https_for_bearer_endpoints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, endpoint_variable: str
+) -> None:
+    _configure_isolated_aws_profile(monkeypatch, tmp_path, config="[profile test]\nregion = us-west-2\n")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", "https://127.0.0.1:1")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "https://127.0.0.1:1")
+    monkeypatch.setenv(endpoint_variable, "http://127.0.0.1:1")
+    provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
+
+    result = runtime_preflight.probe_model(provider, timeout_seconds=15)
+
+    assert result.failure_kind == "invalid_configuration", result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+    assert "test-bearer-token" not in result.detail
+
+
 @pytest.mark.parametrize(
     "bearer_token",
     ["bad\nvalue", "bad\rvalue", "bad\x7fvalue", "bad value", "bad\N{LATIN SMALL LETTER E WITH ACUTE}value"],

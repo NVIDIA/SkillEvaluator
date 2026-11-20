@@ -1831,3 +1831,59 @@ def test_generic_truncated_parser_can_keep_a_complete_empty_result(monkeypatch: 
 
     assert client.last_failure is not None
     assert client.model_used == ANTHROPIC_REFUSAL_FALLBACK_MODEL
+
+
+class TestExtraHeaders:
+    def test_openai_compatible_sends_extra_headers_as_default_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://gateway.example/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_EXTRA_HEADERS", '{"x-opencode-session": "{uuid}"}')
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("ok")
+
+        with patch("openai.OpenAI", return_value=mock_openai) as openai_cls:
+            client = LLMClient()
+            assert client.chat(_CHAT_HISTORY) == "ok"
+            assert client.chat(_CHAT_HISTORY) == "ok"
+
+        assert openai_cls.call_count == 1
+        headers = openai_cls.call_args.kwargs["default_headers"]
+        assert set(headers) == {"x-opencode-session"}
+        assert len(headers["x-opencode-session"]) == 36
+        assert "{uuid}" not in headers["x-opencode-session"]
+
+    def test_explicit_gateway_arguments_still_read_extra_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("SKILL_EVAL_LLM_PROVIDER", raising=False)
+        monkeypatch.setenv("SKILL_EVAL_LLM_EXTRA_HEADERS", '{"X-Team": "eval"}')
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("ok")
+
+        with patch("openai.OpenAI", return_value=mock_openai) as openai_cls:
+            client = LLMClient(base_url="https://gateway.example/v1", api_key="test-key", model="m")
+            assert client.chat(_CHAT_HISTORY) == "ok"
+
+        assert openai_cls.call_args.kwargs["default_headers"] == {"X-Team": "eval"}
+
+    def test_native_providers_never_send_extra_headers(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "nv_build")
+        monkeypatch.setenv("NVIDIA_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_EXTRA_HEADERS", '{"x-opencode-session": "{uuid}"}')
+        mock_openai = MagicMock()
+        mock_openai.chat.completions.create.return_value = _openai_choice_response("ok")
+
+        with patch("openai.OpenAI", return_value=mock_openai) as openai_cls:
+            assert LLMClient().chat(_CHAT_HISTORY) == "ok"
+
+        assert "default_headers" not in openai_cls.call_args.kwargs
+
+    def test_invalid_extra_headers_surface_as_client_error(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("SKILL_EVAL_LLM_PROVIDER", "openai-compatible")
+        monkeypatch.setenv("SKILL_EVAL_LLM_API_KEY", "test-key")
+        monkeypatch.setenv("SKILL_EVAL_LLM_BASE_URL", "https://gateway.example/v1")
+        monkeypatch.setenv("SKILL_EVAL_LLM_EXTRA_HEADERS", '{"Authorization": "Bearer secret-value"}')
+
+        with pytest.raises(LLMClientError, match="SKILL_EVAL_LLM_EXTRA_HEADERS") as excinfo:
+            LLMClient().chat(_CHAT_HISTORY)
+
+        assert "secret-value" not in str(excinfo.value)

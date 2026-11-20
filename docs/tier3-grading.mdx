@@ -153,14 +153,15 @@ Budgets are not the only limit on `accuracy` and `goal_accuracy`. A tool
 result longer than 1,500 characters keeps its beginning and its end and loses
 the middle, a long write body is shortened the same way, and each judge reads
 only its most recent tool results. A long tool result is masked for
-credentials before it is cut, and one over 1,000,000 characters keeps only
-its beginning. Raising a budget lifts none of these limits, and `truncated`
-stays `false` when they are the only cut. Both judges' `omitted` records
-therefore carry `incomplete_sections` as well, naming each section whose
-complete source did not reach the judge (`final response`, `file changes` or
-`tool results`). `tool results` means one of the results the judge reads was
-cut or dropped, and a run with more results than a judge reads lists
-`older tool results`. It is a diagnostic and never withholds a score.
+credentials before it is cut, and it is not cut when it fits once masked. A
+result over 1,000,000 characters keeps only its beginning. Raising a budget
+lifts none of these limits, and `truncated` stays `false` when they are the
+only cut. Both judges' `omitted` records therefore carry
+`incomplete_sections` as well, naming each section whose complete source did
+not reach the judge (`final response`, `file changes` or `tool results`).
+`tool results` means one of the results the judge reads was cut or dropped,
+and a run with more results than a judge reads lists `older tool results`. It
+is a diagnostic and never withholds a score.
 
 `behavior_check`'s `omitted` record carries four further keys, because
 `truncated` alone cannot say whether the judge still had what it needed:

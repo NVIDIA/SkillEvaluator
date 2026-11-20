@@ -772,6 +772,24 @@ def test_long_tool_result_is_masked_before_it_is_cut(after: int) -> None:
             assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
+def test_long_tool_result_that_fits_once_masked_is_not_reported_cut() -> None:
+    # The result is over its allowance as the agent got it and under it once
+    # the value in it is masked, so the judge reads all of what is left.
+    secret = "S3CRET-" + "v" * 400
+    result = f"first line\n{secret}\n" + "log line\n" * 130 + "exit status 0."
+    assert len(result) > atif_helpers._BUNDLE_ITEM_CHARS > len(result) - len(secret)
+    traj = _tool_result_steps([result])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(
+            traj, "Run the checks and report.", redact=lambda text: text.replace(secret, "<masked>")
+        )
+        for metric in ("accuracy", "goal_accuracy"):
+            assert result.replace(secret, "<masked>") in bundles[metric]["prompt_evidence"]
+            assert "...[truncated]..." not in bundles[metric]["prompt_evidence"]
+            assert bundles[metric]["omitted"]["incomplete_sections"] == []
+
+
 def test_tool_result_too_long_to_mask_whole_keeps_its_beginning_only(monkeypatch: pytest.MonkeyPatch) -> None:
     # The end of a result is only safe to show when everything before it was
     # read by the masking, and a result this long is not read to its end.

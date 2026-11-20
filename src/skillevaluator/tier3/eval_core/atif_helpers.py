@@ -949,6 +949,7 @@ def _late_observation_excerpts(
     *,
     count: int | None = None,
     redact: Callable[[str], str] | None = None,
+    cut: list[bool] | None = None,
 ) -> list[str]:
     """Most-recent tool observations first (end-state evidence), each clipped.
 
@@ -962,7 +963,8 @@ def _late_observation_excerpts(
     The result is masked whole, because any cut made first can drop the first
     line of a long key block and leave the rest in the kept end. A result over
     ``_BUNDLE_ITEM_MASK_CHARS`` keeps its beginning only, masked.
-    ``count`` stops after that many results.
+    ``count`` stops after that many results. *cut* gets one entry for each
+    excerpt, true when the result did not go in whole.
     """
     out: list[str] = []
     for step in reversed(traj.get("steps", [])):
@@ -978,8 +980,11 @@ def _late_observation_excerpts(
             elif shortened:
                 if redact is not None:
                     content = redact(content)
+                    shortened = len(content) > limit
                 content = _truncate_for_behavior(content, limit)
             out.append(content)
+            if cut is not None:
+                cut.append(shortened)
             if count is not None and len(out) >= count:
                 return out
     return out
@@ -1253,7 +1258,8 @@ def _result_evidence_incomplete_sections(
     kept: list[str],
     *,
     file_changes_shortened: bool,
-    results: list[str],
+    results_cut: list[bool],
+    result_count: int,
     max_results: int,
 ) -> list[str]:
     """Name the accuracy or goal evidence sections that did not reach the judge whole.
@@ -1264,24 +1270,22 @@ def _result_evidence_incomplete_sections(
     text, so a result whose text appears somewhere else cannot stand in for
     one that was dropped. A section is named when the budget dropped or
     clipped it, or when a write body or tool result in it was shortened to its
-    own per-entry allowance. *results* is every tool result, newest first and
-    uncut. ``tool results`` covers the *max_results* newest, which are the
-    ones the bundle reads, and older ones are listed as ``older tool
-    results``, so a long run does not look like a cut result. Nothing here
-    withholds a score.
+    own per-entry allowance. *results_cut* says for each tool result the
+    excerpts were made from, newest first, whether its excerpt was cut, so a
+    long result that fits once it is masked is not listed. *result_count* is
+    how many results the run has. ``tool results`` covers the *max_results*
+    newest, which are the ones the bundle reads, and older ones are listed as
+    ``older tool results``, so a long run does not look like a cut result.
+    Nothing here withholds a score.
     """
-    shortened = (
-        False,
-        file_changes_shortened,
-        any(len(result) > _BUNDLE_ITEM_CHARS for result in results[:max_results]),
-    )
+    shortened = (False, file_changes_shortened, any(results_cut[:max_results]))
     labels = ("final response", "file changes", "tool results")
     incomplete = [
         label
         for label, (title, body), cut in zip(labels, sections, shortened)  # noqa: B905 -- zip(strict=) needs Python 3.10
         if str(body or "").strip() and (cut or title not in kept)
     ]
-    if len(results) > max_results:
+    if result_count > max_results:
         incomplete.append("older tool results")
     return incomplete
 
@@ -1393,12 +1397,14 @@ def build_metric_evidence_bundles(
     final = get_final_response(traj)
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
     file_changes_shortened = file_changes != "\n\n".join(_collect_file_change_evidence(traj, full=True))
-    results = _late_observation_excerpts(traj, 10**9)
+    result_count = len(_late_observation_excerpts(traj, 10**9))
+    results_cut: list[bool] = []
     late_obs = _late_observation_excerpts(
         traj,
         _BUNDLE_ITEM_CHARS,
         count=max(_BUNDLE_ACCURACY_MAX_OBS, _BUNDLE_GOAL_MAX_OBS),
         redact=redact,
+        cut=results_cut,
     )
 
     def _prepend_facts(text: str) -> str:
@@ -1430,7 +1436,8 @@ def build_metric_evidence_bundles(
                 acc_sections,
                 acc_kept,
                 file_changes_shortened=file_changes_shortened,
-                results=results,
+                results_cut=results_cut,
+                result_count=result_count,
                 max_results=_BUNDLE_ACCURACY_MAX_OBS,
             ),
         },
@@ -1456,7 +1463,8 @@ def build_metric_evidence_bundles(
                 goal_sections,
                 goal_kept,
                 file_changes_shortened=file_changes_shortened,
-                results=results,
+                results_cut=results_cut,
+                result_count=result_count,
                 max_results=_BUNDLE_GOAL_MAX_OBS,
             ),
         },

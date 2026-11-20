@@ -5,7 +5,7 @@
 #
 # The image installs every public optional dependency. Tier 3 still requires
 # credentials for the selected provider and agent at runtime.
-# Bootstrap with a patched pip trust store before the first package download.
+# Use a Python TLS stack that rejects the affected certificates during pip bootstrap.
 FROM python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
 
 ENV PIP_NO_INPUT=1 \

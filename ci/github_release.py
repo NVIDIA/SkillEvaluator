@@ -139,7 +139,12 @@ def preflight(version: str, source_sha: str, main_sha: str, phase: str) -> None:
     if phase == "Full release":
         # A fresh full run must not open a pin PR for a version already staged or published.
         if tag_target(tag) is not None:
-            raise ValueError(f"{tag} already exists. Resume Publish release with the reviewed bundle merge SHA.")
+            raise ValueError(
+                f"{tag} already exists. Re-run failed jobs on the original run. "
+                "For a fresh run, enter the reviewed bundle merge SHA. "
+                "Choose Validate and publish if the run stopped before creating a draft. "
+                "Choose Publish release to resume an existing draft or immutable release."
+            )
     elif phase != "Build CI image and bundle":
         check_tag(tag, source_sha)
 

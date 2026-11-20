@@ -35,12 +35,61 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     jobs = workflow["jobs"]
     assert "workflow_dispatch" in jobs["preflight"]["if"]
     assert "refs/heads/main" in jobs["preflight"]["if"]
+    reviewed = next(step for step in jobs["preflight"]["steps"] if step.get("id") == "reviewed")
+    assert reviewed["env"]["PROMOTE_STABLE"] == "${{ inputs.promote_stable }}"
     assert jobs["image"]["uses"] == "./.github/workflows/release-tier1-image.yml"
     assert jobs["stage"]["environment"] == "release-github"
     assert "Publish release" in jobs["stage"]["if"]
     assert jobs["kitmaker"]["needs"] == ["release-source", "stage"]
     assert jobs["finalize"]["needs"] == ["release-source", "verify-indexes"]
     assert any("inspect-indexes" in step.get("run", "") for step in jobs["prepare"]["steps"])
+
+
+@pytest.mark.parametrize("promote_stable", ["false", "true"])
+@pytest.mark.parametrize(
+    ("phase", "publishes"),
+    [
+        ("Validate release", False),
+        ("Build CI image and bundle", False),
+        ("Validate and publish", True),
+        ("Full release", True),
+        ("Publish release", True),
+    ],
+)
+def test_preflight_validates_stable_promotion_phase(phase, publishes, promote_stable, tmp_path):
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    step = next(step for step in workflow["jobs"]["preflight"]["steps"] if step.get("id") == "reviewed")
+    command = tmp_path / "python3"
+    command.write_text('#!/bin/sh\nprintf "%s\\n" "$@" > "$PREFLIGHT_ARGS"\n', encoding="utf-8")
+    command.chmod(0o755)
+    args_file = tmp_path / "args"
+    output = tmp_path / "output"
+    result = subprocess.run(
+        ["bash", "-e", "-c", step["run"]],
+        env={
+            **os.environ,
+            "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
+            "PHASE": phase,
+            "PROMOTE_STABLE": promote_stable,
+            "VERSION": VERSION,
+            "SOURCE_SHA": SHA,
+            "GITHUB_SHA": SHA,
+            "PREFLIGHT_ARGS": str(args_file),
+            "GITHUB_OUTPUT": str(output),
+        },
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if promote_stable == "true" and not publishes:
+        assert result.returncode == 1
+        assert "Stable promotion requires Full release, Validate and publish, or Publish release." in result.stderr
+        assert not args_file.exists() and not output.exists()
+    else:
+        assert result.returncode == 0, result.stderr
+        arguments = args_file.read_text(encoding="utf-8").splitlines()
+        assert arguments[arguments.index("--phase") + 1] == phase
+        assert output.read_text(encoding="utf-8") == f"version={VERSION}\nsource_sha={SHA}\n"
 
 
 def test_validate_checks_release_metadata_with_the_current_workflow_from_the_reviewed_checkout():
@@ -65,6 +114,41 @@ def test_validate_checks_release_metadata_with_the_current_workflow_from_the_rev
     verify = next(i for i, step in enumerate(steps) if "product_release.py verify-assets" in step.get("run", ""))
     retain = next(i for i, step in enumerate(steps) if "upload-artifact@" in step.get("uses", ""))
     assert verify < metadata_index < retain
+
+
+@pytest.mark.parametrize("phase", ["Validate release", "Validate and publish", "Full release"])
+def test_prepare_summarizes_the_exact_validated_release_before_publication(phase, tmp_path):
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    steps = workflow["jobs"]["prepare"]["steps"]
+    summary = next(step for step in steps if "$GITHUB_STEP_SUMMARY" in step.get("run", ""))
+    output = tmp_path / "summary"
+    subprocess.run(
+        ["bash", "-e", "-c", summary["run"]],
+        env={
+            **os.environ,
+            "PHASE": phase,
+            "VERSION": VERSION,
+            "SOURCE_SHA": SHA,
+            "VALIDATION_RUN": "42-1",
+            "VALIDATION_ARTIFACT_ID": "123",
+            "MANIFEST_SHA256": "b" * 64,
+            "GITHUB_STEP_SUMMARY": str(output),
+        },
+        check=True,
+    )
+    contents = output.read_text(encoding="utf-8")
+    assert f"| `version` | `{VERSION}` |" in contents
+    assert f"| `source_sha` | `{SHA}` |" in contents
+    assert "| `validation_run` | `42-1` |" in contents
+    assert f"| `validation_manifest_sha256` | `{'b' * 64}` |" in contents
+    if phase == "Validate release":
+        assert contents.startswith("### Publish release inputs\n")
+        assert "Validation artifact ID" not in contents
+    else:
+        assert contents.startswith("### Validated release artifacts\n")
+        assert "| Validation artifact ID | `123` |" in contents
+    assert "if" not in summary
+    assert summary["env"]["VALIDATION_ARTIFACT_ID"] == "${{ steps.retained.outputs.artifact-id }}"
 
 
 @pytest.mark.parametrize("name", ["release", "release-tier1-image", "release-kitmaker"])

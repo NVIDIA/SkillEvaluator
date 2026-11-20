@@ -23,9 +23,9 @@ try:
     import github_api
     import product_release
     import stable_channel
-    from github_release import api, gh
+    from github_release import API_ROOT, api, gh
 except ModuleNotFoundError:
-    from ci.github_release import api, gh
+    from ci.github_release import API_ROOT, api, gh
 
     from ci import github_api, product_release, stable_channel
 
@@ -45,8 +45,8 @@ def git(*args: str, env: dict | None = None, data: bytes | None = None) -> bytes
     return result.stdout
 
 
-def branch_for(version: str) -> str:
-    return f"release/pin-v{version}"
+def branch_for(version: str, candidate: str) -> str:
+    return f"release/pin-v{version}-{candidate}"
 
 
 def bundle_paths(version: str) -> set[str]:
@@ -169,6 +169,28 @@ def check_pull(pull: dict, branch: str, *, number: int | None = None) -> None:
         raise ValueError("The bundle PR does not use the expected upstream branches.")
 
 
+def check_competing_pulls(version: str, branch: str) -> None:
+    path = f"{API_ROOT}/pulls?state=open&base=main&per_page=100"
+    pages = json.loads(gh("api", "--paginate", "--slurp", path))
+    if not isinstance(pages, list) or not pages or any(not isinstance(page, list) for page in pages):
+        raise ValueError("GitHub did not provide the open bundle PR listing.")
+    prefix = f"release/pin-v{version}"
+    same_version = re.compile(rf"{re.escape(prefix)}(?:-[0-9a-f]{{40}})?")
+    for page in pages:
+        for pull in page:
+            head = pull["head"]
+            ref = head["ref"]
+            if (
+                ref != branch
+                and same_version.fullmatch(ref)
+                and (head["repo"] or {}).get("full_name") == product_release.REPOSITORY
+            ):
+                check_pull(pull, ref)
+                raise ValueError(
+                    f"Close the stale bundle PR {UPSTREAM}/pull/{pull['number']} before preparing a new candidate."
+                )
+
+
 def existing_pull(branch: str) -> dict | None:
     query = urlencode({"state": "all", "head": f"NVIDIA:{branch}", "base": "main"})
     matches = api(f"pulls?{query}")
@@ -204,7 +226,8 @@ def open_pull(version: str, candidate: str, image: str, bundle: Path) -> int:
     verify_source(version, candidate, image)
     main = fetch_main()
     require_reviewed_candidate(version, candidate, main)
-    branch = branch_for(version)
+    branch = branch_for(version, candidate)
+    check_competing_pulls(version, branch)
     pull = existing_pull(branch)
     if pull is not None and pull.get("state") != "open":
         verified_merge(version, candidate, image, pull, main)
@@ -246,7 +269,7 @@ def wait_for_merge(version: str, candidate: str, image: str, number: int, timeou
     verify_source(version, candidate, image)
     if number < 1 or not 1 <= timeout_minutes <= MAX_WAIT_MINUTES:
         raise ValueError(f"Specify a pull request number and a timeout up to {MAX_WAIT_MINUTES} minutes.")
-    branch = branch_for(version)
+    branch = branch_for(version, candidate)
     deadline = time.monotonic() + timeout_minutes * 60
     print(f"Waiting for review and merge of {UPSTREAM}/pull/{number}", file=sys.stderr)
     while True:

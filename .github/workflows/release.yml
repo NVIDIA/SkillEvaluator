@@ -23,7 +23,7 @@ on:
           - Build CI image and bundle
           - Publish release
       promote_stable:
-        description: Promote this release after verification if it is GitHub Latest
+        description: Promote this release after verification if it is GitHub Latest (publishing phases only)
         type: boolean
         default: false
       validation_run:
@@ -65,7 +65,13 @@ jobs:
           VERSION: ${{ inputs.version }}
           SOURCE_SHA: ${{ inputs.source_sha }}
           PHASE: ${{ inputs.phase }}
+          PROMOTE_STABLE: ${{ inputs.promote_stable }}
         run: |
+          if [[ "$PROMOTE_STABLE" == 'true' && "$PHASE" != 'Full release' &&
+                "$PHASE" != 'Validate and publish' && "$PHASE" != 'Publish release' ]]; then
+            echo 'Stable promotion requires Full release, Validate and publish, or Publish release.' >&2
+            exit 1
+          fi
           python3 ci/github_release.py preflight --version "$VERSION" --source-sha "$SOURCE_SHA" \
             --main-sha "$GITHUB_SHA" --phase "$PHASE"
           printf 'version=%s\nsource_sha=%s\n' "$VERSION" "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
@@ -317,19 +323,26 @@ jobs:
           path: ${{ runner.temp }}/product-release
           if-no-files-found: error
           retention-days: 90
-      - name: Record the standalone Publish release inputs
-        if: inputs.phase == 'Validate release'
+      - name: Record the validated release artifact
         env:
+          PHASE: ${{ inputs.phase }}
           VALIDATION_RUN: ${{ steps.artifact.outputs.run }}
+          VALIDATION_ARTIFACT_ID: ${{ steps.retained.outputs.artifact-id }}
           MANIFEST_SHA256: ${{ steps.verified.outputs.manifest_sha256 }}
         run: |
           {
-            printf '### Publish release inputs\n\n'
-            printf '| Input | Value |\n| --- | --- |\n'
+            if [[ "$PHASE" == 'Validate release' ]]; then
+              printf '### Publish release inputs\n\n| Input | Value |\n| --- | --- |\n'
+            else
+              printf '### Validated release artifacts\n\n| Field | Value |\n| --- | --- |\n'
+            fi
             printf '| `version` | `%s` |\n' "$VERSION"
             printf '| `source_sha` | `%s` |\n' "$SOURCE_SHA"
             printf '| `validation_run` | `%s` |\n' "$VALIDATION_RUN"
             printf '| `validation_manifest_sha256` | `%s` |\n' "$MANIFEST_SHA256"
+            if [[ "$PHASE" != 'Validate release' ]]; then
+              printf '| Validation artifact ID | `%s` |\n' "$VALIDATION_ARTIFACT_ID"
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   stage:

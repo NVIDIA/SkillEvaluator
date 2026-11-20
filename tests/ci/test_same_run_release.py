@@ -267,6 +267,48 @@ def test_standalone_publish_checks_completed_validation_without_same_run_outputs
         assert {path.name: path.read_bytes() for path in output.iterdir()} == producer.contents
 
 
+@pytest.mark.parametrize("previous_receipt", [False, True], ids=["blank", "failed-full-release"])
+def test_standalone_publish_requires_a_qualifying_receipt_after_a_tag_only_failure(
+    producer, monkeypatch, tmp_path, previous_receipt
+):
+    monkeypatch.setattr(github_release, "tag_target", lambda _: SOURCE)
+    producer.origin.update(
+        display_title=f"Full release · SkillEvaluator {VERSION}", status="completed", conclusion="failure"
+    )
+    output = tmp_path / "assets"
+    with pytest.raises(ValueError, match="successful Validate release"):
+        acquire(
+            producer,
+            output,
+            phase="Publish release",
+            artifact_id=None,
+            artifact_digest=None,
+            run_ref=f"{RUN}-{PRODUCER_ATTEMPT}" if previous_receipt else "",
+            manifest_sha256=producer.manifest_digest if previous_receipt else "",
+        )
+    producer.download.assert_not_called()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(("phase", "publishing_attempt"), [(PHASE, "2"), ("Full release", "3")])
+def test_combined_publication_acquires_validated_bytes_after_a_tag_only_failure(
+    producer, monkeypatch, tmp_path, phase, publishing_attempt
+):
+    monkeypatch.setattr(github_release, "tag_target", lambda _: SOURCE)
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", publishing_attempt)
+    original_run = phase == "Full release"
+    producer.origin.update(
+        display_title=f"{phase} · SkillEvaluator {VERSION}",
+        status="completed" if original_run else "in_progress",
+        conclusion="failure" if original_run else None,
+    )
+    output = tmp_path / "assets"
+
+    assert acquire(producer, output, phase=phase) is True
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == producer.contents
+    assert [call.args[0] for call in producer.api.call_args_list] == [producer.attempt_path, producer.artifact_path]
+
+
 def test_same_run_command_preserves_restore_first(producer, monkeypatch, tmp_path, capsys):
     restore = Mock(return_value=True)
     monkeypatch.setattr(github_release, "restore", restore)
@@ -305,12 +347,16 @@ def test_full_release_preflight_rejects_an_existing_version_before_creating_a_bu
         return f'[project]\nversion = "{VERSION}"\n'
 
     monkeypatch.setattr(github_release.subprocess, "check_output", git_output)
-    tag_target = Mock(side_effect=[None, "3" * 40, "3" * 40])
+    tag_target = Mock(side_effect=[None, "3" * 40, SOURCE, "3" * 40])
     monkeypatch.setattr(github_release, "tag_target", tag_target)
 
     github_release.preflight(VERSION, SOURCE, WORKFLOW_COMMIT, "Full release")
-    with pytest.raises(ValueError, match=r"already exists\. Resume Publish release"):
+    with pytest.raises(ValueError, match=r"already exists\. Re-run failed jobs") as error:
         github_release.preflight(VERSION, SOURCE, WORKFLOW_COMMIT, "Full release")
+    assert "reviewed bundle merge SHA" in str(error.value)
+    assert "Validate and publish if the run stopped before creating a draft" in str(error.value)
+    assert "Publish release to resume an existing draft or immutable release" in str(error.value)
+    github_release.preflight(VERSION, SOURCE, WORKFLOW_COMMIT, "Validate and publish")
     with pytest.raises(ValueError, match="points to a different commit"):
         github_release.preflight(VERSION, SOURCE, WORKFLOW_COMMIT, "Publish release")
-    assert [call.args for call in tag_target.call_args_list] == [(f"v{VERSION}",)] * 3
+    assert [call.args for call in tag_target.call_args_list] == [(f"v{VERSION}",)] * 4

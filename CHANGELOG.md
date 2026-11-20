@@ -52,6 +52,16 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 file walkers skip symlinks and Windows directory junctions whose
+  target resolves outside the skill directory (or is missing), so the PII,
+  secrets, Unicode, license and link checks no longer read or quote files from
+  elsewhere on the host through a symlinked `references/` entry. The
+  dependency audit and the license check apply the same rule to root
+  `requirements.txt`, `requirements-dev.txt` and `LICENSE`/`COPYING` files, and
+  the unpinned-dependency warning quotes only the package name, never the whole
+  line. Symlinks that resolve inside the skill still scan as before. Code
+  Integrity & Hygiene records a low-severity `symlink_outside_skill` finding
+  naming each skipped link by its path inside the skill, never by its target.
 - Tier 1 code risk no longer lets a skill configure its own Bandit scan. A
   `.bandit` file shipped in the skill (at the root or nested, for example
   `scripts/.bandit`) with `skips` or `tests`, or `# nosec` comments on risky

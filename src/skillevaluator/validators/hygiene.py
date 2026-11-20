@@ -79,13 +79,18 @@ class HygieneValidator(ValidatorBase):
             return result
 
         for link in outside_links:
-            relative = _link_display(link.relative_to(skill_path).as_posix())
+            # file_path keeps the exact path because reporters resolve it on disk;
+            # only the message text is escaped and truncated.
+            relative = link.relative_to(skill_path).as_posix()
             result.add_finding(
                 Finding(
                     category="HYGIENE",
                     severity=Severity.LOW,
                     check_name="symlink_outside_skill",
-                    message=f"Symlink {relative} points outside the skill (or to a missing target) and was not scanned",
+                    message=(
+                        f"Symlink {_link_display(relative)} points outside the skill "
+                        "(or to a missing target) and was not scanned"
+                    ),
                     file_path=relative,
                     suggestion="Copy the content into the skill instead of symlinking it so Tier 1 checks can scan it",
                     metadata={"symlink_count": len(outside_links)},

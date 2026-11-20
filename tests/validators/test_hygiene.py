@@ -3,10 +3,12 @@
 
 """Tests for hygiene validator."""
 
+import json
 from pathlib import Path
 
 import pytest
 
+from skillevaluator.reporting import SARIFReporter
 from skillevaluator.validators.hygiene import HygieneValidator
 
 
@@ -133,6 +135,54 @@ class TestHygieneValidator:
         assert "references/notes.md" in rendered
         assert "host-private" not in rendered
         assert "HOSTMARKER" not in rendered
+
+    @pytest.mark.parametrize(
+        ("relative", "sarif_uri", "message_path"),
+        [
+            pytest.param(
+                "references/r\u00e9sum\u00e9.md",
+                "references/r%C3%A9sum%C3%A9.md",
+                "references/r\\xe9sum\\xe9.md",
+                id="unicode-name",
+            ),
+            pytest.param(
+                f"references/{'a' * 80}/{'b' * 80}.md",
+                f"references/{'a' * 80}/{'b' * 80}.md",
+                f"references/{'a' * 80}/{'b' * 68}...",
+                id="over-160-chars",
+            ),
+        ],
+    )
+    def test_outside_symlink_finding_keeps_exact_path_for_sarif(
+        self, tmp_path: Path, relative: str, sarif_uri: str, message_path: str
+    ):
+        """file_path stays the real relative path; only the message text is escaped or truncated."""
+        skill = tmp_path / "skill"
+        link = skill / relative
+        link.parent.mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n", encoding="utf-8")
+        host_file = tmp_path / "host_file.txt"
+        host_file.write_text("outside\n", encoding="utf-8")
+        try:
+            link.symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = HygieneValidator().validate(skill)
+
+        findings = [f for f in result.findings if f.check_name == "symlink_outside_skill"]
+        assert [f.file_path for f in findings] == [relative]
+        assert findings[0].message == (
+            f"Symlink {message_path} points outside the skill (or to a missing target) and was not scanned"
+        )
+
+        sarif = json.loads(SARIFReporter(include_timestamp=False, workspace_root=skill, scan_root=skill).render(result))
+        uris = [
+            item["locations"][0]["physicalLocation"]["artifactLocation"]["uri"]
+            for item in sarif["runs"][0]["results"]
+            if item["ruleId"].endswith("/symlink_outside_skill")
+        ]
+        assert uris == [sarif_uri]
 
     def test_no_symlinks_records_boundary_success(self, tmp_path: Path):
         skill = tmp_path / "skill"

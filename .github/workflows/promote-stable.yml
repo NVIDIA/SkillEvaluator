@@ -19,6 +19,7 @@ on:
 concurrency:
   group: skillevaluator-stable
   cancel-in-progress: false
+  queue: max
 
 permissions: {}
 

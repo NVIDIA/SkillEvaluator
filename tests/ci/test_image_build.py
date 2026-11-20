@@ -175,6 +175,11 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
                 }
                 expected_release = triggers["workflow_dispatch"]["inputs"]["expected-release"]
                 assert expected_release["required"] == "true" and expected_release["type"] == "string"
+                assert document["concurrency"] == {
+                    "group": "skillevaluator-stable",
+                    "cancel-in-progress": "false",
+                    "queue": "max",
+                }
                 assert document["permissions"] == {}
                 assert set(document["jobs"]) == {"promote"}
                 promote = document["jobs"]["promote"]

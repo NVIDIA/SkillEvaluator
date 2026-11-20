@@ -441,8 +441,14 @@ def _render(annotations: list[_Annotation], counts: tuple[int, int, int, int], r
 
 
 def _write_stdout(text: str) -> None:
-    sys.stdout.buffer.write(text.encode("utf-8", "backslashreplace"))
-    sys.stdout.buffer.flush()
+    buffer = getattr(sys.stdout, "buffer", None)
+    if buffer is None:
+        sys.stdout.write(text)
+        sys.stdout.flush()
+    else:
+        sys.stdout.flush()
+        buffer.write(text.encode("utf-8", "backslashreplace"))
+        buffer.flush()
 
 
 # A catalog validates each skill as its own run. While a collection is open,

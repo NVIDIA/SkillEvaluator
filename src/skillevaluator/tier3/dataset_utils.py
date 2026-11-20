@@ -14,8 +14,11 @@ import logging
 from pathlib import Path
 from typing import Any, Literal
 
+import yaml
+
+from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
-from skillevaluator.utils.structured_data import load_bounded_yaml
+from skillevaluator.utils.structured_data import StructuredDataSyntaxError, load_bounded_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -183,14 +186,35 @@ def parse_dataset_text(text: str, suffix: str) -> Any:
     suffix = suffix.casefold()
     try:
         if suffix == ".jsonl":
-            return [json.loads(line) for raw_line in text.splitlines() if (line := raw_line.strip())]
+            # Records end at LF, CRLF or CR only, as when a file is read line by line. ``splitlines``
+            # would also split at U+2028, U+2029 and U+0085, which JSON allows inside a string.
+            lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            return [json.loads(line) for raw_line in lines if (line := raw_line.strip())]
         if suffix in {".yaml", ".yml"}:
-            return load_bounded_yaml(text, last_key_wins=True)
+            try:
+                return load_bounded_yaml(text, last_key_wins=True)
+            except StructuredDataSyntaxError as exc:
+                raise StructuredDataSyntaxError(_yaml_syntax_message(exc)) from exc
         if suffix == ".json":
             return json.loads(text)
     except RecursionError as exc:
         raise ValueError("dataset is nested too deeply to read") from exc
     raise ValueError(f"Unsupported dataset format: {suffix}")
+
+
+def _yaml_syntax_message(error: StructuredDataSyntaxError) -> str:
+    """Keep what PyYAML says is wrong and where, but never the source text around it.
+
+    The bounded loader reports only that the input is not valid YAML; the error it wraps has the
+    parser's context, its problem, and a line and column. A dataset can be large, so the line and
+    column are what the author needs to find the mistake.
+    """
+    cause = error.__cause__
+    if not isinstance(cause, yaml.YAMLError) or getattr(cause, "problem_mark", None) is None:
+        return str(error)
+    context = getattr(cause, "context", None)
+    detail = _yaml_error_detail(cause)
+    return f"{error!s}: {context}; {detail}" if context else f"{error!s}: {detail}"
 
 
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:

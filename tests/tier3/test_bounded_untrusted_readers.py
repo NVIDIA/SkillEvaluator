@@ -9,6 +9,7 @@ loader and rejected by it; the assertions are on small values so a regression ca
 inside a failing assertion.
 """
 
+import json
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,46 @@ def test_quality_config_that_exceeds_the_limits_is_an_invalid_config(tmp_path: P
 
     with pytest.raises(QualityConfigError, match="invalid YAML"):
         load_quality_config(config)
+
+
+_LINE_SEPARATORS = {"U+2028": "\u2028", "U+2029": "\u2029", "U+0085": "\u0085"}
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n", "\r"], ids=["lf", "crlf", "cr"])
+@pytest.mark.parametrize("separator", _LINE_SEPARATORS.values(), ids=_LINE_SEPARATORS.keys())
+def test_jsonl_dataset_keeps_a_unicode_line_separator_inside_a_string(tmp_path: Path, separator: str, newline: str):
+    # JSON allows these characters unescaped inside a string; only LF, CRLF and CR end a record.
+    records = [
+        {"question": f"first{separator}prompt", "ground_truth": "g", "expected_behavior": ["b"]},
+        {"question": "second prompt", "ground_truth": "g", "expected_behavior": ["b"]},
+    ]
+    payload = newline.join(json.dumps(record, ensure_ascii=False) for record in records) + newline
+    dataset = tmp_path / "evals.jsonl"
+    dataset.write_bytes(payload.encode("utf-8"))
+
+    assert parse_dataset_text(payload, ".jsonl") == records
+    assert [entry["question"] for entry in load_dataset_entries(dataset)] == [r["question"] for r in records]
+    assert [entry["question"] for entry in adapter._load_evals(dataset)] == [r["question"] for r in records]
+
+
+def test_jsonl_dataset_still_skips_blank_lines_and_surrounding_whitespace():
+    assert parse_dataset_text('  {"a": 1}  \n\n\t\n{"a": 2}\r\n', ".jsonl") == [{"a": 1}, {"a": 2}]
+
+
+def test_yaml_dataset_syntax_error_keeps_what_is_wrong_and_where_without_the_source(tmp_path: Path):
+    text = "- question: hunter2-secret-prompt\n  expected_behavior: [one, two\n"
+    dataset = tmp_path / "evals.yaml"
+    dataset.write_text(text, encoding="utf-8")
+
+    for parse in (lambda: parse_dataset_text(text, ".yaml"), lambda: load_dataset_entries(dataset)):
+        with pytest.raises(ValueError) as caught:
+            parse()
+        message = str(caught.value)
+        assert "line 3, column 1" in message
+        assert "expected ',' or ']'" in message
+        assert "hunter2" not in message
+
+
+def test_yaml_dataset_value_error_without_a_position_stays_generic():
+    with pytest.raises(ValueError, match=r"^Input is not valid YAML$"):
+        parse_dataset_text("- !!int abc\n", ".yaml")

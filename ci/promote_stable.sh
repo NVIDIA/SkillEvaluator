@@ -80,14 +80,17 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
 fi
 git merge-base --is-ancestor "$candidate" "$main"
 git merge-base --is-ancestor "$release_commit" "$candidate"
-bundle="ci/bundles/${release#v}"
+version=${release#v}
+bundle="ci/bundles/$version"
+archive="skillevaluator-ci-$version.zip"
 git diff --exit-code "$release_commit" "$candidate" -- "$bundle"
 
 # Run the validator from main and read the chosen commit's files as data.
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-mkdir -p "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable" "$scratch/ci/gitlab"
-for file in release.json verification-receipt.json "skillevaluator-ci-${release#v}.zip"; do
+assets="$scratch/release-assets"
+mkdir -p "$assets" "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable" "$scratch/ci/gitlab"
+for file in release.json verification-receipt.json "$archive"; do
     git cat-file blob "$release_commit:$bundle/$file" > "$scratch/$bundle/$file"
 done
 for workflow in "$scanner" "$publisher"; do
@@ -110,11 +113,11 @@ if [[ ! -f "$scratch/$gitlab" ]]; then
         exit 1
     fi
 fi
-gh release download "$release" --repo NVIDIA/SkillEvaluator --pattern artifact-manifest.json --dir "$scratch"
+gh release download "$release" --repo NVIDIA/SkillEvaluator --pattern artifact-manifest.json --dir "$assets"
 python3 ci/stable_channel.py "$scratch/$bundle" --check \
     --templates "$scratch/ci/templates/stable" --output "$scratch/.github/workflows" \
     --gitlab-output "$scratch/$gitlab" \
-    --publication "$scratch/artifact-manifest.json" "$release_commit" "$manifest_digest" "$manifest_size" \
+    --publication "$assets/artifact-manifest.json" "$release_commit" "$manifest_digest" "$manifest_size" \
     "$zip_digest" "$zip_size"
 
 if [[ $previous_release == "$release" ]]; then
@@ -125,6 +128,13 @@ if [[ $previous_release == "$release" ]]; then
     echo "Stable already serves $release."
     exit 0
 fi
+
+# Keep the checked manifest and CI archive as the reference for both public indexes.
+cp "$scratch/$bundle/$archive" "$assets/"
+gh release download "$release" --repo NVIDIA/SkillEvaluator \
+    --pattern "skillevaluator-$version-py3-none-any.whl" --pattern "skillevaluator-$version.tar.gz" \
+    --pattern SHA256SUMS.txt --dir "$assets"
+python3 ci/product_release.py verify-indexes --version "$version" --assets "$assets"
 
 if [[ $(latest_release) != "$latest" ]]; then
     echo "The latest release changed during promotion. Retry from the release workflow." >&2

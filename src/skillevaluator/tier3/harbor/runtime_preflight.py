@@ -1311,6 +1311,9 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
                         )
                     raise NoCredentialsError
                 credentials.get_frozen_credentials()
+            # Botocore treats any set bearer variable, even a blank one, as a token.
+            # Pin SigV4 so the clients use the credentials checked above.
+            request_config = request_config.merge(BotoConfig(signature_version="v4"))
         bedrock = session.client(
             "bedrock",
             region_name=provider.region or "us-west-2",

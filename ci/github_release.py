@@ -299,22 +299,30 @@ def acquire_publication(version: str, source_sha: str, output: Path, run_ref: st
     return True
 
 
-def verify_local(version: str, source_sha: str, assets: Path) -> dict:
-    product_release.verify_assets(version, source_sha, assets)
-    manifest = json.loads((assets / product_release.MANIFEST).read_text(encoding="utf-8"))
+def verify_public_image(manifest: dict) -> None:
     image = manifest["image"]
     published = release_image.resolve_digest(image.partition("@")[0], manifest["image_source_commit"])
     if published != image:
         raise ValueError("The official public image revision does not match the reviewed release digest.")
+
+
+def verify_local(version: str, source_sha: str, assets: Path) -> dict:
+    product_release.verify_assets(version, source_sha, assets)
+    manifest = json.loads((assets / product_release.MANIFEST).read_text(encoding="utf-8"))
+    verify_public_image(manifest)
     return {asset["filename"]: asset for asset in manifest["artifacts"]}
 
 
-def release_notes(version: str, assets: Path) -> str:
-    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+def changelog_entry(version: str, source_sha: str) -> str:
+    changelog = product_release.source_file(source_sha, "CHANGELOG.md").decode("utf-8")
     title = re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}\s*$", changelog, re.MULTILINE)
     if title is None:
         raise ValueError(f"CHANGELOG.md has no dated entry for {version}.")
-    changes = re.split(r"^## ", changelog[title.end() :], maxsplit=1, flags=re.MULTILINE)[0].strip()
+    return re.split(r"^## ", changelog[title.end() :], maxsplit=1, flags=re.MULTILINE)[0].strip()
+
+
+def release_notes(version: str, source_sha: str, assets: Path) -> str:
+    changes = changelog_entry(version, source_sha)
     tag = f"v{version}"
     manifest = json.loads((assets / "artifact-manifest.json").read_text(encoding="utf-8"))
     bundle = f"ci/bundles/{version}"
@@ -326,6 +334,14 @@ def release_notes(version: str, assets: Path) -> str:
         f"[CI bundle]({GITHUB}/releases/download/{tag}/skillevaluator-ci-{version}.zip)\n\n"
         f"CI image: `{manifest['image']}`\n\n{changes}\n"
     )
+
+
+def verify_release_metadata(version: str, source_sha: str, assets: Path) -> None:
+    manifest, _ = product_release.checked_manifest(version, assets)
+    if manifest.get("source_commit") != source_sha:
+        raise ValueError("The artifact manifest does not match the reviewed source commit.")
+    changelog_entry(version, source_sha)
+    verify_public_image(manifest)
 
 
 def empty_upload(asset: dict) -> bool:
@@ -362,7 +378,7 @@ def stage(version: str, source_sha: str, assets: Path, run: str) -> None:
         raise ValueError(f"Existing GitHub release is missing tag {tag}.")
     if release is None or release["draft"]:
         product_release.inspect_public_indexes(version, packages)
-        notes = release_notes(version, assets)
+        notes = release_notes(version, source_sha, assets)
     if release is None:
         if target is None:
             api("git/refs", "POST", {"ref": f"refs/tags/{tag}", "sha": source_sha})
@@ -434,7 +450,10 @@ def finalize(version: str, source_sha: str, assets: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "restore", "acquire", "stage", "verify-public", "finalize"))
+    parser.add_argument(
+        "command",
+        choices=("preflight", "restore", "acquire", "verify-release-metadata", "stage", "verify-public", "finalize"),
+    )
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--assets", type=Path)
@@ -446,6 +465,7 @@ def main() -> int:
     args = parser.parse_args()
     commands = {
         "restore": restore,
+        "verify-release-metadata": verify_release_metadata,
         "verify-public": verify_public,
         "finalize": finalize,
     }

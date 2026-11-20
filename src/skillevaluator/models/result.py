@@ -648,7 +648,7 @@ class ValidationResult:
         for finding in self.findings:
             # merge_with_prefix puts skill labels before legacy messages but inside
             # structured finding paths. Recognize both forms, including nested merges.
-            location = finding.location
+            location = finding.location or ""
             prefix = ""
             while location.startswith("[") and "] " in location:
                 label, _, location = location.partition("] ")

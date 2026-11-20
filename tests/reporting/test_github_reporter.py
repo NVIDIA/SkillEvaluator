@@ -803,3 +803,114 @@ def test_non_utf8_file_name_is_encoded(tmp_path: Path) -> None:
     assert "file=skill/caf%25E9.md" in text or "file=skill/caf%E9.md" in text
     assert "Unexpected" in text
     text.encode("utf-8")
+
+
+def _write_license_catalog_skill(skill: Path, *, with_license: bool) -> None:
+    skill.mkdir(parents=True, exist_ok=True)
+    license_line = "license: Apache-2.0\n" if with_license else ""
+    (skill / "SKILL.md").write_text(
+        f"---\nname: {skill.name}\n"
+        "description: Use when a test checks GitHub annotations for catalog license findings.\n"
+        f"{license_line}---\n\n# {skill.name}\n",
+        encoding="utf-8",
+    )
+
+
+def _run_license_catalog(catalog: Path, reports: Path, workers: int) -> str:
+    result = CliRunner().invoke(
+        cli,
+        [
+            "validate",
+            str(catalog),
+            "--tiers",
+            "1",
+            "--checks",
+            "license",
+            "--workers",
+            str(workers),
+            "--no-autopilot",
+            "-r",
+            "github,json",
+            "-o",
+            str(reports),
+        ],
+    )
+    assert result.exit_code == 0, result.output
+    return result.output
+
+
+@pytest.mark.parametrize("in_git_repo", [True, False], ids=["git-repo", "plain-dir"])
+def test_catalog_missing_license_annotation_identifies_skill_across_workers(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, in_git_repo: bool
+) -> None:
+    _inline_process_pool(monkeypatch)
+    root = tmp_path / "repo" if in_git_repo else tmp_path
+    catalog = root / "skills"
+    if in_git_repo:
+        catalog.mkdir(parents=True)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+    else:
+        monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    expected_prefix = "skills/" if in_git_repo else ""
+
+    _write_license_catalog_skill(catalog / "alpha", with_license=False)
+    _write_license_catalog_skill(catalog / "bravo", with_license=True)
+    alpha_w1 = _run_license_catalog(catalog, tmp_path / "reports-alpha-1", workers=1)
+    alpha_w2 = _run_license_catalog(catalog, tmp_path / "reports-alpha-2", workers=2)
+    assert _commands(alpha_w1) == _commands(alpha_w2)
+    alpha_warnings = [line for line in _commands(alpha_w1) if line.startswith("::warning ")]
+    assert len(alpha_warnings) == 1, alpha_w1
+    alpha_props = _runner_properties(alpha_warnings[0])
+    assert alpha_props["file"] == f"{expected_prefix}alpha/SKILL.md"
+    assert "line" not in alpha_props
+    assert "bravo" not in alpha_warnings[0]
+
+    _write_license_catalog_skill(catalog / "alpha", with_license=True)
+    _write_license_catalog_skill(catalog / "bravo", with_license=False)
+    bravo_w1 = _run_license_catalog(catalog, tmp_path / "reports-bravo-1", workers=1)
+    bravo_w2 = _run_license_catalog(catalog, tmp_path / "reports-bravo-2", workers=2)
+    assert _commands(bravo_w1) == _commands(bravo_w2)
+    bravo_warnings = [line for line in _commands(bravo_w1) if line.startswith("::warning ")]
+    assert len(bravo_warnings) == 1, bravo_w1
+    bravo_props = _runner_properties(bravo_warnings[0])
+    assert bravo_props["file"] == f"{expected_prefix}bravo/SKILL.md"
+    assert "line" not in bravo_props
+    assert "alpha" not in bravo_warnings[0]
+    assert _commands(alpha_w1) != _commands(bravo_w1)
+
+
+def test_pathless_finding_falls_back_to_catalog_skill_path_outside_workspace(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    catalog = tmp_path / "external-skills"
+    _write_license_catalog_skill(catalog / "group" / "alpha", with_license=False)
+    _write_license_catalog_skill(catalog / "group" / "bravo", with_license=False)
+
+    finding = Finding(
+        category="LICENSE",
+        severity=Severity.MEDIUM,
+        check_name="missing_license",
+        message="No license information found",
+        file_path=None,
+    )
+    result = ValidationResult(validator_name="License Compliance")
+    result.add_finding(finding)
+
+    alpha_text = GitHubReporter(
+        workspace_root=workspace,
+        scan_root=catalog / "group" / "alpha",
+        catalog_root=catalog,
+    ).render_all([result])
+    bravo_text = GitHubReporter(
+        workspace_root=workspace,
+        scan_root=catalog / "group" / "bravo",
+        catalog_root=catalog,
+    ).render_all([result])
+
+    alpha_warning = next(line for line in _commands(alpha_text) if line.startswith("::warning "))
+    bravo_warning = next(line for line in _commands(bravo_text) if line.startswith("::warning "))
+    assert "file" not in _runner_properties(alpha_warning)
+    assert "file" not in _runner_properties(bravo_warning)
+    assert "::group/alpha: No license information found" in alpha_warning
+    assert "::group/bravo: No license information found" in bravo_warning
+    assert alpha_warning != bravo_warning

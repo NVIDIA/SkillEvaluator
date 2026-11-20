@@ -703,7 +703,10 @@ def emit_reports(
         CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
     if "github" in report_formats:
         github_reporter = GitHubReporter(
-            workspace_root=repository_root, scan_root=scan_root, report_formats=report_formats
+            workspace_root=repository_root,
+            scan_root=scan_root,
+            catalog_root=catalog_root,
+            report_formats=report_formats,
         )
         github_reporter.print_all(results)
 

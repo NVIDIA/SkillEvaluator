@@ -16,12 +16,13 @@ from __future__ import annotations
 
 import sys
 from collections.abc import Collection, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from contextvars import ContextVar
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING
 
+from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped, passes_required_gate
 from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
 from skillevaluator.reporting.sarif_reporter import (
@@ -122,9 +123,109 @@ def _link_github_file_path(
     path = file_path if file_path.is_absolute() else scan_root / file_path
     try:
         relative = (path.parent.resolve() / path.name).relative_to(workspace_root.resolve())
-    except ValueError:
+    except (OSError, RuntimeError, ValueError):
         return None
     return _github_path_text(relative.as_posix())
+
+
+def _same_path(first: Path, second: Path) -> bool:
+    try:
+        return first.resolve() == second.resolve()
+    except (OSError, RuntimeError):
+        return first == second
+
+
+def _effective_workspace_root(
+    workspace_root: Path | None,
+    scan_root: Path | None,
+    catalog_root: Path | None,
+) -> Path | None:
+    """Use *catalog_root* when no outer repository root was resolved for *scan_root*."""
+    if catalog_root is not None and (
+        workspace_root is None or (scan_root is not None and _same_path(workspace_root, scan_root))
+    ):
+        return catalog_root
+    return workspace_root
+
+
+def _skill_manifest_path(
+    workspace_root: Path | None,
+    scan_root: Path | None,
+) -> str | None:
+    """Return the workspace-relative SKILL.md path for *scan_root*, or None."""
+    if workspace_root is None or scan_root is None:
+        return None
+    if scan_root.is_symlink() or not scan_root.is_dir():
+        if scan_root.name in SKILL_MANIFEST_VARIANTS:
+            if scan_root.is_symlink():
+                return _link_github_file_path(Path(scan_root.name), workspace_root, scan_root.parent)
+            if scan_root.is_file():
+                return _github_file_path(str(scan_root), workspace_root, scan_root.parent)
+        return None
+    try:
+        entries = {entry.name for entry in scan_root.iterdir()}
+    except OSError:
+        return None
+    for variant in SKILL_MANIFEST_VARIANTS:
+        if variant not in entries:
+            continue
+        candidate = scan_root / variant
+        if candidate.is_symlink():
+            return _link_github_file_path(Path(variant), workspace_root, scan_root)
+        if candidate.is_file():
+            return _github_file_path(variant, workspace_root, scan_root)
+    return None
+
+
+def _relative_skill_path(scan_root: Path, root: Path) -> str | None:
+    candidates: list[tuple[Path, Path]] = []
+    if ".." not in scan_root.parts and ".." not in root.parts:
+        candidates.append((scan_root, root))
+    try:
+        resolved_root = root.resolve()
+    except (OSError, RuntimeError):
+        resolved_root = None
+    if resolved_root is not None:
+        with suppress(OSError, RuntimeError):
+            candidates.append((scan_root.parent.resolve() / scan_root.name, resolved_root))
+        with suppress(OSError, RuntimeError):
+            candidates.append((scan_root.resolve(), resolved_root))
+    for target, base in candidates:
+        try:
+            relative = target.relative_to(base)
+        except ValueError:
+            continue
+        text = relative.as_posix()
+        if text not in {"", "."} and not text.startswith(".."):
+            return _github_path_text(text)
+    return None
+
+
+def _catalog_skill_label(
+    scan_root: Path | None,
+    catalog_root: Path | None,
+    workspace_root: Path | None,
+) -> str:
+    """Return *scan_root*'s catalog- or workspace-relative skill path, or an empty string."""
+    if scan_root is None:
+        return ""
+    for root in (catalog_root, workspace_root):
+        if root is None:
+            continue
+        relative = _relative_skill_path(scan_root, root)
+        if relative is not None:
+            return relative
+    return ""
+
+
+def _qualify_message(message: object, skill_label: str) -> str:
+    cleaned = _clean_text(message)
+    if not skill_label:
+        return cleaned
+    prefix = f"{_clean_text(skill_label, max_len=_TITLE_MAX)}: "
+    if cleaned.startswith(prefix):
+        return cleaned
+    return _clean_text(f"{prefix}{cleaned}")
 
 
 def _end_line(finding: Finding) -> int | None:
@@ -201,6 +302,7 @@ class _Annotation:
             self.path,
             self.line if self.line is not None else 0,
             self.check,
+            self.title,
             self.message,
         )
 
@@ -220,7 +322,14 @@ class _Annotation:
         return f"::{self.level} {','.join(properties)}::{body}"
 
 
-def _incomplete_diagnostic(result: ValidationResult, validator: str, error: str) -> _Annotation:
+def _incomplete_diagnostic(
+    result: ValidationResult,
+    validator: str,
+    error: str,
+    *,
+    default_path: str = "",
+    skill_label: str = "",
+) -> _Annotation:
     text = error.casefold()
     tool = next((tool for tool in result.incomplete_scans if tool.casefold() in text), None)
     check = f"incomplete/{tool}" if tool else "incomplete"
@@ -228,12 +337,12 @@ def _incomplete_diagnostic(result: ValidationResult, validator: str, error: str)
         level="warning",
         kind="incomplete",
         severity="medium",
-        path="",
+        path=default_path,
         line=None,
         end_line=None,
         check=check,
         title=_title(validator, check),
-        message=_clean_text(error),
+        message=_qualify_message(error, "" if default_path else skill_label),
     )
 
 
@@ -242,21 +351,33 @@ def _finding_annotation(
     validator: str,
     workspace_root: Path | None,
     scan_root: Path | None,
+    *,
+    default_path: str = "",
+    skill_label: str = "",
 ) -> _Annotation:
     severity = _finding_severity_value(finding)
-    path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
-    line = _positive_start_line(finding.line_number)
+    has_file_path = isinstance(finding.file_path, str) and bool(finding.file_path.strip())
+    if has_file_path:
+        path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
+        line = _positive_start_line(finding.line_number) if path else None
+        end_line = _end_line(finding) if path else None
+    else:
+        path = default_path
+        line = None
+        end_line = None
     suggestion = _clean_text(finding.suggestion) if finding.suggestion else ""
     message = _clean_text(finding.message)
     if suggestion:
         message = f"{message} Suggestion: {suggestion}"
+    if not has_file_path and not path:
+        message = _qualify_message(message, skill_label)
     return _Annotation(
         level=_level_for_severity(severity),
         kind="finding",
         severity=severity,
         path=path,
         line=line,
-        end_line=_end_line(finding),
+        end_line=end_line,
         check=_clean_text(finding.check_name, max_len=_TITLE_MAX),
         title=_title(validator, finding.check_name),
         message=message,
@@ -267,6 +388,7 @@ def _annotations_for_result(
     result: ValidationResult,
     workspace_root: Path | None,
     scan_root: Path | None,
+    catalog_root: Path | None = None,
 ) -> list[_Annotation]:
     validator = result.validator_name or "check"
     advisory = _advisory(result)
@@ -275,8 +397,21 @@ def _annotations_for_result(
     if is_cleanly_skipped(result) and result_status(result) == Status.SKIPPED:
         return annotations
 
+    effective_workspace = _effective_workspace_root(workspace_root, scan_root, catalog_root)
+    default_path = _skill_manifest_path(effective_workspace, scan_root) or ""
+    skill_label = "" if default_path else _catalog_skill_label(scan_root, catalog_root, workspace_root)
+
     for finding in result.findings:
-        annotations.append(_finding_annotation(finding, validator, workspace_root, scan_root))
+        annotations.append(
+            _finding_annotation(
+                finding,
+                validator,
+                effective_workspace,
+                scan_root,
+                default_path=default_path,
+                skill_label=skill_label,
+            )
+        )
 
     gate_failures = set(result.gate_failures)
     # An incomplete scanner's reason is reported once, as its incomplete warning below.
@@ -288,19 +423,27 @@ def _annotations_for_result(
         if result.incomplete_scans and not is_gate:
             # Other diagnostics from an incomplete scan, such as a scanner's further
             # per-file errors, are warnings like the scan's own incomplete status.
-            annotations.append(_incomplete_diagnostic(result, validator, error))
+            annotations.append(
+                _incomplete_diagnostic(
+                    result,
+                    validator,
+                    error,
+                    default_path=default_path,
+                    skill_label=skill_label,
+                )
+            )
             continue
         annotations.append(
             _Annotation(
                 level="error",
                 kind="gate" if is_gate else "error",
                 severity="high",
-                path="",
+                path=default_path,
                 line=None,
                 end_line=None,
                 check="gate_failure" if is_gate else "error",
                 title=_title(validator, "gate_failure" if is_gate else "error"),
-                message=_clean_text(error),
+                message=_qualify_message(error, skill_label),
             )
         )
 
@@ -312,12 +455,12 @@ def _annotations_for_result(
                 level="warning",
                 kind="finding",
                 severity="medium",
-                path="",
+                path=default_path,
                 line=None,
                 end_line=None,
                 check="warning",
                 title=_title(validator, "warning"),
-                message=_clean_text(warning),
+                message=_qualify_message(warning, skill_label),
             )
         )
 
@@ -327,12 +470,12 @@ def _annotations_for_result(
                 level="warning",
                 kind="incomplete",
                 severity="medium",
-                path="",
+                path=default_path,
                 line=None,
                 end_line=None,
                 check=f"incomplete/{tool}",
                 title=_title(validator, f"incomplete/{tool}"),
-                message=_clean_text(_incomplete_reason(result, tool)),
+                message=_qualify_message(_incomplete_reason(result, tool), skill_label),
             )
         )
 
@@ -346,12 +489,12 @@ def _annotations_for_result(
                 level="error",
                 kind="gate",
                 severity="high",
-                path="",
+                path=default_path,
                 line=None,
                 end_line=None,
                 check="gate_failure",
                 title=_title(validator, "gate_failure"),
-                message=_clean_text(_failure_reason(result)),
+                message=_qualify_message(_failure_reason(result), skill_label),
             )
         )
     return annotations
@@ -570,10 +713,12 @@ class GitHubReporter(ReporterBase):
         *,
         workspace_root: Path | None = None,
         scan_root: Path | None = None,
+        catalog_root: Path | None = None,
         report_formats: tuple[str, ...] = (),
     ) -> None:
         self.workspace_root = workspace_root
         self.scan_root = scan_root
+        self.catalog_root = catalog_root
         self.report_formats = report_formats
 
     @property
@@ -590,7 +735,7 @@ class GitHubReporter(ReporterBase):
     def annotations(self, results: list[ValidationResult]) -> list[_Annotation]:
         annotations: list[_Annotation] = []
         for result in results:
-            annotations.extend(_annotations_for_result(result, self.workspace_root, self.scan_root))
+            annotations.extend(_annotations_for_result(result, self.workspace_root, self.scan_root, self.catalog_root))
         return annotations
 
     def render_all(self, results: list[ValidationResult]) -> str:

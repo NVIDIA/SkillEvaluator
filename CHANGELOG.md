@@ -55,6 +55,8 @@ All notable changes to SkillEvaluator are documented in this file.
   Incomplete scanners are warnings, gate failures stay errors, and the run
   ends with a summary notice that records how many findings were not annotated
   under GitHub's per-step cap and how to see the omitted findings.
+  Pathless skill findings anchor on the skill's `SKILL.md` when inside the
+  workspace, or include the skill's catalog-relative path.
 
 ### Fixed
 

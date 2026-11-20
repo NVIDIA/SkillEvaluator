@@ -12,9 +12,11 @@ import json
 import re
 import subprocess
 import sys
+import tempfile
 import tomllib
 from pathlib import Path
 from urllib.request import urlopen
+from zipfile import BadZipFile, ZipFile
 
 try:
     import product_release
@@ -26,7 +28,8 @@ REPOSITORY = "NVIDIA/SkillEvaluator"
 API_ROOT = f"repos/{REPOSITORY}"
 GITHUB = f"https://github.com/{REPOSITORY}"
 GITHUB_RAW = f"https://raw.githubusercontent.com/{REPOSITORY}"
-STAGING_MARKER = re.compile(r"<!-- skillevaluator-stage: ([1-9][0-9]*)-([1-9][0-9]*) -->")
+RUN_ATTEMPT = r"([1-9][0-9]*)-([1-9][0-9]*)"
+STAGING_MARKER = re.compile(rf"<!-- skillevaluator-stage: {RUN_ATTEMPT} -->")
 PENDING = "**Package publication:** Pending PyPI and NVIDIA DevZone verification."
 VERIFIED = "**Package publication:** Verified on PyPI and NVIDIA DevZone."
 
@@ -155,6 +158,22 @@ def download_asset(asset: dict, output: Path) -> None:
         )
 
 
+def upstream_release_run(run: str, attempt: str) -> dict | None:
+    origin = api(f"actions/runs/{run}/attempts/{attempt}")
+    if (
+        not isinstance(origin, dict)
+        or origin.get("id") != int(run)
+        or origin.get("run_attempt") != int(attempt)
+        or origin.get("event") != "workflow_dispatch"
+        or origin.get("path") != ".github/workflows/release.yml"
+        or origin.get("head_branch") != "main"
+        or (origin.get("repository") or {}).get("full_name") != REPOSITORY
+        or (origin.get("head_repository") or {}).get("full_name") != REPOSITORY
+    ):
+        return None
+    return origin
+
+
 def restore(version: str, source_sha: str, output: Path) -> bool:
     tag = f"v{version}"
     target = check_tag(tag, source_sha)
@@ -180,23 +199,104 @@ def restore(version: str, source_sha: str, output: Path) -> bool:
     if match is None:
         raise ValueError("Draft lacks its original run artifact. Reconcile the draft before retrying.")
     run, attempt = match.groups()
-    origin = api(f"actions/runs/{run}/attempts/{attempt}")
-    if (
-        origin["id"] != int(run)
-        or origin["run_attempt"] != int(attempt)
-        or origin["event"] != "workflow_dispatch"
-        or origin["path"] != ".github/workflows/release.yml"
-        or origin["head_branch"] != "main"
-        or (origin["head_repository"] or {}).get("full_name") != REPOSITORY
-    ):
-        raise ValueError("The draft artifact must originate from an upstream manual release run.")
-    gh("run", "download", run, "--name", f"product-release-{version}-{run}-{attempt}", "--dir", str(output))
+    try:
+        origin = upstream_release_run(run, attempt)
+        if origin is None:
+            raise ValueError("The draft artifact must originate from an upstream manual release run.")
+        download_run_artifact(version, f"product-release-{version}-{run}-{attempt}", origin, output)
+    except (BadZipFile, ValueError, subprocess.CalledProcessError) as exc:
+        raise ValueError(
+            f"Could not restore the original draft artifact. {exc} Reconcile the draft before retrying."
+        ) from exc
     return True
 
 
 def digest(path: Path) -> str:
     with path.open("rb") as stream:
         return hashlib.file_digest(stream, "sha256").hexdigest()
+
+
+def download_run_artifact(version: str, name: str, origin: dict, output: Path) -> None:
+    listing = api(f"actions/runs/{origin['id']}/artifacts?name={name}")
+    artifacts = listing.get("artifacts") if isinstance(listing, dict) else None
+    if not isinstance(artifacts, list) or len(artifacts) != 1 or listing.get("total_count") != 1:
+        raise ValueError("Expected one retained Actions artifact for the selected attempt.")
+
+    artifact = artifacts[0]
+    lineage = artifact.get("workflow_run") if isinstance(artifact, dict) else None
+    expected = {
+        "id": origin["id"],
+        "repository_id": origin["repository"].get("id"),
+        "head_repository_id": origin["head_repository"].get("id"),
+        "head_branch": origin["head_branch"],
+        "head_sha": origin.get("head_sha"),
+    }
+    if (
+        not isinstance(lineage, dict)
+        or any(value is None or lineage.get(key) != value for key, value in expected.items())
+        or artifact.get("name") != name
+        or artifact.get("expired") is not False
+        or type(artifact.get("id")) is not int
+        or artifact["id"] < 1
+        or type(artifact.get("size_in_bytes")) is not int
+        or artifact["size_in_bytes"] < 1
+        or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest")))
+    ):
+        raise ValueError("The retained Actions artifact is expired or its identity is invalid.")
+
+    with tempfile.TemporaryDirectory() as temp:
+        archive = Path(temp) / "release-artifact.zip"
+        with archive.open("xb") as stream:
+            subprocess.run(
+                ["gh", "api", f"{API_ROOT}/actions/artifacts/{artifact['id']}/zip"],
+                check=True,
+                stdout=stream,
+            )
+        if archive.stat().st_size != artifact["size_in_bytes"] or f"sha256:{digest(archive)}" != artifact["digest"]:
+            raise ValueError("The Actions artifact ZIP differs from the bytes recorded by GitHub.")
+        with ZipFile(archive) as files:
+            if sorted(files.namelist()) != sorted(expected_filenames(version)):
+                raise ValueError("The Actions artifact must contain exactly the five release files.")
+            output.mkdir()
+            files.extractall(output)
+
+
+def restore_validation(version: str, run: str, attempt: str, output: Path) -> None:
+    try:
+        origin = upstream_release_run(run, attempt)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError("The validation attempt is unavailable. Run Validate release again.") from exc
+    if (
+        origin is None
+        or origin.get("status") != "completed"
+        or origin.get("conclusion") != "success"
+        or origin.get("display_title") != f"Validate release · SkillEvaluator {version}"
+    ):
+        raise ValueError("Select a successful Validate release attempt for this version on upstream main.")
+
+    try:
+        download_run_artifact(version, f"validated-release-{version}-{run}-{attempt}", origin, output)
+    except (BadZipFile, ValueError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"Could not verify the validation artifact. {exc} Run Validate release again.") from exc
+
+
+def acquire_publication(version: str, source_sha: str, output: Path, run_ref: str, manifest_sha256: str) -> bool:
+    """Restore a release, or verify its validation receipt and return True for a new draft."""
+    if restore(version, source_sha, output):
+        return False
+
+    match = re.fullmatch(RUN_ATTEMPT, run_ref)
+    if match is None or not product_release.SHA256.fullmatch(manifest_sha256):
+        raise ValueError(
+            "Copy validation_run and validation_manifest_sha256 from a successful Validate release summary."
+        )
+    run, attempt = match.groups()
+    restore_validation(version, run, attempt, output)
+
+    manifest, actual_sha256 = product_release.checked_manifest(version, output)
+    if actual_sha256 != manifest_sha256 or manifest.get("source_commit") != source_sha:
+        raise ValueError("The validation manifest SHA-256 or source commit differs from the Publish release inputs.")
+    return True
 
 
 def verify_local(version: str, source_sha: str, assets: Path) -> dict:
@@ -334,13 +434,15 @@ def finalize(version: str, source_sha: str, assets: Path) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("command", choices=("preflight", "restore", "stage", "verify-public", "finalize"))
+    parser.add_argument("command", choices=("preflight", "restore", "acquire", "stage", "verify-public", "finalize"))
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--assets", type=Path)
     parser.add_argument("--phase")
     parser.add_argument("--main-sha")
     parser.add_argument("--run")
+    parser.add_argument("--validation-run", default="")
+    parser.add_argument("--validation-manifest-sha256", default="")
     args = parser.parse_args()
     commands = {
         "restore": restore,
@@ -350,13 +452,18 @@ def main() -> int:
     try:
         if args.command == "preflight":
             preflight(args.version, args.source_sha, args.main_sha, args.phase)
+        elif args.command == "acquire":
+            new_release = acquire_publication(
+                args.version, args.source_sha, args.assets, args.validation_run, args.validation_manifest_sha256
+            )
+            print(str(new_release).lower())
         elif args.command == "stage":
             stage(args.version, args.source_sha, args.assets, args.run)
         else:
             result = commands[args.command](args.version, args.source_sha, args.assets)
             if result is not None:
                 print(str(result).lower() if isinstance(result, bool) else result)
-    except (OSError, ValueError, subprocess.CalledProcessError, release_image.ReleaseImageError) as exc:
+    except (BadZipFile, OSError, ValueError, subprocess.CalledProcessError, release_image.ReleaseImageError) as exc:
         print(f"Release check failed: {exc}", file=sys.stderr)
         return 1
     return 0

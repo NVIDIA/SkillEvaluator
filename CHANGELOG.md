@@ -59,6 +59,15 @@ All notable changes to SkillEvaluator are documented in this file.
   scan as before. Code Integrity & Hygiene records a low-severity
   `symlink_outside_skill` finding naming each skipped link by its path inside
   the skill, never by its target.
+- The LLM finding verifier's prompt now keeps skill content out of instruction
+  space. File context is wrapped in a backtick fence longer than any backtick
+  run in the file, so a skill cannot close the fence early or leave it open to
+  swallow the finding and the closing instruction. File paths and finding
+  fields have line breaks escaped so each stays on its own line, and the
+  system prompt states that file content and finding fields are untrusted data
+  whose embedded instructions must not be followed and count against a
+  false-positive verdict. Previously a crafted skill file could steer a
+  high-confidence `false_positive` verdict and downgrade a HIGH finding to INFO.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

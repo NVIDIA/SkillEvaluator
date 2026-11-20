@@ -3073,6 +3073,57 @@ def _redact_judge_evidence_as_written(text):
     return _mask_judge_evidence_value_sites(redacted, sites) if sites else redacted
 
 
+_PRIVATE_KEY_BEGIN_RE = re.compile(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_BEGIN)
+_PRIVATE_KEY_END_RE = re.compile(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_END)
+# A line of key data. PEM and PGP wrap it at 64 characters or more, and a key
+# written on one line or with escaped line breaks has runs of that length too.
+_PRIVATE_KEY_DATA_RE = re.compile(r"[A-Za-z0-9+/]{32}")
+# The last line of key data can be short, and a PGP block has a checksum line
+# after it. Either can follow a file name or a line number (grep -n, cat -n).
+_PRIVATE_KEY_LAST_LINE_RE = re.compile(r"[ \t]*(?:\S+:|\d+[ \t]+)?[A-Za-z0-9+/=]+[ \t\r]*")
+_PRIVATE_KEY_CLOSING_LINE = "-----END PRIVATE KEY-----"
+
+
+def _close_open_private_key_blocks(text):
+    """End each private key block in *text* that has no END line.
+
+    The first such block ends at the last line after its header that holds
+    key data, or right after the header when no line does. No key data is
+    left after that point, so each later header ends right after itself.
+    """
+    after_last_end = 0
+    for found in _PRIVATE_KEY_END_RE.finditer(text):
+        after_last_end = found.end()
+    header = _PRIVATE_KEY_BEGIN_RE.search(text, after_last_end)
+    if header is None:
+        return text
+    lines = text[header.start() :].split("\n")
+    last = max((index for index, line in enumerate(lines) if _PRIVATE_KEY_DATA_RE.search(line)), default=None)
+    mentions_from = 0
+    if last is not None:
+        for _ in range(2):
+            if last + 1 < len(lines) and _PRIVATE_KEY_LAST_LINE_RE.fullmatch(lines[last + 1]):
+                last += 1
+        lines[last] += _PRIVATE_KEY_CLOSING_LINE
+        mentions_from = last + 1
+    for index in range(mentions_from, len(lines)):
+        lines[index] = _PRIVATE_KEY_BEGIN_RE.sub(lambda found: found.group() + _PRIVATE_KEY_CLOSING_LINE, lines[index])
+    return text[: header.start()] + "\n".join(lines)
+
+
+def _redact_tool_result(text):
+    """Mask credentials in a tool result before the judges get an excerpt of it.
+
+    This is the masking of saved judge evidence, with one difference. That
+    masking reads a private key header with no END line as a key that runs to
+    the end of the text. A tool result often only mentions such a header (a
+    grep hit, a line of a README), and the end of the result is what its
+    excerpt is there to show. So the block is closed where its key data ends
+    before the result is masked.
+    """
+    return _redact_judge_evidence(_close_open_private_key_blocks(str(text)))
+
+
 def _verifier_output_dir():
     """Directory that receives skill_evaluator_reward.json (see write_reward_outputs)."""
     if (
@@ -4661,7 +4712,11 @@ def main():
         details["skill_efficiency"] = checks
 
     bundles = build_metric_evidence_bundles(
-        traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior
+        traj,
+        question,
+        ground_truth=ground_truth,
+        expected_behavior=expected_behavior,
+        redact=_redact_tool_result,
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.

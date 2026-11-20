@@ -176,6 +176,20 @@ All notable changes to SkillEvaluator are documented in this file.
   similarity scores and clusters are unchanged.
 - Naming checks reject a trailing newline in skill, workflow, and rule path components,
   instead of treating the name before that newline as a complete kebab-case match.
+- The `accuracy` and `goal_accuracy` judges now see the end of a tool result
+  longer than 1,500 characters as well as its beginning. Only the beginning was
+  kept, so the last lines of a long command output, such as the summary line of
+  a test run, never reached the judge that decides the attempt. A long result
+  is masked for credentials before it is cut, so the saved judge evidence does
+  not keep the end of a value the cut went through. A result over 1,000,000
+  characters still keeps only its beginning.
+- The `omitted` record of the `accuracy` and `goal_accuracy` judges now carries
+  `incomplete_sections`, as `behavior_check` already does. It names the final
+  response, file changes or tool results that did not reach the judge whole,
+  including a tool result or write body cut to its own allowance, which the
+  record did not mention before. A run with more tool results than a judge
+  reads lists `older tool results`. On all three judges the record now also
+  counts edits past the five that a multi-edit shows.
 - LLM retries retain the innermost valid `Retry-After` header through exception
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and

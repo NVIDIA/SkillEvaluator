@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 if __package__:
@@ -406,7 +407,8 @@ def _tool_file_path(args: dict[str, Any]) -> str:
     return ", ".join(paths)
 
 
-def _tool_write_body(args: dict[str, Any]) -> str:
+def _tool_write_body(args: dict[str, Any], *, full: bool = False) -> str:
+    """Render what a write call wrote. Only the first five edits of a multi-edit are shown unless *full*."""
     snippets: list[str] = []
     for key in ("content", "new_string", "patch", "code"):
         value = args.get(key)
@@ -417,11 +419,14 @@ def _tool_write_body(args: dict[str, Any]) -> str:
         snippets.append(f"input:\n{patch}")
     edits = args.get("edits")
     if isinstance(edits, list):
-        for idx, edit in enumerate(edits[:5], start=1):
+        for idx, edit in enumerate(edits if full else edits[:5], start=1):
             if isinstance(edit, dict):
                 new_string = edit.get("new_string") or edit.get("replacement")
-                if new_string:
-                    snippets.append(f"edit {idx} new_string:\n{new_string}")
+                # Past the five that are shown, an edit that replaces text
+                # with nothing is listed as well, so a deletion there counts
+                # as left out like any other edit.
+                if new_string or idx > 5:
+                    snippets.append(f"edit {idx} new_string:\n{new_string or ''}")
     return "\n\n".join(str(s) for s in snippets if str(s).strip())
 
 
@@ -443,10 +448,11 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
 def _collect_file_change_evidence(traj: dict[str, Any], *, full: bool = False) -> list[str]:
     """Render one entry per write the agent made.
 
-    Each write body and tool result is clipped to a per-entry allowance. Pass
-    ``full=True`` for the same entries with those clips lifted, which is what
-    the completeness accounting compares against so a body this function
-    shortened is not reported as having reached the judge.
+    Each write body and tool result is clipped to a per-entry allowance, and a
+    multi-edit shows its first five edits. Pass ``full=True`` for the same
+    entries with those limits lifted, which is what the completeness
+    accounting compares against so a body this function shortened is not
+    reported as having reached the judge.
     """
     body_limit = 10**9 if full else 1800
     observation_limit = 10**9 if full else 500
@@ -466,7 +472,7 @@ def _collect_file_change_evidence(traj: dict[str, Any], *, full: bool = False) -
             file_path = _tool_file_path(args)
             if _tool_name_looks_like_write(fn_lower):
                 is_write_call = True
-                body = _tool_write_body(args)
+                body = _tool_write_body(args, full=full)
             elif fn_lower in _BEHAVIOR_EXEC_TOOLS:
                 command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
                 if _command_looks_like_write(command):
@@ -898,6 +904,10 @@ def attach_metric_evidence_refs(
 # ---------------------------------------------------------------------------
 
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
+# The longest tool result that is masked whole before its excerpt is cut. The
+# masking finds a credential by how it starts (its name, the first line of a
+# key block), so the end of a longer result cannot be masked on its own.
+_BUNDLE_ITEM_MASK_CHARS = 1_000_000
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
 _BUNDLE_BUDGETS = {
@@ -933,21 +943,58 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …[clipped]"
 
 
-def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
-    """Most-recent tool observations first (end-state evidence), each clipped."""
+def _late_observation_excerpts(
+    traj: dict[str, Any],
+    limit: int,
+    *,
+    count: int | None = None,
+    redact: Callable[[str], str] | None = None,
+    cut: list[bool] | None = None,
+) -> list[str]:
+    """Most-recent tool observations first (end-state evidence), each clipped.
+
+    A long result keeps its beginning and its end. Commands print their
+    outcome last (a test summary line, the final error, an exit status), and
+    that outcome is the end state these excerpts are here to show.
+
+    ``redact`` masks a long result before it is cut. Saved judge evidence is
+    masked after the cut, and by then the end of a credential that the cut
+    went through no longer follows the name or the first lines that mark it.
+    The result is masked whole, because any cut made first can drop the first
+    line of a long key block and leave the rest in the kept end. A result over
+    ``_BUNDLE_ITEM_MASK_CHARS`` keeps its beginning only, masked.
+    ``count`` stops after that many results. *cut* gets one entry for each
+    excerpt, true when the result did not go in whole.
+    """
     out: list[str] = []
     for step in reversed(traj.get("steps", [])):
         if step.get("source") != "agent":
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
-            if content:
-                out.append(_clip(content, limit))
+            if not content:
+                continue
+            shortened = len(content) > limit
+            if shortened and redact is not None and len(content) > _BUNDLE_ITEM_MASK_CHARS:
+                content = f"{redact(content[:_BUNDLE_ITEM_MASK_CHARS])[:limit]} …[clipped]"
+            elif shortened:
+                if redact is not None:
+                    content = redact(content)
+                    shortened = len(content) > limit
+                content = _truncate_for_behavior(content, limit)
+            out.append(content)
+            if cut is not None:
+                cut.append(shortened)
+            if count is not None and len(out) >= count:
+                return out
     return out
 
 
-def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, bool]:
-    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated)."""
+def _assemble(sections: list[tuple[str, str]], budget: int, kept: list[str] | None = None) -> tuple[str, int, bool]:
+    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated).
+
+    The titles of the sections that went in whole are appended to *kept*.
+    """
     parts: list[str] = []
     used = 0
     dropped = 0
@@ -958,6 +1005,8 @@ def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, b
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
+            if kept is not None:
+                kept.append(title)
         elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
@@ -1204,6 +1253,43 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
+def _result_evidence_incomplete_sections(
+    sections: list[tuple[str, str]],
+    kept: list[str],
+    *,
+    file_changes_shortened: bool,
+    results_cut: list[bool],
+    result_count: int,
+    max_results: int,
+) -> list[str]:
+    """Name the accuracy or goal evidence sections that did not reach the judge whole.
+
+    *sections* are the final response, file changes and tool results as they
+    were given to ``_assemble``, and *kept* the titles it kept whole. The
+    record follows what the bundle selected, never a search of the evidence
+    text, so a result whose text appears somewhere else cannot stand in for
+    one that was dropped. A section is named when the budget dropped or
+    clipped it, or when a write body or tool result in it was shortened to its
+    own per-entry allowance. *results_cut* says for each tool result the
+    excerpts were made from, newest first, whether its excerpt was cut, so a
+    long result that fits once it is masked is not listed. *result_count* is
+    how many results the run has. ``tool results`` covers the *max_results*
+    newest, which are the ones the bundle reads, and older ones are listed as
+    ``older tool results``, so a long run does not look like a cut result.
+    Nothing here withholds a score.
+    """
+    shortened = (False, file_changes_shortened, any(results_cut[:max_results]))
+    labels = ("final response", "file changes", "tool results")
+    incomplete = [
+        label
+        for label, (title, body), cut in zip(labels, sections, shortened)  # noqa: B905 -- zip(strict=) needs Python 3.10
+        if str(body or "").strip() and (cut or title not in kept)
+    ]
+    if result_count > max_results:
+        incomplete.append("older tool results")
+    return incomplete
+
+
 # Clause separators for an expectation. A dot only separates when whitespace
 # follows it, so an artifact path such as ``report.py`` is never split apart.
 _BEHAVIOR_CLAUSE_SPLIT_RE = re.compile(
@@ -1288,6 +1374,7 @@ def build_metric_evidence_bundles(
     *,
     ground_truth: str = "",
     expected_behavior: list[str] | None = None,
+    redact: Callable[[str], str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Compile per-metric judge-facing evidence.
 
@@ -1295,7 +1382,10 @@ def build_metric_evidence_bundles(
     replaces the old ``agent_text[:3000]`` / ``tool_summary[:2000]`` / 4000-char
     blob: it is relevance-/recency-selected, always includes the final response,
     and records what it dropped (never silent). Deterministic verified facts are
-    prepended at the top when any checkable tokens are found.
+    prepended at the top when any checkable tokens are found. ``redact`` masks
+    a tool result that is longer than its excerpt before it is cut; the
+    verifier passes the masking it applies to saved judge evidence, which for
+    a tool result ends a key block that has no END line where its data ends.
     """
     if not isinstance(expected_behavior, list):
         expected_behavior = []
@@ -1307,7 +1397,16 @@ def build_metric_evidence_bundles(
 
     final = get_final_response(traj)
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    late_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS)
+    file_changes_shortened = file_changes != "\n\n".join(_collect_file_change_evidence(traj, full=True))
+    result_count = len(_late_observation_excerpts(traj, 10**9))
+    results_cut: list[bool] = []
+    late_obs = _late_observation_excerpts(
+        traj,
+        _BUNDLE_ITEM_CHARS,
+        count=max(_BUNDLE_ACCURACY_MAX_OBS, _BUNDLE_GOAL_MAX_OBS),
+        redact=redact,
+        cut=results_cut,
+    )
 
     def _prepend_facts(text: str) -> str:
         if not facts_section:
@@ -1319,40 +1418,56 @@ def build_metric_evidence_bundles(
     bundles: dict[str, dict[str, Any]] = {}
     budgets = _bundle_budgets()
 
-    acc_text, acc_drop, acc_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
-            ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
-        ],
-        budgets["accuracy"],
-    )
+    acc_sections = [
+        (_SECTION_FINAL_RESPONSE, final),
+        ("PRODUCED FILES / WRITES", file_changes),
+        ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
+    ]
+    acc_kept: list[str] = []
+    acc_text, acc_drop, acc_trunc = _assemble(acc_sections, budgets["accuracy"], acc_kept)
+    acc_evidence = _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"]))
     bundles["accuracy"] = {
-        "prompt_evidence": _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"])),
+        "prompt_evidence": acc_evidence,
         "evidence_refs": refs["accuracy"],
         "omitted": {
             "count": acc_drop,
             "truncated": acc_trunc,
             "reason": "low-relevance sections dropped to fit budget" if acc_trunc else "",
+            "incomplete_sections": _result_evidence_incomplete_sections(
+                acc_sections,
+                acc_kept,
+                file_changes_shortened=file_changes_shortened,
+                results_cut=results_cut,
+                result_count=result_count,
+                max_results=_BUNDLE_ACCURACY_MAX_OBS,
+            ),
         },
         "verified": facts,
     }
 
-    goal_text, goal_drop, goal_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
-        ],
-        budgets["goal_accuracy"],
-    )
+    goal_sections = [
+        (_SECTION_FINAL_RESPONSE, final),
+        ("END-STATE FILE CHANGES", file_changes),
+        ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
+    ]
+    goal_kept: list[str] = []
+    goal_text, goal_drop, goal_trunc = _assemble(goal_sections, budgets["goal_accuracy"], goal_kept)
+    goal_evidence = _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"]))
     bundles["goal_accuracy"] = {
-        "prompt_evidence": _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"])),
+        "prompt_evidence": goal_evidence,
         "evidence_refs": refs["goal_accuracy"],
         "omitted": {
             "count": goal_drop,
             "truncated": goal_trunc,
             "reason": "older/low-relevance tool results dropped to fit budget" if goal_trunc else "",
+            "incomplete_sections": _result_evidence_incomplete_sections(
+                goal_sections,
+                goal_kept,
+                file_changes_shortened=file_changes_shortened,
+                results_cut=results_cut,
+                result_count=result_count,
+                max_results=_BUNDLE_GOAL_MAX_OBS,
+            ),
         },
         "verified": facts,
     }

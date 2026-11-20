@@ -3558,9 +3558,10 @@ def _security_finding(
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
+_FINDING_EVIDENCE_PRIVATE_KEY_BEGIN = r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----"
+_FINDING_EVIDENCE_PRIVATE_KEY_END = r"-----END [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----"
 _FINDING_EVIDENCE_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----.*?"
-    r"(?:-----END [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----|\Z)",
+    _FINDING_EVIDENCE_PRIVATE_KEY_BEGIN + r".*?(?:" + _FINDING_EVIDENCE_PRIVATE_KEY_END + r"|\Z)",
     re.DOTALL,
 )
 # A URL scheme is at most 32 characters here, so a long dotted run is read

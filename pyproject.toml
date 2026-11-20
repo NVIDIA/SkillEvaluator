@@ -58,11 +58,15 @@ dependencies = [
 [project.optional-dependencies]
 # Shared public LLM / embedding clients used by LLM-backed checks, Tier 2, and Tier 3.
 llm = [
+    # Security floors for dependencies installed through LiteLLM and boto3.
+    "aiohttp>=3.14.4,<4",
     "anthropic>=0.83.0",
     # Botocore 1.44 introduced HTTPS enforcement for bearer authentication.
     "boto3>=1.44.0",
+    "fsspec>=2026.6.0",
     "litellm>=1.110.2,<1.111.0.dev0",
     "openai>=2.21.0",
+    "urllib3>=2.8.0,<3",
 ]
 # Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.
 tier2 = [
@@ -76,14 +80,17 @@ tier3 = [
     "mcp>=1.28.1,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
     "pyjwt[crypto]>=2.13.0",
-    # GHSA-hj66-6f7g-4r5v and GHSA-xpv3-w29h-x7cv fixed floor (via harbor[gke]).
-    "oauthlib>=4.0.0",
+    # The 4.0.1 release includes the device grant security fix (via harbor[gke]).
+    "oauthlib>=4.0.1",
     # PYTHON_DOTENV_DISABLED, which keeps Harbor from loading .env files, needs 1.2.0.
     "python-dotenv>=1.2.0",
 ]
 # Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
+    # CVE-2026-114613 fixed floor for pip-audit's CacheControl dependency.
+    "msgpack>=1.2.3",
     "pip-audit>=2.10.0",
+    "urllib3>=2.8.0,<3",
 ]
 # Verify GitHub-signed execution receipts for the optional CI report publisher.
 publisher = [
@@ -93,6 +100,7 @@ publisher = [
 dashboard = [
     # server.allowedHosts, which limits the dashboard to loopback host names, needs 1.61.
     "streamlit>=1.61,<2",
+    "urllib3>=2.8.0,<3",
 ]
 # Full public install convenience bundle.
 all = [

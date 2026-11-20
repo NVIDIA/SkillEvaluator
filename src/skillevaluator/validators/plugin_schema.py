@@ -14,11 +14,9 @@ structured :class:`~skillevaluator.models.result.Finding` objects (category
 metadata (``manifest_type``, ``plugin_mode``, ``plugin``) on success.
 """
 
-import json
 from pathlib import Path
 from typing import Any
 
-import yaml
 from pydantic import ValidationError
 
 from skillevaluator.constants import (
@@ -33,6 +31,13 @@ from skillevaluator.constants import (
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.plugin import PluginManifest
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_json,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import format_validation_location
 
@@ -137,7 +142,7 @@ class PluginSchemaValidator(ValidatorBase):
         """Parse the manifest YAML; record a finding and return None on failure."""
         try:
             raw = manifest_path.read_text(encoding="utf-8")
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -151,16 +156,24 @@ class PluginSchemaValidator(ValidatorBase):
             return None
 
         try:
-            data = yaml.safe_load(raw)
-        except yaml.YAMLError as exc:
+            data = load_bounded_yaml(raw, last_key_wins=True)
+        except StructuredDataError as exc:
+            if isinstance(exc, StructuredDataLimitError):
+                check_name = "manifest_yaml_complexity"
+                message = f"Plugin manifest exceeds the YAML complexity limits: {exc}"
+                suggestion = "Simplify the manifest by reducing collection sizes, nesting, or alias expansion."
+            else:
+                check_name = "manifest_invalid_yaml"
+                message = f"Plugin manifest is not valid YAML: {exc.__cause__ or exc}"
+                suggestion = "Fix the YAML syntax in the plugin manifest."
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
-                    check_name="manifest_invalid_yaml",
-                    message=f"Plugin manifest is not valid YAML: {exc}",
+                    check_name=check_name,
+                    message=message,
                     file_path=str(manifest_path),
-                    suggestion="Fix the YAML syntax in the plugin manifest.",
+                    suggestion=suggestion,
                 )
             )
             return None
@@ -209,8 +222,8 @@ class PluginSchemaValidator(ValidatorBase):
     def _validate_contained_manifest(self, manifest_path: Path, result: ValidationResult) -> None:
         """Shallow-validate a contained ``.claude-plugin/plugin.json`` file."""
         try:
-            data: Any = json.loads(manifest_path.read_text(encoding="utf-8-sig"))
-        except OSError as exc:
+            data: Any = load_bounded_json(manifest_path.read_text(encoding="utf-8-sig"))
+        except (OSError, UnicodeDecodeError) as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
@@ -222,13 +235,25 @@ class PluginSchemaValidator(ValidatorBase):
                 )
             )
             return
-        except json.JSONDecodeError as exc:
+        except StructuredDataLimitError as exc:
+            result.add_finding(
+                Finding(
+                    category="PLUGIN_SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="manifest_json_complexity",
+                    message=f"Contained plugin manifest exceeds the JSON complexity limits: {exc}",
+                    file_path=str(manifest_path),
+                    suggestion="Simplify the manifest by reducing collection sizes, nesting, or oversized values.",
+                )
+            )
+            return
+        except StructuredDataSyntaxError as exc:
             result.add_finding(
                 Finding(
                     category="PLUGIN_SCHEMA",
                     severity=Severity.HIGH,
                     check_name="manifest_invalid_json",
-                    message=f"Contained plugin manifest is not valid JSON: {exc}",
+                    message=f"Contained plugin manifest is not valid JSON: {exc.__cause__ or exc}",
                     file_path=str(manifest_path),
                     suggestion="Fix the JSON syntax in .claude-plugin/plugin.json.",
                 )

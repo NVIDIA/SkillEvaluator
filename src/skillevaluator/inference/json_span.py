@@ -10,6 +10,8 @@ from __future__ import annotations
 import math
 from typing import Any
 
+from skillevaluator.utils.structured_data import reject_duplicate_object_pairs
+
 # Bracket depth beyond which a span is not decoded. Verdicts are shallow, and
 # the cap keeps the decoder well away from the recursion limit.
 MAX_JSON_NESTING = 128
@@ -77,16 +79,6 @@ def json_nesting_within_limit(text: str) -> bool:
         elif character in "}]" and depth:
             depth -= 1
     return True
-
-
-def reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
-    """Build an object while rejecting ambiguous duplicate members."""
-    result: dict[str, Any] = {}
-    for key, value in pairs:
-        if key in result:
-            raise ValueError("Duplicate JSON object member")
-        result[key] = value
-    return result
 
 
 def reject_nonstandard_json_constant(_value: str) -> None:

@@ -326,6 +326,31 @@ def test_bedrock_inference_accepts_https_bearer_override_on_other_routes(
         assert server.bearer_requests == 1
 
 
+@pytest.mark.parametrize("model_prefix", ["", "bedrock/"])
+def test_bedrock_mantle_uses_its_own_endpoint_when_runtime_is_also_set(
+    isolated_provider_environment, monkeypatch, loopback_tls, model_prefix
+):
+    litellm = pytest.importorskip("litellm")
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    monkeypatch.setattr(litellm, "drop_params", False)
+    with _server([200], tls_context) as runtime, _server([200], tls_context) as mantle:
+        monkeypatch.setenv("AWS_BEDROCK_RUNTIME_ENDPOINT", f"https://127.0.0.1:{runtime.server_port}")
+        client = _client(
+            monkeypatch,
+            f"https://127.0.0.1:{mantle.server_port}",
+            model=f"{model_prefix}{_MANTLE_MODEL}",
+            endpoint_variable="BEDROCK_MANTLE_API_BASE",
+        )
+        assert client.completions("system", "user") == "recovered"
+        assert mantle.paths == ["/anthropic/v1/messages"]
+        assert runtime.connections == 0
+
+
 @pytest.mark.parametrize("bearer_token", ["", " \t "])
 @pytest.mark.parametrize(("model", "variable", "path"), _OTHER_ROUTE_ENDPOINTS)
 def test_bedrock_inference_ignores_http_override_on_other_routes_when_bearer_token_is_blank(
@@ -363,7 +388,7 @@ def test_bedrock_responses_route_signs_with_sigv4_when_bearer_token_is_blank(
 ):
     litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
-    monkeypatch.setattr(litellm, "drop_params", True)
+    monkeypatch.setattr(litellm, "drop_params", False)
     with _server([200]) as server:
         client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model="responses/us.openai.gpt-5.6-sol")
         assert client.completions("system", "user") == "recovered"
@@ -379,7 +404,7 @@ def test_bedrock_responses_route_restores_blank_bearer_token_after_a_failed_call
 ):
     litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", " \t ")
-    monkeypatch.setattr(litellm, "drop_params", True)
+    monkeypatch.setattr(litellm, "drop_params", False)
     with _server([400]) as server:
         client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model="responses/us.openai.gpt-5.6-sol")
         with pytest.raises(Exception) as raised:
@@ -440,7 +465,7 @@ def test_bedrock_inference_accepts_https_bearer_override(
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
     monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
     monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
-    monkeypatch.setattr(litellm, "drop_params", True)
+    monkeypatch.setattr(litellm, "drop_params", False)
     with _server([200], tls_context) as server:
         client = _client(monkeypatch, f"https://127.0.0.1:{server.server_port}", model=model)
         assert client.completions("system", "user") == "recovered"

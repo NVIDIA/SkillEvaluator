@@ -161,6 +161,7 @@ _BEDROCK_INVALID_CONFIGURATION_ERRORS: tuple[type[BaseException], ...] = (
 for _error_name, _target in (
     ("LoginError", "authentication"),
     ("InvalidChecksumConfigError", "configuration"),
+    ("InvalidEndpointConfigurationError", "configuration"),
     ("UnknownTokenProviderError", "configuration"),
     ("UnsupportedServiceProtocolsError", "configuration"),
 ):

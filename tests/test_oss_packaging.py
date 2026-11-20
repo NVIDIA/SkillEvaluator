@@ -18,6 +18,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
@@ -159,9 +160,9 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier
-    assert litellm_specifier.contains(Version("1.92.0"), prereleases=True)
-    assert litellm_specifier.contains(Version("1.93.0"), prereleases=True)
-    assert not litellm_specifier.contains(Version("1.94.0.dev0"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.93.2"), prereleases=True)
+    assert litellm_specifier.contains(Version("1.110.2"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.111.0.dev0"), prereleases=True)
     declared_names = base_names | {
         canonicalize_name(Requirement(raw).name) for requirements in extras.values() for raw in requirements
     }
@@ -181,7 +182,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     locked_harbor = [requirement for requirement in locked_requirements if requirement["name"] == "harbor"]
     locked_litellm = [requirement for requirement in locked_requirements if requirement["name"] == "litellm"]
     assert [requirement["specifier"] for requirement in locked_harbor] == [f"=={HARBOR_VERSION}"]
-    assert [requirement["specifier"] for requirement in locked_litellm] == [">=1.92.0,<1.94.0.dev0"]
+    assert [SpecifierSet(requirement["specifier"]) for requirement in locked_litellm] == [litellm_specifier]
 
 
 def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
@@ -923,7 +924,7 @@ def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
     assert f"The `tier3` extra installs Harbor {HARBOR_VERSION}" in normalized
     assert "The exact Harbor pin is deliberate" in normalized
     assert f"stable Harbor {HARBOR_VERSION} rather than unreleased `main`" in normalized
-    assert "litellm>=1.92.0,<1.94.0.dev0" in normalized
+    assert "litellm>=1.110.2,<1.111.0.dev0" in normalized
     assert "static Tier 1 installs do not pull it in" in normalized
     assert "0.13.2" not in normalized
     assert "0.22.0" not in normalized

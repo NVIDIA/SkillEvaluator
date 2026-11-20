@@ -60,7 +60,7 @@ dependencies = [
 llm = [
     "anthropic>=0.83.0",
     "boto3>=1.34.0",
-    "litellm>=1.92.0,<1.94.0.dev0",
+    "litellm>=1.110.2,<1.111.0.dev0",
     "openai>=2.21.0",
 ]
 # Tier 2 intra-skill deduplication and local-catalog inter-skill similarity.

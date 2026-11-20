@@ -9,14 +9,11 @@ import ipaddress
 import json
 import os
 import socket
-import ssl
 import threading
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
-from datetime import UTC, datetime, timedelta
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
 
 import pytest
 
@@ -249,48 +246,16 @@ def test_provider_http_status_survives_sdk_wrapping(
         assert extract_http_status(raised.value) == status
 
 
-def _untrusted_tls_context(tmp_path: Path):
-    x509 = pytest.importorskip("cryptography.x509")
-    from cryptography.hazmat.primitives import hashes, serialization
-    from cryptography.hazmat.primitives.asymmetric import rsa
-    from cryptography.x509.oid import NameOID
-
-    key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, "localhost")])
-    certificate = (
-        x509.CertificateBuilder()
-        .subject_name(name)
-        .issuer_name(name)
-        .public_key(key.public_key())
-        .serial_number(x509.random_serial_number())
-        .not_valid_before(datetime.now(UTC) - timedelta(days=1))
-        .not_valid_after(datetime.now(UTC) + timedelta(days=1))
-        .add_extension(x509.SubjectAlternativeName([x509.IPAddress(ipaddress.ip_address("127.0.0.1"))]), False)
-        .sign(key, hashes.SHA256())
-    )
-    cert_path, key_path = tmp_path / "certificate.pem", tmp_path / "key.pem"
-    cert_path.write_bytes(certificate.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(
-        key.private_bytes(
-            serialization.Encoding.PEM,
-            serialization.PrivateFormat.PKCS8,
-            serialization.NoEncryption(),
-        )
-    )
-    context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
-    context.load_cert_chain(cert_path, key_path)
-    return context
-
-
 @pytest.mark.parametrize("provider", ["bedrock", "openai"])
 def test_provider_certificate_failure_is_not_retried(
     isolated_provider_environment,
     monkeypatch,
-    tmp_path,
+    loopback_tls,
     provider,
     record_property,
 ):
-    with _server([503], _untrusted_tls_context(tmp_path)) as server:
+    tls_context, _ = loopback_tls
+    with _server([503], tls_context) as server:
         client = _client(monkeypatch, f"https://127.0.0.1:{server.server_port}", provider)
         with pytest.raises(Exception) as raised:
             client.completions("system", "user")

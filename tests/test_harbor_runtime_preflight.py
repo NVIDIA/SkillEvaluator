@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,7 @@ from botocore.exceptions import (
     EndpointProviderError,
     InvalidConfigError,
     InvalidDefaultsMode,
+    InvalidEndpointConfigurationError,
     InvalidIMDSEndpointError,
     InvalidIMDSEndpointModeError,
     InvalidProxiesConfigError,
@@ -1601,6 +1603,7 @@ aws_secret_access_key = test-secret-key
 def test_bedrock_bearer_token_only_uses_real_catalog_transport(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    loopback_tls: tuple[ssl.SSLContext, Path],
     status_code: int,
     expected_ok: bool,
     expected_kind: str | None,
@@ -1636,21 +1639,24 @@ def test_bedrock_bearer_token_only_uses_real_catalog_transport(
         config="[profile test]\nregion = us-west-2\n",
     )
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token")
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(ca_bundle))
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
     with ThreadingHTTPServer(("127.0.0.1", 0), CatalogResponse) as server:
-        endpoint = f"http://127.0.0.1:{server.server_port}"
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+        endpoint = f"https://127.0.0.1:{server.server_port}"
         monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", endpoint)
         monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", endpoint)
         worker = Thread(target=server.serve_forever, daemon=True)
         worker.start()
         try:
-            result = runtime_preflight.probe_model(provider, timeout_seconds=5)
+            result = runtime_preflight.probe_model(provider, timeout_seconds=15)
         finally:
             server.shutdown()
             worker.join(timeout=5)
 
-    assert seen_authorization == [True]
+    assert seen_authorization == [True], result.detail
     assert result.ok is expected_ok
     assert result.failure_kind == expected_kind
     assert runtime_preflight.credential_probe_disposition(provider, result) == expected_disposition
@@ -2160,6 +2166,7 @@ aws_secret_access_key = test-secret-key
         (EndpointProviderError(msg="private endpoint detail"), "invalid_configuration"),
         (InvalidConfigError(error_msg="invalid profile"), "invalid_configuration"),
         (InvalidDefaultsMode(mode="private mode", valid_modes=["standard"]), "invalid_configuration"),
+        (InvalidEndpointConfigurationError(msg="private endpoint details"), "invalid_configuration"),
         (InvalidIMDSEndpointError(endpoint="private endpoint"), "invalid_configuration"),
         (
             InvalidIMDSEndpointModeError(mode="private mode", valid_modes=["ipv4", "ipv6"]),

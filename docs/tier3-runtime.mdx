@@ -167,9 +167,8 @@ The exact Harbor pin is deliberate: its CLI, Python models, result artifacts,
 and environment/agent subclass interfaces form one compatibility surface. This
 release targets stable Harbor 0.25.0 rather than unreleased `main`. Harbor stays
 behind the operator-selected `tier3` extra, so static Tier 1 installs do not pull
-it in. The shared LLM client window (`litellm>=1.92.0,<1.94.0.dev0`) admits
-patched 1.92 and 1.93 releases validated with this integration while excluding
-prerelease and as-yet unvalidated 1.94 behavior.
+it in. The shared LLM client uses `litellm>=1.110.2,<1.111.0.dev0`. Bedrock
+bearer-token authentication requires HTTPS, including for custom endpoints.
 
 The integration preserves SkillEvaluator's runtime and artifact contracts while
 using Harbor 0.25:

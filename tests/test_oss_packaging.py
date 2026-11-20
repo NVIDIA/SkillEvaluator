@@ -694,7 +694,9 @@ def test_public_slim_docker_image_uses_only_distribution_dependencies() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "skillevaluator[tier2,tier3,security]" in extras["all"]
-    assert re.search(r"^FROM python:3\.12-slim$", dockerfile, flags=re.MULTILINE)
+    base = re.search(r"^FROM python:(3\.12\.\d+)-slim@sha256:[a-f0-9]{64}$", dockerfile, flags=re.MULTILINE)
+    assert base is not None
+    assert Version(base[1]) >= Version("3.12.16")
 
     public_install = 'python -m pip install --no-cache-dir ".[all]"'
     install_run = next(

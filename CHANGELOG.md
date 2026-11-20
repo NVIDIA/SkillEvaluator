@@ -179,7 +179,8 @@ All notable changes to SkillEvaluator are documented in this file.
   kept, so the last lines of a long command output, such as the summary line of
   a test run, never reached the judge that decides the attempt. A long result
   is masked for credentials before it is cut, so the saved judge evidence does
-  not keep the end of a value the cut went through.
+  not keep the end of a value the cut went through. A result over 1,000,000
+  characters still keeps only its beginning.
 - The `omitted` record of the `accuracy` and `goal_accuracy` judges now carries
   `incomplete_sections`, as `behavior_check` already does. It names the final
   response, file changes or tool results that did not reach the judge whole,

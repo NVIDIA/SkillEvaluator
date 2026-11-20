@@ -904,10 +904,10 @@ def attach_metric_evidence_refs(
 # ---------------------------------------------------------------------------
 
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
-# How much of a long tool result is masked before its excerpt is cut. Its
-# own cut is far enough from the kept beginning and end that no credential
-# reaches from there into the excerpt.
-_BUNDLE_ITEM_REDACTION_CHARS = 16 * _BUNDLE_ITEM_CHARS
+# The longest tool result that is masked whole before its excerpt is cut. The
+# masking finds a credential by how it starts (its name, the first line of a
+# key block), so the end of a longer result cannot be masked on its own.
+_BUNDLE_ITEM_MASK_CHARS = 1_000_000
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
 _BUNDLE_BUDGETS = {
@@ -959,6 +959,9 @@ def _late_observation_excerpts(
     ``redact`` masks a long result before it is cut. Saved judge evidence is
     masked after the cut, and by then the end of a credential that the cut
     went through no longer follows the name or the first lines that mark it.
+    The result is masked whole, because any cut made first can drop the first
+    line of a long key block and leave the rest in the kept end. A result over
+    ``_BUNDLE_ITEM_MASK_CHARS`` keeps its beginning only, masked.
     ``count`` stops after that many results.
     """
     out: list[str] = []
@@ -969,9 +972,14 @@ def _late_observation_excerpts(
             content = atif_content_text(result.get("content")).strip()
             if not content:
                 continue
-            if redact is not None and len(content) > limit:
-                content = redact(_truncate_for_behavior(content, _BUNDLE_ITEM_REDACTION_CHARS))
-            out.append(_truncate_for_behavior(content, limit))
+            shortened = len(content) > limit
+            if shortened and redact is not None and len(content) > _BUNDLE_ITEM_MASK_CHARS:
+                content = f"{redact(content[:_BUNDLE_ITEM_MASK_CHARS])[:limit]} …[clipped]"
+            elif shortened:
+                if redact is not None:
+                    content = redact(content)
+                content = _truncate_for_behavior(content, limit)
+            out.append(content)
             if count is not None and len(out) >= count:
                 return out
     return out

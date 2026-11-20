@@ -1892,6 +1892,12 @@ def test_credential_across_the_cut_of_a_long_tool_result_is_not_saved(tmp_path: 
     key_lines = ["".join(rng.choices(string.ascii_letters + string.digits, k=64)) for _ in range(26)]
     private_key = "PRIVATE " + "KEY"
     key_block = "\n".join([f"-----BEGIN {private_key}-----", *key_lines, f"-----END {private_key}-----"])
+    # A key block of 13,000 characters that ends just before the end of a
+    # result of 40,000. Its first line is far from the kept end, so no window
+    # around that end would have it.
+    key_lines += ["".join(rng.choices(string.ascii_letters + string.digits, k=64)) for _ in range(200)]
+    pgp_key = f"PGP {private_key} BLOCK"
+    long_block = "\n".join([f"-----BEGIN {pgp_key}-----", *key_lines[26:], f"-----END {pgp_key}-----"])
     head_end = _cut_point(atif_helpers._BUNDLE_ITEM_CHARS)
     tail_start = 3000 - (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n") - head_end)
     results = [
@@ -1899,8 +1905,9 @@ def test_credential_across_the_cut_of_a_long_tool_result_is_not_saved(tmp_path: 
         _tool_result_with(f"mysql --password {flag_value} --host db", at=tail_start),
         _tool_result_with(configured, at=tail_start),
         _tool_result_with(key_block, at=tail_start - 400),
+        _tool_result_with(long_block, at=40_000 - 300 - len(long_block) // 2, length=40_000),
     ]
-    assert all(len(result) == 3000 for result in results)
+    assert [len(result) for result in results] == [3000, 3000, 3000, 3000, 40_000]
     steps: list[dict[str, Any]] = []
     for index, result in enumerate(results):
         call = {"tool_call_id": f"run-{index}", "function_name": "bash", "arguments": {"command": f"./step-{index}.sh"}}

@@ -744,13 +744,16 @@ def test_tool_result_repeated_in_the_final_response_does_not_hide_a_dropped_sect
             assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
-def test_long_tool_result_is_masked_before_it_is_cut() -> None:
+@pytest.mark.parametrize("after", [1500, 40_000], ids=["over-the-allowance", "far-over-the-allowance"])
+def test_long_tool_result_is_masked_before_it_is_cut(after: int) -> None:
     # A value that the cut would go through is masked while it is still whole.
-    # A result that fits its allowance is left as it is, because it reaches
-    # the saved evidence whole and is masked there.
+    # The masking gets the whole result however long it is, because a first
+    # cut can drop the line that marks what follows it as a credential. A
+    # result that fits its allowance is left as it is, because it reaches the
+    # saved evidence whole and is masked there.
     secret = "S3CRET-" + "v" * 40
     head = (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n")) * 2 // 3
-    across_the_cut = "a" * (head - 20) + secret + "b" * 1500
+    across_the_cut = "a" * (head - 20) + secret + "b" * after
     traj = _tool_result_steps([across_the_cut, f"short result with {secret}"])
     masked: list[str] = []
 
@@ -767,6 +770,29 @@ def test_long_tool_result_is_masked_before_it_is_cut() -> None:
             assert "<masked>" in evidence
             assert evidence.count(secret) == 1  # only the short result still shows it
             assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+def test_tool_result_too_long_to_mask_whole_keeps_its_beginning_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The end of a result is only safe to show when everything before it was
+    # read by the masking, and a result this long is not read to its end.
+    monkeypatch.setattr(atif_helpers, "_BUNDLE_ITEM_MASK_CHARS", 4000)
+    result = "first line\n" + "log line\n" * 600 + "exit status 0."
+    traj = _tool_result_steps([result])
+    masked: list[str] = []
+
+    def redact(text: str) -> str:
+        masked.append(text)
+        return text.replace("first line", "<masked>")
+
+    bundles = atif_helpers.build_metric_evidence_bundles(traj, "Run the checks and report.", redact=redact)
+
+    assert masked == [result[:4000]]
+    for metric in ("accuracy", "goal_accuracy"):
+        evidence = bundles[metric]["prompt_evidence"]
+        assert "<masked>" in evidence
+        assert "exit status 0." not in evidence
+        assert evidence.endswith("…[clipped]")
+        assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
 def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() -> None:

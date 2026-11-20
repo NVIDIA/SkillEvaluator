@@ -277,9 +277,15 @@ def _fence_for(content: str) -> str:
 
 
 def _fenced_block(name: str, content: str) -> str:
-    """Wrap ``content`` in a fence that it cannot close, with ``name`` on the opening fence line."""
+    """Wrap ``content`` in a fence that it cannot close, with ``name`` on the opening fence line.
+
+    The info string of a backtick fence may not contain a backtick (CommonMark
+    would not treat the line as a fence at all), so backticks in ``name`` are
+    written as the character reference ``&#96;``.
+    """
     fence = _fence_for(content)
-    return f"{fence} {_single_line(name)}\n{content}\n{fence}\n"
+    header = _single_line(name).replace("`", "&#96;")
+    return f"{fence} {header}\n{content}\n{fence}\n"
 
 
 class RubricJudge(LLMClient):
@@ -340,8 +346,9 @@ class RubricJudge(LLMClient):
         than any backtick run in that file, so the file cannot close its own
         fence or forge a section header such as ``Evaluation Criteria:``.  File
         names and the skill name stay on one line (``\\r`` and ``\\n`` are
-        escaped).  The evaluator's own framing, including the criteria, appears
-        only outside the fences.
+        escaped), and backticks in a file name are written as ``&#96;`` so the
+        fence header stays a valid CommonMark fence.  The evaluator's own
+        framing, including the criteria, appears only outside the fences.
         """
         skill_name: str = kwargs["skill_name"]
         skill_content: str = kwargs["skill_content"]

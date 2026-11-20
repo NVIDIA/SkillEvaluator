@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import datetime
 import ipaddress
+import json
 import math
 import os
 import re
@@ -14,9 +15,10 @@ import shutil
 import subprocess
 import time
 import unicodedata
+import uuid
 from collections.abc import Callable, Iterator, Mapping, MutableMapping
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from urllib.parse import quote, unquote_to_bytes, urlsplit, urlunsplit
 
 import idna
@@ -229,6 +231,14 @@ class ProviderConfig:
     credential_env: str | None = None
     base_url_env: str | None = None
     credential_expiry: float | None = None
+    # Extra HTTP headers for the ``openai-compatible`` chat client, as (name, value)
+    # pairs so the frozen dataclass stays hashable. Values may be secrets: never
+    # print them. ``extra_headers_dict`` returns them in SDK form.
+    extra_headers: tuple[tuple[str, str], ...] = field(default=(), repr=False)
+
+    def extra_headers_dict(self) -> dict[str, str]:
+        """Return the extra headers as the mapping the OpenAI SDK expects."""
+        return dict(self.extra_headers)
 
     def child_environment(self) -> dict[str, str]:
         """Return this provider's public credential settings for a child process."""
@@ -512,6 +522,7 @@ def _build_vertex_openapi_adc_config(
     base_url_env: str,
     timeout_seconds: float = 10.0,
     environ: Mapping[str, str] | None = None,
+    extra_headers: tuple[tuple[str, str], ...] = (),
 ) -> ProviderConfig:
     """Build a ProviderConfig using Google Application Default Credentials for Vertex OpenAPI."""
     token = _get_google_access_token(timeout_seconds=timeout_seconds, environ=environ)
@@ -528,6 +539,7 @@ def _build_vertex_openapi_adc_config(
         credential_env=CREDENTIAL_SOURCE_ADC,
         base_url_env=base_url_env,
         credential_expiry=get_adc_token_expiry(token),
+        extra_headers=extra_headers,
     )
 
 
@@ -598,6 +610,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
 
     base_url = _required(env, "SKILL_EVAL_LLM_BASE_URL").rstrip("/")
     api_key = env.get("SKILL_EVAL_LLM_API_KEY")
+    extra_headers = resolve_extra_headers(env)
     if _is_vertex_openapi_endpoint(base_url) and not api_key:
         return _build_vertex_openapi_adc_config(
             provider=provider,
@@ -605,6 +618,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
             base_url=base_url,
             base_url_env="SKILL_EVAL_LLM_BASE_URL",
             environ=env,
+            extra_headers=extra_headers,
         )
     return ProviderConfig(
         provider=provider,
@@ -614,6 +628,7 @@ def resolve_llm_provider(environ: Mapping[str, str] | None = None) -> ProviderCo
         litellm_model=f"openai/{model}",
         credential_env="SKILL_EVAL_LLM_API_KEY",
         base_url_env="SKILL_EVAL_LLM_BASE_URL",
+        extra_headers=extra_headers,
     )
 
 
@@ -689,6 +704,73 @@ def _required(environ: Mapping[str, str], variable: str) -> str:
             )
         raise ProviderConfigurationError(message)
     return value
+
+
+EXTRA_HEADERS_ENV = "SKILL_EVAL_LLM_EXTRA_HEADERS"
+_HEADER_TOKEN = re.compile(r"^[!#$%&'*+.^_`|~0-9A-Za-z-]+$")
+_HEADER_VALUE = re.compile(r"[!-~](?:[\t -~]*[!-~])?")
+# Owned by the SDK: an override here would break auth or the request body.
+_RESERVED_HEADERS = frozenset({"authorization", "content-type", "content-length", "host"})
+
+
+def _unique_header_members(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    members: dict[str, object] = {}
+    for name, value in pairs:
+        if name in members:
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} has a repeated JSON key.")
+        members[name] = value
+    return members
+
+
+def resolve_extra_headers(environ: Mapping[str, str] | None = None) -> tuple[tuple[str, str], ...]:
+    """Parse ``SKILL_EVAL_LLM_EXTRA_HEADERS`` for the ``openai-compatible`` chat client.
+
+    The value is a JSON object of header names to string values. A ``{uuid}``
+    placeholder in a value is replaced with one random UUID per call, so a
+    client that resolves its configuration once keeps one session id for its
+    lifetime. Errors name the variable and never repeat header values, which
+    may be credentials.
+    """
+    env = _environment(environ)
+    raw = env.get(EXTRA_HEADERS_ENV)
+    if raw is None or not raw.strip():
+        return ()
+    try:
+        parsed = json.loads(raw, object_pairs_hook=_unique_header_members)
+    except ProviderConfigurationError:
+        raise
+    except (ValueError, RecursionError):
+        raise ProviderConfigurationError(
+            f"{EXTRA_HEADERS_ENV} must be a JSON object of header names to string values."
+        ) from None
+    if not isinstance(parsed, dict):
+        raise ProviderConfigurationError(
+            f"{EXTRA_HEADERS_ENV} must be a JSON object, not a JSON {type(parsed).__name__}."
+        )
+    session_id = str(uuid.uuid4())
+    headers: list[tuple[str, str]] = []
+    seen: set[str] = set()
+    for name, value in parsed.items():
+        if not isinstance(name, str) or not _HEADER_TOKEN.fullmatch(name):
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} has an invalid header name: {name!r}.")
+        if name.lower() in _RESERVED_HEADERS:
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} must not set {name}; the client owns that header.")
+        if name.lower() in seen:
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} sets {name} more than once.")
+        if not isinstance(value, str):
+            raise ProviderConfigurationError(
+                f"{EXTRA_HEADERS_ENV} value for {name} must be a string, not {type(value).__name__}."
+            )
+        if "\r" in value or "\n" in value:
+            raise ProviderConfigurationError(f"{EXTRA_HEADERS_ENV} value for {name} must not contain line breaks.")
+        if value and not _HEADER_VALUE.fullmatch(value):
+            raise ProviderConfigurationError(
+                f"{EXTRA_HEADERS_ENV} value for {name} must be ASCII without control characters "
+                "or surrounding whitespace."
+            )
+        seen.add(name.lower())
+        headers.append((name, value.replace("{uuid}", session_id)))
+    return tuple(headers)
 
 
 def _anthropic_base_url(environ: Mapping[str, str]) -> str | None:

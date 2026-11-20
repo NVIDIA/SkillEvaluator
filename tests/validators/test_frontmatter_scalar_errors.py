@@ -10,7 +10,8 @@ import yaml
 
 from skillevaluator.harness.overlay import _tab_indent_breaks_yaml
 from skillevaluator.tier1.commands import run_validation
-from skillevaluator.validators.frontmatter_parser import load_frontmatter_yaml, parse_frontmatter
+from skillevaluator.utils.structured_data import StructuredDataSyntaxError, load_bounded_yaml
+from skillevaluator.validators.frontmatter_parser import parse_frontmatter
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY
 from skillevaluator.validators.markdown import markdown_link_targets
 from skillevaluator.validators.quality_score import QualityScoreValidator
@@ -27,7 +28,6 @@ from skillevaluator.validators.version import VersionValidator
         "!!timestamp invalid",
         r'"\U00110000"',
         r'"\UFFFFFFFF"',
-        pytest.param("[" * 2000 + "leaf" + "]" * 2000, id="excessive-nesting"),
     ]
 )
 def malformed_skill(tmp_path: Path, request: pytest.FixtureRequest) -> Path:
@@ -74,11 +74,13 @@ def test_native_scalar_error_keeps_value_and_actual_source_location(tmp_path, ra
     raw = f"name: invalid-location\ndescription: Test a source location\nextra: {raw_value}"
     (skill / "SKILL.md").write_text(f"---\n{raw}\n---\n# Example\n", encoding="utf-8")
 
-    with pytest.raises(yaml.constructor.ConstructorError) as error:
-        load_frontmatter_yaml(raw)
-    assert error.value.problem_mark.line == 2
-    assert error.value.problem_mark.column == 7
-    assert error.value.problem == f"invalid {kind} value {value!r}"
+    with pytest.raises(StructuredDataSyntaxError) as error:
+        load_bounded_yaml(raw, last_key_wins=True)
+    cause = error.value.__cause__
+    assert isinstance(cause, yaml.constructor.ConstructorError)
+    assert cause.problem_mark.line == 2
+    assert cause.problem_mark.column == 7
+    assert cause.problem == f"invalid {kind} value {value!r}"
 
     result = SchemaValidator().validate(skill)
     finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
@@ -93,16 +95,18 @@ def test_native_scanner_error_keeps_actual_source_location(tmp_path, raw_value):
     raw = f"name: invalid-escape\ndescription: Test a source location\nextra: {raw_value}"
     (skill / "SKILL.md").write_text(f"---\n{raw}\n---\n# Example\n", encoding="utf-8")
 
-    with pytest.raises(yaml.scanner.ScannerError) as error:
-        load_frontmatter_yaml(raw)
-    assert error.value.problem_mark.line == 2
-    assert error.value.problem_mark.column == 10
-    assert "invalid escape sequence" in error.value.problem
+    with pytest.raises(StructuredDataSyntaxError) as error:
+        load_bounded_yaml(raw, last_key_wins=True)
+    cause = error.value.__cause__
+    assert isinstance(cause, yaml.scanner.ScannerError)
+    assert cause.problem_mark.line == 2
+    assert cause.problem_mark.column == 10
+    assert "invalid YAML value" in cause.problem
 
     result = SchemaValidator().validate(skill)
     finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
     assert finding.line_number == 4
-    assert "invalid escape sequence" in finding.message
+    assert "invalid YAML value" in finding.message
 
 
 def test_version_reports_the_parse_error(malformed_skill: Path) -> None:
@@ -159,3 +163,21 @@ def test_ordinary_nested_yaml_keeps_values_and_body_links(tmp_path: Path) -> Non
     assert parsed.yaml_data["extra"] == {"enabled": True, "values": [1, ["two", None]]}
     assert not any(finding.check_name == "yaml_syntax" for finding in SchemaValidator().validate(skill).findings)
     assert "guide.md" in markdown_link_targets(content)
+
+
+def test_excessive_nesting_retains_the_bounded_loader_error(tmp_path: Path) -> None:
+    skill = tmp_path / "deep-skill"
+    skill.mkdir()
+    nested = "[" * 2000 + "leaf" + "]" * 2000
+    content = f"---\nname: deep-skill\ndescription: Check nesting\nextra: {nested}\n---\n[guide](guide.md)\n"
+    (skill / "SKILL.md").write_text(content, encoding="utf-8")
+
+    parsed, result = parse_frontmatter(skill / "SKILL.md")
+    assert parsed is None
+    assert any("YAML complexity limits" in error for error in result.errors)
+    assert any(f.check_name == "yaml_complexity" for f in SchemaValidator().validate(skill).findings)
+    quality = QualityScoreValidator().validate(skill)
+    assert not quality.passed
+    assert any("YAML complexity limits" in error for error in quality.gate_failures)
+    assert "guide.md" in markdown_link_targets(content)
+    assert not _tab_indent_breaks_yaml("note: |\n  \ttext\nextra: " + nested)

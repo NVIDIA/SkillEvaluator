@@ -22,7 +22,12 @@ from skillevaluator.constants import (
     SKILL_MANIFEST_VARIANTS,
     SKILL_NOT_SHIPPED_DIRS,
 )
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, load_frontmatter_yaml
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.schema import _duplicate_frontmatter_keys
 
 PROFILES_DIR = Path(__file__).parent / "profiles"
@@ -234,8 +239,8 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     match = FRONTMATTER_PATTERN.match(text)
     fm_yaml = match.group(1) if match else ""
     try:
-        data = load_frontmatter_yaml(fm_yaml) if match else None
-    except yaml.YAMLError:
+        data = load_bounded_yaml(fm_yaml, last_key_wins=True) if match else None
+    except StructuredDataError:
         data = None
     return manifest, raw, text, fm_yaml, data if isinstance(data, dict) else {}
 
@@ -250,9 +255,11 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
     if not any("\t" in line[: len(line) - len(line.lstrip())] for line in fm_yaml.splitlines()):
         return False
     try:
-        load_frontmatter_yaml(fm_yaml)
-    except yaml.YAMLError:
-        return True
+        load_bounded_yaml(fm_yaml, last_key_wins=True)
+    except StructuredDataSyntaxError as exc:
+        return isinstance(exc.__cause__, yaml.YAMLError)
+    except StructuredDataError:
+        return False
     return False
 
 
@@ -367,8 +374,10 @@ def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
 def _codex_implicit_disabled(skill_path: Path) -> bool:
     policy_file = skill_path / "agents" / "openai.yaml"
     try:
-        data = yaml.safe_load(policy_file.read_text(encoding="utf-8")) if policy_file.is_file() else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        # Bounded: the file ships with the skill, and merge keys or aliases expand inside plain ``safe_load``.
+        text = policy_file.read_text(encoding="utf-8") if policy_file.is_file() else None
+        data = load_bounded_yaml(text, last_key_wins=True) if text is not None else None
+    except (OSError, UnicodeDecodeError, StructuredDataError):
         return False
     policy = data.get("policy") if isinstance(data, dict) else None
     return isinstance(policy, dict) and policy.get("allow_implicit_invocation") is False

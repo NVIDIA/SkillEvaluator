@@ -24,8 +24,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-import yaml
-
 from skillevaluator.constants import (
     EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
@@ -41,8 +39,13 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataLimitError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidatorBase
-from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, load_frontmatter_yaml
+from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
 
 logger = get_logger(__name__)
@@ -427,7 +430,13 @@ class QualityScoreValidator(ValidatorBase):
         content = manifest.read_text(encoding="utf-8-sig")
         lines = content.split("\n")
 
-        frontmatter_data = self._parse_frontmatter(content)
+        try:
+            frontmatter_data = self._parse_frontmatter(content)
+        except StructuredDataLimitError as exc:
+            result.fail_gate(
+                f"Cannot compute quality score for {manifest}: frontmatter exceeds the YAML complexity limits ({exc})"
+            )
+            return result
         if frontmatter_data:
             qs.has_frontmatter = True
 
@@ -482,9 +491,13 @@ class QualityScoreValidator(ValidatorBase):
         if not fm_match:
             return None
         try:
-            data = load_frontmatter_yaml(fm_match.group(1))
+            # Bounded: a frontmatter block whose aliases expand far beyond its
+            # size is rejected here instead of being stringified field by field.
+            data = load_bounded_yaml(fm_match.group(1), last_key_wins=True)
             return data if isinstance(data, dict) else None
-        except yaml.YAMLError:
+        except StructuredDataLimitError:
+            raise
+        except StructuredDataError:
             return None
 
     # -----------------------------------------------------------------

@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Mapping, Sequence, Set
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +28,17 @@ MAX_YAML_ALIAS_REFERENCES = 1_024
 MAX_STRUCTURED_SCALAR_CHARS = 65_536
 # About 4,215 decimal digits: Python formats ints up to 4,300 digits by default.
 MAX_STRUCTURED_INT_BITS = 14_000
+# A YAML alias shares one node, so a consumer that stringifies the expanded graph
+# (``str()``, ``repr()``, ``json.dumps``) reads one 64 KiB scalar once per alias:
+# a 64 KiB file can then yield hundreds of megabytes, and gigabytes where ``repr``
+# escapes each character. The graph walk therefore also budgets the characters it
+# reaches, aliases included. The floor is 64 full-size scalars, which covers any
+# frontmatter (a skill description is at most 1,024 characters) and the evals
+# config byte cap; a longer document may expand to four times its own length,
+# which a document without aliases never does. The count is of decoded characters; ``repr``
+# escapes some of them, so a rendering can be several times wider.
+MAX_YAML_EXPANDED_CHARS = 4_194_304
+YAML_EXPANDED_CHARS_PER_INPUT_CHAR = 4
 _YAML_MERGE_TAG = "tag:yaml.org,2002:merge"
 _YAML_VALUE_TAG = "tag:yaml.org,2002:value"
 
@@ -51,6 +62,22 @@ class _MergeBoundedSafeLoader(yaml.SafeLoader):
         node = super().compose_document()
         _preflight_yaml_merge_work(node)
         return node
+
+    def fetch_more_tokens(self) -> None:
+        try:
+            super().fetch_more_tokens()
+        except (ValueError, OverflowError) as exc:
+            raise yaml.scanner.ScannerError(None, None, f"invalid YAML value: {exc}", self.get_mark()) from exc
+
+    def construct_object(self, node: Node, deep: bool = False) -> Any:
+        try:
+            return super().construct_object(node, deep=deep)
+        except StructuredDataError:
+            raise
+        except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
+            value = node.value[:80] if isinstance(node.value, str) else ""
+            kind = node.tag.rsplit(":", 1)[-1]
+            raise ConstructorError(None, None, f"invalid {kind} value {value!r}", node.start_mark) from exc
 
 
 class _UniqueKeySafeLoader(_MergeBoundedSafeLoader):
@@ -186,9 +213,12 @@ def _preflight_yaml(raw: str) -> None:
                 raise _limit(f"parsed node count exceeds {MAX_STRUCTURED_NODES}")
     except StructuredDataLimitError:
         raise
-    except (RecursionError, OverflowError) as exc:
-        raise _limit("parser recursion or numeric range") from exc
-    except yaml.YAMLError as exc:
+    except RecursionError as exc:
+        raise _limit("parser recursion") from exc
+    except (yaml.YAMLError, ValueError, OverflowError) as exc:
+        # The scanner converts ``%YAML`` version digits and ``\U`` escapes itself, so an over-long
+        # number or an out-of-range code point raises a plain ValueError, or on Python 3.12 an
+        # OverflowError for a code point above a C int. All of them are invalid YAML.
         raise StructuredDataSyntaxError("Input is not valid YAML") from exc
 
 
@@ -197,9 +227,11 @@ def _validate_graph(
     *,
     max_nodes: int = MAX_STRUCTURED_NODES,
     max_collection_items: int = MAX_STRUCTURED_COLLECTION_ITEMS,
+    max_expanded_chars: int | None = None,
 ) -> None:
     stack: list[tuple[object, int]] = [(value, 0)]
     visits = 0
+    chars = 0
     while stack:
         current, depth = stack.pop()
         visits += 1
@@ -214,23 +246,36 @@ def _validate_graph(
             for key, item in current.items():
                 stack.append((item, depth + 1))
                 stack.append((key, depth + 1))
+        elif isinstance(current, Set):
+            # ``!!set`` members are scalars, but a member can be as large as any other value. YAML
+            # writes a set as a mapping, which the composed-node preflight already bounds.
+            stack.extend((item, depth + 1) for item in current)
         elif isinstance(current, Sequence) and not isinstance(current, (str, bytes, bytearray)):
             if len(current) > max_collection_items:
                 raise _limit(f"sequence size exceeds {max_collection_items}")
             stack.extend((item, depth + 1) for item in current)
-        elif isinstance(current, (str, bytes, bytearray)) and len(current) > MAX_STRUCTURED_SCALAR_CHARS:
-            raise _limit(f"scalar length exceeds {MAX_STRUCTURED_SCALAR_CHARS}")
-        elif isinstance(current, int) and current.bit_length() > MAX_STRUCTURED_INT_BITS:
-            # Hexadecimal, binary, octal and sexagesimal YAML integers skip the
-            # decimal digit limit of int(), and str() would then raise.
-            raise _limit(f"integer size exceeds {MAX_STRUCTURED_INT_BITS} bits")
+        elif isinstance(current, (str, bytes, bytearray)):
+            if len(current) > MAX_STRUCTURED_SCALAR_CHARS:
+                raise _limit(f"scalar length exceeds {MAX_STRUCTURED_SCALAR_CHARS}")
+            chars += len(current)
+        elif isinstance(current, int):
+            if current.bit_length() > MAX_STRUCTURED_INT_BITS:
+                # Hexadecimal, binary, octal and sexagesimal YAML integers skip the
+                # decimal digit limit of int(), and str() would then raise.
+                raise _limit(f"integer size exceeds {MAX_STRUCTURED_INT_BITS} bits")
+            chars += current.bit_length() // 3 + 1  # an upper bound on its decimal digits
+        if max_expanded_chars is not None and chars > max_expanded_chars:
+            raise _limit(f"expanded text exceeds {max_expanded_chars} characters")
 
 
-def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
+def load_bounded_yaml(raw: str, *, last_key_wins: bool = False, max_expanded_chars: int | None = None) -> Any:
     """Parse one YAML document after bounded event and graph validation.
 
     A duplicate mapping key is a syntax error, unless ``last_key_wins`` keeps
     the last value, as agent clients do when they read Markdown frontmatter.
+    ``max_expanded_chars`` bounds the text reachable by walking the expanded
+    graph, aliases included; it defaults to :data:`MAX_YAML_EXPANDED_CHARS` or
+    four times ``len(raw)``, whichever is larger.
     """
     _preflight_yaml(raw)
     try:
@@ -243,7 +288,9 @@ def load_bounded_yaml(raw: str, *, last_key_wins: bool = False) -> Any:
         # SafeLoader's scalar constructors raise the lookup and attribute errors
         # for explicitly tagged values such as ``!!int ""`` or ``!!bool nope``.
         raise StructuredDataSyntaxError("Input is not valid YAML") from exc
-    _validate_graph(value)
+    if max_expanded_chars is None:
+        max_expanded_chars = max(MAX_YAML_EXPANDED_CHARS, YAML_EXPANDED_CHARS_PER_INPUT_CHAR * len(raw))
+    _validate_graph(value, max_expanded_chars=max_expanded_chars)
     return value
 
 
@@ -409,6 +456,16 @@ def preflight_json_structure(
         else:
             preflight.close()
     preflight.run(raw, position, len(raw))
+
+
+def reject_duplicate_object_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Build an object while rejecting ambiguous duplicate members."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("Duplicate JSON object member")
+        result[key] = value
+    return result
 
 
 def load_bounded_json(

@@ -115,6 +115,11 @@ def _save_state(state_path: Path, state: dict) -> str | None:
         return f"Failed to write state file: {exc}"
 
 
+def _single_line(content: str) -> str:
+    """Collapse whitespace so a task fits on one line of the state file."""
+    return " ".join(content.split())
+
+
 class TaskManager:
     """Manages tasks with file-backed state."""
 
@@ -146,6 +151,7 @@ class TaskManager:
 
     def add_task(self, content: str) -> dict:
         """Add a single task."""
+        content = _single_line(content)
         if not content:
             return {"error": "Content is required"}
 
@@ -168,7 +174,7 @@ class TaskManager:
             return {"error": "Content is required"}
 
         items = re.split(r"[;\n]", content)
-        items = [t.strip() for t in items if t.strip()]
+        items = [_single_line(t) for t in items if t.strip()]
 
         if not items:
             return {"error": "No valid tasks found"}

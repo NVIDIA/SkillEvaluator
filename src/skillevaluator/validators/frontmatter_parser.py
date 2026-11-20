@@ -13,8 +13,11 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
-import yaml
-
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidationResult
 
 # Regex pattern for extracting frontmatter between --- markers
@@ -32,34 +35,6 @@ class ParsedFrontmatter:
     content: str
     raw_yaml: str
     line_count: int
-
-
-class _FrontmatterLoader(yaml.SafeLoader):
-    """Keep source locations when safe scalar constructors reject a value."""
-
-    def construct_object(self, node: yaml.Node, deep: bool = False) -> Any:
-        try:
-            return super().construct_object(node, deep=deep)
-        except (ValueError, OverflowError, IndexError, KeyError, AttributeError, TypeError) as exc:
-            value = node.value[:80] if isinstance(node.value, str) else ""
-            kind = node.tag.rsplit(":", 1)[-1]
-            raise yaml.constructor.ConstructorError(
-                None, None, f"invalid {kind} value {value!r}", node.start_mark
-            ) from exc
-
-
-def load_frontmatter_yaml(raw: str) -> Any:
-    """Load frontmatter while reporting native loading failures as YAML errors."""
-    loader = _FrontmatterLoader(raw)
-    try:
-        return loader.get_single_data()
-    except RecursionError as exc:
-        raise yaml.YAMLError("frontmatter nesting exceeds the parser recursion limit") from exc
-    except (ValueError, OverflowError) as exc:
-        # Invalid Unicode escapes can fail in the scanner before a node exists.
-        raise yaml.scanner.ScannerError(None, None, f"invalid escape sequence: {exc}", loader.get_mark()) from exc
-    finally:
-        loader.dispose()
 
 
 def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, ValidationResult]:
@@ -89,9 +64,12 @@ def parse_frontmatter(file_path: Path) -> tuple[ParsedFrontmatter | None, Valida
     frontmatter_yaml, markdown_content = match.groups()
 
     try:
-        data = load_frontmatter_yaml(frontmatter_yaml)
-    except yaml.YAMLError as e:
-        result.add_error(f"Invalid YAML in frontmatter: {e}")
+        data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+    except StructuredDataLimitError as e:
+        result.add_error(f"Frontmatter exceeds the YAML complexity limits: {e}")
+        return None, result
+    except StructuredDataSyntaxError as e:
+        result.add_error(f"Invalid YAML in frontmatter: {e.__cause__ or e}")
         return None, result
 
     if not data or not isinstance(data, dict):

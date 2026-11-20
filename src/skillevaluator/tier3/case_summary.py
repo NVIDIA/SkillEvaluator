@@ -33,6 +33,7 @@ from skillevaluator.tier3.harbor.report_data import _harbor_task_directory, _rec
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1357,10 +1358,9 @@ def _skill_description(skill_path: Path | None) -> str:
         return ""
     match = re.match(r"---\s*\n(.*?)\n---", skill_md.read_text(encoding="utf-8", errors="replace"), re.DOTALL)
     try:
-        import yaml
-
-        meta = yaml.safe_load(match.group(1)) if match else None
-    except Exception:  # malformed frontmatter: Tier 1 reports it
+        # Bounded: ``str()`` below would expand nested aliases without limit.
+        meta = load_bounded_yaml(match.group(1), last_key_wins=True) if match else None
+    except StructuredDataError:  # malformed or over-limit frontmatter: Tier 1 reports it
         return ""
     return str(meta.get("description") or "") if isinstance(meta, Mapping) else ""
 

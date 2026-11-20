@@ -197,6 +197,16 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- Redact generated NVIDIA Build bridge credentials from retained agent logs,
+  session files, and trajectories. Masking keeps file sizes and recorded usage
+  metrics. Files that cannot be masked (files over 64 MiB, anything past the
+  first 10,000 files and folders in the agent log folder, and entries that
+  cannot be listed, read or replaced) keep their contents. If that happens
+  before Harbor converts the logs, the trial skips the conversion, so it has
+  no `trajectory.json` and no usage counts. With a token or cost budget, such
+  a trial counts as unmeasured usage, so the run stops admitting further
+  attempts. A warning about unmasked files is written to the Harbor process's
+  standard error, which SkillEvaluator keeps only when the Harbor run fails.
 
 ## 1.0.1 - 2026-11-17
 

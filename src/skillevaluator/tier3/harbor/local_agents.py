@@ -13,6 +13,7 @@ import os
 import re
 import secrets
 import shlex
+import stat
 import tempfile
 import uuid
 from collections.abc import Awaitable, Callable, Mapping
@@ -39,6 +40,8 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
 )
+from skillevaluator.tier3.output_provenance import write_output_file_atomically
+from skillevaluator.utils.secure_fs import SecureRoot, stat_is_link_or_reparse
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
@@ -52,6 +55,8 @@ _NVIDIA_BUILD_BRIDGE_API_KEY_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_API_KEY"
 _NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN_ENV = "SKILLEVALUATOR_NVIDIA_BUILD_BRIDGE_CLIENT_TOKEN"
 _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
+_BRIDGE_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
+_BRIDGE_ARTIFACT_MAX_PATHS = 10_000
 # Local mode runs the CLI installed on the host, not the release Harbor installs
 # in other environments. These are the oldest releases that run each model family.
 _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
@@ -59,6 +64,136 @@ _CODEX_MIN_VERSION_FOR_GPT_6 = (0, 159, 1)
 _CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 
 logger = logging.getLogger(__name__)
+
+
+def _same_bridge_artifact(current: os.stat_result, opened: os.stat_result) -> bool:
+    fields = ("st_size", "st_mtime_ns", "st_ctime_ns")
+    return (
+        stat.S_ISREG(current.st_mode)
+        and os.path.samestat(current, opened)
+        and all(getattr(current, field) == getattr(opened, field) for field in fields)
+    )
+
+
+def _replace_bridge_artifact(secure_root: SecureRoot, relative: Path, opened: os.stat_result, payload: bytes) -> None:
+    """Replace one log entry through descriptors anchored at the pinned log folder.
+
+    The log folder can still be written while Harbor collects it, so no lexical
+    path is resolved again: each parent is opened without following links from
+    the pinned root, and only this name is renamed over. Other names for a
+    hard-linked file keep their bytes.
+    """
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_fd = secure_root.duplicate_posix_root_descriptor()
+    temporary: str | None = None
+    try:
+        for component in relative.parts[:-1]:
+            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+        if not _same_bridge_artifact(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False), opened):
+            raise OSError(f"Agent log entry changed before masking: {relative.as_posix()}")
+        candidate = f".{relative.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp"
+        descriptor = os.open(
+            candidate,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0),
+            0o600,
+            dir_fd=directory_fd,
+        )
+        temporary = candidate
+        with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), stat.S_IMODE(opened.st_mode))
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if not _same_bridge_artifact(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False), opened):
+            raise OSError(f"Agent log entry changed before masking: {relative.as_posix()}")
+        os.replace(candidate, relative.name, src_dir_fd=directory_fd, dst_dir_fd=directory_fd)
+        temporary = None
+        os.fsync(directory_fd)
+    finally:
+        if temporary is not None:
+            with suppress(OSError):
+                os.unlink(temporary, dir_fd=directory_fd)
+        os.close(directory_fd)
+
+
+def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
+    """Remove generated capabilities from contained native artifacts after download.
+
+    Links are never followed and special files are never opened. On POSIX a
+    file is masked by renaming a fresh copy over its name inside the pinned
+    folder, so no other name for a hard-linked file changes. Elsewhere the
+    atomic output writer is used, which refuses hard-linked files.
+    Return the entries that may still hold a capability: files over the size
+    limit, entries that could not be listed, read or replaced, and the first
+    entry past the path limit.
+    """
+    if not tokens:
+        return []
+    try:
+        logs_dir.lstat()
+    except FileNotFoundError:
+        return []
+    values = sorted((token.encode("utf-8") for token in tokens), key=len, reverse=True)
+    unmasked: list[str] = []
+    seen = 0
+    with SecureRoot(logs_dir) as secure_root:
+        for current, directories, names in os.walk(logs_dir, onerror=lambda exc: unmasked.append(str(exc.filename))):
+            parent = Path(current)
+            descend: list[str] = []
+            for name in sorted([*directories, *names]):
+                path = parent / name
+                relative = path.relative_to(logs_dir)
+                seen += 1
+                if seen > _BRIDGE_ARTIFACT_MAX_PATHS:
+                    unmasked.append(relative.as_posix())
+                    return unmasked
+                try:
+                    metadata = path.lstat()
+                except FileNotFoundError:
+                    continue
+                if stat_is_link_or_reparse(metadata):
+                    continue
+                if stat.S_ISDIR(metadata.st_mode):
+                    descend.append(name)
+                    continue
+                if not stat.S_ISREG(metadata.st_mode):
+                    continue
+                try:
+                    raw, opened = secure_root.read_bytes(
+                        relative, _BRIDGE_ARTIFACT_MAX_BYTES, expected=metadata, allow_hardlinks=True
+                    )
+                    safe = raw
+                    for value in values:
+                        # Equal-length masking also preserves offsets in opaque artifacts.
+                        safe = safe.replace(value, b"*" * len(value))
+                    if safe != raw:
+                        if os.name == "posix":
+                            _replace_bridge_artifact(secure_root, relative, opened, safe)
+                        else:
+                            # Windows pins the opened parent chain against renames.
+                            write_output_file_atomically(path, safe)
+                except (OSError, ValueError):
+                    unmasked.append(relative.as_posix())
+            directories[:] = descend
+    return unmasked
+
+
+def _bridge_artifacts_masked(logs_dir: Path, tokens: set[str]) -> bool:
+    """Mask capabilities in retained native artifacts; return whether none can remain."""
+    try:
+        unmasked = _redact_bridge_artifacts(logs_dir, tokens)
+    except (OSError, ValueError) as exc:
+        unmasked = [str(exc)]
+    if unmasked:
+        logger.warning(
+            "Could not mask the NVIDIA Build bridge credential in %d agent log entries under %s, starting with %s.",
+            len(unmasked),
+            logs_dir,
+            unmasked[0],
+        )
+    return not unmasked
 
 
 async def _await_task_uninterruptibly(
@@ -956,6 +1091,9 @@ class _NvidiaBuildBridgeAgent:
         run_failed = False
         try:
             await self._start_bridge(environment)
+            tokens = getattr(self, "_nvidia_build_artifact_tokens", set())
+            tokens.add(self._bridge_client_token())
+            self._nvidia_build_artifact_tokens = tokens
             self._nvidia_build_bridge_client_env = self._bridge_client_environment()
             await self._prepare_bridge_client(environment)
             await super().run(instruction=instruction, environment=environment, context=context)
@@ -971,6 +1109,20 @@ class _NvidiaBuildBridgeAgent:
                 except BaseException:
                     if not run_failed:
                         raise
+
+    def populate_context_post_run(self, context: Any) -> None:
+        # Harbor downloads native logs after run() has already cleaned up the
+        # bridge. Keep its capabilities private until that retention boundary.
+        tokens = getattr(self, "_nvidia_build_artifact_tokens", set())
+        if not _bridge_artifacts_masked(self.logs_dir, tokens):
+            # Never convert logs that may still hold a capability. Keep it recorded
+            # so Harbor's recovery call after a later trial error skips them too.
+            return
+        try:
+            super().populate_context_post_run(context)
+        finally:
+            if _bridge_artifacts_masked(self.logs_dir, tokens):
+                self._nvidia_build_artifact_tokens = set()
 
 
 class SkillEvaluatorNvidiaBuildCodex(_NvidiaBuildBridgeAgent, SkillEvaluatorCodex):

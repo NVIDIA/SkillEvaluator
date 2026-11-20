@@ -58,6 +58,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
+  unreadable candidate logs, preserving source priority and reporting skipped
+  artifacts while recovering available evidence from later agent logs.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
@@ -66,6 +69,17 @@ All notable changes to SkillEvaluator are documented in this file.
   list) now report zero tool seconds even when LLM timing is missing or invalid.
   Previously, those missing/invalid-LLM cases had no timing, so the arm's
   tool-seconds total was `N/A`.
+- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with
+  a skill, and the `--policy` and `--quality-config` files are read within the
+  structured-data limits. Chained YAML merge keys no longer take memory and time
+  that double with each level (a 943-byte file took over a gigabyte), and nested
+  aliases no longer expand when a dataset is staged or a policy value is
+  stringified. A file over a limit is an invalid dataset, policy or config, not
+  an out-of-memory kill. JSON datasets nested past the parser's recursion limit
+  are invalid datasets, not a traceback. A YAML dataset must stay within 1,024
+  items per list or mapping and 20,000 nodes. A quality config with nesting past
+  100 levels or an integer past 14,000 bits is refused with a structure-limit
+  message instead of the settings' own error.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the

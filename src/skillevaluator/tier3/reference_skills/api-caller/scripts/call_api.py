@@ -101,21 +101,47 @@ def fetch_openapi_spec(spec_url: str) -> tuple[dict | None, str]:
     return None, spec_url
 
 
+_HTTP_METHODS = ("get", "post", "put", "delete", "patch")
+
+
 def find_operation(spec: dict, operation_id: str) -> tuple:
     """Find an operation in the OpenAPI spec by operation ID."""
     paths = spec.get("paths", {})
 
     for path, methods in paths.items():
+        if not isinstance(methods, dict):
+            continue
         for method, details in methods.items():
-            if method in ("get", "post", "put", "delete", "patch") and details.get("operationId") == operation_id:
+            if method in _HTTP_METHODS and isinstance(details, dict) and details.get("operationId") == operation_id:
                 return path, method.upper(), details
 
     return None, None, None
 
 
-def build_url_from_spec(spec: dict, path: str, params: dict, spec_url: str | None = None) -> str:
+def build_url_from_spec(
+    spec: dict,
+    path: str,
+    params: dict,
+    spec_url: str | None = None,
+    *,
+    operation: dict | None = None,
+    path_item: dict | None = None,
+) -> str:
     """Build a URL from OpenAPI spec and parameters."""
-    base_url = resolve_openapi_server_url(spec, spec_url)
+    if path_item is None:
+        paths = spec.get("paths")
+        if isinstance(paths, dict) and isinstance(paths.get(path), dict):
+            path_item = paths[path]
+    if operation is None and isinstance(path_item, dict):
+        candidates = [
+            details
+            for method, details in path_item.items()
+            if method in (*_HTTP_METHODS, "head", "options", "trace") and isinstance(details, dict)
+        ]
+        if len(candidates) == 1:
+            operation = candidates[0]
+
+    base_url = resolve_openapi_server_url(spec, spec_url, path_item=path_item, operation=operation)
 
     # Replace path parameters
     url_path = path
@@ -206,13 +232,15 @@ def main():
             _print_json({"success": False, "error": f"Failed to fetch OpenAPI spec from {args.spec}"}, file=sys.stderr)
             sys.exit(1)
 
-        path, spec_method, _operation = find_operation(spec, args.operation)
+        path, spec_method, operation = find_operation(spec, args.operation)
         if not path:
             # List available operations
             available = []
             for p, methods in spec.get("paths", {}).items():
+                if not isinstance(methods, dict):
+                    continue
                 for m, details in methods.items():
-                    if "operationId" in details:
+                    if m in _HTTP_METHODS and isinstance(details, dict) and "operationId" in details:
                         available.append(f"{m.upper()} {p} ({details['operationId']})")
 
             _print_json(
@@ -226,7 +254,7 @@ def main():
             sys.exit(1)
 
         try:
-            url = build_url_from_spec(spec, path, params, spec_url=spec_final_url)
+            url = build_url_from_spec(spec, path, params, spec_url=spec_final_url, operation=operation)
         except ValueError as exc:
             _print_json({"success": False, "error": f"Invalid input: {exc}"}, file=sys.stderr)
             sys.exit(1)

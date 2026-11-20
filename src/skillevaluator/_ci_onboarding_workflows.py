@@ -11,10 +11,11 @@ import yaml
 from skillevaluator._ci_onboarding_git import SetupError, safe_relative
 
 EVALUATOR = "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml"
+STABLE_EVALUATOR = "NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable"
 WORKFLOW = re.compile(
     r"(?P<repository>[A-Za-z0-9][A-Za-z0-9_.-]*/[A-Za-z0-9][A-Za-z0-9_.-]*)/"
     r"(?P<path>\.github/workflows/[A-Za-z0-9_-][A-Za-z0-9_.-]*\.ya?ml)@"
-    r"(?P<ref>[0-9a-f]{40}|v[0-9]+(?:\.[0-9]+)*)"
+    r"(?P<ref>[0-9a-f]{40}|v[0-9]+(?:\.[0-9]+)*|stable)"
 )
 
 
@@ -120,7 +121,7 @@ def existing_scan(content: str) -> ExistingScan:
         raise SetupError("Matrix or secret-passing scan callers require manual reporting setup.")
     uses = job.get("uses")
     match = WORKFLOW.fullmatch(uses) if isinstance(uses, str) else None
-    if not match:
+    if not match or (match["ref"] == "stable" and uses != STABLE_EVALUATOR):
         raise SetupError("The existing scan must call a full-SHA workflow or an approved version tag such as @v3.")
     inputs = job.get("with", {})
     if not isinstance(inputs, dict) or not isinstance(inputs.get("paths"), str) or "${{" in inputs["paths"]:

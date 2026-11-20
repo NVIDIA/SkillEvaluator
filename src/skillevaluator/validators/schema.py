@@ -37,6 +37,11 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Finding, Severity
 from skillevaluator.models.skill import SkillFrontmatter, SkillManifest
 from skillevaluator.utils.path_security import matches_filesystem_name
+from skillevaluator.utils.structured_data import (
+    StructuredDataLimitError,
+    StructuredDataSyntaxError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidationResult, ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN, format_validation_location
 from skillevaluator.validators.policy import AUTHOR_SHAPE_PATTERN, ValidationPolicy, default_policy
@@ -196,7 +201,10 @@ def _duplicate_frontmatter_keys(frontmatter_yaml: str) -> list[tuple[str, int]]:
     """Return ``(dotted_key, line)`` for every repeated mapping key (PyYAML keeps the last silently)."""
     try:
         root = yaml.compose(frontmatter_yaml, Loader=yaml.SafeLoader)
-    except yaml.YAMLError:
+    except (yaml.YAMLError, RecursionError, ValueError):
+        # ``compose`` recurses once per nesting level, and the scanner raises a plain ValueError
+        # for an over-long ``%YAML`` number or an out-of-range ``\U`` escape. The caller that
+        # parses the same text reports those; this helper only looks for repeated keys.
         return []
     duplicates: list[tuple[str, int]] = []
     stack: list[tuple[yaml.Node, str]] = [(root, "")] if root is not None else []
@@ -459,17 +467,31 @@ class SchemaValidator(ValidatorBase):
         frontmatter_yaml, markdown_content = match.groups()
 
         try:
-            data = yaml.safe_load(frontmatter_yaml)
-        except yaml.YAMLError as e:
+            data = load_bounded_yaml(frontmatter_yaml, last_key_wins=True)
+        except StructuredDataLimitError as e:
+            result.add_finding(
+                Finding(
+                    category="SCHEMA",
+                    severity=Severity.HIGH,
+                    check_name="yaml_complexity",
+                    message=f"Frontmatter exceeds the YAML complexity limits: {e}",
+                    file_path=file_path,
+                    line_number=2,
+                    suggestion="Remove nested anchors, aliases, merge keys or very large values from the frontmatter",
+                )
+            )
+            return result
+        except StructuredDataSyntaxError as e:
+            cause = e.__cause__ or e
             # Extract line number from YAML error if available
-            line_num = getattr(e, "problem_mark", None)
+            line_num = getattr(cause, "problem_mark", None)
             line_number = line_num.line + 2 if line_num else 2  # +2 for --- offset
             result.add_finding(
                 Finding(
                     category="SCHEMA",
                     severity=Severity.HIGH,
                     check_name="yaml_syntax",
-                    message=f"Invalid YAML syntax in frontmatter: {e}",
+                    message=f"Invalid YAML syntax in frontmatter: {cause}",
                     file_path=file_path,
                     line_number=line_number,
                     suggestion="Fix YAML syntax errors (check indentation, quotes, colons)",

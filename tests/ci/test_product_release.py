@@ -190,6 +190,60 @@ def test_assembles_generated_bundle_and_verifies_exact_assets(release):
 
 
 @pytest.mark.parametrize(
+    ("invalid", "error"),
+    [
+        (None, ""),
+        ("changelog", "no dated entry"),
+        ("digest", "does not match the reviewed release digest"),
+        ("missing-image", "does not match the reviewed release digest"),
+        ("source", "does not match the reviewed source"),
+    ],
+)
+def test_validate_checks_the_reviewed_changelog_and_live_public_image(release, monkeypatch, capsys, invalid, error):
+    repo, source, dist, assets, candidate = release
+    result = release_command(repo, source, "assemble", "--dist", dist, "--output", assets)
+    assert result.returncode == 0, result.stderr
+    title = f"## {VERSION}" if invalid == "changelog" else f"## {VERSION} - 2026-11-20"
+    (repo / "CHANGELOG.md").write_text(f"# Changelog\n\n{title}\n\nPublished changes.\n", encoding="utf-8")
+    repository = "ghcr.io/nvidia/skillevaluator-tier1"
+    published = {"digest": f"{repository}@sha256:{'b' * 64}", "missing-image": None}.get(invalid, IMAGE)
+    lookups = []
+
+    def resolve_image(repo_name, source_revision):
+        lookups.append((repo_name, source_revision))
+        return published
+
+    def unexpected_write(*_, **__):
+        pytest.fail("Release validation must avoid GitHub writes")
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(github_release.release_image, "resolve_digest", resolve_image)
+    monkeypatch.setattr(github_release, "api", unexpected_write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "github_release.py",
+            "verify-release-metadata",
+            "--version",
+            VERSION,
+            "--source-sha",
+            candidate if invalid == "source" else source,
+            "--assets",
+            str(assets),
+        ],
+    )
+    assert github_release.main() == (1 if error else 0)
+    stderr = capsys.readouterr().err
+    if error:
+        assert error in stderr
+    else:
+        assert not stderr
+    if invalid in (None, "digest", "missing-image"):
+        assert lookups == [(repository, candidate)]
+
+
+@pytest.mark.parametrize(
     "artifact_change",
     [
         None,

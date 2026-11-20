@@ -35,6 +35,30 @@ def test_release_is_only_dispatched_manually_and_defaults_to_validation():
     assert any("inspect-indexes" in step.get("run", "") for step in jobs["prepare"]["steps"])
 
 
+def test_validate_checks_release_metadata_with_the_current_workflow_from_the_reviewed_checkout():
+    workflow = yaml.load((ROOT / ".github/workflows/release.yml").read_text(), Loader=yaml.BaseLoader)
+    job = workflow["jobs"]["prepare"]
+    steps = job["steps"]
+    metadata = [i for i, step in enumerate(steps) if "github_release.py verify-release-metadata" in step.get("run", "")]
+    assert len(metadata) == 1
+    (metadata_index,) = metadata
+    assert "../release-control/ci/github_release.py" in steps[metadata_index]["run"]
+    assert job["defaults"]["run"]["working-directory"] == "source"
+    assert job["permissions"] == {"actions": "read", "contents": "read"}
+    checkout_refs = {
+        step["with"]["path"]: step["with"]["ref"]
+        for step in steps[:metadata_index]
+        if step.get("uses", "").startswith("actions/checkout@")
+    }
+    assert checkout_refs == {
+        "release-control": "${{ github.workflow_sha }}",
+        "source": "${{ needs.preflight.outputs.source_sha }}",
+    }
+    verify = next(i for i, step in enumerate(steps) if "product_release.py verify-assets" in step.get("run", ""))
+    retain = next(i for i, step in enumerate(steps) if "upload-artifact@" in step.get("uses", ""))
+    assert verify < metadata_index < retain
+
+
 @pytest.mark.parametrize("name", ["release", "release-tier1-image", "release-kitmaker"])
 def test_release_workflows_scope_permissions_and_credentials(name):
     source = (ROOT / ".github" / "workflows" / f"{name}.yml").read_text(encoding="utf-8")
@@ -113,17 +137,22 @@ def test_public_verification_rejects_a_mutable_release(release, monkeypatch, tmp
     download.assert_not_called()
 
 
-def test_registry_revision_must_match_the_reviewed_digest(release, monkeypatch, tmp_path):
+def test_publish_rechecks_the_public_image_before_tagging(release, monkeypatch, tmp_path):
     repository = "ghcr.io/nvidia/skillevaluator-tier1"
     (tmp_path / "artifact-manifest.json").write_text(
         json.dumps({"image": f"{repository}@sha256:{'a' * 64}", "image_source_commit": SHA})
     )
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
     monkeypatch.setattr(release.product_release, "verify_assets", Mock())
     resolve = Mock(return_value=f"{repository}@sha256:{'b' * 64}")
     monkeypatch.setattr(release.release_image, "resolve_digest", resolve)
+    writes = Mock()
+    monkeypatch.setattr(release, "api", writes)
     with pytest.raises(ValueError, match="does not match the reviewed release digest"):
-        release.verify_local(VERSION, SHA, tmp_path)
+        release.stage(VERSION, SHA, tmp_path, "123-2")
     resolve.assert_called_once_with(repository, SHA)
+    writes.assert_not_called()
 
 
 def release_run(**overrides):
@@ -370,13 +399,29 @@ def test_initial_publication_checks_package_conflicts_before_tagging(release, mo
     writes.assert_not_called()
 
 
+def test_publish_rechecks_the_dated_changelog_before_tagging(release, monkeypatch, tmp_path):
+    (tmp_path / "CHANGELOG.md").write_text(f"## {VERSION}\n\nPublished changes.\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setattr(release, "tag_target", lambda _: None)
+    monkeypatch.setattr(release, "get_release", lambda _: None)
+    monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
+    monkeypatch.setattr(release.product_release, "inspect_public_indexes", Mock())
+    writes = Mock()
+    monkeypatch.setattr(release, "api", writes)
+    with pytest.raises(ValueError, match="no dated entry"):
+        release.stage(VERSION, SHA, tmp_path, "123-2")
+    writes.assert_not_called()
+
+
 def test_immutable_resume_reaches_kitmaker_even_when_an_index_is_pending(release, monkeypatch, tmp_path):
     monkeypatch.setattr(release, "tag_target", lambda _: SHA)
     monkeypatch.setattr(release, "get_release", lambda _: {"draft": False, "immutable": True})
     monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
     monkeypatch.setattr(release, "verify_staged", Mock())
-    monkeypatch.setattr(release, "release_notes", lambda *_: "Frozen release notes")
+    notes = Mock(side_effect=ValueError("CHANGELOG.md has no dated release entry."))
+    monkeypatch.setattr(release, "release_notes", notes)
     inspect_indexes = Mock(side_effect=ValueError("An artifact is present on only one index"))
     monkeypatch.setattr(release.product_release, "inspect_public_indexes", inspect_indexes)
     release.stage(VERSION, SHA, tmp_path, "123-2")
+    notes.assert_not_called()
     inspect_indexes.assert_not_called()

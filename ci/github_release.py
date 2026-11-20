@@ -199,9 +199,15 @@ def restore(version: str, source_sha: str, output: Path) -> bool:
     if match is None:
         raise ValueError("Draft lacks its original run artifact. Reconcile the draft before retrying.")
     run, attempt = match.groups()
-    if upstream_release_run(run, attempt) is None:
-        raise ValueError("The draft artifact must originate from an upstream manual release run.")
-    gh("run", "download", run, "--name", f"product-release-{version}-{run}-{attempt}", "--dir", str(output))
+    try:
+        origin = upstream_release_run(run, attempt)
+        if origin is None:
+            raise ValueError("The draft artifact must originate from an upstream manual release run.")
+        download_run_artifact(version, f"product-release-{version}-{run}-{attempt}", origin, output)
+    except (BadZipFile, ValueError, subprocess.CalledProcessError) as exc:
+        raise ValueError(
+            f"Could not restore the original draft artifact. {exc} Reconcile the draft before retrying."
+        ) from exc
     return True
 
 
@@ -210,26 +216,11 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def validation_artifact(version: str, run: str, attempt: str) -> dict:
-    try:
-        origin = upstream_release_run(run, attempt)
-    except subprocess.CalledProcessError as exc:
-        raise ValueError("The validation attempt is unavailable. Run Validate release again.") from exc
-    if (
-        origin is None
-        or origin.get("status") != "completed"
-        or origin.get("conclusion") != "success"
-        or origin.get("display_title") != f"Validate release · SkillEvaluator {version}"
-    ):
-        raise ValueError("Select a successful Validate release attempt for this version on upstream main.")
-
-    name = f"validated-release-{version}-{run}-{attempt}"
-    listing = api(f"actions/runs/{run}/artifacts?name={name}")
+def download_run_artifact(version: str, name: str, origin: dict, output: Path) -> None:
+    listing = api(f"actions/runs/{origin['id']}/artifacts?name={name}")
     artifacts = listing.get("artifacts") if isinstance(listing, dict) else None
     if not isinstance(artifacts, list) or len(artifacts) != 1 or listing.get("total_count") != 1:
-        raise ValueError(
-            "Expected one retained validation artifact for the selected attempt. Run Validate release again."
-        )
+        raise ValueError("Expected one retained Actions artifact for the selected attempt.")
 
     artifact = artifacts[0]
     lineage = artifact.get("workflow_run") if isinstance(artifact, dict) else None
@@ -251,10 +242,42 @@ def validation_artifact(version: str, run: str, attempt: str) -> dict:
         or artifact["size_in_bytes"] < 1
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest")))
     ):
-        raise ValueError(
-            "The retained validation artifact is expired or its identity is invalid. Run Validate release again."
-        )
-    return artifact
+        raise ValueError("The retained Actions artifact is expired or its identity is invalid.")
+
+    with tempfile.TemporaryDirectory() as temp:
+        archive = Path(temp) / "release-artifact.zip"
+        with archive.open("xb") as stream:
+            subprocess.run(
+                ["gh", "api", f"{API_ROOT}/actions/artifacts/{artifact['id']}/zip"],
+                check=True,
+                stdout=stream,
+            )
+        if archive.stat().st_size != artifact["size_in_bytes"] or f"sha256:{digest(archive)}" != artifact["digest"]:
+            raise ValueError("The Actions artifact ZIP differs from the bytes recorded by GitHub.")
+        with ZipFile(archive) as files:
+            if sorted(files.namelist()) != sorted(expected_filenames(version)):
+                raise ValueError("The Actions artifact must contain exactly the five release files.")
+            output.mkdir()
+            files.extractall(output)
+
+
+def restore_validation(version: str, run: str, attempt: str, output: Path) -> None:
+    try:
+        origin = upstream_release_run(run, attempt)
+    except subprocess.CalledProcessError as exc:
+        raise ValueError("The validation attempt is unavailable. Run Validate release again.") from exc
+    if (
+        origin is None
+        or origin.get("status") != "completed"
+        or origin.get("conclusion") != "success"
+        or origin.get("display_title") != f"Validate release · SkillEvaluator {version}"
+    ):
+        raise ValueError("Select a successful Validate release attempt for this version on upstream main.")
+
+    try:
+        download_run_artifact(version, f"validated-release-{version}-{run}-{attempt}", origin, output)
+    except (BadZipFile, ValueError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"Could not verify the validation artifact. {exc} Run Validate release again.") from exc
 
 
 def acquire_publication(version: str, source_sha: str, output: Path, run_ref: str, manifest_sha256: str) -> bool:
@@ -267,26 +290,8 @@ def acquire_publication(version: str, source_sha: str, output: Path, run_ref: st
         raise ValueError(
             "Copy validation_run and validation_manifest_sha256 from a successful Validate release summary."
         )
-    names = expected_filenames(version)
-    artifact = validation_artifact(version, *match.groups())
-    with tempfile.TemporaryDirectory() as temp:
-        archive = Path(temp) / "validated-release.zip"
-        try:
-            with archive.open("xb") as stream:
-                subprocess.run(
-                    ["gh", "api", f"{API_ROOT}/actions/artifacts/{artifact['id']}/zip"],
-                    check=True,
-                    stdout=stream,
-                )
-        except subprocess.CalledProcessError as exc:
-            raise ValueError("The validation artifact could not be downloaded. Run Validate release again.") from exc
-        if archive.stat().st_size != artifact["size_in_bytes"] or f"sha256:{digest(archive)}" != artifact["digest"]:
-            raise ValueError("The validation artifact ZIP differs from the bytes recorded by GitHub.")
-        with ZipFile(archive) as files:
-            if sorted(files.namelist()) != sorted(names):
-                raise ValueError("The validation artifact must contain exactly the five release files.")
-            output.mkdir()
-            files.extractall(output)
+    run, attempt = match.groups()
+    restore_validation(version, run, attempt, output)
 
     manifest, actual_sha256 = product_release.checked_manifest(version, output)
     if actual_sha256 != manifest_sha256 or manifest.get("source_commit") != source_sha:

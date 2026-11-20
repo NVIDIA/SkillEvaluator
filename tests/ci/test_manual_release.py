@@ -1,11 +1,14 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
 import importlib.util
+import io
 import json
 import re
 from pathlib import Path
 from unittest.mock import Mock
+from zipfile import ZipFile
 
 import pytest
 import yaml
@@ -75,22 +78,6 @@ def test_conflicting_tag_blocks_all_release_writes(release, monkeypatch, tmp_pat
     publish.assert_not_called()
 
 
-def test_partial_draft_requires_the_original_run_artifact(release, monkeypatch, tmp_path):
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(
-        release,
-        "get_release",
-        lambda _: {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": []},
-    )
-    download = Mock()
-    monkeypatch.setattr(release, "gh", download)
-    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
-    assert release.restore(VERSION, SHA, tmp_path)
-    download.assert_called_once_with(
-        "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(tmp_path)
-    )
-
-
 def test_draft_with_conflicting_bytes_is_never_published(release, monkeypatch, tmp_path):
     tag = f"v{VERSION}"
     (tmp_path / "SHA256SUMS.txt").write_bytes(b"verified checksums")
@@ -124,23 +111,6 @@ def test_public_verification_rejects_a_mutable_release(release, monkeypatch, tmp
     with pytest.raises(ValueError, match="immutable, published"):
         release.verify_public(VERSION, SHA, tmp_path)
     download.assert_not_called()
-
-
-def test_interrupted_github_upload_recovers_original_artifact(release, monkeypatch, tmp_path):
-    names = sorted(release.expected_filenames(VERSION))
-    assets = [{"name": name, "state": "uploaded"} for name in names]
-    assets[0].update(state="starter", size=0)
-    draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": assets}
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(release, "get_release", lambda _: draft)
-    download = Mock()
-    monkeypatch.setattr(release, "gh", download)
-    monkeypatch.setattr(release, "api", Mock(return_value=release_run()))
-    output = tmp_path / "release"
-    assert release.restore(VERSION, SHA, output)
-    download.assert_called_once_with(
-        "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(output)
-    )
 
 
 def test_registry_revision_must_match_the_reviewed_digest(release, monkeypatch, tmp_path):
@@ -221,7 +191,7 @@ def test_new_release_rejects_unqualified_validation_attempts(release, monkeypatc
     origin = Mock(return_value=release_run(**metadata))
     monkeypatch.setattr(release, "api", origin)
     download = Mock()
-    monkeypatch.setattr(release, "gh", download)
+    monkeypatch.setattr(release.subprocess, "run", download)
     with pytest.raises(ValueError, match="successful Validate release"):
         release.acquire_publication(VERSION, SHA, tmp_path / "assets", "123-2", "a" * 64)
     origin.assert_called_once_with("actions/runs/123/attempts/2")
@@ -260,22 +230,95 @@ def test_missing_or_expired_validation_artifact_requires_revalidation(release, m
     download.assert_not_called()
 
 
-def test_publish_recovers_the_original_draft_without_a_validation_artifact(release, monkeypatch, tmp_path):
-    draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": []}
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(release, "get_release", lambda _: draft)
-    origin = Mock(
-        return_value=release_run(conclusion="failure", display_title=f"Publish release · SkillEvaluator {VERSION}")
-    )
-    monkeypatch.setattr(release, "api", origin)
-    download = Mock()
-    monkeypatch.setattr(release, "gh", download)
+@pytest.fixture
+def draft_recovery(release, monkeypatch):
+    def configure(state="empty", fault=None):
+        contents = {
+            "artifact-manifest.json": b"original manifest",
+            "SHA256SUMS.txt": b"original checksums",
+            f"skillevaluator-{VERSION}-py3-none-any.whl": b"original wheel",
+            f"skillevaluator-{VERSION}.tar.gz": b"original sdist",
+            f"skillevaluator-ci-{VERSION}.zip": b"original CI bundle",
+        }
+        staged = [{"name": name, "state": "uploaded"} for name in contents] if state != "empty" else []
+        if state == "interrupted":
+            staged[0].update(state="starter", size=0)
+        draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": staged}
+        monkeypatch.setattr(release, "tag_target", lambda _: SHA)
+        monkeypatch.setattr(release, "get_release", lambda _: draft)
+
+        archive = io.BytesIO()
+        with ZipFile(archive, "w") as files:
+            for name, data in contents.items():
+                files.writestr(name, data)
+            if fault == "extra-file":
+                files.writestr("unexpected.bin", b"extra file")
+        zipped = archive.getvalue()
+        artifact = {
+            "id": 789,
+            "name": f"product-release-{VERSION}-123-2",
+            "expired": fault == "expired",
+            "size_in_bytes": len(zipped) + (fault == "size"),
+            "digest": "sha256:" + hashlib.sha256(b"different bytes" if fault == "digest" else zipped).hexdigest(),
+            "workflow_run": {
+                "id": 456 if fault == "lineage" else 123,
+                "repository_id": 42,
+                "head_repository_id": 42,
+                "head_branch": "main",
+                "head_sha": SHA,
+            },
+        }
+        artifacts = {
+            "missing": [],
+            "duplicate": [artifact, {**artifact, "id": 790}],
+            "name": [{**artifact, "name": f"product-release-{VERSION}-123-1"}],
+        }.get(fault, [artifact])
+        requests = Mock(
+            side_effect=[
+                release_run(conclusion="failure", display_title=f"Publish release · SkillEvaluator {VERSION}"),
+                {"total_count": len(artifacts), "artifacts": artifacts},
+            ]
+        )
+        monkeypatch.setattr(release, "api", requests)
+
+        def download(command, *, check, stdout):
+            assert command == ["gh", "api", "repos/NVIDIA/SkillEvaluator/actions/artifacts/789/zip"]
+            assert check
+            assert fault in (None, "size", "digest", "extra-file")
+            stdout.write(zipped)
+
+        monkeypatch.setattr(release.subprocess, "run", download)
+        legacy_download = Mock(side_effect=AssertionError("Recover draft archives by numeric artifact ID"))
+        monkeypatch.setattr(release, "gh", legacy_download)
+        return contents, requests
+
+    return configure
+
+
+@pytest.mark.parametrize("draft_state", ["empty", "interrupted", "complete"])
+def test_publish_recovers_the_original_draft_without_a_validation_artifact(
+    release, draft_recovery, tmp_path, draft_state
+):
+    contents, requests = draft_recovery(state=draft_state)
     output = tmp_path / "assets"
     assert release.acquire_publication(VERSION, SHA, output, "", "") is False
-    origin.assert_called_once_with("actions/runs/123/attempts/2")
-    download.assert_called_once_with(
-        "run", "download", "123", "--name", f"product-release-{VERSION}-123-2", "--dir", str(output)
-    )
+    assert {path.name: path.read_bytes() for path in output.iterdir()} == contents
+    assert [call.args for call in requests.call_args_list] == [
+        ("actions/runs/123/attempts/2",),
+        (f"actions/runs/123/artifacts?name=product-release-{VERSION}-123-2",),
+    ]
+
+
+@pytest.mark.parametrize(
+    "fault",
+    ["missing", "duplicate", "name", "expired", "lineage", "size", "digest", "extra-file"],
+)
+def test_draft_rejects_an_unverified_recovery_archive(release, draft_recovery, tmp_path, fault):
+    draft_recovery(fault=fault)
+    output = tmp_path / "assets"
+    with pytest.raises(ValueError, match=r"original draft artifact.*Reconcile the draft before retrying"):
+        release.acquire_publication(VERSION, SHA, output, "", "")
+    assert not output.exists()
 
 
 def test_publish_recovers_immutable_bytes_without_a_validation_artifact(release, monkeypatch, tmp_path):
@@ -300,33 +343,13 @@ def test_publish_recovers_immutable_bytes_without_a_validation_artifact(release,
     checkout_run.assert_not_called()
 
 
-def test_complete_draft_restores_original_actions_bytes(release, monkeypatch, tmp_path):
-    draft = {
-        "draft": True,
-        "body": "<!-- skillevaluator-stage: 123-2 -->",
-        "assets": [{"name": name, "state": "uploaded"} for name in release.expected_filenames(VERSION)],
-    }
-    monkeypatch.setattr(release, "tag_target", lambda _: SHA)
-    monkeypatch.setattr(release, "get_release", lambda _: draft)
-    run = Mock(return_value=release_run())
-    run_download = Mock()
-    release_download = Mock()
-    monkeypatch.setattr(release, "api", run)
-    monkeypatch.setattr(release, "gh", run_download)
-    monkeypatch.setattr(release, "download_asset", release_download)
-    assert release.restore(VERSION, SHA, tmp_path / "staged")
-    run.assert_called_once_with("actions/runs/123/attempts/2")
-    run_download.assert_called_once()
-    release_download.assert_not_called()
-
-
 def test_draft_cannot_recover_artifacts_from_a_pull_request(release, monkeypatch, tmp_path):
     draft = {"draft": True, "body": "<!-- skillevaluator-stage: 123-2 -->", "assets": []}
     monkeypatch.setattr(release, "tag_target", lambda _: SHA)
     monkeypatch.setattr(release, "get_release", lambda _: draft)
     monkeypatch.setattr(release, "api", Mock(return_value=release_run(event="pull_request")))
     run_download = Mock()
-    monkeypatch.setattr(release, "gh", run_download)
+    monkeypatch.setattr(release.subprocess, "run", run_download)
     with pytest.raises(ValueError, match="upstream manual release run"):
         release.restore(VERSION, SHA, tmp_path / "staged")
     run_download.assert_not_called()

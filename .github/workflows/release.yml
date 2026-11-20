@@ -202,6 +202,7 @@ jobs:
           MANIFEST_SHA256: ${{ inputs.validation_manifest_sha256 }}
         run: |
           # A draft can be invisible to read-only tokens. Check after approval.
+          # Use the workflow checkout because an older reviewed source may predate the acquire command.
           new_release="$(python3 ../release-control/ci/github_release.py acquire --version "$VERSION" \
             --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/staged-release" \
             --validation-run "$VALIDATION_RUN" --validation-manifest-sha256 "$MANIFEST_SHA256")"

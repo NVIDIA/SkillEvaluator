@@ -9,6 +9,7 @@ similarity >= threshold to at least one other member in the group.
 
 from __future__ import annotations
 
+from array import array
 from dataclasses import dataclass, field, replace
 from itertools import combinations
 from typing import TYPE_CHECKING
@@ -108,11 +109,13 @@ def build_clusters(
         return group is not None and group == chunks[j].split_group
 
     uf = UnionFind(n)
-    pair_scores: dict[tuple[int, int], float] = {}
+    # Row i contains the upper-triangle scores (i, i + 1), ..., (i, n - 1).
+    # Packed doubles avoid a tuple key and boxed float for every pair.
+    pair_scores = [array("d") for _ in range(n - 1)]
 
     for i, j in combinations(range(n), 2):
         score = unit_vector_similarity(units[i], units[j])
-        pair_scores[(i, j)] = score
+        pair_scores[i].append(score)
         if score >= threshold and not siblings(i, j):
             uf.union(i, j)
 
@@ -122,7 +125,7 @@ def build_clusters(
             continue
 
         members = _merge_split_pieces([chunks[i] for i in indices])
-        scores = [pair_scores[(i, j)] for i, j in combinations(indices, 2) if not siblings(i, j)]
+        scores = array("d", (pair_scores[i][j - i - 1] for i, j in combinations(indices, 2) if not siblings(i, j)))
 
         clusters.append(
             ContentCluster(

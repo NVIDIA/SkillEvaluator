@@ -432,3 +432,184 @@ def test_relative_server_resolves_against_final_spec_url_after_redirect() -> Non
     result = json.loads(called.stdout)
     assert result["url"] == f"{origin}/current/openapi/v2/books/7"
     assert result["data"] == {"id": 7}
+
+
+def test_operation_relative_servers_without_document_servers() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec_url = "http://docs.example/specs/openapi.json"
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "servers": [{"url": "/v2"}],
+                }
+            }
+        },
+    }
+
+    path, _method, operation = caller.find_operation(spec, "listPets")
+    built = caller.build_url_from_spec(spec, path, {}, spec_url=spec_url, operation=operation)
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+
+    assert built == "http://docs.example/v2/pets"
+    assert parsed["base_url"] == "http://docs.example/"
+    assert parsed["operations"][0]["full_url"] == "http://docs.example/v2/pets"
+
+
+def test_operation_and_path_item_servers_route_away_from_spec_origin(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec_url = "http://docs.example/openapi.json"
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Pets", "version": "1.0.0"},
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "servers": [{"url": "http://api.example/v2"}],
+                }
+            },
+            "/owners/{ownerId}": {
+                "servers": [
+                    {
+                        "url": "http://{env}.api.example/v2",
+                        "variables": {"env": {"default": "prod"}},
+                    }
+                ],
+                "get": {
+                    "operationId": "getOwner",
+                    "parameters": [{"name": "ownerId", "in": "path", "required": True}],
+                },
+            },
+        },
+    }
+
+    pet_path, _method, pet_op = caller.find_operation(spec, "listPets")
+    owner_path, _method, owner_op = caller.find_operation(spec, "getOwner")
+    assert caller.build_url_from_spec(spec, pet_path, {}, spec_url=spec_url, operation=pet_op) == (
+        "http://api.example/v2/pets"
+    )
+    assert (
+        caller.build_url_from_spec(spec, owner_path, {"ownerId": 42}, spec_url=spec_url, operation=owner_op)
+        == "http://prod.api.example/v2/owners/42"
+    )
+
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+    assert parsed["base_url"] == "http://docs.example/"
+    assert {op["operation_id"]: op["full_url"] for op in parsed["operations"]} == {
+        "listPets": "http://api.example/v2/pets",
+        "getOwner": "http://prod.api.example/v2/owners/{ownerId}",
+    }
+
+    sent: list[tuple[str, str, dict | None]] = []
+
+    def fake_make_request(
+        url: str, method: str = "GET", data: object = None, headers: dict | None = None, timeout: int = 30
+    ) -> dict:
+        del data, timeout
+        caller.validate_http_url(url)
+        sent.append((url, method, headers))
+        return {
+            "success": True,
+            "status_code": 200,
+            "headers": {},
+            "data": [],
+            "error": None,
+            "url": url,
+            "method": method,
+        }
+
+    monkeypatch.setattr(caller, "fetch_openapi_spec", lambda url: (spec, url))
+    monkeypatch.setattr(caller, "make_request", fake_make_request)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "call_api.py",
+            "--spec",
+            spec_url,
+            "--operation",
+            "listPets",
+            "--headers",
+            json.dumps({"Authorization": "Bearer secret-token"}),
+        ],
+    )
+
+    with pytest.raises(SystemExit) as exc:
+        caller.main()
+
+    assert exc.value.code == 0
+    capsys.readouterr()
+    assert sent == [("http://api.example/v2/pets", "GET", {"Authorization": "Bearer secret-token"})]
+
+
+def test_server_precedence_operation_overrides_path_item_overrides_document() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec_url = "http://docs.example/openapi.json"
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Precedence", "version": "1.0.0"},
+        "servers": [{"url": "http://doc.example/v1"}],
+        "paths": {
+            "/pets": {
+                "servers": [{"url": "http://path.example/v2"}],
+                "get": {
+                    "operationId": "listPets",
+                    "servers": [{"url": "http://op.example/v3"}],
+                },
+                "post": {
+                    "operationId": "createPet",
+                },
+            },
+            "/health": {
+                "get": {
+                    "operationId": "getHealth",
+                }
+            },
+        },
+    }
+
+    resolved_calls = {}
+    for op_id in ("listPets", "createPet", "getHealth"):
+        path, _method, operation = caller.find_operation(spec, op_id)
+        resolved_calls[op_id] = caller.build_url_from_spec(spec, path, {}, spec_url=spec_url, operation=operation)
+
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+    expected = {
+        "listPets": "http://op.example/v3/pets",
+        "createPet": "http://path.example/v2/pets",
+        "getHealth": "http://doc.example/v1/health",
+    }
+    assert resolved_calls == expected
+    assert parsed["base_url"] == "http://doc.example/v1"
+    assert {op["operation_id"]: op["full_url"] for op in parsed["operations"]} == expected
+
+
+def test_operation_server_rejects_disallowed_scheme() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec = {
+        "openapi": "3.0.3",
+        "paths": {
+            "/pets": {
+                "get": {
+                    "operationId": "listPets",
+                    "servers": [{"url": "file:///etc/passwd"}],
+                }
+            }
+        },
+    }
+
+    with pytest.raises(ValueError, match="Only absolute HTTP or HTTPS URLs are supported"):
+        caller.build_url_from_spec(spec, "/pets", {}, spec_url="http://docs.example/openapi.json")
+
+    with pytest.raises(ValueError, match="Only absolute HTTP or HTTPS URLs are supported"):
+        parser.parse_spec(spec, spec_url="http://docs.example/openapi.json")

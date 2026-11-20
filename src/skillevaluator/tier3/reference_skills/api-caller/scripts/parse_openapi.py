@@ -92,9 +92,11 @@ def parse_spec(spec: dict, filter_path: str | None = None, spec_url: str | None 
         # Optional: filter by path substring
         if filter_path and filter_path.lower() not in path.lower():
             continue
+        if not isinstance(methods, dict):
+            continue
 
         for method, details in methods.items():
-            if method in ["get", "post", "put", "delete", "patch"]:
+            if method in ["get", "post", "put", "delete", "patch"] and isinstance(details, dict):
                 parameters = details.get("parameters", [])
                 path_parameters = methods.get("parameters", [])
                 if (
@@ -113,10 +115,11 @@ def parse_spec(spec: dict, filter_path: str | None = None, spec_url: str | None 
                     merged.update({(parameter["name"], parameter["in"]): parameter for parameter in parameters})
                     parameters = list(merged.values())
 
+                operation_base_url = resolve_openapi_server_url(spec, spec_url, path_item=methods, operation=details)
                 op = {
                     "method": method.upper(),
                     "path": path,
-                    "full_url": join_url_path(base_url, path),
+                    "full_url": join_url_path(operation_base_url, path),
                     "operation_id": details.get("operationId", ""),
                     "summary": details.get("summary", "")[:100],
                     "parameters": parse_parameters(parameters),

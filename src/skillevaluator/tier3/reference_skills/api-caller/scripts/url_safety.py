@@ -49,15 +49,38 @@ def _swagger2_base_url(spec: dict, spec_url: str | None) -> str:
     return f"{scheme}://{host}{base_path}"
 
 
-def resolve_openapi_server_url(spec: dict, spec_url: str | None = None) -> str:
+def _select_openapi_servers(spec: dict, path_item: dict | None, operation: dict | None) -> list:
+    """Return the most specific non-empty OpenAPI 3 servers list."""
+    for scope in (operation, path_item, spec):
+        if not isinstance(scope, dict):
+            continue
+        servers = scope.get("servers")
+        if servers is None:
+            continue
+        if not isinstance(servers, list):
+            raise ValueError("servers must be a list")
+        if servers:
+            return servers
+    return []
+
+
+def resolve_openapi_server_url(
+    spec: dict,
+    spec_url: str | None = None,
+    *,
+    path_item: dict | None = None,
+    operation: dict | None = None,
+) -> str:
     """Return the API base URL: servers[0].url (OpenAPI 3) or schemes/host/basePath (Swagger 2.0).
 
-    Relative URLs are resolved against the spec URL, which should be the final URL
-    after redirects. Server variable defaults are applied.
+    OpenAPI 3 servers are checked on the operation, then the path item, then the
+    document, falling back to the spec URL origin. Relative URLs are resolved against
+    the spec URL, which should be the final URL after redirects. Server variable
+    defaults are applied.
     """
     if str(spec.get("swagger", "")).startswith("2"):
         return _swagger2_base_url(spec, spec_url)
-    servers = spec.get("servers") or []
+    servers = _select_openapi_servers(spec, path_item, operation)
     if servers:
         server = servers[0] if isinstance(servers[0], dict) else {}
         server_url = server.get("url")
@@ -80,9 +103,10 @@ def resolve_openapi_server_url(spec: dict, spec_url: str | None = None) -> str:
         return str(variable["default"])
 
     server_url = _PLACEHOLDER.sub(replace_variable, server_url)
-    if spec_url:
-        return urljoin(spec_url, server_url)
-    return server_url
+    resolved = urljoin(spec_url, server_url) if spec_url else server_url
+    if urlparse(resolved).scheme:
+        validate_http_url(resolved)
+    return resolved
 
 
 def join_url_path(base: str, path: str) -> str:

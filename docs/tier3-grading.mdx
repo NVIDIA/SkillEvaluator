@@ -157,8 +157,9 @@ credentials before it is cut. Raising a budget lifts none of these limits, and
 `truncated` stays `false` when they are the only cut. Both judges' `omitted`
 records therefore carry `incomplete_sections` as well, naming each section
 whose complete source did not reach the judge (`final response`,
-`file changes` or `tool results`). It is a diagnostic and never withholds a
-score.
+`file changes` or `tool results`). `tool results` means one of the results the
+judge reads was cut or dropped, and a run with more results than a judge reads
+lists `older tool results`. It is a diagnostic and never withholds a score.
 
 `behavior_check`'s `omitted` record carries four further keys, because
 `truncated` alone cannot say whether the judge still had what it needed:

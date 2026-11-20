@@ -1230,13 +1230,16 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
-def _result_evidence_incomplete_sections(traj: dict[str, Any], evidence: str) -> list[str]:
+def _result_evidence_incomplete_sections(traj: dict[str, Any], evidence: str, max_results: int) -> list[str]:
     """Name the accuracy or goal evidence sections that did not reach the judge whole.
 
     As for the behavior bundle, every section is compared against its complete
-    source. A write body or tool result shortened to its own per-entry
-    allowance and a tool result past the bundle's count cap are named, as well
-    as a section the budget dropped or clipped. Nothing here withholds a score.
+    source, so a write body or tool result shortened to its own per-entry
+    allowance is named as well as a section the budget dropped or clipped.
+    ``tool results`` covers the *max_results* newest results, which are the
+    ones the bundle reads. Results older than those are listed as ``older
+    tool results``, so a long run does not look like a cut result. Nothing
+    here withholds a score.
     """
 
     def reaches_judge(source: str) -> bool:
@@ -1245,12 +1248,16 @@ def _result_evidence_incomplete_sections(traj: dict[str, Any], evidence: str) ->
         # keeps the search short for a very large tool result.
         return not text or (len(text) <= len(evidence) and _source_reaches_judge(text, evidence))
 
+    results = _late_observation_excerpts(traj, 10**9)
     sources = (
         ("final response", [get_final_response(traj)]),
         ("file changes", ["\n\n".join(_collect_file_change_evidence(traj, full=True))]),
-        ("tool results", _late_observation_excerpts(traj, 10**9)),
+        ("tool results", results[:max_results]),
     )
-    return [label for label, texts in sources if not all(reaches_judge(str(text or "")) for text in texts)]
+    incomplete = [label for label, texts in sources if not all(reaches_judge(str(text or "")) for text in texts)]
+    if len(results) > max_results:
+        incomplete.append("older tool results")
+    return incomplete
 
 
 # Clause separators for an expectation. A dot only separates when whitespace
@@ -1392,7 +1399,7 @@ def build_metric_evidence_bundles(
             "count": acc_drop,
             "truncated": acc_trunc,
             "reason": "low-relevance sections dropped to fit budget" if acc_trunc else "",
-            "incomplete_sections": _result_evidence_incomplete_sections(traj, acc_evidence),
+            "incomplete_sections": _result_evidence_incomplete_sections(traj, acc_evidence, _BUNDLE_ACCURACY_MAX_OBS),
         },
         "verified": facts,
     }
@@ -1413,7 +1420,7 @@ def build_metric_evidence_bundles(
             "count": goal_drop,
             "truncated": goal_trunc,
             "reason": "older/low-relevance tool results dropped to fit budget" if goal_trunc else "",
-            "incomplete_sections": _result_evidence_incomplete_sections(traj, goal_evidence),
+            "incomplete_sections": _result_evidence_incomplete_sections(traj, goal_evidence, _BUNDLE_GOAL_MAX_OBS),
         },
         "verified": facts,
     }

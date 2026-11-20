@@ -688,15 +688,29 @@ def test_accuracy_and_goal_bundles_report_a_tool_result_cut_to_its_allowance(
 
 def test_accuracy_bundle_reports_tool_results_past_its_count_cap() -> None:
     # Accuracy reads the six newest tool results and goal accuracy the twelve
-    # newest, so the oldest of seven is missing from one bundle only.
+    # newest, so the oldest of seven is missing from one bundle only. It gets
+    # its own name, because most real runs have more results than a judge
+    # reads and that must not look like a result that was cut.
     traj = _tool_result_steps([f"RESULT_{idx}: ok" for idx in range(7)])
 
     for module in (atif_helpers, _load_harbor_template_module()):
         bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
         assert "RESULT_0: ok" not in bundles["accuracy"]["prompt_evidence"]
-        assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["tool results"]
+        assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["older tool results"]
         assert "RESULT_0: ok" in bundles["goal_accuracy"]["prompt_evidence"]
         assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == []
+
+
+def test_a_cut_result_past_the_count_cap_is_not_reported_as_a_cut_result() -> None:
+    # The long log is the oldest of seven results, so accuracy never reads it
+    # and goal accuracy reads it cut.
+    traj, _outcome = _suite_run_trajectory()
+    long_log = traj["steps"][1]["observation"]["results"][0]["content"]
+    traj = _tool_result_steps([long_log, *(f"RESULT_{idx}: ok" for idx in range(6))])
+
+    bundles = atif_helpers.build_metric_evidence_bundles(traj, "Run the checks and report.")
+    assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["older tool results"]
+    assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
 def test_long_tool_result_is_masked_before_it_is_cut() -> None:

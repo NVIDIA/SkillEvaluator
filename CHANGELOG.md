@@ -127,8 +127,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The `omitted` record of the `accuracy` and `goal_accuracy` judges now carries
   `incomplete_sections`, as `behavior_check` already does. It names the final
   response, file changes or tool results that did not reach the judge whole,
-  including a tool result or write body cut to its own allowance and tool
-  results past the judge's count cap, which the record did not mention before.
+  including a tool result or write body cut to its own allowance, which the
+  record did not mention before. A run with more tool results than a judge
+  reads lists `older tool results`.
 - LLM retries retain the innermost valid `Retry-After` header through exception
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and

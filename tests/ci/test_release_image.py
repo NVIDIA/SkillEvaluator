@@ -79,7 +79,7 @@ def test_unrecognized_not_found_and_digest_mismatch_fail_closed(monkeypatch):
 
 @pytest.mark.parametrize("scenario", ["existing", "new", "race", "auth-error", "wrong-revision"])
 def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scenario):
-    workflow = yaml.load((ROOT / ".github/workflows/publish-tier1-image.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/release-tier1-image.yml").read_text(), Loader=yaml.BaseLoader)
     publish = workflow["jobs"]["publish"]
     script = next(step["run"] for step in publish["steps"] if step.get("id") == "release")
     binaries = tmp_path / "bin"
@@ -90,7 +90,7 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
         'printf "%s\\n" "$*" >> "$COMMAND_LOG"\n'
         'if [ "$1" = login ]; then cat >/dev/null; fi\n'
         'if [ "$1" = inspect ]; then\n'
-        '  if [ "$SCENARIO" = wrong-revision ]; then printf "bad-revision\\n"; else printf "%s\\n" "$GITHUB_SHA"; fi\n'
+        '  if [ "$SCENARIO" = wrong-revision ]; then printf "bad-revision\\n"; else printf "%s\\n" "$SOURCE_SHA"; fi\n'
         "fi\n"
     )
     docker.chmod(0o755)
@@ -109,7 +109,7 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
         "COMMAND_LOG": str(tmp_path / "commands"),
         "SCENARIO": scenario,
         "IMAGE": IMAGE,
-        "GITHUB_SHA": REVISION,
+        "SOURCE_SHA": REVISION,
         "GHCR_TOKEN": "dummy",
         "GITHUB_ACTOR": "owner",
         "GITHUB_OUTPUT": str(tmp_path / "output"),
@@ -126,14 +126,17 @@ def test_release_shell_never_pushes_an_existing_or_unverified_tag(tmp_path, scen
 
 
 def test_anonymous_verification_retry_has_no_build_or_write_permission():
-    workflow = yaml.load((ROOT / ".github/workflows/publish-tier1-image.yml").read_text(), Loader=yaml.BaseLoader)
+    workflow = yaml.load((ROOT / ".github/workflows/release-tier1-image.yml").read_text(), Loader=yaml.BaseLoader)
     onboarding = workflow["jobs"]["onboarding"]
     assert onboarding["needs"] == "publish"
     assert onboarding["env"]["IMAGE_DIGEST"] == "${{ needs.publish.outputs.image_digest }}"
     assert onboarding["permissions"] == {"contents": "read"}
     commands = "\n".join(step.get("run", "") for step in onboarding["steps"])
     assert "docker build" not in commands and "docker push" not in commands and "docker login" not in commands
-    assert 'pull "$published_image"' in commands
+    assert 'pull "$IMAGE_DIGEST"' in commands
+    assert 'ci/smoke_image.py --image "$IMAGE_DIGEST"' in commands
+    assert 'ci/release_bundle.py --version "$VERSION" --source-sha "$SOURCE_SHA"' in commands
+    assert any(step.get("with", {}).get("name") == "ci-bundle-${{ inputs.version }}" for step in onboarding["steps"])
 
 
 def test_scanner_locks_cover_every_requirement_with_hashes():

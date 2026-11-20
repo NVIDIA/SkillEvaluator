@@ -148,14 +148,35 @@ def extract_http_status(exc: BaseException) -> int | None:
     return status
 
 
+def _valid_retry_after(value: str) -> bool:
+    """Accept finite, non-negative delay seconds or a parseable HTTP date."""
+    clean_value = str(value).strip()
+    try:
+        delay = float(clean_value)
+    except ValueError:
+        try:
+            parsedate_to_datetime(clean_value)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        return True
+    return math.isfinite(delay) and delay >= 0
+
+
 def extract_retry_after(exc: BaseException) -> str | None:
-    """Extract Retry-After header string from an exception if present."""
-    if isinstance(exc, urllib.error.HTTPError) and exc.headers:
-        return exc.headers.get("retry-after") or exc.headers.get("Retry-After")
-    response = getattr(exc, "response", None)
-    if response is not None and hasattr(response, "headers") and response.headers:
-        return response.headers.get("retry-after") or response.headers.get("Retry-After")
-    return None
+    """Retain the innermost valid Retry-After along the HTTP status's causal chain."""
+    retry_after = None
+    seen: set[int] = set()
+    current: BaseException | None = exc
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        response = getattr(current, "response", None)
+        headers = current.headers if isinstance(current, urllib.error.HTTPError) else getattr(response, "headers", None)
+        if headers:
+            value = headers.get("retry-after") or headers.get("Retry-After")
+            if value and _valid_retry_after(value):
+                retry_after = value
+        current = _exception_cause(current)
+    return retry_after
 
 
 def _is_certificate_failure(exc: BaseException) -> bool:

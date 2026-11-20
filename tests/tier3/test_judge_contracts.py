@@ -1871,6 +1871,60 @@ def test_long_judge_evidence_is_bounded_and_redacted_before_it_is_cut(tmp_path: 
     assert credential[-8:] not in saved_text
 
 
+def _tool_result_with(text: str, *, at: int, length: int = 3000) -> str:
+    """A log of *length* characters in short lines, with *text* lying across character *at*."""
+    start = at - len(text) // 2
+    before = ("log line before the value\n" * (start // 26 + 1))[: start - 1] + "\n"
+    after = "\n" + "log line after the value\n" * (length // 25)
+    return (before + text + after)[: length - 14] + "exit status 0."
+
+
+def test_credential_across_the_cut_of_a_long_tool_result_is_not_saved(tmp_path: Path, monkeypatch) -> None:
+    # The accuracy and goal judges get the beginning and the end of a long
+    # tool result. A credential that the cut goes through must be masked while
+    # it is whole. After the cut its end stands alone in the kept tail, away
+    # from the name or the first lines that the masking reads.
+    verifier = _stage_verifier(tmp_path)
+    configured = "configured-" + "Kq7" * 10
+    monkeypatch.setenv("ANTHROPIC_API_KEY", configured)
+    password, flag_value = "pass-" + "Zx9" * 12, "flag-" + "Jv4" * 12
+    rng = random.Random(816)
+    key_lines = ["".join(rng.choices(string.ascii_letters + string.digits, k=64)) for _ in range(26)]
+    private_key = "PRIVATE " + "KEY"
+    key_block = "\n".join([f"-----BEGIN {private_key}-----", *key_lines, f"-----END {private_key}-----"])
+    head_end = _cut_point(atif_helpers._BUNDLE_ITEM_CHARS)
+    tail_start = 3000 - (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n") - head_end)
+    results = [
+        _tool_result_with(f"export DB_PASSWORD={password}", at=head_end),
+        _tool_result_with(f"mysql --password {flag_value} --host db", at=tail_start),
+        _tool_result_with(configured, at=tail_start),
+        _tool_result_with(key_block, at=tail_start - 400),
+    ]
+    assert all(len(result) == 3000 for result in results)
+    steps: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        call = {"tool_call_id": f"run-{index}", "function_name": "bash", "arguments": {"command": f"./step-{index}.sh"}}
+        observation = {"results": [{"source_call_id": f"run-{index}", "content": result}]}
+        steps.append({"source": "agent", "tool_calls": [call], "observation": observation})
+    steps.append({"source": "agent", "message": "I completed the task."})
+    verifier.ATIF_PATH.write_text(json.dumps({"steps": steps}), encoding="utf-8")
+    prompts: list[str] = []
+    route = _routed(prompts, accuracy=_ACCURACY_RESPONSE, goal=_GOAL_RESPONSE, behavior=_BEHAVIOR_RESPONSE)
+    verifier.call_public_llm = route
+    verifier._call_public_llm_with_provenance = lambda prompt, **kwargs: (*route(prompt, **kwargs), {})
+
+    verifier.main()
+
+    saved_text = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for value in (password, flag_value, configured):
+        assert value[:8] not in saved_text
+        assert value[-8:] not in saved_text
+    assert not any(line in saved_text for line in key_lines)
+    # The end of each result still reaches the two judges that read tool results.
+    goal_prompt = next(prompt for prompt in prompts if "EXPECTED BEHAVIORS" not in prompt and "FORMAT_FOLLOWED" not in prompt)
+    assert goal_prompt.count("exit status 0.") == len(results)
+
+
 def test_judge_evidence_write_failure_never_changes_the_score(tmp_path: Path, monkeypatch) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

@@ -152,7 +152,8 @@ in [Judge evidence budgets](/skills/skillevaluator/environment-variables#judge-e
 Budgets are not the only limit on `accuracy` and `goal_accuracy`. A tool
 result longer than 1,500 characters keeps its beginning and its end and loses
 the middle, a long write body is shortened the same way, and each judge reads
-only its most recent tool results. Raising a budget lifts none of these, and
+only its most recent tool results. A long tool result is masked for
+credentials before it is cut. Raising a budget lifts none of these limits, and
 `truncated` stays `false` when they are the only cut. Both judges' `omitted`
 records therefore carry `incomplete_sections` as well, naming each section
 whose complete source did not reach the judge (`final response`,

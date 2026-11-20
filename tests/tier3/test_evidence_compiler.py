@@ -699,6 +699,31 @@ def test_accuracy_bundle_reports_tool_results_past_its_count_cap() -> None:
         assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == []
 
 
+def test_long_tool_result_is_masked_before_it_is_cut() -> None:
+    # A value that the cut would go through is masked while it is still whole.
+    # A result that fits its allowance is left as it is, because it reaches
+    # the saved evidence whole and is masked there.
+    secret = "S3CRET-" + "v" * 40
+    head = (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n")) * 2 // 3
+    across_the_cut = "a" * (head - 20) + secret + "b" * 1500
+    traj = _tool_result_steps([across_the_cut, f"short result with {secret}"])
+    masked: list[str] = []
+
+    def redact(text: str) -> str:
+        masked.append(text)
+        return text.replace(secret, "<masked>")
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        masked.clear()
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.", redact=redact)
+        assert masked == [across_the_cut]
+        for metric in ("accuracy", "goal_accuracy"):
+            evidence = bundles[metric]["prompt_evidence"]
+            assert "<masked>" in evidence
+            assert evidence.count(secret) == 1  # only the short result still shows it
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
 def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() -> None:
     content = "HEAD_MARK " + "a" * 2000 + " MIDDLE_MARK " + "b" * 2000 + " TAIL_MARK"
     traj = {

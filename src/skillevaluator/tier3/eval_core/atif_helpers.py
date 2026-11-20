@@ -15,6 +15,7 @@ import json
 import logging
 import os
 import re
+from collections.abc import Callable
 from typing import Any
 
 if __package__:
@@ -898,6 +899,10 @@ def attach_metric_evidence_refs(
 # ---------------------------------------------------------------------------
 
 _BUNDLE_ITEM_CHARS = 1500  # per-item excerpt for the judge prompt (refs use 300)
+# How much of a long tool result is masked before its excerpt is cut. Its
+# own cut is far enough from the kept beginning and end that no credential
+# reaches from there into the excerpt.
+_BUNDLE_ITEM_REDACTION_CHARS = 16 * _BUNDLE_ITEM_CHARS
 _DEFAULT_ACCURACY_BUDGET = 8000
 _DEFAULT_GOAL_ACCURACY_BUDGET = 12000
 _BUNDLE_BUDGETS = {
@@ -933,12 +938,23 @@ def _clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[:limit] + " …[clipped]"
 
 
-def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
+def _late_observation_excerpts(
+    traj: dict[str, Any],
+    limit: int,
+    *,
+    count: int | None = None,
+    redact: Callable[[str], str] | None = None,
+) -> list[str]:
     """Most-recent tool observations first (end-state evidence), each clipped.
 
     A long result keeps its beginning and its end. Commands print their
     outcome last (a test summary line, the final error, an exit status), and
     that outcome is the end state these excerpts are here to show.
+
+    ``redact`` masks a long result before it is cut. Saved judge evidence is
+    masked after the cut, and by then the end of a credential that the cut
+    went through no longer follows the name or the first lines that mark it.
+    ``count`` stops after that many results.
     """
     out: list[str] = []
     for step in reversed(traj.get("steps", [])):
@@ -946,8 +962,13 @@ def _late_observation_excerpts(traj: dict[str, Any], limit: int) -> list[str]:
             continue
         for result in reversed((step.get("observation") or {}).get("results") or []):
             content = atif_content_text(result.get("content")).strip()
-            if content:
-                out.append(_truncate_for_behavior(content, limit))
+            if not content:
+                continue
+            if redact is not None and len(content) > limit:
+                content = redact(_truncate_for_behavior(content, _BUNDLE_ITEM_REDACTION_CHARS))
+            out.append(_truncate_for_behavior(content, limit))
+            if count is not None and len(out) >= count:
+                return out
     return out
 
 
@@ -1316,6 +1337,7 @@ def build_metric_evidence_bundles(
     *,
     ground_truth: str = "",
     expected_behavior: list[str] | None = None,
+    redact: Callable[[str], str] | None = None,
 ) -> dict[str, dict[str, Any]]:
     """Compile per-metric judge-facing evidence.
 
@@ -1323,7 +1345,9 @@ def build_metric_evidence_bundles(
     replaces the old ``agent_text[:3000]`` / ``tool_summary[:2000]`` / 4000-char
     blob: it is relevance-/recency-selected, always includes the final response,
     and records what it dropped (never silent). Deterministic verified facts are
-    prepended at the top when any checkable tokens are found.
+    prepended at the top when any checkable tokens are found. ``redact`` masks
+    a tool result that is longer than its excerpt before it is cut; the
+    verifier passes the masking it applies to saved judge evidence.
     """
     if not isinstance(expected_behavior, list):
         expected_behavior = []
@@ -1335,7 +1359,12 @@ def build_metric_evidence_bundles(
 
     final = get_final_response(traj)
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
-    late_obs = _late_observation_excerpts(traj, _BUNDLE_ITEM_CHARS)
+    late_obs = _late_observation_excerpts(
+        traj,
+        _BUNDLE_ITEM_CHARS,
+        count=max(_BUNDLE_ACCURACY_MAX_OBS, _BUNDLE_GOAL_MAX_OBS),
+        redact=redact,
+    )
 
     def _prepend_facts(text: str) -> str:
         if not facts_section:

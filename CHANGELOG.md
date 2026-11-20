@@ -121,7 +121,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The `accuracy` and `goal_accuracy` judges now see the end of a tool result
   longer than 1,500 characters as well as its beginning. Only the beginning was
   kept, so the last lines of a long command output, such as the summary line of
-  a test run, never reached the judge that decides the attempt.
+  a test run, never reached the judge that decides the attempt. A long result
+  is masked for credentials before it is cut, so the saved judge evidence does
+  not keep the end of a value the cut went through.
 - The `omitted` record of the `accuracy` and `goal_accuracy` judges now carries
   `incomplete_sections`, as `behavior_check` already does. It names the final
   response, file changes or tool results that did not reach the judge whole,

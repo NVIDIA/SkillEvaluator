@@ -4661,7 +4661,11 @@ def main():
         details["skill_efficiency"] = checks
 
     bundles = build_metric_evidence_bundles(
-        traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior
+        traj,
+        question,
+        ground_truth=ground_truth,
+        expected_behavior=expected_behavior,
+        redact=_redact_judge_evidence,
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.

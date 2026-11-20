@@ -173,6 +173,8 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
                     "workflows": ["SkillEvaluator release published"],
                     "types": ["completed"],
                 }
+                expected_release = triggers["workflow_dispatch"]["inputs"]["expected-release"]
+                assert expected_release["required"] == "true" and expected_release["type"] == "string"
                 assert document["permissions"] == {}
                 assert set(document["jobs"]) == {"promote"}
                 promote = document["jobs"]["promote"]
@@ -190,6 +192,7 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
                 assert writer["with"]["permission-contents"] == "write"
                 assert update["run"] == "bash ci/promote_stable.sh"
                 assert update["env"]["RELEASE_DEVZONE_INDEX_URL"] == "${{ vars.RELEASE_DEVZONE_INDEX_URL }}"
+                assert update["env"]["STABLE_EXPECTED_RELEASE"] == "${{ inputs.expected-release }}"
                 continue
             # The consumer listener calls only the immutable trusted publishers;
             # it has no local steps, candidate checkout or image build/cache job.

@@ -7,6 +7,10 @@ on:
     types: [completed]
   workflow_dispatch:
     inputs:
+      expected-release:
+        description: Reviewed release tag to promote (vX.Y.Z)
+        type: string
+        required: true
       bootstrap-sha:
         description: Reviewed main commit SHA for the first promotion of v1.0.1
         type: string
@@ -49,6 +53,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+          STABLE_EXPECTED_RELEASE: ${{ inputs.expected-release }}
           STABLE_PUSH_TOKEN: ${{ steps.writer.outputs.token }}
           STABLE_BOOTSTRAP_SHA: ${{ inputs.bootstrap-sha }}
         run: bash ci/promote_stable.sh

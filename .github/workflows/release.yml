@@ -315,4 +315,5 @@ jobs:
           assets="$RUNNER_TEMP/product-release"
           test "$(python3 ci/github_release.py restore --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets")" = true
           python3 ci/github_release.py finalize --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets"
-          printf '%s\n' 'Run **Promote stable GitHub workflows** on `main` from Actions to promote the latest verified release.' >> "$GITHUB_STEP_SUMMARY"
+          printf 'To promote this release when it is GitHub Latest, run **Promote stable GitHub workflows** on `main` with `expected-release` set to `v%s`.\n' \
+            "$VERSION" >> "$GITHUB_STEP_SUMMARY"

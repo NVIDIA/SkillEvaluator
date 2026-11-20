@@ -192,12 +192,16 @@ def _keep_attached_descriptors(text: str) -> str:
 
 
 def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str | None:
-    """Strip comment text only when its quote context can be modelled."""
+    """Strip comment text only when its quote context can be modelled.
+
+    A misparsed expansion can only move a comment boundary that comes after it,
+    so a comment ahead of every such expansion is stripped; a comment after one
+    leaves the command unmodelled.
+    """
     out = []
     quote = None
     word_start = True
     unmodelled_expansion = False
-    stripped_comment = False
     index = 0
     while index < len(text):
         char = text[index]
@@ -231,7 +235,8 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             index += 1
             continue
         if char == "#" and word_start:
-            stripped_comment = True
+            if unmodelled_expansion:
+                return None
             out.append(char)
             end = text.find("\n", index)
             if end < 0:
@@ -251,8 +256,6 @@ def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str |
             word_start = char in " \t\n" or char in _SHELL_METACHARS
         out.append(char)
         index += 1
-    if unmodelled_expansion and stripped_comment:
-        return None
     # With no comment removed, keep the original spelling and the existing
     # status attribution, including expansions next to a quoted literal hash.
     return "".join(out)

@@ -142,7 +142,8 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
         start = 0
         if words[0] == "time":
             start = 1
-            while start < len(words) and words[start] == "-p":
+            # Newer Bash also accepts ``--`` to end the options of ``time``.
+            while start < len(words) and words[start] in {"-p", "--"}:
                 start += 1
         if start < len(words) and words[start] == "!":
             return None

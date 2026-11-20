@@ -29,6 +29,18 @@ def _bash_supports_stderr_pipeline():
     return int(completed.stdout) >= 4
 
 
+@cache
+def _bash_accepts_time_option_terminator():
+    executable = shutil.which("bash")
+    if sys.platform == "win32" or executable is None:
+        return False
+    # Older Bash reads ``--`` as the name of a command and exits 127.
+    completed = subprocess.run(
+        [executable, "-c", "time -- true"], capture_output=True, text=True, check=False, timeout=10
+    )
+    return completed.returncode == 0
+
+
 @pytest.mark.parametrize(
     "command",
     ["python 'scripts/my task.py'", 'python "scripts/my task.py"'],
@@ -83,10 +95,12 @@ def test_quoted_script_still_does_not_claim_a_shell_tail_status(tail: str) -> No
     ],
 )
 @pytest.mark.parametrize("script_status", [0, 2])
-@pytest.mark.parametrize("negation", ["!", "time !", "time -p !"])
+@pytest.mark.parametrize("negation", ["!", "time !", "time -p !", "time -- !", "time -p -- !"])
 def test_negated_quoted_script_does_not_claim_the_shell_status(
     tmp_path, script_operand, relative_script, script_status, negation
 ):
+    if "--" in negation and not _bash_accepts_time_option_terminator():
+        pytest.skip("Requires a Bash whose time keyword accepts --")
     script = tmp_path / relative_script
     script.parent.mkdir(parents=True)
     script.write_text("import sys\nprint('script-ran')\nraise SystemExit(int(sys.argv[1]))\n", encoding="utf-8")
@@ -397,6 +411,55 @@ def test_literal_continued_expansion_text_keeps_the_script_status(tmp_path, shel
     assert completed.returncode == status
     assert result["passed"] is (status == 0)
     assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("prefix", ["# Run the evaluation\n", "printf 'before\\n'\n# Run the evaluation\n"])
+@pytest.mark.parametrize(
+    "argument", [' --out "$(pwd)/out.json"', ' --out "`pwd`/out.json"', ' --model "${MODEL:-gpt}"']
+)
+def test_comment_before_an_expansion_keeps_the_script_status(tmp_path, shell, status, prefix, argument):
+    # A comment line ahead of the expansion has no nested quote to misread.
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, argument, prefix
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize("comment", ['# "$(printf " # hi")" ignored', "# `pwd`", '# "${0:+" # hi"}"'])
+def test_comment_text_before_the_command_keeps_the_script_status(tmp_path, shell, status, comment):
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, ' "$(pwd)"', f"{comment}\n"
+    )
+    assert completed.returncode == status
+    assert result["passed"] is (status == 0)
+    assert f"exited {status}" in result["reason"]
+
+
+@pytest.mark.parametrize("shell", ["bash", "zsh"])
+@pytest.mark.parametrize("status", [0, 2])
+@pytest.mark.parametrize(
+    ("argument", "prefix"),
+    [
+        (' "$(pwd)" # run it', ""),
+        (" `pwd` # run it", ""),
+        (' "${MODEL:-gpt}" # run it', ""),
+        (" # run it", 'cd "$(pwd)" && '),
+    ],
+)
+def test_comment_after_an_expansion_stays_unattributed(tmp_path, shell, status, argument, prefix):
+    # The expansion's own quoting could move this boundary, so it is not graded.
+    completed, result = _run_and_grade_comment_command(
+        tmp_path, shell, "scripts/plain.py", "scripts/plain.py", status, argument, prefix
+    )
+    assert completed.returncode == status
+    assert result["passed"] is None
+    assert "could not be attributed" in result["reason"]
 
 
 @pytest.mark.parametrize("shell", ["bash", "zsh"])

@@ -77,6 +77,8 @@ def test_starter_eval_text_statistics_are_unchanged() -> None:
         ("(see above.) Next", 2),
         ("It was founded in 1993.[1] The company grew.", 2),
         ("Done.[1][2] Next.", 2),
+        ("Done.[^1] Next.", 2),
+        ("Done.[^1][^2] Next.", 2),
         ("This is **done.** Next one.", 2),
         ("_She left._ Then he came.", 2),
         ("Wait... what?", 2),

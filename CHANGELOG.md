@@ -202,8 +202,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - The text-analyzer reference skill counts a sentence end only when `.`, `!` or
   `?` is followed by whitespace or the end of the text, so file names, decimals
   and version numbers stay in one sentence. Closing quotes, Markdown emphasis
-  and citation markers such as `[1]` after the terminator still end it. `--file` on a directory or an
-  unreadable path prints `Error:` on stderr and exits 1 instead of a traceback.
+  and citation or footnote markers such as `[1]` or `[^1]` after the terminator
+  still end it. `--file` on a directory or an unreadable path prints `Error:`
+  on stderr and exits 1 instead of a traceback.
 - Restore a temporary-cleanup exemption for a narrow, NUL-delimited
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown

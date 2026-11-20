@@ -249,6 +249,9 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- CI bootstrap rejects unsupported Tier 3 environment modes before importing
+  optional runtime dependencies, preserving the isolated consumer-path check
+  without paying for unnecessary Harbor initialization.
 
 ## 1.0.1 - 2026-11-17
 

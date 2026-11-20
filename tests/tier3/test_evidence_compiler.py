@@ -713,6 +713,37 @@ def test_a_cut_result_past_the_count_cap_is_not_reported_as_a_cut_result() -> No
     assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == ["tool results"]
 
 
+@pytest.mark.parametrize(("calls", "older"), [(6, []), (13, ["older tool results"])], ids=["six-calls", "thirteen-calls"])
+def test_tool_calls_that_print_the_same_text_are_counted_one_by_one(calls: int, older: list[str]) -> None:
+    # Thirteen calls print the same line. The copies a bundle keeps must not
+    # stand in for the calls it dropped.
+    traj = _tool_result_steps(["check passed."] * calls)
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric, kept in (("accuracy", 6), ("goal_accuracy", 12)):
+            assert bundles[metric]["prompt_evidence"].count("check passed.") == min(calls, kept)
+            assert bundles[metric]["omitted"]["incomplete_sections"] == older
+
+
+def test_tool_result_repeated_in_the_final_response_does_not_hide_a_dropped_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The budget has room for the final response only. The answer repeats the
+    # text of the tool result, which is still not the tool result reaching the judge.
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.setenv(name, "40")
+    traj = _tool_result_steps(["check passed."])
+    traj["steps"][-1]["message"] = "check passed."
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert bundles[metric]["prompt_evidence"].count("check passed.") == 1
+            assert bundles[metric]["omitted"]["truncated"] is True
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
 def test_long_tool_result_is_masked_before_it_is_cut() -> None:
     # A value that the cut would go through is masked while it is still whole.
     # A result that fits its allowance is left as it is, because it reaches

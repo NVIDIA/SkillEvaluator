@@ -974,8 +974,11 @@ def _late_observation_excerpts(
     return out
 
 
-def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, bool]:
-    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated)."""
+def _assemble(sections: list[tuple[str, str]], budget: int, kept: list[str] | None = None) -> tuple[str, int, bool]:
+    """Join (title, body) sections under a char budget. Returns (text, dropped, truncated).
+
+    The titles of the sections that went in whole are appended to *kept*.
+    """
     parts: list[str] = []
     used = 0
     dropped = 0
@@ -986,6 +989,8 @@ def _assemble(sections: list[tuple[str, str]], budget: int) -> tuple[str, int, b
         if used + len(block) <= budget:
             parts.append(block)
             used += len(block) + 2
+            if kept is not None:
+                kept.append(title)
         elif title == _SECTION_FINAL_RESPONSE and budget - used > 0:
             avail = budget - used
             later_blocks = [len(f"{t}\n{b}") + 2 for t, b in non_empty[idx + 1 :]]
@@ -1232,31 +1237,39 @@ def _behavior_evidence_completeness(
     return not required_missing, required_missing, incomplete
 
 
-def _result_evidence_incomplete_sections(traj: dict[str, Any], evidence: str, max_results: int) -> list[str]:
+def _result_evidence_incomplete_sections(
+    sections: list[tuple[str, str]],
+    kept: list[str],
+    *,
+    file_changes_shortened: bool,
+    results: list[str],
+    max_results: int,
+) -> list[str]:
     """Name the accuracy or goal evidence sections that did not reach the judge whole.
 
-    As for the behavior bundle, every section is compared against its complete
-    source, so a write body or tool result shortened to its own per-entry
-    allowance is named as well as a section the budget dropped or clipped.
-    ``tool results`` covers the *max_results* newest results, which are the
-    ones the bundle reads. Results older than those are listed as ``older
-    tool results``, so a long run does not look like a cut result. Nothing
-    here withholds a score.
+    *sections* are the final response, file changes and tool results as they
+    were given to ``_assemble``, and *kept* the titles it kept whole. The
+    record follows what the bundle selected, never a search of the evidence
+    text, so a result whose text appears somewhere else cannot stand in for
+    one that was dropped. A section is named when the budget dropped or
+    clipped it, or when a write body or tool result in it was shortened to its
+    own per-entry allowance. *results* is every tool result, newest first and
+    uncut. ``tool results`` covers the *max_results* newest, which are the
+    ones the bundle reads, and older ones are listed as ``older tool
+    results``, so a long run does not look like a cut result. Nothing here
+    withholds a score.
     """
-
-    def reaches_judge(source: str) -> bool:
-        text = source.strip()
-        # A source longer than the evidence cannot be inside it, which also
-        # keeps the search short for a very large tool result.
-        return not text or (len(text) <= len(evidence) and _source_reaches_judge(text, evidence))
-
-    results = _late_observation_excerpts(traj, 10**9)
-    sources = (
-        ("final response", [get_final_response(traj)]),
-        ("file changes", ["\n\n".join(_collect_file_change_evidence(traj, full=True))]),
-        ("tool results", results[:max_results]),
+    shortened = (
+        False,
+        file_changes_shortened,
+        any(len(result) > _BUNDLE_ITEM_CHARS for result in results[:max_results]),
     )
-    incomplete = [label for label, texts in sources if not all(reaches_judge(str(text or "")) for text in texts)]
+    labels = ("final response", "file changes", "tool results")
+    incomplete = [
+        label
+        for label, (title, body), cut in zip(labels, sections, shortened)  # noqa: B905 -- zip(strict=) needs Python 3.10
+        if str(body or "").strip() and (cut or title not in kept)
+    ]
     if len(results) > max_results:
         incomplete.append("older tool results")
     return incomplete
@@ -1368,6 +1381,8 @@ def build_metric_evidence_bundles(
 
     final = get_final_response(traj)
     file_changes = "\n\n".join(_collect_file_change_evidence(traj))
+    file_changes_shortened = file_changes != "\n\n".join(_collect_file_change_evidence(traj, full=True))
+    results = _late_observation_excerpts(traj, 10**9)
     late_obs = _late_observation_excerpts(
         traj,
         _BUNDLE_ITEM_CHARS,
@@ -1385,14 +1400,13 @@ def build_metric_evidence_bundles(
     bundles: dict[str, dict[str, Any]] = {}
     budgets = _bundle_budgets()
 
-    acc_text, acc_drop, acc_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("PRODUCED FILES / WRITES", file_changes),
-            ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
-        ],
-        budgets["accuracy"],
-    )
+    acc_sections = [
+        (_SECTION_FINAL_RESPONSE, final),
+        ("PRODUCED FILES / WRITES", file_changes),
+        ("KEY OBSERVATIONS", "\n---\n".join(late_obs[:_BUNDLE_ACCURACY_MAX_OBS])),
+    ]
+    acc_kept: list[str] = []
+    acc_text, acc_drop, acc_trunc = _assemble(acc_sections, budgets["accuracy"], acc_kept)
     acc_evidence = _prepend_facts(acc_text or _clip(get_agent_text(traj), budgets["accuracy"]))
     bundles["accuracy"] = {
         "prompt_evidence": acc_evidence,
@@ -1401,19 +1415,24 @@ def build_metric_evidence_bundles(
             "count": acc_drop,
             "truncated": acc_trunc,
             "reason": "low-relevance sections dropped to fit budget" if acc_trunc else "",
-            "incomplete_sections": _result_evidence_incomplete_sections(traj, acc_evidence, _BUNDLE_ACCURACY_MAX_OBS),
+            "incomplete_sections": _result_evidence_incomplete_sections(
+                acc_sections,
+                acc_kept,
+                file_changes_shortened=file_changes_shortened,
+                results=results,
+                max_results=_BUNDLE_ACCURACY_MAX_OBS,
+            ),
         },
         "verified": facts,
     }
 
-    goal_text, goal_drop, goal_trunc = _assemble(
-        [
-            (_SECTION_FINAL_RESPONSE, final),
-            ("END-STATE FILE CHANGES", file_changes),
-            ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
-        ],
-        budgets["goal_accuracy"],
-    )
+    goal_sections = [
+        (_SECTION_FINAL_RESPONSE, final),
+        ("END-STATE FILE CHANGES", file_changes),
+        ("RECENT TOOL RESULTS (newest first)", "\n---\n".join(late_obs[:_BUNDLE_GOAL_MAX_OBS])),
+    ]
+    goal_kept: list[str] = []
+    goal_text, goal_drop, goal_trunc = _assemble(goal_sections, budgets["goal_accuracy"], goal_kept)
     goal_evidence = _prepend_facts(goal_text or _clip(get_agent_text(traj), budgets["goal_accuracy"]))
     bundles["goal_accuracy"] = {
         "prompt_evidence": goal_evidence,
@@ -1422,7 +1441,13 @@ def build_metric_evidence_bundles(
             "count": goal_drop,
             "truncated": goal_trunc,
             "reason": "older/low-relevance tool results dropped to fit budget" if goal_trunc else "",
-            "incomplete_sections": _result_evidence_incomplete_sections(traj, goal_evidence, _BUNDLE_GOAL_MAX_OBS),
+            "incomplete_sections": _result_evidence_incomplete_sections(
+                goal_sections,
+                goal_kept,
+                file_changes_shortened=file_changes_shortened,
+                results=results,
+                max_results=_BUNDLE_GOAL_MAX_OBS,
+            ),
         },
         "verified": facts,
     }

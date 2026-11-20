@@ -129,7 +129,8 @@ All notable changes to SkillEvaluator are documented in this file.
   response, file changes or tool results that did not reach the judge whole,
   including a tool result or write body cut to its own allowance, which the
   record did not mention before. A run with more tool results than a judge
-  reads lists `older tool results`.
+  reads lists `older tool results`. On all three judges the record now also
+  counts edits past the five that a multi-edit shows.
 - LLM retries retain the innermost valid `Retry-After` header through exception
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and

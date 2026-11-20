@@ -114,6 +114,15 @@ def _run_analyzer(*args: str) -> subprocess.CompletedProcess[str]:
     )
 
 
+def test_file_argument_reports_a_missing_file(tmp_path: Path) -> None:
+    path = tmp_path / "missing.txt"
+    result = _run_analyzer("--file", str(path))
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr == f"Error: file not found: {path}\n"
+
+
 def test_file_argument_rejects_a_directory(tmp_path: Path) -> None:
     result = _run_analyzer("--file", str(tmp_path))
 

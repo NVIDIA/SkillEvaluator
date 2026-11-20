@@ -73,16 +73,26 @@ def main():
 
     if args.file:
         path = Path(args.file)
+        # The read decides: Path.exists() and is_dir() report False for a
+        # path they cannot stat on Python 3.14, which hid permission errors.
         try:
-            if not path.exists():
-                print(f"Error: file not found: {args.file}", file=sys.stderr)
-                sys.exit(1)
-            if path.is_dir():
-                print(f"Error: not a file: {args.file}", file=sys.stderr)
-                sys.exit(1)
             text = path.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, NotADirectoryError):
+            print(f"Error: file not found: {args.file}", file=sys.stderr)
+            sys.exit(1)
+        except IsADirectoryError:
+            print(f"Error: not a file: {args.file}", file=sys.stderr)
+            sys.exit(1)
         except OSError as exc:
-            print(f"Error: cannot read file: {args.file} ({exc.strerror})", file=sys.stderr)
+            # Windows refuses to open a directory with PermissionError.
+            try:
+                is_dir = path.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                print(f"Error: not a file: {args.file}", file=sys.stderr)
+            else:
+                print(f"Error: cannot read file: {args.file} ({exc.strerror})", file=sys.stderr)
             sys.exit(1)
     else:
         text = args.text

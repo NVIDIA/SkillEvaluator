@@ -227,14 +227,20 @@ def split_into_paragraphs(
         start = separator.end()
     spans.append((start, len(section.text)))
 
+    counted_until = 0
+    counted_line = section.start_line
     for block_start, block_end in spans:
         block = section.text[block_start:block_end]
         block_stripped = block.strip()
         if len(block_stripped) >= min_chars:
             content_start = block_start + len(block) - len(block.lstrip())
             content_end = block_start + len(block.rstrip())
-            start_line = section.start_line + section.text[:content_start].count("\n")
-            end_line = section.start_line + section.text[:content_end].count("\n")
+            # Retained paragraphs advance monotonically. Scan only the next
+            # range, including skipped short paragraphs and intervening whitespace.
+            start_line = counted_line + section.text.count("\n", counted_until, content_start)
+            end_line = counted_line + section.text.count("\n", counted_until, content_end)
+            counted_until = content_end
+            counted_line = end_line
             paragraphs.append(
                 ContentChunk(
                     source_file=section.source_file,

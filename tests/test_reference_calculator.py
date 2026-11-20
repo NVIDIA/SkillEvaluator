@@ -29,8 +29,16 @@ def _calc(expression: str) -> subprocess.CompletedProcess[str]:
         ("-40 celsius to fahrenheit", "-40 celsius = -40 fahrenheit"),
         ("-4 fahrenheit to celsius", "-4 fahrenheit = -20 celsius"),
         (".5 kg to lbs", "0.5 kg = 1.102 lbs"),
+        ("5. km to miles", "5 km = 3.107 miles"),
+        ("+5 km to miles", "5 km = 3.107 miles"),
         ("-10% of 50", "Result: -5"),
         ("12.5% of -80", "Result: -10"),
+        (".5% of 100", "Result: 0.5"),
+        ("5.% of 100", "Result: 5"),
+        ("+5% of 100", "Result: 5"),
+        ("10% of .5", "Result: 0.05"),
+        ("10% of 5.", "Result: 0.5"),
+        ("10% of +5", "Result: 0.5"),
         ("100 celsius to fahrenheit", "100 celsius = 212 fahrenheit"),
         ("15% of 200", "Result: 30"),
     ],
@@ -44,7 +52,14 @@ def test_conversions_and_percentages_accept_signed_numbers(expression: str, expe
 
 @pytest.mark.parametrize(
     "expression",
-    ["10% of 50 + 5", "5 km to miles please", "1.2.3 km to miles"],
+    [
+        "10% of 50 + 5",
+        "5 km to miles please",
+        "1.2.3 km to miles",
+        "1.2.3% of 100",
+        "10% of 1.2.3",
+        "10% of .",
+    ],
 )
 def test_input_beyond_a_conversion_or_percentage_is_rejected(expression: str) -> None:
     result = _calc(expression)

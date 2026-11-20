@@ -125,7 +125,7 @@ MAX_WORKFLOWS_MDC_LINES = 1000  # Workflows can be longer
 
 # Naming conventions
 # Name must be: lowercase, alphanumeric + hyphens, no leading/trailing/consecutive hyphens
-KEBAB_CASE_PATTERN = r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+KEBAB_CASE_PATTERN = r"^[a-z][a-z0-9]*(-[a-z0-9]+)*\Z"
 
 # Content types for auto-detection
 CONTENT_TYPE_SKILL = "skill"

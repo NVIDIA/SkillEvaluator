@@ -169,6 +169,74 @@ def test_skillspector_baseline_must_name_an_existing_file(tmp_path: Path) -> Non
     assert "--skillspector-baseline" in result.output
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        ["validate", "--no-tier3", "--no-dedup", "--no-llm", "--checks", "security"],
+        ["security-scan"],
+        ["tier1", "security-scan"],
+        ["tier1", "--checks", "security", "--no-llm"],
+        ["tier1", "validate", "--checks", "security", "--no-llm"],
+    ],
+    ids=["validate", "security-scan", "tier1-security-scan", "tier1", "tier1-validate"],
+)
+def test_hook_waivers_reach_security_validator_only_when_explicit(
+    command: list[str], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.tier1 import commands
+
+    skill = tmp_path / "skill"
+    shutil.copytree(FIXTURE, skill)
+    waiver_content = "version: 1\nwaivers: []\n"
+    (skill / "hook-waivers.yaml").write_text(waiver_content, encoding="utf-8")
+    waiver_path = tmp_path / "reviewed-hook-waivers.yaml"
+    waiver_path.write_text(waiver_content, encoding="utf-8")
+    seen: list[Path | None] = []
+
+    class StubSecurityValidator:
+        description = "Security scan"
+
+        def __init__(self, **kwargs):
+            seen.append(kwargs.get("hook_waivers"))
+
+        def validate_security_only(self, _path: Path) -> ValidationResult:
+            return ValidationResult()
+
+    monkeypatch.setattr(commands, "SecurityValidator", StubSecurityValidator)
+    monkeypatch.chdir(tmp_path)
+    relative_path = waiver_path.relative_to(tmp_path)
+    args = [*command, str(skill), "-r", "json", "-o", str(tmp_path / "reports")]
+    runner = CliRunner()
+
+    implicit = runner.invoke(cli, args)
+    explicit = runner.invoke(cli, [*args, "--hook-waivers", str(relative_path)])
+
+    assert implicit.exit_code == 0, implicit.output
+    assert explicit.exit_code == 0, explicit.output
+    assert seen == [None, relative_path]
+
+
+@pytest.mark.parametrize("linked_root", [True, False])
+def test_validate_hook_review_rejects_linked_package_paths(tmp_path: Path, linked_root: bool) -> None:
+    real = tmp_path / "real"
+    package = real / "plugin"
+    package.mkdir(parents=True)
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(package if linked_root else real, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"Directory symlinks unavailable: {exc}")
+    path = alias if linked_root else alias / "plugin"
+    waiver = tmp_path / "review.yaml"
+    waiver.write_text("version: 1\nwaivers: []\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["validate", str(path), "--no-dedup", "--hook-waivers", str(waiver)])
+
+    assert result.exit_code == 2, result.output
+    assert "--hook-waivers requires a secure packaged plugin directory" in result.output
+
+
 def test_claude_alias_is_canonicalized_and_deduplicated() -> None:
     assert parse_agents("claude, claude-code, opencode, claude") == ["claude-code", "opencode"]
 
@@ -1954,6 +2022,22 @@ def test_catalog_child_argv_forwards_the_skillspector_baseline(tmp_path: Path) -
     argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
 
     assert argv[argv.index("--skillspector-baseline") + 1] == str(baseline.resolve())
+
+
+def test_catalog_child_argv_forwards_an_absolute_hook_waivers_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.cli import _catalog_child_argv_from_ctx, validate
+
+    skill_dir = tmp_path / "catalog" / "simple"
+    skill_dir.mkdir(parents=True)
+    waiver_path = tmp_path / "hook-waivers.yaml"
+    waiver_path.write_text("version: 1\nwaivers: []\n", encoding="utf-8")
+    monkeypatch.chdir(tmp_path)
+    with validate.make_context("validate", [str(skill_dir), "--hook-waivers", waiver_path.name]) as ctx:
+        argv = _catalog_child_argv_from_ctx(ctx, skill_dir, tmp_path / "out" / "simple")
+
+    assert argv[argv.index("--hook-waivers") + 1] == str(waiver_path)
 
 
 def test_catalog_child_argv_forwards_every_validate_option() -> None:

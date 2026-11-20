@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import json
+import uuid
 from pathlib import Path
 
 import pytest
@@ -718,3 +719,93 @@ def test_sync_refreshed_adc_persistent_env_scrubs_expiry_and_updates_existing_ke
     assert sync_refreshed_adc_persistent_env(without_key, fresh_token="ya29.fresh-token") is False
     assert CREDENTIAL_EXPIRY_ENV not in without_key
     assert "OPENAI_API_KEY" not in without_key
+
+
+_OPENAI_COMPATIBLE_ENV = {
+    "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+    "SKILL_EVAL_LLM_API_KEY": "test-gateway-key",
+    "SKILL_EVAL_LLM_BASE_URL": "https://gateway.example/v1",
+}
+
+
+def test_openai_compatible_extra_headers_are_parsed_and_uuid_is_shared_within_one_client() -> None:
+    config = resolve_llm_provider(
+        {
+            **_OPENAI_COMPATIBLE_ENV,
+            "SKILL_EVAL_LLM_EXTRA_HEADERS": '{"x-opencode-session": "{uuid}", "X-Team": "eval-{uuid}"}',
+        }
+    )
+
+    headers = config.extra_headers_dict()
+    session = headers["x-opencode-session"]
+    uuid.UUID(session)
+    assert headers["X-Team"] == f"eval-{session}"
+    assert "SKILL_EVAL_LLM_EXTRA_HEADERS" not in config.child_environment()
+
+
+def test_openai_compatible_extra_headers_uuid_differs_between_clients() -> None:
+    env = {**_OPENAI_COMPATIBLE_ENV, "SKILL_EVAL_LLM_EXTRA_HEADERS": '{"x-opencode-session": "{uuid}"}'}
+
+    first = resolve_llm_provider(env).extra_headers_dict()["x-opencode-session"]
+    second = resolve_llm_provider(env).extra_headers_dict()["x-opencode-session"]
+
+    assert first != second
+
+
+def test_openai_compatible_without_extra_headers_sends_none() -> None:
+    assert resolve_llm_provider(_OPENAI_COMPATIBLE_ENV).extra_headers == ()
+    assert resolve_llm_provider({**_OPENAI_COMPATIBLE_ENV, "SKILL_EVAL_LLM_EXTRA_HEADERS": "  "}).extra_headers == ()
+
+
+def test_openai_compatible_vertex_adc_retains_extra_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("skillevaluator.provider_config._get_google_access_token", lambda **_kwargs: "mock-adc-token")
+    config = resolve_llm_provider(
+        {
+            "SKILL_EVAL_LLM_PROVIDER": "openai-compatible",
+            "SKILL_EVAL_LLM_BASE_URL": "https://us-central1-aiplatform.googleapis.com/v1beta1/projects/p/locations/l/endpoints/openapi",
+            "SKILL_EVAL_LLM_EXTRA_HEADERS": '{"X-Team": "evaluation"}',
+        }
+    )
+
+    assert config.extra_headers_dict() == {"X-Team": "evaluation"}
+    assert "evaluation" not in repr(config)
+
+
+@pytest.mark.parametrize(
+    "env",
+    [
+        {"SKILL_EVAL_LLM_PROVIDER": "openai", "OPENAI_API_KEY": "test-openai-key"},
+        {"SKILL_EVAL_LLM_PROVIDER": "nv_build", "NVIDIA_API_KEY": "test-nvidia-key"},
+        {"SKILL_EVAL_LLM_PROVIDER": "anthropic", "ANTHROPIC_API_KEY": "test-anthropic-key"},
+    ],
+)
+def test_other_providers_ignore_extra_headers(env: dict[str, str]) -> None:
+    config = resolve_llm_provider({**env, "SKILL_EVAL_LLM_EXTRA_HEADERS": '{"x-opencode-session": "{uuid}"}'})
+
+    assert config.extra_headers == ()
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("not json", "must be a JSON object"),
+        ('["x-a", "secret-value"]', "must be a JSON object, not a JSON list"),
+        ('{"Authorization": "Bearer secret-value"}', "must not set Authorization"),
+        ('{"content-type": "secret-value"}', "must not set content-type"),
+        ('{"bad name": "secret-value"}', "invalid header name"),
+        ('{"x-a": 1}', "must be a string, not int"),
+        ('{"x-a": "secret-value\\r\\nx-b: injected"}', "must not contain line breaks"),
+        ('{"X-A": "secret-value", "x-a": "other"}', "sets x-a more than once"),
+        ('{"x-a": 1, "x-a": "secret-value"}', "has a repeated JSON key"),
+        ('{"X-Team": "évaluation secret-value"}', "must be ASCII"),
+        ('{"X-Team": " secret-value"}', "or surrounding whitespace"),
+    ],
+)
+def test_invalid_extra_headers_fail_without_echoing_values(raw: str, expected: str) -> None:
+    with pytest.raises(ProviderConfigurationError) as excinfo:
+        resolve_llm_provider({**_OPENAI_COMPATIBLE_ENV, "SKILL_EVAL_LLM_EXTRA_HEADERS": raw})
+
+    message = str(excinfo.value)
+    assert "SKILL_EVAL_LLM_EXTRA_HEADERS" in message
+    assert expected in message
+    assert "secret-value" not in message

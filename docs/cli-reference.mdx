@@ -22,6 +22,7 @@ commands referenced below.
 | [tier2 PATH](#direct-tier-workflows) | Run intra-skill dedup; include inter-skill comparison with `--catalog` | Chat and embeddings provider |
 | [tier3 PATH](#direct-tier-workflows) | Prepare a missing starter dataset and run live evaluation | Provider, supported agent, and sandbox |
 | [validate](#validate) | Run all three tiers for skills, including Tier 3 autopilot, with explicit scope and gating controls | Provider access, scanners, supported agent, and sandbox; `--tiers 1` selects static checks |
+| [ci init](/skills/skillevaluator/cli-onboarding) | Set up GitHub Tier 1 checks with optional hosted reports. Use `--channel stable` to opt a new setup into stable releases. | GitHub checkout and authenticated GitHub CLI for a setup PR |
 | [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
 | [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
 | [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |

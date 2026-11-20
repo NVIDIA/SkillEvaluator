@@ -2638,6 +2638,7 @@ all = [
     { name = "aiohttp" },
     { name = "anthropic" },
     { name = "boto3" },
+    { name = "certifi" },
     { name = "filelock" },
     { name = "fsspec" },
     { name = "harbor", extra = ["gke"] },
@@ -2682,6 +2683,7 @@ publisher = [
     { name = "pyjwt", extra = ["crypto"] },
 ]
 security = [
+    { name = "certifi" },
     { name = "filelock" },
     { name = "msgpack" },
     { name = "pip" },
@@ -2723,6 +2725,7 @@ requires-dist = [
     { name = "bandit", specifier = ">=1.9.4" },
     { name = "boto3", marker = "extra == 'llm'", specifier = ">=1.44.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
+    { name = "certifi", marker = "extra == 'security'", specifier = ">=2026.10.19" },
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "filelock", marker = "extra == 'llm'", specifier = ">=4.2.1,<5" },
     { name = "filelock", marker = "extra == 'security'", specifier = ">=4.2.1,<5" },

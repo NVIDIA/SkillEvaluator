@@ -525,6 +525,34 @@ jobs:
           $basePython = Join-Path $baseEnvironment "Scripts\python.exe"
           uv pip install --python $basePython $wheels[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install security and all extras using pip on Windows
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist -Filter "skillevaluator-*.whl" | Select-Object -First 1
+          $checkFloors = @'
+          from importlib.metadata import version
+          from packaging.version import Version
+
+          assert Version(version("pip")) >= Version("26.2.2")
+          assert Version(version("certifi")) >= Version("2026.10.19")
+          '@
+          foreach ($extra in @("security", "all")) {
+            $environment = Join-Path $env:RUNNER_TEMP "skillevaluator-pip-$extra-windows"
+            # Use the patched Python TLS denylist while exercising the older pip.
+            uv venv --managed-python --python 3.12.16 $environment
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $extraPython = Join-Path $environment "Scripts\python.exe"
+            uv pip install --python $extraPython "pip==26.2.1" "certifi==2025.8.3"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip install "$($wheel.FullName)[$extra]"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $checkFloors | & $extraPython -
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip_audit --version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Smoke-test the installed Windows CLI with a CRLF checkout
         shell: pwsh
         run: |

@@ -81,7 +81,14 @@ def test_tests_are_scanned_when_they_are_not_excluded(plain_root: Path) -> None:
 
 
 @needs_bandit
-@pytest.mark.parametrize("name", ["a,b", "a[1]", "a*b?c"])
+@pytest.mark.parametrize(
+    "name",
+    [
+        "a,b",
+        "a[1]",
+        pytest.param("a*b?c", marks=pytest.mark.skipif(os.name == "nt", reason="Windows has no * or ? in a name")),
+    ],
+)
 def test_commas_and_pattern_characters_in_a_name_keep_the_same_files(plain_root: Path, name: str) -> None:
     # Bandit splits --exclude at commas and reads each entry as a pattern.
     assert _flagged_files(_skill(plain_root / "skills" / name)) == LIVE_FILES

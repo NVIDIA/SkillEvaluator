@@ -168,17 +168,35 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
             assert caller["secrets"] == {"NVSKILLS_CI_DISPATCH_TOKEN": "${{ secrets.NVSKILLS_CI_DISPATCH_TOKEN }}"}
         if "workflow_run" in triggers:
             if path.name == "promote-stable.yml":
-                assert set(triggers) == {"workflow_run", "workflow_dispatch"}
+                assert set(triggers) == {"workflow_run", "workflow_dispatch", "workflow_call"}
                 assert triggers["workflow_run"] == {
                     "workflows": ["SkillEvaluator release published"],
                     "types": ["completed"],
                 }
+                expected_release = triggers["workflow_dispatch"]["inputs"]["expected-release"]
+                assert expected_release["required"] == "true" and expected_release["type"] == "string"
+                assert triggers["workflow_call"] == {
+                    "inputs": {"expected-release": {"required": "true", "type": "string"}},
+                    "secrets": {"STABLE_CHANNEL_APP_PRIVATE_KEY": {"required": "true"}},
+                }
                 assert document["permissions"] == {}
+                assert "concurrency" not in document
                 assert set(document["jobs"]) == {"promote"}
                 promote = document["jobs"]["promote"]
                 assert promote["environment"] == "stable-channel"
                 assert promote["permissions"] == {"contents": "read"}
+                assert promote["concurrency"] == {
+                    "group": "skillevaluator-stable",
+                    "cancel-in-progress": "false",
+                    "queue": "max",
+                }
                 assert "github.ref == 'refs/heads/main'" in promote["if"]
+                assert set(re.findall(r"github\.workflow_ref == '([^']+)'", promote["if"])) == {
+                    "NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main",
+                    "NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main",
+                }
+                assert "github.event_name == 'workflow_dispatch'" in promote["if"]
+                assert "github.event_name == 'workflow_run'" in promote["if"]
                 checkout, writer, update = promote["steps"]
                 assert re.fullmatch(r"actions/checkout@[0-9a-f]{40}", checkout["uses"])
                 assert checkout["with"] == {
@@ -187,8 +205,11 @@ def test_pull_requests_read_but_never_write_the_layer_cache():
                     "persist-credentials": "false",
                 }
                 assert re.fullmatch(r"actions/create-github-app-token@[0-9a-f]{40}", writer["uses"])
+                assert writer["with"]["private-key"] == "${{ secrets.STABLE_CHANNEL_APP_PRIVATE_KEY }}"
                 assert writer["with"]["permission-contents"] == "write"
                 assert update["run"] == "bash ci/promote_stable.sh"
+                assert update["env"]["RELEASE_DEVZONE_INDEX_URL"] == "${{ vars.RELEASE_DEVZONE_INDEX_URL }}"
+                assert update["env"]["STABLE_EXPECTED_RELEASE"] == "${{ inputs.expected-release }}"
                 continue
             # The consumer listener calls only the immutable trusted publishers;
             # it has no local steps, candidate checkout or image build/cache job.

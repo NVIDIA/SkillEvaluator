@@ -29,7 +29,7 @@ from skillevaluator.provider_config import ProviderConfig
 def isolated_provider_environment(monkeypatch, tmp_path):
     """Use synthetic credentials and refuse any network address outside loopback."""
     for name in tuple(os.environ):
-        if name.startswith("AWS_"):
+        if name.startswith(("AWS_", "BEDROCK_MANTLE_", "ANTHROPIC_AWS_")):
             monkeypatch.delenv(name)
     monkeypatch.setenv("HOME", str(tmp_path))
     monkeypatch.setenv("AWS_SHARED_CREDENTIALS_FILE", str(tmp_path / "credentials"))
@@ -77,7 +77,9 @@ class _Server(ThreadingHTTPServer):
         self.statuses = statuses
         self.retry_after = retry_after
         self.requests: list[int] = []
+        self.paths: list[str] = []
         self.bearer_requests = 0
+        self.authorizations: list[str] = []
         self.connections = 0
         self.tls_context = tls_context
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -99,6 +101,8 @@ class _Handler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         status = self.server.statuses[min(len(self.server.requests), len(self.server.statuses) - 1)]
         self.server.requests.append(status)
+        self.server.paths.append(self.path)
+        self.server.authorizations.append(self.headers.get("Authorization", ""))
         self.server.bearer_requests += self.headers.get("Authorization", "").startswith("Bearer ")
         payload = {"message": "loopback response"}
         if status == 200:
@@ -109,9 +113,28 @@ class _Handler(BaseHTTPRequestHandler):
                     "usage": {"inputTokens": 2, "outputTokens": 1, "totalTokens": 3},
                     "metrics": {"latencyMs": 1},
                 }
-            elif self.path.endswith("/invoke"):
+            elif self.path.endswith("/responses"):
                 payload = {
                     "id": "loopback",
+                    "object": "response",
+                    "created_at": 0,
+                    "model": "loopback",
+                    "status": "completed",
+                    "output": [
+                        {
+                            "id": "loopback",
+                            "type": "message",
+                            "role": "assistant",
+                            "status": "completed",
+                            "content": [{"type": "output_text", "text": "recovered", "annotations": []}],
+                        }
+                    ],
+                    "usage": {"input_tokens": 2, "output_tokens": 1, "total_tokens": 3},
+                }
+            elif self.path.endswith(("/invoke", "/messages")):
+                payload = {
+                    "id": "loopback",
+                    "model": "loopback",
                     "type": "message",
                     "role": "assistant",
                     "content": [{"type": "text", "text": "recovered"}],
@@ -204,19 +227,18 @@ def test_wrapped_retry_after_preserves_valid_delay_over_http(
             assert server.requests == [429]
 
 
-def _client(monkeypatch, endpoint, provider="bedrock"):
+def _client(
+    monkeypatch,
+    endpoint,
+    provider="bedrock",
+    model="anthropic.claude-3-haiku-20240307-v1:0",
+    endpoint_variable="AWS_BEDROCK_RUNTIME_ENDPOINT",
+):
     if provider == "bedrock":
         pytest.importorskip("litellm")
-        monkeypatch.setenv("AWS_BEDROCK_RUNTIME_ENDPOINT", endpoint)
+        monkeypatch.setenv(endpoint_variable, endpoint)
         client = LLMClient(max_retries=2, retry_base_delay=0, retry_max_delay=0)
-        client._provider_config = ProviderConfig(
-            "bedrock",
-            "anthropic.claude-3-haiku-20240307-v1:0",
-            None,
-            None,
-            "bedrock/anthropic.claude-3-haiku-20240307-v1:0",
-            region="us-west-2",
-        )
+        client._provider_config = ProviderConfig("bedrock", model, None, None, f"bedrock/{model}", region="us-west-2")
         return client
     pytest.importorskip("openai")
     return LLMClient(
@@ -260,6 +282,134 @@ def test_bedrock_inference_rejects_http_bearer_override(isolated_provider_enviro
         assert server.connections == 0
 
 
+_MANTLE_MODEL = "mantle/anthropic.claude-3-haiku-20240307-v1:0"
+_PLATFORM_MODEL = "claude_platform/anthropic.claude-3-haiku-20240307-v1:0"
+_OTHER_ROUTE_ENDPOINTS = [
+    (_MANTLE_MODEL, "BEDROCK_MANTLE_API_BASE", "/anthropic/v1/messages"),
+    (_PLATFORM_MODEL, "ANTHROPIC_AWS_BASE_URL", "/v1/messages"),
+    (_PLATFORM_MODEL, "ANTHROPIC_AWS_API_BASE", "/v1/messages"),
+]
+
+
+@pytest.mark.parametrize(("model", "variable", "_path"), _OTHER_ROUTE_ENDPOINTS)
+def test_bedrock_inference_rejects_http_bearer_override_on_other_routes(
+    isolated_provider_environment, monkeypatch, model, variable, _path
+):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("ANTHROPIC_AWS_WORKSPACE_ID", "loopback-workspace")
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model=model, endpoint_variable=variable)
+        with pytest.raises(LLMClientError, match=f"{variable} must use HTTPS"):
+            client.completions("system", "user")
+        assert server.connections == 0
+
+
+@pytest.mark.parametrize(("model", "variable", "path"), _OTHER_ROUTE_ENDPOINTS)
+def test_bedrock_inference_accepts_https_bearer_override_on_other_routes(
+    isolated_provider_environment, monkeypatch, loopback_tls, model, variable, path
+):
+    litellm = pytest.importorskip("litellm")
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("ANTHROPIC_AWS_WORKSPACE_ID", "loopback-workspace")
+    monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    monkeypatch.setattr(litellm, "drop_params", True)
+    with _server([200], tls_context) as server:
+        client = _client(
+            monkeypatch, f"https://127.0.0.1:{server.server_port}", model=model, endpoint_variable=variable
+        )
+        assert client.completions("system", "user") == "recovered"
+        assert server.paths == [path]
+        assert server.bearer_requests == 1
+
+
+@pytest.mark.parametrize("bearer_token", ["", " \t "])
+@pytest.mark.parametrize(("model", "variable", "path"), _OTHER_ROUTE_ENDPOINTS)
+def test_bedrock_inference_ignores_http_override_on_other_routes_when_bearer_token_is_blank(
+    isolated_provider_environment, monkeypatch, model, variable, path, bearer_token
+):
+    litellm = pytest.importorskip("litellm")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    monkeypatch.setenv("ANTHROPIC_AWS_WORKSPACE_ID", "loopback-workspace")
+    monkeypatch.setattr(litellm, "drop_params", True)
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model=model, endpoint_variable=variable)
+        assert client.completions("system", "user") == "recovered"
+        assert server.paths == [path]
+        assert server.authorizations[0].startswith("AWS4-HMAC-SHA256 ")
+        assert server.bearer_requests == 0
+
+
+@pytest.mark.parametrize("bearer_token", ["", "   ", " \t "])
+def test_bedrock_inference_signs_with_sigv4_when_bearer_token_is_blank(
+    isolated_provider_environment, monkeypatch, bearer_token
+):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        assert client.completions("system", "user") == "recovered"
+        assert server.requests == [200]
+        assert len(server.authorizations) == 1
+        assert server.authorizations[0].startswith("AWS4-HMAC-SHA256 ")
+        assert "Bearer" not in server.authorizations[0]
+
+
+@pytest.mark.parametrize("bearer_token", ["", "   ", " \t "])
+def test_bedrock_responses_route_signs_with_sigv4_when_bearer_token_is_blank(
+    isolated_provider_environment, monkeypatch, bearer_token
+):
+    litellm = pytest.importorskip("litellm")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    monkeypatch.setattr(litellm, "drop_params", True)
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model="responses/us.openai.gpt-5.6-sol")
+        assert client.completions("system", "user") == "recovered"
+        assert server.paths == ["/openai/v1/responses"]
+        assert len(server.authorizations) == 1
+        assert server.authorizations[0].startswith("AWS4-HMAC-SHA256 ")
+        assert "Bearer" not in server.authorizations[0]
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == bearer_token
+
+
+def test_bedrock_responses_route_restores_blank_bearer_token_after_a_failed_call(
+    isolated_provider_environment, monkeypatch
+):
+    litellm = pytest.importorskip("litellm")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", " \t ")
+    monkeypatch.setattr(litellm, "drop_params", True)
+    with _server([400]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}", model="responses/us.openai.gpt-5.6-sol")
+        with pytest.raises(Exception) as raised:
+            client.completions("system", "user")
+        assert extract_http_status(raised.value) == 400
+        assert server.paths == ["/openai/v1/responses"]
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == " \t "
+
+
+def test_blank_bedrock_bearer_token_is_restored_exactly(monkeypatch):
+    from skillevaluator.inference.client import _bedrock_token_window
+
+    name = "AWS_BEARER_TOKEN_BEDROCK"
+    monkeypatch.setenv(name, " \t ")
+    with _bedrock_token_window.blank():
+        assert os.environ[name] == ""
+        with _bedrock_token_window.blank():
+            assert os.environ[name] == ""
+        # An overlapping call finishing must not put the value back for the one still running.
+        assert os.environ[name] == ""
+    assert os.environ[name] == " \t "
+    with pytest.raises(RuntimeError), _bedrock_token_window.blank():
+        raise RuntimeError("call failed")
+    assert os.environ[name] == " \t "
+    monkeypatch.delenv(name)
+    with _bedrock_token_window.blank():
+        assert os.environ[name] == ""
+    assert name not in os.environ
+
+
 def test_bedrock_inference_validates_credentials_loaded_at_sdk_import(isolated_provider_environment, monkeypatch):
     def unexpected_completion(**_kwargs):
         pytest.fail("Bedrock completion must not be called for an HTTP bearer endpoint")
@@ -279,7 +429,10 @@ def test_bedrock_inference_validates_credentials_loaded_at_sdk_import(isolated_p
         assert server.connections == 0
 
 
-def test_bedrock_inference_accepts_https_bearer_override(isolated_provider_environment, monkeypatch, loopback_tls):
+@pytest.mark.parametrize("model", ["anthropic.claude-3-haiku-20240307-v1:0", "responses/us.openai.gpt-5.6-sol"])
+def test_bedrock_inference_accepts_https_bearer_override(
+    isolated_provider_environment, monkeypatch, loopback_tls, model
+):
     litellm = pytest.importorskip("litellm")
     from litellm.caching.llm_caching_handler import LLMClientCache
 
@@ -287,11 +440,14 @@ def test_bedrock_inference_accepts_https_bearer_override(isolated_provider_envir
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
     monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
     monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    monkeypatch.setattr(litellm, "drop_params", True)
     with _server([200], tls_context) as server:
-        client = _client(monkeypatch, f"https://127.0.0.1:{server.server_port}")
+        client = _client(monkeypatch, f"https://127.0.0.1:{server.server_port}", model=model)
         assert client.completions("system", "user") == "recovered"
         assert server.requests == [200]
+        assert server.paths[0].endswith("/openai/v1/responses" if model.startswith("responses/") else "/converse")
         assert server.bearer_requests == 1
+    assert os.environ["AWS_BEARER_TOKEN_BEDROCK"] == "loopback-bearer-token"
 
 
 @pytest.mark.parametrize("provider", ["bedrock", "openai"])

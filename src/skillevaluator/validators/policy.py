@@ -30,10 +30,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-import yaml
-
 from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity, ValidationResult
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 logger = get_logger(__name__)
 
@@ -193,9 +192,13 @@ def _load_policy_yaml(path: Path) -> Any:
     """Load policy YAML and normalize parser failures to the public contract."""
     try:
         with path.open(encoding="utf-8") as fh:
-            return yaml.safe_load(fh) or {}
-    except (yaml.YAMLError, UnicodeError, RecursionError) as exc:
-        raise ValueError(f"Invalid policy YAML in {path}: {exc}") from exc
+            # Bounded: the file usually sits in the repository under test, and aliases or merge
+            # keys expand inside ``safe_load`` or in the ``str()`` calls that read the values.
+            return load_bounded_yaml(fh.read(), last_key_wins=True) or {}
+    except (StructuredDataError, UnicodeError) as exc:
+        # A syntax error wraps PyYAML's own error, which has the position and reason.
+        cause = exc.__cause__ if isinstance(exc, StructuredDataError) and exc.__cause__ else exc
+        raise ValueError(f"Invalid policy YAML in {path}: {cause}") from cause
     except FileNotFoundError:
         raise
     except OSError as exc:

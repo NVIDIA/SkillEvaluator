@@ -3,6 +3,7 @@
 
 """Behavioral safety and output checks; live GitHub is verified separately."""
 
+import base64
 import hashlib
 import json
 import subprocess
@@ -21,6 +22,8 @@ RELEASE = {
     "publisher_ref": "1f3c98cf1b178d5446e31cc187c97a6a697d599a",
     "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:" + "c" * 64,
 }
+STABLE_SCANNER = "NVIDIA/SkillEvaluator/.github/workflows/skill-checks-stable.yml@stable"
+STABLE_PUBLISHER = "NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports-stable.yml@stable"
 
 
 @pytest.fixture
@@ -63,9 +66,8 @@ def release_file(tmp_path):
 
 
 def invoke(repository, release_file, *args, input_text=None):
-    return CliRunner().invoke(
-        cli, ["ci", "init", "--repo", str(repository), "--release", str(release_file), *args], input=input_text
-    )
+    release_args = ["--release", str(release_file)] if release_file else []
+    return CliRunner().invoke(cli, ["ci", "init", "--repo", str(repository), *release_args, *args], input=input_text)
 
 
 def test_full_preview_needs_no_login_and_leaves_checkout_unchanged(repository, release_file, monkeypatch):
@@ -219,6 +221,188 @@ def test_scan_only_does_not_request_identity_or_generate_publisher(repository, r
     assert scan["permissions"] == {"contents": "read"}
     assert "report-base-url" not in scan["jobs"]["skills"]["with"]
     assert not (repository / ".github/workflows/publish-skill-reports.yml").exists()
+
+
+def test_stable_onboarding_uses_released_workflows_and_approves_caller(repository, tmp_path):
+    receipt = tmp_path / "stable-plan.json"
+    result = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "save", "--output", str(receipt))
+    assert result.exit_code == 0, result.output
+    scan_path = repository / wizard.SCAN
+    scan = yaml.safe_load(scan_path.read_text())
+    publisher = yaml.safe_load((repository / wizard.PUBLISH).read_text())
+    assert scan["jobs"]["skills"]["uses"] == STABLE_SCANNER
+    assert publisher["jobs"]["reports"]["uses"] == STABLE_PUBLISHER
+    assert "image" not in scan["jobs"]["skills"]["with"]
+    assert scan["permissions"]["id-token"] == "write"
+    publisher_inputs = publisher["jobs"]["reports"]["with"]
+    assert publisher_inputs.keys() == {"run-id", "run-attempt", "report-base-url", "trusted-caller-blobs"}
+    blob = subprocess.check_output(["git", "-C", str(repository), "hash-object", wizard.SCAN], text=True).strip()
+    assert publisher_inputs["trusted-caller-blobs"] == blob
+    plan = json.loads(receipt.read_text())
+    assert plan["channel"] == "stable"
+    assert plan["publisher_ref"] == "stable"
+    assert plan["scan_workflow"] == STABLE_SCANNER
+    assert plan["image"] is None
+
+
+def test_existing_stable_scan_adds_stable_hosting_without_repeating_channel(repository):
+    created = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "save", "--checks-only")
+    assert created.exit_code == 0, created.output
+    scan_path = repository / wizard.SCAN
+    original = yaml.safe_load(scan_path.read_text())
+    assert original["permissions"] == {"contents": "read"}
+    assert not (repository / wizard.PUBLISH).exists()
+    subprocess.run(["git", "-C", str(repository), "add", wizard.SCAN], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-c",
+            "core.hooksPath=/dev/null",
+            "-c",
+            "commit.gpgsign=false",
+            "-C",
+            str(repository),
+            "commit",
+            "-m",
+            "Add stable skill checks",
+        ],
+        check=True,
+        capture_output=True,
+    )
+
+    added = invoke(repository, None, "--no-input", "--mode", "save")
+    assert added.exit_code == 0, added.output
+    updated = yaml.safe_load(scan_path.read_text())
+    assert updated["jobs"]["skills"].pop("permissions")["id-token"] == "write"
+    assert updated == original
+    publisher = yaml.safe_load((repository / wizard.PUBLISH).read_text())
+    assert publisher["jobs"]["reports"]["uses"] == STABLE_PUBLISHER
+
+    repeated = invoke(repository, None, "--no-input", "--mode", "save")
+    assert repeated.exit_code == 0, repeated.output
+    assert "already match" in repeated.output
+
+
+@pytest.mark.parametrize("options", [("--tiers", "1,2,3"), ("--platform", "gitlab")])
+def test_stable_channel_rejects_unsupported_onboarding(repository, options):
+    result = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "save", *options)
+    assert result.exit_code != 0
+    assert "only for GitHub Tier 1" in result.output
+    assert not (repository / wizard.SCAN).exists()
+
+
+def test_stable_channel_rejects_explicit_release_descriptor(repository, release_file):
+    result = invoke(repository, release_file, "--channel", "stable", "--no-input", "--mode", "save")
+    assert result.exit_code != 0
+    assert "Use --release with pinned CI only" in result.output
+    assert not (repository / wizard.SCAN).exists()
+
+
+def test_stable_channel_does_not_replace_existing_pinned_scan(repository, release_file):
+    initial = invoke(repository, release_file, "--mode", "save", "--no-input", "--checks-only")
+    assert initial.exit_code == 0, initial.output
+    scan_path = repository / wizard.SCAN
+    before = scan_path.read_bytes()
+    result = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "save")
+    assert result.exit_code != 0
+    assert "preserves its version" in result.output
+    assert scan_path.read_bytes() == before
+    assert not (repository / wizard.PUBLISH).exists()
+
+
+def test_stable_pr_preflight_verifies_both_workflows_at_the_tag_commit(repository, monkeypatch):
+    from test_ci_onboarding_existing import CALLER
+
+    scan = CALLER.replace("example/components/.github/workflows/skill-checks.yml@v3", STABLE_SCANNER)
+    state = {"report_url": "https://example-org.github.io/consumer/"}
+    revision = "e" * 40
+    scanner = {
+        "jobs": {
+            "scan": {
+                "uses": "NVIDIA/SkillEvaluator/.github/workflows/evaluate-skills.yml@" + "d" * 40,
+                "with": {"image": RELEASE["image"]},
+            },
+        },
+    }
+    publisher = {
+        "on": {"workflow_call": {}},
+        "jobs": {
+            "publish": {
+                "uses": "NVIDIA/SkillEvaluator/.github/workflows/publish-skill-reports.yml@" + "c" * 40,
+                "with": {"tools-ref": "c" * 40},
+            },
+        },
+    }
+
+    def response(path):
+        return {"encoding": "base64", "content": base64.b64encode(yaml.safe_dump(path).encode()).decode()}
+
+    prefix = "repos/NVIDIA/SkillEvaluator/"
+    requests = {
+        prefix + "git/ref/tags/stable": {"ref": "refs/tags/stable", "object": {"type": "commit", "sha": revision}},
+        prefix + f"contents/.github/workflows/skill-checks-stable.yml?ref={revision}": response(scanner),
+        prefix + f"contents/.github/workflows/publish-skill-reports-stable.yml?ref={revision}": response(publisher),
+    }
+
+    def github_api(method, endpoint, *, missing_ok=False):
+        assert method == "GET"
+        assert missing_ok == endpoint.endswith("/git/ref/tags/stable")
+        return requests.pop(endpoint)
+
+    monkeypatch.setattr(wizard, "github_api", github_api)
+    monkeypatch.setattr(wizard, "remote_preflight", lambda *_args: state)
+    monkeypatch.setattr(wizard, "enable_hosting", lambda *_args: None)
+    plan = {"report_url": state["report_url"], "changed_files": [], "channel": "stable"}
+    wizard.create_setup(repository, "example-org/consumer", "trunk", {wizard.SCAN: scan}, True, plan)
+    assert plan["action"] == "configured"
+    assert not requests
+
+
+@pytest.mark.parametrize("status", [404, 401, 403])
+def test_stable_pr_setup_handles_tag_lookup_failures_before_writes(repository, monkeypatch, status):
+    monkeypatch.setattr(
+        wizard,
+        "remote_preflight",
+        lambda *_args: {"report_url": "https://example-org.github.io/consumer/", "verified_private_url": None},
+    )
+    real_run = subprocess.run
+    endpoint = "repos/NVIDIA/SkillEvaluator/git/ref/tags/stable"
+
+    def run(args, *extra, **kwargs):
+        if args[:2] != ["gh", "api"]:
+            return real_run(args, *extra, **kwargs)
+        assert args[args.index("--method") + 1] == "GET"
+        assert endpoint in args
+        return subprocess.CompletedProcess(args, 1, f"HTTP/2.0 {status}\n\n", "")
+
+    def unexpected_write(*_args):
+        pytest.fail("A failed stable tag lookup must stop setup before repository writes")
+
+    monkeypatch.setattr(wizard.subprocess, "run", run)
+    monkeypatch.setattr(wizard, "enable_hosting", unexpected_write)
+    result = invoke(repository, None, "--channel", "stable", "--no-input", "--mode", "pr")
+
+    assert result.exit_code != 0
+    if status == 404:
+        assert "stable CI channel is unavailable" in result.output
+        assert "omit --channel stable" in result.output
+    else:
+        assert f"failed (HTTP {status})" in result.output
+        assert "Check your gh login and repository permissions" in result.output
+    assert not (repository / wizard.SCAN).exists()
+    assert not (repository / wizard.PUBLISH).exists()
+
+
+def test_missing_custom_component_tag_keeps_normal_github_api_error(monkeypatch):
+    from test_ci_onboarding_existing import CALLER
+
+    def missing_tag(args, **_kwargs):
+        assert "repos/example/components/git/ref/tags/v3" in args
+        return subprocess.CompletedProcess(args, 1, "HTTP/2.0 404\n\n", "")
+
+    monkeypatch.setattr(wizard.subprocess, "run", missing_tag)
+    with pytest.raises(wizard.SetupError, match=r"git/ref/tags/v3 failed \(HTTP 404\)"):
+        wizard.component_preflight(wizard.workflow_helpers.existing_scan(CALLER))
 
 
 def test_conflicting_publisher_does_not_partially_write_scan(repository, release_file):

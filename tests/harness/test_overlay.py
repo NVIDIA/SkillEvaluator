@@ -20,7 +20,7 @@ from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.schema import SchemaValidator
 
-HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
+HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode", "pi"]
 BODY = "\n# Demo\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
 
 
@@ -53,7 +53,7 @@ def test_packaged_profiles_load_and_pin_versions():
 
     assert sorted(p["harness"] for p in profiles) == HARNESSES
     assert all(p["verified"]["version"] and p["verified"]["date"] for p in profiles)
-    assert len(list(PROFILES_DIR.glob("*.yaml"))) == 6
+    assert len(list(PROFILES_DIR.glob("*.yaml"))) == 7
 
 
 def test_unknown_harness_is_rejected():
@@ -68,7 +68,7 @@ def test_clean_skill_loads_everywhere(tmp_path: Path):
 def test_duplicate_key_is_not_loaded_by_strict_parsers(tmp_path: Path):
     status = _status(_skill(tmp_path, extra="description: Use when a second value is given.\n"))
 
-    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == "not_loaded"
+    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == status["pi"] == "not_loaded"
     assert status["claude-code"] == "loads"
 
 
@@ -80,6 +80,7 @@ def test_bom_is_not_loaded_by_codex_only(tmp_path: Path):
     status = _status(skill)
 
     assert status["codex"] == "not_loaded"
+    assert status["pi"] == "loads"
     assert {h for h, s in status.items() if s != "loads"} == {"codex"}
 
 
@@ -277,7 +278,7 @@ def test_harness_check_alone_marks_ticker_and_panel(tmp_path: Path):
     text = _render(harness_panel(block))
     assert "Harness compatibility" in text and "advisory" not in text
     assert "not found" in text and "[CC-ROOT]" not in text
-    assert "1 of 6 not loaded" in text and "Details and fixes: -v" in text
+    assert "1 of 7 not loaded" in text and "Details and fixes: -v" in text
     full = _render(harness_panel(block, verbose=True))
     assert "NOT LOADED" in full and "[CC-ROOT]" in full
 
@@ -287,7 +288,7 @@ def test_clean_skill_panel_is_one_line(tmp_path: Path):
 
     assert harness_note(block) is None
     text = _render(harness_panel(block))
-    assert "6 of 6 load" in text and "harness-check" not in text
+    assert "7 of 7 load" in text and "harness-check" not in text
 
 
 def test_validate_shows_panel_and_verdict_note(tmp_path: Path):
@@ -389,7 +390,7 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
     rows = _rows(skills / "filler-000")
 
     assert rows["opencode"]["status"] == "degraded"
-    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME"} <= {
+    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME", "PI-NAME-COLLISION"} <= {
         f["id"] for r in rows.values() for f in r["findings"]
     }
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
@@ -678,13 +679,13 @@ def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
     rows = _rows(skill)
 
     flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
-    assert flagged == set(HARNESSES) - {"codex"}
+    assert flagged == set(HARNESSES) - {"codex", "pi"}  # pi has no implicit-invocation policy mechanism
 
 
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
     rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
 
-    for harness in set(HARNESSES) - {"claude-code"}:
+    for harness in set(HARNESSES) - {"claude-code", "pi"}:  # pi substitutes neither; no pi rule exists
         assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
         assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
     assert not rows["claude-code"]["findings"]
@@ -749,6 +750,54 @@ def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
     assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
         f["message"] for f in mac_only["hermes"]["findings"]
     }
+
+
+def test_pi_drops_tab_indented_frontmatter(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: demo-skill\nmetadata:\n  \tauthor: x\n---\nBody\n")
+
+    rows = _rows(skill)
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-FRONTMATTER-TABS" in _ids(rows, "pi")
+
+
+def test_pi_drops_skills_without_frontmatter_or_description(tmp_path: Path):
+    bare = tmp_path / "skills" / "bare"
+    bare.mkdir(parents=True)
+    (bare / "SKILL.md").write_text("No frontmatter, just a body.\n")
+    blank = _skill(tmp_path / "blank", desc='"   "')
+
+    assert _rows(bare)["pi"]["status"] == "not_loaded"
+    assert "PI-UNPARSEABLE" in _ids(_rows(bare), "pi")
+    assert _rows(blank)["pi"]["status"] == "not_loaded"
+    assert "PI-DESC-MISSING" in _ids(_rows(blank), "pi")
+
+
+@pytest.mark.parametrize("target, flagged", [(1024, False), (1025, True)])
+def test_pi_description_length_boundary(tmp_path: Path, target: int, flagged: bool):
+    rows = _rows(_skill(tmp_path / str(target), desc="a" * target))
+
+    assert ("PI-DESC-LONG" in _ids(rows, "pi")) is flagged
+    assert rows["pi"]["status"] == "loads"
+
+
+def test_pi_hidden_disable_model_invocation(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    assert rows["pi"]["status"] == "degraded"
+    assert "PI-HIDDEN" in _ids(rows, "pi")
+
+
+def test_pi_name_falls_back_to_the_folder(tmp_path: Path):
+    skill = tmp_path / "skills" / "folder-name"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\ndescription: Use when testing name fallback.\n---\nBody\n")
+
+    rows = _rows(skill)
+
+    assert "PI-NAME-FALLBACK" in _ids(rows, "pi")
+    assert rows["pi"]["status"] == "loads"
 
 
 def _sized(root: Path, fact: str, target: int) -> Path:

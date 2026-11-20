@@ -170,7 +170,9 @@ behind the operator-selected `tier3` extra, so static Tier 1 installs do not pul
 it in. The shared LLM client uses `litellm>=1.110.2,<1.111.0.dev0` with
 `boto3>=1.44.0`. When you set `AWS_BEARER_TOKEN_BEDROCK`, use HTTPS for the
 Bedrock catalog and runtime endpoints checked by preflight and for the
-`AWS_BEDROCK_RUNTIME_ENDPOINT` override used by the LiteLLM client.
+endpoint overrides used by the LiteLLM client: `AWS_BEDROCK_RUNTIME_ENDPOINT`,
+`BEDROCK_MANTLE_API_BASE`, `ANTHROPIC_AWS_BASE_URL`, and
+`ANTHROPIC_AWS_API_BASE`.
 
 The integration preserves SkillEvaluator's runtime and artifact contracts while
 using Harbor 0.25:

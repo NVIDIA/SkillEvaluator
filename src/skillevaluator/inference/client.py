@@ -108,6 +108,30 @@ class _BedrockTokenWindow:
 
 _bedrock_token_window = _BedrockTokenWindow()
 
+# Endpoint overrides that LiteLLM's Bedrock routes send the bearer token to.
+_BEDROCK_BEARER_ENDPOINT_VARIABLES = (
+    "AWS_BEDROCK_RUNTIME_ENDPOINT",  # bedrock-runtime routes, such as Converse and Responses
+    "BEDROCK_MANTLE_API_BASE",  # the mantle/ route
+    # The hosted-platform route sends the token only when its own API key is not set.
+    "ANTHROPIC_AWS_BASE_URL",
+    "ANTHROPIC_AWS_API_BASE",
+)
+
+
+def _require_https_for_bedrock_bearer_endpoints() -> None:
+    """Refuse to send a Bedrock bearer token to a plain HTTP endpoint override."""
+    for variable in _BEDROCK_BEARER_ENDPOINT_VARIABLES:
+        endpoint = os.environ.get(variable)
+        if not endpoint:
+            continue
+        try:
+            target = urlsplit(endpoint)
+            uses_https = target.scheme == "https" and target.hostname is not None
+        except ValueError:
+            uses_https = False
+        if not uses_https:
+            raise LLMClientError(f"{variable} must use HTTPS with a Bedrock bearer token.")
+
 
 def _effective_openai_base_url(explicit_base_url: str | None) -> str:
     if explicit_base_url is not None:
@@ -835,15 +859,9 @@ class LLMClient:
                     ) from exc
                 # LiteLLM can load environment variables on its first import.
                 has_bearer_token = has_bedrock_bearer_token()
+                if has_bearer_token:
+                    _require_https_for_bedrock_bearer_endpoints()
                 endpoint = os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT") if has_bearer_token else None
-                if endpoint:
-                    try:
-                        target = urlsplit(endpoint)
-                        uses_https = target.scheme == "https" and target.hostname is not None
-                    except ValueError:
-                        uses_https = False
-                    if not uses_https:
-                        raise LLMClientError("AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS with a Bedrock bearer token.")
                 # LiteLLM sends a whitespace-only AWS_BEARER_TOKEN_BEDROCK as a blank Bearer header.
                 # An empty key makes it sign with the IAM credentials, as it does for an unset variable.
                 # The Responses route also reads the variable itself, so hide it for the call.

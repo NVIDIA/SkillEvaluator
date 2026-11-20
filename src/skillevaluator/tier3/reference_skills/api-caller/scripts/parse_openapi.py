@@ -11,22 +11,15 @@ import json
 import sys
 import urllib.error
 import urllib.request
-from urllib.parse import urlparse
 
-
-def _validate_http_url(url: str) -> str:
-    """Reject local-file and custom URL schemes before fetching a spec."""
-    parsed = urlparse(url)
-    if parsed.scheme not in {"http", "https"} or not parsed.netloc:
-        raise ValueError("Only absolute HTTP or HTTPS URLs are supported")
-    return url
+from url_safety import validate_http_url
 
 
 def fetch_spec(url: str) -> dict:
     """Fetch OpenAPI spec from URL."""
     try:
-        req = urllib.request.Request(_validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
-        # _validate_http_url() rejects non-HTTP schemes before this request.
+        req = urllib.request.Request(validate_http_url(url), headers={"User-Agent": "api-caller/1.0"})
+        # validate_http_url() rejects non-HTTP schemes before this request.
         with urllib.request.urlopen(req, timeout=30) as response:  # nosec B310
             content = response.read().decode("utf-8")
             return json.loads(content)
@@ -38,13 +31,22 @@ def parse_parameters(params: list) -> list:
     """Parse parameter definitions."""
     result = []
     for p in params:
+        schema = p.get("schema")
+        if schema is None:
+            schema = {}
+        description = p.get("description")
         param_info = {
             "name": p.get("name"),
             "in": p.get("in"),  # path, query, header, cookie
             "required": p.get("required", False),
-            "type": p.get("schema", {}).get("type", "string"),
-            "description": p.get("description", "")[:100],  # Truncate long descriptions
         }
+        if isinstance(schema, bool):
+            param_info["schema"] = schema
+        elif isinstance(schema, dict):
+            param_info["type"] = schema.get("type", "string")
+        else:
+            param_info["type"] = "string"
+        param_info["description"] = description[:100] if isinstance(description, str) else ""
         result.append(param_info)
     return result
 
@@ -98,13 +100,31 @@ def parse_spec(spec: dict, filter_path: str | None = None) -> dict:
 
         for method, details in methods.items():
             if method in ["get", "post", "put", "delete", "patch"]:
+                parameters = details.get("parameters", [])
+                path_parameters = methods.get("parameters", [])
+                if (
+                    isinstance(path_parameters, list)
+                    and path_parameters
+                    and isinstance(parameters, list)
+                    and all(
+                        isinstance(parameter, dict)
+                        and "$ref" not in parameter
+                        and isinstance(parameter.get("name"), str)
+                        and isinstance(parameter.get("in"), str)
+                        for parameter in [*path_parameters, *parameters]
+                    )
+                ):
+                    merged = {(parameter["name"], parameter["in"]): parameter for parameter in path_parameters}
+                    merged.update({(parameter["name"], parameter["in"]): parameter for parameter in parameters})
+                    parameters = list(merged.values())
+
                 op = {
                     "method": method.upper(),
                     "path": path,
                     "full_url": f"{base_url}{path}" if base_url else path,
                     "operation_id": details.get("operationId", ""),
                     "summary": details.get("summary", "")[:100],
-                    "parameters": parse_parameters(details.get("parameters", [])),
+                    "parameters": parse_parameters(parameters),
                 }
 
                 # Parse request body for POST/PUT/PATCH

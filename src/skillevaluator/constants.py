@@ -125,7 +125,7 @@ MAX_WORKFLOWS_MDC_LINES = 1000  # Workflows can be longer
 
 # Naming conventions
 # Name must be: lowercase, alphanumeric + hyphens, no leading/trailing/consecutive hyphens
-KEBAB_CASE_PATTERN = r"^[a-z][a-z0-9]*(-[a-z0-9]+)*$"
+KEBAB_CASE_PATTERN = r"^[a-z][a-z0-9]*(-[a-z0-9]+)*\Z"
 
 # Content types for auto-detection
 CONTENT_TYPE_SKILL = "skill"
@@ -408,12 +408,10 @@ QUALITY_SCORE_WEIGHTS = {
 
 QUALITY_GRADE_THRESHOLDS = [(90, "A"), (80, "B"), (70, "C"), (60, "D"), (0, "F")]
 QUALITY_DEFAULT_MIN_SCORE = 70
-QUALITY_RECOMMENDED_MAX_TOKENS = 5000
 # Tier 1 estimates tokens as characters / QUALITY_CHARS_PER_TOKEN; it does not run a tokenizer.
 QUALITY_CHARS_PER_TOKEN = 4
 QUALITY_MAX_BODY_LINES = 500
 
-QUALITY_RESERVED_NAMES = ["anthropic", "claude"]
 
 QUALITY_EXCLUDED_DIRS = frozenset(
     {

@@ -7,10 +7,12 @@ from pathlib import Path
 
 import pytest
 import yaml
+from tests.yaml_alias_fixtures import alias_bomb_skill_md, scalar_alias_fan_yaml
 
 from skillevaluator.models.quality import QualityScoreResult, score_to_grade
 from skillevaluator.quality_config import load_quality_config, quality_config_digest
 from skillevaluator.tier1.commands import run_validation
+from skillevaluator.utils.structured_data import StructuredDataLimitError
 from skillevaluator.validators.quality_score import QualityScoreValidator
 
 
@@ -620,7 +622,7 @@ class TestQualityScoreValidator:
         assert large_findings[0].severity == Severity.MEDIUM
         assert "recommended max <5000" in large_findings[0].message
         assert "estimated tokens" in large_findings[0].message
-        assert "long or unfocused top-level descriptions" in large_findings[0].message
+        assert "long or unfocused top-level descriptions" in large_findings[0].suggestion
         assert "Keep required sections concise" in large_findings[0].suggestion
         assert "references/" in large_findings[0].suggestion
         assert result.passed, result.errors
@@ -957,12 +959,12 @@ class TestQualityScoreDeterministicContracts:
     def test_reserved_names_match_complete_name_segments(self, tmp_path: Path):
         messages = _finding_messages(_write_issue_skill(tmp_path, name="philanthropic-grant-matcher"))
 
-        assert "Name contains reserved word (anthropic, claude)" not in messages
+        assert not any("reserved word" in message for message in messages)
 
     def test_reserved_name_segment_is_still_reported(self, tmp_path: Path):
         messages = _finding_messages(_write_issue_skill(tmp_path, name="anthropic-grant-matcher"))
 
-        assert "Name contains reserved word (anthropic, claude)" in messages
+        assert "Name contains reserved word: anthropic" in messages
 
     def test_person_phrases_do_not_match_inside_words(self, tmp_path: Path):
         messages = _finding_messages(
@@ -1694,6 +1696,362 @@ class TestReliabilityErrorHandlingConfig:
         assert not _contains_any_word("nothing here", ["error", "failure"])
 
 
+def _write_sized_skill(tmp_path: Path, characters: int) -> Path:
+    """Write a skill whose SKILL.md is exactly ``characters`` long, so its estimate is characters // 4."""
+    skill_dir = tmp_path / "sized-skill"
+    skill_dir.mkdir(parents=True)
+    head = (
+        "---\nname: sized-skill\ndescription: A skill of a known size. Use for testing the token budget.\n---\n\n"
+        "# Sized Skill\n\n## Instructions\n\n1. Run the skill\n\n## Examples\n\n```\nexample\n```\n\n"
+    )
+    filler = "".join(f"Filler line number {index} for the token budget.\n" for index in range(characters // 20))
+    (skill_dir / "SKILL.md").write_text((head + filler)[: characters - 1] + "\n", encoding="utf-8")
+    return skill_dir
+
+
+def _token_budget_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["efficiency"]["issues"]
+    return [issue for issue in issues if "recommended max" in issue["message"]]
+
+
+class TestEfficiencyTokenBudgetConfig:
+    def test_packaged_budget_fires_only_above_5000_estimated_tokens(self, tmp_path: Path):
+        at_limit = _validate_with(_write_sized_skill(tmp_path / "at", 20003), tmp_path)
+        over_limit = _validate_with(_write_sized_skill(tmp_path / "over", 20004), tmp_path)
+
+        assert at_limit.metadata["quality_scores"]["metrics"]["total_tokens"] == 5000
+        assert _token_budget_issues(at_limit) == []
+        assert over_limit.metadata["quality_scores"]["metrics"]["total_tokens"] == 5001
+        (issue,) = _token_budget_issues(over_limit)
+        assert issue["deduction"] == 15
+        assert issue["severity"] == "warning"
+        assert issue["message"] == (
+            "Large skill: ~5001 estimated tokens at 4 characters per token, "
+            "recommended max <5000; a real tokenizer may count more"
+        )
+        # Report summaries cut a finding message at 160 characters; the estimate and limit must survive.
+        assert len(issue["message"]) <= 160
+        assert issue["suggestion"].startswith("Per agentskills.io, SKILL.md should be concise")
+
+    def test_custom_limit_moves_the_threshold_and_the_reported_limit(self, tmp_path: Path):
+        skill_dir = _write_sized_skill(tmp_path, 24000)
+
+        raised = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    max_tokens: 8000\n")
+        lowered = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    max_tokens: 100\n")
+
+        assert _token_budget_issues(raised) == []
+        assert raised.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 8000
+        (issue,) = _token_budget_issues(lowered)
+        assert issue["message"].endswith(": ~6000 estimated tokens at 4 characters per token, recommended max <100; a real tokenizer may count more")
+        assert lowered.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 100
+
+    def test_report_metric_is_the_packaged_limit_without_a_custom_file(self, tmp_path: Path):
+        result = _validate_with(_write_sized_skill(tmp_path, 400), tmp_path)
+
+        assert result.metadata["quality_scores"]["metrics"]["recommended_max_tokens"] == 5000
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "efficiency:\n  token_budget:\n    points: 40\n"
+            "    message: Over the team budget\n    suggestion: Split the skill\n"
+        )
+
+        result = _validate_with(_write_sized_skill(tmp_path, 24000), tmp_path, config)
+
+        (issue,) = _token_budget_issues(result)
+        assert issue["message"] == (
+            "Over the team budget: ~6000 estimated tokens at 4"
+            " characters per token, recommended max <5000; a real tokenizer may count more"
+        )
+        assert issue["suggestion"] == "Split the skill"
+        assert issue["deduction"] == 40
+
+    def test_zero_points_turns_the_rule_off_but_keeps_the_metrics(self, tmp_path: Path):
+        skill_dir = _write_sized_skill(tmp_path, 24000)
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "efficiency:\n  token_budget:\n    points: 0\n")
+
+        assert _token_budget_issues(disabled) == []
+        metrics = disabled.metadata["quality_scores"]["metrics"]
+        assert metrics["total_tokens"] == 6000
+        assert metrics["recommended_max_tokens"] == 5000
+        dimensions = disabled.metadata["quality_scores"]["dimensions"]
+        assert dimensions["efficiency"]["score"] == default.metadata["quality_scores"]["dimensions"]["efficiency"]["score"] + 15
+
+    def test_result_built_without_a_config_omits_the_limit(self):
+        assert "recommended_max_tokens" not in QualityScoreResult(skill_name="test").to_dict()["metrics"]
+
+
+def _write_described_skill(tmp_path: Path, description: str) -> Path:
+    skill_dir = tmp_path / "described-skill"
+    skill_dir.mkdir(parents=True)
+    (skill_dir / "SKILL.md").write_text(
+        f"---\nname: described-skill\ndescription: {description}\n---\n\n"
+        "# Described Skill\n\n## Instructions\n\n1. Run the skill\n",
+        encoding="utf-8",
+    )
+    return skill_dir
+
+
+def _short_description_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+    return [issue for issue in issues if "chars, minimum" in issue["message"]]
+
+
+def _long_description_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+    return [issue for issue in issues if "chars, maximum" in issue["message"]]
+
+
+class TestDiscoverabilityDescriptionTooLongConfig:
+    def test_packaged_rule_fires_only_above_200_characters(self, tmp_path: Path):
+        at_maximum = _validate_with(_write_described_skill(tmp_path / "at", "Use for logs. " + "x" * 186), tmp_path)
+        above = _validate_with(_write_described_skill(tmp_path / "above", "Use for logs. " + "x" * 187), tmp_path)
+
+        assert _long_description_issues(at_maximum) == []
+        (issue,) = _long_description_issues(above)
+        assert issue["message"] == "Description very long (recommend 50-150 chars): 201 chars, maximum 200"
+        assert issue["suggestion"] == "Keep descriptions concise for progressive disclosure"
+        assert issue["deduction"] == 5
+        assert issue["severity"] == "info"
+
+    def test_custom_maximum_moves_the_threshold_in_both_directions(self, tmp_path: Path):
+        config = "discoverability:\n  description_too_long:\n    max_chars: {}\n"
+        long_skill = _write_described_skill(tmp_path / "long", "Use for logs. " + "x" * 236)
+        short_skill = _write_described_skill(tmp_path / "short", "Use for parsing application logs")
+
+        raised = _validate_with(long_skill, tmp_path, config.format(300))
+        lowered = _validate_with(short_skill, tmp_path, config.format(30))
+
+        assert _long_description_issues(raised) == []
+        (issue,) = _long_description_issues(lowered)
+        assert issue["message"].endswith(": 32 chars, maximum 30")
+        assert _long_description_issues(_validate_with(short_skill, tmp_path)) == []
+
+    @pytest.mark.parametrize("points", [0, 5])
+    def test_maximum_below_the_minimum_keeps_the_short_description_rule(self, tmp_path: Path, points: int):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs")
+        config = f"discoverability:\n  description_too_long:\n    max_chars: 10\n    points: {points}\n"
+
+        result = _validate_with(skill_dir, tmp_path, config)
+
+        (short,) = _short_description_issues(result)
+        assert short["message"].endswith(": 12 chars, minimum 20")
+        if points:
+            (long,) = _long_description_issues(result)
+            assert long["message"].endswith(": 12 chars, maximum 10")
+        else:
+            assert _long_description_issues(result) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "discoverability:\n  description_too_long:\n    points: 3\n"
+            "    message: Description runs long\n    suggestion: Trim it\n"
+        )
+
+        result = _validate_with(_write_described_skill(tmp_path, "Use for logs. " + "x" * 236), tmp_path, config)
+
+        (issue,) = _long_description_issues(result)
+        assert issue["message"] == "Description runs long: 250 chars, maximum 200"
+        assert issue["suggestion"] == "Trim it"
+        assert issue["deduction"] == 3
+
+    def test_zero_points_turns_the_rule_off_without_changing_other_rules(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs. " + "x" * 236)
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "discoverability:\n  description_too_long:\n    points: 0\n")
+
+        def other_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if "chars, maximum" not in issue["message"]]
+
+        assert _long_description_issues(disabled) == []
+        assert other_issues(disabled) == other_issues(default)
+        scores = [r.metadata["quality_scores"]["dimensions"]["discoverability"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 5
+
+
+class TestDiscoverabilityDescriptionTooShortConfig:
+    def test_packaged_rule_fires_only_below_20_characters(self, tmp_path: Path):
+        at_minimum = _validate_with(_write_described_skill(tmp_path / "at", "Use for parsing logs"), tmp_path)
+        below = _validate_with(_write_described_skill(tmp_path / "below", "Use for parsing log"), tmp_path)
+
+        assert _short_description_issues(at_minimum) == []
+        (issue,) = _short_description_issues(below)
+        assert issue["message"] == "Description too short (recommend 50-150 chars): 19 chars, minimum 20"
+        assert issue["suggestion"] == "Add more context: what tasks does this skill handle?"
+        assert issue["deduction"] == 20
+        assert issue["severity"] == "warning"
+
+    def test_length_ignores_surrounding_whitespace(self, tmp_path: Path):
+        result = _validate_with(_write_described_skill(tmp_path, '"   Use for logs        "'), tmp_path)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"].endswith(": 12 chars, minimum 20")
+
+    def test_custom_minimum_moves_the_threshold(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for parsing application logs")
+        config = "discoverability:\n  description_too_short:\n    min_chars: {}\n"
+
+        raised = _validate_with(skill_dir, tmp_path, config.format(40))
+        default = _validate_with(skill_dir, tmp_path)
+
+        (issue,) = _short_description_issues(raised)
+        assert issue["message"].endswith(": 32 chars, minimum 40")
+        assert _short_description_issues(default) == []
+
+    def test_custom_minimum_below_the_packaged_20_is_honored(self, tmp_path: Path):
+        config = "discoverability:\n  description_too_short:\n    min_chars: 10\n"
+
+        lowered = _validate_with(_write_described_skill(tmp_path / "lowered", "Use for logs"), tmp_path, config)
+        below = _validate_with(_write_described_skill(tmp_path / "below", "Use for X"), tmp_path, config)
+
+        assert _short_description_issues(lowered) == []
+        (issue,) = _short_description_issues(below)
+        assert issue["message"].endswith(": 9 chars, minimum 10")
+
+    @pytest.mark.parametrize("points", [0, 20])
+    def test_minimum_above_200_keeps_the_long_description_rule(self, tmp_path: Path, points: int):
+        skill_dir = _write_described_skill(tmp_path, "Use for parsing logs. " + "x" * 230)
+        config = f"discoverability:\n  description_too_short:\n    min_chars: 300\n    points: {points}\n"
+
+        default = _validate_with(skill_dir, tmp_path)
+        raised = _validate_with(skill_dir, tmp_path, config)
+
+        def long_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if "chars, maximum" in issue["message"]]
+
+        expected = ["Description very long (recommend 50-150 chars): 252 chars, maximum 200"]
+        assert long_issues(default) == long_issues(raised) == expected
+        if points:
+            (issue,) = _short_description_issues(raised)
+            assert issue["message"].endswith(": 252 chars, minimum 300")
+        else:
+            assert _short_description_issues(raised) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "discoverability:\n  description_too_short:\n    points: 7\n"
+            "    message: Description is too thin\n    suggestion: Say what it does and when\n"
+        )
+
+        result = _validate_with(_write_described_skill(tmp_path, "Use for logs"), tmp_path, config)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"] == "Description is too thin: 12 chars, minimum 20"
+        assert issue["suggestion"] == "Say what it does and when"
+        assert issue["deduction"] == 7
+
+    def test_zero_points_turns_the_rule_off_without_changing_other_rules(self, tmp_path: Path):
+        skill_dir = _write_described_skill(tmp_path, "Use for logs")
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "discoverability:\n  description_too_short:\n    points: 0\n")
+
+        def other_issues(result) -> list[str]:
+            issues = result.metadata["quality_scores"]["dimensions"]["discoverability"]["issues"]
+            return [issue["message"] for issue in issues if "chars, minimum" not in issue["message"]]
+
+        assert _short_description_issues(disabled) == []
+        assert other_issues(disabled) == other_issues(default)
+        scores = [r.metadata["quality_scores"]["dimensions"]["discoverability"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 20
+
+    def test_missing_description_is_not_reported_as_too_short(self, tmp_path: Path):
+        skill_dir = tmp_path / "undescribed-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text("---\nname: undescribed-skill\n---\n\n# Undescribed\n", encoding="utf-8")
+
+        assert _short_description_issues(_validate_with(skill_dir, tmp_path)) == []
+
+    def test_empty_description_is_not_reported_as_too_short(self, tmp_path: Path):
+        assert _short_description_issues(_validate_with(_write_described_skill(tmp_path, '""'), tmp_path)) == []
+
+    def test_description_key_without_a_value_is_counted_as_the_text_none(self, tmp_path: Path):
+        # YAML reads a bare `description:` as null, which the scorer has always turned into "None".
+        # The docs describe this; treating it as empty would change scores, so it is pinned here.
+        result = _validate_with(_write_described_skill(tmp_path, ""), tmp_path)
+
+        (issue,) = _short_description_issues(result)
+        assert issue["message"].endswith(": 4 chars, minimum 20")
+
+
+def _reserved_name_issues(result) -> list[dict]:
+    issues = result.metadata["quality_scores"]["dimensions"]["correctness"]["issues"]
+    return [issue for issue in issues if "reserved" in issue["message"].lower()]
+
+
+class TestCorrectnessReservedNameConfig:
+    def test_padded_and_hyphenated_terms_match_and_are_reported_without_padding(self, tmp_path: Path):
+        config = 'correctness:\n  reserved_name:\n    terms: [" claude ", claude-code]\n'
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-code-helper"), tmp_path, config)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: claude, claude-code"
+
+    def test_packaged_rule_reports_the_matched_term_as_a_gate_failure(self, tmp_path: Path):
+        from skillevaluator.models.result import Severity
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-grant-matcher"), tmp_path)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: claude"
+        assert issue["suggestion"] == "Remove reserved words from skill name"
+        assert issue["deduction"] == 15
+        assert issue["severity"] == "error"
+        assert any(f.severity == Severity.HIGH and "reserved word" in f.message for f in result.findings)
+        assert not result.passed
+
+    def test_every_matched_term_is_listed_once_and_deducted_once(self, tmp_path: Path):
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-anthropic-helper"), tmp_path)
+
+        (issue,) = _reserved_name_issues(result)
+        assert issue["message"] == "Name contains reserved word: anthropic, claude"
+        assert issue["deduction"] == 15
+
+    def test_custom_terms_replace_the_packaged_list(self, tmp_path: Path):
+        config = "correctness:\n  reserved_name:\n    terms: [acme, Internal]\n"
+
+        packaged_word = _validate_with(_write_issue_skill(tmp_path, name="claude-helper"), tmp_path, config)
+        custom_word = _validate_with(_write_issue_skill(tmp_path, name="internal-helper"), tmp_path, config)
+        inside_word = _validate_with(_write_issue_skill(tmp_path, name="acmestore-helper"), tmp_path, config)
+
+        assert _reserved_name_issues(packaged_word) == []
+        assert [issue["message"] for issue in _reserved_name_issues(custom_word)] == [
+            "Name contains reserved word: Internal"
+        ]
+        assert _reserved_name_issues(inside_word) == []
+
+    def test_custom_points_message_and_suggestion_are_used(self, tmp_path: Path):
+        config = (
+            "correctness:\n  reserved_name:\n    points: 30\n"
+            "    message: Name uses a vendor name\n    suggestion: Pick a neutral name\n"
+        )
+
+        result = _validate_with(_write_issue_skill(tmp_path, name="claude-helper"), tmp_path, config)
+
+        issues = result.metadata["quality_scores"]["dimensions"]["correctness"]["issues"]
+        (issue,) = [issue for issue in issues if issue["message"].startswith("Name uses a vendor name")]
+        assert issue["message"] == "Name uses a vendor name: claude"
+        assert issue["suggestion"] == "Pick a neutral name"
+        assert issue["deduction"] == 30
+
+    def test_zero_points_turns_the_rule_and_its_gate_failure_off(self, tmp_path: Path):
+        skill_dir = _write_issue_skill(tmp_path, name="claude-helper")
+        default = _validate_with(skill_dir, tmp_path)
+
+        disabled = _validate_with(skill_dir, tmp_path, "correctness:\n  reserved_name:\n    points: 0\n")
+
+        assert _reserved_name_issues(disabled) == []
+        assert not any("reserved word" in finding.message for finding in disabled.findings)
+        scores = [r.metadata["quality_scores"]["dimensions"]["correctness"]["score"] for r in (default, disabled)]
+        assert scores[1] == scores[0] + 15
+
+
 @pytest.mark.parametrize("newline", ["\n", "\r\n"])
 @pytest.mark.parametrize(
     "extra_yaml",
@@ -1821,3 +2179,60 @@ def test_python_script_skill_still_needs_run_script(tmp_path):
     skill = _script_skill(tmp_path, "run.py", "Run `node scripts/run.py` and show the output.")
 
     assert any("Instructions don't mention 'run_script'" in message for message in _messages(skill))
+
+
+def test_nested_alias_frontmatter_is_rejected_without_expanding(tmp_path: Path) -> None:
+    """A tiny frontmatter block with nested aliases must not be stringified field by field."""
+    import time
+
+
+    skill_dir = tmp_path / "demo-skill"
+    skill_dir.mkdir()
+    (skill_dir / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
+
+    started = time.perf_counter()
+    result = QualityScoreValidator().validate(skill_dir)
+
+    assert time.perf_counter() - started < 5
+    assert not result.passed
+    assert "quality_scores" not in result.metadata
+    assert any("frontmatter exceeds the YAML complexity limits" in failure for failure in result.gate_failures)
+
+
+class TestFrontmatterParseLimits:
+    """The frontmatter parse behind the quality score, beyond the nested-alias case above."""
+
+    def test_one_large_scalar_aliased_many_times_exceeds_the_character_budget(self):
+        content = f"---\nname: demo-skill\ndescription: Use when demoing.\n{scalar_alias_fan_yaml()}\n---\n# Body\n"
+
+        with pytest.raises(StructuredDataLimitError, match="expanded text exceeds"):
+            QualityScoreValidator._parse_frontmatter(content)
+
+    def test_a_set_member_too_large_to_format_fails_the_gate_instead_of_crashing(self, tmp_path: Path):
+        skill = tmp_path / "demo-skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text(
+            "---\nname: demo-skill\ndescription: Use when demoing.\nx: !!set {0x" + "f" * 5_000 + "}\n---\n# Demo\n",
+            encoding="utf-8",
+        )
+
+        result = QualityScoreValidator().validate(skill)
+
+        assert not result.passed
+        assert any("exceeds the YAML complexity limits" in failure for failure in result.gate_failures)
+
+    def test_unreadable_yaml_is_still_scored_without_frontmatter(self):
+        assert QualityScoreValidator._parse_frontmatter("---\nname: [unclosed\n---\n# Body\n") is None
+
+    def test_a_repeated_key_keeps_its_last_value(self):
+        content = "---\nname: first\nname: second\ndescription: Use when testing.\n---\n# Body\n"
+
+        assert QualityScoreValidator._parse_frontmatter(content) == {
+            "name": "second",
+            "description": "Use when testing.",
+        }
+
+    def test_a_plain_alias_still_resolves(self):
+        content = "---\nname: demo\nbase: &b [x, y]\nextra: *b\n---\n# Body\n"
+
+        assert QualityScoreValidator._parse_frontmatter(content)["extra"] == ["x", "y"]

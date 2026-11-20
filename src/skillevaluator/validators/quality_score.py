@@ -24,8 +24,6 @@ from collections.abc import Iterable
 from pathlib import Path
 from urllib.parse import unquote, urlsplit
 
-import yaml
-
 from skillevaluator.constants import (
     EXECUTABLE_SCRIPT_PATTERNS,
     EXECUTABLE_SKILL_DIRS,
@@ -34,8 +32,6 @@ from skillevaluator.constants import (
     QUALITY_CHARS_PER_TOKEN,
     QUALITY_DEFAULT_MIN_SCORE,
     QUALITY_EXCLUDED_DIRS,
-    QUALITY_RECOMMENDED_MAX_TOKENS,
-    QUALITY_RESERVED_NAMES,
     QUALITY_RESOURCE_DIRS,
 )
 from skillevaluator.logging_config import get_logger
@@ -43,6 +39,11 @@ from skillevaluator.models.quality import QualityScoreResult
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.models.skill import XML_TAG_RE
 from skillevaluator.quality_config import CodeErrorHandlingRule, load_quality_config_with_provenance
+from skillevaluator.utils.structured_data import (
+    StructuredDataError,
+    StructuredDataLimitError,
+    load_bounded_yaml,
+)
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 from skillevaluator.validators.markdown import markdown_link_targets
@@ -407,7 +408,10 @@ class QualityScoreValidator(ValidatorBase):
             validator_name="QUALITY",
             validator_description=self.description,
         )
-        qs = QualityScoreResult(skill_name=skill_path.name)
+        qs = QualityScoreResult(
+            skill_name=skill_path.name,
+            recommended_max_tokens=self.quality_config["efficiency"]["token_budget"]["max_tokens"],
+        )
 
         manifest = self._find_skill_manifest(skill_path)
         if not manifest:
@@ -426,7 +430,13 @@ class QualityScoreValidator(ValidatorBase):
         content = manifest.read_text(encoding="utf-8-sig")
         lines = content.split("\n")
 
-        frontmatter_data = self._parse_frontmatter(content)
+        try:
+            frontmatter_data = self._parse_frontmatter(content)
+        except StructuredDataLimitError as exc:
+            result.fail_gate(
+                f"Cannot compute quality score for {manifest}: frontmatter exceeds the YAML complexity limits ({exc})"
+            )
+            return result
         if frontmatter_data:
             qs.has_frontmatter = True
 
@@ -481,9 +491,13 @@ class QualityScoreValidator(ValidatorBase):
         if not fm_match:
             return None
         try:
-            data = yaml.safe_load(fm_match.group(1))
+            # Bounded: a frontmatter block whose aliases expand far beyond its
+            # size is rejected here instead of being stringified field by field.
+            data = load_bounded_yaml(fm_match.group(1), last_key_wins=True)
             return data if isinstance(data, dict) else None
-        except yaml.YAMLError:
+        except StructuredDataLimitError:
+            raise
+        except StructuredDataError:
             return None
 
     # -----------------------------------------------------------------
@@ -591,12 +605,14 @@ class QualityScoreValidator(ValidatorBase):
                     f"Invalid name format: '{name}' (lowercase/numbers/hyphens only)",
                     "Use only lowercase letters, numbers, and hyphens",
                 )
-            if _contains_any_term(name, QUALITY_RESERVED_NAMES):
+            reserved = self.quality_config["correctness"]["reserved_name"]
+            matched = [term for term in reserved["terms"] if _contains_term(name, term)]
+            if matched and reserved["points"]:
                 dim.deduct(
-                    15,
+                    reserved["points"],
                     "error",
-                    "Name contains reserved word (anthropic, claude)",
-                    "Remove reserved words from skill name",
+                    f"{reserved['message']}: {', '.join(matched)}",
+                    reserved["suggestion"],
                 )
             if XML_TAG_RE.search(name):
                 dim.deduct(15, "error", "Name contains XML tags", "Remove XML tags from skill name")
@@ -720,19 +736,22 @@ class QualityScoreValidator(ValidatorBase):
             desc = str(frontmatter.get("description", "")).strip()
 
         if desc:
-            if len(desc) < 20:
+            too_short = self.quality_config["discoverability"]["description_too_short"]
+            if too_short["points"] and len(desc) < too_short["min_chars"]:
                 dim.deduct(
-                    20,
+                    too_short["points"],
                     "warning",
-                    f"Description too short ({len(desc)} chars, recommend 50-150)",
-                    "Add more context: what tasks does this skill handle?",
+                    f"{too_short['message']}: {len(desc)} chars, minimum {too_short['min_chars']}",
+                    too_short["suggestion"],
                 )
-            elif len(desc) > 200:
+            # Checked independently of the minimum, so neither limit can hide the other rule.
+            too_long = self.quality_config["discoverability"]["description_too_long"]
+            if too_long["points"] and len(desc) > too_long["max_chars"]:
                 dim.deduct(
-                    5,
+                    too_long["points"],
                     "info",
-                    f"Description very long ({len(desc)} chars, recommend 50-150)",
-                    "Keep descriptions concise for progressive disclosure",
+                    f"{too_long['message']}: {len(desc)} chars, maximum {too_long['max_chars']}",
+                    too_long["suggestion"],
                 )
 
             trigger_words = ["use", "when", "for", "helps", "allows"]
@@ -864,19 +883,16 @@ class QualityScoreValidator(ValidatorBase):
 
         # The token budget is a recommendation: exceeding it is advisory (MEDIUM),
         # and the deduction still counts toward the --min-score gate.
-        if qs.total_tokens > QUALITY_RECOMMENDED_MAX_TOKENS:
+        budget = self.quality_config["efficiency"]["token_budget"]
+        if budget["points"] and qs.total_tokens > budget["max_tokens"]:
             dim.deduct(
-                15,
+                budget["points"],
                 "warning",
                 (
-                    f"Large skill (~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} characters per token, "
-                    f"recommended max <{QUALITY_RECOMMENDED_MAX_TOKENS}; a real tokenizer may count more). "
-                    f"Per agentskills.io, SKILL.md should be concise (~500 lines) — "
-                    f"large skill bodies increase token cost after invocation; long or unfocused "
-                    f"top-level descriptions can degrade agent routing accuracy"
+                    f"{budget['message']}: ~{qs.total_tokens} estimated tokens at {QUALITY_CHARS_PER_TOKEN} "
+                    f"characters per token, recommended max <{budget['max_tokens']}; a real tokenizer may count more"
                 ),
-                "Keep required sections concise; move detailed examples, reference material, "
-                "and supporting docs to the references/ directory",
+                budget["suggestion"],
             )
 
         # Repetition (compare against non-empty lines to avoid false positives from blank lines)

@@ -45,6 +45,9 @@ def safe_eval(expr: str) -> float:
     return _eval(tree)
 
 
+# A signed decimal number: "-40", "+2", "3.5", ".5" or "5.".
+NUMBER = r"[-+]?(?:\d+(?:\.\d*)?|\.\d+)"
+
 CONVERSIONS = {
     ("celsius", "fahrenheit"): lambda c: c * 9 / 5 + 32,
     ("fahrenheit", "celsius"): lambda f: (f - 32) * 5 / 9,
@@ -58,18 +61,14 @@ CONVERSIONS = {
 
 
 def try_conversion(expr: str) -> str | None:
-    m = re.match(
-        r"([-]?\d+(?:\.\d+)?)\s+(\w+)\s+to\s+(\w+)$",
+    m = re.fullmatch(
+        rf"({NUMBER})\s+(\w+)\s+to\s+(\w+)",
         expr.strip(),
         re.IGNORECASE,
     )
     if not m:
         return None
-    value_str = m.group(1)
-    try:
-        value = float(value_str)
-    except ValueError:
-        return None
+    value = float(m.group(1))
     from_unit = m.group(2).lower()
     to_unit = m.group(3).lower()
     fn = CONVERSIONS.get((from_unit, to_unit))
@@ -80,16 +79,11 @@ def try_conversion(expr: str) -> str | None:
 
 
 def try_percentage(expr: str) -> str | None:
-    m = re.match(r"([-]?\d+(?:\.\d+)?)%\s+of\s+([-]?\d+(?:\.\d+)?)$", expr.strip(), re.IGNORECASE)
+    m = re.fullmatch(rf"({NUMBER})%\s+of\s+({NUMBER})", expr.strip(), re.IGNORECASE)
     if not m:
         return None
-    pct_str = m.group(1)
-    base_str = m.group(2)
-    try:
-        pct = float(pct_str)
-        base = float(base_str)
-    except ValueError:
-        return None
+    pct = float(m.group(1))
+    base = float(m.group(2))
     result = pct / 100 * base
     return f"Result: {result:g}"
 

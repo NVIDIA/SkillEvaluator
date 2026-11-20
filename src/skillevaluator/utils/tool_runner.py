@@ -25,6 +25,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
     GITLEAKS_VERSION,
+    SKILLSPECTOR_UV_ENV,
     SKILLSPECTOR_VERSION,
     SKILLSPECTOR_WHEEL_URL,
     ensure_gitleaks,
@@ -32,6 +33,7 @@ from skillevaluator.utils.scanner_install import (
     gitleaks_platform,
     managed_gitleaks_path,
     managed_skillspector_wheel,
+    skillspector_uv_run_args,
 )
 
 logger = get_logger(__name__)
@@ -245,7 +247,7 @@ class ExternalTool:
             wheel = managed_skillspector_wheel()
             if uv is not None and wheel is not None:
                 self._path = uv
-                self._uv_run = (uv, ("tool", "run", "--quiet", "--from", str(wheel), "skillspector"))
+                self._uv_run = (uv, skillspector_uv_run_args(wheel))
                 self._ensure = (uv, ensure_skillspector_wheel)
                 self.resolution_source = "uv tool run"
         elif self.command == "gitleaks":
@@ -325,14 +327,24 @@ class ExternalTool:
             "Bundled with the security extra — reinstall with: "
             'uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
         )
+        gitleaks_go = "go install github.com/zricethezav/gitleaks/v8@latest"
+        if sys.platform == "win32":
+            gitleaks_hint = f"Install with: winget install Gitleaks.Gitleaks or {gitleaks_go}"
+            semgrep_hint = "Optional; install separately with: uv tool install semgrep"
+        elif sys.platform == "darwin":
+            gitleaks_hint = f"Install with: brew install gitleaks or {gitleaks_go}"
+            semgrep_hint = "Optional; install separately with: brew install semgrep or uv tool install semgrep"
+        else:
+            gitleaks_hint = (
+                f"Install with: {gitleaks_go}, or a release binary from https://github.com/gitleaks/gitleaks/releases"
+            )
+            semgrep_hint = "Optional; install separately with: uv tool install semgrep"
         hints = {
-            "gitleaks": (
-                "Install with: brew install gitleaks (macOS) or go install github.com/gitleaks/gitleaks/v8@latest"
-            ),
+            "gitleaks": gitleaks_hint,
             "pip-audit": security_extra_hint,
             "safety": "Optional secondary scanner; install separately with: uv tool install safety",
             "bandit": bundled_scanner_hint,
-            "semgrep": "Optional; install separately with: brew install semgrep (macOS) or uv tool install semgrep",
+            "semgrep": semgrep_hint,
             "skillspector": f"Install with: uv tool install {SKILLSPECTOR_WHEEL_URL}",
             "skillevaluator": (
                 'Install with: uv tool install "skillevaluator[all] @ git+https://github.com/NVIDIA/SkillEvaluator.git"'
@@ -414,6 +426,8 @@ class ExternalTool:
             return ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message=error)
 
         cmd = [self._path, *launch_args, *args]
+        if launch_args:
+            child_env = {**(os.environ if child_env is None else child_env), **SKILLSPECTOR_UV_ENV}
 
         if log_command:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")

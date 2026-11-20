@@ -19,6 +19,13 @@ skillevaluator ci init
 Adding reports to an existing shared component and using private Pages require
 SkillEvaluator **0.7.2 or later**.
 
+For a new GitHub Tier 1 setup, use `skillevaluator ci init --channel stable` with
+a CLI release that supports this option. The generated workflows follow verified
+stable releases after the channel's first promotion. To add hosted reports to an
+existing stable scan, run `skillevaluator ci init`. To move an existing pinned
+setup to stable, edit its workflow files using the manual setup.
+[Stable GitHub workflows](/skills/skillevaluator/github-actions#follow-the-latest-stable-release)
+
 <CardGroup cols={3}>
   <Card title="1. Choose" icon="terminal" href="#run-the-wizard">
     Select skill folders, a score threshold and feedback.
@@ -45,8 +52,9 @@ locally. The shared container supplies the runtime; you control the configuratio
   public and private repositories. Hosted feedback supports public Pages and
   verified private Pages sites in eligible organization repositories. See
   [private report hosting](#private-report-hosting) for the one-time prerequisite.
-  The released setup wizard supports GitHub. For GitLab, use the
-  [GitLab template](/skills/skillevaluator/gitlab-ci).
+  This default Tier 1 wizard supports GitHub. For GitLab Tier 1, use the
+  [GitLab template](/skills/skillevaluator/gitlab-ci). The separate
+  [all-tier CLI opt-in](/skills/skillevaluator/advanced-ci) supports GitHub and GitLab.
 </Accordion>
 
 ## Run the wizard
@@ -87,7 +95,9 @@ and a provider key.
   inputs, triggers and workflow reference, including a shared component's `@v3`
   tag. Review those settings, then choose whether to add hosted feedback.
   Reporting adds `id-token: write` to the scan job when needed and prepares the
-  publisher workflow.
+  publisher workflow. Installing a newer CLI does not upgrade these existing
+  pins; review the [current versioned files](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/README.md)
+  when upgrading a committed caller.
 </Note>
 
 ### Shared components
@@ -117,7 +127,9 @@ an existing SkillEvaluator report site or a newly configured empty private
 site; an unrelated website is preserved.
 
 Personal repositories cannot host access-controlled Pages. If private Pages is
-unavailable, choose **checks only** to retain reports in Actions artifacts.
+unavailable, choose **checks only** to retain reports in Actions artifacts, or
+use the [manual comments-only setup](/skills/skillevaluator/github-actions#enable-pr-comments)
+for PR feedback without a hosted site.
 Repository privacy alone does not restrict access to a Pages site. See
 [GitHub's private Pages requirements](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/changing-the-visibility-of-your-github-pages-site).
 
@@ -252,7 +264,8 @@ extract it and open `index.html`. Failed scans retain their available reports to
 <div id="opt-in-to-three-tier-ci">
 <div id="upgrade-a-tier-1-only-consumer">
 
-For the explicit all-tier opt-in and its prerequisites, see [Advanced CI](/skills/skillevaluator/advanced-ci).
+The all-tier CLI was already included in 0.9.0; it remains a separate opt-in
+from this default wizard. For its prerequisites and current pins, see [Advanced CI](/skills/skillevaluator/advanced-ci).
 The [setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#opt-in-to-three-tier-ci) and [migration](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/templates/all-tiers/README.md#upgrade-a-tier-1-only-consumer) references preserve the detailed contracts.
 
 </div>

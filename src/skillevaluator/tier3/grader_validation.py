@@ -479,7 +479,7 @@ def _verifier_git_provenance(paths):
         )
         if result.returncode or len(result.stdout) > 256 * 1024:
             raise ValueError("Git source identity unavailable")
-        return result.stdout.decode("utf-8").strip()
+        return result.stdout.decode("utf-8").removesuffix("\n")
 
     try:
         repository = Path(git(paths[0].parent, "rev-parse", "--show-toplevel")).resolve()

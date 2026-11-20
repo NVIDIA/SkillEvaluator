@@ -766,6 +766,42 @@ def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() ->
             assert bundle["omitted"]["incomplete_sections"] == ["file changes"]
 
 
+@pytest.mark.parametrize(("edits", "reported"), [(5, False), (6, True)], ids=["five-edits", "six-edits"])
+def test_bundles_report_edits_past_the_five_a_multi_edit_shows(edits: int, reported: bool) -> None:
+    # A multi-edit shows its first five edits. The sixth is short and nothing
+    # else is cut, so only the count can say that it did not reach the judge.
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "edit-1",
+                        "function_name": "MultiEdit",
+                        "arguments": {
+                            "file_path": "/workspace/output/x.py",
+                            "edits": [
+                                {"old_string": f"old_{idx}", "new_string": f"NEW_EDIT_{idx}"}
+                                for idx in range(1, edits + 1)
+                            ],
+                        },
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "edit-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, edited the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Edit x")
+        for metric in METRICS:
+            bundle = bundles[metric]
+            assert "NEW_EDIT_5" in bundle["prompt_evidence"]
+            assert "NEW_EDIT_6" not in bundle["prompt_evidence"]
+            assert ("file changes" in bundle["omitted"]["incomplete_sections"]) is reported
+
+
 def test_accuracy_and_goal_bundles_report_a_final_response_the_budget_clipped(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

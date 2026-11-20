@@ -407,7 +407,8 @@ def _tool_file_path(args: dict[str, Any]) -> str:
     return ", ".join(paths)
 
 
-def _tool_write_body(args: dict[str, Any]) -> str:
+def _tool_write_body(args: dict[str, Any], *, full: bool = False) -> str:
+    """Render what a write call wrote. Only the first five edits of a multi-edit are shown unless *full*."""
     snippets: list[str] = []
     for key in ("content", "new_string", "patch", "code"):
         value = args.get(key)
@@ -418,7 +419,7 @@ def _tool_write_body(args: dict[str, Any]) -> str:
         snippets.append(f"input:\n{patch}")
     edits = args.get("edits")
     if isinstance(edits, list):
-        for idx, edit in enumerate(edits[:5], start=1):
+        for idx, edit in enumerate(edits if full else edits[:5], start=1):
             if isinstance(edit, dict):
                 new_string = edit.get("new_string") or edit.get("replacement")
                 if new_string:
@@ -444,10 +445,11 @@ def _tool_name_looks_like_write(fn_lower: str) -> bool:
 def _collect_file_change_evidence(traj: dict[str, Any], *, full: bool = False) -> list[str]:
     """Render one entry per write the agent made.
 
-    Each write body and tool result is clipped to a per-entry allowance. Pass
-    ``full=True`` for the same entries with those clips lifted, which is what
-    the completeness accounting compares against so a body this function
-    shortened is not reported as having reached the judge.
+    Each write body and tool result is clipped to a per-entry allowance, and a
+    multi-edit shows its first five edits. Pass ``full=True`` for the same
+    entries with those limits lifted, which is what the completeness
+    accounting compares against so a body this function shortened is not
+    reported as having reached the judge.
     """
     body_limit = 10**9 if full else 1800
     observation_limit = 10**9 if full else 500
@@ -467,7 +469,7 @@ def _collect_file_change_evidence(traj: dict[str, Any], *, full: bool = False) -
             file_path = _tool_file_path(args)
             if _tool_name_looks_like_write(fn_lower):
                 is_write_call = True
-                body = _tool_write_body(args)
+                body = _tool_write_body(args, full=full)
             elif fn_lower in _BEHAVIOR_EXEC_TOOLS:
                 command = str(args.get("command") or args.get("cmd") or args.get("code") or "")
                 if _command_looks_like_write(command):

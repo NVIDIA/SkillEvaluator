@@ -54,6 +54,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Agent JSONL log reconstruction preserves Unicode line separators inside command,
   observation and response strings instead of treating them as record boundaries.
+  Previously, a Claude Code log whose skill-read record held such a separator lost
+  that record and could score `skill_execution` 0 instead of 1.
   Raw CR-only JSONL strings supplied directly to `import-traces` are no
   longer split into records; file imports still normalize line endings.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and

@@ -1306,6 +1306,13 @@ def _stage_repo_context(
     if not source_skill_path:
         return {"mode": "none", "files": []}
 
+    if mode == "full":
+        from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+        authored = runtime_source_path(source_skill_path)
+        if authored != source_skill_path:
+            excluded_roots = (*excluded_roots, authored / "evals")
+        source_skill_path = authored
     source_skill_path = source_skill_path.resolve()
     skill_md = _skill_manifest(source_skill_path)
     repo_root = resolve_repo_context_root(source_skill_path)

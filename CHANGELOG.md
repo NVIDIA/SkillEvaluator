@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Security
+
+- Update LiteLLM and the minimum AWS SDK version in the optional LLM and
+  Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
+  overrides when bearer authentication is configured.
+
 ### Changed
 
 - Claude Code log recovery pairs batched and delayed tool results without repeatedly
@@ -52,6 +58,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Bedrock preflight and host inference now sign requests with IAM credentials
+  when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
+  a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
+  `Authorization: Bearer` header, and host inference failed with an illegal
+  header value. This includes models called through the Bedrock Responses
+  route.
 - Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to

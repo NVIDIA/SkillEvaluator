@@ -23,6 +23,7 @@ OPERATORS = {
 
 # Keep printed integers below Python's default int-to-str limit (4,300 digits).
 MAX_RESULT_DIGITS = 1000
+MAX_INTEGER_RESULT = 10**MAX_RESULT_DIGITS - 1
 
 
 def _log10_int(n: int) -> float:
@@ -31,10 +32,6 @@ def _log10_int(n: int) -> float:
     lead = text[:12]
     significand = int(lead) / 10 ** (len(lead) - 1)
     return math.log10(significand) + len(text) - 1
-
-
-def _int_digit_count(n: int) -> int:
-    return len(str(abs(n)))
 
 
 def _integer_pow_exceeds_digit_budget(base: object, exp: object) -> bool:
@@ -56,7 +53,7 @@ def _check_result(value):
         raise ValueError("result is not a real number")
     if isinstance(value, float) and not math.isfinite(value):
         raise ValueError("result is too large")
-    if type(value) is int and _int_digit_count(value) > MAX_RESULT_DIGITS:
+    if type(value) is int and abs(value) > MAX_INTEGER_RESULT:
         raise ValueError("result is too large")
     return value
 

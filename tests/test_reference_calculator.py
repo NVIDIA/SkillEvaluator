@@ -77,7 +77,17 @@ def test_input_beyond_a_conversion_or_percentage_is_rejected(expression: str) ->
 
 @pytest.mark.parametrize(
     "expression",
-    ["9**9**9", "10**10**10", "10.0**400", "1e308*10", "2**4000", "2**(10**309)", "2**(10**999)"],
+    [
+        "9**9**9",
+        "10**10**10",
+        "10.0**400",
+        "1e308*10",
+        "2**4000",
+        "2**(10**309)",
+        "2**(10**999)",
+        pytest.param(hex(10**1000), id="first-oversized-integer"),
+        pytest.param("0x" + "f" * 4000, id="oversized-hex-literal"),
+    ],
 )
 def test_oversized_results_are_rejected_quickly(expression: str) -> None:
     result = _calc(expression)

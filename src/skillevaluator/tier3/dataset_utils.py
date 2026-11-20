@@ -16,7 +16,9 @@ from typing import Any, Literal
 
 import yaml
 
+from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
+from skillevaluator.utils.structured_data import StructuredDataSyntaxError, load_bounded_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -172,21 +174,56 @@ def _normalize_entry(
     return normalized
 
 
+def parse_dataset_text(text: str, suffix: str) -> Any:
+    """Parse the text of a ``.json``, ``.jsonl``, ``.yaml`` or ``.yml`` dataset.
+
+    A dataset ships with the skill, so YAML is read within the structured-data limits: plain
+    ``yaml.safe_load`` expands chained merge keys inside the parser and shares aliases that a
+    later ``str()`` or ``json.dumps`` expands without limit. Every failure, including nesting
+    deeper than the JSON parser allows, is a ``ValueError``; the YAML limit errors are
+    ``StructuredDataError``, which subclasses it.
+    """
+    suffix = suffix.casefold()
+    try:
+        if suffix == ".jsonl":
+            # Records end at LF, CRLF or CR only, as when a file is read line by line. ``splitlines``
+            # would also split at U+2028, U+2029 and U+0085, which JSON allows inside a string.
+            lines = text.replace("\r\n", "\n").replace("\r", "\n").split("\n")
+            return [json.loads(line) for raw_line in lines if (line := raw_line.strip())]
+        if suffix in {".yaml", ".yml"}:
+            try:
+                return load_bounded_yaml(text, last_key_wins=True)
+            except StructuredDataSyntaxError as exc:
+                raise StructuredDataSyntaxError(_yaml_syntax_message(exc)) from exc
+        if suffix == ".json":
+            return json.loads(text)
+    except RecursionError as exc:
+        raise ValueError("dataset is nested too deeply to read") from exc
+    raise ValueError(f"Unsupported dataset format: {suffix}")
+
+
+def _yaml_syntax_message(error: StructuredDataSyntaxError) -> str:
+    """Keep what PyYAML says is wrong and where, but never the source text around it.
+
+    The bounded loader reports only that the input is not valid YAML; the error it wraps has the
+    parser's context, its problem, and a line and column. A dataset can be large, so the line and
+    column are what the author needs to find the mistake.
+    """
+    cause = error.__cause__
+    if not isinstance(cause, yaml.YAMLError) or getattr(cause, "problem_mark", None) is None:
+        return str(error)
+    context = getattr(cause, "context", None)
+    detail = _yaml_error_detail(cause)
+    return f"{error!s}: {context}; {detail}" if context else f"{error!s}: {detail}"
+
+
 def _load_jsonl(path: Path) -> list[dict[str, Any]]:
-    entries: list[dict[str, Any]] = []
-    with path.open(encoding="utf-8") as f:
-        for line in f:
-            line = line.strip()
-            if line:
-                entries.append(json.loads(line))
-    return entries
+    return parse_dataset_text(path.read_text(encoding="utf-8"), ".jsonl")
 
 
 def _load_yaml(path: Path) -> Any:
-    with path.open(encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    return parse_dataset_text(path.read_text(encoding="utf-8"), ".yaml")
 
 
 def _load_json(path: Path) -> Any:
-    with path.open(encoding="utf-8") as f:
-        return json.load(f)
+    return parse_dataset_text(path.read_text(encoding="utf-8"), ".json")

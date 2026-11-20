@@ -155,13 +155,20 @@ at the release commit. Before moving the `stable` tag, it verifies that public
 PyPI and NVIDIA DevZone serve the unyanked wheel and source distribution with
 the exact filenames, SHA-256 digests, and sizes in that same manifest.
 
-Before activation, set the repository variable `RELEASE_DEVZONE_INDEX_URL`
-and install a dedicated GitHub App on this repository with Contents write
-access. Allow it to bypass only the tag ruleset for `stable`. In the
-`stable-channel` Actions environment, restrict deployments to `main` and set the
-`STABLE_CHANNEL_APP_CLIENT_ID` variable and `STABLE_CHANNEL_APP_PRIVATE_KEY`
-secret. Reserve the name `stable` for the tag and protect the version tags
-separately.
+Before the first promotion, a repository administrator must configure promotion
+access.
+
+- Set the repository Actions variable `RELEASE_DEVZONE_INDEX_URL` to the approved
+  public HTTPS NVIDIA DevZone listing for `/skillevaluator/`.
+- Install a dedicated GitHub App on this repository with Contents write access.
+  Allow it to bypass only the tag ruleset for `stable`. Reserve the name `stable`
+  for the tag and protect the version tags separately.
+- Create the `stable-channel` Actions environment and restrict deployments to
+  `main`. Add the `STABLE_CHANNEL_APP_CLIENT_ID` variable and the
+  `STABLE_CHANNEL_APP_PRIVATE_KEY` secret to that environment.
+
+If the DevZone URL is unset or invalid, package verification stops promotion
+before the `stable` tag can move.
 
 After the manual product release finishes verification, open **Promote stable
 GitHub workflows** in Actions and select **Run workflow** on `main`. The

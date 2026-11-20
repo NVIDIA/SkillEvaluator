@@ -9,6 +9,12 @@ Based on SkillEvaluator HOW_TO_CONTRIBUTE_SKILLS.md specification.
 from pathlib import Path
 
 import pytest
+from tests.yaml_alias_fixtures import (
+    YAML_DIRECTIVE_VALUE_ERROR,
+    alias_bomb_skill_md,
+    deeply_nested_flow,
+    scalar_alias_fan_yaml,
+)
 
 from skillevaluator.models.result import Severity
 from skillevaluator.models.skill import SkillMetadata
@@ -1740,11 +1746,10 @@ class TestSchemaPortabilityChecks:
 
 
 def test_nested_alias_frontmatter_reports_complexity_finding(tmp_path: Path) -> None:
-    from tests.validators._alias_frontmatter import NESTED_ALIAS_SKILL_MD
 
     skill_dir = tmp_path / "demo-skill"
     skill_dir.mkdir()
-    (skill_dir / "SKILL.md").write_text(NESTED_ALIAS_SKILL_MD, encoding="utf-8")
+    (skill_dir / "SKILL.md").write_text(alias_bomb_skill_md(), encoding="utf-8")
 
     result = SchemaValidator().validate(skill_dir)
 
@@ -1764,3 +1769,69 @@ def test_yaml_syntax_finding_keeps_the_parser_line(tmp_path: Path) -> None:
     finding = next(f for f in result.findings if f.check_name == "yaml_syntax")
     assert "Invalid YAML syntax in frontmatter" in finding.message
     assert finding.line_number >= 2
+
+
+class TestFrontmatterComplexityLimits:
+    """Frontmatter limits that the nested-alias test above does not reach."""
+
+    @staticmethod
+    def _skill(tmp_path: Path, manifest: str) -> Path:
+        skill_dir = tmp_path / "demo-skill"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(manifest, encoding="utf-8")
+        return skill_dir
+
+    def test_aliased_name_and_description_are_rejected_before_validation(self, tmp_path: Path):
+        skill_dir = self._skill(tmp_path, alias_bomb_skill_md(alias_fields=("name", "description")))
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert [f.check_name for f in result.findings if f.severity == Severity.HIGH] == ["yaml_complexity"]
+
+    def test_one_large_scalar_aliased_many_times_is_rejected_by_the_character_budget(self, tmp_path: Path):
+        manifest = (
+            "---\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            f"{scalar_alias_fan_yaml()}\n---\n# Demo\n"
+        )
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        (finding,) = [f for f in result.findings if f.check_name == "yaml_complexity"]
+        assert "expanded text exceeds" in finding.message
+
+    def test_a_set_member_too_large_to_format_is_rejected(self, tmp_path: Path):
+        manifest = (
+            "---\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            "x: !!set {0x" + "f" * 5_000 + "}\n---\n# Demo\n"
+        )
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        assert any(f.check_name == "yaml_complexity" for f in result.findings)
+
+    @pytest.mark.usefixtures("default_int_digit_limit")
+    def test_a_yaml_directive_number_past_the_digit_limit_is_a_syntax_finding_not_a_crash(self, tmp_path: Path):
+        manifest = f"---\n{YAML_DIRECTIVE_VALUE_ERROR}\n---\n# Demo\n"
+
+        result = SchemaValidator().validate(self._skill(tmp_path, manifest))
+
+        assert [f.check_name for f in result.findings if f.severity == Severity.HIGH] == ["yaml_syntax"]
+
+    def test_a_repeated_key_is_reported_once_and_keeps_its_last_value(self, tmp_path: Path):
+        skill_dir = self._skill(
+            tmp_path,
+            "---\nname: demo-skill\nname: demo-skill\ndescription: Demo skill used for testing. Use when demoing.\n"
+            "---\n# Demo\n\n## Instructions\n\n1. Step\n",
+        )
+
+        result = SchemaValidator().validate(skill_dir)
+
+        assert [f.check_name for f in result.findings if f.check_name == "duplicate_key"] == ["duplicate_key"]
+        assert not any(f.check_name in {"yaml_syntax", "yaml_complexity"} for f in result.findings)
+
+    @pytest.mark.usefixtures("default_int_digit_limit")
+    def test_duplicate_key_scan_survives_text_the_loader_rejects(self):
+        from skillevaluator.validators.schema import _duplicate_frontmatter_keys
+
+        assert _duplicate_frontmatter_keys(deeply_nested_flow()) == []
+        assert _duplicate_frontmatter_keys(YAML_DIRECTIVE_VALUE_ERROR) == []

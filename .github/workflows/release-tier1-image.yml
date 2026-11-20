@@ -1,0 +1,178 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Release Tier 1 image
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        description: SkillEvaluator package version
+        type: string
+        required: true
+      source_sha:
+        description: Reviewed release candidate on main
+        type: string
+        required: true
+    outputs:
+      image_digest:
+        description: Qualified public Tier 1 image pinned by digest
+        value: ${{ jobs.onboarding.outputs.image_digest }}
+      bundle_artifact:
+        description: Artifact containing the bundle and packaged descriptors
+        value: ${{ jobs.onboarding.outputs.bundle_artifact }}
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.ref == 'refs/heads/main' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    environment: release-image
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: tier1-image-${{ inputs.source_sha }}
+      cancel-in-progress: false
+    outputs:
+      image_digest: ${{ steps.release.outputs.image_digest }}
+    env:
+      IMAGE: ghcr.io/nvidia/skillevaluator-tier1
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      VERSION: ${{ inputs.version }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate and check out the release candidate
+        shell: bash
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          [[ "$VERSION" =~ ^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]
+          git rev-list --first-parent HEAD | grep -Fx "$SOURCE_SHA" >/dev/null
+          git checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+          python3 - "$VERSION" <<'PYTHON'
+          import sys
+          import tomllib
+          from pathlib import Path
+
+          project = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))["project"]
+          if project["version"] != sys.argv[1]:
+              sys.exit("The candidate package version differs from the requested release version.")
+          PYTHON
+      - name: Check for an existing immutable revision
+        id: existing
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        run: python3 ci/release_image.py --image "$IMAGE" --revision "$SOURCE_SHA" --output "$GITHUB_OUTPUT"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+        if: steps.existing.outputs.exists != 'true'
+      - name: Build the reviewed release revision
+        if: steps.existing.outputs.exists != 'true'
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ci/Dockerfile.tier1
+          platforms: linux/amd64
+          labels: |
+            org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator
+            org.opencontainers.image.revision=${{ inputs.source_sha }}
+            org.opencontainers.image.description=SkillEvaluator complete Tier 1 CI runtime
+          tags: ${{ env.IMAGE }}:sha-${{ inputs.source_sha }}
+          load: true
+          provenance: false
+          no-cache: true
+          cache-to: type=gha,scope=tier1-image,mode=max,ignore-error=true
+      - name: Verify the exact image being published
+        if: steps.existing.outputs.exists != 'true'
+        run: python3 ci/smoke_image.py --image "$IMAGE:sha-$SOURCE_SHA" --output "$RUNNER_TEMP/release-verification"
+      - name: Publish or reuse the immutable revision
+        id: release
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+          EXISTING_IMAGE: ${{ steps.existing.outputs.image_digest }}
+        shell: bash
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/publish-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          if [ -n "$EXISTING_IMAGE" ]; then
+            docker pull "$EXISTING_IMAGE"
+            existing_revision="$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "$EXISTING_IMAGE")"
+            test "$existing_revision" = "$SOURCE_SHA"
+          else
+            # Check again immediately before push. Never move an existing revision tag.
+            python3 ci/release_image.py --image "$IMAGE" --revision "$SOURCE_SHA" --output "$RUNNER_TEMP/pre-push-check"
+            test "$(head -n 1 "$RUNNER_TEMP/pre-push-check")" = 'exists=false'
+            docker push "$IMAGE:sha-$SOURCE_SHA"
+          fi
+          python3 ci/release_image.py --image "$IMAGE" --revision "$SOURCE_SHA" --require --output "$GITHUB_OUTPUT"
+      - name: Retain release build verification
+        if: always() && steps.existing.outputs.exists != 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier1-release-build-${{ inputs.version }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-verification
+          retention-days: 30
+
+  onboarding:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    outputs:
+      image_digest: ${{ needs.publish.outputs.image_digest }}
+      bundle_artifact: ${{ steps.bundle.outputs.artifact }}
+    env:
+      VERSION: ${{ inputs.version }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Exercise the anonymously pulled image, including on reruns
+        shell: bash
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          mkdir "$DOCKER_CONFIG"
+          docker pull "$IMAGE_DIGEST"
+          python3 ci/smoke_image.py --image "$IMAGE_DIGEST" --output "$RUNNER_TEMP/public-image-verification"
+      - name: Generate the verified CI bundle and descriptors
+        id: bundle
+        shell: bash
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          python3 ci/release_bundle.py --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --image "$IMAGE_DIGEST" --smoke-receipt "$RUNNER_TEMP/public-image-verification/smoke-receipt.json" \
+            --build-run "$GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID" \
+            --output "$RUNNER_TEMP/ci-bundle"
+          printf 'artifact=ci-bundle-%s\n' "$VERSION" >> "$GITHUB_OUTPUT"
+          printf 'Verified public image: %s\n\nDownload **ci-bundle-%s** for the release pin PR.\n' \
+            "$IMAGE_DIGEST" "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain public image verification
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier1-release-public-${{ inputs.version }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-image-verification
+          retention-days: 30
+      - name: Upload pinned bundle and consumers
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ci-bundle-${{ inputs.version }}
+          path: ${{ runner.temp }}/ci-bundle/
+          if-no-files-found: error
+          include-hidden-files: true
+          overwrite: true
+          retention-days: 90

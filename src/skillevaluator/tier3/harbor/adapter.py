@@ -4589,7 +4589,7 @@ def _prepare_native_environment(
         pass
     else:
         raise ValueError(
-            "native Harbor task environment must not contain repo-context.json; "
+            f"native Harbor task '{task_dir.name}' environment must not contain repo-context.json; "
             "that path is reserved for generated repository-context metadata"
         )
     if not has_skill and not baseline_aliases_prevalidated:

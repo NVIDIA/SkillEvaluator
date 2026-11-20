@@ -131,7 +131,9 @@ def test_native_tasks_reserve_only_the_generated_context_metadata_path(
     output_dir = tmp_path / "tasks"
 
     if relative == "repo-context.json":
-        with pytest.raises(ValueError, match="reserved for generated repository-context metadata"):
+        with pytest.raises(
+            ValueError, match=r"native Harbor task 'case-001' environment .* reserved for generated repository-context"
+        ):
             stage_native_harbor_tasks(skill, output_dir, with_skill=with_skill, grading_mode="custom_only")
         assert not (output_dir / "case-001").exists()
     else:

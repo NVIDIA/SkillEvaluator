@@ -76,8 +76,8 @@ tier2 = [
 tier3 = [
     "skillevaluator[llm]",
     "harbor[gke]==0.25.0",
-    # CVE-2026-59950, CVE-2026-52870, and CVE-2026-52869 fixed floor.
-    "mcp>=1.28.1,<2",
+    # MCP 1.30 fixes the server-authentication, client-transport, and session limit advisories.
+    "mcp>=1.30.0,<2",
     # CVE-2026-48522 through CVE-2026-48526 fixed floor.
     "pyjwt[crypto]>=2.13.0",
     # The 4.0.1 release includes the device grant security fix (via harbor[gke]).

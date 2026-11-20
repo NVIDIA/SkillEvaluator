@@ -4,10 +4,12 @@ verified: {version: 1.6.0, source: "npm @earendil-works/pi-coding-agent", date: 
 roots:
   project: [.pi/skills, .agents/skills]
   user: [~/.pi/agent/skills, ~/.agents/skills]
+  project_requires_trust: true
 limits: {desc_cap: none, body_cap: none}
 listing: {}
 rules:
   - {id: PI-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "pi reads project .pi/skills and .agents/skills, and user ~/.pi/agent/skills and ~/.agents/skills.", fix: "Install it under one of those skills roots.", confidence: high}
+  - {id: PI-TRUST, when: "install_root in roots.project", effect: advisory, message: "Project skills load only after the project is trusted; print and JSON runs skip them unless --approve, a saved decision or defaultProjectTrust: always applies.", fix: "Install under ~/.agents/skills, or pass --approve when the project's skills are trusted.", confidence: high}
   - {id: PI-UNPARSEABLE, when: "frontmatter_missing", effect: not_loaded, outcome: dropped, message: "Skill dropped: without frontmatter there is no description to list.", fix: "Add frontmatter with a description.", confidence: high}
   - {id: PI-DESC-MISSING, when: "description_missing or description_empty or description_type != 'str'", effect: not_loaded, outcome: dropped, message: "Skill dropped: pi requires a string description to list.", fix: "Add a non-empty string description.", confidence: high}
   - {id: PI-FRONTMATTER-DUPKEYS, when: "frontmatter_duplicate_keys", effect: not_loaded, outcome: dropped, message: "Skill dropped: duplicate frontmatter keys make the YAML unparseable.", fix: "Remove the duplicate frontmatter key.", confidence: high}
@@ -20,8 +22,8 @@ rules:
 
 plugin:
   rules:
-    - {id: PI-PLUGIN-NONE, when: "always", effect: not_loaded, outcome: rejected, message: "pi has no plugin package format; it loads skills from ~/.agents/skills and rules from its own config only.", fix: "Ship the work as plain skill directories under a skills root.", confidence: high}
-  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: not_observed, lsp: not_observed}
+    - {id: PI-PLUGIN-NONE, when: "always", effect: not_loaded, outcome: rejected, message: "pi does not read Claude, Codex, Copilot or Agent Plugins plugin manifests; its own Pi packages (package.json pi key, pi install) are a different format.", fix: "Ship the skills as plain skill directories under a skills root.", confidence: high}
+  components: {}
 notes:
   - "First folder wins a name collision; later same-name skills are dropped with a warning."
   - "Tolerant of BOM, CRLF and tabs inside values; a loose .md file loads only under a skills root."

@@ -42,7 +42,8 @@ All notable changes to SkillEvaluator are documented in this file.
   configured servers (Harbor's pi-mcp-adapter targets pi 0.85.x and is replaced
   by a no-op extension shim). Existing agent defaults are unchanged. The OpenAI
   and OpenAI-compatible providers accept it (custom endpoints pass pi the
-  `model_api` agent option, and the Anthropic default is provider-qualified),
+  `model_api` agent option — Responses API on the official endpoint, completions
+  on gateways — and the Anthropic default is provider-qualified),
   and Anthropic accepts it on the public endpoint only; NVIDIA Build and other
   providers fail early.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible

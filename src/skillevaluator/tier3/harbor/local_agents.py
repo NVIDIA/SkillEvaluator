@@ -703,7 +703,12 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
                 filename=_PI_MCP_SHIM_FILENAME,
             )
         result = await self.exec_as_agent(environment, command="pi --version")
-        self._version = self.parse_version(result.stdout or "")
+        try:
+            self._version = self.parse_version(result.stdout or "")
+        except IndexError:
+            # Harbor's parser takes the last line; empty output has none. The
+            # version check is a soft warning, so unparsable output stays unset.
+            self._version = None
         if self._version and self._version != PINNED_RUNTIME_VERSIONS["pi"]:
             # Soft check: local mode runs the operator's CLI; only warn on drift.
             self.logger.warning(
@@ -728,15 +733,19 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
     def _local_config_path(self, command: str) -> str:
         # Harbor writes pi's isolated config under /tmp, which the local sandbox
         # keeps outside its allowed roots; keep it in the trial's agent dir —
-        # everywhere except inside the quoted task instruction.
+        # everywhere except inside the task instruction. The instruction is
+        # matched together with the launch tail that follows it, so a bare
+        # "/tmp/harbor-pi-agent" prompt never shields the real config path
+        # earlier in the launcher line.
         def repoint(part: str) -> str:
             part = part.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
             return part.replace(_REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix())
 
         quoted = self._quoted_instruction
-        if quoted and quoted in command:
-            before, _, after = command.partition(quoted)
-            return repoint(before) + quoted + repoint(after)
+        prompt_and_tail = f"{quoted} 2>&1 </dev/null"
+        if quoted and prompt_and_tail in command:
+            before, _, after = command.partition(prompt_and_tail)
+            return repoint(before) + prompt_and_tail + repoint(after)
         return repoint(command)
 
     async def _upload_config_text(

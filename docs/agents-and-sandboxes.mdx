@@ -19,7 +19,7 @@ local, and cloud environment backends.
 Pass agents as a comma-separated list with `-a/--agents`. Without that option,
 SkillEvaluator selects the provider-native default: `opencode` for NVIDIA Build,
 `codex` for OpenAI, and `claude-code` for Anthropic. Three agents are supported,
-with Hermes available as an explicit experimental option:
+with Hermes and pi available as explicit experimental options:
 
 | Agent | Notes |
 | --- | --- |
@@ -99,35 +99,6 @@ The pinned CLI releases apply wherever Harbor installs the agent: Docker and
 the remote environments. [Local mode](#local-mode) runs the CLI already on your
 machine instead.
 
-### Experimental pi
-
-pi, the Earendil Works pi Coding Agent, runs as an explicit experimental option
-in Docker, [local mode](#local-mode), GKE, and the native plugin arm.
-SkillEvaluator pins pi 1.6.0 wherever it installs the agent; in local mode the
-host CLI's version is checked against that pin and drift is reported as a
-warning, never a hard failure.
-
-```bash title="Run pi on the OpenAI provider"
-skillevaluator doctor --agents pi
-skillevaluator tier3 evaluate ./my-skill --agents pi
-```
-
-pi works on the OpenAI, OpenAI-compatible, and Anthropic providers:
-OpenAI-compatible custom endpoints are wired through pi's models.json with an
-explicit API style, and the Anthropic provider requires the public Anthropic
-endpoint (a base URL is rejected before execution). Other providers, including
-Bedrock and NVIDIA Build, reject pi before execution. Skills are staged to
-`$HOME/.agents/skills`, which pi reads natively, so in the native plugin arm
-member skills and plugin MCP servers load without a wrapper and only rules stay
-in the wrapper skill. Retained jobs include `trajectory.json` and `pi.txt`.
-
-MCP servers work through pi's native config: SkillEvaluator stages mcp.json in
-pi's isolated config dir (`PI_CODING_AGENT_DIR`), keeps HTTP headers as approved
-`${VAR}` references, and verifies after staging that `pi mcp list` reports every
-configured server — a trial fails at startup when pi did not read the config.
-Harbor 0.25.0's own pi-mcp-adapter path targets pi 0.85.x only, so SkillEvaluator
-skips the adapter install and stages a no-op extension at the path the launch
-line references; the servers themselves load natively from mcp.json.
 In Docker and Kata, SkillEvaluator reruns a Claude Code or Codex install that
 fails, for example on a dropped download or a package mirror error. It makes up
 to three attempts, waiting 2 and then 4 seconds, all within Harbor's agent setup
@@ -208,6 +179,36 @@ credential name (`ANTHROPIC_API_KEY`, `ANTHROPIC_BASE_URL`,
 `OPENAI_BASE_URL`) or references one with `${...}` is rejected at run time.
 See the two credential roles in [Providers & Credentials](/skills/skillevaluator/configuration).
 </Note>
+
+### Experimental pi
+
+pi, the Earendil Works pi Coding Agent, runs as an explicit experimental option
+in Docker, [local mode](#local-mode), GKE, and the native plugin arm.
+SkillEvaluator pins pi 1.6.0 wherever it installs the agent; in local mode the
+host CLI's version is checked against that pin and drift is reported as a
+warning, never a hard failure.
+
+```bash title="Run pi on the OpenAI provider"
+skillevaluator doctor --agents pi
+skillevaluator tier3 evaluate ./my-skill --agents pi
+```
+
+pi works on the OpenAI, OpenAI-compatible, and Anthropic providers:
+OpenAI-compatible custom endpoints are wired through pi's models.json with an
+explicit API style, and the Anthropic provider requires the public Anthropic
+endpoint (a base URL is rejected before execution). Other providers, including
+Bedrock and NVIDIA Build, reject pi before execution. Skills are staged to
+`$HOME/.agents/skills`, which pi reads natively, so in the native plugin arm
+member skills and plugin MCP servers load without a wrapper and only rules stay
+in the wrapper skill. Retained jobs include `trajectory.json` and `pi.txt`.
+
+MCP servers work through pi's native config: SkillEvaluator stages mcp.json in
+pi's isolated config dir (`PI_CODING_AGENT_DIR`), keeps HTTP headers as approved
+`${VAR}` references, and verifies after staging that `pi mcp list` reports every
+configured server — a trial fails at startup when pi did not read the config.
+Harbor 0.25.0's own pi-mcp-adapter path targets pi 0.85.x only, so SkillEvaluator
+skips the adapter install and stages a no-op extension at the path the launch
+line references; the servers themselves load natively from mcp.json.
 
 ## One NVIDIA Build key for everything
 
@@ -759,7 +760,7 @@ full process isolation, so it is the weaker of the two. Native Windows is
 hard-unsupported and fails closed before agent-runtime discovery —
 `SKILLEVALUATOR_LOCAL_SANDBOX=prefer` or `off` is not a bypass; the error
 directs you to WSL2 or `--env-mode docker`. Only `claude-code`, `codex`,
-and `opencode` can run in local mode.
+`opencode`, and the experimental `pi` can run in local mode.
 
 When the selected agent's CLI is missing, a local-mode run offers to install it
 under `SKILLEVALUATOR_RUNTIME_DIR`, at the release Harbor installs; without a

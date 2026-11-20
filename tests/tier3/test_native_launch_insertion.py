@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import shlex
 import subprocess
 
 import pytest
@@ -61,6 +62,23 @@ def test_pi_launch_keeps_prompt_argument_and_log_pipeline() -> None:
     assert "pi --print --mode json" in rewritten
     assert rewritten.endswith("| stdbuf -oL tee /logs/agent/pi.txt")
     assert "--model m 'do the task'" in rewritten
+
+
+def test_pi_launch_with_a_multiline_prompt_still_gets_native_setup() -> None:
+    instruction = "First line of the task.\nSecond line, with 'single quotes' and $shell."
+    quoted = shlex.quote(instruction)
+    command = PI.replace("'do the task'", quoted)
+    agent = _mixin(native_agents._NativePiMixin)
+    agent._skilleval_quoted_prompt = quoted
+
+    rewritten, _ = agent.skilleval_native_command(command, None)
+
+    head, _, tail = rewritten.partition(SETUP)
+    assert command.startswith(head)
+    assert tail.startswith("PI_CODING_AGENT_DIR=")
+    assert quoted in rewritten  # the prompt stays byte-identical, newlines and all
+    assert rewritten.endswith("| stdbuf -oL tee /logs/agent/pi.txt")
+    assert subprocess.run(["sh", "-n", "-c", rewritten], check=False).returncode == 0
 
 
 def test_pi_version_probe_is_never_touched_by_native_setup() -> None:

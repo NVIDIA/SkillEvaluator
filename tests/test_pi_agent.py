@@ -160,7 +160,20 @@ def test_mcp_config_verification_tolerates_unconnected_servers(tmp_path):
     )
 
     asyncio.run(agent._write_mcp_config(object()))  # a broken task server is the task's own concern
-    assert "pi mcp list --json" in agent.exec_as_agent.call_args.kwargs["command"]
+    # pi exits 1 with this census; the probe swallows the code and reads it.
+    assert agent.exec_as_agent.call_args.kwargs["command"].endswith("pi mcp list --json; true")
+
+
+def test_mcp_config_verification_fails_when_the_probe_itself_fails(tmp_path):
+    from harbor.models.task.config import MCPServerConfig
+
+    server = MCPServerConfig(name="docs", transport="stdio", command="npx", args=["-y", "@upstash/context7-mcp"])
+    agent = _agent(tmp_path, mcp_servers=[server])
+    agent.mcp_header_env = SimpleNamespace(refs={}, env={})
+    agent.exec_as_agent = AsyncMock(side_effect=RuntimeError("connection lost"))
+
+    with pytest.raises(RuntimeError, match="pi mcp list failed"):
+        asyncio.run(agent._verify_mcp_config(object()))
 
 
 def test_header_variables_reach_the_launch_command(monkeypatch, tmp_path):
@@ -180,6 +193,15 @@ def test_header_variables_reach_the_launch_command(monkeypatch, tmp_path):
     asyncio.run(agent.exec_as_agent(object(), "pi --print x", env={"OPENAI_API_KEY": "k"}))
 
     assert captured["env"] == {"DOCS_TOKEN": "secret-token", "OPENAI_API_KEY": "k"}
+
+
+def test_local_version_probe_with_empty_output_stays_a_warning(tmp_path):
+    agent = _local_agent(tmp_path)
+    agent.exec_as_agent = AsyncMock(return_value=SimpleNamespace(stdout=""))
+
+    asyncio.run(agent.install(object()))  # unparsable output must not fail the trial
+
+    assert agent._version is None
 
 
 def _local_agent(tmp_path, **kwargs):
@@ -248,6 +270,35 @@ def test_local_rewrite_never_touches_the_quoted_instruction(monkeypatch):
     assert shlex.quote(instruction) in command  # the task text is byte-identical
 
 
+def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
+    from harbor.agents.installed.pi import Pi
+
+    agent = object.__new__(SkillEvaluatorLocalPi)
+    instruction = "/tmp/harbor-pi-agent"  # a bare path: shlex.quote() adds no quotes
+    agent._quoted_instruction = shlex.quote(instruction)
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            "PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent pi --print --mode json --model m "
+            + instruction
+            + " 2>&1 </dev/null | stdbuf -oL tee /logs/agent/pi.txt",
+        )
+    )
+
+    command = str(captured["command"])
+    # The launcher's config path moved; the prompt argument stayed verbatim.
+    assert command.startswith("PI_CODING_AGENT_DIR=/logs/agent/pi-agent pi --print")
+    assert " --model m /tmp/harbor-pi-agent 2>&1 </dev/null" in command
+
+
 def test_local_exec_rewrites_container_assumptions(monkeypatch):
     from harbor.agents.installed.pi import Pi
 
@@ -304,6 +355,11 @@ def test_custom_endpoints_wire_the_model_api_agent_option(tmp_path):
     assert _pi_custom_endpoint_agent_kwargs({"OPENAI_BASE_URL": ""}) == {}
     overrides = _pi_custom_endpoint_agent_kwargs({"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://gw.example/v1"})
     assert overrides == {"pi": {"model_api": "openai-completions"}}
+    # The OpenAI provider exports its default endpoint as a base URL too; the
+    # official endpoint keeps its native Responses API.
+    assert _pi_custom_endpoint_agent_kwargs({"OPENAI_BASE_URL": "https://api.openai.com/v1"}) == {
+        "pi": {"model_api": "openai-responses"}
+    }
     command = build_harbor_run_command(
         dataset_path=tmp_path,
         agent="pi",

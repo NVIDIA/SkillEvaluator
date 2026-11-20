@@ -313,6 +313,28 @@ class _NativePiMixin(_NativePluginLoadMixin):
         _COMMAND_START + r"(?:PI_CODING_AGENT_DIR=[^ \t]+[ \t]+)?pi[ \t]+--print[ \t]+--mode[ \t]+json\b"
     )
     _SKILLEVAL_PROMPT_SEPARATOR = False
+    _skilleval_quoted_prompt: str | None = None
+
+    async def run(self, instruction: str, environment: BaseEnvironment, context: Any) -> None:
+        # Pi embeds the shlex-quoted prompt inside the launcher line, so a
+        # multiline task puts the launch command's only legitimate newline
+        # inside that quoted argument; keep it out of the single-line check.
+        self._skilleval_quoted_prompt = shlex.quote(self.render_instruction(instruction))
+        try:
+            await super().run(instruction=instruction, environment=environment, context=context)
+        finally:
+            self._skilleval_quoted_prompt = None
+
+    def _skilleval_launch_match(self, command: str) -> tuple[str, str, str, re.Match[str]] | None:
+        quoted = self._skilleval_quoted_prompt
+        if quoted and quoted in command:
+            before, _, after = command.partition(quoted)
+            found = super()._skilleval_launch_match(before)
+            if found is None:
+                return None
+            launcher, separator, prompt, match = found
+            return launcher, separator, quoted + after + prompt, match
+        return super()._skilleval_launch_match(command)
 
 
 class NativePi(_NativePiMixin, SkillEvaluatorPi):

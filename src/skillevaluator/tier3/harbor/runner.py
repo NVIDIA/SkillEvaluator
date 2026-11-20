@@ -35,6 +35,7 @@ from pathlib import Path
 from queue import Empty, SimpleQueue
 from types import MappingProxyType
 from typing import Any, NoReturn
+from urllib.parse import urlparse
 from uuid import uuid4
 
 from skillevaluator import __version__
@@ -1887,13 +1888,18 @@ def _pi_custom_endpoint_agent_kwargs(run_env: Mapping[str, str]) -> dict[str, di
 
     Harbor's Pi agent routes a custom base URL through models.json, and building
     that file requires the ``model_api`` agent option; without it the launch
-    fails with "Pi custom endpoints require the model_api agent argument". The
-    Anthropic provider has no pi custom-endpoint path and is rejected by the
-    credential gate instead.
+    fails with "Pi custom endpoints require the model_api agent argument".
+    The OpenAI provider also exports its default endpoint as a base URL, so the
+    official endpoint keeps its native Responses API and gateways get the
+    completions style. The Anthropic provider has no pi custom-endpoint path
+    and is rejected by the credential gate instead.
     """
-    if run_env.get("OPENAI_BASE_URL", "").strip():
-        return {"pi": {"model_api": "openai-completions"}}
-    return {}
+    base_url = run_env.get("OPENAI_BASE_URL", "").strip()
+    if not base_url:
+        return {}
+    hostname = urlparse(base_url).hostname or ""
+    model_api = "openai-responses" if hostname == "api.openai.com" else "openai-completions"
+    return {"pi": {"model_api": model_api}}
 
 
 def build_harbor_run_command(
@@ -2769,12 +2775,14 @@ def _check_prerequisites(
             return [str(exc)]
         except ValueError as exc:
             return [f"Invalid local sandbox configuration: {exc}"]
+        from skillevaluator.tier3.harbor import LOCAL_HARBOR_AGENTS
         from skillevaluator.tier3.harbor.local_runtime import validate_local_agents
 
         selected_agents = agents or []
         unsupported = validate_local_agents(selected_agents)
         if unsupported:
-            return [f"Local mode supports only claude-code, codex, opencode. Unsupported: {', '.join(unsupported)}."]
+            supported = ", ".join(sorted(LOCAL_HARBOR_AGENTS))
+            return [f"Local mode supports only {supported}. Unsupported: {', '.join(unsupported)}."]
         try:
             strict_reads = local_sandbox.coerce_flag(None, env_var=local_sandbox.STRICT_READS_ENV)
             return ensure_local_runtimes(selected_agents, sandbox=sandbox, strict_reads=strict_reads)

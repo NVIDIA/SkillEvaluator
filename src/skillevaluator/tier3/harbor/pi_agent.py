@@ -99,7 +99,12 @@ class SkillEvaluatorPi(Pi):
         """
         command = (
             ". ~/.nvm/nvm.sh; "
-            f"{_PI_CONFIG_DIR_ENV}={shlex.quote(_REMOTE_PI_CONFIG_DIR.as_posix())} pi mcp list --json"
+            # The exit code is swallowed on purpose: pi reports an unreachable
+            # server in the census with state "failed" and exits 1, and that is
+            # the documented soft path. Hard failures come from the census
+            # itself below (missing servers, unreadable output) or from exec
+            # infrastructure errors.
+            f"{_PI_CONFIG_DIR_ENV}={shlex.quote(_REMOTE_PI_CONFIG_DIR.as_posix())} pi mcp list --json; true"
         )
         try:
             result = await self.exec_as_agent(environment, command=command)

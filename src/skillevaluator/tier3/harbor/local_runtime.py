@@ -3,7 +3,7 @@
 
 """Local runtime discovery for Harbor local mode.
 
-Local mode runs the vendor agent CLIs (claude-code, codex, opencode) that are
+Local mode runs the vendor agent CLIs (claude-code, codex, opencode, pi) that are
 already installed on the host or under ``SKILLEVALUATOR_RUNTIME_DIR``. This
 module discovers them on ``PATH``. Discovery never installs anything; only
 :func:`install_local_runtime`, run after the operator confirms, installs the

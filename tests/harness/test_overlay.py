@@ -790,6 +790,22 @@ def test_pi_hidden_disable_model_invocation(tmp_path: Path):
     assert "PI-HIDDEN" in _ids(rows, "pi")
 
 
+def test_pi_project_root_loads_for_pi_and_gates_the_others(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "proj" / ".pi" / "skills"))
+
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-TRUST" in _ids(rows, "pi")  # project roots load only once trusted
+    assert rows["claude-code"]["status"] == "not_loaded"
+    assert "CC-ROOT" in _ids(rows, "claude-code")
+
+
+def test_claude_root_is_not_a_pi_root(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "proj" / ".claude" / "skills"))
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-ROOT" in _ids(rows, "pi")
+
+
 def test_pi_drops_non_string_descriptions(tmp_path: Path):
     rows = _rows(_skill(tmp_path / "numeric", desc="42"))
 

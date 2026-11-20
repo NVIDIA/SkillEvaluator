@@ -82,6 +82,8 @@ _KNOWN_ROOTS = (
     ".copilot/skills",
     ".openclaw/skills",
     ".config/opencode/skills",
+    ".pi/skills",
+    ".pi/agent/skills",
 )
 
 

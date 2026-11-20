@@ -313,16 +313,16 @@ def verify_local(version: str, source_sha: str, assets: Path) -> dict:
     return {asset["filename"]: asset for asset in manifest["artifacts"]}
 
 
-def changelog_entry(version: str) -> str:
-    changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+def changelog_entry(version: str, source_sha: str) -> str:
+    changelog = product_release.source_file(source_sha, "CHANGELOG.md").decode("utf-8")
     title = re.search(rf"^## {re.escape(version)} - \d{{4}}-\d{{2}}-\d{{2}}\s*$", changelog, re.MULTILINE)
     if title is None:
         raise ValueError(f"CHANGELOG.md has no dated entry for {version}.")
     return re.split(r"^## ", changelog[title.end() :], maxsplit=1, flags=re.MULTILINE)[0].strip()
 
 
-def release_notes(version: str, assets: Path) -> str:
-    changes = changelog_entry(version)
+def release_notes(version: str, source_sha: str, assets: Path) -> str:
+    changes = changelog_entry(version, source_sha)
     tag = f"v{version}"
     manifest = json.loads((assets / "artifact-manifest.json").read_text(encoding="utf-8"))
     bundle = f"ci/bundles/{version}"
@@ -340,7 +340,7 @@ def verify_release_metadata(version: str, source_sha: str, assets: Path) -> None
     manifest, _ = product_release.checked_manifest(version, assets)
     if manifest.get("source_commit") != source_sha:
         raise ValueError("The artifact manifest does not match the reviewed source commit.")
-    changelog_entry(version)
+    changelog_entry(version, source_sha)
     verify_public_image(manifest)
 
 
@@ -378,7 +378,7 @@ def stage(version: str, source_sha: str, assets: Path, run: str) -> None:
         raise ValueError(f"Existing GitHub release is missing tag {tag}.")
     if release is None or release["draft"]:
         product_release.inspect_public_indexes(version, packages)
-        notes = release_notes(version, assets)
+        notes = release_notes(version, source_sha, assets)
     if release is None:
         if target is None:
             api("git/refs", "POST", {"ref": f"refs/tags/{tag}", "sha": source_sha})

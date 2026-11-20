@@ -77,11 +77,12 @@ image and consumer qualification details.
 
 1. Open the workflow in the GitHub UI again, choose **Validate release**, and
    enter the version and product release SHA from the bundle PR. Review the
-   source, wheel, sdist, and CI bundle checks. Validation checks for a dated
-   changelog entry and confirms the live public GHCR digest against the reviewed
-   bundle. On the successful run's **Summary** page, copy both values from
-   **Publish release inputs**. `validation_run` includes the run ID and attempt
-   (such as `123-1`), and `validation_manifest_sha256` is the manifest hash.
+   source, wheel, sdist, and CI bundle checks. Validation checks the selected
+   commit for a dated changelog entry and matches the live public GHCR digest
+   against the bundle. On the successful run's **Summary** page, copy both
+   values from **Publish release inputs**. `validation_run` includes the run ID
+   and attempt (such as `123-1`), and `validation_manifest_sha256` is the
+   manifest hash.
 2. Choose **Publish release** with the same version and product SHA, enter the
    two values from the summary, and approve the `release-github` job. The
    publish run verifies the selected validation attempt and uses its exact

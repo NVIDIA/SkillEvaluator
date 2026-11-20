@@ -400,8 +400,18 @@ def test_initial_publication_checks_package_conflicts_before_tagging(release, mo
 
 
 def test_publish_rechecks_the_dated_changelog_before_tagging(release, monkeypatch, tmp_path):
-    (tmp_path / "CHANGELOG.md").write_text(f"## {VERSION}\n\nPublished changes.\n", encoding="utf-8")
+    changelog = tmp_path / "CHANGELOG.md"
+    changelog.write_text(f"## {VERSION}\n\nPublished changes.\n", encoding="utf-8")
     monkeypatch.chdir(tmp_path)
+    git = release.product_release.git
+    git("init", "-q")
+    git("add", "CHANGELOG.md")
+    git("-c", "user.name=Release tests", "-c", "user.email=test@example.com", "commit", "-qm", "Undated changelog")
+    source = git("rev-parse", "HEAD").decode().strip()
+    changelog.write_text(f"## {VERSION} - 2026-11-20\n\nWorktree changes.\n", encoding="utf-8")
+    (tmp_path / "artifact-manifest.json").write_text(
+        json.dumps({"image": f"ghcr.io/nvidia/skillevaluator-tier1@sha256:{'a' * 64}"}), encoding="utf-8"
+    )
     monkeypatch.setattr(release, "tag_target", lambda _: None)
     monkeypatch.setattr(release, "get_release", lambda _: None)
     monkeypatch.setattr(release, "verify_local", Mock(return_value={}))
@@ -409,7 +419,7 @@ def test_publish_rechecks_the_dated_changelog_before_tagging(release, monkeypatc
     writes = Mock()
     monkeypatch.setattr(release, "api", writes)
     with pytest.raises(ValueError, match="no dated entry"):
-        release.stage(VERSION, SHA, tmp_path, "123-2")
+        release.stage(VERSION, source, tmp_path, "123-2")
     writes.assert_not_called()
 
 

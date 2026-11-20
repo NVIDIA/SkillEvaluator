@@ -534,7 +534,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     for package in _lock()["package"]:
         all_lock_versions.setdefault(package["name"], []).append(Version(package["version"]))
 
-    assert "mcp>=1.28.1,<2" in tier3
+    assert "mcp>=1.30.0,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
     assert "oauthlib>=4.0.1" in tier3
     assert {"aiohttp>=3.14.4,<4", "fsspec>=2026.6.0", "urllib3>=2.8.0,<3"} <= set(extras["llm"])
@@ -546,7 +546,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     assert all(
         "opentelemetry" not in requirement.lower() for requirements in extras.values() for requirement in requirements
     )
-    assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
+    assert all(version >= Version("1.30.0") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
     # The optional dashboard uses Streamlit's protobuf transport. It does not
     # restore the removed evaluator telemetry integration or its dependencies.

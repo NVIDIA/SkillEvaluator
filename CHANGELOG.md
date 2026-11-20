@@ -8,6 +8,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Update LiteLLM in the optional LLM and Tier 3 installs. Bedrock reports
   invalid bearer-token endpoints as configuration errors.
+- Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
+  installs to include upstream security fixes.
 
 ### Changed
 

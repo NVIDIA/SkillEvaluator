@@ -517,7 +517,7 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
         if package["name"] in prerelease_guarded:
             assert Version(package["version"]).is_prerelease is False
     assert versions["cryptography"] >= Version("48.0.1")
-    assert versions["msgpack"] >= Version("1.2.1")
+    assert versions["msgpack"] >= Version("1.2.3")
     assert versions["pydantic-settings"] >= Version("2.14.2")
 
 
@@ -531,7 +531,9 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
 
     assert "mcp>=1.28.1,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
-    assert "oauthlib>=4.0.0" in tier3
+    assert "oauthlib>=4.0.1" in tier3
+    assert {"aiohttp>=3.14.4,<4", "fsspec>=2026.6.0", "urllib3>=2.8.0,<3"} <= set(extras["llm"])
+    assert {"msgpack>=1.2.3", "urllib3>=2.8.0,<3"} <= set(extras["security"])
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -550,10 +552,10 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     }
     assert protobuf_consumers == {"streamlit"}
     # Older Streamlit releases silently ignore the launcher's server.allowedHosts setting.
-    assert extras["dashboard"] == ["streamlit>=1.61,<2"]
+    assert extras["dashboard"] == ["streamlit>=1.61,<2", "urllib3>=2.8.0,<3"]
     assert all(version >= Version("1.61") for version in all_lock_versions["streamlit"])
     assert not any("streamlit" in dependency for dependency in project["project"]["dependencies"])
-    assert all(version >= Version("4.0.0") for version in all_lock_versions["oauthlib"])
+    assert all(version >= Version("4.0.1") for version in all_lock_versions["oauthlib"])
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 
 

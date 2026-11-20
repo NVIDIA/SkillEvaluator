@@ -54,7 +54,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Preserve warnings from passing rules, workflows, and workflow references when
   validating collections, including each member's context and warning counts.
-  Single-workflow reports also display reference warnings in the report body.
+  Single-workflow JSON reports include reference warning messages. Markdown
+  reports count these warnings in the summary.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains

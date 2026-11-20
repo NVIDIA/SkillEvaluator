@@ -9,6 +9,7 @@ path, so the bare names the check used to pass ("test", "evals", "results",
 """
 
 import json
+import os
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path
@@ -16,6 +17,7 @@ from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.constants import SCAN_EXCLUDED_DIRS
 from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.code_risk import CodeRiskValidator
 
@@ -117,45 +119,44 @@ def _exclude_entries(mock_run, skill: Path) -> list[str]:
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_exclude_entries_are_folders_below_the_skill(mock_run, tmp_path: Path) -> None:
-    skill = _skill(tmp_path / "webapp-testing")
+def test_exclude_entries_are_anchored_at_the_skill(mock_run, tmp_path: Path) -> None:
+    skill = tmp_path / "webapp-testing"
+    skill.mkdir()
+    (skill / "run.py").write_text(RISKY, encoding="utf-8")
 
     entries = _exclude_entries(mock_run, skill)
 
-    root = skill.resolve()
-    # A plain folder goes in as it is, and Bandit skips everything below it.
-    # The comma in "pkg,one" cannot, because Bandit splits the option there.
-    assert sorted(entries) == sorted(
-        [
-            str(root / "evals"),
-            str(root / "tests"),
-            str(root / "versions"),
-            str(root / "pkg?one" / "test" / "*"),
-        ]
-    )
+    # Two patterns for each name, one right below the skill and one for any
+    # depth. No entry is a bare name that could match above the skill.
+    assert len(entries) == 2 * (len(SCAN_EXCLUDED_DIRS) + 2)
+    assert all(entry.startswith(str(skill.resolve()) + os.sep) for entry in entries)
+    assert str(skill.resolve() / "tests" / "*") in entries
+    assert str(skill.resolve() / "*" / "tests" / "*") in entries
 
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_exclude_does_not_grow_with_the_number_of_test_files(mock_run, tmp_path: Path) -> None:
-    # One entry per test file would not fit a Windows command line for a
-    # skill that ships a few hundred of them.
+def test_exclude_does_not_grow_with_the_tree(mock_run, tmp_path: Path) -> None:
+    # One entry per test file or per tests/ folder would not fit a Windows
+    # command line for a skill that vendors a large library.
     skill = _skill(tmp_path / "webapp-testing")
     before = _exclude_entries(mock_run, skill)
     for index in range(300):
-        (skill / "scripts" / f"test_case_{index}.py").write_text(RISKY, encoding="utf-8")
+        package = skill / "vendor" / f"package_{index}"
+        (package / "tests").mkdir(parents=True)
+        (package / "tests" / "helper.py").write_text(RISKY, encoding="utf-8")
+        (package / f"test_case_{index}.py").write_text(RISKY, encoding="utf-8")
 
     assert _exclude_entries(mock_run, skill) == before
 
 
-@patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
-@patch.object(Tools.bandit, "run")
-def test_exclude_is_passed_empty_when_there_is_nothing_to_skip(mock_run, tmp_path: Path) -> None:
-    # Without the option Bandit falls back to its own list, which has ".git" in it.
-    mock_run.return_value = ToolResult(success=True, stdout=json.dumps({"results": []}), stderr="", exit_code=0)
-    (tmp_path / "run.py").write_text(RISKY, encoding="utf-8")
+@needs_bandit
+def test_differently_cased_artifact_folder_follows_the_filesystem(plain_root: Path) -> None:
+    # "Evals" is the evals folder where the filesystem ignores case, and a
+    # folder of its own where it does not.
+    skill = _skill(plain_root / "skills" / "webapp-checks")
+    (skill / "Evals").mkdir(exist_ok=True)
+    (skill / "Evals" / "copy.py").write_text(RISKY, encoding="utf-8")
+    same_folder = (skill / "Evals").samefile(skill / "evals")
 
-    CodeRiskValidator()._run_bandit(tmp_path)
-
-    args = mock_run.call_args.args[0]
-    assert args[args.index("--exclude") + 1] == ""
+    assert _flagged_files(skill) == (LIVE_FILES if same_folder else LIVE_FILES | {"Evals/copy.py"})

@@ -180,8 +180,8 @@ class CodeRiskValidator(ValidatorBase):
         # "--exclude=*") cannot be parsed as a scanner flag.
         root = skill_path.resolve()
         args = ["-r", str(root), "-f", "json", "-q", "-ll"]
-        # Always passed, also when empty, because Bandit's own default list
-        # is matched the same way and has ".git" in it.
+        # This also replaces Bandit's own default list, which is matched as
+        # substrings and has ".git" in it.
         args.extend(["--exclude", ",".join(self._bandit_excludes(root))])
 
         tool_result = Tools.bandit.run(args, timeout=120)
@@ -207,23 +207,40 @@ class CodeRiskValidator(ValidatorBase):
         copies of the live skill, and scanning them produces duplicate
         findings. Bandit drops a file when an ``--exclude`` entry is a
         substring of its whole path, so a bare name such as "test" also hid
-        every file of a skill called "webapp-testing". Each entry is
-        therefore the path of a directory that exists, written as a pattern
-        that matches only below it. Test files outside those directories are
-        left out of the report by name, see ``_is_test_file``.
+        every file of a skill called "webapp-testing". Each name is
+        therefore written as two patterns anchored at *root*, one for a
+        directory of that name right below it and one for any depth, so the
+        option has the same size for a small skill and a large tree. Test
+        files outside those directories are left out of the report by name,
+        see ``_is_test_file``.
         """
-        test_dirs = {"tests", "test"} if self.exclude_tests else set()
+        # Bandit splits the option at every comma, so a comma in the path is
+        # written as "?". Every scanned path starts with this same root.
+        prefix = glob.escape(str(root)).replace(",", "?")
+        names = [glob.escape(name) for name in sorted({"tests", "test"})] if self.exclude_tests else []
+        # A differently cased spelling is the same artifact directory where
+        # the filesystem ignores case, as for the other Tier 1 scans.
+        ignores_case = self._ignores_case(root)
+        for name in sorted(SCAN_EXCLUDED_DIRS):
+            names.append(
+                "".join(f"[{char.lower()}{char.upper()}]" if char.isalpha() else glob.escape(char) for char in name)
+                if ignores_case
+                else glob.escape(name)
+            )
         patterns: list[str] = []
-        for dirpath, dirnames, _ in os.walk(root):
-            base = Path(dirpath)
-            excluded = [
-                name
-                for name in dirnames
-                if name in test_dirs or matches_filesystem_name(base / name, SCAN_EXCLUDED_DIRS)
-            ]
-            dirnames[:] = [name for name in dirnames if name not in excluded]
-            patterns.extend(self._bandit_pattern(base / name) for name in excluded)
+        for name in names:
+            for parent in (prefix, f"{prefix}{os.sep}*"):
+                patterns.append(self._bandit_pattern(f"{parent}{os.sep}{name}"))
         return sorted(patterns)
+
+    @staticmethod
+    def _ignores_case(root: Path) -> bool:
+        """Whether the filesystem holding *root* treats differently cased names as one entry."""
+        swapped = Path(str(root).swapcase())
+        try:
+            return swapped != root and root.samefile(swapped)
+        except OSError:
+            return False
 
     @staticmethod
     def _is_test_file(entry: object) -> bool:
@@ -237,18 +254,18 @@ class CodeRiskValidator(ValidatorBase):
         return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
 
     @staticmethod
-    def _bandit_pattern(path: Path) -> str:
-        """The directory *path* as one ``--exclude`` entry.
+    def _bandit_pattern(directory: str) -> str:
+        """The pattern for everything below the directory pattern *directory*, as one ``--exclude`` entry.
 
-        Bandit excludes everything below an entry that is a directory, so a
-        plain path goes in as it is. A path with pattern characters is
-        escaped and ends in ``*``. Bandit also splits the option at every
-        comma, so a comma is written as ``?``. The entries only name test and
-        artifact directories, and a path that differs in that one character
-        is one of those as well.
+        Bandit adds its own ``*`` to an entry that is the path of a directory,
+        which would then match one level too deep, so the entry must not be
+        one. That only happens when a folder is literally named ``*``.
         """
-        pattern = glob.escape(str(path)).replace(",", "?")
-        return pattern if pattern == str(path) else f"{pattern}{os.sep}*"
+        for wildcard in ("*", "?*", "*?"):
+            pattern = f"{directory}{os.sep}{wildcard}"
+            if not Path(pattern).is_dir():
+                break
+        return pattern
 
     def _process_bandit_output(
         self,

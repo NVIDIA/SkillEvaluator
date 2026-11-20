@@ -57,6 +57,7 @@ For conversions:
 - No symbolic algebra (no variables, no equations).
 - Only supports basic arithmetic operators: `+`, `-`, `*`, `/`, `**`, `%`, parentheses.
 - Unit conversions are limited to: celsius/fahrenheit, miles/km, kg/lbs, meters/feet.
+- Arithmetic results are limited to 1000 decimal digits for whole-number math, and to the floating-point range (about 1.8e308) when a division or a decimal number is involved; larger, infinite, or non-real arithmetic results return an error. These limits apply to intermediate values as well as the final result, so an expression with a small final value can still be rejected: `10**1000 - 10**1000` returns `Error: result is too large` because each power has 1001 digits.
 
 ## Troubleshooting
 

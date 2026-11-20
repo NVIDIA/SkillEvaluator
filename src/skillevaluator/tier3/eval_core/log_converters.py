@@ -1034,52 +1034,29 @@ def load_trajectory_with_fallback(
                     meta["source"] = "trajectory.json"
                     return data, meta
             meta["warning"] = "trajectory.json has no steps[]"
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
             meta["warning"] = f"trajectory.json unreadable: {e}"
 
-    claude_path = logs / "claude-code.txt"
-    if claude_path.exists():
-        raw = claude_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_claude_stream_jsonl(raw)
+    candidates = (
+        ("claude-code.txt", synthetic_trajectory_from_claude_stream_jsonl, "Claude Code stream JSONL"),
+        ("cursor-cli.txt", synthetic_trajectory_from_cursor_cli, "Cursor CLI log (heuristic)"),
+        ("cline.txt", synthetic_trajectory_from_cline_cli, "Cline CLI JSONL log"),
+        ("opencode.txt", synthetic_trajectory_from_opencode_json, "OpenCode JSON stream"),
+        ("codex.txt", synthetic_trajectory_from_codex_txt, "Codex structured log"),
+    )
+    for filename, converter, description in candidates:
+        try:
+            raw = (logs / filename).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            warning = f"{filename} unreadable: {exc}"
+            meta["warning"] = f"{meta['warning']}; {warning}" if meta["warning"] else warning
+            continue
+        synth = converter(raw)
         if synth and synth.get("steps"):
-            meta["source"] = "claude-code.txt"
-            meta["note"] = "Synthetic ATIF from Claude Code stream JSONL"
-            return synth, meta
-
-    cursor_path = logs / "cursor-cli.txt"
-    if cursor_path.exists():
-        raw = cursor_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_cursor_cli(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "cursor-cli.txt"
-            meta["note"] = "Synthetic ATIF from Cursor CLI log (heuristic)"
-            return synth, meta
-
-    cline_path = logs / "cline.txt"
-    if cline_path.exists():
-        raw = cline_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_cline_cli(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "cline.txt"
-            meta["note"] = "Synthetic ATIF from Cline CLI JSONL log"
-            return synth, meta
-
-    opencode_path = logs / "opencode.txt"
-    if opencode_path.exists():
-        raw = opencode_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_opencode_json(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "opencode.txt"
-            meta["note"] = "Synthetic ATIF from OpenCode JSON stream"
-            return synth, meta
-
-    codex_path = logs / "codex.txt"
-    if codex_path.exists():
-        raw = codex_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_codex_txt(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "codex.txt"
-            meta["note"] = "Synthetic ATIF from Codex structured log"
+            meta["source"] = filename
+            meta["note"] = f"Synthetic ATIF from {description}"
             return synth, meta
 
     return None, meta

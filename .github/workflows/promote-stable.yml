@@ -48,6 +48,7 @@ jobs:
       - name: Verify the published release and promote its workflows
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
           STABLE_PUSH_TOKEN: ${{ steps.writer.outputs.token }}
           STABLE_BOOTSTRAP_SHA: ${{ inputs.bootstrap-sha }}
         run: bash ci/promote_stable.sh

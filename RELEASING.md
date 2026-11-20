@@ -44,6 +44,50 @@ listing for `/skillevaluator/`.
   Kitmaker and run the protected dry-run job successfully before approving
   the first upload. The checked-in dry-run job sends `upload: false`.
   Apply that restriction in Ferry policy as well if the tenant supports it.
+- For **Full release**, install a dedicated bundle PR GitHub App on SkillEvaluator
+  with repository Contents, Pull requests, and Workflows write access. Keep the
+  App subject to the normal `main` rules. In a `release-bundle-pr` Actions
+  environment restricted to `main`, add the
+  `RELEASE_BUNDLE_APP_CLIENT_ID` variable and `RELEASE_BUNDLE_APP_PRIVATE_KEY`
+  secret. The workflow checks both are present before it builds an image.
+  The App writes generated files to a release branch and opens the PR.
+
+## Start a release from GitHub Actions
+
+1. Merge the version-preparation PR described below. Open **SkillEvaluator
+   Release → Run workflow** on `main`, choose **Full release**, and enter the
+   version and the version-preparation merge SHA.
+2. Approve the image job. The workflow builds or reuses the immutable image,
+   verifies the public digest, generates the bundle and pins, and opens or
+   reuses the bundle PR. Its link appears in the run summary.
+3. Review the PR and qualify the generated GitHub and GitLab configurations.
+   Update the bundle catalog and current onboarding links in the PR if needed.
+   Merge the PR after the required checks pass. The run waits up to two hours
+   for that merge and verifies the exact squash-merge commit on `main`. If the
+   wait expires, merge the PR and use **Re-run failed jobs** on the original run.
+   Before the version tag exists, a fresh dispatch can reuse an open or
+   merged bundle PR for the same candidate. If intervening changes require a
+   new image candidate, close the old bundle PR if it is still open and
+   dispatch **Full release** with the new reviewed SHA. The workflow generates
+   a separate branch and PR for that candidate.
+4. Review the validated bundle merge SHA, artifact ID, and manifest checksum
+   in the run summary. Follow the GitHub release and Kitmaker approvals from
+   the same run. Publication uses the exact validated artifacts, verifies PyPI
+   and DevZone, runs fresh install smoke tests, and finalizes the release.
+
+If the bundle PR is already merged, choose **Validate and publish** with the
+version and the bundle merge SHA. This starts at package validation and skips
+image building and bundle PR creation.
+
+Select **promote_stable** with **Full release**, **Validate and publish**, or
+**Publish release**. After both package indexes pass verification, the workflow
+promotes the exact version if it is GitHub Latest and the stable writer App is
+configured. Use the standalone promotion workflow for retries and the first
+`v1.0.1` bootstrap. Docs publish through **Publish Docs** on pushes to `main`,
+including the bundle PR merge.
+
+The individual image, validation and publication phases are also available for
+manual qualification and recovery.
 
 ## Prepare the CI release
 
@@ -104,16 +148,22 @@ image and consumer qualification details.
    fresh pip and uv installations, a Tier 1 report, and the installed CI pins
    before recording verification in the GitHub release notes.
 
-On interruption, use **Re-run failed jobs** or open **Run workflow** with the
-same version, product SHA, and **Publish release** phase. Supply the validation
-inputs if a GitHub draft has yet to be created. For an existing draft, the
-approved job restores the bytes retained by the original Publish release run.
-Preserve that artifact until completion. An immutable GitHub release uses its
-published bytes and resumes any recorded Kitmaker submission. Both recovery
-paths accept blank validation inputs. If GitHub rejects the workflow token
-when creating the version tag, an authorized maintainer can create that tag at
-the exact reviewed product SHA and resume the same run. The workflow checks
-the tag target on every attempt.
+On interruption, use **Re-run failed jobs** on the original run first. To
+start a fresh run, enter the same version and reviewed bundle merge SHA.
+
+- If the tag exists and the GitHub draft was never created, use **Validate and
+  publish**. The standalone **Publish release** phase can also continue with
+  the receipt from a successful standalone **Validate release** run.
+- For an existing draft, choose **Publish release** with blank validation
+  inputs. The approved job restores the exact bytes retained by the original
+  publishing run. Preserve that artifact until completion.
+- For an immutable GitHub release, choose **Publish release** with blank
+  validation inputs. The workflow uses the published bytes and resumes any
+  recorded Kitmaker submission.
+
+If GitHub rejects the workflow token when creating the version tag, an
+authorized maintainer can create that tag at the exact reviewed product SHA
+and resume the same run. The workflow checks the tag target on every attempt.
 
 For a Kitmaker timeout or partial publication, inspect the private receipt,
 Kitmaker status and both public indexes. The workflow polls a saved submission
@@ -179,8 +229,8 @@ access.
 If the DevZone URL is unset or invalid, package verification stops promotion
 before the `stable` tag can move.
 
-After the manual product release finishes verification, open **Promote stable
-GitHub workflows** in Actions and select **Run workflow** on `main`. Set
+For a standalone promotion after the product release finishes verification,
+open **Promote stable GitHub workflows** in Actions and select **Run workflow** on `main`. Set
 `expected-release` to the reviewed `vX.Y.Z` tag shown in the release workflow
 summary. Manual promotion stops if GitHub Latest differs from that tag. The
 product workflow's GitHub Actions token does not trigger the release relay.

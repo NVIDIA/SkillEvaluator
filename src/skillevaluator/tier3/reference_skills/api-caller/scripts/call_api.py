@@ -20,7 +20,16 @@ def make_request(
     url: str, method: str = "GET", data: object = _UNSET, headers: dict | None = None, timeout: int = 30
 ) -> dict:
     """Make an HTTP request and return the response."""
+    result, _final_url = _request_with_final_url(url, method, data, headers, timeout)
+    return result
 
+
+def _request_with_final_url(
+    url: str, method: str = "GET", data: object = _UNSET, headers: dict | None = None, timeout: int = 30
+) -> tuple[dict, str | None]:
+    """Make an HTTP request and return the result plus the final URL after redirects (None on failure)."""
+
+    final_url = None
     result = {
         "success": False,
         "status_code": None,
@@ -54,7 +63,7 @@ def make_request(
         # validate_http_url() rejects non-HTTP schemes before this request.
         with urlopen(req, timeout=timeout) as response:  # nosec B310
             result["status_code"] = response.status
-            result["final_url"] = getattr(response, "url", None) or url
+            final_url = getattr(response, "url", None) or url
             result["headers"] = dict(response.headers)
 
             # Read and parse response
@@ -90,14 +99,14 @@ def make_request(
     except Exception as e:
         result["error"] = f"Error: {e!s}"
 
-    return result
+    return result, final_url
 
 
 def fetch_openapi_spec(spec_url: str) -> tuple[dict | None, str]:
     """Fetch and parse an OpenAPI spec. Returns the spec and its final URL after redirects."""
-    result = make_request(spec_url)
+    result, final_url = _request_with_final_url(spec_url)
     if result["success"] and isinstance(result["data"], dict):
-        return result["data"], result.get("final_url") or spec_url
+        return result["data"], final_url or spec_url
     return None, spec_url
 
 

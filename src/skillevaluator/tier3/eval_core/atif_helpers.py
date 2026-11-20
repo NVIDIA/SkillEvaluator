@@ -422,8 +422,11 @@ def _tool_write_body(args: dict[str, Any], *, full: bool = False) -> str:
         for idx, edit in enumerate(edits if full else edits[:5], start=1):
             if isinstance(edit, dict):
                 new_string = edit.get("new_string") or edit.get("replacement")
-                if new_string:
-                    snippets.append(f"edit {idx} new_string:\n{new_string}")
+                # Past the five that are shown, an edit that replaces text
+                # with nothing is listed as well, so a deletion there counts
+                # as left out like any other edit.
+                if new_string or idx > 5:
+                    snippets.append(f"edit {idx} new_string:\n{new_string or ''}")
     return "\n\n".join(str(s) for s in snippets if str(s).strip())
 
 

@@ -797,10 +797,19 @@ def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() ->
             assert bundle["omitted"]["incomplete_sections"] == ["file changes"]
 
 
-@pytest.mark.parametrize(("edits", "reported"), [(5, False), (6, True)], ids=["five-edits", "six-edits"])
-def test_bundles_report_edits_past_the_five_a_multi_edit_shows(edits: int, reported: bool) -> None:
+@pytest.mark.parametrize(
+    ("replacements", "reported"),
+    [
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5"], False),
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5", "NEW_EDIT_6"], True),
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5", ""], True),
+    ],
+    ids=["five-edits", "six-edits", "five-edits-and-a-deletion"],
+)
+def test_bundles_report_edits_past_the_five_a_multi_edit_shows(replacements: list[str], reported: bool) -> None:
     # A multi-edit shows its first five edits. The sixth is short and nothing
     # else is cut, so only the count can say that it did not reach the judge.
+    # A sixth edit that deletes text has nothing to show and counts the same.
     traj = {
         "steps": [
             {
@@ -812,8 +821,8 @@ def test_bundles_report_edits_past_the_five_a_multi_edit_shows(edits: int, repor
                         "arguments": {
                             "file_path": "/workspace/output/x.py",
                             "edits": [
-                                {"old_string": f"old_{idx}", "new_string": f"NEW_EDIT_{idx}"}
-                                for idx in range(1, edits + 1)
+                                {"old_string": f"old_{idx}", "new_string": new_string}
+                                for idx, new_string in enumerate(replacements, start=1)
                             ],
                         },
                     }

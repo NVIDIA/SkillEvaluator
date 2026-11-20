@@ -1,0 +1,93 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: Release Python distributions through Kitmaker
+
+on:
+  workflow_call:
+    inputs:
+      version:
+        type: string
+        required: true
+      source_sha:
+        type: string
+        required: true
+      manifest_sha256:
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  dry-run:
+    name: Validate the released Python distributions in Kitmaker
+    if: >-
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.event_name == 'workflow_dispatch' &&
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    environment: release-kitmaker-dry-run
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - &kitmaker_checkout
+        uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - &kitmaker_teleport
+        name: Install Teleport
+        uses: teleport-actions/setup@b638ff596557cc3959eb6b5287d5e58e0c8ac6a6 # v1.1.1
+        with:
+          version: ${{ vars.KITMAKER_TELEPORT_VERSION }}
+          proxy: ${{ vars.KITMAKER_FERRY_PROXY }}
+      - &kitmaker_tunnel
+        name: Start the approved Charon Ferry tunnel
+        uses: teleport-actions/application-tunnel@bb7a8fbfb67b85d26013554f10d71dd032c1c764 # v1.0.1
+        with:
+          proxy: ${{ vars.KITMAKER_FERRY_PROXY }}
+          token: ${{ vars.KITMAKER_FERRY_JOIN_TOKEN }}
+          app: charon
+          listen: tcp://127.0.0.1:8888
+      - name: Dry-run the exact wheel and source archive
+        env: &kitmaker_environment
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_VERSION: ${{ inputs.version }}
+          RELEASE_SOURCE: ${{ inputs.source_sha }}
+          RELEASE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+          KITMAKER_VAULT_URL: ${{ vars.KITMAKER_VAULT_URL }}
+          KITMAKER_VAULT_AUTH_MOUNT: ${{ vars.KITMAKER_VAULT_AUTH_MOUNT }}
+          KITMAKER_VAULT_ROLE: ${{ vars.KITMAKER_VAULT_ROLE }}
+          KITMAKER_VAULT_AUDIENCE: ${{ vars.KITMAKER_VAULT_AUDIENCE }}
+          KITMAKER_VAULT_NAMESPACE: ${{ vars.KITMAKER_VAULT_NAMESPACE }}
+          KITMAKER_VAULT_CA_PEM: ${{ vars.KITMAKER_VAULT_CA_PEM }}
+          KITMAKER_VAULT_CONFIG_PATH: ${{ vars.KITMAKER_VAULT_CONFIG_PATH }}
+          KITMAKER_VAULT_RECEIPT_PATH: ${{ vars.KITMAKER_VAULT_RECEIPT_PATH }}
+        run: >-
+          python3 -m ci.kitmaker_release dry-run
+          --version "$RELEASE_VERSION" --source-sha "$RELEASE_SOURCE"
+          --manifest-sha256 "$RELEASE_MANIFEST_SHA256"
+
+  upload:
+    name: Publish the dry-run distributions through Kitmaker
+    needs: dry-run
+    runs-on: ubuntu-24.04
+    timeout-minutes: 55
+    # Configure this main-only environment with required release reviewers and prevent self-review.
+    environment: release-kitmaker
+    permissions:
+      contents: read
+      id-token: write
+    steps:
+      - *kitmaker_checkout
+      - *kitmaker_teleport
+      - *kitmaker_tunnel
+      - name: Submit or resume the approved publication
+        env: *kitmaker_environment
+        run: >-
+          python3 -m ci.kitmaker_release publish
+          --version "$RELEASE_VERSION" --source-sha "$RELEASE_SOURCE"
+          --manifest-sha256 "$RELEASE_MANIFEST_SHA256"

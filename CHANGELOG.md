@@ -197,6 +197,8 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations.
 
 ## 1.0.1 - 2026-11-17
 

@@ -9,11 +9,13 @@ import ipaddress
 import json
 import os
 import socket
+import sys
 import threading
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import ModuleType
 
 import pytest
 
@@ -253,6 +255,25 @@ def test_bedrock_inference_rejects_http_bearer_override(isolated_provider_enviro
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
     with _server([200]) as server:
         client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        with pytest.raises(LLMClientError, match="AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS"):
+            client.completions("system", "user")
+        assert server.connections == 0
+
+
+def test_bedrock_inference_validates_credentials_loaded_at_sdk_import(isolated_provider_environment, monkeypatch):
+    def unexpected_completion(**_kwargs):
+        pytest.fail("Bedrock completion must not be called for an HTTP bearer endpoint")
+
+    class LazyLiteLLM(ModuleType):
+        def __getattr__(self, name):
+            if name != "completion":
+                raise AttributeError(name)
+            monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+            return unexpected_completion
+
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setitem(sys.modules, "litellm", LazyLiteLLM("litellm"))
         with pytest.raises(LLMClientError, match="AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS"):
             client.completions("system", "user")
         assert server.connections == 0

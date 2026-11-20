@@ -786,6 +786,13 @@ class LLMClient:
                 )
                 return _checked_content(content.strip(), getattr(response, "stop_reason", None))
             if config.provider == "bedrock":
+                try:
+                    from litellm import completion
+                except ImportError as exc:
+                    raise LLMClientError(
+                        "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
+                    ) from exc
+                # LiteLLM can load environment variables on its first import.
                 endpoint = (
                     os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT")
                     if os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
@@ -799,12 +806,6 @@ class LLMClient:
                         uses_https = False
                     if not uses_https:
                         raise LLMClientError("AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS with a Bedrock bearer token.")
-                try:
-                    from litellm import completion
-                except ImportError as exc:
-                    raise LLMClientError(
-                        "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
-                    ) from exc
                 response = completion(
                     model=config.litellm_model,
                     messages=_chat_messages(system_prompt, turns),

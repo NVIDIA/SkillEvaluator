@@ -8,6 +8,13 @@ scanner=.github/workflows/skill-checks-stable.yml
 publisher=.github/workflows/publish-skill-reports-stable.yml
 gitlab=ci/gitlab/stable-tier1.yml
 gitlab_template=ci/templates/stable/${gitlab##*/}
+event=${GITHUB_EVENT_NAME:-}
+expected_release=${STABLE_EXPECTED_RELEASE:-}
+
+if [[ $event == workflow_dispatch && ! $expected_release =~ $version_pattern ]]; then
+    echo "Manual promotion requires expected-release to be a canonical vX.Y.Z tag." >&2
+    exit 1
+fi
 
 latest_release() {
     gh api repos/NVIDIA/SkillEvaluator/releases/latest --jq \
@@ -25,6 +32,10 @@ if [[ ! $release =~ $version_pattern || ! $manifest_digest =~ ^sha256:[a-f0-9]{6
       ! $manifest_size =~ ^[0-9]{1,7}$ || ! $zip_digest =~ ^sha256:[a-f0-9]{64}$ ||
       ! $zip_size =~ ^[0-9]{1,8}$ || $latest == *$'\n'* ]]; then
     echo "The latest release must be a published, immutable stable version with an artifact manifest." >&2
+    exit 1
+fi
+if [[ $event == workflow_dispatch && $release != "$expected_release" ]]; then
+    echo "GitHub Latest is $release, but the expected release is $expected_release." >&2
     exit 1
 fi
 
@@ -71,7 +82,7 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
     else
         bootstrapping=true
         candidate=${STABLE_BOOTSTRAP_SHA:-}
-        if [[ ${GITHUB_EVENT_NAME:-} != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
+        if [[ $event != workflow_dispatch || ! $candidate =~ ^[0-9a-f]{40}$ ||
               $(git cat-file -t "$candidate" 2>/dev/null) != commit ]]; then
             echo "Bootstrap v1.0.1 by dispatching this workflow with a reviewed main commit as bootstrap-sha." >&2
             exit 1
@@ -80,14 +91,17 @@ if ! git cat-file -e "$release_commit:$scanner" 2>/dev/null ||
 fi
 git merge-base --is-ancestor "$candidate" "$main"
 git merge-base --is-ancestor "$release_commit" "$candidate"
-bundle="ci/bundles/${release#v}"
+version=${release#v}
+bundle="ci/bundles/$version"
+archive="skillevaluator-ci-$version.zip"
 git diff --exit-code "$release_commit" "$candidate" -- "$bundle"
 
 # Run the validator from main and read the chosen commit's files as data.
 scratch=$(mktemp -d)
 trap 'rm -rf "$scratch"' EXIT
-mkdir -p "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable" "$scratch/ci/gitlab"
-for file in release.json verification-receipt.json "skillevaluator-ci-${release#v}.zip"; do
+assets="$scratch/release-assets"
+mkdir -p "$assets" "$scratch/$bundle" "$scratch/.github/workflows" "$scratch/ci/templates/stable" "$scratch/ci/gitlab"
+for file in release.json verification-receipt.json "$archive"; do
     git cat-file blob "$release_commit:$bundle/$file" > "$scratch/$bundle/$file"
 done
 for workflow in "$scanner" "$publisher"; do
@@ -110,11 +124,11 @@ if [[ ! -f "$scratch/$gitlab" ]]; then
         exit 1
     fi
 fi
-gh release download "$release" --repo NVIDIA/SkillEvaluator --pattern artifact-manifest.json --dir "$scratch"
+gh release download "$release" --repo NVIDIA/SkillEvaluator --pattern artifact-manifest.json --dir "$assets"
 python3 ci/stable_channel.py "$scratch/$bundle" --check \
     --templates "$scratch/ci/templates/stable" --output "$scratch/.github/workflows" \
     --gitlab-output "$scratch/$gitlab" \
-    --publication "$scratch/artifact-manifest.json" "$release_commit" "$manifest_digest" "$manifest_size" \
+    --publication "$assets/artifact-manifest.json" "$release_commit" "$manifest_digest" "$manifest_size" \
     "$zip_digest" "$zip_size"
 
 if [[ $previous_release == "$release" ]]; then
@@ -125,6 +139,13 @@ if [[ $previous_release == "$release" ]]; then
     echo "Stable already serves $release."
     exit 0
 fi
+
+# Keep the checked manifest and CI archive as the reference for both public indexes.
+cp "$scratch/$bundle/$archive" "$assets/"
+gh release download "$release" --repo NVIDIA/SkillEvaluator \
+    --pattern "skillevaluator-$version-py3-none-any.whl" --pattern "skillevaluator-$version.tar.gz" \
+    --pattern SHA256SUMS.txt --dir "$assets"
+python3 ci/product_release.py verify-indexes --version "$version" --assets "$assets"
 
 if [[ $(latest_release) != "$latest" ]]; then
     echo "The latest release changed during promotion. Retry from the release workflow." >&2

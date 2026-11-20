@@ -982,6 +982,7 @@ class _DiscoveryAdmission:
         max_depth: int | None,
         allow_context_alias: bool,
         refuse_selected_dirs: bool = True,
+        on_directory: Callable[[Path, os.stat_result], None] | None = None,
     ) -> None:
         self.root = root
         self.selected = selected
@@ -990,6 +991,7 @@ class _DiscoveryAdmission:
         self.max_paths = max_paths
         self.max_depth = max_depth
         self.allow_context_alias = allow_context_alias
+        self.on_directory = on_directory
         self.discovered_paths = 0
         self.files: list[SecureFile] = []
         # Keep exact authored spelling. ``WindowsPath`` keys compare
@@ -1009,7 +1011,7 @@ class _DiscoveryAdmission:
         if listed > self.max_paths - self.discovered_paths + len(self.excluded):
             self._raise_path_count_limit(directory, self.discovered_paths + listed)
 
-    def admit_directory(self, relative: Path, *, linked: bool) -> bool:
+    def admit_directory(self, relative: Path, metadata: os.stat_result, *, linked: bool) -> bool:
         """Apply the directory rules; return whether the walker should descend."""
         if linked:
             # A POSIX walker sees a directory link as a non-directory and counts it in
@@ -1032,6 +1034,8 @@ class _DiscoveryAdmission:
         directory_depth = len(relative.parts)
         if directory_depth > MAX_SECURE_DIRECTORY_DEPTH:
             _raise_directory_depth_limit(relative)
+        if self.on_directory is not None:
+            self.on_directory(relative, metadata)
         return self.max_depth is None or directory_depth < self.max_depth
 
     def admit_file(
@@ -1121,6 +1125,7 @@ def discover_secure_files(
     max_depth: int | None = None,
     allow_context_alias: bool = True,
     refuse_selected_dirs: bool = True,
+    on_directory: Callable[[Path, os.stat_result], None] | None = None,
 ) -> list[SecureFile]:
     """Discover selected files below ``root`` without following redirects.
 
@@ -1136,6 +1141,9 @@ def discover_secure_files(
     ``refuse_selected_dirs=False`` when ``selected`` filters every file below
     ``root``, so an ordinary subfolder (``rules/team/``, ``agents/team.md/``)
     is walked instead.
+
+    When provided, ``on_directory`` receives each admitted directory's relative
+    path and no-follow metadata, excluding the root itself.
     """
     if max_paths < 1:
         raise ValueError("max_paths must be positive")
@@ -1150,6 +1158,7 @@ def discover_secure_files(
         max_depth=max_depth,
         allow_context_alias=allow_context_alias,
         refuse_selected_dirs=refuse_selected_dirs,
+        on_directory=on_directory,
     )
     if os.name == "posix":
         _walk_posix(root, root_metadata, admission)
@@ -1205,7 +1214,7 @@ def _admit_posix_directory(frame: _DirectoryFrame, admission: _DiscoveryAdmissio
     for name, metadata in entries:
         relative = frame.relative_path / name
         if stat.S_ISDIR(metadata.st_mode):
-            if admission.admit_directory(relative, linked=stat_is_link_or_reparse(metadata)):
+            if admission.admit_directory(relative, metadata, linked=stat_is_link_or_reparse(metadata)):
                 children.append((name, metadata))
             continue
         admission.admit_file(
@@ -1383,7 +1392,7 @@ def _admit_windows_entry(
         _validate_windows_entry_snapshot(metadata, handle_metadata, relative)
 
         if handle_metadata.is_directory:
-            if admission.admit_directory(relative, linked=handle_metadata.is_reparse):
+            if admission.admit_directory(relative, metadata, linked=handle_metadata.is_reparse):
                 return name, handle_metadata
             return None
 

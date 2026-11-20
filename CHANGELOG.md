@@ -33,21 +33,97 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
+  command hooks in an exact, reviewed plugin package. Applied waivers are
+  reported and clear only the matching unmodeled-hook gate.
+- Add an opt-in GitHub Actions stable channel for Tier 1 scans and hosted PR
+  reports. `skillevaluator ci init --channel stable` prepares both workflows
+  with release-managed references and preserves signed scan verification.
+- Add an opt-in GitLab CI stable include for Tier 1 scans. New pipelines pick up
+  the promoted job configuration and scanner image. The report artifact
+  records the release, commit, image, pipeline, and job.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
+  `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
+  placeholder becomes one random UUID per client. Harbor verifier judges,
+  embeddings, in-container agents, and reusable CI commands use separate
+  configuration.
 
 ### Fixed
 
+- NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
+  such as `case` and `case-` retain separate rewards, trajectories and attempt records.
+- Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
+  repeated scans of the whole prefix for Markdown sections with many paragraphs.
+- Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
+  any independently measured component, instead of stopping report collection with `OverflowError`.
+  Native-timed trajectories without tool calls (an empty or omitted `tool_calls`
+  list) now report zero tool seconds even when LLM timing is missing or invalid.
+  Previously, those missing/invalid-LLM cases had no timing, so the arm's
+  tool-seconds total was `N/A`.
+- Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
+  `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
+  harness compatibility overlay use the
+  bounded YAML loader. A small `SKILL.md` whose anchors and aliases expand far
+  beyond its size is reported as an invalid-frontmatter finding instead of
+  exhausting memory during the quality check.
+- The bounded YAML loader also caps the total text a document reaches through
+  aliases (4 MiB, or four times the document's length if larger), so one large
+  string aliased many times no longer expands to gigabytes when a reader
+  stringifies it. It walks `!!set` members, which hid an oversized integer, and
+  reports a `%YAML` version number or `\U` escape that PyYAML's scanner rejects
+  with a plain `ValueError` (an `OverflowError` on Python 3.12) as invalid YAML.
+  Tier 2 reads its frontmatter and manifests with the same loader, so it gets
+  the same protection.
+- The Tier 3 dataset generator, case summary and workspace skill-name readers,
+  the harness check's `agents/openai.yaml` read, and the contained
+  `.claude-plugin/plugin.json` read use the same limits, and
+  `tier3 create-eval-dataset` reports over-limit `SKILL.md` frontmatter as a
+  one-line error. Chained YAML merge keys, deeply nested YAML or JSON, an
+  invalid date, or an integer past Python's digit limit in those files now
+  produce a finding or a fail-closed result instead of exhausting memory or
+  ending the run with a traceback and no report. A plugin manifest with bytes
+  that are not valid UTF-8 is an unreadable-manifest finding, not a traceback.
+- The managed Tier 1 runtime and CI image now pin SkillSpector 2.13.6,
+  which fixes false incomplete-analysis findings on valid JSON hook
+  `timeout` fields. SkillSpector's Gemini provider uses `google-auth[requests]`,
+  which brings `google-auth`, `cryptography`, `cffi`, `pycparser`, `pyasn1`,
+  and `pyasn1-modules` into the Tier 1 image.
+- Tier 1 accepts a verified, non-executable PNG that SkillSpector excludes
+  from text-pattern coverage when the remaining coverage and the full YARA
+  and artifact-integrity counts agree.
+- Native platform CI stays enabled for package-code changes, including catalog
+  I/O and rubric validators with macOS-specific filesystem behavior.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
+- OpenAPI discovery inherits inline Path Item parameters and applies operation overrides by name and location; parameter lists containing references retain operation-only parsing.
+- The task list trims leading and trailing whitespace and collapses internal
+  whitespace runs to a single space, so descriptions stay on one line and
+  remain available on the next command. Whitespace-only descriptions are
+  rejected as missing content.
 - Scanner install hints in `health-check` and `doctor` now match the host:
   Windows suggests `winget install Gitleaks.Gitleaks` and `uv tool install semgrep`
   instead of `brew`, macOS keeps `brew`, and Linux suggests `go install` or a
   release binary.
+- The managed SkillSpector runtime now runs on a compatible Python 3.12 or 3.13,
+  so an installed 3.12 also works offline. uv otherwise
+  picked its newest Python, 3.14, for which yara-python publishes no wheels, so
+  the Tier 1 security scan failed to install on hosts without a C toolchain,
+  including a default Windows setup.
 - Malformed optional trajectory `final_metrics` leave condition usage unavailable
   and no longer abort fresh or reused Tier 3 result collection.
-- NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
-  such as `case` and `case-` retain separate rewards, trajectories and attempt records.
+- SARIF reports retain findings on cyclic symbolic links (which previously
+  aborted on Python 3.12), preserve the named link on expanding cycles on every
+  supported Python, and normalize parent paths before workspace containment checks.
+- Tier 2 content clustering uses much less memory on skills with many chunks;
+  similarity scores and clusters are unchanged.
+- Naming checks reject a trailing newline in skill, workflow, and rule path components,
+  instead of treating the name before that newline as a complete kebab-case match.
+- LLM retries retain the innermost valid `Retry-After` header through exception
+  wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
+  supported. Malformed inner values do not discard a valid outer delay, and
+  rate-limited calls stop when the requested wait exceeds the retry budget.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -95,6 +171,10 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Restore a temporary-cleanup exemption for a narrow, NUL-delimited
+  find-to-xargs pipeline under a literal temporary root: these pipelines now
+  score Security `1.0` instead of a destructive-command finding. Unknown
+  producers, joined shell words and link traversal keep the finding.
 
 ## 1.0.1 - 2026-11-17
 

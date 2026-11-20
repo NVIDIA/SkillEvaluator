@@ -90,6 +90,7 @@ WIDTH = 98
 LABEL = 12
 DUR = 8
 BAR = 10
+_SCAN_COVERAGE_MAX_CHARS = 240
 _SKIP_REASON_MAX_CHARS = 110
 # Setup instructions in a skip reason span several short lines (provider
 # variables, a docs link, the flag that skips the tier); keep them readable.
@@ -968,7 +969,7 @@ def _is_skipped(result: ValidationResult) -> bool:
     return payload.get("execution_status") == "skipped" or summary.get("execution_status") == "skipped"
 
 
-def _bounded_console_line(line: str) -> str:
+def _bounded_console_line(line: str, *, limit: int = _SKIP_REASON_MAX_CHARS) -> str:
     """Flatten one line of untrusted text and bound it for the compact view."""
     flattened = " ".join(
         "".join(
@@ -976,9 +977,9 @@ def _bounded_console_line(line: str) -> str:
             for character in line
         ).split()
     )
-    if len(flattened) <= _SKIP_REASON_MAX_CHARS:
+    if len(flattened) <= limit:
         return flattened
-    return flattened[: _SKIP_REASON_MAX_CHARS - 1] + "…"
+    return flattened[: limit - 1] + "…"
 
 
 def _raw_skip_reason(result: ValidationResult) -> str:
@@ -1164,11 +1165,14 @@ def _quality_stats(results: list[ValidationResult]) -> tuple[str, float] | None:
     return None
 
 
-def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = None) -> tuple[bool, list[TierRow]]:
+def summarize_tier1(
+    results: list[ValidationResult], lineup: list[str] | None = None, *, show_coverage_notes: bool = True
+) -> tuple[bool, list[TierRow]]:
     """Build the Tier 1 section rows from its validator results.
 
     When *lineup* is given, the per-check ticker stays in the completed
     section with each check's final state (failed checks in red).
+    Set *show_coverage_notes* to false when the full CLI report will show them.
     """
     from skillevaluator.reporting.run_status import Status, result_status
 
@@ -1229,6 +1233,18 @@ def summarize_tier1(results: list[ValidationResult], lineup: list[str] | None = 
     if advisory:
         detail = " · ".join(f"{name} {count}" for name, count in sorted(advisory.items(), key=lambda kv: -kv[1]))
         rows.append(TierRow("advisories", [(str(sum(advisory.values())), TEXT), (f"  {detail}", MUTED)]))
+    if show_coverage_notes:
+        rows.extend(
+            TierRow(
+                "coverage",
+                [(_bounded_console_line(finding.message, limit=_SCAN_COVERAGE_MAX_CHARS), MUTED)],
+                fit="wrap",
+            )
+            for result in results
+            if not _is_skipped(result)
+            for finding in result.findings
+            if finding.category == "SCAN" and finding.severity == "info"
+        )
     harness_rows = [
         row
         for r in results

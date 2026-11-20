@@ -258,6 +258,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     Validates `SKILL.md` frontmatter and repository placement:
 
     - YAML frontmatter must parse and satisfy the skill schema.
+    - Frontmatter is read within the same [structure limits](/skills/skillevaluator/tier2-reference#defaults-and-safety-limits) as Tier 2, so YAML aliases and merge keys are never expanded past them. The limits include 4,194,304 characters in total, counting an aliased value once per reference. Frontmatter that exceeds a limit, such as nested aliases that expand to far more than the file's size, is a HIGH `yaml_complexity` finding. Plugin manifests (`agent_plugin.yaml`, `.claude-plugin/plugin.json`) are read within the same limits; a manifest over a limit is a HIGH `manifest_yaml_complexity` or `manifest_json_complexity` finding.
     - Frontmatter keys, including keys nested under `metadata`, must be strings. An unquoted key that YAML reads as a number, boolean, null, or date (`123`, `yes`, `null`, `2026-01-01`) is a HIGH finding that names the key in YAML form, such as `Field 'metadata.true': Keys should be strings`; quote the key (`"yes":`) to keep it. Rules, workflows, and plugin manifests report non-string keys as schema errors too.
     - `name` and `description` are required. Names are 1–64 characters; descriptions are 1–1024 characters.
     - Names use kebab-case, start with a letter, and cannot have trailing or consecutive hyphens. The directory name must match the frontmatter `name`. The reserved words `anthropic` and `claude` must not appear in a skill name.
@@ -301,7 +302,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Placeholder rules: `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` are substituted only by Claude Code, and price-like `$N` text is replaced with arguments by Claude Code and OpenCode.
 
-    Invocation rules: `disable-model-invocation` (ignored by Codex, Hermes and OpenCode), Codex's `agents/openai.yaml` implicit-invocation policy (Codex only), `allowed-tools`, Claude Code-only fields, and Hermes project trust.
+    Invocation rules: `disable-model-invocation` (ignored by Codex, Hermes and OpenCode), Codex's `agents/openai.yaml` implicit-invocation policy (Codex only), `allowed-tools`, Claude Code-only fields, and Hermes project trust. A skill's `agents/openai.yaml` is read within the same structure limits; a file over a limit gives no finding, and the Codex implicit-invocation policy is simply not applied.
 
     Gate rules: Hermes `platforms` and OpenClaw `metadata.openclaw.requires` hide the skill on hosts that don't match.
 
@@ -326,6 +327,8 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
     The LLM pass requires a configured provider. It enriches the static result but does not replace static findings or make missing scanner evidence pass.
 
     SkillSpector's text pattern analyzers cannot read images, so it reports the analysis of a skill that references a PNG or JPEG file as `partial`. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` only when the report shows no other gap apart from the missing references described next, and no fatal scope exclusion, and each referenced image is a regular, single-link (not hard-linked), non-executable file whose bytes have the chunk structure of a PNG or the marker structure of a JPEG and that is not reached through a symlink. The gap is accepted for at most 256 images and 128 MiB of image data in total. An image is never accepted inside a `hooks`, `scripts`, `tools`, `agents`, `commands`, `prompts`, `rules`, `team-rules` or `workflows` directory at any depth, or under a top-level `config`, `skills`, `.mcp`, `.agents`, `.claude`, `.codex`, `.continue`, `.cursor`, `.gemini` or `.windsurf` directory (names compared without regard to case). The structure check corroborates the file type; it does not decode the image or prove that it renders. PNG IDAT compressed data and ancillary chunks, and JPEG entropy-coded data and APPn or COM segments, are not inspected and can still carry other bytes. The image content itself is not assessed. Any other partial reason, except the missing references described next and the hooks described below, still leaves the scan `INCOMPLETE`. SkillSpector also reports a High `AE1` (incomplete referenced artifact analysis) finding for such an image; from v2.12.0 it omits that finding when the skill renders a PNG with Markdown image syntax, such as `![Logo](assets/logo.png)`. An `AE1` finding fails the check like any other High finding.
+
+    A SkillSpector report with status `complete` can list PNGs in its component inventory while leaving them out of the coverage total. SkillEvaluator reports that difference as an informational note when every extra component is a PNG with no resolved scanner reference and a nonfatal, whole-file `binary_content` scope exclusion marked `out_of_scope` that names exactly the static text-pattern analyzers. Each PNG must be a regular, single-link, non-executable file outside agent-control paths, reachable without following a symlink and matching its reported size. This check covers at most 256 PNGs and 128 MiB of image data in total. The text-pattern analyzers must account for the coverage total. YARA and artifact integrity must report completed work for every component, including the PNGs. The file check verifies PNG chunk structure. The image content itself is unassessed.
 
     SkillSpector also reports the analysis as `partial` when the skill's instructions name a file that it did not scan, such as a file the skill writes at run time (`output/notes.md`) or a source file elsewhere in the repository. SkillEvaluator accepts that gap with a warning instead of `INCOMPLETE` when each such reference meets all of these conditions:
 
@@ -356,7 +359,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     From v2.13.4, SkillSpector no longer reports such a scan as `partial`. When it inspected every bundled file and the only gaps are references to files the skill does not bundle, it reports the status `complete_with_caveats` and lists each reference as a caveat. SkillEvaluator accepts these caveats under the same conditions and shows the missing-reference warning above, and the findings of an accepted report are checked as in any other complete scan. A caveat on a path that is not a bundled file, or one that fails a condition above, such as a line that names a file left out of the scan, leaves the scan `INCOMPLETE`; as for a `partial` report, the report's findings are still checked and reported. Unlike a v2.13.3 caveat, these caveats are never accepted from the report alone, so they leave a scan without a known target `INCOMPLETE`, and an accepted report carries no `skillspector_reference_caveats` entry. SkillSpector gives this status only when every gap is a nonfatal `reference_missing` row, so a report with no caveat, or with a caveat that is not a nonfatal `reference_missing` row in phase `reference_resolution`, contradicts itself: SkillEvaluator does not trust it, and the scan is `INCOMPLETE` without its findings. The same holds for `complete_with_caveats` from a release before v2.13.4.
 
-    SkillSpector v2.12.0 and later cannot model what an ordinary command or HTTP hook, such as one that runs `echo hi` or a bundled script, does with its hook input. The exception is a hook that SkillSpector recognizes as sending hook content to a remote host, which it reports as **BH2**; a manifest whose command and HTTP hooks are all of that kind counts as modeled. For other hooks it discovers in manifests such as `hooks/hooks.json` and `.claude/settings.json`, SkillSpector reports a **BH1** finding whose evidence says the payload is `unmodeled`, records a nonfatal `partial` `opaque_content` row from `bundled_execution_surface` on the manifest, and reports the analysis as `partial` although the scan finished. This rule applies only to manifests SkillSpector actually reports with that evidence and ledger row; it does not establish coverage for inline plugin-manifest hooks or other hook locations the scanner does not report. The scan's findings cannot show that such hooks are safe: a hook script that sends its input over a socket, `nc` or `/dev/tcp` gets no blocking SkillSpector finding. SkillEvaluator therefore reports the manifest as the Critical `skillspector_hook_payload_unverified`, with a gate failure that neither a `--policy` severity override nor `--llm-verify` clears, instead of `INCOMPLETE` (see [Troubleshooting](#troubleshooting)). This applies when the row is a whole-file row that names only `bundled_execution_surface` and no error class, on a manifest whose BH1 says `unmodeled` (also when a baseline suppresses that BH1), and the report accounts for it exactly: one such row per manifest, `bundled_execution_surface` degraded by exactly those rows with nothing failed or skipped, its `Analyzer bundled_execution_surface status: degraded.` limitation, and one partially inspected file for each manifest that no other row names. The rest of the report is then judged on its own: it is complete when it shows no other gap, and missing references and referenced images can still be accepted with their warnings as described above. The v2.13.3 missing-reference caveat that is accepted from the report alone does not apply, because that check reads the whole report, hook row included. Any other gap still records the SkillSpector scan as incomplete (`incomplete_scans` in the JSON report, and publication eligibility **Incomplete**), with an error that names the other rows, or the other gaps when no other row remains. The check itself is then reported as `FAIL`, not `INCOMPLETE`, because the Critical and its gate failure are a confirmed failure, which takes precedence over missing evidence, also when a `--policy` override lowers the Critical (see [Reading the final status](/skills/skillevaluator/reports#reading-the-final-status)). A row that does not fit, such as one for a manifest in which SkillSpector parsed no hook (no `unmodeled` BH1), or a report that does not account for it, leaves the whole scan `INCOMPLETE` as before.
+    SkillSpector v2.12.0 and later cannot model what an ordinary command or HTTP hook, such as one that runs `echo hi` or a bundled script, does with its hook input. The exception is a hook that SkillSpector recognizes as sending hook content to a remote host, which it reports as **BH2**; a manifest whose command and HTTP hooks are all of that kind counts as modeled. For other hooks it discovers in manifests such as `hooks/hooks.json` and `.claude/settings.json`, SkillSpector reports a **BH1** finding whose evidence says the payload is `unmodeled`, records a nonfatal `partial` `opaque_content` row from `bundled_execution_surface` on the manifest, and reports the analysis as `partial` although the scan finished. This rule applies only to manifests SkillSpector actually reports with that evidence and ledger row; it does not establish coverage for inline plugin-manifest hooks or other hook locations the scanner does not report. The scan's findings cannot show that such hooks are safe: a hook script that sends its input over a socket, `nc` or `/dev/tcp` gets no blocking SkillSpector finding. Unless a [reviewed command hook waiver](#reviewed-command-hook-waivers) applies, SkillEvaluator reports the manifest as the Critical `skillspector_hook_payload_unverified` with a gate failure. That gate stays failed under severity overrides and `--llm-verify`. This applies when the row is a whole-file row that names only `bundled_execution_surface` and no error class, on a manifest whose BH1 says `unmodeled` (also when a baseline suppresses that BH1), and the report accounts for it exactly: one such row per manifest, `bundled_execution_surface` degraded by exactly those rows with nothing failed or skipped, its `Analyzer bundled_execution_surface status: degraded.` limitation, and one partially inspected file for each manifest that no other row names. The rest of the report is then judged on its own: it is complete when it shows no other gap, and missing references and referenced images can still be accepted with their warnings as described above. The v2.13.3 missing-reference caveat that is accepted from the report alone does not apply, because that check reads the whole report, hook row included. Any other gap still records the SkillSpector scan as incomplete (`incomplete_scans` in the JSON report, and publication eligibility **Incomplete**), with an error that names the other rows, or the other gaps when no other row remains. An outstanding hook gate is a confirmed failure and takes precedence over missing evidence in the reported status, even when a `--policy` override lowers the Critical. See [Reading the final status](/skills/skillevaluator/reports#reading-the-final-status). A row that does not fit, such as one for a manifest in which SkillSpector parsed no hook (no `unmodeled` BH1), or a report that does not account for it, leaves the whole scan `INCOMPLETE` as before.
 
     SkillSpector records the same row when it could not parse part of the manifest or read only its first 2,048 hook, permission and settings records. How much of that SkillEvaluator can see depends on the release:
 
@@ -891,6 +894,79 @@ Markdown and HTML reports show the same outcome as a `skillspector_baseline` lin
 
 `security-scan` and `tier1 security-scan` on a folder of skills write one merged report without the JSON field. When a skill in the folder passes, its outcome is appended to that skill's "All checks passed" line in the Markdown and HTML reports. `validate` on a folder validates each skill as its own job, so each skill's JSON report records the field. The field keeps the `fingerprint_version_mismatch` and `llm_stage_unmatched` messages even when a later `--llm-verify` downgrade or policy severity override rebuilds the error and warning lists. See the [SkillSpector suppression reference](https://github.com/NVIDIA/SkillSpector/blob/v2.13.3/docs/SUPPRESSION.md) for the full baseline schema.
 
+## Reviewed command hook waivers
+
+Use `--hook-waivers FILE` to record approval of eligible command hooks in a specific packaged plugin. An applied waiver clears the `skillspector_hook_payload_unverified` gate for one manifest in the reviewed package. SkillSpector findings, including BH1 and BH2, risk scores, and unrelated coverage gaps still affect the result.
+
+<Steps toc={true}>
+  ### Review the package and capture its hashes
+
+  Start with the plugin directory you intend to distribute, including its plugin manifest, such as `.claude-plugin/plugin.json`. Keep Git metadata, generated reports, and your trusted waiver file outside that directory. Review what the hooks do with their input, including bundled dependencies and any runtime dependencies they invoke. During validation SkillEvaluator scans a private copy of the package and verifies that the package still matches afterward.
+
+  Create an empty approval file in a trusted location. Passing it selects the whole package for the evidence scan without approving any hooks.
+  With `--hook-waivers`, findings in shipped paths normally filtered as generated output or outside agent control scope count toward the result. This applies even with an empty waiver list.
+
+  ```yaml title="trusted/hook-waivers.yaml (before approval)"
+  version: 1
+  waivers: []
+  ```
+
+  ```bash title="Record the reviewed package hashes"
+  skillevaluator security-scan ./packages/example-plugin --no-llm \
+    --hook-waivers ./trusted/hook-waivers.yaml \
+    -r json -o ./reports/hook-review
+  ```
+
+  When the unwaived hook gate fails, find the `skillspector_hook_payload_unverified` finding for the manifest under `results[].findings[]` in the JSON report. Its `metadata` contains `manifest_sha256`, `artifact_sha256`, and `payload` when the package and commands qualify for review. If the finding lists `coverage_problems`, resolve those issues and repeat the scan to obtain the hashes.
+
+  ### Record the approval
+
+  SkillEvaluator reads a waiver file only when the operator supplies `--hook-waivers FILE`. Pass a direct filesystem path to the UTF-8 YAML file. A plugin author who can change the CI command or its waiver file can approve their own hooks. For independent approval, use a protected CI workflow and load the waiver file from a separate policy repository with its own reviewers.
+
+  Replace the example digests with the values from the unwaived scan for the exact package you reviewed.
+
+  ```yaml title="trusted/hook-waivers.yaml"
+  version: 1
+  waivers:
+    - id: HOOK-001
+      manifest: hooks/hooks.json
+      manifest_sha256: "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
+      artifact_sha256: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"
+      payload:
+        - path: hooks/count-builds.sh
+          sha256: "cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc"
+      reason: Reviewed the build-count hook and its bundled dependencies.
+      owner: plugin-security
+      created: 2026-11-01
+      expires: 2027-02-01
+  ```
+
+  `manifest` and each `payload[].path` are canonical paths relative to the plugin root. Use the lowercase, 64-character SHA-256 values from the report and include every script directly invoked by the manifest. `artifact_sha256` identifies the whole packaged tree, including relative paths, file contents, and file and directory permissions. Changing any of that evidence requires a new review. Use a unique waiver `id`, a reviewer or team as the `owner`, and a `reason` that explains the approval. The waiver applies from `created` through `expires`, inclusive, in UTC. Use `YYYY-MM-DD` for both dates. The creation date must be on or before the current UTC date, and expiration must be on or after creation.
+
+  ### Scan the reviewed package
+
+  ```bash title="Run Tier 1 with the reviewed hook waiver"
+  skillevaluator validate ./packages/example-plugin --type plugin --tiers 1 \
+    --checks security --no-llm --hook-waivers ./trusted/hook-waivers.yaml \
+    -r json -o ./reports/hook-review
+  ```
+
+  A match records the INFO finding `skillspector_hook_waiver_applied` with the waiver ID, expiry date, owner, reason, and package evidence. A verified passive PNG exclusion in the same package gets its own coverage note. A mismatch or expiry leaves the hook gate failed. If scan setup cannot load the waiver file or capture the package, the security scan is `INCOMPLETE`.
+</Steps>
+
+Every handler in the manifest must be a command invoking one bundled script. Use `sh` or `bash` with a double-quoted `.sh` path, or `python` or `python3` with a double-quoted `.py` path. The path must start with `$CLAUDE_PLUGIN_ROOT` or `$CODEX_PLUGIN_ROOT`. Braces around the variable name are optional.
+
+```text title="Supported hook commands"
+bash "${CLAUDE_PLUGIN_ROOT}/hooks/count-builds.sh"
+python3 "$CODEX_PLUGIN_ROOT/hooks/session-start.py"
+```
+
+The command format permits one script path. Additional arguments, pipes, shell substitutions, HTTP handlers, mixed handler types, and paths outside the package leave the gate in place. The JSON manifest supports hook groups, optional matchers, and positive integer timeouts. SkillSpector must report the manifest and scripts as local components and confirm the declaration count. The managed SkillSpector 2.13.6 supports this evidence.
+
+Use a regular directory tree without symlinks, hard links, or filesystem mounts. The package limit is 20,000 paths, with a maximum directory depth of 64 and a path length of 1,024 bytes in UTF-8. Files can be up to 16 MiB each and 128 MiB in total. The waiver file can be up to 1 MiB, with 32 waivers and 512 payload entries per waiver.
+
+The option is also available on `security-scan`, `tier1 security-scan`, `tier1`, and `tier1 validate`. The combined `tier1` workflow requires a root `SKILL.md`. Run `validate` or `security-scan` at the plugin root for a package with only nested `SKILL.md` files. Passing `--hook-waivers` selects one complete package scan even in that layout. An ordinary scan of a plugin with only nested `SKILL.md` files visits the child skills and skips the plugin root.
+
 ## Exit behavior and scoring
 
 | Exit code | Meaning |
@@ -966,12 +1042,10 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     pass.
   </Accordion>
   <Accordion title="SkillSpector could not fully model the hooks">
-    With SkillSpector v2.12.0 and later, a skill, folder or hooks-only plugin
-    with an ordinary command or HTTP hook fails the security check with the
-    Critical `skillspector_hook_payload_unverified`, for example
-    `SkillSpector could not fully model the hooks in hooks/hooks.json (analyzer bundled_execution_surface could not verify what they do with hook input), so this check cannot pass while these hooks are present.`
-    The check also records the gate failure
-    `hooks/hooks.json: SkillSpector could not model these hooks; this check cannot pass while they are present`.
+    SkillSpector v2.12.0 and later can report ordinary command and HTTP hooks
+    as unmodeled. Without a matching review, SkillEvaluator reports the
+    Critical `skillspector_hook_payload_unverified` and records a gate failure
+    such as `hooks/hooks.json: SkillSpector could not model these hooks and no matching reviewed waiver applied`.
     Earlier SkillEvaluator releases reported the same scan as `INCOMPLETE`
     ("Security Scan didn't run") with
     `hooks/hooks.json [static; opaque_content; analyzers=bundled_execution_surface]`.
@@ -980,15 +1054,16 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     the scan at that skill, so the other skills are still scanned without
     `--continue-on-failure`.
 
-    SkillSpector cannot tell what these hooks do with their input, so review
-    the manifest and every file its hooks run. SkillEvaluator has no way to
-    record that review: removing the hooks is the only way to pass the check.
-    A `--policy` severity override can lower the finding's severity, but the
-    gate failure keeps the check failed, also when another gap records the
-    scan as incomplete. `--llm-verify` does not send the
-    finding to the verifier, so it keeps its severity and gets no verdict. The
-    finding's metadata records the manifest's SHA-256 (`manifest_sha256`) and
-    SkillSpector's row for it.
+    For an eligible command hook, review the complete packaged plugin and
+    follow [Reviewed command hook waivers](#reviewed-command-hook-waivers).
+    If the supplied waiver file contains entries for the manifest and none
+    apply, the Critical finding's `metadata.rejected_waivers` in the JSON
+    report lists each waiver ID and its first failed condition. An expired
+    entry includes its expiry date. Missing or stale payload pins identify
+    the affected paths. When a rejection says `coverage_unconfirmed`, check
+    `metadata.coverage_problems` for the scanner or package issue.
+    A `--policy` severity override cannot clear the gate, and
+    `--llm-verify` leaves the finding outside LLM review.
 
     SkillSpector records the same row for a manifest it read only in part.
     With v2.13.4, a manifest with more records than SkillSpector reads or with
@@ -998,15 +1073,14 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     2,048 or more declarations does. See the `security` check under
     [The checks](#the-checks).
 
-    SkillSpector v2.13.4 also reads a hook's `"timeout"` key as a command
-    wrapper it cannot resolve and records
+    The managed SkillSpector v2.13.6 no longer reports a parse limit for a
+    valid hook `"timeout"` key. An unmodeled hook still raises
+    `skillspector_hook_payload_unverified` without a matching review waiver.
+    SkillSpector v2.13.4 misread the key as a command wrapper and recorded
     `hooks/hooks.json:11 [static; static_parse_limit; boundary_unresolved command_word_boundary; analyzers=static_patterns_tool_misuse]`.
-    That row is an ordinary analysis gap, so with v2.13.4 the SkillSpector
-    scan of such a manifest is also recorded as incomplete (`incomplete_scans`
-    in the JSON report, and publication eligibility **Incomplete**), with an
-    error that names only that row. The check itself is still reported as
-    `FAIL` because of the Critical and its gate failure. v2.13.3 does not
-    record the row.
+    That extra analysis gap marked the scan incomplete (`incomplete_scans`
+    in the JSON report and publication eligibility **Incomplete**). The
+    check still reported `FAIL` when the hook gate applied.
   </Accordion>
   <Accordion title="SkillSpector times out">
     Each SkillSpector run (the static stage, and the LLM stage with `--llm`)

@@ -77,19 +77,23 @@ image and consumer qualification details.
 
 1. Open the workflow in the GitHub UI again, choose **Validate release**, and
    enter the version and product release SHA from the bundle PR. Review the
-   source, wheel, sdist, and CI bundle checks. This run retains its verified
-   artifacts in Actions.
-2. Choose **Publish release** with the same inputs and approve the
-   `release-github` job when validation succeeds. The publish run qualifies
-   its exact build outputs, creates `vVERSION` at the reviewed product SHA,
-   and stages one draft with the wheel, sdist, CI ZIP, manifest, and
-   checksums. Before creating the tag, it resolves the official GHCR digest
-   and checks both package indexes for version conflicts. It verifies the
-   staged bytes before publishing and verifies anonymous downloads afterward.
-   The notes show that package publication is pending. Release runs execute one
-   at a time across versions and phases. GitHub retains up to 100 pending
-   dispatches. A backfilled version stays off **Latest** when a newer release
-   already holds it.
+   source, wheel, sdist, and CI bundle checks. On the successful run's
+   **Summary** page, copy `validation_run` (the run ID and attempt, such as
+   `123-1`) and `validation_manifest_sha256` from **Publish release inputs**.
+2. Choose **Publish release** with the same version and product SHA, enter the
+   two values from the summary, and approve the `release-github` job. The
+   publish run verifies the selected validation attempt and uses its exact
+   wheel, sdist, CI ZIP, manifest, and checksums. If the retained validation
+   artifact has expired or is missing before the first draft is staged, run
+   **Validate release** again and use both values from the new summary.
+   Before creating `vVERSION` at the reviewed product SHA, the workflow
+   checks the release notes, the official GHCR digest, and both package
+   indexes for version conflicts. It verifies the staged bytes before
+   publishing and verifies anonymous downloads afterward. The notes show that
+   package publication is pending. Release runs execute one at a time across
+   versions and phases. GitHub retains up to 100 pending dispatches. A
+   backfilled version stays off **Latest** when a newer release already holds
+   it.
 3. Approve `release-kitmaker-dry-run` to validate both anonymous Python asset
    URLs. Review the results and approve `release-kitmaker` after both pass. The job submits those URLs
    for both public PyPI and NVIDIA DevZone and records its request UUID in the
@@ -98,13 +102,15 @@ image and consumer qualification details.
    before recording verification in the GitHub release notes.
 
 On interruption, use **Re-run failed jobs** or open **Run workflow** with the
-same version, product SHA, and **Publish release** phase. Draft recovery
-uses the original artifact from the recorded upstream Actions run. Preserve
-that artifact until completion. An immutable GitHub release uses its
-published bytes and resumes any recorded Kitmaker submission. If GitHub
-rejects the workflow token when creating the version tag, an authorized
-maintainer can create that tag at the exact reviewed product SHA and resume
-the same run. The workflow checks the tag target on every attempt.
+same version, product SHA, and **Publish release** phase. Supply the validation
+inputs if a GitHub draft has yet to be created. For an existing draft, the
+approved job restores the bytes retained by the original Publish release run.
+Preserve that artifact until completion. An immutable GitHub release uses its
+published bytes and resumes any recorded Kitmaker submission. Both recovery
+paths accept blank validation inputs. If GitHub rejects the workflow token
+when creating the version tag, an authorized maintainer can create that tag at
+the exact reviewed product SHA and resume the same run. The workflow checks
+the tag target on every attempt.
 
 For a Kitmaker timeout or partial publication, inspect the private receipt,
 Kitmaker status and both public indexes. The workflow polls a saved submission

@@ -389,6 +389,37 @@ class TestChunkShell:
 
 
 class TestSplitIntoParagraphs:
+    def test_many_paragraphs_read_the_section_a_bounded_number_of_times(self) -> None:
+        text = _ReadCountingText("\n\n".join(f"paragraph {index}\nsecond line" for index in range(1_000)))
+        section = ContentChunk("f.md", "## H", 40, 3038, text, "markdown")
+        _ReadCountingText.read = 0
+
+        paragraphs = split_into_paragraphs(section, min_chars=1)
+
+        assert [(item.start_line, item.end_line) for item in paragraphs] == [
+            (40 + index * 3, 41 + index * 3) for index in range(1_000)
+        ]
+        assert paragraphs[-1].text == "paragraph 999\nsecond line"
+        assert _ReadCountingText.read <= len(text) * 10
+
+    def test_zero_minimum_preserves_whitespace_only_offsets(self) -> None:
+        section = ContentChunk("f.md", "## H", 40, 41, " \n ", "markdown")
+
+        paragraphs = split_into_paragraphs(section, min_chars=0)
+
+        assert [(item.start_line, item.end_line, item.text) for item in paragraphs] == [(41, 40, "")]
+
+    def test_offsets_include_skipped_paragraphs_and_whitespace(self) -> None:
+        text = "\n  first kept\r\nsecond line  \r\n \t\r\nx\r\n \t\r\n last kept \n final line \n"
+        section = ContentChunk("f.md", "## H", 40, 48, text, "markdown")
+
+        paragraphs = split_into_paragraphs(section, min_chars=5)
+
+        assert [(item.start_line, item.end_line, item.text) for item in paragraphs] == [
+            (41, 42, "first kept\r\nsecond line"),
+            (46, 47, "last kept \n final line"),
+        ]
+
     def test_splits_on_blank_lines(self) -> None:
         section = ContentChunk("f.md", "## H", 1, 10, "a" * 100 + "\n\n" + "b" * 100, "markdown")
         paras = split_into_paragraphs(section, min_chars=80)

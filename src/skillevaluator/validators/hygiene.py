@@ -12,7 +12,14 @@ from pathlib import Path
 
 from skillevaluator.constants import BANNED_PACKAGES
 from skillevaluator.logging_config import get_logger
-from skillevaluator.validators.base import ValidationResult, ValidatorBase, iter_scannable_files
+from skillevaluator.validators.base import (
+    Finding,
+    Severity,
+    ValidationResult,
+    ValidatorBase,
+    iter_outside_symlinks,
+    iter_scannable_files,
+)
 from skillevaluator.validators.markdown import markdown_link_targets, normalized_local_path
 
 logger = get_logger(__name__)
@@ -48,9 +55,42 @@ class HygieneValidator(ValidatorBase):
     def _validate_single_skill(self, skill_path: Path) -> ValidationResult:
         """Run all hygiene checks on a single skill directory."""
         result = ValidationResult()
+        result.merge(self._check_symlink_boundaries(skill_path))
         result.merge(self._check_dead_links(skill_path))
         result.merge(self._audit_dependencies(skill_path))
         result.merge(self._check_test_presence(skill_path))
+        return result
+
+    def _check_symlink_boundaries(self, skill_path: Path) -> ValidationResult:
+        """Report symlinks that leave the skill directory.
+
+        Tier 1 file walkers skip a symlink whose target resolves outside the
+        skill (or is missing), so nothing outside the skill is read or quoted
+        in reports. This check names each skipped link by its path inside the
+        skill, never by its target, so authors know the content was not scanned.
+        """
+        result = ValidationResult()
+        outside_links = iter_outside_symlinks(skill_path)
+        if not outside_links:
+            result.add_success(
+                check_name="symlink_boundaries",
+                message="No symlinks point outside the skill directory",
+            )
+            return result
+
+        for link in outside_links:
+            relative = _link_display(link.relative_to(skill_path).as_posix())
+            result.add_finding(
+                Finding(
+                    category="HYGIENE",
+                    severity=Severity.LOW,
+                    check_name="symlink_outside_skill",
+                    message=f"Symlink {relative} points outside the skill (or to a missing target) and was not scanned",
+                    file_path=relative,
+                    suggestion="Copy the content into the skill instead of symlinking it so Tier 1 checks can scan it",
+                    metadata={"symlink_count": len(outside_links)},
+                )
+            )
         return result
 
     def _check_dead_links(self, skill_path: Path) -> ValidationResult:

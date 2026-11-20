@@ -13,7 +13,9 @@ from skillevaluator.validators.base import (
     ValidationResult,
     ValidatorBase,
     continue_on_failure_scope,
+    iter_outside_symlinks,
     iter_scannable_files,
+    path_resolves_inside,
 )
 
 
@@ -502,3 +504,69 @@ class TestIterScannableFiles:
         f = tmp_path / "x.bin"
         f.write_text("x")
         assert iter_scannable_files(f, {".md"}) == []
+
+    @staticmethod
+    def _symlink(link: Path, target: Path, *, directory: bool = False) -> None:
+        try:
+            link.symlink_to(target, target_is_directory=directory)
+        except OSError as exc:  # pragma: no cover - platform without symlink support
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+    def test_symlinked_file_outside_root_is_not_returned(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("x")
+        host_file = tmp_path / "host_file.md"
+        host_file.write_text("outside")
+        self._symlink(skill / "references" / "notes.md", host_file)
+
+        out = iter_scannable_files(skill, {".md"})
+
+        assert [p.relative_to(skill).as_posix() for p in out] == ["SKILL.md"]
+        assert iter_outside_symlinks(skill) == [skill / "references" / "notes.md"]
+
+    def test_symlinked_file_inside_root_is_still_returned(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("x")
+        (skill / "references" / "real.md").write_text("inside")
+        self._symlink(skill / "alias.md", skill / "references" / "real.md")
+
+        out = iter_scannable_files(skill, {".md"})
+
+        assert sorted(p.relative_to(skill).as_posix() for p in out) == ["SKILL.md", "alias.md", "references/real.md"]
+        assert iter_outside_symlinks(skill) == []
+
+    def test_dangling_symlink_is_not_returned(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        self._symlink(skill / "missing.md", tmp_path / "does-not-exist.md")
+
+        assert iter_scannable_files(skill, {".md"}) == []
+        assert iter_outside_symlinks(skill) == [skill / "missing.md"]
+
+    def test_symlinked_directory_is_not_descended_and_is_reported(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("x")
+        outside_dir = tmp_path / "outside"
+        outside_dir.mkdir()
+        (outside_dir / "secret.md").write_text("outside")
+        self._symlink(skill / "linked", outside_dir, directory=True)
+
+        out = iter_scannable_files(skill, {".md"})
+
+        assert [p.relative_to(skill).as_posix() for p in out] == ["SKILL.md"]
+        assert iter_outside_symlinks(skill) == [skill / "linked"]
+
+    def test_path_resolves_inside(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        (skill / "sub").mkdir(parents=True)
+        (skill / "sub" / "a.md").write_text("x")
+        outside = tmp_path / "outside.md"
+        outside.write_text("y")
+
+        assert path_resolves_inside(skill / "sub" / "a.md", skill)
+        assert path_resolves_inside(skill, skill)
+        assert not path_resolves_inside(outside, skill)
+        assert not path_resolves_inside(skill / "nope.md", skill)

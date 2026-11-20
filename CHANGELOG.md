@@ -52,6 +52,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 1 file walkers skip symlinks whose target resolves outside the skill
+  directory (or is missing), so the PII, secrets, Unicode, license and link
+  checks no longer read or quote files from elsewhere on the host through a
+  symlinked `references/` entry. Symlinks that resolve inside the skill still
+  scan as before. Code Integrity & Hygiene records a low-severity
+  `symlink_outside_skill` finding naming each skipped link by its path inside
+  the skill, never by its target.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

@@ -108,6 +108,42 @@ class TestHygieneValidator:
         assert detail.metadata["test_count"] == 1
         assert result.summary.files_scanned == 1
 
+    def test_symlink_outside_skill_is_reported_by_relative_path_only(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        (skill / "references").mkdir(parents=True)
+        (skill / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n", encoding="utf-8")
+        (skill / "references" / "real.md").write_text("inside\n", encoding="utf-8")
+        host_dir = tmp_path / "host-private"
+        host_dir.mkdir()
+        host_file = host_dir / "host_file.txt"
+        host_file.write_text("contact alice.host@acme-widgets.net token=HOSTMARKER\n", encoding="utf-8")
+        try:
+            (skill / "references" / "notes.md").symlink_to(host_file)
+            (skill / "alias.md").symlink_to(skill / "references" / "real.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = HygieneValidator().validate(skill)
+
+        findings = [f for f in result.findings if f.check_name == "symlink_outside_skill"]
+        assert [f.file_path for f in findings] == ["references/notes.md"]
+        assert findings[0].severity.value == "low"
+        assert result.passed
+        rendered = " ".join([findings[0].message, findings[0].file_path, *result.warnings, *result.errors])
+        assert "references/notes.md" in rendered
+        assert "host-private" not in rendered
+        assert "HOSTMARKER" not in rendered
+
+    def test_no_symlinks_records_boundary_success(self, tmp_path: Path):
+        skill = tmp_path / "skill"
+        skill.mkdir()
+        (skill / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n", encoding="utf-8")
+
+        result = HygieneValidator().validate(skill)
+
+        assert any(detail.check_name == "symlink_boundaries" for detail in result.success_details)
+        assert not [f for f in result.findings if f.check_name == "symlink_outside_skill"]
+
     def test_hygiene_never_loads_conftest_plugins_or_test_modules(self, tmp_path: Path, monkeypatch) -> None:
         skill = tmp_path / "skill"
         tests_dir = skill / "tests"

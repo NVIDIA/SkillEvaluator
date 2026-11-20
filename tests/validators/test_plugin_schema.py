@@ -206,3 +206,93 @@ skills:
         assert finding.category == "PLUGIN_SCHEMA"
         assert finding.file_path == str(tmp_path / "skills")
         assert "Cannot inspect skill manifest" in finding.message
+
+
+def test_nested_alias_manifest_is_reported_as_yaml_complexity(tmp_path: Path) -> None:
+    from tests.yaml_alias_fixtures import alias_bomb_frontmatter
+
+    _write_manifest(tmp_path, alias_bomb_frontmatter() + "\n")
+
+    result = PluginSchemaValidator().validate(tmp_path)
+
+    assert not result.passed
+    finding = next(f for f in result.findings if f.check_name == "manifest_yaml_complexity")
+    assert "complexity limits" in finding.message
+    assert "Simplify the manifest" in finding.suggestion
+
+
+class TestPluginManifestComplexityLimits:
+    """Plugin manifests are read within the structured-data limits."""
+
+    @staticmethod
+    def _findings(result) -> list[tuple[str, str]]:
+        return [(finding.check_name, finding.severity.name) for finding in result.findings]
+
+    def test_agent_plugin_merge_key_bomb_is_a_complexity_finding(self, tmp_path: Path):
+        from tests.yaml_alias_fixtures import merge_bomb_yaml
+
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\n{merge_bomb_yaml()}\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert not result.passed
+        assert ("manifest_yaml_complexity", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_scalar_alias_fan_is_a_complexity_finding(self, tmp_path: Path):
+        from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
+
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\n{scalar_alias_fan_yaml()}\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_yaml_complexity", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_invalid_date_is_a_yaml_finding_not_a_crash(self, tmp_path: Path):
+        _write_manifest(tmp_path, f"{_VALID_MANIFEST}\nreleased: 2026-13-45\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_invalid_yaml", "HIGH") in self._findings(result)
+
+    @pytest.mark.parametrize(
+        ("body", "check_name"),
+        [
+            ("[" * 3_000 + "]" * 3_000, "manifest_json_complexity"),
+            ('{"name": ' + "9" * 5_000 + "}", "manifest_invalid_json"),
+        ],
+        ids=["deep-nesting", "integer-past-the-digit-limit"],
+    )
+    def test_contained_plugin_json_that_cannot_be_loaded_is_a_finding_not_a_crash(
+        self, tmp_path: Path, body: str, check_name: str
+    ):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_text(body, encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert (check_name, "HIGH") in self._findings(result)
+
+    def test_contained_plugin_json_with_undecodable_bytes_is_unreadable_not_a_crash(self, tmp_path: Path):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_bytes(b'\xff\xfe{"name": "x"}')
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_unreadable", "HIGH") in self._findings(result)
+
+    def test_agent_plugin_with_undecodable_bytes_is_unreadable_not_a_crash(self, tmp_path: Path):
+        (tmp_path / "agent_plugin.yaml").write_bytes(b"name: \xff\xfe\n")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        assert ("manifest_unreadable", "HIGH") in self._findings(result)
+
+    def test_invalid_json_message_names_the_parser_position_once(self, tmp_path: Path):
+        (tmp_path / ".claude-plugin").mkdir()
+        (tmp_path / ".claude-plugin" / "plugin.json").write_text('{"name": ', encoding="utf-8")
+
+        result = PluginSchemaValidator().validate(tmp_path)
+
+        (finding,) = [f for f in result.findings if f.check_name == "manifest_invalid_json"]
+        assert finding.message.count("not valid JSON") == 1
+        assert "line 1" in finding.message

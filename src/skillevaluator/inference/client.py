@@ -792,10 +792,25 @@ class LLMClient:
                     raise LLMClientError(
                         "The 'litellm' package is required for Bedrock LLM operations. Install with: pip install 'skillevaluator[llm]'"
                     ) from exc
+                # LiteLLM can load environment variables on its first import.
+                endpoint = (
+                    os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT")
+                    if os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
+                    else None
+                )
+                if endpoint:
+                    try:
+                        target = urlsplit(endpoint)
+                        uses_https = target.scheme == "https" and target.hostname is not None
+                    except ValueError:
+                        uses_https = False
+                    if not uses_https:
+                        raise LLMClientError("AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS with a Bedrock bearer token.")
                 response = completion(
                     model=config.litellm_model,
                     messages=_chat_messages(system_prompt, turns),
                     aws_region_name=config.region,
+                    **({"aws_bedrock_runtime_endpoint": endpoint} if endpoint else {}),
                     **_temperature_kwargs(config.model, self._temperature),
                     **({"max_tokens": max_tokens} if max_tokens is not None else {}),
                     **({"timeout": self._timeout} if self._timeout is not None else {}),

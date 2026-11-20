@@ -2714,7 +2714,7 @@ requires-dist = [
     { name = "aiohttp", marker = "extra == 'llm'", specifier = ">=3.14.4,<4" },
     { name = "anthropic", marker = "extra == 'llm'", specifier = ">=0.83.0" },
     { name = "bandit", specifier = ">=1.9.4" },
-    { name = "boto3", marker = "extra == 'llm'", specifier = ">=1.34.0" },
+    { name = "boto3", marker = "extra == 'llm'", specifier = ">=1.44.0" },
     { name = "build", marker = "extra == 'dev'", specifier = ">=1.2" },
     { name = "click", specifier = ">=8.3.3,<9" },
     { name = "fsspec", marker = "extra == 'llm'", specifier = ">=2026.6.0" },

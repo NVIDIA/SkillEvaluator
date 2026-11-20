@@ -9,16 +9,19 @@ import ipaddress
 import json
 import os
 import socket
+import sys
 import threading
 import urllib.error
 import urllib.request
 from contextlib import contextmanager
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from types import ModuleType
 
 import pytest
 
 from skillevaluator.inference.client import LLMClient
 from skillevaluator.inference.retry import extract_http_status, is_retriable_exception, retry_call_with_backoff
+from skillevaluator.inference.types import LLMClientError
 from skillevaluator.provider_config import ProviderConfig
 
 
@@ -74,6 +77,7 @@ class _Server(ThreadingHTTPServer):
         self.statuses = statuses
         self.retry_after = retry_after
         self.requests: list[int] = []
+        self.bearer_requests = 0
         self.connections = 0
         self.tls_context = tls_context
         super().__init__(("127.0.0.1", 0), _Handler)
@@ -95,6 +99,7 @@ class _Handler(BaseHTTPRequestHandler):
         self.rfile.read(int(self.headers.get("Content-Length", "0")))
         status = self.server.statuses[min(len(self.server.requests), len(self.server.statuses) - 1)]
         self.server.requests.append(status)
+        self.server.bearer_requests += self.headers.get("Authorization", "").startswith("Bearer ")
         payload = {"message": "loopback response"}
         if status == 200:
             if self.path.endswith("/converse"):
@@ -244,6 +249,49 @@ def test_provider_http_status_survives_sdk_wrapping(
         record_property("outer_status", getattr(raised.value, "status_code", None))
         assert server.requests == [status] * expected
         assert extract_http_status(raised.value) == status
+
+
+def test_bedrock_inference_rejects_http_bearer_override(isolated_provider_environment, monkeypatch):
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        with pytest.raises(LLMClientError, match="AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS"):
+            client.completions("system", "user")
+        assert server.connections == 0
+
+
+def test_bedrock_inference_validates_credentials_loaded_at_sdk_import(isolated_provider_environment, monkeypatch):
+    def unexpected_completion(**_kwargs):
+        pytest.fail("Bedrock completion must not be called for an HTTP bearer endpoint")
+
+    class LazyLiteLLM(ModuleType):
+        def __getattr__(self, name):
+            if name != "completion":
+                raise AttributeError(name)
+            monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+            return unexpected_completion
+
+    with _server([200]) as server:
+        client = _client(monkeypatch, f"http://127.0.0.1:{server.server_port}")
+        monkeypatch.setitem(sys.modules, "litellm", LazyLiteLLM("litellm"))
+        with pytest.raises(LLMClientError, match="AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS"):
+            client.completions("system", "user")
+        assert server.connections == 0
+
+
+def test_bedrock_inference_accepts_https_bearer_override(isolated_provider_environment, monkeypatch, loopback_tls):
+    litellm = pytest.importorskip("litellm")
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    with _server([200], tls_context) as server:
+        client = _client(monkeypatch, f"https://127.0.0.1:{server.server_port}")
+        assert client.completions("system", "user") == "recovered"
+        assert server.requests == [200]
+        assert server.bearer_requests == 1
 
 
 @pytest.mark.parametrize("provider", ["bedrock", "openai"])

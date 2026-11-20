@@ -153,7 +153,9 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
         requirement for requirement in llm_requirements if canonicalize_name(requirement.name) == "litellm"
     ]
 
-    assert base_names.isdisjoint({"harbor", "litellm"})
+    assert base_names.isdisjoint({"boto3", "harbor", "litellm"})
+    aws_sdk = next(requirement for requirement in llm_requirements if requirement.name == "boto3")
+    assert aws_sdk.specifier == SpecifierSet(">=1.44.0")
     assert len(harbor_requirements) == 1
     assert harbor_requirements[0].extras == {"gke"}
     assert HARBOR_VERSION == "0.25.0"
@@ -171,9 +173,12 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     lock = _lock()
     locked_versions = {
         name: [Version(package["version"]) for package in lock["package"] if package["name"] == name]
-        for name in ("harbor", "litellm")
+        for name in ("boto3", "botocore", "harbor", "litellm")
     }
     assert locked_versions["harbor"] == [Version(HARBOR_VERSION)]
+    for name in ("boto3", "botocore"):
+        assert len(locked_versions[name]) == 1
+        assert locked_versions[name][0] >= Version("1.44.0")
     assert len(locked_versions["litellm"]) == 1
     assert litellm_specifier.contains(locked_versions["litellm"][0], prereleases=True)
 

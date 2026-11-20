@@ -365,10 +365,10 @@ class RubricJudge(LLMClient):
     def create_user_prompt(self, **kwargs: Any) -> str:
         """Build the judge's user message, fencing every piece of skill text.
 
-        SKILL.md and each supplementary file use a fence longer than any
-        backtick run in that file. Fence headers and the Skill Name line carry
-        escaped, length-limited labels. Evaluator framing and criteria are
-        written outside the fenced file contents.
+        SKILL.md and each supplementary file preview use a fence longer than
+        any backtick run in the rendered content. Fence headers and the Skill
+        Name line carry escaped, length-limited labels. Evaluator framing and
+        criteria are written outside the fenced content.
         """
         skill_name: str = kwargs["skill_name"]
         skill_content: str = kwargs["skill_content"]

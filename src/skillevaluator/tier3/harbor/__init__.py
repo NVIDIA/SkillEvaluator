@@ -53,6 +53,7 @@ DOCKER_AGENT_IMPORT_PATHS = {
     "opencode": "skillevaluator.tier3.harbor.installed_agents:SkillEvaluatorOpenCode",
     "claude-code": CONTAINER_AGENT_IMPORT_PATHS["claude-code"],
     "hermes": "skillevaluator.tier3.harbor.hermes_agent:SkillEvaluatorHermes",
+    "pi": "skillevaluator.tier3.harbor.pi_agent:SkillEvaluatorPi",
 }
 
 HARBOR_AGENTS_SUPPORTED = frozenset(
@@ -63,7 +64,7 @@ HARBOR_AGENTS_SUPPORTED = frozenset(
     }
 )
 
-HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset({"hermes"})
+HARBOR_AGENTS_EXPERIMENTAL: frozenset[str] = frozenset({"hermes", "pi"})
 
 HARBOR_AGENTS = HARBOR_AGENTS_SUPPORTED | HARBOR_AGENTS_EXPERIMENTAL
 

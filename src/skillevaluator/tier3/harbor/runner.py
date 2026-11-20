@@ -1467,6 +1467,7 @@ _HARBOR_LAUNCH_ENV = MappingProxyType({"HARBOR_TELEMETRY": "0", "PYTHON_DOTENV_D
 _CODEX_VERSION = PINNED_RUNTIME_VERSIONS["codex"]
 _CLAUDE_CODE_VERSION = PINNED_RUNTIME_VERSIONS["claude-code"]
 OPENCODE_VERSION = PINNED_RUNTIME_VERSIONS["opencode"]
+PI_VERSION = PINNED_RUNTIME_VERSIONS["pi"]
 # Harbor 0.22's Codex agent ran with ``model_reasoning_effort=high``; later
 # releases defer to Codex's own default. Pin the effort SkillEvaluator was
 # validated with so scores and cost stay comparable across Harbor upgrades.
@@ -1476,6 +1477,7 @@ _HARBOR_AGENT_KWARGS: Mapping[str, Mapping[str, str]] = MappingProxyType(
         "claude-code": MappingProxyType({"version": _CLAUDE_CODE_VERSION}),
         "opencode": MappingProxyType({"version": OPENCODE_VERSION}),
         "hermes": MappingProxyType({"version": HERMES_VERSION}),
+        "pi": MappingProxyType({"version": PI_VERSION}),
     }
 )
 # Claude Code's default effort depends on the model, and Claude Opus 5 ran at
@@ -2149,9 +2151,9 @@ def _validate_agent_provider_credentials(
 
     if provider.provider != "nv_build":
         supported_agents = {
-            "openai": {"claude-code", "codex", "opencode"},
-            "openai-compatible": {"claude-code", "codex", "opencode"},
-            "anthropic": {"claude-code", "codex", "opencode"},
+            "openai": {"claude-code", "codex", "opencode", "pi"},
+            "openai-compatible": {"claude-code", "codex", "opencode", "pi"},
+            "anthropic": {"claude-code", "codex", "opencode", "pi"},
             "bedrock": {"claude-code"},
         }.get(provider.provider, set())
         unsupported = [agent for agent in agents if agent not in supported_agents]

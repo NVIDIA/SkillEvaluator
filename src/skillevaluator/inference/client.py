@@ -861,7 +861,12 @@ class LLMClient:
                 has_bearer_token = has_bedrock_bearer_token()
                 if has_bearer_token:
                     _require_https_for_bedrock_bearer_endpoints()
-                endpoint = os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT") if has_bearer_token else None
+                # Mantle resolves its own endpoint. An explicit runtime override takes precedence in LiteLLM.
+                endpoint = (
+                    os.environ.get("AWS_BEDROCK_RUNTIME_ENDPOINT")
+                    if has_bearer_token and "/mantle/" not in f"/{config.model}"
+                    else None
+                )
                 # LiteLLM sends a whitespace-only AWS_BEARER_TOKEN_BEDROCK as a blank Bearer header.
                 # An empty key makes it sign with the IAM credentials, as it does for an unset variable.
                 # The Responses route also reads the variable itself, so hide it for the call.

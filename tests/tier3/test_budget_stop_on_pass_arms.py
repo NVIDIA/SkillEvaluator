@@ -4,6 +4,7 @@
 """A run budget must not change when ``--stop-on-pass`` stops an arm."""
 
 import shutil
+import threading
 from pathlib import Path
 
 import pytest
@@ -132,3 +133,48 @@ def test_budget_denial_after_one_arm_passed_leaves_that_arm_complete(monkeypatch
     conditions = results["agents"][AGENT]["conditions"]
     assert conditions["with_skill"]["expected_attempts"] == conditions["with_skill"]["scored_attempts"] == 1
     assert conditions["without_skill"]["scored_attempts"] == 1
+
+
+def test_single_arm_takes_the_last_slot_after_a_pair_is_denied(monkeypatch, tmp_path):
+    # Five attempts fit and the first attempt of both cases uses four. After
+    # that case-b still needs both arms and case-a only its baseline. The
+    # requests are ordered so the pair is denied before the single arm asks.
+    first_pass = {
+        "case-a": {"with": 1, "without": None},
+        "case-b": {"with": None, "without": None},
+    }
+    budget = BudgetController(max_attempts_total=5, planned=2 * N_ATTEMPTS * len(first_pass))
+    admit_many = budget.admit_many
+    first_attempts_started = threading.Event()
+    pair_denied = threading.Event()
+
+    def pair_before_single_arm(attempts):
+        if attempts[0]["attempt"] > 1:
+            assert first_attempts_started.wait(timeout=30)
+        if len(attempts) == 1:
+            assert pair_denied.wait(timeout=30)
+        admitted = admit_many(attempts)
+        if budget.metadata()["started_attempts"] == 4:
+            first_attempts_started.set()
+        if len(attempts) == 2 and not admitted:
+            pair_denied.set()
+        return admitted
+
+    monkeypatch.setattr(budget, "admit_many", pair_before_single_arm)
+    starts, results = _run(monkeypatch, tmp_path, first_pass, budget=budget, n_concurrent=2)
+
+    assert sorted(starts) == [
+        ("case-a", "with", 1),
+        ("case-a", "without", 1),
+        ("case-a", "without", 2),
+        ("case-b", "with", 1),
+        ("case-b", "without", 1),
+    ]
+    assert sorted((row["case_id"], row["arm"], row["attempt"]) for row in budget.not_run) == [
+        ("case-a", "without", 3),
+        ("case-b", "with", 2),
+        ("case-b", "with", 3),
+        ("case-b", "without", 2),
+        ("case-b", "without", 3),
+    ]
+    assert not results["execution_errors"]

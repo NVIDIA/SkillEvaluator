@@ -119,12 +119,40 @@ def test_task_status_words_survive_persistence(
 
 
 @pytest.mark.parametrize(
+    ("operation", "content", "expected"),
+    [
+        ("add", "Write the report\nand send it", ["Write the report and send it"]),
+        ("add", "Fix\r\nlogin  flow\t", ["Fix login flow"]),
+        ("add_multiple", "Draft\rreview; Ship", ["Draft review", "Ship"]),
+    ],
+)
+def test_task_line_breaks_survive_persistence(
+    operation: str, content: str, expected: list[str], tmp_path: Path
+) -> None:
+    state_path = tmp_path / "todo.md"
+    env = {"TASK_LIST_STATE_PATH": str(state_path)}
+
+    added = _run_script("tasks", operation, "--content", content, env=env)
+    started = _run_script("tasks", "start", "--task_id", "task_1", env=env)
+    state, error = _load_script("tasks")._load_state(state_path)
+
+    assert added.returncode == started.returncode == 0
+    assert added.stderr == started.stderr == ""
+    assert error is None
+    assert {task_id: task["content"] for task_id, task in state["tasks"].items()} == {
+        f"task_{number}": text for number, text in enumerate(expected, start=1)
+    }
+    assert state["tasks"]["task_1"]["status"] == "in_progress"
+
+
+@pytest.mark.parametrize(
     ("name", "args", "expected_error"),
     [
         ("call_api", ("--url", "https://example.invalid", "--headers", "not-json"), "Invalid input"),
         ("call_api", (), "No URL provided"),
         ("parse_openapi", (), "Usage:"),
         ("tasks", ("add",), "Error: Content is required"),
+        ("tasks", ("add", "--content", " \n "), "Error: Content is required"),
     ],
 )
 def test_handled_input_failures_write_only_to_stderr(

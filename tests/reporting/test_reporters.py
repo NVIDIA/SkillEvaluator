@@ -1432,6 +1432,58 @@ def test_html_skill_entries_merge_only_occurrences_of_one_finding() -> None:
         assert {group_of[occurrence_id] for occurrence_id in entry["occurrence_ids"]} == {entry["finding_id"]}
 
 
+def test_folder_merges_keep_one_entry_per_skill_with_that_skills_verdict() -> None:
+    """A member's prefixed label is its identity, not a second skill.
+
+    ``merge_with_prefix`` writes ``[skill] check`` into success details and
+    ``[skill] path`` into findings. Reading the whole detail label as a skill
+    name gave each skill a second, empty entry whose ``passed`` was always
+    true, and treating every finding as a failure marked the real entry failed
+    even when its findings were advisory, so a folder whose skills all passed
+    reported that none did.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for skill, findings in (("alpha", (Severity.MEDIUM,)), ("beta", (Severity.MEDIUM, Severity.LOW))):
+        per_skill = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        for index, severity in enumerate(findings):
+            per_skill.add_finding(
+                Finding("QUALITY", severity, "guide-only", "Guide-only skill has little content", "SKILL.md", index + 1)
+            )
+        per_skill.add_success("quality_score", "Score: 80.0/100 (Grade: B)", overall_score=80.0, grade="B")
+        collection.merge_with_prefix(per_skill, skill)
+    assert collection.passed, "advisory findings must not fail the collection"
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["alpha", "beta"]
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"alpha": True, "beta": True}
+    assert {name: data["issue_count"] for name, data in skills_by_name.items()} == {"alpha": 1, "beta": 2}
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted((entry["name"], entry["passed"]) for entry in json_data["skills"]) == [
+        ("alpha", True),
+        ("beta", True),
+    ]
+    assert "[alpha] quality_score" not in html_skill_names(json_data)
+
+
+def html_skill_names(json_data: dict) -> set[str]:
+    """Return the skill names a JSON report lists, for identity assertions."""
+    return {entry["name"] for entry in json_data["skills"]}
+
+
+def test_folder_marks_only_the_members_whose_own_result_failed() -> None:
+    """A blocking member finding fails that member, not its passing sibling."""
+    collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+    for skill, severity in (("good", Severity.LOW), ("broken", Severity.HIGH)):
+        per_skill = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
+        per_skill.add_finding(Finding("SCHEMA", severity, "name-consistency", "Name mismatch", "SKILL.md", 1))
+        collection.merge_with_prefix(per_skill, skill)
+    assert not collection.passed
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"good": True, "broken": False}
+
+
 def test_same_finding_in_several_skills_counts_once_with_one_occurrence_per_skill() -> None:
     collection = ValidationResult(validator_name="SCHEMA", validator_description="Schema")
     for skill in ("alpha", "beta", "gamma"):

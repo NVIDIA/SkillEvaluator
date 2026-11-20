@@ -44,6 +44,49 @@ listing for `/skillevaluator/`.
   Kitmaker and run the protected dry-run job successfully before approving
   the first upload. The checked-in dry-run job sends `upload: false`.
   Apply that restriction in Ferry policy as well if the tenant supports it.
+- For **Full release**, install a dedicated bundle PR GitHub App on SkillEvaluator
+  with repository Contents, Pull requests, and Workflows write access. Keep the
+  App subject to the normal `main` rules. In a `release-bundle-pr` Actions
+  environment restricted to `main`, add the
+  `RELEASE_BUNDLE_APP_CLIENT_ID` variable and `RELEASE_BUNDLE_APP_PRIVATE_KEY`
+  secret. The workflow checks both are present before it builds an image.
+  The App writes generated files to a release branch and opens the PR.
+
+## Start a release from GitHub Actions
+
+1. Merge the version-preparation PR described below. Open **SkillEvaluator
+   Release → Run workflow** on `main`, choose **Full release**, and enter the
+   version and the version-preparation merge SHA.
+2. Approve the image job. The workflow builds or reuses the immutable image,
+   verifies the public digest, generates the bundle and pins, and opens or
+   reuses the bundle PR. Its link appears in the run summary.
+3. Review the PR and qualify the generated GitHub and GitLab configurations.
+   Update the bundle catalog and current onboarding links in the PR if needed.
+   Merge the PR after the required checks pass. The run waits up to two hours
+   for that merge and verifies the exact squash-merge commit on `main`. If the
+   wait expires, merge the PR and use **Re-run failed jobs** on the original run.
+   A fresh dispatch can also reuse a matching bundle PR before the version
+   tag is created. Once the tag exists, use **Re-run failed jobs** or the
+   standalone **Publish release** phase with the reviewed bundle merge SHA.
+   Reconcile a closed unmerged PR or a candidate changed by intervening commits
+   before retrying.
+4. Follow the existing GitHub release and Kitmaker approvals from the same
+   run. The workflow validates the final source and passes the exact retained
+   artifact and manifest automatically to publication. It verifies PyPI and
+   DevZone, runs fresh install smoke tests, and finalizes the GitHub release.
+
+If the bundle PR is already merged, choose **Validate and publish** with the
+version and the bundle merge SHA. This starts at package validation and skips
+image building and bundle PR creation.
+
+Select **promote_stable** to promote the exact released version after both
+package indexes pass verification, provided the stable writer App is configured
+and the version is GitHub Latest. Keep the standalone promotion workflow for
+retries and the first `v1.0.1` bootstrap. Docs publish through **Publish Docs**
+on pushes to `main`, including the bundle PR merge.
+
+The individual image, validation and publication phases are also available for
+manual qualification and recovery.
 
 ## Prepare the CI release
 
@@ -179,8 +222,8 @@ access.
 If the DevZone URL is unset or invalid, package verification stops promotion
 before the `stable` tag can move.
 
-After the manual product release finishes verification, open **Promote stable
-GitHub workflows** in Actions and select **Run workflow** on `main`. Set
+For a standalone promotion after the product release finishes verification,
+open **Promote stable GitHub workflows** in Actions and select **Run workflow** on `main`. Set
 `expected-release` to the reviewed `vX.Y.Z` tag shown in the release workflow
 summary. Manual promotion stops if GitHub Latest differs from that tag. The
 product workflow's GitHub Actions token does not trigger the release relay.

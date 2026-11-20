@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import os
 import re
 import subprocess
 import sys
@@ -29,6 +30,7 @@ API_ROOT = f"repos/{REPOSITORY}"
 GITHUB = f"https://github.com/{REPOSITORY}"
 GITHUB_RAW = f"https://raw.githubusercontent.com/{REPOSITORY}"
 RUN_ATTEMPT = r"([1-9][0-9]*)-([1-9][0-9]*)"
+SAME_RUN_PHASES = {"Validate and publish", "Full release"}
 STAGING_MARKER = re.compile(rf"<!-- skillevaluator-stage: {RUN_ATTEMPT} -->")
 PENDING = "**Package publication:** Pending PyPI and NVIDIA DevZone verification."
 VERIFIED = "**Package publication:** Verified on PyPI and NVIDIA DevZone."
@@ -134,7 +136,11 @@ def preflight(version: str, source_sha: str, main_sha: str, phase: str) -> None:
     tag = f"v{version}"
     if phase == "Build CI image and bundle" and check_tag(tag, source_sha) is not None:
         raise ValueError(f"{tag} already exists. Use the reviewed product SHA to validate or resume publication.")
-    if phase != "Build CI image and bundle":
+    if phase == "Full release":
+        # A fresh full run must not open a pin PR for a version already staged or published.
+        if tag_target(tag) is not None:
+            raise ValueError(f"{tag} already exists. Resume Publish release with the reviewed bundle merge SHA.")
+    elif phase != "Build CI image and bundle":
         check_tag(tag, source_sha)
 
 
@@ -216,7 +222,14 @@ def digest(path: Path) -> str:
         return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
-def download_run_artifact(version: str, name: str, origin: dict, output: Path) -> None:
+def download_run_artifact(
+    version: str,
+    name: str,
+    origin: dict,
+    output: Path,
+    *,
+    expected_artifact: tuple[int, str] | None = None,
+) -> None:
     listing = api(f"actions/runs/{origin['id']}/artifacts?name={name}")
     artifacts = listing.get("artifacts") if isinstance(listing, dict) else None
     if not isinstance(artifacts, list) or len(artifacts) != 1 or listing.get("total_count") != 1:
@@ -243,6 +256,8 @@ def download_run_artifact(version: str, name: str, origin: dict, output: Path) -
         or not re.fullmatch(r"sha256:[0-9a-f]{64}", str(artifact.get("digest")))
     ):
         raise ValueError("The retained Actions artifact is expired or its identity is invalid.")
+    if expected_artifact is not None and (artifact["id"], artifact["digest"]) != expected_artifact:
+        raise ValueError("The validation artifact ID or SHA-256 digest differs from the producer job output.")
 
     with tempfile.TemporaryDirectory() as temp:
         archive = Path(temp) / "release-artifact.zip"
@@ -280,18 +295,83 @@ def restore_validation(version: str, run: str, attempt: str, output: Path) -> No
         raise ValueError(f"Could not verify the validation artifact. {exc} Run Validate release again.") from exc
 
 
-def acquire_publication(version: str, source_sha: str, output: Path, run_ref: str, manifest_sha256: str) -> bool:
+def restore_same_run_validation(
+    version: str,
+    run: str,
+    attempt: str,
+    output: Path,
+    *,
+    phase: str | None,
+    artifact_id: str | None,
+    artifact_digest: str | None,
+) -> None:
+    if phase not in SAME_RUN_PHASES:
+        raise ValueError("Same-run validation requires the Validate and publish or Full release phase.")
+    artifact_digest = (artifact_digest or "").removeprefix("sha256:")
+    if (
+        not artifact_id
+        or not re.fullmatch(r"[1-9][0-9]*", artifact_id)
+        or not product_release.SHA256.fullmatch(artifact_digest)
+    ):
+        raise ValueError("Same-run validation requires the artifact ID and SHA-256 digest from the producer job.")
+
+    current_attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+    if (
+        run != os.environ.get("GITHUB_RUN_ID")
+        or not re.fullmatch(r"[1-9][0-9]*", current_attempt)
+        or int(attempt) > int(current_attempt)
+    ):
+        raise ValueError(
+            "The validation artifact must come from the current workflow run and a valid producer attempt."
+        )
+
+    # The stage job requires successful prepare outputs. The enclosing workflow is still running,
+    # and an earlier producer attempt may have failed in a later publication job.
+    try:
+        origin = upstream_release_run(run, attempt)
+        if origin is None or origin.get("display_title") != f"{phase} · SkillEvaluator {version}":
+            raise ValueError("Select the expected upstream manual release run, phase and version.")
+        download_run_artifact(
+            version,
+            f"validated-release-{version}-{run}-{attempt}",
+            origin,
+            output,
+            expected_artifact=(int(artifact_id), f"sha256:{artifact_digest}"),
+        )
+    except (BadZipFile, ValueError, subprocess.CalledProcessError) as exc:
+        raise ValueError(f"Could not verify the same-run validation artifact. {exc}") from exc
+
+
+def acquire_publication(
+    version: str,
+    source_sha: str,
+    output: Path,
+    run_ref: str,
+    manifest_sha256: str,
+    *,
+    phase: str | None = None,
+    artifact_id: str | None = None,
+    artifact_digest: str | None = None,
+) -> bool:
     """Restore a release, or verify its validation receipt and return True for a new draft."""
     if restore(version, source_sha, output):
         return False
 
+    same_run = phase in SAME_RUN_PHASES or artifact_id is not None or artifact_digest is not None
     match = re.fullmatch(RUN_ATTEMPT, run_ref)
     if match is None or not product_release.SHA256.fullmatch(manifest_sha256):
+        if same_run:
+            raise ValueError("Same-run validation requires the producer run attempt and manifest SHA-256.")
         raise ValueError(
             "Copy validation_run and validation_manifest_sha256 from a successful Validate release summary."
         )
     run, attempt = match.groups()
-    restore_validation(version, run, attempt, output)
+    if same_run:
+        restore_same_run_validation(
+            version, run, attempt, output, phase=phase, artifact_id=artifact_id, artifact_digest=artifact_digest
+        )
+    else:
+        restore_validation(version, run, attempt, output)
 
     manifest, actual_sha256 = product_release.checked_manifest(version, output)
     if actual_sha256 != manifest_sha256 or manifest.get("source_commit") != source_sha:
@@ -462,6 +542,8 @@ def main() -> int:
     parser.add_argument("--run")
     parser.add_argument("--validation-run", default="")
     parser.add_argument("--validation-manifest-sha256", default="")
+    parser.add_argument("--validation-artifact-id")
+    parser.add_argument("--validation-artifact-digest")
     args = parser.parse_args()
     commands = {
         "restore": restore,
@@ -474,7 +556,14 @@ def main() -> int:
             preflight(args.version, args.source_sha, args.main_sha, args.phase)
         elif args.command == "acquire":
             new_release = acquire_publication(
-                args.version, args.source_sha, args.assets, args.validation_run, args.validation_manifest_sha256
+                args.version,
+                args.source_sha,
+                args.assets,
+                args.validation_run,
+                args.validation_manifest_sha256,
+                phase=args.phase,
+                artifact_id=args.validation_artifact_id,
+                artifact_digest=args.validation_artifact_digest,
             )
             print(str(new_release).lower())
         elif args.command == "stage":

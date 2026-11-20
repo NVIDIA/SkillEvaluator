@@ -9,7 +9,9 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 
 from __future__ import annotations
 
+import glob
 import os
+from fnmatch import fnmatch
 from pathlib import Path
 
 from skillevaluator.config import CONFIG_DIR
@@ -195,20 +197,13 @@ class CodeRiskValidator(ValidatorBase):
             result.mark_scan_incomplete("bandit")
             return result
 
-        # Tier 1 artifact dirs (evals/, results/, versions/, ...) hold
-        # snapshot copies of the live skill; scanning them produces
-        # duplicate findings. Bandit takes a single comma-separated
-        # ``--exclude`` arg that combines the test exclusion (when on)
-        # with the artifact exclusion list.
-        excludes: list[str] = []
-        if self.exclude_tests:
-            excludes.extend(["tests", "test", "*_test.py", "test_*.py"])
-        excludes.extend(sorted(SCAN_EXCLUDED_DIRS))
-
         # resolve() so a skill dir named like an option token (e.g.
         # "--exclude=*") cannot be parsed as a scanner flag.
-        args = ["-r", str(skill_path.resolve()), "-f", "json", "-q", "-ll"]
-        args.extend(["--exclude", ",".join(excludes)])
+        root = skill_path.resolve()
+        args = ["-r", str(root), "-f", "json", "-q", "-ll"]
+        # This also replaces Bandit's own default list, which is matched as
+        # substrings and has ".git" in it.
+        args.extend(["--exclude", ",".join(self._bandit_excludes(root))])
         # Without --ini, Bandit walks the scanned tree for a ``.bandit`` file and
         # applies its ``skips`` / ``tests`` / ``configfile`` settings, so a skill
         # could switch off the checks that would flag it. Point Bandit at a
@@ -238,6 +233,109 @@ class CodeRiskValidator(ValidatorBase):
 
         return result
 
+    def _bandit_excludes(self, root: Path) -> list[str]:
+        """Patterns for the artifact directories Bandit skips below *root*, and for test directories when tests are excluded.
+
+        Tier 1 artifact dirs (evals/, results/, versions/, ...) hold snapshot
+        copies of the live skill, and scanning them produces duplicate
+        findings. Bandit drops a file when an ``--exclude`` entry is a
+        substring of its whole path, so a bare name such as "test" also hid
+        every file of a skill called "webapp-testing". Each name is
+        therefore written as two patterns anchored at *root*, one for a
+        directory of that name right below it and one for any depth, so the
+        option has the same size for a small skill and a large tree. Test
+        files outside those directories are matched by name, see
+        ``_bandit_test_file_patterns``.
+        """
+        # Bandit splits the option at every comma, so a comma in the path is
+        # written as "?". Every scanned path starts with this same root.
+        prefix = glob.escape(str(root)).replace(",", "?")
+        names = [glob.escape(name) for name in sorted({"tests", "test"})] if self.exclude_tests else []
+        # A differently cased spelling is the same artifact directory where
+        # the filesystem ignores case, as for the other Tier 1 scans.
+        ignores_case = self._ignores_case(root)
+        for name in sorted(SCAN_EXCLUDED_DIRS):
+            names.append(
+                "".join(f"[{char.lower()}{char.upper()}]" if char.isalpha() else glob.escape(char) for char in name)
+                if ignores_case
+                else glob.escape(name)
+            )
+        patterns: list[str] = []
+        for name in names:
+            for parent in (prefix, f"{prefix}{os.sep}*"):
+                patterns.append(self._bandit_pattern(f"{parent}{os.sep}{name}"))
+        if self.exclude_tests:
+            patterns.extend(self._bandit_test_file_patterns(root, prefix))
+        return sorted(patterns)
+
+    def _bandit_test_file_patterns(self, root: Path, prefix: str) -> list[str]:
+        """Patterns for the ``test_*.py`` and ``*_test.py`` files below *root*, so that Bandit does not open them.
+
+        A pattern is listed only where it hides nothing else. A test file
+        that is then not covered is read by Bandit and left out of the
+        report, see ``_is_test_file``. Bandit's ``*`` also matches a path
+        separator, so ``test_*.py`` matches every Python file below a
+        directory such as ``test_tools``. Bandit also matches an entry as
+        plain text, and adds its own ``*`` to one that is a directory, so a
+        pattern is left out when a path begins with its text.
+        """
+        patterns = [f"{prefix}{os.sep}*_test.py"]
+        if not self._has_code_below_test_named_directory(root):
+            patterns += [f"{prefix}{os.sep}test_*.py", f"{prefix}{os.sep}*{os.sep}test_*.py"]
+        return [
+            pattern for pattern in patterns if not any(Path(pattern).parent.glob(f"{glob.escape(Path(pattern).name)}*"))
+        ]
+
+    def _has_code_below_test_named_directory(self, root: Path) -> bool:
+        """Whether a directory whose name starts with ``test_`` holds a Python file that is not a test."""
+        skipped = {"tests", "test", *SCAN_EXCLUDED_DIRS}
+        for current, directories, files in os.walk(root):
+            directories[:] = [name for name in directories if name not in skipped]
+            if not any(fnmatch(part, "test_*") for part in Path(current).relative_to(root).parts):
+                continue
+            if any(fnmatch(name, "*.py") and not self._is_test_name(name) for name in files):
+                return True
+        return False
+
+    @staticmethod
+    def _ignores_case(root: Path) -> bool:
+        """Whether the filesystem holding *root* treats differently cased names as one entry."""
+        swapped = Path(str(root).swapcase())
+        try:
+            return swapped != root and root.samefile(swapped)
+        except OSError:
+            return False
+
+    @staticmethod
+    def _is_test_name(name: str) -> bool:
+        return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
+
+    @classmethod
+    def _is_test_file(cls, entry: object) -> bool:
+        """Whether a Bandit finding or scan error is about a ``test_*.py`` or ``*_test.py`` file.
+
+        These are dropped from the report. Most never get there, because
+        ``_bandit_test_file_patterns`` keeps Bandit from opening them. One
+        ``--exclude`` entry per file would cover the rest, and made the
+        option grow with the number of test files, past what a Windows
+        command line holds.
+        """
+        return cls._is_test_name(Path(str(entry.get("filename") or "")).name if isinstance(entry, dict) else "")
+
+    @staticmethod
+    def _bandit_pattern(directory: str) -> str:
+        """The pattern for everything below the directory pattern *directory*, as one ``--exclude`` entry.
+
+        Bandit adds its own ``*`` to an entry that is the path of a directory,
+        which would then match one level too deep, so the entry must not be
+        one. That only happens when a folder is literally named ``*``.
+        """
+        for wildcard in ("*", "?*", "*?"):
+            pattern = f"{directory}{os.sep}{wildcard}"
+            if not Path(pattern).is_dir():
+                break
+        return pattern
+
     def _process_bandit_output(
         self,
         output: str,
@@ -263,6 +361,8 @@ class CodeRiskValidator(ValidatorBase):
             result.add_error("Bandit JSON field 'errors' must be a list; scan did not complete")
             result.mark_scan_incomplete("bandit")
             return
+        if self.exclude_tests:
+            errors = [error for error in errors if not self._is_test_file(error)]
         if errors:
             for error in errors[:3]:
                 detail = error.get("reason") or error.get("message") if isinstance(error, dict) else str(error)
@@ -276,6 +376,9 @@ class CodeRiskValidator(ValidatorBase):
         if exit_code == 0 and issues:
             result.add_error("Bandit returned findings with clean exit code 0; scanner status is inconsistent")
             result.mark_scan_incomplete("bandit")
+        # After the exit code checks, which are about everything Bandit found.
+        if self.exclude_tests:
+            issues = [issue for issue in issues if not self._is_test_file(issue)]
 
         if not issues:
             if not errors:

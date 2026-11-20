@@ -55,8 +55,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 2 rubric prompts now fence SKILL.md and every supplementary file preview in
   a backtick fence longer than any backtick run inside that file, keep file names
   on one fence line, and tell the judge that fenced skill text is untrusted data
-  under evaluation. Skill text can no longer forge a file header or an
-  `Evaluation Criteria:` section of the evaluator's own prompt.
+  under evaluation. File names on fence lines and the skill name are
+  percent-encoded and length-capped, so skill text can no longer forge a file
+  header, an `Evaluation Criteria:` section, or evaluator prose anywhere in the
+  prompt.
 - The LLM finding verifier's prompt now keeps skill content out of instruction
   space. File context is wrapped in a backtick fence longer than any backtick
   run in the file, so a skill cannot close the fence early or leave it open to

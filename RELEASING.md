@@ -77,9 +77,12 @@ image and consumer qualification details.
 
 1. Open the workflow in the GitHub UI again, choose **Validate release**, and
    enter the version and product release SHA from the bundle PR. Review the
-   source, wheel, sdist, and CI bundle checks. On the successful run's
-   **Summary** page, copy `validation_run` (the run ID and attempt, such as
-   `123-1`) and `validation_manifest_sha256` from **Publish release inputs**.
+   source, wheel, sdist, and CI bundle checks. Validation checks the selected
+   commit for a dated changelog entry and matches the live public GHCR digest
+   against the bundle. On the successful run's **Summary** page, copy both
+   values from **Publish release inputs**. `validation_run` includes the run ID
+   and attempt (such as `123-1`), and `validation_manifest_sha256` is the
+   manifest hash.
 2. Choose **Publish release** with the same version and product SHA, enter the
    two values from the summary, and approve the `release-github` job. The
    publish run verifies the selected validation attempt and uses its exact
@@ -87,7 +90,7 @@ image and consumer qualification details.
    artifact has expired or is missing before the first draft is staged, run
    **Validate release** again and use both values from the new summary.
    Before creating `vVERSION` at the reviewed product SHA, the workflow
-   checks the release notes, the official GHCR digest, and both package
+   rechecks the release notes and official GHCR digest and checks both package
    indexes for version conflicts. It verifies the staged bytes before
    publishing and verifies anonymous downloads afterward. The notes show that
    package publication is pending. Release runs execute one at a time across

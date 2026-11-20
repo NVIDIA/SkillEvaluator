@@ -24,7 +24,8 @@ import os
 import re
 import threading
 import urllib.error
-from collections.abc import Callable, Mapping, Sequence
+from collections.abc import Callable, Iterator, Mapping, Sequence
+from contextlib import contextmanager, nullcontext
 from dataclasses import replace
 from typing import Any, NamedTuple
 from urllib.parse import urlsplit
@@ -67,6 +68,45 @@ logger = get_logger(__name__)
 
 _NATIVE_OPENAI_AUTHORITIES = frozenset({"api.openai.com", "api.openai.com:443"})
 _NATIVE_OPENAI_PATHS = frozenset({"/v1", "/v1/"})
+
+_BEDROCK_BEARER_TOKEN_ENV = "AWS_BEARER_TOKEN_BEDROCK"
+
+
+class _BedrockTokenWindow:
+    """Blank AWS_BEARER_TOKEN_BEDROCK while Bedrock calls are in flight, then restore it exactly.
+
+    LiteLLM's Bedrock Responses route picks its token as `api_key or <this variable>`, so an empty
+    `api_key` still falls back to a whitespace-only value and sends it as a Bearer header. LiteLLM
+    has no per-call setting that skips that fallback. Concurrent calls share one blanked window:
+    the first saves the value and the last puts it back.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._holders = 0
+        self._saved: str | None = None
+
+    @contextmanager
+    def blank(self) -> Iterator[None]:
+        with self._lock:
+            if self._holders == 0:
+                self._saved = os.environ.get(_BEDROCK_BEARER_TOKEN_ENV)
+                os.environ[_BEDROCK_BEARER_TOKEN_ENV] = ""
+            self._holders += 1
+        try:
+            yield
+        finally:
+            with self._lock:
+                self._holders -= 1
+                if self._holders == 0:
+                    if self._saved is None:
+                        os.environ.pop(_BEDROCK_BEARER_TOKEN_ENV, None)
+                    else:
+                        os.environ[_BEDROCK_BEARER_TOKEN_ENV] = self._saved
+                    self._saved = None
+
+
+_bedrock_token_window = _BedrockTokenWindow()
 
 
 def _effective_openai_base_url(explicit_base_url: str | None) -> str:
@@ -806,17 +846,19 @@ class LLMClient:
                         raise LLMClientError("AWS_BEDROCK_RUNTIME_ENDPOINT must use HTTPS with a Bedrock bearer token.")
                 # LiteLLM sends a whitespace-only AWS_BEARER_TOKEN_BEDROCK as a blank Bearer header.
                 # An empty key makes it sign with the IAM credentials, as it does for an unset variable.
-                ignore_blank_token = "AWS_BEARER_TOKEN_BEDROCK" in os.environ and not has_bearer_token
-                response = completion(
-                    model=config.litellm_model,
-                    messages=_chat_messages(system_prompt, turns),
-                    aws_region_name=config.region,
-                    **({"aws_bedrock_runtime_endpoint": endpoint} if endpoint else {}),
-                    **({"api_key": ""} if ignore_blank_token else {}),
-                    **_temperature_kwargs(config.model, self._temperature),
-                    **({"max_tokens": max_tokens} if max_tokens is not None else {}),
-                    **({"timeout": self._timeout} if self._timeout is not None else {}),
-                )
+                # The Responses route also reads the variable itself, so hide it for the call.
+                ignore_blank_token = _BEDROCK_BEARER_TOKEN_ENV in os.environ and not has_bearer_token
+                with _bedrock_token_window.blank() if ignore_blank_token else nullcontext():
+                    response = completion(
+                        model=config.litellm_model,
+                        messages=_chat_messages(system_prompt, turns),
+                        aws_region_name=config.region,
+                        **({"aws_bedrock_runtime_endpoint": endpoint} if endpoint else {}),
+                        **({"api_key": ""} if ignore_blank_token else {}),
+                        **_temperature_kwargs(config.model, self._temperature),
+                        **({"max_tokens": max_tokens} if max_tokens is not None else {}),
+                        **({"timeout": self._timeout} if self._timeout is not None else {}),
+                    )
                 return _extract_choice_content(response)
 
             def _openai_kwargs(include_schema: bool) -> dict[str, Any]:

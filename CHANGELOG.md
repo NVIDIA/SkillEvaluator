@@ -9,6 +9,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Update LiteLLM and the minimum AWS SDK version in the optional LLM and
   Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
   overrides when bearer authentication is configured.
+- Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
+  installs to include upstream security fixes.
 
 ### Changed
 

@@ -68,6 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- JUnit report generation remembers the next case-name suffix for repeated
+  checks, avoiding quadratic name searches in large collection reports while
+  preserving existing names and collisions with explicitly numbered checks.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

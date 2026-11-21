@@ -10,6 +10,7 @@ import gzip
 import hashlib
 import json
 import os
+import ssl
 import subprocess
 import sys
 from concurrent.futures import ThreadPoolExecutor
@@ -33,6 +34,7 @@ from botocore.exceptions import (
     EndpointProviderError,
     InvalidConfigError,
     InvalidDefaultsMode,
+    InvalidEndpointConfigurationError,
     InvalidIMDSEndpointError,
     InvalidIMDSEndpointModeError,
     InvalidProxiesConfigError,
@@ -1615,6 +1617,7 @@ aws_secret_access_key = test-secret-key
 def test_bedrock_bearer_token_only_uses_real_catalog_transport(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    loopback_tls: tuple[ssl.SSLContext, Path],
     status_code: int,
     expected_ok: bool,
     expected_kind: str | None,
@@ -1650,10 +1653,13 @@ def test_bedrock_bearer_token_only_uses_real_catalog_transport(
         config="[profile test]\nregion = us-west-2\n",
     )
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token")
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(ca_bundle))
     provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
 
     with ThreadingHTTPServer(("127.0.0.1", 0), CatalogResponse) as server:
-        endpoint = f"http://127.0.0.1:{server.server_port}"
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+        endpoint = f"https://127.0.0.1:{server.server_port}"
         monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", endpoint)
         monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", endpoint)
         worker = Thread(target=server.serve_forever, daemon=True)
@@ -1664,12 +1670,114 @@ def test_bedrock_bearer_token_only_uses_real_catalog_transport(
             server.shutdown()
             worker.join(timeout=5)
 
-    assert seen_authorization == [True]
+    assert seen_authorization == [True], result.detail
     assert result.ok is expected_ok
     assert result.failure_kind == expected_kind
     assert runtime_preflight.credential_probe_disposition(provider, result) == expected_disposition
     assert "test-bearer-token" not in result.detail
     assert "private rejected bearer" not in result.detail
+
+
+@pytest.mark.parametrize("endpoint_variable", ["AWS_ENDPOINT_URL_BEDROCK", "AWS_ENDPOINT_URL_BEDROCK_RUNTIME"])
+def test_bedrock_preflight_requires_https_for_bearer_endpoints(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, endpoint_variable: str
+) -> None:
+    _configure_isolated_aws_profile(monkeypatch, tmp_path, config="[profile test]\nregion = us-west-2\n")
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "test-bearer-token")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", "https://127.0.0.1:1")
+    monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", "https://127.0.0.1:1")
+    monkeypatch.setenv(endpoint_variable, "http://127.0.0.1:1")
+    provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
+
+    result = _probe_bedrock_fixture(provider, timeout_seconds=15)
+
+    assert result.failure_kind == "invalid_configuration", result.detail
+    assert runtime_preflight.credential_probe_disposition(provider, result) == "fatal"
+    assert "https" in result.detail.lower()
+    assert "AWS_BEARER_TOKEN_BEDROCK" in result.detail
+    assert "test-bearer-token" not in result.detail
+    assert "127.0.0.1" not in result.detail
+
+
+@pytest.mark.parametrize("bearer_token", ["", " \t "])
+def test_bedrock_blank_bearer_token_signs_both_clients_with_sigv4(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    loopback_tls: tuple[ssl.SSLContext, Path],
+    bearer_token: str,
+) -> None:
+    auth_schemes = BotocoreSession().get_service_model("bedrock").metadata.get("auth", [])
+    if "smithy.api#httpBearerAuth" not in auth_schemes:
+        pytest.skip("installed Botocore does not support Bedrock bearer authentication")
+
+    seen_authorization: list[tuple[str, str]] = []
+
+    class BedrockResponse(BaseHTTPRequestHandler):
+        def _respond(self) -> None:
+            self.rfile.read(int(self.headers.get("Content-Length", 0)))
+            seen_authorization.append((self.command, self.headers.get("Authorization", "")))
+            encoded = json.dumps({"modelSummaries": [{"modelId": "test-model"}]}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(encoded)))
+            self.end_headers()
+            self.wfile.write(encoded)
+
+        def do_GET(self) -> None:
+            self._respond()
+
+        def do_POST(self) -> None:
+            self._respond()
+
+        def log_message(self, _format, *_args) -> None:
+            return
+
+    _configure_isolated_aws_profile(
+        monkeypatch,
+        tmp_path,
+        config="[profile test]\nregion = us-west-2\n",
+        credentials="""\
+[test]
+aws_access_key_id = test-access-key
+aws_secret_access_key = test-secret-key
+""",
+    )
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", bearer_token)
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_CA_BUNDLE", str(ca_bundle))
+    clients: dict[str, object] = {}
+    real_session_type = runtime_preflight.boto3.session.Session
+
+    class RecordingSession(real_session_type):
+        def client(self, service_name: str, **kwargs):
+            clients[service_name] = super().client(service_name, **kwargs)
+            return clients[service_name]
+
+    monkeypatch.setattr(runtime_preflight.boto3.session, "Session", RecordingSession)
+    provider = ProviderConfig("bedrock", "test-model", None, None, "bedrock/test-model", region="us-west-2")
+
+    with ThreadingHTTPServer(("127.0.0.1", 0), BedrockResponse) as server:
+        server.socket = tls_context.wrap_socket(server.socket, server_side=True)
+        endpoint = f"https://127.0.0.1:{server.server_port}"
+        monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK", endpoint)
+        monkeypatch.setenv("AWS_ENDPOINT_URL_BEDROCK_RUNTIME", endpoint)
+        worker = Thread(target=server.serve_forever, daemon=True)
+        worker.start()
+        try:
+            result = _probe_bedrock_fixture(provider, timeout_seconds=15)
+            clients["bedrock-runtime"].converse(
+                modelId="test-model",
+                messages=[{"role": "user", "content": [{"text": "hello"}]}],
+            )
+        finally:
+            server.shutdown()
+            worker.join(timeout=5)
+
+    assert result.ok is True, result.detail
+    assert [method for method, _authorization in seen_authorization] == ["GET", "POST"]
+    for _method, authorization in seen_authorization:
+        assert authorization.startswith("AWS4-HMAC-SHA256 ")
+        assert "Bearer" not in authorization
 
 
 @pytest.mark.parametrize(
@@ -2174,6 +2282,7 @@ aws_secret_access_key = test-secret-key
         (EndpointProviderError(msg="private endpoint detail"), "invalid_configuration"),
         (InvalidConfigError(error_msg="invalid profile"), "invalid_configuration"),
         (InvalidDefaultsMode(mode="private mode", valid_modes=["standard"]), "invalid_configuration"),
+        (InvalidEndpointConfigurationError(msg="private endpoint details"), "invalid_configuration"),
         (InvalidIMDSEndpointError(endpoint="private endpoint"), "invalid_configuration"),
         (
             InvalidIMDSEndpointModeError(mode="private mode", valid_modes=["ipv4", "ipv6"]),

@@ -768,11 +768,13 @@ print(json.dumps({"streamed": streamed, "buffered": _redact(text, secrets)}))
             [sys.executable, "-c", script],
             cwd=Path(__file__).resolve().parents[1],
             env=child_env,
-            check=True,
+            check=False,
             capture_output=True,
             text=True,
             timeout=60,
         )
+        # Surface the watchdog's stack dump, or any other child error, in the report.
+        assert completed.returncode == 0, f"PYTHONHASHSEED={seed}\n{completed.stderr}"
         outputs.append(json.loads(completed.stdout))
 
     expected = _marker_for("abcdefgh", "ghijklmn") + "\n"

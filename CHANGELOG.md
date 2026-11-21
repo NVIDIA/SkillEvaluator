@@ -30,6 +30,9 @@ All notable changes to SkillEvaluator are documented in this file.
   when the catalog has no eligible entries to compare against.
   These queries return an empty result without constructing the provider
   client, including when that provider is missing or unreachable.
+- The all-tier CI bootstrap rejects an unsupported `SKILL_EVAL_ENV_MODE`
+  without first loading the Tier 3 runtime (Harbor), so the rejection is
+  faster; its message and exit code are unchanged.
 
 ### Documentation
 
@@ -249,9 +252,6 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
-- CI bootstrap rejects unsupported Tier 3 environment modes before importing
-  optional runtime dependencies, preserving the isolated consumer-path check
-  without paying for unnecessary Harbor initialization.
 
 ## 1.0.1 - 2026-11-17
 

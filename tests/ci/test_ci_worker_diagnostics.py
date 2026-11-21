@@ -203,8 +203,10 @@ print('unchanged')
         # Imports can be slow on loaded CI hosts; the child still enforces the
         # original processing budget, while this watchdog bounds startup/hangs.
         timeout=30,
-        check=True,
+        check=False,
     )
+    # Surface the child's assertion (including the measured time) in the report.
+    assert completed.returncode == 0, completed.stderr
     assert completed.stdout == "unchanged\n"
 
 

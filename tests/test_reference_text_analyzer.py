@@ -71,10 +71,14 @@ def test_starter_eval_text_statistics_are_unchanged() -> None:
         ("See https://example.com/index.html for details.", 1),
         ("Write to user@example.com.", 1),
         ('He said "go." Then left.', 2),
+        ("He said 'go.' Then left.", 2),
         ("She said \u201cGo now.\u201d Then left.", 2),
         ("She said \u2018Go now.\u2019 Then left.", 2),
         ("He wrote \u00abfin.\u00bb Then left.", 2),
+        ("He wrote \u203afin.\u203a Then left.", 2),
         ("(see above.) Next", 2),
+        ("[see above.] Next", 2),
+        ("{done.} Next", 2),
         ("It was founded in 1993.[1] The company grew.", 2),
         ("Done.[1][2] Next.", 2),
         ("Done.[^1] Next.", 2),
@@ -132,6 +136,25 @@ def test_file_argument_rejects_a_directory(tmp_path: Path) -> None:
     assert result.stdout == ""
     assert result.stderr == f"Error: not a file: {tmp_path}\n"
     assert "Traceback" not in result.stderr
+
+
+def test_file_argument_rejects_a_directory_that_raises_permission_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # Windows opens a directory with PermissionError, not IsADirectoryError.
+    def read_text(self: Path, *args: object, **kwargs: object) -> str:
+        raise PermissionError(13, "Permission denied", str(self))
+
+    monkeypatch.setattr(Path, "read_text", read_text)
+    monkeypatch.setattr(sys, "argv", ["analyze_text.py", "--file", str(tmp_path)])
+
+    with pytest.raises(SystemExit) as excinfo:
+        _load_analyzer().main()
+
+    assert excinfo.value.code == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == f"Error: not a file: {tmp_path}\n"
 
 
 @pytest.mark.skipif(os.name == "nt", reason="permission bits do not apply on Windows")

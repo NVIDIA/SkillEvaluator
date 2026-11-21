@@ -133,3 +133,16 @@ def test_harness_publication_requires_actual_execution_evidence(
 
     assert assessment.status == ("pass" if actual_harness else "incomplete")
     assert assessment.reasons == (() if actual_harness else ("Tier 1 lacks trustworthy execution evidence.",))
+
+
+def test_harness_only_summary_counts_its_single_sub_check(tmp_path: Path, clean_profiles: Path) -> None:
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    results = run_validation(
+        _skill(tmp_path), checks="harness", harness_profiles=clean_profiles, on_check=lambda _check: None
+    )
+
+    _passed, rows = summarize_tier1(results, lineup=["harness"])
+    summary = next("".join(chunk for chunk, _ in row.segments) for row in rows if row.label == "summary")
+
+    assert summary == "1/1 checks passed (1 sub-check)"

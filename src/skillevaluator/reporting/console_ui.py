@@ -1224,7 +1224,7 @@ def summarize_tier1(
     if sub_checks := sum(
         r.summary.checks_performed for r in results if outcome[id(r)] in {"pass", "fail", "incomplete"}
     ):
-        checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
+        checks_segments.append((f" ({sub_checks} sub-check{'s' if sub_checks != 1 else ''})", MUTED))
     if count["fail"]:
         checks_segments += [("  ·  ", FAINT), (f"{count['fail']} failed", f"bold {RED}")]
     if count["incomplete"]:
@@ -1240,8 +1240,14 @@ def summarize_tier1(
         names = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in user_skipped))
         rows.append(TierRow("skipped", [(names, MUTED), ("  with --skip, not checked", FAINT)]))
     if not_applicable:
+        # A check key names every member of that check, so use it only when no other member ran; otherwise
+        # the row would list a check that the ticker marks as passed or failed.
+        ran = {_check_key(r.validator_name) for r in results if not _is_skipped(r)}
         names = ", ".join(
-            dict.fromkeys(_check_key(r.validator_name) or _short_name(r.validator_name) for r in not_applicable)
+            dict.fromkeys(
+                key if (key := _check_key(r.validator_name)) and key not in ran else _short_name(r.validator_name)
+                for r in not_applicable
+            )
         )
         first = not_applicable[0]
         reason = _bounded_console_line(
@@ -1393,12 +1399,19 @@ def _scanner_setup_issue(result: ValidationResult) -> bool:
     )
 
 
+_INCOMPLETE_DIAGNOSTICS_SHOWN = 3
+
+
 def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
-    """Keep partial, malformed and failed analyses separate from installation failures."""
+    """Keep partial, malformed and failed analyses separate from installation failures.
+
+    Some checks report one diagnostic per scanned item, so the item quotes only the first few,
+    each bounded, and counts the rest; the detailed reports keep every diagnostic.
+    """
     checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
     diagnostics = list(
         dict.fromkeys(
-            str(message)
+            _bounded_console_line(str(message), limit=_FIX_TEXT_LIMIT)
             for result in results
             for message in (
                 result.gate_failures
@@ -1408,9 +1421,11 @@ def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
             )
         )
     )
+    shown = diagnostics[:_INCOMPLETE_DIAGNOSTICS_SHOWN]
+    more = len(diagnostics) - len(shown)
     return FixItem(
         "scan",
-        f"{checks} incomplete: {'; '.join(diagnostics)}",
+        f"{checks} incomplete: {'; '.join(shown)}" + (f"; and {more} more" if more else ""),
         ["resolve the reported scanner or input issues, then rerun; see detailed reports for full diagnostics"],
     )
 

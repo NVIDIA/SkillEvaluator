@@ -68,6 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Report source links encode reserved characters, UTF-8 names, and retained
+  filename/ref bytes so refs and skill paths link to the intended GitHub and
+  GitLab locations. HTML labels remain readable while link targets stay encoded.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

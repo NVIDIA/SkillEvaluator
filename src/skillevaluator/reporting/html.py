@@ -35,7 +35,7 @@ from functools import cache
 from importlib import resources
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, ClassVar
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from jinja2 import BaseLoader, Environment, pass_context
 
@@ -2901,7 +2901,7 @@ class HTMLReporter(ReporterBase):
         if not url or not url.startswith("https://"):
             return url or ""
         parsed = urlparse(url)
-        path = parsed.path.lstrip("/")
+        path = unquote(parsed.path).lstrip("/")
         if "/-/tree/" in path:
             repo_part, _, rest = path.partition("/-/tree/")
             branch_and_path = rest.split("/", 1)
@@ -2938,7 +2938,7 @@ class HTMLReporter(ReporterBase):
         path = target
         if path.startswith("https://"):
             parsed = urlparse(path)
-            path = parsed.path.lstrip("/")
+            path = unquote(parsed.path).lstrip("/")
             if "/-/tree/" in path:
                 _repo, _, rest = path.partition("/-/tree/")
                 branch_and_path = rest.split("/", 1)

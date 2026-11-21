@@ -17,7 +17,7 @@ from typing import Any
 
 import pytest
 
-from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS, live_case_marks
+from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS, case_marks, live_case_marks
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.nemo_gym.results import write_job_from_rollouts
@@ -481,3 +481,108 @@ def test_live_marks_score_multi_step_episodes_as_the_final_result_does(tmp_path:
     assert running == set()
     final = write_job_from_rollouts(rows, tmp_path / "job", eval_name="codex__m", task_case_ids=CASES, n_attempts=3)
     assert final == ["case case-1 attempt 3: step 'second': test.sh timed out"]
+
+
+def _graded(logs: Path, goal_accuracy: float, *, entry_id: str | None = None, **sidecar: Any) -> None:
+    rewards: dict[str, Any] = {**dict.fromkeys(DEFAULT_METRICS, 1.0), "goal_accuracy": goal_accuracy, "overall": 0.95}
+    if entry_id is not None:
+        rewards["entry_id"] = entry_id
+    (logs / "reward.json").write_text(json.dumps(rewards), encoding="utf-8")
+    (logs / "skill_evaluator_reward.json").write_text(json.dumps(rewards | sidecar), encoding="utf-8")
+
+
+def _graded_turn(base: Path, name: str, goal_accuracy: float, entry_id: str | None = None) -> dict[str, Any]:
+    turn = _turn(base, name, 0.95)
+    _graded(Path(turn["verifier_logs_dir"]), goal_accuracy, entry_id=entry_id)
+    return turn
+
+
+def _live_and_final_marks(out: Path, jobs: Path, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    arm = out / "_nemo-gym" / "codex-with"
+    arm.mkdir(parents=True)
+    (arm / "rollouts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+    live, running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+    assert running == set()
+    write_job_from_rollouts(
+        rows,
+        jobs / "demo-codex-with",
+        eval_name="codex__m",
+        task_case_ids={"login-task": "auth-login"},
+        n_attempts=len(rows),
+    )
+    results = collect_harbor_results(
+        "demo",
+        ["codex"],
+        out,
+        jobs,
+        skip_baseline=True,
+        expected_cases=1,
+        expected_case_ids=["auth-login"],
+        expected_trials=len(rows),
+    )
+    return live["codex"]["with_skill"]["login-task"], case_marks(results)["codex"]["with_skill"]["auth-login"]
+
+
+@pytest.mark.parametrize("strategy", ["mean", "final"])
+def test_live_marks_apply_the_final_verdict_and_staged_case_to_episodes(tmp_path: Path, strategy: str) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+
+    def episode(label: str, goal_accuracy: float, second_entry_id: str | None = None) -> dict[str, Any]:
+        turns = [
+            _graded_turn(tmp_path / label, "first", goal_accuracy),
+            _graded_turn(tmp_path / label, "second", goal_accuracy, second_entry_id),
+        ]
+        return _episode(turns, task="login-task", turn_reward_strategy=strategy)
+
+    rows = [
+        episode("goal-met", 1.0),
+        # Overall clears the threshold, but standard grading requires the goal.
+        episode("goal-missed", 0.5),
+        episode("other-case", 1.0, second_entry_id="other-case"),
+        episode("staged-case", 1.0, second_entry_id="auth-login"),
+    ]
+
+    live, final = _live_and_final_marks(out, jobs, rows)
+
+    assert live == [PASS, FAIL, ERROR, PASS]
+    assert sorted(live) == sorted(final)
+
+
+def test_live_marks_keep_a_verified_case_after_its_staged_task_is_removed(tmp_path: Path) -> None:
+    out = tmp_path / "out"
+    _stage_native_task(out, "with")
+    turns = [_graded_turn(tmp_path, name, 1.0, "auth-login") for name in ("first", "second")]
+    arm = out / "_nemo-gym" / "codex-with"
+    arm.mkdir(parents=True)
+    (arm / "rollouts.jsonl").write_text(json.dumps(_episode(turns, task="login-task")) + "\n", encoding="utf-8")
+    # The run removes its staged tasks before the live view stops polling.
+    shutil.rmtree(out / "_harbor-tasks")
+
+    marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+
+    assert marks == {"codex": {"with_skill": {"login-task": [PASS]}}}
+
+
+def test_live_marks_apply_the_final_verdict_and_staged_case_to_single_steps(tmp_path: Path) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+
+    def rollout(label: str, goal_accuracy: float, **reward: Any) -> dict[str, Any]:
+        logs = tmp_path / label
+        logs.mkdir()
+        _graded(logs, goal_accuracy, **reward)
+        return {"task_id": "login-task", "verifier_return_code": 0, "verifier_logs_dir": str(logs)}
+
+    not_applicable = {"details": {"goal_accuracy": {"status": "not_applicable"}}}
+    rows = [
+        rollout("goal-missed", 0.5),
+        rollout("other-case", 1.0, entry_id="other-case"),
+        # The collector reads the sidecar's N/A goal back into the reward, so only Overall decides.
+        rollout("goal-not-applicable", 0.0, **not_applicable),
+    ]
+
+    live, final = _live_and_final_marks(out, jobs, rows)
+
+    assert live == [FAIL, ERROR, PASS]
+    assert sorted(live) == sorted(final)

@@ -73,10 +73,13 @@ All notable changes to SkillEvaluator are documented in this file.
   rewards, verifier files and trajectory are kept in order, and the attempt is
   scored once by the task's `mean` or `final` strategy. An attempt with a masked,
   failed or ungraded step stays unscored and names that step. The live case
-  status uses the same score, and a `final` attempt credits only the last
-  step's judges. Published multi-step trials, from Gym or Harbor, keep each
-  step's redacted trajectory and verifier output under `steps/<name>/`, so the
-  evidence survives job cleanup and a partial attempt keeps the steps that ran.
+  status uses the same score and, for every Gym attempt, the finished run's
+  pass verdict, so a goal missed under standard grading or a verifier that
+  names another case no longer shows as a pass while the run is active. A
+  `final` attempt credits only the last step's judges. Published multi-step
+  trials, from Gym or Harbor, keep each step's redacted trajectory and verifier
+  output under `steps/<name>/`, so the evidence survives job cleanup and a
+  partial attempt keeps the steps that ran.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

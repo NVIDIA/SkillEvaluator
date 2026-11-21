@@ -10,6 +10,7 @@ import logging
 import os
 import re
 import tempfile
+import tomllib
 from collections import Counter
 from collections.abc import Callable, Mapping
 from contextvars import ContextVar
@@ -1617,12 +1618,28 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     return ERROR
 
 
+def _gym_staged_case_id(staged: Path, task: str, run_dir: Path) -> str | None:
+    """The case the Gym runner staged ``task`` as, or ``None`` once the run has removed its staged task.
+
+    As in the runner, a task without a ``[metadata].entry_id`` is staged as its folder name.
+    """
+    try:
+        with SecureRoot(run_dir) as reader:
+            raw, _ = reader.read_bytes((staged / task / "task.toml").relative_to(run_dir), _MAX_TRIAL_JSON_BYTES)
+        metadata = tomllib.loads(raw.decode("utf-8")).get("metadata")
+    except (OSError, ValueError, SecurePathError):
+        return None
+    entry_id = metadata.get("entry_id") if isinstance(metadata, dict) else None
+    return entry_id if isinstance(entry_id, str) and entry_id else task
+
+
 def _add_gym_live_marks(
     run_dir: Path, agents: list[str], marks: dict[str, dict[str, dict[str, list[str]]]], pass_threshold: float
 ) -> bool:
     """Add the attempts a running NeMo Gym arm has appended to its ``rollouts.jsonl``; False for a non-Gym run.
 
-    Each attempt is scored from its verifier logs with the same rules the Gym result normalizer uses.
+    Each attempt is scored from its verifier logs with the same rules the Gym result normalizer uses,
+    including the staged case its verifier must name, and marked by the final attempt verdict.
     """
     from skillevaluator.tier3.nemo_gym.results import read_rollouts, rollout_rewards, rollout_task_name
 
@@ -1635,17 +1652,21 @@ def _add_gym_live_marks(
             rollouts = arm / "rollouts.jsonl"
             if arm.is_symlink() or rollouts.is_symlink() or not rollouts.is_file():
                 continue
+            staged = run_dir / "_harbor-tasks" / agent / variant
+            case_ids: dict[str, str | None] = {}
             for row in read_rollouts(rollouts):
-                case_id = rollout_task_name(row)
-                if case_id is None or not _SAFE_TRIAL.match(case_id):
+                task = rollout_task_name(row)
+                if task is None or not _SAFE_TRIAL.match(task):
                     continue
-                rewards = rollout_rewards(row)
+                if task not in case_ids:
+                    case_ids[task] = _gym_staged_case_id(staged, task, run_dir)
+                rewards = rollout_rewards(row, case_ids[task])
                 score = rewards.get("overall", rewards.get("reward")) if rewards else None
                 if not isinstance(score, int | float) or isinstance(score, bool):
                     mark = ERROR
                 else:
-                    mark = PASS if score >= pass_threshold else FAIL
-                marks.setdefault(agent, {}).setdefault(key, {}).setdefault(case_id, []).append(mark)
+                    mark = PASS if attempt_verdict(score, pass_threshold, reward=rewards).passed else FAIL
+                marks.setdefault(agent, {}).setdefault(key, {}).setdefault(task, []).append(mark)
     return True
 
 

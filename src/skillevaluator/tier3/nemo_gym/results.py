@@ -115,29 +115,35 @@ def read_verifier_rewards(verifier_dir: Path) -> dict[str, Any] | None:
     return None
 
 
-def rollout_rewards(row: dict[str, Any]) -> dict[str, Any] | None:
-    """Return a Gym rollout's rewards read in place from its verifier logs, or ``None`` when it is unscored.
+def rollout_rewards(row: dict[str, Any], case_id: str | None) -> dict[str, Any] | None:
+    """Return the rewards the collector scores for a Gym rollout, read in place, or ``None`` when it is unscored.
 
-    A multi-step episode is rolled up from its turns with the rules the result normalizer applies.
+    The rollout passes the result normalizer's checks, including that its verifier scored the staged
+    ``case_id`` when that is known. A multi-step episode is rolled up from its turns; a single-step
+    rollout's reward sidecars are merged in as the collector merges them.
     """
     turns = row.get("turns")
     if turns is None:
-        return _logged_rewards(row)[0]
+        rewards = _logged_rewards(row, case_id)[0]
+        if rewards is not None:
+            from skillevaluator.tier3.harbor.collector import _merge_reward_sidecars
+
+            _merge_reward_sidecars(rewards, Path(row["verifier_logs_dir"]))
+        return rewards
     names = _turn_names(turns)
     if names is None:
         return None
-    return _episode_rewards(row, names, [_logged_rewards(turn) for turn in turns])[0]
+    return _episode_rewards(row, names, [_logged_rewards(turn, case_id) for turn in turns])[0]
 
 
-def _logged_rewards(row: dict[str, Any]) -> tuple[dict[str, Any] | None, str]:
+def _logged_rewards(row: dict[str, Any], case_id: str | None) -> tuple[dict[str, Any] | None, str]:
     failure = _failure_text(row)
     if failure:
         return None, failure
     logs_dir = row.get("verifier_logs_dir")
-    rewards = read_verifier_rewards(Path(logs_dir)) if isinstance(logs_dir, str) and logs_dir else None
-    if rewards is None:
+    if not isinstance(logs_dir, str) or not logs_dir:
         return None, _NO_REWARDS
-    return rewards, ""
+    return _case_rewards(read_verifier_rewards(Path(logs_dir)), case_id)
 
 
 def _failure_text(row: dict[str, Any]) -> str:
@@ -158,19 +164,28 @@ def _reported_failure_text(row: dict[str, Any]) -> str:
     return ""
 
 
-def _verified_rewards(verifier_dir: Path, case_id: str) -> tuple[dict[str, Any] | None, str]:
-    """Return the verifier's rewards stamped with ``case_id``, or why they cannot be scored."""
-    loaded = read_verifier_rewards(verifier_dir)
+def _case_rewards(loaded: dict[str, Any] | None, case_id: str | None) -> tuple[dict[str, Any] | None, str]:
+    """Return the verifier's rewards stamped with ``case_id``, or why they cannot be scored.
+
+    An unknown ``case_id`` leaves the rewards as the verifier wrote them.
+    """
     if loaded is None:
         return None, _NO_REWARDS
+    if case_id is None:
+        return dict(loaded), ""
     loaded_entry_id = loaded.get("entry_id")
     if loaded_entry_id is not None and str(loaded_entry_id) != str(case_id):
         return None, f"the task verifier reported case {str(loaded_entry_id)!r} for staged case {str(case_id)!r}"
-    rewards = {**loaded, "entry_id": case_id}
+    return {**loaded, "entry_id": case_id}, ""
+
+
+def _verified_rewards(verifier_dir: Path, case_id: str) -> tuple[dict[str, Any] | None, str]:
+    """Return the trial verifier's rewards stamped with ``case_id`` and write them back, or why they are unscored."""
+    rewards, failure = _case_rewards(read_verifier_rewards(verifier_dir), case_id)
     reward_path = verifier_dir / "reward.json"
-    if reward_path.is_file():
+    if rewards is not None and reward_path.is_file():
         reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
-    return rewards, ""
+    return rewards, failure
 
 
 def _turn_names(turns: Any) -> list[str] | None:

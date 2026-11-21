@@ -68,6 +68,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Python content chunks preserve complete multiline function and class headers
+  without inline implementation bodies, including continued bodies and decorated
+  members. More definitions can clear the 80-character minimum, increasing
+  embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

@@ -18,7 +18,7 @@ import yaml
 
 from skillevaluator.quality_config import _yaml_error_detail
 from skillevaluator.tier3.eval_core.optional_reference import normalize_expected_behaviors, normalize_optional_reference
-from skillevaluator.utils.structured_data import StructuredDataSyntaxError, load_bounded_yaml
+from skillevaluator.utils.structured_data import ScalarConstructionError, StructuredDataSyntaxError, load_bounded_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -210,6 +210,8 @@ def _yaml_syntax_message(error: StructuredDataSyntaxError) -> str:
     column are what the author needs to find the mistake.
     """
     cause = error.__cause__
+    if isinstance(cause, ScalarConstructionError):
+        return str(error)
     if not isinstance(cause, yaml.YAMLError) or getattr(cause, "problem_mark", None) is None:
         return str(error)
     context = getattr(cause, "context", None)

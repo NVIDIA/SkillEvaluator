@@ -6,6 +6,7 @@
 Tests validator logic and graceful handling when external tools are unavailable.
 """
 
+import configparser
 import json
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -14,7 +15,7 @@ import pytest
 
 from skillevaluator.utils.tool_runner import Severity, ToolResult, Tools
 from skillevaluator.validators.base import ValidationResult
-from skillevaluator.validators.code_risk import CodeRiskValidator
+from skillevaluator.validators.code_risk import BANDIT_INI_PATH, CodeRiskValidator
 from skillevaluator.validators.dependencies import DependencySecurityValidator
 from skillevaluator.validators.secrets import SecretsValidator
 
@@ -807,9 +808,7 @@ class TestCodeRiskValidator:
         assert "scripts/bad.sh:2" in summary
         assert "skips the code it cannot parse" in summary
 
-    def test_run_semgrep_reports_parse_errors_with_relative_paths(
-        self, tmp_path: Path, mock_tool_available
-    ) -> None:
+    def test_run_semgrep_reports_parse_errors_with_relative_paths(self, tmp_path: Path, mock_tool_available) -> None:
         skill = tmp_path / "my-skill"
         (skill / "scripts").mkdir(parents=True)
         absolute = str(skill.resolve() / "scripts" / "bad.sh")
@@ -1292,3 +1291,97 @@ File is at /Users/johndoe/Documents/project
 
         # Error string should contain standard format
         assert any("[PII-" in e for e in result.errors)
+
+
+# =============================================================================
+# BANDIT IGNORES SKILL-SUPPLIED CONFIGURATION
+# =============================================================================
+
+_RISKY_SCRIPT = """import subprocess
+import sys
+
+subprocess.call(sys.argv[1], shell=True)
+eval(sys.argv[1])
+"""
+
+_RISKY_SCRIPT_NOSEC = """import subprocess
+import sys
+
+subprocess.call(sys.argv[1], shell=True)  # nosec
+eval(sys.argv[1])  # nosec B307
+"""
+
+_SKIP_INI = "[bandit]\nskips = B602,B307\n"
+
+
+def _make_risky_skill(tmp_path: Path, script: str, extra_files: dict[str, str]) -> Path:
+    skill = tmp_path / "risky-skill"
+    (skill / "scripts").mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\nname: risky-skill\ndescription: Risky skill\n---\n# Risky\n")
+    (skill / "scripts" / "run.py").write_text(script)
+    for relative, content in extra_files.items():
+        target = skill / relative
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(content)
+    return skill
+
+
+class TestBanditIgnoresSkillConfig:
+    """A skill cannot switch off or silence its own Bandit findings."""
+
+    def test_packaged_ini_is_empty(self):
+        assert BANDIT_INI_PATH.is_file()
+        parser = configparser.ConfigParser()
+        parser.read(BANDIT_INI_PATH)
+        assert parser.has_section("bandit")
+        assert parser.items("bandit") == []
+
+    @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
+    @patch.object(Tools.bandit, "run")
+    def test_bandit_argv_pins_ini_and_ignores_nosec(self, mock_run, tmp_path: Path):
+        mock_run.return_value = ToolResult(success=True, stdout='{"results": [], "errors": []}', stderr="", exit_code=0)
+
+        CodeRiskValidator()._run_bandit(tmp_path)
+
+        args = mock_run.call_args.args[0]
+        assert "--ignore-nosec" in args
+        assert args[args.index("--ini") + 1] == str(BANDIT_INI_PATH)
+
+    @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
+    @patch.object(Tools.bandit, "run")
+    def test_skill_bandit_file_is_reported_as_ignored(self, mock_run, tmp_path: Path):
+        mock_run.return_value = ToolResult(success=True, stdout='{"results": [], "errors": []}', stderr="", exit_code=0)
+        skill = _make_risky_skill(tmp_path, _RISKY_SCRIPT, {"scripts/.bandit": _SKIP_INI, "evals/.bandit": _SKIP_INI})
+
+        result = CodeRiskValidator()._run_bandit(skill)
+
+        ignored = [w for w in result.warnings if ".bandit" in w and "ignored" in w]
+        assert len(ignored) == 1
+        assert "scripts/.bandit" in ignored[0]
+
+    @pytest.mark.skipif(not Tools.bandit.is_available, reason="bandit not installed")
+    @pytest.mark.parametrize(
+        ("script", "extra_files"),
+        [
+            pytest.param(_RISKY_SCRIPT, {".bandit": _SKIP_INI}, id="root-skips"),
+            pytest.param(_RISKY_SCRIPT, {"scripts/.bandit": _SKIP_INI}, id="nested-skips"),
+            pytest.param(_RISKY_SCRIPT, {".bandit": _SKIP_INI, "scripts/.bandit": _SKIP_INI}, id="two-ini-files"),
+            pytest.param(_RISKY_SCRIPT, {".bandit": "[bandit]\ntests = B101\n"}, id="root-tests-allowlist"),
+            pytest.param(_RISKY_SCRIPT_NOSEC, {}, id="nosec-comments"),
+        ],
+    )
+    def test_skill_config_cannot_hide_findings(self, tmp_path: Path, monkeypatch, script: str, extra_files: dict):
+        skill = _make_risky_skill(tmp_path, script, extra_files)
+        # Bandit must not pick anything up from the working directory either.
+        monkeypatch.chdir(skill)
+
+        # exclude_tests=False: Bandit's --exclude matches substrings of the full
+        # path, and pytest's temp root ("pytest-of-...") contains "test".
+        result = CodeRiskValidator(use_semgrep=False, exclude_tests=False).validate(skill)
+
+        assert "bandit" not in result.metadata.get("incomplete_scans", [])
+        reported = {finding.check_name.split(":")[0] for finding in result.findings if finding.category == "BANDIT"}
+        assert {"B602", "B307"} <= reported
+        assert not result.passed
+        has_ini = any(name.endswith(".bandit") for name in extra_files)
+        assert any(".bandit" in w and "ignored" in w for w in result.warnings) is has_ini

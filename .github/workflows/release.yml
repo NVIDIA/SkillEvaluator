@@ -1,0 +1,563 @@
+# SPDX-License-Identifier: Apache-2.0
+name: SkillEvaluator Release
+run-name: "${{ inputs.phase }} · SkillEvaluator ${{ inputs.version }}"
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Product version (X.Y.Z)
+        required: true
+        type: string
+      source_sha:
+        description: Full main SHA of the version PR (image/full release) or bundle PR (validation/publication)
+        required: true
+        type: string
+      phase:
+        description: Release phase
+        type: choice
+        default: Validate release
+        options:
+          - Validate release
+          - Validate and publish
+          - Full release
+          - Build CI image and bundle
+          - Publish release
+      promote_stable:
+        description: Promote this release after verification if it is GitHub Latest (publishing phases only)
+        type: boolean
+        default: false
+      validation_run:
+        description: Run ID and attempt from the successful Validate release summary (e.g. 123-1)
+        type: string
+      validation_manifest_sha256:
+        description: Manifest SHA-256 from the successful Validate release summary
+        type: string
+
+permissions: {}
+env:
+  RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+concurrency:
+  group: skillevaluator-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      version: ${{ steps.reviewed.outputs.version }}
+      source_sha: ${{ steps.reviewed.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Validate the release version and reviewed source
+        id: reviewed
+        env:
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PHASE: ${{ inputs.phase }}
+          PROMOTE_STABLE: ${{ inputs.promote_stable }}
+        run: |
+          if [[ "$PROMOTE_STABLE" == 'true' && "$PHASE" != 'Full release' &&
+                "$PHASE" != 'Validate and publish' && "$PHASE" != 'Publish release' ]]; then
+            echo 'Stable promotion requires Full release, Validate and publish, or Publish release.' >&2
+            exit 1
+          fi
+          python3 ci/github_release.py preflight --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --main-sha "$GITHUB_SHA" --phase "$PHASE"
+          printf 'version=%s\nsource_sha=%s\n' "$VERSION" "$SOURCE_SHA" >> "$GITHUB_OUTPUT"
+
+  bundle-configuration:
+    needs: preflight
+    if: inputs.phase == 'Full release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    environment: release-bundle-pr
+    permissions: {}
+    steps:
+      - name: Check bundle PR App configuration before building the image
+        env:
+          APP_CLIENT_ID: ${{ vars.RELEASE_BUNDLE_APP_CLIENT_ID }}
+          APP_PRIVATE_KEY: ${{ secrets.RELEASE_BUNDLE_APP_PRIVATE_KEY }}
+        run: |
+          if [[ -z "$APP_CLIENT_ID" || -z "$APP_PRIVATE_KEY" ]]; then
+            echo "Configure the bundle PR GitHub App in the release-bundle-pr environment." >&2
+            exit 1
+          fi
+
+  image:
+    needs: [preflight, bundle-configuration]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      (inputs.phase == 'Build CI image and bundle' ||
+       (inputs.phase == 'Full release' && needs.bundle-configuration.result == 'success'))
+    uses: ./.github/workflows/release-tier1-image.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ needs.preflight.outputs.version }}
+      source_sha: ${{ needs.preflight.outputs.source_sha }}
+
+  bundle-pr:
+    needs: [preflight, image]
+    if: inputs.phase == 'Full release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-bundle-pr
+    permissions:
+      actions: read
+      contents: read
+    outputs:
+      number: ${{ steps.pin.outputs.number }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify and extract the exact generated bundle
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_ID: ${{ needs.image.outputs.bundle_artifact_id }}
+          ARTIFACT_DIGEST: ${{ needs.image.outputs.bundle_artifact_digest }}
+        run: |
+          archive="$RUNNER_TEMP/ci-bundle.zip"
+          digest="${ARTIFACT_DIGEST#sha256:}"
+          if [[ ! "$ARTIFACT_ID" =~ ^[1-9][0-9]*$ || ! "$digest" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "The image job did not provide a valid bundle artifact ID and digest." >&2
+            exit 1
+          fi
+          gh api "repos/$GITHUB_REPOSITORY/actions/artifacts/$ARTIFACT_ID/zip" > "$archive"
+          printf '%s  %s\n' "$digest" "$archive" | sha256sum --check --status
+          python3 -m zipfile -e "$archive" "$RUNNER_TEMP/ci-bundle"
+      - name: Create the bundle PR writer token
+        id: writer
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.RELEASE_BUNDLE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_BUNDLE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          permission-workflows: write
+      - name: Open or reuse the generated bundle PR
+        id: pin
+        env:
+          GH_TOKEN: ${{ steps.writer.outputs.token }}
+          RELEASE_BUNDLE_APP_SLUG: ${{ steps.writer.outputs.app-slug }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.image_digest }}
+        run: |
+          pr="$(python3 ci/release_pin_pr.py open --version "$VERSION" --source-sha "$CANDIDATE_SHA" \
+            --image "$IMAGE_DIGEST" --bundle "$RUNNER_TEMP/ci-bundle")"
+          printf 'number=%s\n' "$pr" >> "$GITHUB_OUTPUT"
+          printf 'Review and merge [the generated bundle PR](%s/%s/pull/%s) to continue.\n' \
+            "$GITHUB_SERVER_URL" "$GITHUB_REPOSITORY" "$pr" >> "$GITHUB_STEP_SUMMARY"
+
+  bundle-merge:
+    needs: [preflight, image, bundle-pr]
+    if: inputs.phase == 'Full release'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 125
+    permissions:
+      contents: read
+      pull-requests: read
+    outputs:
+      source_sha: ${{ steps.reviewed.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Wait for the bundle PR and verify its exact merge commit
+        id: reviewed
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.preflight.outputs.version }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          IMAGE_DIGEST: ${{ needs.image.outputs.image_digest }}
+          PR: ${{ needs.bundle-pr.outputs.number }}
+        run: |
+          source_sha="$(python3 ci/release_pin_pr.py wait --version "$VERSION" --source-sha "$CANDIDATE_SHA" \
+            --image "$IMAGE_DIGEST" --pr "$PR")"
+          python3 ci/github_release.py preflight --version "$VERSION" --source-sha "$source_sha" \
+            --main-sha "$(git rev-parse origin/main)" --phase 'Publish release'
+          printf 'source_sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+  release-source:
+    needs: [preflight, bundle-merge]
+    if: >-
+      !cancelled() && needs.preflight.result == 'success' &&
+      ((inputs.phase == 'Full release' && needs.bundle-merge.result == 'success') ||
+       (inputs.phase != 'Full release' && inputs.phase != 'Build CI image and bundle'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions: {}
+    outputs:
+      version: ${{ needs.preflight.outputs.version }}
+      source_sha: ${{ steps.source.outputs.sha }}
+    steps:
+      - name: Select the reviewed product release commit
+        id: source
+        env:
+          PHASE: ${{ inputs.phase }}
+          CANDIDATE_SHA: ${{ needs.preflight.outputs.source_sha }}
+          MERGED_SHA: ${{ needs.bundle-merge.outputs.source_sha }}
+        run: |
+          source_sha="$CANDIDATE_SHA"
+          if [[ "$PHASE" == 'Full release' ]]; then
+            source_sha="$MERGED_SHA"
+          fi
+          if [[ ! "$source_sha" =~ ^[0-9a-f]{40}$ ]]; then
+            echo "The workflow did not identify the reviewed release commit." >&2
+            exit 1
+          fi
+          printf 'sha=%s\n' "$source_sha" >> "$GITHUB_OUTPUT"
+
+  prepare:
+    needs: release-source
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      (inputs.phase == 'Validate release' || inputs.phase == 'Validate and publish' || inputs.phase == 'Full release')
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    defaults:
+      run:
+        working-directory: source
+    permissions:
+      actions: read
+      contents: read
+    env:
+      VERSION: ${{ needs.release-source.outputs.version }}
+      SOURCE_SHA: ${{ needs.release-source.outputs.source_sha }}
+    outputs:
+      run: ${{ steps.artifact.outputs.run }}
+      artifact_id: ${{ steps.retained.outputs.artifact-id }}
+      artifact_digest: ${{ steps.retained.outputs.artifact-digest }}
+      manifest_sha256: ${{ steps.verified.outputs.manifest_sha256 }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release-source.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.13.8"
+      - name: Restore the exact artifacts when resuming a release
+        id: restore
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          restored="$(python3 ci/github_release.py restore --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/product-release")"
+          printf 'restored=%s\n' "$restored" >> "$GITHUB_OUTPUT"
+      - name: Build and assemble the launch artifacts
+        if: steps.restore.outputs.restored == 'false'
+        run: |
+          uv build --python 3.13 --no-sources --no-create-gitignore --out-dir "$RUNNER_TEMP/dist"
+          python3 ci/product_release.py assemble --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --dist "$RUNNER_TEMP/dist" --output "$RUNNER_TEMP/product-release"
+      - name: Verify asset identity and package metadata
+        id: verified
+        run: |
+          assets="$RUNNER_TEMP/product-release"
+          wheel="$assets/skillevaluator-$VERSION-py3-none-any.whl"
+          sdist="$assets/skillevaluator-$VERSION.tar.gz"
+          manifest_sha256="$(python3 ci/product_release.py verify-assets --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$assets")"
+          python3 scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json \
+            --archive "$wheel" --archive "$sdist"
+          uvx --from twine==6.2.0 twine check --strict "$wheel" "$sdist"
+          printf 'manifest_sha256=%s\n' "$manifest_sha256" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+      - name: Verify the dated changelog and public GHCR digest
+        run: |
+          # Run the current check against the reviewed source, which may predate the command.
+          python3 ../release-control/ci/github_release.py verify-release-metadata --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/product-release"
+      - name: Check that the package indexes can accept these release bytes
+        if: inputs.phase == 'Validate release' || steps.restore.outputs.restored == 'false'
+        run: |
+          python3 ci/product_release.py inspect-indexes --version "$VERSION" --assets "$RUNNER_TEMP/product-release"
+      - name: Smoke-test fresh wheel and sdist installations
+        env:
+          PYTHON_DOTENV_DISABLED: "1"
+        run: |
+          assets="$RUNNER_TEMP/product-release"
+          for python_version in 3.12 3.13 3.14; do
+            for file in "skillevaluator-$VERSION-py3-none-any.whl" "skillevaluator-$VERSION.tar.gz"; do
+              venv="$RUNNER_TEMP/$python_version-$file"
+              uv venv --python "$python_version" "$venv"
+              uv pip install --python "$venv/bin/python" "$assets/$file"
+              uv pip check --python "$venv/bin/python"
+              "$venv/bin/python" -I ci/smoke_distribution.py "$VERSION"
+            done
+          done
+      - name: Name the retained artifact
+        id: artifact
+        run: |
+          run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'name=validated-release-%s-%s\nrun=%s\n' "$VERSION" "$run" "$run" >> "$GITHUB_OUTPUT"
+      - name: Retain the reviewed release bytes
+        id: retained
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/product-release
+          if-no-files-found: error
+          retention-days: 90
+      - name: Record the validated release artifact
+        env:
+          PHASE: ${{ inputs.phase }}
+          VALIDATION_RUN: ${{ steps.artifact.outputs.run }}
+          VALIDATION_ARTIFACT_ID: ${{ steps.retained.outputs.artifact-id }}
+          MANIFEST_SHA256: ${{ steps.verified.outputs.manifest_sha256 }}
+        run: |
+          {
+            if [[ "$PHASE" == 'Validate release' ]]; then
+              printf '### Publish release inputs\n\n| Input | Value |\n| --- | --- |\n'
+            else
+              printf '### Validated release artifacts\n\n| Field | Value |\n| --- | --- |\n'
+            fi
+            printf '| `version` | `%s` |\n' "$VERSION"
+            printf '| `source_sha` | `%s` |\n' "$SOURCE_SHA"
+            printf '| `validation_run` | `%s` |\n' "$VALIDATION_RUN"
+            printf '| `validation_manifest_sha256` | `%s` |\n' "$MANIFEST_SHA256"
+            if [[ "$PHASE" != 'Validate release' ]]; then
+              printf '| Validation artifact ID | `%s` |\n' "$VALIDATION_ARTIFACT_ID"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  stage:
+    needs: [release-source, prepare]
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      ((inputs.phase == 'Publish release' && needs.prepare.result == 'skipped') ||
+       ((inputs.phase == 'Validate and publish' || inputs.phase == 'Full release') &&
+        needs.prepare.result == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    environment: release-github
+    defaults:
+      run:
+        working-directory: source
+    permissions:
+      actions: read
+      contents: write
+    outputs:
+      artifact: ${{ steps.public.outputs.artifact }}
+      manifest_sha256: ${{ steps.public.outputs.manifest_sha256 }}
+    env:
+      VERSION: ${{ needs.release-source.outputs.version }}
+      SOURCE_SHA: ${{ needs.release-source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          path: release-control
+          persist-credentials: false
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release-source.outputs.source_sha }}
+          path: source
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Restore a staged release or acquire the validated artifacts
+        id: acquire
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PHASE: ${{ inputs.phase }}
+          VALIDATION_RUN: ${{ inputs.phase == 'Publish release' && inputs.validation_run || needs.prepare.outputs.run }}
+          MANIFEST_SHA256: ${{ inputs.phase == 'Publish release' && inputs.validation_manifest_sha256 || needs.prepare.outputs.manifest_sha256 }}
+          VALIDATION_ARTIFACT_ID: ${{ needs.prepare.outputs.artifact_id }}
+          VALIDATION_ARTIFACT_DIGEST: ${{ needs.prepare.outputs.artifact_digest }}
+        run: |
+          # A draft can be invisible to read-only tokens. Check after approval.
+          # Use the workflow checkout because an older reviewed source may predate the acquire command.
+          artifact_args=()
+          if [[ "$PHASE" != 'Publish release' ]]; then
+            artifact_args=(--validation-artifact-id "$VALIDATION_ARTIFACT_ID" \
+              --validation-artifact-digest "$VALIDATION_ARTIFACT_DIGEST")
+          fi
+          new_release="$(python3 ../release-control/ci/github_release.py acquire --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/staged-release" --phase "$PHASE" \
+            --validation-run "$VALIDATION_RUN" --validation-manifest-sha256 "$MANIFEST_SHA256" "${artifact_args[@]}")"
+          run="$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          printf 'new_release=%s\nname=product-release-%s-%s\nrun=%s\n' \
+            "$new_release" "$VERSION" "$run" "$run" >> "$GITHUB_OUTPUT"
+      - name: Retain the validated bytes for draft recovery
+        if: steps.acquire.outputs.new_release == 'true'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.acquire.outputs.name }}
+          path: ${{ runner.temp }}/staged-release
+          if-no-files-found: error
+          retention-days: 90
+      - name: Stage and publish the full immutable GitHub release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ARTIFACT_RUN: ${{ steps.acquire.outputs.run }}
+        run: |
+          python3 ci/github_release.py stage --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --assets "$RUNNER_TEMP/staged-release" --run "$ARTIFACT_RUN"
+      - name: Verify every public GitHub download
+        id: public
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          manifest_sha256="$(python3 ci/github_release.py verify-public --version "$VERSION" \
+            --source-sha "$SOURCE_SHA" --assets "$RUNNER_TEMP/staged-release")"
+          printf 'manifest_sha256=%s\nartifact=published-release-%s-%s-%s\n' \
+            "$manifest_sha256" "$VERSION" "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" >> "$GITHUB_OUTPUT"
+      - name: Retain the verified GitHub release bytes
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.public.outputs.artifact }}
+          path: ${{ runner.temp }}/staged-release
+          if-no-files-found: error
+          retention-days: 90
+
+  kitmaker:
+    needs: [release-source, stage]
+    if: ${{ !cancelled() && needs.release-source.result == 'success' && needs.stage.result == 'success' }}
+    uses: ./.github/workflows/release-kitmaker.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version: ${{ needs.release-source.outputs.version }}
+      source_sha: ${{ needs.release-source.outputs.source_sha }}
+      manifest_sha256: ${{ needs.stage.outputs.manifest_sha256 }}
+
+  verify-indexes:
+    needs: [release-source, stage, kitmaker]
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      needs.stage.result == 'success' && needs.kitmaker.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    permissions:
+      contents: read
+    env:
+      VERSION: ${{ needs.release-source.outputs.version }}
+      SOURCE_SHA: ${{ needs.release-source.outputs.source_sha }}
+      PYTHON_DOTENV_DISABLED: "1"
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release-source.outputs.source_sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: ${{ needs.stage.outputs.artifact }}
+          path: ${{ runner.temp }}/product-release
+      - uses: astral-sh/setup-uv@d31148d669074a8d0a63714ba94f3201e7020bc3 # v8.3.0
+        with:
+          version: "0.13.8"
+      - name: Verify the exact public PyPI and DevZone artifacts
+        run: |
+          python3 ci/product_release.py verify-indexes --version "$VERSION" \
+            --assets "$RUNNER_TEMP/product-release" --wait-seconds 1200
+      - name: Smoke-test fresh public pip and uv installations
+        run: |
+          pip_env="$RUNNER_TEMP/pypi-pip"
+          uv_env="$RUNNER_TEMP/pypi-uv"
+          uv venv --seed --python 3.12 "$pip_env"
+          uv venv --python 3.14 "$uv_env"
+          "$pip_env/bin/python" -m pip --isolated install --no-cache-dir \
+            --index-url https://pypi.org/simple "skillevaluator==$VERSION"
+          "$pip_env/bin/python" -m pip check
+          uv --no-config pip install --no-cache --python "$uv_env/bin/python" \
+            --default-index https://pypi.org/simple "skillevaluator==$VERSION"
+          uv pip check --python "$uv_env/bin/python"
+          "$pip_env/bin/python" -I ci/smoke_distribution.py "$VERSION"
+          "$uv_env/bin/python" -I ci/smoke_distribution.py "$VERSION"
+
+  finalize:
+    needs: [release-source, verify-indexes]
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' && needs.verify-indexes.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: release-github
+    permissions:
+      contents: write
+    env:
+      VERSION: ${{ needs.release-source.outputs.version }}
+      SOURCE_SHA: ${{ needs.release-source.outputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ needs.release-source.outputs.source_sha }}
+          persist-credentials: false
+      - name: Record the verified PyPI and DevZone publication
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          assets="$RUNNER_TEMP/product-release"
+          test "$(python3 ci/github_release.py restore --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets")" = true
+          python3 ci/github_release.py finalize --version "$VERSION" --source-sha "$SOURCE_SHA" --assets "$assets"
+          printf 'To promote this release when it is GitHub Latest, run **Promote stable GitHub workflows** on `main` with `expected-release` set to `v%s`.\n' \
+            "$VERSION" >> "$GITHUB_STEP_SUMMARY"
+
+  promotion-candidate:
+    needs: [release-source, finalize]
+    if: >-
+      !cancelled() && inputs.promote_stable &&
+      needs.release-source.result == 'success' && needs.finalize.result == 'success'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    outputs:
+      is_latest: ${{ steps.latest.outputs.matches }}
+    steps:
+      - name: Check whether the verified release is GitHub Latest
+        id: latest
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.release-source.outputs.version }}
+        run: |
+          latest="$(gh api "repos/$GITHUB_REPOSITORY/releases/latest" --jq \
+            'select(.immutable == true and .draft == false and .prerelease == false and .published_at != null) | .tag_name')"
+          if [[ ! "$latest" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ||
+                "$(printf '%s\n' "$latest" "v$VERSION" | sort -V | tail -n 1)" != "$latest" ]]; then
+            echo 'Expected GitHub Latest to be the verified release or a newer immutable release.' >&2
+            exit 1
+          fi
+          if [[ "$latest" == "v$VERSION" ]]; then
+            echo 'matches=true' >> "$GITHUB_OUTPUT"
+          else
+            echo 'matches=false' >> "$GITHUB_OUTPUT"
+            printf 'Stable promotion skipped because GitHub Latest is `%s`.\n' "$latest" >> "$GITHUB_STEP_SUMMARY"
+          fi
+
+  promote-stable:
+    needs: [release-source, promotion-candidate]
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      needs.promotion-candidate.result == 'success' && needs.promotion-candidate.outputs.is_latest == 'true'
+    uses: ./.github/workflows/promote-stable.yml
+    permissions:
+      contents: read
+    with:
+      expected-release: v${{ needs.release-source.outputs.version }}
+    secrets:
+      STABLE_CHANNEL_APP_PRIVATE_KEY: ${{ secrets.STABLE_CHANNEL_APP_PRIVATE_KEY }}

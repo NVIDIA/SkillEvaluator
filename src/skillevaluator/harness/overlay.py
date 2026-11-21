@@ -374,8 +374,10 @@ def _dollar_n(body: str, first_line: int) -> dict[str, Any]:
 def _codex_implicit_disabled(skill_path: Path) -> bool:
     policy_file = skill_path / "agents" / "openai.yaml"
     try:
-        data = yaml.safe_load(policy_file.read_text(encoding="utf-8")) if policy_file.is_file() else None
-    except (OSError, UnicodeDecodeError, yaml.YAMLError):
+        # Bounded: the file ships with the skill, and merge keys or aliases expand inside plain ``safe_load``.
+        text = policy_file.read_text(encoding="utf-8") if policy_file.is_file() else None
+        data = load_bounded_yaml(text, last_key_wins=True) if text is not None else None
+    except (OSError, UnicodeDecodeError, StructuredDataError):
         return False
     policy = data.get("policy") if isinstance(data, dict) else None
     return isinstance(policy, dict) and policy.get("allow_implicit_invocation") is False

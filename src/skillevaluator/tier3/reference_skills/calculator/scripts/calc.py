@@ -149,8 +149,6 @@ def try_conversion(expr: str) -> str | None:
     to_unit = m.group(3).lower()
     fn = CONVERSIONS.get((from_unit, to_unit))
     if fn is None:
-        # A number-unit-to-unit request is never valid arithmetic, so report the
-        # unknown pair here rather than as a parser error from safe_eval.
         raise ValueError(f"Unknown conversion: {from_unit} to {to_unit}. Supported units: {SUPPORTED_UNITS}")
     result = fn(value)
     return f"{value:g} {from_unit} = {result:.4g} {to_unit}"

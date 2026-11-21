@@ -328,16 +328,16 @@ def test_unparseable_dependency_manifest_is_incomplete(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("setting", "limit", "check_name"),
+    ("setting", "limit", "check_name", "file_path"),
     [
-        ("CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 0, "path_count_limit"),
-        ("CONTENT_DEDUP_MAX_FILES", 0, "file_count_limit"),
-        ("CONTENT_DEDUP_MAX_FILE_BYTES", 1, "file_size_limit"),
-        ("CONTENT_DEDUP_MAX_TOTAL_BYTES", 1, "total_size_limit"),
+        ("CONTENT_DEDUP_MAX_DISCOVERED_PATHS", 0, "path_count_limit", "custom/a"),
+        ("CONTENT_DEDUP_MAX_FILES", 0, "file_count_limit", "custom/a/SKILL.md"),
+        ("CONTENT_DEDUP_MAX_FILE_BYTES", 1, "file_size_limit", "custom/a/SKILL.md"),
+        ("CONTENT_DEDUP_MAX_TOTAL_BYTES", 1, "total_size_limit", "custom/a/SKILL.md"),
     ],
 )
 def test_context_collection_limit_cannot_become_advisory_pass(
-    modules, tmp_path, monkeypatch, setting, limit, check_name
+    modules, tmp_path, monkeypatch, setting, limit, check_name, file_path
 ):
     from skillevaluator.deduplication.utils import skill_collector
     from skillevaluator.reporting.run_status import result_status
@@ -355,6 +355,26 @@ def test_context_collection_limit_cannot_become_advisory_pass(
     assert not result.metadata.get("optional_skip")
     assert result.summary.checks_performed == 0
     assert any(finding.check_name == check_name for finding in result.findings)
+    assert result.metadata["work_limit"]["check_name"] == check_name
+    assert result.metadata["work_limit"]["file_path"] == file_path
+
+
+def test_context_invalid_text_encoding_cannot_become_advisory_pass(modules, tmp_path, monkeypatch):
+    from skillevaluator.reporting.run_status import result_status
+
+    inv = inventory(tmp_path / "bundle")
+    (inv.root / "custom/a/notes.md").write_bytes(b"# Notes\n\xff\xfe not UTF-8\n")
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    profile = modules.profile.load_plugin_profile(inv.root)
+
+    result = modules.commands.run_plugin_skill_context_dedup(profile)[0]
+
+    assert not result.passed
+    assert result.status == "incomplete"
+    assert result_status(result).value == "incomplete"
+    assert result.metadata["optional_skip"] is False
+    assert "work_limit" not in result.metadata
+    assert [(f.check_name, f.file_path) for f in result.findings] == [("invalid_text_encoding", "custom/a/notes.md")]
 
 
 def test_incomplete_inventory_never_reports_clean_comparison(modules, tmp_path, monkeypatch):

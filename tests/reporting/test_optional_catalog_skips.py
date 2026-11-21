@@ -138,6 +138,20 @@ def test_optional_catalog_skip_requires_matching_semantic_check():
     assert assess_publication(results, expected_skill_name="demo").status == "incomplete"
 
 
+def test_optional_catalog_skip_ignores_context_analysis_from_another_check():
+    results = _results(context="absent")
+    context = ValidationResult(validator_name="Context Deduplication")
+    context.add_success("context_dedup", "Analyzed local skill content")
+    stamp_publication_evidence([context], tier=2, check_id="similarity")
+    for key in ("publication_target", "benchmark_policy"):
+        context.metadata[key] = results[-1].metadata[key]
+    results.insert(-2, context)
+
+    assert assess_publication(results, expected_skill_name="demo").status == "incomplete"
+    rendered = BenchmarkReporter(skill_name="demo", include_timestamp=False).render_all(results)
+    assert "| Tier 2 | Semantic deduplication | **INCOMPLETE** |" in rendered
+
+
 @pytest.mark.parametrize("tier", [1, 3])
 def test_optional_catalog_skip_cannot_override_contradictory_gate_tier(tier):
     results = _results()

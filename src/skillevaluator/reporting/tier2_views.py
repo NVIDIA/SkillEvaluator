@@ -42,8 +42,16 @@ def _count(value: object) -> int | None:
     return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
 
 
+# The bundle catalog setup record (build, load or save) that precedes its comparisons.
+_CATALOG_SETUP_NAME = "plugin catalog similarity"
+
+
+def _normalized_name(result: ValidationResult) -> str:
+    return " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
+
+
 def _scope(result: ValidationResult) -> str | None:
-    name = " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
+    name = _normalized_name(result)
     if name == "plugin dependency deduplication":
         return "other"
     if name in {"inter skill deduplication", "inter plugin deduplication"} or "similarity" in name:
@@ -95,6 +103,9 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         catalog_known = bool(members) and scope == "across"
         pairwise_only = bool(members) and scope == "across"
         for result in members:
+            # A catalog setup record completes by building or loading the
+            # catalog; its index size is not a pairwise collection scan.
+            setup = scope == "across" and _normalized_name(result) == _CATALOG_SETUP_NAME
             budget = result.metadata.get("plugin_context_budget")
             if isinstance(budget, dict):
                 limits, consumed = budget.get("limits"), budget.get("consumed")
@@ -125,7 +136,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 None,
             )
             indexed = details.get("index_built")
-            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None
+            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) and not setup else None
             analysis = result.metadata.get("llm_analysis")
             analysis_complete = (
                 isinstance(analysis, dict)
@@ -135,7 +146,9 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 and _count(analysis.get("clusters_refused")) == 0
             )
             recorded_completion = bool(
-                compared_check or {"index_built", "similarity_check"} & details.keys()
+                {"index_built", "catalog_loaded"} & details.keys()
+                if setup
+                else compared_check or {"index_built", "similarity_check"} & details.keys()
                 if scope == "across"
                 else "context_dedup" in details or analysis_complete
             )
@@ -188,7 +201,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 notes.append(
                     f"Compared {target} against {total - excluded} catalog entries; {excluded} self entries excluded."
                 )
-            else:
+            elif not (setup and finished):
                 catalog_known = False
             pairwise_only = pairwise_only and entries is not None and compared_check is None
             if scope == "across" and entries is not None and not single_entry and compared_check is None:

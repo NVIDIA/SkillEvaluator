@@ -11,6 +11,9 @@ from skillevaluator.constants import CONTENT_TYPE_PLUGIN
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.tier2.results import guarded_results
 
+# Tier 2 views treat this catalog setup record as similarity evidence.
+CATALOG_SUMMARY_NAME = "Plugin Catalog Similarity"
+
 
 def plugin_target(path: Path, content_type: str = "auto") -> Path | None:
     if content_type == CONTENT_TYPE_PLUGIN or (
@@ -27,6 +30,10 @@ def plugin_dedup_results(path: Path, **options) -> list[ValidationResult]:
 
 
 def run_public_plugin_dedup(path: Path, **options) -> list[ValidationResult]:
+    from skillevaluator.deduplication.plugin.context_budget import validate_plugin_context_limits
+
+    # Caller option errors have safe diagnostics and should not become provider failures.
+    validate_plugin_context_limits(options.get("max_chunks"), options.get("max_scalar_comparisons"))
     root = resolve_plugin_path(path)
     return guarded_results(
         "Plugin Deduplication", root, lambda: plugin_dedup_results(path, **options), check_id="context-optimization"
@@ -67,6 +74,7 @@ def plugin_similarity_results(
     from skillevaluator.deduplication.plugin.catalog import LocalCatalog
     from skillevaluator.deduplication.plugin.catalog_checks import check_catalog_plugins, check_catalog_skills
     from skillevaluator.deduplication.plugin.commands import _security_result
+    from skillevaluator.deduplication.plugin.llm_analyzer import VerdictAllowance
     from skillevaluator.deduplication.plugin.profile import load_plugin_profile
     from skillevaluator.embedding.client import EmbeddingClient, SimilarityConfigError
     from skillevaluator.embedding.registry import _validate_scalar_work, _validate_threshold
@@ -74,7 +82,7 @@ def plugin_similarity_results(
     from skillevaluator.utils.secure_fs import SecurePathError
     from skillevaluator.utils.tier2_paths import sanitize_path_text
 
-    summary = ValidationResult(validator_name="Plugin Catalog", metadata={"advisory_tier2": True})
+    summary = ValidationResult(validator_name=CATALOG_SUMMARY_NAME, metadata={"advisory_tier2": True})
     results = [summary]
     root = resolve_plugin_path(path)
     try:
@@ -86,7 +94,8 @@ def plugin_similarity_results(
         client = EmbeddingClient(model=model)
         if catalog is not None:
             local = LocalCatalog.load(catalog, client=client, max_scalar_comparisons=max_scalar_comparisons)
-            profiles = [load_plugin_profile(path)]
+            # A loaded catalog does not say where the target is; manifest fingerprints identify self.
+            profiles = [(None, load_plugin_profile(path))]
             summary.add_success("catalog_loaded", f"Loaded {len(local.skills) + len(local.plugins)} catalog entries")
         else:
             local = LocalCatalog.build(
@@ -98,7 +107,8 @@ def plugin_similarity_results(
             profiles = []
             for prefix in prefixes:
                 try:
-                    profiles.append(load_plugin_profile(path if prefix == "." else root / prefix))
+                    # This catalog was built here, so each target's own entries are those at its prefix.
+                    profiles.append((prefix, load_plugin_profile(path if prefix == "." else root / prefix)))
                 except SecurePathError:
                     raise
                 except ValueError:
@@ -114,14 +124,21 @@ def plugin_similarity_results(
                 summary.add_warning(f"Plugin {prefix}: {reason}")
             local = replace(local, client=_IndexedQueries(local))
         comparisons = len(profiles) * len(local.plugins) + sum(
-            sum(skill.entry is not None for skill in profile.bundled_skills) for profile in profiles
+            sum(skill.entry is not None for skill in profile.bundled_skills) for _, profile in profiles
         ) * len(local.skills)
         _validate_scalar_work(comparisons, local.vector_dimension, max_scalar_comparisons)
-        for profile in profiles:
+        allowance = VerdictAllowance()
+        for self_prefix, profile in profiles:
             compared = [
-                check_catalog_skills(profile, local, threshold=threshold),
+                check_catalog_skills(profile, local, threshold=threshold, self_prefix=self_prefix),
                 check_catalog_plugins(
-                    profile, local, threshold=threshold, llm_verdict=llm_verdict, llm_model=llm_model
+                    profile,
+                    local,
+                    threshold=threshold,
+                    llm_verdict=llm_verdict,
+                    llm_model=llm_model,
+                    self_prefix=self_prefix,
+                    verdict_allowance=allowance,
                 ),
             ]
             prefix = profile.root.relative_to(root)

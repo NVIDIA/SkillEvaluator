@@ -2,6 +2,7 @@
 """Public plugin dispatch preserves catalog compatibility and provider bounds."""
 
 import json
+import shutil
 from types import SimpleNamespace
 
 import pytest
@@ -32,10 +33,11 @@ def embedding(monkeypatch):
     return client
 
 
-def make_plugin(root, name="demo"):
+def make_plugin(root, name="demo", *, description="Reusable project workflow"):
     manifest = root / ".claude-plugin/plugin.json"
     manifest.parent.mkdir(parents=True)
-    manifest.write_text(json.dumps({"name": name, "description": "Reusable project workflow"}), encoding="utf-8")
+    data = {"name": name} if description is None else {"name": name, "description": description}
+    manifest.write_text(json.dumps(data), encoding="utf-8")
     member = root / "skills" / f"{name}-member" / "SKILL.md"
     member.parent.mkdir(parents=True)
     member.write_text(
@@ -112,7 +114,8 @@ def test_collection_v2_catalog_reuses_fresh_vectors(tmp_path, embedding):
     assert sum(r.validator_name == "Inter-Plugin Deduplication" for r in result) == 2
     assert any(f.category == "INTER_PLUGIN" for r in result for f in r.findings)
     across = tier2_scope_views(result)[1]
-    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (4, 4, 4, 4)
+    # The catalog setup record counts with the four comparisons; it adds no catalog entries.
+    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (5, 4, 4, 4)
 
 
 def test_existing_v1_skill_catalog_can_be_used_for_a_plugin(tmp_path, embedding):
@@ -276,3 +279,149 @@ def test_dedup_budget_stop_is_incomplete_in_public_json(tmp_path, monkeypatch):
     assert context["summary"]["checks_performed"] == 0
     assert context["work_limit"]["actual_chunks"] > context["work_limit"]["chunk_limit"] == 0
     assert result_status(retained_results(payload)[1]).value == "incomplete"
+
+
+def _comparisons(results, name):
+    return {r.metadata["plugin_catalog_target"]["path"]: r for r in results if r.validator_name == name}
+
+
+@pytest.mark.parametrize(("other_description", "schema_version"), [("Other workflow", 2), (None, 1)])
+def test_collection_without_bundle_description_excludes_only_its_own_entries(
+    tmp_path, embedding, other_description, schema_version
+):
+    root = tmp_path / "collection"
+    make_plugin(root / "one", "one", description=other_description)
+    make_plugin(root / "two", "two", description=None)
+    output = tmp_path / "catalog.json"
+
+    results = similarity(root, save_catalog=output)
+
+    assert all(r.passed for r in results), [r.errors for r in results]
+    assert json.loads(output.read_text(encoding="utf-8"))["schema_version"] == schema_version
+    skills = _comparisons(results, "Inter-Skill Deduplication")
+    assert sorted(skills) == ["one", "two"]
+    for target, result in skills.items():
+        own = f"{target}/skills/{target}-member"
+        comparison = next(d.metadata for d in result.success_details if d.check_name == "skill_catalog_comparison")
+        assert (comparison["self_matches_excluded"], comparison["excluded_catalog_paths"]) == (1, [own])
+        assert [f.metadata["catalog_path"] for f in result.findings] == [
+            f"{'two' if target == 'one' else 'one'}/skills/{'two' if target == 'one' else 'one'}-member"
+        ]
+
+
+def test_collection_reports_an_identical_bundle_copy(tmp_path, embedding):
+    root = tmp_path / "collection"
+    make_plugin(root / "one", "one")
+    shutil.copytree(root / "one", root / "one-fork")
+    make_plugin(root / "other", "other")
+
+    results = similarity(root)
+
+    assert all(r.passed for r in results), [r.errors for r in results]
+    for target, copy in (("one", "one-fork"), ("one-fork", "one")):
+        skill = _comparisons(results, "Inter-Skill Deduplication")[target]
+        bundle = _comparisons(results, "Inter-Plugin Deduplication")[target]
+        assert f"{copy}/skills/one-member" in {f.metadata["catalog_path"] for f in skill.findings}
+        assert f"{target}/skills/one-member" not in {f.metadata["catalog_path"] for f in skill.findings}
+        copies = [f for f in bundle.findings if f.metadata["catalog_path"] == copy]
+        assert len(copies) == 1 and copies[0].category == "INTER_PLUGIN"
+        assert copies[0].message.endswith("; same name and identical manifest")
+        comparison = next(d.metadata for d in bundle.success_details if d.check_name == "plugin_catalog_comparison")
+        assert comparison["excluded_catalog_paths"] == [target]
+
+
+def test_optional_verdicts_share_one_allowance_across_a_collection(tmp_path, embedding, monkeypatch):
+    from skillevaluator import inference
+    from skillevaluator.deduplication.plugin.llm_analyzer import MAX_RUN_PROMPT_CHARS, MAX_RUN_VERDICT_CALLS
+
+    requests = []
+
+    class Verdicts:
+        def __init__(self, **_kwargs):
+            pass
+
+        def extract_json_from_response(self, system, prompt):
+            requests.append(len(system) + len(prompt))
+            return {"verdict": "PARTIAL_OVERLAP", "confidence": 0.5, "reasoning": "Shared", "suggestion": "Review"}
+
+    monkeypatch.setattr(inference, "LLMClient", Verdicts)
+    root = tmp_path / "collection"
+    for index in range(15):
+        make_plugin(root / f"b{index:02d}", f"b{index:02d}")
+
+    results = similarity(root, llm_verdict=True)
+
+    assert 0 < len(requests) <= MAX_RUN_VERDICT_CALLS
+    assert sum(requests) <= MAX_RUN_PROMPT_CHARS
+    bundles = [r for r in results if r.validator_name == "Inter-Plugin Deduplication"]
+    refused = [r for r in bundles if r.metadata["llm_analysis"].get("status") == "skipped"]
+    assert len(refused) == 15 - MAX_RUN_VERDICT_CALLS // 10
+    assert all(any("allowance is used up" in w for w in r.warnings) for r in refused)
+    assert all(r.findings for r in refused)
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"max_chunks": 0},
+        {"max_chunks": True},
+        {"max_chunks": 1.5},
+        {"max_scalar_comparisons": 0},
+        {"max_chunks": 0, "run_context": False},
+    ],
+)
+def test_invalid_context_limits_are_caller_errors(tmp_path, options):
+    with pytest.raises(ValueError, match="must be an integer within"):
+        plugin_commands.run_public_plugin_dedup(make_plugin(tmp_path / "plugin"), **options)
+
+
+@pytest.mark.parametrize("provider", ["available", "failed"])
+def test_catalog_summary_is_tier2_similarity_evidence(tmp_path, embedding, provider):
+    from skillevaluator.embedding.client import SimilarityConfigError
+    from skillevaluator.reporting.html import HTMLReporter
+    from skillevaluator.reporting.run_status import result_tier
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+    from skillevaluator.tier2.results import guarded_results
+
+    root = tmp_path / "collection"
+    make_plugin(root / "one", "one")
+    make_plugin(root / "two", "two")
+    if provider == "failed":
+
+        def unavailable(_texts):
+            raise SimilarityConfigError("Provider unavailable")
+
+        embedding.embed = unavailable
+
+    results = guarded_results("Similarity Check", root, lambda: similarity(root), check_id="similarity")
+
+    summary = results[0]
+    assert summary.validator_name == plugin_commands.CATALOG_SUMMARY_NAME
+    assert all(result_tier(r) == 2 for r in results)
+    views = tier2_scope_views(results)
+    assert [view.id for view in views] == ["within", "across"]
+    across = views[1]
+    assert summary in across.results and not across.not_run
+    section = HTMLReporter(include_timestamp=False).render_all(results).split('id="tier2-across"', 1)[1]
+    section = section.split("</section>", 1)[0]
+    if provider == "failed":
+        assert results == [summary] and summary.is_incomplete
+        assert (across.completed, across.catalog_entries) == (None, None)
+        assert "Embedding provider error" in section
+    else:
+        assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (5, 4, 4, 4)
+        assert not any("Pairwise" in note or "not applicable" in note for note in across.notes)
+
+
+def test_loaded_catalog_summary_counts_as_completed_similarity_evidence(tmp_path, embedding):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    catalog = tmp_path / "catalog.json"
+    similarity(make_plugin(tmp_path / "source", "source"), save_catalog=catalog)
+
+    results = similarity(make_plugin(tmp_path / "target", "target"), catalog=catalog)
+
+    assert all(r.passed for r in results), [r.errors for r in results]
+    across = tier2_scope_views(results)[1]
+    assert across.results[0].validator_name == plugin_commands.CATALOG_SUMMARY_NAME
+    assert (across.completed, across.duplicates, across.catalog_entries) == (3, 2, 2)

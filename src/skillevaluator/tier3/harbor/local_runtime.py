@@ -3,7 +3,7 @@
 
 """Local runtime discovery for Harbor local mode.
 
-Local mode runs the vendor agent CLIs (claude-code, codex, opencode) that are
+Local mode runs the vendor agent CLIs (claude-code, codex, opencode, pi) that are
 already installed on the host or under ``SKILLEVALUATOR_RUNTIME_DIR``. This
 module discovers them on ``PATH``. Discovery never installs anything; only
 :func:`install_local_runtime`, run after the operator confirms, installs the
@@ -27,7 +27,7 @@ from typing import Any
 
 from skillevaluator.tier3.harbor.local_sandbox import SandboxUnavailable
 
-LOCAL_RUNTIME_AGENTS: tuple[str, ...] = ("claude-code", "codex", "opencode")
+LOCAL_RUNTIME_AGENTS: tuple[str, ...] = ("claude-code", "codex", "opencode", "pi")
 DEFAULT_RUNTIME_ROOT = Path("~/.local/share/skillevaluator/runtimes")
 RUNTIME_VERSION_TIMEOUT_SECONDS = 10
 
@@ -53,6 +53,7 @@ _AGENT_COMMANDS: dict[str, tuple[str, ...]] = {
     "claude-code": ("claude", "claude-code"),
     "codex": ("codex",),
     "opencode": ("opencode",),
+    "pi": ("pi",),
 }
 
 # npm packages and the releases SkillEvaluator was validated with. Harbor pins
@@ -61,9 +62,10 @@ _AGENT_PACKAGES: dict[str, str] = {
     "claude-code": "@anthropic-ai/claude-code",
     "codex": "@openai/codex",
     "opencode": "opencode-ai",
+    "pi": "@earendil-works/pi-coding-agent",
 }
 PINNED_RUNTIME_VERSIONS: Mapping[str, str] = MappingProxyType(
-    {"claude-code": "2.1.292", "codex": "0.161.0", "opencode": "1.19.5"}
+    {"claude-code": "2.1.292", "codex": "0.161.0", "opencode": "1.19.5", "pi": "1.6.0"}
 )
 RUNTIME_INSTALL_TIMEOUT_SECONDS = 600
 
@@ -73,6 +75,7 @@ _AGENT_INSTALL_HINTS: dict[str, str] = {
     "claude-code": "npm install -g @anthropic-ai/claude-code  (see https://docs.claude.com/en/docs/claude-code)",
     "codex": "npm install -g @openai/codex  (or: brew install codex)",
     "opencode": "npm install -g opencode-ai  (or: brew install sst/tap/opencode; see https://opencode.ai)",
+    "pi": "npm install -g @earendil-works/pi-coding-agent  (see https://earendil.works/pi)",
 }
 
 

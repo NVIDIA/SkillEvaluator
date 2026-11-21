@@ -23,6 +23,7 @@ from urllib.parse import urlsplit
 
 from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
 from harbor.agents.installed.base import NetworkConnectionError, NonZeroAgentExitCodeError
+from harbor.agents.installed.pi import _REMOTE_PI_CONFIG_DIR, _REMOTE_PI_MCP_ADAPTER_DIR
 from harbor.models.trial.paths import EnvironmentPaths
 from harbor.utils.env import parse_bool_env_value
 
@@ -30,11 +31,13 @@ from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
+from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
     start_in_process_bridge,
 )
+from skillevaluator.tier3.harbor.pi_agent import _PI_MCP_SHIM, _PI_MCP_SHIM_FILENAME, SkillEvaluatorPi
 from skillevaluator.tier3.harbor.sensitive_stdin import (
     NVIDIA_BUILD_STDIN_SENTINEL,
     read_nvidia_build_key_from_stdin,
@@ -42,6 +45,7 @@ from skillevaluator.tier3.harbor.sensitive_stdin import (
 
 if TYPE_CHECKING:
     from harbor.environments.base import BaseEnvironment
+    from harbor.models.agent.context import AgentContext
 
 _CODEX_MODEL_ARG_RE = re.compile(r"(?P<prefix>(?:^|\s)--model(?:=|\s+))(?P<model>[^\s]+)(?P<suffix>(?=\s|$))")
 
@@ -670,6 +674,140 @@ class SkillEvaluatorLocalOpenCode(SkillEvaluatorOpenCode):
             "| tee /logs/agent/opencode.txt",
         ).replace(" --dangerously-skip-permissions", "", 1)
         env = self._confined_project_env(env)
+        return await super().exec_as_agent(
+            environment,
+            command=command,
+            env=env,
+            cwd=cwd,
+            timeout_sec=timeout_sec,
+        )
+
+
+class SkillEvaluatorLocalPi(SkillEvaluatorPi):
+    """Use the installed local pi CLI without the container's nvm/npm bootstrap."""
+
+    _PI_CONFIG_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-agent")
+    _PI_MCP_ADAPTER_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-mcp-adapter")
+    _quoted_instruction: str | None = None
+    _instruction: str | None = None
+
+    async def install(self, environment: BaseEnvironment) -> None:
+        if self.mcp_servers:
+            # pi reads mcp.json natively; the no-op shim only satisfies
+            # the adapter path Harbor's launch line references.
+            adapter_dir = (self._PI_MCP_ADAPTER_DIR / "node_modules" / "pi-mcp-adapter").as_posix()
+            await self.exec_as_agent(environment, command=f"mkdir -p {shlex.quote(adapter_dir)}")
+            await self._upload_config_text(
+                environment,
+                content=_PI_MCP_SHIM,
+                remote_path=f"{adapter_dir}/{_PI_MCP_SHIM_FILENAME}",
+                filename=_PI_MCP_SHIM_FILENAME,
+            )
+        result = await self.exec_as_agent(environment, command="pi --version")
+        try:
+            self._version = self.parse_version(result.stdout or "")
+        except IndexError:
+            # Harbor's parser takes the last line; empty output has none. The
+            # version check is a soft warning, so unparsable output stays unset.
+            self._version = None
+        if self._version and self._version != PINNED_RUNTIME_VERSIONS["pi"]:
+            # Soft check: local mode runs the operator's CLI; only warn on drift.
+            self.logger.warning(
+                f"Local pi {self._version} differs from the validated pin "
+                f"{PINNED_RUNTIME_VERSIONS['pi']}; docker mode pins the runtime instead."
+            )
+
+    def get_version_command(self) -> str | None:
+        return "pi --version"
+
+    async def run(self, instruction: str, environment: BaseEnvironment, context: AgentContext) -> None:
+        # Harbor embeds the shlex-quoted instruction inside the launch command;
+        # the config-path rewrite must never touch it, or a task quoting a
+        # literal /tmp/harbor-pi-agent path is evaluated on different text in
+        # local and Docker mode.
+        rendered = self.render_instruction(instruction)
+        self._instruction = rendered
+        self._quoted_instruction = shlex.quote(rendered)
+        try:
+            await super().run(instruction, environment, context)
+        finally:
+            self._quoted_instruction = None
+            self._instruction = None
+
+    def _split_around_prompt(self, command: str) -> tuple[str, str, str]:
+        # The instruction is matched together with the launch tail that follows
+        # it, so a bare "/tmp/harbor-pi-agent" (or one-word) prompt never
+        # matches launcher text earlier in the line.
+        quoted = self._quoted_instruction
+        prompt_and_tail = f"{quoted} 2>&1 </dev/null"
+        if quoted and prompt_and_tail in command:
+            before, _, after = command.partition(prompt_and_tail)
+            return before, prompt_and_tail, after
+        return command, "", ""
+
+    def _local_config_path(self, command: str) -> str:
+        # Harbor writes pi's isolated config under /tmp, which the local sandbox
+        # keeps outside its allowed roots; keep it in the trial's agent dir —
+        # everywhere except inside the task instruction.
+        def repoint(part: str) -> str:
+            part = part.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+            return part.replace(_REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix())
+
+        before, prompt_and_tail, after = self._split_around_prompt(command)
+        return repoint(before) + prompt_and_tail + repoint(after)
+
+    async def _upload_config_text(
+        self,
+        environment: BaseEnvironment,
+        *,
+        content: str,
+        remote_path: str,
+        filename: str,
+    ) -> None:
+        await super()._upload_config_text(
+            environment,
+            content=content,
+            remote_path=self._local_config_path(remote_path),
+            filename=filename,
+        )
+
+    async def exec_as_agent(
+        self,
+        environment: BaseEnvironment,
+        command: str,
+        env: dict[str, str] | None = None,
+        cwd: str | None = None,
+        timeout_sec: int | None = None,
+    ):
+        # Host-only substitutions stay off the task text, and the task text
+        # stays out of the command string: like Claude Code, the prompt travels
+        # in a per-launch instruction env var that the local environment's
+        # final path-substitution stage keeps verbatim, so a prompt quoting
+        # /workspace or /logs paths reaches pi byte-identical, as in Docker.
+        before, prompt_and_tail, after = self._split_around_prompt(command)
+        if prompt_and_tail and self._instruction is not None:
+            shell_var = f"pi_instruction_{uuid.uuid4().hex}"
+            env_var = shell_var.upper()
+            launch_tail = prompt_and_tail[len(self._quoted_instruction or ""):]
+            command = (
+                f'{shell_var}="${env_var}"; unset {env_var}; '
+                + before.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
+                + f'"${shell_var}"'
+                + launch_tail
+                + after.replace("| stdbuf -oL tee ", "| tee ")  # hosts may lack GNU coreutils' stdbuf
+            )
+            env = {**(env or {}), env_var: self._instruction}
+        elif prompt_and_tail:
+            command = (
+                before.replace(". ~/.nvm/nvm.sh; ", "")
+                + prompt_and_tail
+                + after.replace("| stdbuf -oL tee ", "| tee ")
+            )
+        else:
+            # Install and probe commands carry no task text; the host-only
+            # substitutions are safe everywhere.
+            command = command.replace(". ~/.nvm/nvm.sh; ", "").replace("| stdbuf -oL tee ", "| tee ")
+        command = self._local_config_path(command)
         return await super().exec_as_agent(
             environment,
             command=command,

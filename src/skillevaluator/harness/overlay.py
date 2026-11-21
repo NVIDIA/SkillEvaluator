@@ -82,6 +82,8 @@ _KNOWN_ROOTS = (
     ".copilot/skills",
     ".openclaw/skills",
     ".config/opencode/skills",
+    ".pi/skills",
+    ".pi/agent/skills",
 )
 
 
@@ -165,11 +167,35 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
         homes = set()
     for root in sorted(_KNOWN_ROOTS, key=lambda r: -len(r.split("/"))):
         size = len(root.split("/"))
-        for index in range(len(parts) - size - 1, -1, -1):
+        # index + size == len(parts): the skill dir is the root itself (pi's
+        # loose manifests); that counts as installed at the root, depth 0.
+        for index in range(len(parts) - size, -1, -1):
             if "/".join(parts[index : index + size]) == root:
                 user = parts[:index] in homes
-                return f"~/{root}" if user else root, len(parts) - (index + size) - 1
+                return f"~/{root}" if user else root, max(len(parts) - (index + size) - 1, 0)
     return None, 0
+
+
+#: pi 1.6.0 discovery (collectSkillEntries modes "pi"/"agents"): a loose
+#: manifest at the .pi skills roots loads with any .md name, a nested one only
+#: as exact SKILL.md; under .agents/skills it is the other way around.
+_PI_ROOT_FAMILIES = {
+    ".pi/skills": "pi",
+    ".pi/agent/skills": "pi",
+    ".agents/skills": "agents",
+}
+
+
+def _pi_manifest_ignored(skill_path: Path) -> bool:
+    """Whether pi skips a non-SKILL.md manifest at this depth under its roots."""
+    parts = _link_location_parts(skill_path)
+    for root, family in _PI_ROOT_FAMILIES.items():
+        size = len(root.split("/"))
+        for index in range(len(parts) - size, -1, -1):  # dir == root allowed: loose manifest
+            if "/".join(parts[index : index + size]) == root:
+                direct = index + size == len(parts)
+                return family == "agents" if direct else family == "pi"
+    return False
 
 
 # OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
@@ -234,6 +260,14 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     manifest = next(
         (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
     )
+    if not manifest.is_file() and skill_path.is_dir():
+        # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
+        # roots, nested under .agents/skills); an explicit-file check can point
+        # at a directory whose only manifest is that casing.
+        manifest = next(
+            (p for p in sorted(skill_path.iterdir()) if p.is_file() and p.name.casefold() == "skill.md"),
+            manifest,
+        )
     raw = manifest.read_bytes() if manifest.is_file() else b""
     text = raw.decode("utf-8-sig", errors="replace")
     match = FRONTMATTER_PATTERN.match(text)
@@ -265,6 +299,41 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
 
 def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
+def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
+    """pi 1.6.0 (js-yaml core schema) reads only the unquoted boolean spellings.
+
+    PyYAML (YAML 1.1) also coerces ``yes``/``on`` to True, and a quoted
+    ``"true"`` stays a string for pi while ``_is_true`` accepts it — so the
+    raw scalar decides when the parsed value is a bool.
+    """
+    if data.get(key) is not True:
+        return False
+    from yaml.nodes import MappingNode, ScalarNode
+
+    try:
+        # BaseLoader keeps every scalar a string (with .style telling plain vs
+        # quoted) and compose() already resolves anchors and aliases to nodes.
+        document = yaml.compose(fm_yaml, Loader=yaml.BaseLoader)
+    except yaml.YAMLError:
+        return True  # unparseable frontmatter is reported by its own finding
+
+    def plain_true(node: object) -> bool:
+        return isinstance(node, ScalarNode) and node.style is None and node.value in ("true", "True", "TRUE")
+
+    def walk(node: object) -> bool | None:
+        if not isinstance(node, MappingNode):
+            return None
+        for key_node, value_node in node.value:
+            if isinstance(key_node, ScalarNode) and key_node.value == key:
+                return plain_true(value_node)
+            found = walk(value_node)
+            if found is not None:
+                return found
+        return None
+
+    return walk(document) is True
 
 
 def _shipped_paths(skill_path: Path) -> list[Path]:
@@ -476,6 +545,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
+        "pi_manifest_ignored": "SKILL.md" not in names and _pi_manifest_ignored(skill_path),
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -504,6 +574,9 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
+        "pi_disable_model_invocation": _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
+        "pi_hidden_value_invalid": _is_true(data.get("disable-model-invocation"))
+        and not _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "claude_ignored_values": "; ".join(_claude_ignored_values(data)),
@@ -659,6 +732,11 @@ def _catalog_base(skill: Path) -> Path | None:
     """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
     root, depth = _install_root(skill)
     if root is not None:
+        # A skill sitting directly at the skills root (pi's loose manifests)
+        # scans that root itself; parents[0] would start one folder above it.
+        parts = _link_location_parts(skill)
+        if "/".join(parts[-len(root.removeprefix("~/").split("/")) :]) == root.removeprefix("~/"):
+            return skill.absolute()
         return skill.absolute().parents[depth]
     parent = skill.absolute().parent
     return parent if parent.name == "skills" else None

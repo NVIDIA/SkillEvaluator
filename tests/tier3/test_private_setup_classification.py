@@ -37,7 +37,7 @@ def test_private_wrapper_retains_base_methods_and_has_no_native_launcher(key: tu
         assert issubclass(cls, import_symbol(key[1]))
     else:
         module = key[0].replace("-", "_")
-        stock_name = {"claude-code": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes"}[key[0]]
+        stock_name = {"claude-code": "ClaudeCode", "codex": "Codex", "opencode": "OpenCode", "hermes": "Hermes", "pi": "Pi"}[key[0]]
         assert base is import_symbol(f"harbor.agents.installed.{module}:{stock_name}")
     for method in ("install", "run", "exec_as_agent"):
         assert getattr(cls, method) is getattr(base, method)
@@ -91,6 +91,20 @@ def test_opencode_plugin_arms_share_the_environment_default_agent(
         assert issubclass(cls, default_agent)
         assert cls.install is default_agent.install
         assert cls.ensure_system_dependencies is default_agent.ensure_system_dependencies
+
+
+@pytest.mark.parametrize("env_mode", ["e2b", "daytona", "modal"])
+def test_pi_plugin_arms_use_the_builtin_container_wrapper_on_cloud_modes(
+    monkeypatch: pytest.MonkeyPatch, env_mode: str
+) -> None:
+    # Native plugin selection must resolve the same built-in base wrapper the
+    # run command uses, not fail over "the stock agent" before launch.
+    monkeypatch.setattr(runner, "_private_runtime_hooks", _NativeHooks)
+
+    baseline_path, with_path = runner._private_agent_paths(["pi"], {}, env_mode)["pi"]
+
+    assert baseline_path == PRIVATE_AGENT_IMPORT_PATHS[("pi", CONTAINER_AGENT_IMPORT_PATHS["pi"])]
+    assert with_path == "skillevaluator.tier3.harbor.native_agents:NativePi"
 
 
 def test_unknown_private_wrapper_does_not_silently_replace_custom_routing() -> None:

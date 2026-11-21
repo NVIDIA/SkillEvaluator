@@ -525,7 +525,7 @@ class SchemaValidator(ValidatorBase):
                     check_name="duplicate_key",
                     message=(
                         f"Duplicate frontmatter key '{key}': YAML parsers disagree on it "
-                        "(Codex, OpenCode, Copilot CLI and OpenClaw drop the skill; others keep the last value)"
+                        "(Codex, OpenCode, Copilot CLI, OpenClaw and pi drop the skill; others keep the last value)"
                     ),
                     file_path=file_path,
                     line_number=line_number,

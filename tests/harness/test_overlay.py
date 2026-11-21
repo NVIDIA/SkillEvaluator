@@ -21,7 +21,7 @@ from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
 from skillevaluator.validators.harness import HarnessValidator
 from skillevaluator.validators.schema import SchemaValidator
 
-HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode"]
+HARNESSES = ["claude-code", "codex", "copilot-cli", "hermes", "openclaw", "opencode", "pi"]
 BODY = "\n# Demo\n\n## Instructions\n\n1. Step\n\n## Examples\n\nExample.\n"
 
 
@@ -54,7 +54,7 @@ def test_packaged_profiles_load_and_pin_versions():
 
     assert sorted(p["harness"] for p in profiles) == HARNESSES
     assert all(p["verified"]["version"] and p["verified"]["date"] for p in profiles)
-    assert len(list(PROFILES_DIR.glob("*.yaml"))) == 6
+    assert len(list(PROFILES_DIR.glob("*.yaml"))) == 7
 
 
 def test_unknown_harness_is_rejected():
@@ -69,7 +69,7 @@ def test_clean_skill_loads_everywhere(tmp_path: Path):
 def test_duplicate_key_is_not_loaded_by_strict_parsers(tmp_path: Path):
     status = _status(_skill(tmp_path, extra="description: Use when a second value is given.\n"))
 
-    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == "not_loaded"
+    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == status["pi"] == "not_loaded"
     assert status["claude-code"] == "loads"
 
 
@@ -81,6 +81,7 @@ def test_bom_is_not_loaded_by_codex_only(tmp_path: Path):
     status = _status(skill)
 
     assert status["codex"] == "not_loaded"
+    assert status["pi"] == "loads"
     assert {h for h, s in status.items() if s != "loads"} == {"codex"}
 
 
@@ -278,7 +279,7 @@ def test_harness_check_alone_marks_ticker_and_panel(tmp_path: Path):
     text = _render(harness_panel(block))
     assert "Harness compatibility" in text and "advisory" not in text
     assert "not found" in text and "[CC-ROOT]" not in text
-    assert "1 of 6 not loaded" in text and "Details and fixes: -v" in text
+    assert "1 of 7 not loaded" in text and "Details and fixes: -v" in text
     full = _render(harness_panel(block, verbose=True))
     assert "NOT LOADED" in full and "[CC-ROOT]" in full
 
@@ -288,7 +289,7 @@ def test_clean_skill_panel_is_one_line(tmp_path: Path):
 
     assert harness_note(block) is None
     text = _render(harness_panel(block))
-    assert "6 of 6 load" in text and "harness-check" not in text
+    assert "7 of 7 load" in text and "harness-check" not in text
 
 
 def test_validate_shows_panel_and_verdict_note(tmp_path: Path):
@@ -390,7 +391,7 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
     rows = _rows(skills / "filler-000")
 
     assert rows["opencode"]["status"] == "degraded"
-    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME"} <= {
+    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME", "PI-NAME-COLLISION"} <= {
         f["id"] for r in rows.values() for f in r["findings"]
     }
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
@@ -660,6 +661,81 @@ def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
     assert flagged == {"codex", "hermes", "opencode"}
 
 
+@pytest.mark.parametrize(
+    ("value", "hidden"),
+    [("true", True), ("True", True), ('"true"', False), ("yes", False), ("false", False)],
+)
+def test_pi_hidden_matches_pis_boolean_semantics(tmp_path: Path, value: str, hidden: bool):
+    skill = _skill(tmp_path, extra=f"disable-model-invocation: {value}\n")
+    rows = _rows(skill)
+
+    assert ("PI-HIDDEN" in _ids(rows, "pi")) is hidden
+    # A value that looks hiding to a YAML 1.1 reader or _is_true but is a plain
+    # string for pi gets an advisory instead of silence.
+    invalid = "PI-HIDDEN-INVALID" in _ids(rows, "pi")
+    assert invalid is (not hidden and value.strip('"') in {"true", "yes"})
+
+
+def test_pi_hidden_matches_pis_semantics_for_quoted_keys_and_anchors(tmp_path: Path):
+    """A quoted key and an anchored/aliased scalar map the same as the plain spelling."""
+    for extra in ('"disable-model-invocation": true\n', "disable-model-invocation: &flag true\n", "flag: &flag true\ndisable-model-invocation: *flag\n"):
+        skill = _skill(tmp_path / f"q{abs(hash(extra)) % 1000}", extra=extra)
+        rows = _rows(skill)
+
+        assert "PI-HIDDEN" in _ids(rows, "pi"), extra
+        assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi"), extra
+
+
+def test_direct_root_duplicate_scan_stays_inside_the_skills_root(tmp_path: Path):
+    """A loose .pi/skills/SKILL.md must not collide with same-named skills outside the root."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing duplicates.\n---\nBody\n", encoding="utf-8"
+    )
+    example = tmp_path / "proj" / ".pi" / "notes" / "example"
+    example.mkdir(parents=True)
+    (example / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing duplicates.\n---\nBody\n", encoding="utf-8"
+    )
+
+    rows = _rows(root)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-NAME-COLLISION" not in _ids(rows, "pi")
+
+
+def test_pi_trust_covers_a_manifest_directly_at_the_root(tmp_path: Path):
+    """A .pi/skills/SKILL.md with no child folder still counts as installed at the root."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing trust.\n---\nBody\n", encoding="utf-8"
+    )
+
+    rows = _rows(root)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-TRUST" in _ids(rows, "pi")  # project roots require trust, equal-to-root too
+    assert "PI-ROOT" not in _ids(rows, "pi")
+
+
+def test_harness_check_accepts_the_documented_mixed_case_manifest(tmp_path: Path):
+    """harness-check on an explicit Skill.md (pi loads it nested under .agents/skills)
+    reports instead of exiting 1 with No skills found."""
+    skill = tmp_path / "proj" / ".agents" / "skills" / "demo" / "Skill.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["harness-check", str(skill), "--harness", "pi", "--json", str(tmp_path / "h.json")])
+
+    assert result.exit_code == 0, result.output
+    assert "No skills found" not in result.output
+    # The schema summary gives the canonical-name diagnostic, not the generic rerun.
+    assert "no canonical SKILL.md" in result.output
+    assert "SKILL.md not found in skill directory" not in result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    assert rows[0]["harness"] == "pi" and rows[0]["status"] == "loads"
+
+
 def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):
     skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
     (skill / "agents").mkdir()
@@ -679,13 +755,18 @@ def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
     rows = _rows(skill)
 
     flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
-    assert flagged == set(HARNESSES) - {"codex"}
+    assert flagged == set(HARNESSES) - {"codex"}  # pi has no implicit-invocation policy mechanism either
+    # pi honors disable-model-invocation, so the fix names that setting.
+    finding = next(f for f in rows["pi"]["findings"] if f["id"] == "PI-CODEX-POLICY")
+    assert finding["fix"] == (
+        "Also set disable-model-invocation: true (pi hides the skill from the model; the user can still run /skill:name)."
+    )
 
 
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
     rows = _rows(_skill(tmp_path, body=BODY + "Run ${CLAUDE_SKILL_DIR}/run.sh $ARGUMENTS\n"))
 
-    for harness in set(HARNESSES) - {"claude-code"}:
+    for harness in set(HARNESSES) - {"claude-code"}:  # pi substitutes neither placeholder
         assert any(f["id"].endswith("-ARGUMENTS") for f in rows[harness]["findings"]), harness
         assert any(f["id"].endswith("-SKILL-DIR") for f in rows[harness]["findings"]), harness
     assert not rows["claude-code"]["findings"]
@@ -750,6 +831,144 @@ def test_hermes_platforms_listing_every_os_is_not_flagged(tmp_path: Path):
     assert "Hidden from the skill list on linux, windows (platforms: macos)." in {
         f["message"] for f in mac_only["hermes"]["findings"]
     }
+
+
+def test_pi_drops_tab_indented_frontmatter(tmp_path: Path):
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text("---\nname: demo-skill\nmetadata:\n  \tauthor: x\n---\nBody\n")
+
+    rows = _rows(skill)
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-FRONTMATTER-TABS" in _ids(rows, "pi")
+
+
+def test_pi_drops_skills_without_frontmatter_or_description(tmp_path: Path):
+    bare = tmp_path / "skills" / "bare"
+    bare.mkdir(parents=True)
+    (bare / "SKILL.md").write_text("No frontmatter, just a body.\n")
+    blank = _skill(tmp_path / "blank", desc='"   "')
+
+    assert _rows(bare)["pi"]["status"] == "not_loaded"
+    assert "PI-UNPARSEABLE" in _ids(_rows(bare), "pi")
+    assert _rows(blank)["pi"]["status"] == "not_loaded"
+    assert "PI-DESC-MISSING" in _ids(_rows(blank), "pi")
+
+
+@pytest.mark.parametrize("target, flagged", [(1024, False), (1025, True)])
+def test_pi_description_length_boundary(tmp_path: Path, target: int, flagged: bool):
+    rows = _rows(_skill(tmp_path / str(target), desc="a" * target))
+
+    assert ("PI-DESC-LONG" in _ids(rows, "pi")) is flagged
+    assert rows["pi"]["status"] == "loads"
+
+
+def test_pi_hidden_disable_model_invocation(tmp_path: Path):
+    rows = _rows(_skill(tmp_path, extra="disable-model-invocation: true\n"))
+
+    assert rows["pi"]["status"] == "degraded"
+    assert "PI-HIDDEN" in _ids(rows, "pi")
+
+
+def test_pi_project_root_loads_for_pi_and_gates_the_others(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "proj" / ".pi" / "skills"))
+
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-TRUST" in _ids(rows, "pi")  # project roots load only once trusted
+    assert rows["claude-code"]["status"] == "not_loaded"
+    assert "CC-ROOT" in _ids(rows, "claude-code")
+
+
+def _loose_skill(root: Path) -> Path:
+    """A non-exact manifest sitting directly in a skills root (pi mode "pi")."""
+    root.mkdir(parents=True)
+    (root / "skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
+    # Nested (collectSkillEntries mode "agents"): any .md manifest name loads.
+    agents_skill = _skill(tmp_path / "proj" / ".agents")
+    (agents_skill / "SKILL.md").rename(agents_skill / "skill.md")  # rename, not copy: case-insensitive FS
+    rows = _rows(agents_skill)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
+
+    # Nested under a .pi root: only the exact entry name loads.
+    dotpi_skill = _skill(tmp_path / "proj2" / ".pi" / "skills")
+    (dotpi_skill / "SKILL.md").rename(dotpi_skill / "skill.md")
+    rows = _rows(dotpi_skill)
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-CASING" in _ids(rows, "pi")
+
+    # Loose at .agents/skills: mode "agents" loads only the exact name at the root.
+    # Sibling control: a working named child skill next to the loose manifest
+    # keeps loading, and the fix must not recommend hiding it.
+    agents_root = tmp_path / "proj3" / ".agents" / "skills"
+    loose = _loose_skill(agents_root)
+    sky = agents_root / "sky"
+    sky.mkdir(parents=True)
+    (sky / "SKILL.md").write_text(
+        "---\nname: sky\ndescription: Use when testing siblings.\n---\nBody\n", encoding="utf-8"
+    )
+    rows = _rows(loose)
+    assert rows["pi"]["status"] == "not_loaded"
+    finding = next(f for f in rows["pi"]["findings"] if f["id"] == "PI-CASING")
+    assert "named child folder" in finding["fix"]
+    assert "sibling" in finding["fix"]
+    rows = _rows(sky)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
+
+    # Loose at a .pi root: mode "pi" accepts any .md name directly in the root.
+    rows = _rows(_loose_skill(tmp_path / "proj4" / ".pi" / "skills"))
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
+
+
+def test_claude_root_is_not_a_pi_root(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "proj" / ".claude" / "skills"))
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-ROOT" in _ids(rows, "pi")
+
+
+def test_pi_drops_non_string_descriptions(tmp_path: Path):
+    rows = _rows(_skill(tmp_path / "numeric", desc="42"))
+
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-DESC-MISSING" in _ids(rows, "pi")
+
+
+def test_pi_name_collision_is_a_warning_not_a_drop(tmp_path: Path):
+    skills = tmp_path / "skills"
+    for folder in ("first", "second"):
+        skill = skills / folder
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: same\ndescription: Use when testing collisions.\n---\n{BODY}", encoding="utf-8"
+        )
+    first = _rows(skills / "first")
+    second = _rows(skills / "second")
+
+    # The loader keeps the first skill it scans; the check cannot know the scan
+    # order, so both sides report the collision as degraded, never as loaded.
+    assert "PI-NAME-COLLISION" in _ids(first, "pi")
+    assert "PI-NAME-COLLISION" in _ids(second, "pi")
+    assert first["pi"]["status"] == second["pi"]["status"] == "degraded"
+
+
+def test_pi_name_falls_back_to_the_folder(tmp_path: Path):
+    skill = tmp_path / "skills" / "folder-name"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text("---\ndescription: Use when testing name fallback.\n---\nBody\n")
+
+    rows = _rows(skill)
+
+    assert "PI-NAME-FALLBACK" in _ids(rows, "pi")
+    assert rows["pi"]["status"] == "loads"
 
 
 def _sized(root: Path, fact: str, target: int) -> Path:

@@ -979,7 +979,11 @@ class SkillEvaluatorLocalEnvironment(BaseEnvironment):
                         patterns.append("./" + staging.relative_to(source_root).as_posix())
                     excludes = " ".join(f"--exclude={shlex.quote(pattern)}" for pattern in patterns)
                     command = f"tar czf {archive_argument} {excludes} ."
-                result = await self.exec(command, cwd=str(source), timeout_sec=600, user="root")
+                # macOS tar otherwise invents AppleDouble members for xattrs;
+                # disable their creation while retaining real ._ filenames.
+                result = await self.exec(
+                    command, cwd=str(source), env={"COPYFILE_DISABLE": "1"}, timeout_sec=600, user="root"
+                )
                 if result.return_code != 0:
                     raise RuntimeError(f"Failed to pack local directory transfer (exit code {result.return_code})")
                 with tarfile.open(archive, "r:gz") as transfer:

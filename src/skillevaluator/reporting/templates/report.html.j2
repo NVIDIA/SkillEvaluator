@@ -2511,10 +2511,10 @@
         <div id="dedup-{{ dedup_id }}" class="dedup-subtab" style="display:{{ 'block' if loop.first else 'none' }};" role="tabpanel" aria-labelledby="dedup-tab-{{ dedup_id }}" tabindex="0">
         <section id="tier2-{{ scope.id }}" aria-labelledby="tier2-{{ scope.id }}-title">
             <h2 id="tier2-{{ scope.id }}-title">{{ scope.label }}</h2>
-            <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else 'Semantic overlap with catalog entries or among a collection of skills.' }}</p>
-            {% if not scope.not_run %}
+            <p>{{ 'Redundant content among files in the evaluated skill.' if scope.id == 'within' else ('Semantic overlap with catalog entries or among a collection of skills.' if scope.id == 'across' else 'Additional recorded Tier 2 checks.') }}</p>
+            {% if not scope.not_run and scope.id != 'other' %}
             <dl class="tier2-scope-summary">
-                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings' if scope.id == 'within' else 'Similarity matches', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected skills', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
+                {% for label, value in [('Checks completed', scope.completed), ('Duplicate findings' if scope.id == 'within' else 'Similarity matches', scope.duplicates), ('Affected files' if scope.id == 'within' else 'Affected entries', scope.affected), ('Catalog entries compared', scope.catalog_entries)] %}
                 <div><dt>{{ label }}</dt><dd>{{ 'Not applicable' if label == 'Catalog entries compared' and scope.catalog_not_applicable else (value if value is not none else 'Unavailable') }}</dd></div>
                 {% endfor %}
             </dl>
@@ -2528,6 +2528,8 @@
             {% endfor %}
             {% for result in scope.results %}
                 {% set execution_errors = result | additional_errors %}
+                {# A catalog setup record compares nothing; it is titled by its own name, like other checks. #}
+                {% set titled = scope.id == 'other' or result | catalog_setup_record %}
                 {% if execution_errors %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     <strong>{{ 'Execution errors' if result.is_incomplete else 'Errors' }}</strong>
@@ -2543,9 +2545,9 @@
                     <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
                     {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
                 </div>
-                {% elif result.passed and not result.findings and scope.completed == scope.results | length %}
+                {% elif result.passed and not result.findings and ((titled and result.success_details) or (not titled and scope.completed == scope.results | length)) %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
-                    {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">No semantic overlaps detected.</strong>
+                    {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">{{ result.validator_name if titled else 'No semantic overlaps detected.' }}</strong>
                     {% if result.success_details %}
                     <ul style="margin:0.5rem 0 0;padding-left:1.25rem;font-size:0.85rem;color:var(--text-secondary);">
                         {% for d in result.success_details %}<li>{{ d.message }}</li>{% endfor %}

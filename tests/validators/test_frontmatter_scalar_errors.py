@@ -19,7 +19,7 @@ from skillevaluator.validators.frontmatter_parser import parse_frontmatter
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY
 from skillevaluator.validators.markdown import markdown_link_targets
 from skillevaluator.validators.quality_score import QualityScoreValidator
-from skillevaluator.validators.schema import SchemaValidator
+from skillevaluator.validators.schema import SchemaValidator, _duplicate_frontmatter_keys
 from skillevaluator.validators.version import VersionValidator
 
 
@@ -111,6 +111,15 @@ def test_native_scanner_error_keeps_actual_source_location(tmp_path, raw_value):
     finding = next(finding for finding in result.findings if finding.check_name == "yaml_syntax")
     assert finding.line_number == 4
     assert "invalid YAML value" in finding.message
+
+
+def test_duplicate_key_scan_handles_native_overflow_on_every_python_version(monkeypatch):
+    def overflow(*args, **kwargs):
+        raise OverflowError("scanner code point is out of range")
+
+    monkeypatch.setattr(yaml, "compose", overflow)
+
+    assert _duplicate_frontmatter_keys("name: sample\n") == []
 
 
 def test_version_reports_the_parse_error(malformed_skill: Path) -> None:

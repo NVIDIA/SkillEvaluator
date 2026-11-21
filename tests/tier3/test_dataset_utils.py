@@ -15,6 +15,7 @@ import pytest
 import yaml
 
 from skillevaluator.tier3.dataset_utils import load_dataset_entries
+from skillevaluator.utils.structured_data import StructuredDataSyntaxError
 
 
 @pytest.mark.parametrize("suffix", [".json", ".jsonl", ".yaml", ".yml"])
@@ -71,4 +72,14 @@ def test_invalid_utf8_dataset_is_rejected(tmp_path: Path, suffix: str) -> None:
     dataset_path.write_bytes(b'[{"question": "\xff"}]')
 
     with pytest.raises(UnicodeDecodeError):
+        load_dataset_entries(dataset_path)
+
+
+@pytest.mark.parametrize("suffix", [".yaml", ".yml"])
+@pytest.mark.parametrize("tag", ["int", "float", "bool", "timestamp"])
+def test_invalid_dataset_scalar_does_not_echo_prompt_text(tmp_path: Path, suffix: str, tag: str) -> None:
+    dataset_path = tmp_path / f"evals{suffix}"
+    dataset_path.write_text(f"- id: scalar\n  question: !!{tag} private prompt text\n", encoding="utf-8")
+
+    with pytest.raises(StructuredDataSyntaxError, match=r"^Input is not valid YAML$"):
         load_dataset_entries(dataset_path)

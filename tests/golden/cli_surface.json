@@ -519,7 +519,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -716,7 +717,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1623,7 +1625,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1705,7 +1708,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1805,7 +1809,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1855,7 +1860,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1935,7 +1941,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2067,7 +2074,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2110,7 +2118,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2169,7 +2178,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2227,7 +2237,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2277,7 +2288,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2357,7 +2369,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2491,7 +2504,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli', 'json', 'html')",
               "multiple": true,
@@ -2627,7 +2641,8 @@
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -2696,7 +2711,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2762,7 +2778,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2894,7 +2911,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2973,7 +2991,8 @@
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -5427,7 +5446,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,

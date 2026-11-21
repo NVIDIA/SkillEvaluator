@@ -1694,7 +1694,11 @@ class TestInvalidReplyRetry:
         assert successes == {"[skill-a] rubric_eval": 2, "[skill-b] rubric_eval": 1}
         (finding,) = _llm_findings(result)
         assert finding.file_path.startswith("[skill-c] ")
-        assert finding.metadata == {"judge_attempts": 2}
+        assert finding.metadata == {
+            "judge_attempts": 2,
+            "artifact_path": str(tmp_path / "skill-c" / "SKILL.md"),
+            "member_label": "skill-c",
+        }
 
     def test_report_names_the_model_that_answered_the_retry(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         pytest.importorskip("anthropic")

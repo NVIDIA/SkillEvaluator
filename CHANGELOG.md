@@ -4,6 +4,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Security
+
+- Update LiteLLM and the minimum AWS SDK version in the optional LLM and
+  Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
+  overrides when bearer authentication is configured.
+- Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
+  installs to include upstream security fixes.
+- Raise the Tier 3 MCP Python SDK floor to 1.30.0 for upstream security fixes.
+- Update filelock, multidict, pip, and certifi in the optional LLM, Tier 2,
+  Tier 3, and dependency audit installs to include upstream security fixes.
+- Build the public Docker image and managed GitLab jobs from a digest-pinned
+  Python 3.12.16 image to protect the pip bootstrap against the affected
+  eMudhra certificates. On Windows, use `python -m pip` with a patched Python
+  release to install the security or all extra so an older pip can upgrade
+  during installation.
+
 ### Changed
 
 - Claude Code log recovery pairs batched and delayed tool results without repeatedly
@@ -52,6 +68,26 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Bedrock preflight and host inference now sign requests with IAM credentials
+  when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
+  a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
+  `Authorization: Bearer` header, and host inference failed with an illegal
+  header value. This includes models called through the Bedrock Responses
+  route.
+- Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
+  The fence length exceeds any backtick run in the rendered content. File and
+  skill labels are escaped and length-limited. The judge is instructed to
+  treat the fenced content and labels as skill data and follow the rubric.
+- Tier 1 file walkers skip symlinks and Windows directory junctions whose
+  target resolves outside the skill directory (or is missing), so the PII,
+  secrets, Unicode, license and link checks no longer read or quote files from
+  elsewhere on the host through a symlinked `references/` entry. The
+  dependency audit and the license check apply the same rule to root
+  `requirements.txt`, `requirements-dev.txt` and `LICENSE`/`COPYING` files, and
+  the unpinned-dependency warning quotes only the package name, never the whole
+  line. Symlinks that resolve inside the skill still scan as before. Code
+  Integrity & Hygiene records a low-severity `symlink_outside_skill` finding
+  naming each skipped link by its path inside the skill, never by its target.
 - Tier 1 code risk no longer lets a skill configure its own Bandit scan. A
   `.bandit` file shipped in the skill (at the root or nested, for example
   `scripts/.bandit`) with `skips` or `tests`, or `# nosec` comments on risky

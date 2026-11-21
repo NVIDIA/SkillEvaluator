@@ -689,6 +689,7 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
     _PI_CONFIG_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-agent")
     _PI_MCP_ADAPTER_DIR = PurePosixPath(EnvironmentPaths.agent_dir / "pi-mcp-adapter")
     _quoted_instruction: str | None = None
+    _instruction: str | None = None
 
     async def install(self, environment: BaseEnvironment) -> None:
         if self.mcp_servers:
@@ -724,11 +725,14 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
         # the config-path rewrite must never touch it, or a task quoting a
         # literal /tmp/harbor-pi-agent path is evaluated on different text in
         # local and Docker mode.
-        self._quoted_instruction = shlex.quote(self.render_instruction(instruction))
+        rendered = self.render_instruction(instruction)
+        self._instruction = rendered
+        self._quoted_instruction = shlex.quote(rendered)
         try:
             await super().run(instruction, environment, context)
         finally:
             self._quoted_instruction = None
+            self._instruction = None
 
     def _split_around_prompt(self, command: str) -> tuple[str, str, str]:
         # The instruction is matched together with the launch tail that follows
@@ -775,19 +779,34 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
         cwd: str | None = None,
         timeout_sec: int | None = None,
     ):
-        # Host-only substitutions stay off the task text: a prompt quoting the
-        # literal nvm preamble or stdbuf pipeline reaches pi byte-identical, as
-        # it would in Docker mode. Install and probe commands carry no task
-        # text, so they take the substitutions everywhere.
+        # Host-only substitutions stay off the task text, and the task text
+        # stays out of the command string: like Claude Code, the prompt travels
+        # in a per-launch instruction env var that the local environment's
+        # final path-substitution stage keeps verbatim, so a prompt quoting
+        # /workspace or /logs paths reaches pi byte-identical, as in Docker.
         before, prompt_and_tail, after = self._split_around_prompt(command)
-        if not prompt_and_tail:
-            command = command.replace(". ~/.nvm/nvm.sh; ", "").replace("| stdbuf -oL tee ", "| tee ")
-        else:
+        if prompt_and_tail and self._instruction is not None:
+            shell_var = f"pi_instruction_{uuid.uuid4().hex}"
+            env_var = shell_var.upper()
+            launch_tail = prompt_and_tail[len(self._quoted_instruction or ""):]
             command = (
-                before.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
-                + prompt_and_tail
+                f'{shell_var}="${env_var}"; unset {env_var}; '
+                + before.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
+                + f'"{shell_var}"'
+                + launch_tail
                 + after.replace("| stdbuf -oL tee ", "| tee ")  # hosts may lack GNU coreutils' stdbuf
             )
+            env = {**(env or {}), env_var: self._instruction}
+        elif prompt_and_tail:
+            command = (
+                before.replace(". ~/.nvm/nvm.sh; ", "")
+                + prompt_and_tail
+                + after.replace("| stdbuf -oL tee ", "| tee ")
+            )
+        else:
+            # Install and probe commands carry no task text; the host-only
+            # substitutions are safe everywhere.
+            command = command.replace(". ~/.nvm/nvm.sh; ", "").replace("| stdbuf -oL tee ", "| tee ")
         command = self._local_config_path(command)
         return await super().exec_as_agent(
             environment,

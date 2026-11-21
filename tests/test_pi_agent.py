@@ -268,16 +268,21 @@ def test_local_install_stages_the_mcp_shim_in_the_agent_dir(tmp_path):
     assert kwargs["content"].startswith("export default function")
 
 
-def test_local_rewrite_never_touches_the_quoted_instruction(monkeypatch):
+def test_local_rewrite_moves_the_task_text_into_an_instruction_env_var(monkeypatch):
     from harbor.agents.installed.pi import Pi
 
+    from skillevaluator.tier3.harbor.local_environment import _AGENT_INSTRUCTION_ENV_RE
+
     agent = object.__new__(SkillEvaluatorLocalPi)
+    agent.mcp_servers = []
     instruction = "Print the literal path /tmp/harbor-pi-agent"
+    agent._instruction = instruction
     agent._quoted_instruction = shlex.quote(instruction)
     captured = {}
 
     async def raw_exec(_self, _environment, command, env=None, **_kwargs):
         captured["command"] = command
+        captured["env"] = env
         return SimpleNamespace(return_code=0)
 
     monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
@@ -292,20 +297,30 @@ def test_local_rewrite_never_touches_the_quoted_instruction(monkeypatch):
     )
 
     command = str(captured["command"])
+    env = captured["env"]
     assert "PI_CODING_AGENT_DIR=/logs/agent/pi-agent" in command  # the config dir moved
-    assert shlex.quote(instruction) in command  # the task text is byte-identical
+    assert instruction not in command  # the task text left the command string
+    (env_var,) = [key for key in env if key.startswith("PI_INSTRUCTION_")]
+    assert env[env_var] == instruction  # byte-identical in the launch env
+    assert _AGENT_INSTRUCTION_ENV_RE.fullmatch(env_var)  # the local env keeps it verbatim
+    shell_var = env_var.lower()
+    assert f'{shell_var}="${env_var}"; unset {env_var};' in command
+    assert f'"{shell_var}" 2>&1 </dev/null' in command  # pi's prompt argument
 
 
 def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
     from harbor.agents.installed.pi import Pi
 
     agent = object.__new__(SkillEvaluatorLocalPi)
+    agent.mcp_servers = []
     instruction = "/tmp/harbor-pi-agent"  # a bare path: shlex.quote() adds no quotes
+    agent._instruction = instruction
     agent._quoted_instruction = shlex.quote(instruction)
     captured = {}
 
     async def raw_exec(_self, _environment, command, env=None, **_kwargs):
         captured["command"] = command
+        captured["env"] = env
         return SimpleNamespace(return_code=0)
 
     monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
@@ -320,21 +335,27 @@ def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
     )
 
     command = str(captured["command"])
-    # The launcher's config path moved; the prompt argument stayed verbatim.
-    assert command.startswith("PI_CODING_AGENT_DIR=/logs/agent/pi-agent pi --print")
-    assert " --model m /tmp/harbor-pi-agent 2>&1 </dev/null" in command
+    env = captured["env"]
+    # The launcher's config path moved; the prompt argument rides the env var.
+    assert "PI_CODING_AGENT_DIR=/logs/agent/pi-agent pi --print --mode json --model m" in command
+    (env_var,) = [key for key in env if key.startswith("PI_INSTRUCTION_")]
+    assert env[env_var] == instruction
+    assert f'"{env_var.lower()}" 2>&1 </dev/null' in command
 
 
 def test_local_host_substitutions_stay_off_the_task_text(monkeypatch):
     from harbor.agents.installed.pi import Pi
 
     agent = object.__new__(SkillEvaluatorLocalPi)
+    agent.mcp_servers = []
     instruction = "Explain the literal text . ~/.nvm/nvm.sh; and | stdbuf -oL tee "
+    agent._instruction = instruction
     agent._quoted_instruction = shlex.quote(instruction)
     captured = {}
 
     async def raw_exec(_self, _environment, command, env=None, **_kwargs):
         captured["command"] = command
+        captured["env"] = env
         return SimpleNamespace(return_code=0)
 
     monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
@@ -349,11 +370,94 @@ def test_local_host_substitutions_stay_off_the_task_text(monkeypatch):
     )
 
     command = str(captured["command"])
-    # The task text quotes the host preamble and pipeline and stays byte-identical;
-    # only the launcher's own copies are rewritten for the local host.
-    assert shlex.quote(instruction) in command
-    assert command.startswith("pi --print --mode json --model m ")
+    env = captured["env"]
+    # The task text quotes the host preamble and pipeline and stays byte-identical
+    # in the env var; only the launcher's own copies are rewritten for the host.
+    (env_var,) = [key for key in env if key.startswith("PI_INSTRUCTION_")]
+    assert env[env_var] == instruction
+    assert instruction not in command
+    assert command.startswith("pi_instruction_")
+    assert 'pi --print --mode json --model m "' in command
     assert command.endswith("| tee /logs/agent/pi.txt")
+
+
+def test_local_task_text_survives_the_environments_final_path_rewrite(monkeypatch, tmp_path):
+    """The local environment rewrites container paths in the assembled command after
+    the wrapper ran; the task text travels in an env var that stage keeps verbatim."""
+    from harbor.agents.installed.pi import Pi
+    from harbor.models.task.config import EnvironmentConfig
+    from harbor.models.trial.paths import TrialPaths
+
+    from skillevaluator.tier3.harbor.local_environment import SkillEvaluatorLocalEnvironment
+
+    environment_dir = tmp_path / "environment"
+    environment_dir.mkdir()
+    runtime_root = tmp_path / "runtime"
+    runtime_root.mkdir()
+    paths = TrialPaths(tmp_path / "trial")
+    paths.mkdir()
+    environment = SkillEvaluatorLocalEnvironment(
+        environment_dir=environment_dir,
+        environment_name="pi-prompt",
+        session_id="pi-prompt",
+        trial_paths=paths,
+        task_env_config=EnvironmentConfig(),
+        runtime_agent="codex",
+        runtime_root=str(runtime_root),
+        sandbox_mode="off",
+    )
+
+    agent = object.__new__(SkillEvaluatorLocalPi)
+    agent.mcp_servers = []
+    instruction = "Quote the literal paths /workspace/input and /logs/agent/pi.txt\nin the answer."
+    agent._instruction = instruction
+    agent._quoted_instruction = shlex.quote(instruction)
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        captured["env"] = env
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            "PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent pi --print "
+            + shlex.quote(instruction)
+            + " 2>&1 </dev/null | stdbuf -oL tee /logs/agent/pi.txt",
+        )
+    )
+
+    # The final local stage: container paths in the command map to host paths;
+    # env values rewrite the same way except instruction vars, which stay verbatim.
+    command = environment._rewrite_command(str(captured["command"]))
+    env = environment._rewrite_env_values(environment._filter_command_env(captured["env"], protected=set()))
+
+    (env_var,) = [key for key in env if key.startswith("PI_INSTRUCTION_")]
+    assert env[env_var] == instruction  # the multiline task text is byte-identical
+    assert instruction not in command and "/workspace" not in command
+    assert str(paths.agent_dir) in command  # the launcher's own log path did map to the host
+    assert subprocess.run(["sh", "-n", "-c", command], check=False).returncode == 0
+
+
+def test_built_in_cloud_modes_route_pi_through_the_pinned_wrapper(tmp_path):
+    """e2b, daytona and the other built-in cloud modes reach the stock-agent branch;
+    pi still needs the pinned wrapper there (stock pi-mcp-adapter, model setup)."""
+    from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS
+
+    for env_mode in ("e2b", "daytona", "modal"):
+        command = build_harbor_run_command(
+            dataset_path=tmp_path, agent="pi", job_name="j", env_mode=env_mode, model="openai/gpt-5.5"
+        )
+        assert command[command.index("--agent") + 1] == CONTAINER_AGENT_IMPORT_PATHS["pi"], env_mode
+
+    # Agents whose stock Harbor class works keep the stock route.
+    command = build_harbor_run_command(
+        dataset_path=tmp_path, agent="claude-code", job_name="j", env_mode="e2b", model="claude-sonnet-5"
+    )
+    assert command[command.index("--agent") + 1] == "claude-code"
 
 
 def test_local_exec_rewrites_container_assumptions(monkeypatch):

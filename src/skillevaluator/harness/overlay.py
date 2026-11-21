@@ -167,10 +167,12 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
         homes = set()
     for root in sorted(_KNOWN_ROOTS, key=lambda r: -len(r.split("/"))):
         size = len(root.split("/"))
-        for index in range(len(parts) - size - 1, -1, -1):
+        # index + size == len(parts): the skill dir is the root itself (pi's
+        # loose manifests); that counts as installed at the root, depth 0.
+        for index in range(len(parts) - size, -1, -1):
             if "/".join(parts[index : index + size]) == root:
                 user = parts[:index] in homes
-                return f"~/{root}" if user else root, len(parts) - (index + size) - 1
+                return f"~/{root}" if user else root, max(len(parts) - (index + size) - 1, 0)
     return None, 0
 
 
@@ -258,6 +260,14 @@ def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, A
     manifest = next(
         (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
     )
+    if not manifest.is_file() and skill_path.is_dir():
+        # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
+        # roots, nested under .agents/skills); an explicit-file check can point
+        # at a directory whose only manifest is that casing.
+        manifest = next(
+            (p for p in sorted(skill_path.iterdir()) if p.is_file() and p.name.casefold() == "skill.md"),
+            manifest,
+        )
     raw = manifest.read_bytes() if manifest.is_file() else b""
     text = raw.decode("utf-8-sig", errors="replace")
     match = FRONTMATTER_PATTERN.match(text)
@@ -289,6 +299,19 @@ def _tab_indent_breaks_yaml(fm_yaml: str) -> bool:
 
 def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() == "true")
+
+
+def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
+    """pi 1.6.0 (js-yaml core schema) reads only the unquoted boolean spellings.
+
+    PyYAML (YAML 1.1) also coerces ``yes``/``on`` to True, and a quoted
+    ``"true"`` stays a string for pi while ``_is_true`` accepts it — so the
+    raw scalar decides when the parsed value is a bool.
+    """
+    if data.get(key) is not True:
+        return False
+    match = re.search(rf"(?m)^{re.escape(key)}:[ \t]*(.*?)[ \t]*(?:#.*)?$", fm_yaml)
+    return match is not None and match.group(1) in ("true", "True", "TRUE")
 
 
 def _shipped_paths(skill_path: Path) -> list[Path]:
@@ -529,6 +552,9 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
+        "pi_disable_model_invocation": _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
+        "pi_hidden_value_invalid": _is_true(data.get("disable-model-invocation"))
+        and not _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "claude_ignored_values": "; ".join(_claude_ignored_values(data)),

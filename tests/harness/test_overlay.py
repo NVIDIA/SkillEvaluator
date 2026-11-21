@@ -661,6 +661,50 @@ def test_disable_model_invocation_is_ignored_by_three_harnesses(tmp_path: Path):
     assert flagged == {"codex", "hermes", "opencode"}
 
 
+@pytest.mark.parametrize(
+    ("value", "hidden"),
+    [("true", True), ("True", True), ('"true"', False), ("yes", False), ("false", False)],
+)
+def test_pi_hidden_matches_pis_boolean_semantics(tmp_path: Path, value: str, hidden: bool):
+    skill = _skill(tmp_path, extra=f"disable-model-invocation: {value}\n")
+    rows = _rows(skill)
+
+    assert ("PI-HIDDEN" in _ids(rows, "pi")) is hidden
+    # A value that looks hiding to a YAML 1.1 reader or _is_true but is a plain
+    # string for pi gets an advisory instead of silence.
+    invalid = "PI-HIDDEN-INVALID" in _ids(rows, "pi")
+    assert invalid is (not hidden and value.strip('"') in {"true", "yes"})
+
+
+def test_pi_trust_covers_a_manifest_directly_at_the_root(tmp_path: Path):
+    """A .pi/skills/SKILL.md with no child folder still counts as installed at the root."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing trust.\n---\nBody\n", encoding="utf-8"
+    )
+
+    rows = _rows(root)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-TRUST" in _ids(rows, "pi")  # project roots require trust, equal-to-root too
+    assert "PI-ROOT" not in _ids(rows, "pi")
+
+
+def test_harness_check_accepts_the_documented_mixed_case_manifest(tmp_path: Path):
+    """harness-check on an explicit Skill.md (pi loads it nested under .agents/skills)
+    reports instead of exiting 1 with No skills found."""
+    skill = tmp_path / "proj" / ".agents" / "skills" / "demo" / "Skill.md"
+    skill.parent.mkdir(parents=True)
+    skill.write_text("---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8")
+
+    result = CliRunner().invoke(cli, ["harness-check", str(skill), "--harness", "pi", "--json", str(tmp_path / "h.json")])
+
+    assert result.exit_code == 0, result.output
+    assert "No skills found" not in result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    assert rows[0]["harness"] == "pi" and rows[0]["status"] == "loads"
+
+
 def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):
     skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
     (skill / "agents").mkdir()
@@ -829,9 +873,23 @@ def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
     assert "PI-CASING" in _ids(rows, "pi")
 
     # Loose at .agents/skills: mode "agents" loads only the exact name at the root.
-    rows = _rows(_loose_skill(tmp_path / "proj3" / ".agents" / "skills"))
+    # Sibling control: a working named child skill next to the loose manifest
+    # keeps loading, and the fix must not recommend hiding it.
+    agents_root = tmp_path / "proj3" / ".agents" / "skills"
+    loose = _loose_skill(agents_root)
+    sky = agents_root / "sky"
+    sky.mkdir(parents=True)
+    (sky / "SKILL.md").write_text(
+        "---\nname: sky\ndescription: Use when testing siblings.\n---\nBody\n", encoding="utf-8"
+    )
+    rows = _rows(loose)
     assert rows["pi"]["status"] == "not_loaded"
-    assert "PI-CASING" in _ids(rows, "pi")
+    finding = next(f for f in rows["pi"]["findings"] if f["id"] == "PI-CASING")
+    assert "named child folder" in finding["fix"]
+    assert "sibling" in finding["fix"]
+    rows = _rows(sky)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
 
     # Loose at a .pi root: mode "pi" accepts any .md name directly in the root.
     rows = _rows(_loose_skill(tmp_path / "proj4" / ".pi" / "skills"))

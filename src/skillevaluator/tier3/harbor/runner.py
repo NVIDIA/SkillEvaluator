@@ -2024,7 +2024,12 @@ def build_harbor_run_command(
         command.extend(["--agent", agent_import_path or backend_import or agent])
         command.extend(["--env", backend.import_path])
     else:
-        command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
+        # Every remaining Harbor-native mode (e2b, daytona, modal, ...) runs
+        # Harbor's stock agents; pi must still go through the pinned wrapper,
+        # whose native mcp.json staging replaces Harbor 0.25.0's stock
+        # pi-mcp-adapter path (it rejects pi >= 0.86 before any setup).
+        default_import = CONTAINER_AGENT_IMPORT_PATHS["pi"] if agent == "pi" else agent
+        command.extend(["--agent", agent_import_path or default_import, "--env", harbor_environment_type(env_mode)])
     agent_kwargs = _harbor_agent_kwargs(agent, model, env_mode)
     agent_kwargs.update((agent_kwargs_overrides or {}).get(agent, {}))
     for name, value in sorted(agent_kwargs.items()):

@@ -102,9 +102,11 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
 
 
 def test_help_emits_color_when_enabled() -> None:
-    ctx = click.Context(cli, info_name="skillevaluator", color=True)
-    colored = render_help(cli, ctx, width=80)
-    plain = render_help(cli, click.Context(cli, info_name="skillevaluator", color=False), width=80)
+    # make_context applies context_settings; a bare Context would make Click cache a help option without -h.
+    with cli.make_context("skillevaluator", [], resilient_parsing=True, color=True) as ctx:
+        colored = render_help(cli, ctx, width=80)
+    with cli.make_context("skillevaluator", [], resilient_parsing=True, color=False) as ctx:
+        plain = render_help(cli, ctx, width=80)
 
     assert "\x1b[" in colored
     assert "\x1b[" not in plain

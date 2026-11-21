@@ -122,11 +122,13 @@ def test_banner_respects_terminal_color_capabilities(terminal, monkeypatch):
 
 
 def test_nested_help_does_not_show_banner(terminal):
-    parent = click.Context(cli, info_name="skillevaluator")
-    tier = cli.get_command(parent, "tier1")
-    ctx = click.Context(tier, info_name="tier1", parent=parent, color=False)
+    # Click caches each command's help option from the first context it sees, so a context
+    # without the CLI's context_settings would drop -h for later tests in the same worker.
+    with cli.make_context("skillevaluator", [], resilient_parsing=True) as parent:
+        tier = cli.get_command(parent, "tier1")
+        ctx = click.Context(tier, info_name="tier1", parent=parent, color=False)
 
-    assert render_help(tier, ctx).startswith("Usage: skillevaluator tier1")
+        assert render_help(tier, ctx).startswith("Usage: skillevaluator tier1")
 
 
 @pytest.mark.parametrize(

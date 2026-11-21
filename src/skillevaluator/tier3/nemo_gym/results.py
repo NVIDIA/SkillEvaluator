@@ -24,7 +24,7 @@ _VERIFIER_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "
 
 
 def _safe(value: str) -> str:
-    return _UNSAFE.sub("-", value).strip("-") or "task"
+    return _UNSAFE.sub("-", value) or "task"
 
 
 def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str, Any]]:

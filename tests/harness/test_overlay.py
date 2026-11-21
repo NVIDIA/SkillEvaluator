@@ -681,6 +681,11 @@ def test_codex_implicit_policy_is_codex_only(tmp_path: Path):
 
     flagged = {h for h, r in rows.items() if any(f["id"].endswith("CODEX-POLICY") for f in r["findings"])}
     assert flagged == set(HARNESSES) - {"codex"}  # pi has no implicit-invocation policy mechanism either
+    # pi honors disable-model-invocation, so the fix names that setting.
+    finding = next(f for f in rows["pi"]["findings"] if f["id"] == "PI-CODEX-POLICY")
+    assert finding["fix"] == (
+        "Also set disable-model-invocation: true (pi hides the skill from the model; the user can still run /skill:name)."
+    )
 
 
 def test_claude_placeholders_reach_other_harnesses_literally(tmp_path: Path):
@@ -799,21 +804,39 @@ def test_pi_project_root_loads_for_pi_and_gates_the_others(tmp_path: Path):
     assert "CC-ROOT" in _ids(rows, "claude-code")
 
 
-def test_pi_casing_rule_covers_only_the_dotpi_roots(tmp_path: Path):
-    # .agents/skills roots accept any .md manifest name (collectSkillEntries
-    # mode "agents" in pi 1.6.0), so skill.md loads there without a finding.
+def _loose_skill(root: Path) -> Path:
+    """A non-exact manifest sitting directly in a skills root (pi mode "pi")."""
+    root.mkdir(parents=True)
+    (root / "skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8"
+    )
+    return root
+
+
+def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
+    # Nested (collectSkillEntries mode "agents"): any .md manifest name loads.
     agents_skill = _skill(tmp_path / "proj" / ".agents")
     (agents_skill / "SKILL.md").rename(agents_skill / "skill.md")  # rename, not copy: case-insensitive FS
     rows = _rows(agents_skill)
     assert rows["pi"]["status"] == "loads"
     assert "PI-CASING" not in _ids(rows, "pi")
 
-    # The .pi roots compare the exact entry name; skill.md is dropped.
+    # Nested under a .pi root: only the exact entry name loads.
     dotpi_skill = _skill(tmp_path / "proj2" / ".pi" / "skills")
     (dotpi_skill / "SKILL.md").rename(dotpi_skill / "skill.md")
     rows = _rows(dotpi_skill)
     assert rows["pi"]["status"] == "not_loaded"
     assert "PI-CASING" in _ids(rows, "pi")
+
+    # Loose at .agents/skills: mode "agents" loads only the exact name at the root.
+    rows = _rows(_loose_skill(tmp_path / "proj3" / ".agents" / "skills"))
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-CASING" in _ids(rows, "pi")
+
+    # Loose at a .pi root: mode "pi" accepts any .md name directly in the root.
+    rows = _rows(_loose_skill(tmp_path / "proj4" / ".pi" / "skills"))
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
 
 
 def test_claude_root_is_not_a_pi_root(tmp_path: Path):

@@ -8,6 +8,7 @@ from __future__ import annotations
 import json
 import shlex
 from typing import TYPE_CHECKING, Any
+from urllib.parse import urlparse
 
 from harbor.agents.installed.pi import (
     _PI_CONFIG_DIR_ENV,
@@ -21,6 +22,14 @@ if TYPE_CHECKING:
 
 _PI_MCP_SHIM = "export default function () {}\n"
 _PI_MCP_SHIM_FILENAME = "index.ts"
+
+
+def _is_public_openai_base_url(name: str, value: str) -> bool:
+    """Whether a resolved base-URL variable points at OpenAI's public endpoint."""
+    return (
+        name in {"OPENAI_BASE_URL", "OPENAI_API_BASE"}
+        and (urlparse(value.strip()).hostname or "") == "api.openai.com"
+    )
 
 
 class SkillEvaluatorPi(Pi):
@@ -37,6 +46,30 @@ class SkillEvaluatorPi(Pi):
     # pi resolves staged mcp.json headers from its own environment; the header
     # variables are forwarded to the launch command by exec_as_agent below.
     capabilities = Pi.capabilities.model_copy(update={"mcp_http_headers": True})
+
+    @classmethod
+    def resolve_model_connection_config(cls, model_name, resolve_env, **options):
+        """Keep the public OpenAI endpoint on pi's built-in provider.
+
+        Harbor exports OPENAI_BASE_URL process-wide (the staged verifier.env
+        ${VAR} placeholders resolve against it), and the stock Pi resolution
+        would turn even api.openai.com into a models.json custom endpoint that
+        needs the model_api agent argument and runs generic model metadata.
+        pi's built-in openai provider already targets the public endpoint, so
+        the wrapper never sees that URL: no models.json entry, no custom
+        provider, nothing forwarded to the pi CLI. Gateway base URLs keep the
+        custom-endpoint path.
+        """
+
+        def resolve_env_without_public_openai_url(*names: str):
+            resolved = resolve_env(*names)
+            if resolved is not None and _is_public_openai_base_url(resolved[0], resolved[1]):
+                return None
+            return resolved
+
+        return super().resolve_model_connection_config(
+            model_name, resolve_env_without_public_openai_url, **options
+        )
 
     async def install(self, environment: BaseEnvironment) -> None:
         from skillevaluator.tier3.harbor.local_runtime import PINNED_RUNTIME_VERSIONS

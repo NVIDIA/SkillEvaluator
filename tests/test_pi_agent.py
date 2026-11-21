@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import asyncio
 import shlex
+import subprocess
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -324,6 +325,37 @@ def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
     assert " --model m /tmp/harbor-pi-agent 2>&1 </dev/null" in command
 
 
+def test_local_host_substitutions_stay_off_the_task_text(monkeypatch):
+    from harbor.agents.installed.pi import Pi
+
+    agent = object.__new__(SkillEvaluatorLocalPi)
+    instruction = "Explain the literal text . ~/.nvm/nvm.sh; and | stdbuf -oL tee "
+    agent._quoted_instruction = shlex.quote(instruction)
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            ". ~/.nvm/nvm.sh; pi --print --mode json --model m "
+            + shlex.quote(instruction)
+            + " 2>&1 </dev/null | stdbuf -oL tee /logs/agent/pi.txt",
+        )
+    )
+
+    command = str(captured["command"])
+    # The task text quotes the host preamble and pipeline and stays byte-identical;
+    # only the launcher's own copies are rewritten for the local host.
+    assert shlex.quote(instruction) in command
+    assert command.startswith("pi --print --mode json --model m ")
+    assert command.endswith("| tee /logs/agent/pi.txt")
+
+
 def test_local_exec_rewrites_container_assumptions(monkeypatch):
     from harbor.agents.installed.pi import Pi
 
@@ -395,16 +427,140 @@ def test_custom_endpoints_wire_the_model_api_agent_option(tmp_path):
 
 
 def test_public_openai_endpoint_keeps_pi_on_the_builtin_provider():
-    from skillevaluator.tier3.harbor.runner import _pi_launch_run_env
+    """The wrapper hides the public OpenAI base URL from pi's own resolution.
+
+    Harbor's process env keeps OPENAI_BASE_URL (the staged [verifier.env]
+    ${VAR} placeholders resolve against it), so the stock resolution would
+    build a models.json custom endpoint that needs the model_api agent
+    argument; pi's built-in openai provider already targets that endpoint.
+    """
+
+    def resolve_env(table):
+        def _resolve(*names):
+            for name in names:
+                if name in table:
+                    return name, table[name]
+            return None
+
+        return _resolve
+
+    public = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://api.openai.com/v1"}
+    connection = SkillEvaluatorPi.resolve_model_connection_config("openai/gpt-5.5", resolve_env(public))
+    assert connection.user_supplied_base_url is None
+    assert "OPENAI_BASE_URL" not in connection.env
+    assert connection.api_key == "k"  # the key still reaches the launch env
+
+    # Real gateways keep the custom-endpoint path (models.json + model_api).
+    gateway = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://gw.example/v1"}
+    connection = SkillEvaluatorPi.resolve_model_connection_config("openai/glm-4.7", resolve_env(gateway))
+    assert connection.user_supplied_base_url == "https://gw.example/v1"
+    assert connection.candidate_base_url == "https://gw.example/v1"
+
+
+def test_run_harbor_env_resolves_the_staged_verifier_placeholders(monkeypatch, tmp_path):
+    """Every ${VAR} in the staged [verifier.env] resolves against the Harbor process env.
+
+    The pi arm used to strip OPENAI_BASE_URL from the whole Harbor env; the
+    wrapper now hides the public endpoint from pi alone, so the verifier's
+    placeholder resolution must keep working for the default OpenAI provider.
+    """
+    from skillevaluator.tier3.harbor import runner
+
+    captured: dict[str, object] = {}
+
+    def fake_process(_command, *, env, **_kwargs):
+        captured["env"] = dict(env)
+        return runner._BoundedHarborProcessResult(returncode=1, output_tail="", output_exceeded=False)
+
+    monkeypatch.setattr(runner, "_run_bounded_harbor_process", fake_process)
 
     run_env = {"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://api.openai.com/v1"}
-    # Without OPENAI_BASE_URL pi launches --provider openai with the built-in
-    # catalog; a models.json entry would run the model on generic metadata.
-    assert _pi_launch_run_env(run_env, "pi") == {"OPENAI_API_KEY": "k"}
-    # Other agents and real gateways keep the variable.
-    assert _pi_launch_run_env(run_env, "codex") == run_env
-    gateway = {**run_env, "OPENAI_BASE_URL": "https://gw.example/v1"}
-    assert _pi_launch_run_env(gateway, "pi") == gateway
+    staged_verifier_env = {name: f"${{{name}}}" for name in run_env}
+    ok, _detail = runner._run_harbor(
+        dataset=tmp_path / "dataset",
+        agent="pi",
+        job_name="j",
+        env_mode="docker",
+        model="openai/gpt-5.5",
+        jobs_dir=tmp_path,
+        run_env=run_env,
+        n_attempts=1,
+        n_concurrent=1,
+        timeout_multiplier=1.0,
+        override_cpus=None,
+        override_memory_mb=None,
+        override_storage_mb=None,
+        verifier_env=staged_verifier_env,
+    )
+    assert ok is False  # the stubbed process exited 1; only the env matters here
+    harbor_env = captured["env"]
+    for placeholder in staged_verifier_env.values():
+        name = placeholder[2:-1]
+        assert harbor_env.get(name) == run_env[name], name
+
+
+def test_runtime_preflight_for_pi_with_the_default_openai_base_url(monkeypatch, tmp_path):
+    """Preflight hands Harbor the provider env and asks for no model_api on the public endpoint."""
+    from skillevaluator.tier3.harbor import runtime_preflight
+
+    task_dir = tmp_path / "dataset" / "task-1"
+    task_dir.mkdir(parents=True)
+    (task_dir / "task.toml").write_text('name = "task-1"\n', encoding="utf-8")
+
+    captured: dict[str, object] = {}
+
+    def run(command, **kwargs):
+        captured["command"] = command
+        captured["env"] = kwargs.get("env")
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+    monkeypatch.setattr(runtime_preflight.subprocess, "run", run)
+    monkeypatch.setattr(
+        runtime_preflight, "validate_harbor_agent_only_job_result", lambda *_args, **_kwargs: (True, "ok")
+    )
+
+    result = runtime_preflight.run_agent_runtime_preflight(
+        dataset=task_dir.parent,
+        agent="pi",
+        model="openai/gpt-5.5",
+        env_mode="docker",
+        jobs_dir=tmp_path / "jobs",
+        run_env={"OPENAI_API_KEY": "k", "OPENAI_BASE_URL": "https://api.openai.com/v1"},
+    )
+
+    assert result.ok is True
+    command = captured["command"]
+    assert isinstance(command, list)
+    # No custom endpoint on the public endpoint: Harbor's Pi must not demand model_api.
+    assert "model_api" not in " ".join(command)
+    assert command[command.index("--agent") + 1] == DOCKER_AGENT_IMPORT_PATHS["pi"]
+    env = captured["env"]
+    assert isinstance(env, dict)
+    assert env.get("OPENAI_BASE_URL") == "https://api.openai.com/v1"
+
+
+def test_custom_backends_route_pi_through_the_pinned_wrapper(monkeypatch, tmp_path):
+    """e2b/daytona run stock Harbor agents for the ones they do not wrap, but pi needs the
+    pinned wrapper: Harbor 0.25.0's stock pi-mcp-adapter rejects pi >= 0.86 before any setup."""
+    from skillevaluator.tier3.harbor import CONTAINER_AGENT_IMPORT_PATHS, runner
+
+    spec = runner.EnvironmentBackendSpec(
+        import_path="skillevaluator.tier3.harbor.local_environment:SkillEvaluatorLocalEnvironment",
+        agent_import_paths={"claude-code": "skillevaluator.tier3.harbor.local_agents:SkillEvaluatorClaudeCode"},
+    )
+    monkeypatch.setattr(runner, "is_env_mode", lambda env_mode: env_mode == "acme")
+    monkeypatch.setattr(runner, "_custom_backend", lambda env_mode: spec if env_mode == "acme" else None)
+
+    command = build_harbor_run_command(
+        dataset_path=tmp_path, agent="pi", job_name="j", env_mode="acme", model="openai/gpt-5.5"
+    )
+
+    assert command[command.index("--agent") + 1] == CONTAINER_AGENT_IMPORT_PATHS["pi"]
+    # An agent the backend wraps itself keeps the backend's route.
+    command = build_harbor_run_command(
+        dataset_path=tmp_path, agent="claude-code", job_name="j", env_mode="acme", model="claude-sonnet-5"
+    )
+    assert command[command.index("--agent") + 1] == spec.agent_import_paths["claude-code"]
 
 
 def test_anthropic_default_model_is_qualified_for_pi():

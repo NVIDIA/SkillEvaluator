@@ -43,7 +43,8 @@ All notable changes to SkillEvaluator are documented in this file.
 ### Added
 
 - Experimental `pi` Tier 3 agent (the Earendil Works pi Coding Agent, pinned
-  to 1.6.0) for Docker, local, GKE, and the native plugin arm. Ships a Tier 1
+  to 1.6.0) for Docker, local, GKE, custom execution backends (e2b, Daytona;
+  routed through the pinned wrapper), and the native plugin arm. Ships a Tier 1
   `pi` profile for `harness-check`, stages skills to the agent-native
   `$HOME/.agents/skills`, and stages MCP servers through pi's native config-dir
   mcp.json with HTTP headers kept as approved `${VAR}` references; a

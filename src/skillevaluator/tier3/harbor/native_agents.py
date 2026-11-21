@@ -327,13 +327,19 @@ class _NativePiMixin(_NativePluginLoadMixin):
 
     def _skilleval_launch_match(self, command: str) -> tuple[str, str, str, re.Match[str]] | None:
         quoted = self._skilleval_quoted_prompt
-        if quoted and quoted in command:
-            before, _, after = command.partition(quoted)
-            found = super()._skilleval_launch_match(before)
-            if found is None:
-                return None
-            launcher, separator, prompt, match = found
-            return launcher, separator, quoted + after + prompt, match
+        if quoted:
+            # Anchor on the prompt hard against the launch tail: a one-word
+            # instruction (``pi``, ``json``) also occurs earlier in the launcher
+            # line (the config path, ``--mode json``), so a bare substring cut
+            # would truncate the launcher and skip the native setup.
+            prompt_and_tail = f"{quoted} 2>&1 </dev/null"
+            if prompt_and_tail in command:
+                before, _, after = command.partition(prompt_and_tail)
+                found = super()._skilleval_launch_match(before)
+                if found is None:
+                    return None
+                launcher, separator, prompt, match = found
+                return launcher, separator, prompt_and_tail + after + prompt, match
         return super()._skilleval_launch_match(command)
 
 

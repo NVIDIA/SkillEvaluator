@@ -81,6 +81,24 @@ def test_pi_launch_with_a_multiline_prompt_still_gets_native_setup() -> None:
     assert subprocess.run(["sh", "-n", "-c", rewritten], check=False).returncode == 0
 
 
+@pytest.mark.parametrize("instruction", ["pi", "json", "blue"])
+def test_one_word_prompts_get_native_setup(instruction: str) -> None:
+    # A one-word prompt stays unquoted and its text (``pi``, ``json``) also
+    # occurs earlier in the launcher; only the argument hard against the
+    # launch tail is the prompt.
+    quoted = shlex.quote(instruction)
+    command = PI.replace("'do the task'", quoted)
+    agent = _mixin(native_agents._NativePiMixin)
+    agent._skilleval_quoted_prompt = quoted
+
+    rewritten, _ = agent.skilleval_native_command(command, None)
+
+    assert SETUP in rewritten  # setup staged, not a NativeLaunchError
+    head, _, tail = rewritten.partition(SETUP)
+    assert command.startswith(head)
+    assert f"--model m {quoted} 2>&1 </dev/null" in tail
+
+
 def test_pi_version_probe_is_never_touched_by_native_setup() -> None:
     probe = "pi --version"
     rewritten, _ = _mixin(native_agents._NativePiMixin).skilleval_native_command(probe, None)

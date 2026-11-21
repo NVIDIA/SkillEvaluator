@@ -730,23 +730,27 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
         finally:
             self._quoted_instruction = None
 
-    def _local_config_path(self, command: str) -> str:
-        # Harbor writes pi's isolated config under /tmp, which the local sandbox
-        # keeps outside its allowed roots; keep it in the trial's agent dir —
-        # everywhere except inside the task instruction. The instruction is
-        # matched together with the launch tail that follows it, so a bare
-        # "/tmp/harbor-pi-agent" prompt never shields the real config path
-        # earlier in the launcher line.
-        def repoint(part: str) -> str:
-            part = part.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
-            return part.replace(_REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix())
-
+    def _split_around_prompt(self, command: str) -> tuple[str, str, str]:
+        # The instruction is matched together with the launch tail that follows
+        # it, so a bare "/tmp/harbor-pi-agent" (or one-word) prompt never
+        # matches launcher text earlier in the line.
         quoted = self._quoted_instruction
         prompt_and_tail = f"{quoted} 2>&1 </dev/null"
         if quoted and prompt_and_tail in command:
             before, _, after = command.partition(prompt_and_tail)
-            return repoint(before) + prompt_and_tail + repoint(after)
-        return repoint(command)
+            return before, prompt_and_tail, after
+        return command, "", ""
+
+    def _local_config_path(self, command: str) -> str:
+        # Harbor writes pi's isolated config under /tmp, which the local sandbox
+        # keeps outside its allowed roots; keep it in the trial's agent dir —
+        # everywhere except inside the task instruction.
+        def repoint(part: str) -> str:
+            part = part.replace(_REMOTE_PI_CONFIG_DIR.as_posix(), self._PI_CONFIG_DIR.as_posix())
+            return part.replace(_REMOTE_PI_MCP_ADAPTER_DIR.as_posix(), self._PI_MCP_ADAPTER_DIR.as_posix())
+
+        before, prompt_and_tail, after = self._split_around_prompt(command)
+        return repoint(before) + prompt_and_tail + repoint(after)
 
     async def _upload_config_text(
         self,
@@ -771,10 +775,20 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
         cwd: str | None = None,
         timeout_sec: int | None = None,
     ):
-        command = command.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
+        # Host-only substitutions stay off the task text: a prompt quoting the
+        # literal nvm preamble or stdbuf pipeline reaches pi byte-identical, as
+        # it would in Docker mode. Install and probe commands carry no task
+        # text, so they take the substitutions everywhere.
+        before, prompt_and_tail, after = self._split_around_prompt(command)
+        if not prompt_and_tail:
+            command = command.replace(". ~/.nvm/nvm.sh; ", "").replace("| stdbuf -oL tee ", "| tee ")
+        else:
+            command = (
+                before.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
+                + prompt_and_tail
+                + after.replace("| stdbuf -oL tee ", "| tee ")  # hosts may lack GNU coreutils' stdbuf
+            )
         command = self._local_config_path(command)
-        # Hosts may lack GNU coreutils' stdbuf; plain tee keeps the log capture.
-        command = command.replace("| stdbuf -oL tee ", "| tee ")
         return await super().exec_as_agent(
             environment,
             command=command,

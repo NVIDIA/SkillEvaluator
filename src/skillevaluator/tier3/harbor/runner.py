@@ -1895,33 +1895,16 @@ def _pi_openai_public_endpoint(run_env: Mapping[str, str]) -> bool:
     return hostname == "api.openai.com"
 
 
-def _pi_launch_run_env(run_env: Mapping[str, str], agent: str) -> dict[str, str]:
-    """Keep pi on its built-in openai provider for the public OpenAI endpoint.
-
-    Harbor exports ``OPENAI_BASE_URL`` to the agents, and pi turns any base URL
-    into a models.json custom model with generic metadata (128K context, 16K
-    output, no thinking, no image input), so the default OpenAI arm would run
-    degraded next to Codex and OpenCode on the same provider. Without the
-    variable pi launches ``--provider openai`` with its built-in catalog;
-    gateway base URLs keep the custom-endpoint path. Nothing else changes:
-    everything that falls back to a default uses the same URL.
-    """
-    env = dict(run_env)
-    if agent == "pi" and _pi_openai_public_endpoint(env):
-        env.pop("OPENAI_BASE_URL", None)
-    return env
-
-
 def _pi_custom_endpoint_agent_kwargs(run_env: Mapping[str, str]) -> dict[str, dict[str, str]]:
     """Give pi the explicit API style its OpenAI-shaped custom endpoints need.
 
     Harbor's Pi agent routes a custom base URL through models.json, and building
     that file requires the ``model_api`` agent option; without it the launch
     fails with "Pi custom endpoints require the model_api agent argument".
-    The public OpenAI endpoint is excluded (see :func:`_pi_launch_run_env`):
-    pi stays on its built-in provider with the full model catalog, and gateways
-    get the completions style. The Anthropic provider has no pi custom-endpoint
-    path and is rejected by the credential gate instead.
+    The public OpenAI endpoint is excluded (the SkillEvaluatorPi wrapper keeps
+    pi on its built-in provider there): pi stays on the full model catalog, and
+    gateways get the completions style. The Anthropic provider has no pi
+    custom-endpoint path and is rejected by the credential gate instead.
     """
     base_url = run_env.get("OPENAI_BASE_URL", "").strip()
     if not base_url or _pi_openai_public_endpoint(run_env):
@@ -2031,7 +2014,14 @@ def build_harbor_run_command(
             env_import_path = SECURE_DOCKER_ENV_IMPORT_PATH
         command.extend(["--env", env_import_path])
     elif backend is not None:
-        command.extend(["--agent", agent_import_path or backend.agent_import_paths.get(agent, agent)])
+        backend_import = backend.agent_import_paths.get(agent)
+        if backend_import is None and agent == "pi":
+            # Custom backends (e2b, daytona) run Harbor's stock agents unless they
+            # wrap one themselves; pi must still go through the pinned wrapper,
+            # whose native mcp.json staging replaces Harbor 0.25.0's stock
+            # pi-mcp-adapter path (it rejects pi >= 0.86 before any setup).
+            backend_import = CONTAINER_AGENT_IMPORT_PATHS["pi"]
+        command.extend(["--agent", agent_import_path or backend_import or agent])
         command.extend(["--env", backend.import_path])
     else:
         command.extend(["--agent", agent_import_path or agent, "--env", harbor_environment_type(env_mode)])
@@ -4250,7 +4240,7 @@ def _run_harbor(
         agent_kwargs_overrides=_pi_custom_endpoint_agent_kwargs(run_env),
     )
     try:
-        handoff = _nvidia_build_key_handoff(_pi_launch_run_env(run_env, agent), env_mode=env_mode)
+        handoff = _nvidia_build_key_handoff(run_env, env_mode=env_mode)
         # Harbor owns its phase deadlines, and native tasks may intentionally
         # leave the agent unbounded. Keep bounded streaming and process-tree
         # cleanup without imposing an outer orchestration deadline except when

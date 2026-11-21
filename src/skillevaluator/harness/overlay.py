@@ -174,6 +174,28 @@ def _install_root(skill_path: Path) -> tuple[str | None, int]:
     return None, 0
 
 
+#: pi 1.6.0 discovery (collectSkillEntries modes "pi"/"agents"): a loose
+#: manifest at the .pi skills roots loads with any .md name, a nested one only
+#: as exact SKILL.md; under .agents/skills it is the other way around.
+_PI_ROOT_FAMILIES = {
+    ".pi/skills": "pi",
+    ".pi/agent/skills": "pi",
+    ".agents/skills": "agents",
+}
+
+
+def _pi_manifest_ignored(skill_path: Path) -> bool:
+    """Whether pi skips a non-SKILL.md manifest at this depth under its roots."""
+    parts = _link_location_parts(skill_path)
+    for root, family in _PI_ROOT_FAMILIES.items():
+        size = len(root.split("/"))
+        for index in range(len(parts) - size, -1, -1):  # dir == root allowed: loose manifest
+            if "/".join(parts[index : index + size]) == root:
+                direct = index + size == len(parts)
+                return family == "agents" if direct else family == "pi"
+    return False
+
+
 # OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
 _OPENCLAW_CJK = (
     (3, ((0xB7, 0xB7), (0x3000, 0x319F), (0x4E00, 0x9FA5), (0xAC00, 0xD7AF), (0xFF01, 0xFF60))),
@@ -478,6 +500,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, A
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
+        "pi_manifest_ignored": "SKILL.md" not in names and _pi_manifest_ignored(skill_path),
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),

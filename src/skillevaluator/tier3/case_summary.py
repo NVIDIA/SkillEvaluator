@@ -1624,12 +1624,7 @@ def _add_gym_live_marks(
 
     Each attempt is scored from its verifier logs with the same rules the Gym result normalizer uses.
     """
-    from skillevaluator.tier3.nemo_gym.results import (
-        read_rollouts,
-        read_verifier_rewards,
-        rollout_failure_text,
-        rollout_task_name,
-    )
+    from skillevaluator.tier3.nemo_gym.results import read_rollouts, rollout_rewards, rollout_task_name
 
     gym_root = run_dir / "_nemo-gym"
     if not gym_root.is_dir() or gym_root.is_symlink():
@@ -1644,12 +1639,7 @@ def _add_gym_live_marks(
                 case_id = rollout_task_name(row)
                 if case_id is None or not _SAFE_TRIAL.match(case_id):
                     continue
-                logs_dir = row.get("verifier_logs_dir")
-                rewards = (
-                    read_verifier_rewards(Path(logs_dir))
-                    if not rollout_failure_text(row) and isinstance(logs_dir, str) and logs_dir
-                    else None
-                )
+                rewards = rollout_rewards(row)
                 score = rewards.get("overall", rewards.get("reward")) if rewards else None
                 if not isinstance(score, int | float) or isinstance(score, bool):
                     mark = ERROR

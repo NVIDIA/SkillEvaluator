@@ -9,6 +9,13 @@ import pytest
 
 from skillevaluator.evaluation import EvaluationOptions, EvaluationService
 from skillevaluator.evaluation.options import PluginOptions
+from skillevaluator.tier3.results_location import ENV_RESULTS_DIR
+
+
+@pytest.fixture(autouse=True)
+def _default_results_location(monkeypatch):
+    # The results-directory helper prefers this variable over ``<source>/results``.
+    monkeypatch.delenv(ENV_RESULTS_DIR, raising=False)
 
 
 @pytest.mark.parametrize("value", [-1, 6, True, 1.5])
@@ -72,6 +79,35 @@ def test_plugin_backend_is_rejected_before_preparation_or_execution(tmp_path, mo
         evaluate_plugin(EvaluationOptions(root, agents="claude-code", backend=backend))
 
 
+@pytest.mark.parametrize(
+    "run_options,plugin_options,config,error",
+    [
+        ({"skip_with_skill": True}, {}, None, "omit --skip-with-skill"),
+        ({}, {}, "schema_version: 1\nharbor:\n  task_source: native_harbor\n", "native_harbor is unsupported"),
+        ({}, {"probe_mcp_env": ("FIXTURE_TOKEN",)}, None, "--probe-mcp-env requires --probe-mcp"),
+    ],
+    ids=["skip-with-skill", "native-harbor", "env-grants-without-probing"],
+)
+def test_unsupported_run_settings_are_refused_before_preparation_or_execution(
+    tmp_path, monkeypatch, run_options, plugin_options, config, error
+):
+    root = _plugin(tmp_path / "plugin")
+    if config is not None:
+        (root / "evals").mkdir()
+        (root / "evals/config.yml").write_text(config, encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("A refused run reached preparation or execution")
+
+    monkeypatch.setattr("skillevaluator.tier3.plugin_prepare.prepare_runtime_package", forbidden)
+    monkeypatch.setattr(EvaluationService, "evaluate", forbidden)
+
+    with pytest.raises(ValueError, match=error):
+        evaluate_plugin(
+            EvaluationOptions(root, agents="claude-code", **run_options), plugin_options=PluginOptions(**plugin_options)
+        )
+
+
 def test_public_workflow_uses_real_preparation_and_cleans_up(tmp_path, monkeypatch):
     from skillevaluator.tier3 import plugin_execution
 
@@ -93,6 +129,98 @@ def test_public_workflow_uses_real_preparation_and_cleans_up(tmp_path, monkeypat
     assert result["plugin_provenance"]["load"] == "wrapper"
     assert result["plugin_provenance"]["lift_mode"] == "effectiveness"
     assert result["plugin_provenance"]["attempts"] == 1
+
+
+def test_results_location_variable_replaces_the_source_results(tmp_path, monkeypatch):
+    root = _plugin(tmp_path / "plugin")
+    monkeypatch.setenv(ENV_RESULTS_DIR, str(tmp_path / "shared-results"))
+    seen = {}
+
+    def engine(self, options, *, progress_reporter=None):
+        seen["results"] = options.results_dir
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    evaluate_plugin(EvaluationOptions(root, agents="claude-code"))
+    assert seen["results"] == tmp_path / "shared-results"
+
+
+@pytest.mark.parametrize(
+    "location,allowed",
+    [("out", False), ("evals/other", False), ("results/nested", True), ("evals/results", True)],
+)
+def test_results_inside_the_source_must_use_its_results_directories(tmp_path, monkeypatch, location, allowed):
+    from skillevaluator.tier3.plugin_prepare import prepare_runtime_package
+
+    root = _plugin(tmp_path / "plugin")
+    # The publication digest of the source ignores output only under these directories.
+    (root / "evals").mkdir()
+    (root / "evals/config.yml").write_text("schema_version: 1\n", encoding="utf-8")
+    calls = []
+
+    def prepare(*args, **kwargs):
+        calls.append("prepare")
+        return prepare_runtime_package(*args, **kwargs)
+
+    monkeypatch.setattr("skillevaluator.tier3.plugin_prepare.prepare_runtime_package", prepare)
+    monkeypatch.setattr(
+        EvaluationService, "evaluate", lambda *_a, **_kw: calls.append("engine") or {"execution_status": "succeeded"}
+    )
+    options = EvaluationOptions(root, agents="claude-code", results_dir=root / location)
+    if allowed:
+        evaluate_plugin(options)
+        assert calls == ["prepare", "engine"]
+    else:
+        with pytest.raises(ValueError, match="results root inside the plugin source"):
+            evaluate_plugin(options)
+        assert calls == []
+
+
+def test_evals_results_needs_an_existing_evals_directory(tmp_path, monkeypatch):
+    root = _plugin(tmp_path / "plugin")
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_a, **_kw: pytest.fail("refused run reached the engine"))
+    # Creating evals/ for the output would itself change the source's publication digest.
+    with pytest.raises(ValueError, match="results root inside the plugin source"):
+        evaluate_plugin(EvaluationOptions(root, agents="claude-code", results_dir=root / "evals/results"))
+    assert not (root / "evals").exists()
+
+
+def test_authored_settings_apply_when_run_options_are_unset(tmp_path, monkeypatch):
+    from skillevaluator.tier3 import plugin_execution
+    from skillevaluator.validators import private_plugin_schema
+
+    root = _plugin(tmp_path / "plugin")
+    (root / "evals").mkdir()
+    (root / "evals/config.yml").write_text(
+        "schema_version: 1\nharbor:\n  trial_retries: 2\nplugin:\n  load: auto\n  lift_mode: integration\n",
+        encoding="utf-8",
+    )
+    seen = {}
+    run_private_evaluation = plugin_execution.run_private_evaluation
+    validate_inventory_schema = private_plugin_schema.validate_inventory_schema
+
+    def run(*args, **kwargs):
+        seen["retries"] = kwargs["max_setup_retries"]
+        return run_private_evaluation(*args, **kwargs)
+
+    def validate(inventory, **kwargs):
+        seen["repo_root"] = kwargs.get("repo_root")
+        return validate_inventory_schema(inventory, **kwargs)
+
+    def engine(self, options, *, progress_reporter=None):
+        seen["skip_baseline"] = options.skip_baseline
+        return {"execution_status": "succeeded"}
+
+    monkeypatch.setattr(plugin_execution, "run_private_evaluation", run)
+    monkeypatch.setattr(private_plugin_schema, "validate_inventory_schema", validate)
+    monkeypatch.setattr(EvaluationService, "evaluate", engine)
+    result = evaluate_plugin(
+        EvaluationOptions(root, agents="claude-code"), plugin_options=PluginOptions(repo_root=tmp_path)
+    )
+    assert result["plugin_provenance"]["load"] == "auto"
+    assert result["plugin_provenance"]["lift_mode"] == "integration"
+    # Integration mode runs no baseline arm.
+    assert seen == {"retries": 2, "repo_root": tmp_path, "skip_baseline": True}
 
 
 def test_root_dataset_and_authored_config_survive_staging(tmp_path, monkeypatch):
@@ -202,7 +330,7 @@ def test_nested_grader_links_are_refused(tmp_path, link):
             (nested / "grader.py").symlink_to(target)
     except (OSError, NotImplementedError):
         pytest.skip("symlinks unavailable")
-    with pytest.raises(EvalsConfigError, match="Cannot read bounded"):
+    with pytest.raises(EvalsConfigError, match=r"Cannot read bounded .* evals/tests/grader\.py: \S"):
         _load_config(root)
 
 
@@ -214,7 +342,25 @@ def test_nested_graders_retain_the_bounded_read_limit(tmp_path):
     nested = root / "evals/tests"
     nested.mkdir(parents=True)
     (nested / "grader.py").write_bytes(b"x" * (MAX_CONFIG_BYTES + 1))
-    with pytest.raises(EvalsConfigError, match="Cannot read bounded"):
+    # The error names the file and the reason, not only the fixed prefix.
+    with pytest.raises(
+        EvalsConfigError,
+        match=rf"Cannot read bounded .* evals/tests/grader\.py: Selected file exceeds the {MAX_CONFIG_BYTES}-byte limit",
+    ):
+        _load_config(root)
+
+
+def test_invalid_config_yaml_reports_the_file_and_position(tmp_path):
+    from skillevaluator.tier3.evals_config import EvalsConfigError
+    from skillevaluator.tier3.plugin_workflow import _load_config
+
+    root = _plugin(tmp_path / "plugin")
+    (root / "evals").mkdir()
+    (root / "evals/config.yml").write_text(
+        "schema_version: 1\nharbor: {n_attempts: 1, n_attempts: 2}\n", encoding="utf-8"
+    )
+    # As the engine reports it for a skill: the file, then the line, column and problem.
+    with pytest.raises(EvalsConfigError, match=r"config\.yml: invalid YAML: line 2, column 9: .*duplicate mapping key"):
         _load_config(root)
 
 
@@ -397,3 +543,69 @@ def test_refreshed_run_report_is_incomplete_when_the_package_is(tmp_path, monkey
     # The run-directory report that evaluate-plugin links carries the same incomplete mark as the requested formats.
     report = Path(result["report_path"]).read_text(encoding="utf-8")
     assert ("plugin-components" in report) is not complete
+
+
+# What a run saves in result.json after its own report pass (Insights output included).
+SAVED_FEEDBACK = {
+    "schema_version": "1.0",
+    "conclusions": [
+        {
+            "severity": "fail",
+            "title": "Skill effect",
+            "message": "per-case result: skill hurts (saved by the run).",
+            "source": "deterministic",
+        },
+        {"severity": "warn", "title": "Saved conclusion", "message": "Written by the run's Insights pass"},
+    ],
+    "recommendations": [{"severity": "warn", "title": "Saved recommendation", "message": "Kept from the run"}],
+    "suggestions": ["Saved suggestion"],
+    "suggestions_v2": [],
+}
+SAVED_FIXES = [
+    {
+        "case": "one",
+        "scope": "opencode",
+        "kind": "skill hurts",
+        "what": "passes 1/1 without the skill but 0/1 with it",
+        "attempts_lost": 1,
+        "action": "Saved fix from the run",
+    }
+]
+
+
+def test_refreshed_run_report_keeps_the_feedback_the_run_saved(tmp_path, monkeypatch):
+    from skillevaluator.evaluation import insights_judge
+    from skillevaluator.tier3 import case_summary
+
+    root = _plugin(tmp_path / "plugin")
+    run_dir = _scored_run(tmp_path / "results" / "demo" / "20261110_010001")
+    cases = {
+        "with_skill": {"cases": {"one": {"attempts": [{"passed": False, "trial": "one__1", "score": 0.4}]}}},
+        "without_skill": {"cases": {"one": {"attempts": [{"passed": True, "trial": "one__1", "score": 0.6}]}}},
+    }
+    engine_result = {
+        "execution_status": "succeeded",
+        "run_id": run_dir.name,
+        "run_dir": str(run_dir),
+        "agents": {"opencode": {"pass_at_k": cases}},
+        "tier3_feedback": SAVED_FEEDBACK,
+    }
+    (run_dir / "result.json").write_text(json.dumps(engine_result), encoding="utf-8")
+    (run_dir / "what_to_fix.json").write_text(json.dumps(SAVED_FIXES), encoding="utf-8")
+    saved_fixes = (run_dir / "what_to_fix.json").read_bytes()
+    calls = []
+    monkeypatch.setattr(insights_judge, "build_insights", lambda *_a, **_kw: calls.append("insights") or {})
+    monkeypatch.setattr(case_summary, "_llm_actions", lambda _issues, *_a: calls.append("what_to_fix") or [])
+    monkeypatch.setattr(EvaluationService, "evaluate", lambda *_a, **_kw: json.loads(json.dumps(engine_result)))
+
+    result = evaluate_plugin(EvaluationOptions(root, agents="opencode"))
+
+    assert result["report_status"] == "complete"
+    assert calls == []
+    # The refresh reuses the saved feedback: no rule-based rebuild replaces it in the result,
+    # the report or the run's what_to_fix.json.
+    assert result["tier3_feedback"] == SAVED_FEEDBACK
+    assert (run_dir / "what_to_fix.json").read_bytes() == saved_fixes
+    report = Path(result["report_path"]).read_text(encoding="utf-8")
+    for text in ("Saved conclusion", "Saved recommendation", "Saved suggestion"):
+        assert text in report

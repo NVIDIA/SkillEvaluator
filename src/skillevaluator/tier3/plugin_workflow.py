@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
-from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
+from skillevaluator.utils.structured_data import StructuredDataError
 
 if TYPE_CHECKING:
     from skillevaluator.evaluation.options import EvaluationOptions, PluginOptions
@@ -21,19 +21,26 @@ MAX_CONFIG_BYTES = 256 * 1024
 
 
 def _load_config(root: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
-    from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, EvalsConfigError, _validate_config
+    from skillevaluator.tier3.evals_config import (
+        CONFIG_FILENAMES,
+        EvalsConfigError,
+        _parse_config_text,
+        _validate_config,
+    )
 
     config: dict[str, Any] = {}
     controls: dict[str, bytes] = {}
+    relative = Path("evals")
     try:
         with SecureRoot(root) as reader:
             for name in CONFIG_FILENAMES:
                 relative = Path("evals") / name
                 if os.path.lexists(root / relative):
                     raw, _ = reader.read_bytes(relative, MAX_CONFIG_BYTES)
-                    parsed = load_bounded_yaml(raw.decode("utf-8-sig"))
+                    # The engine's parser: a YAML error names the file, line, column and problem.
+                    parsed = _parse_config_text(raw.decode("utf-8-sig"), root / relative)
                     if not isinstance(parsed, dict):
-                        raise EvalsConfigError("Plugin eval config must be a nonempty mapping")
+                        raise EvalsConfigError(f"{root / relative}: plugin eval config must be a nonempty mapping")
                     config = _validate_config(parsed, root / relative)
                     break
             for name in ("grader.py", "grader.sh", "tests/grader.py", "tests/grader.sh"):
@@ -41,8 +48,32 @@ def _load_config(root: Path) -> tuple[dict[str, Any], dict[str, bytes]]:
                 if os.path.lexists(root / relative):
                     controls[name], _ = reader.read_bytes(relative, MAX_CONFIG_BYTES)
     except (SecurePathError, OSError, UnicodeError, StructuredDataError) as exc:
-        raise EvalsConfigError("Cannot read bounded plugin eval configuration or grader") from exc
+        raise EvalsConfigError(
+            f"Cannot read bounded plugin eval configuration or grader {relative.as_posix()}: {exc}"
+        ) from exc
     return config, controls
+
+
+def _check_results_location(source: Path, results: Path) -> None:
+    """Refuse run output inside the source where its publication digest would count it.
+
+    The digest skips only ``results/`` and, when ``evals/`` already exists,
+    ``evals/results/``. Output anywhere else in the source would change the
+    digest between run start and run end.
+    """
+    from skillevaluator.tier3.harbor.adapter import _path_is_canonically_contained, _path_is_excluded
+
+    results = results.expanduser()
+    if not _path_is_excluded(results, (source,)):
+        return
+    allowed = [source / "results"]
+    if (source / "evals").is_dir() and not (source / "evals").is_symlink():
+        allowed.append(source / "evals" / "results")
+    if not any(_path_is_canonically_contained(results, root) for root in allowed):
+        raise ValueError(
+            "A results root inside the plugin source must be under its results/ directory, or under "
+            f"evals/results/ when evals/ exists; use an external --results-dir otherwise: {results}"
+        )
 
 
 def evaluate_plugin(
@@ -90,6 +121,8 @@ def evaluate_plugin(
         raise ValueError("Plugin runs require an evals dataset or member datasets; native_harbor is unsupported")
     if plugin_options.probe_mcp_env and not plugin_options.probe_mcp:
         raise ValueError("--probe-mcp-env requires --probe-mcp")
+    results_dir = plugin_results_directory(inventory.root, options.results_dir)
+    _check_results_location(inventory.root, results_dir)
     validation = validate_inventory_schema(inventory, repo_root=plugin_options.repo_root)
     policy = plugin_options.policy
     # Block on the severities Tier 1 reports: the operator's policy overrides each check's default.
@@ -105,9 +138,7 @@ def evaluate_plugin(
         agents = resolve_agents(None, provider=resolve_llm_provider().provider)
     if not agents or validate_agents(agents):
         raise ValueError("Select supported agents with --agents")
-    options = replace(
-        options, agents=",".join(agents), results_dir=plugin_results_directory(inventory.root, options.results_dir)
-    )
+    options = replace(options, agents=",".join(agents), results_dir=results_dir)
     dataset = next(
         (
             inventory.root / "evals" / f"evals{extension}"
@@ -128,17 +159,17 @@ def evaluate_plugin(
     )
     # The engine resolves relative paths against the skill it runs, which is the temporary wrapper.
     # Resolve them against the authored source first: ``include`` and ``decoy_manifest`` from the
-    # source's parent directory, ``price_file`` from the source directory, as for a skill.
+    # source's real parent directory, ``price_file`` from the source directory, as the engine does
+    # from a skill's resolved path (a lexical parent of ``.`` or a link would be wrong).
+    source_root = inventory.root.resolve()
     workspace_config = config.get("skill_workspace", {})
     if include := workspace_config.get("include"):
-        workspace_config["include"] = [
-            str((inventory.root.parent / Path(path).expanduser()).absolute()) for path in include
-        ]
+        workspace_config["include"] = [str(source_root.parent / Path(path).expanduser()) for path in include]
     if manifest := workspace_config.get("decoy_manifest"):
-        workspace_config["decoy_manifest"] = str((inventory.root.parent / Path(manifest).expanduser()).absolute())
+        workspace_config["decoy_manifest"] = str(source_root.parent / Path(manifest).expanduser())
     harbor_config = config.get("harbor", {})
     if price_file := harbor_config.get("price_file"):
-        harbor_config["price_file"] = str((inventory.root / Path(price_file).expanduser()).absolute())
+        harbor_config["price_file"] = str(source_root / Path(price_file).expanduser())
     staged_config = yaml.safe_dump(config).encode("utf-8") if config else None
 
     def run_prepared(prepared: EvaluationOptions) -> dict[str, Any]:
@@ -192,6 +223,7 @@ def evaluate_plugin(
         if error := getattr(outcome, key):
             result["plugin_provenance"][key] = error
     if result.get("run_dir") and isinstance(result.get("agents"), dict) and result["agents"]:
+        from skillevaluator.evaluation.tier3_feedback_chat import saved_feedback_for_run
         from skillevaluator.evaluation.tier3_report import render_agent_eval_html_report
         from skillevaluator.utils.redaction import redact_printable_text
 
@@ -205,6 +237,9 @@ def evaluate_plugin(
                 engine_result=result,
                 use_llm_judge=False,
                 include_benchmark=True,
+                # Reuse the feedback the run's own report pass saved (Insights output and
+                # what_to_fix.json) instead of replacing it with rule-based text.
+                saved_feedback=saved_feedback_for_run(result, run_dir),
             )
             result["report_path"] = str(refreshed)
             result["benchmark_path"] = str(refreshed.with_name("tier3-benchmark.md"))

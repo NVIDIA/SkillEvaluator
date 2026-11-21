@@ -199,6 +199,11 @@ notes below describe the new policy and backend configuration behavior.
 
 ### Fixed
 
+- NeMo Gym runs of native multi-step tasks are scored instead of failing with
+  "SkillEvaluator verifier did not run in the NeMo Gym sandbox". Each step's
+  rewards, verifier files and trajectory are kept in order, and the attempt is
+  scored once by the task's `mean` or `final` strategy. An attempt with a masked,
+  failed or ungraded step stays unscored and names that step.
 - Bound declarative output-pattern checks with isolated Python regex workers and a shared
   matching budget, preserving Python regex semantics and later checks. Interpreter
   startup and JSON transfer have a separate startup allowance and do not consume

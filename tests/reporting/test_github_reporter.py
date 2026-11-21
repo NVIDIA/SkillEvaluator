@@ -248,7 +248,27 @@ def test_advisory_failure_does_not_fail_the_skill() -> None:
     text = GitHubReporter().render_all([schema, _advisory_dedup_failure()])
 
     assert "::error" not in text
+    warnings = [line for line in _commands(text) if line.startswith("::warning ")]
+    assert len(warnings) == 1
+    assert "title=Tier 2 Dedup/error" in warnings[0]
+    assert "SKILL.md duplicates an existing skill" in warnings[0]
     assert "1 skill checked, 1 passed, 0 failed, 0 incomplete" in _summary(text)
+
+
+def test_advisory_errors_count_toward_warning_cap_without_failing_summary() -> None:
+    advisory = ValidationResult(validator_name="Tier 2 Dedup")
+    advisory.metadata["gating"] = {"tier": 2, "blocking": False}
+    for index in range(12):
+        advisory.add_error(f"SKILL.md duplicates existing skill {index:02d}")
+
+    text = GitHubReporter().render_all([advisory])
+
+    assert "::error" not in text
+    warnings = [line for line in _commands(text) if line.startswith("::warning ")]
+    assert len(warnings) == 10
+    summary = _summary(text)
+    assert "1 skill checked, 1 passed, 0 failed, 0 incomplete" in summary
+    assert "2 more were not annotated" in summary
 
 
 def test_advisory_failure_keeps_required_incomplete_scan() -> None:
@@ -614,6 +634,7 @@ def test_catalog_summary_counts_duplicate_metadata_id_failures(
     import json
 
     _inline_process_pool(monkeypatch)
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
     catalog = _catalog_with_ids(tmp_path, ["shared-id", "shared-id"])
     reports = tmp_path / "reports"
     args = [*_validate_catalog_args(catalog, reports, workers), "--profile", "registry"]
@@ -785,24 +806,57 @@ def test_catalog_findings_share_the_annotation_cap(capsys: pytest.CaptureFixture
 
 
 @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")
-def test_non_utf8_file_name_is_encoded(tmp_path: Path) -> None:
+def test_non_utf8_file_name_omits_file_and_line_and_shows_safe_path(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from skillevaluator.reporting.github_reporter import catalog_annotation, print_collected_annotations
+
     skill = tmp_path / "skill"
     skill.mkdir()
+    (skill / "SKILL.md").write_text("---\nname: skill\ndescription: skill\n---\n", encoding="utf-8")
     name = "caf\udce9.md"
-    result = ValidationResult(validator_name="SCHEMA")
+    result = ValidationResult(validator_name="SCRIPT_LINT")
     result.add_finding(
         Finding(
-            category="SCHEMA",
-            severity=Severity.LOW,
-            check_name="unexpected_file",
-            message=f"Unexpected '{name}' in skill root",
+            category="SCRIPT_LINT",
+            severity=Severity.HIGH,
+            check_name="script_lint",
+            message="Unsafe call",
             file_path=str(skill / name),
+            line_number=7,
+            metadata={"end_line": 9},
         )
     )
     text = GitHubReporter(workspace_root=tmp_path, scan_root=skill).render_all([result])
-    assert "file=skill/caf%25E9.md" in text or "file=skill/caf%E9.md" in text
-    assert "Unexpected" in text
+    error = next(line for line in _commands(text) if line.startswith("::error "))
+    props = _runner_properties(error)
+    assert "file" not in props
+    assert "line" not in props
+    assert "endLine" not in props
+    assert "file=" not in error
+    assert "line=" not in error
+    assert "caf%E9" not in text
+    assert "caf%25E9" not in text
+    assert r"::skill/caf\xe9.md: Unsafe call" in error
     text.encode("utf-8")
+
+    entry = catalog_annotation(
+        check="discovery",
+        message="Symlinked skill directory is rejected",
+        severity="high",
+        blocking=True,
+        file_path=Path(name),
+        workspace_root=tmp_path,
+        scan_root=skill,
+        follow_links=False,
+    )
+    assert entry["path"] == ""
+    assert entry["message"] == r"skill/caf\xe9.md: Symlinked skill directory is rejected"
+    print_collected_annotations({"skill": []}, failed={"skill"}, catalog_failed={"skill"}, catalog_annotations=[entry])
+    collected_out = capsys.readouterr().out
+    collected_error = next(line for line in _commands(collected_out) if line.startswith("::error "))
+    assert "file=" not in collected_error
+    assert r"::skill/caf\xe9.md: Symlinked skill directory is rejected" in collected_error
 
 
 def _write_license_catalog_skill(skill: Path, *, with_license: bool) -> None:

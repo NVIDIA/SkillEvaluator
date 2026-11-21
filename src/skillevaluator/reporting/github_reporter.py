@@ -28,7 +28,6 @@ from skillevaluator.reporting.run_status import Status, resolve_run_status, resu
 from skillevaluator.reporting.sarif_reporter import (
     _finding_severity_value,
     _positive_start_line,
-    _quote_uri_path,
     _resolve_artifact_path,
     _workspace_relative_path,
 )
@@ -74,16 +73,16 @@ def _clean_text(value: object, *, max_len: int = _MESSAGE_MAX) -> str:
     return redact_sensitive_text(strip_terminal_controls(_utf8_text(value)), max_len=max_len)
 
 
-def _github_path_text(posix: str) -> str:
-    """Return a stdout-safe POSIX path; non-UTF-8 names use the SARIF/JUnit encoding."""
+def _is_valid_utf8(text: str) -> bool:
+    """Return whether *text* encodes cleanly as UTF-8 (no surrogate escapes)."""
     try:
-        posix.encode("utf-8")
+        text.encode("utf-8")
     except UnicodeEncodeError:
-        return _quote_uri_path(posix)
-    return posix
+        return False
+    return True
 
 
-def _github_file_path(
+def _raw_github_file_path(
     file_path: object,
     workspace_root: Path | None,
     scan_root: Path | None,
@@ -96,19 +95,31 @@ def _github_file_path(
         relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
         if relative is None:
             return None
-        return _github_path_text(relative.as_posix())
+        return relative.as_posix()
     if scan_root is not None:
         try:
-            return _github_path_text(path.resolve().relative_to(scan_root.resolve()).as_posix())
-        except ValueError:
+            return path.resolve().relative_to(scan_root.resolve()).as_posix()
+        except (OSError, ValueError):
             if path.is_absolute() or path.root:
                 return None
     if path.is_absolute() or path.root:
         return None
-    return _github_path_text(file_path.replace("\\", "/"))
+    return file_path.replace("\\", "/")
 
 
-def _link_github_file_path(
+def _github_file_path(
+    file_path: object,
+    workspace_root: Path | None,
+    scan_root: Path | None,
+) -> str | None:
+    """Return a valid UTF-8 repository-relative POSIX path, or None."""
+    posix = _raw_github_file_path(file_path, workspace_root, scan_root)
+    if posix is None or not _is_valid_utf8(posix):
+        return None
+    return posix
+
+
+def _raw_link_github_file_path(
     file_path: Path,
     workspace_root: Path | None,
     scan_root: Path | None,
@@ -125,7 +136,19 @@ def _link_github_file_path(
         relative = (path.parent.resolve() / path.name).relative_to(workspace_root.resolve())
     except (OSError, RuntimeError, ValueError):
         return None
-    return _github_path_text(relative.as_posix())
+    return relative.as_posix()
+
+
+def _link_github_file_path(
+    file_path: Path,
+    workspace_root: Path | None,
+    scan_root: Path | None,
+) -> str | None:
+    """Return a valid UTF-8 repository-relative path of *file_path* itself, or None."""
+    posix = _raw_link_github_file_path(file_path, workspace_root, scan_root)
+    if posix is None or not _is_valid_utf8(posix):
+        return None
+    return posix
 
 
 def _same_path(first: Path, second: Path) -> bool:
@@ -218,7 +241,7 @@ def _relative_skill_path(scan_root: Path, root: Path) -> str | None:
             continue
         text = relative.as_posix()
         if text not in {"", "."} and not text.startswith(".."):
-            return _github_path_text(text)
+            return _utf8_text(text)
     return None
 
 
@@ -247,7 +270,7 @@ def _combine_labels(outer: str, inner: str) -> str:
     return f"{outer}/{inner}"
 
 
-def _prefixed_artifact_github_path(
+def _raw_prefixed_artifact_github_path(
     artifact_path: object,
     workspace_root: Path | None,
     scan_root: Path | None,
@@ -262,7 +285,7 @@ def _prefixed_artifact_github_path(
     raw = Path(artifact_path.replace("\\", "/"))
     if not (raw.is_absolute() or raw.root):
         return None
-    return _github_file_path(artifact_path, workspace_root, scan_root)
+    return _raw_github_file_path(artifact_path, workspace_root, scan_root)
 
 
 def _qualify_message(message: object, skill_label: str) -> str:
@@ -399,11 +422,15 @@ def _finding_annotation(
     workspace_root: Path | None,
     scan_root: Path | None,
     *,
+    advisory: bool = False,
     default_path: str = "",
     skill_label: str = "",
     catalog_skill_label: str = "",
 ) -> _Annotation:
     severity = _finding_severity_value(finding)
+    level = _level_for_severity(severity)
+    if advisory and level == "error":
+        level = "warning"
     metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
     artifact_path = metadata.get("artifact_path")
     has_artifact_path = isinstance(artifact_path, str) and bool(artifact_path.strip())
@@ -412,12 +439,19 @@ def _finding_annotation(
     has_file_path = isinstance(finding.file_path, str) and bool(finding.file_path.strip())
 
     fallback_to_anchor = False
+    display_path = ""
     if has_artifact_path:
-        resolved = _prefixed_artifact_github_path(artifact_path, workspace_root, scan_root)
+        resolved = _raw_prefixed_artifact_github_path(artifact_path, workspace_root, scan_root)
         if resolved:
-            path = resolved
-            line = _positive_start_line(finding.line_number)
-            end_line = _end_line(finding)
+            if _is_valid_utf8(resolved):
+                path = resolved
+                line = _positive_start_line(finding.line_number)
+                end_line = _end_line(finding)
+            else:
+                path = ""
+                line = None
+                end_line = None
+                display_path = resolved
         else:
             path = default_path
             line = None
@@ -429,21 +463,34 @@ def _finding_annotation(
         end_line = None
         fallback_to_anchor = True
     else:
-        path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
-        line = _positive_start_line(finding.line_number) if path else None
-        end_line = _end_line(finding) if path else None
-        if not path and catalog_skill_label:
-            fallback_to_anchor = True
+        raw_path = _raw_github_file_path(finding.file_path, workspace_root, scan_root) or ""
+        if raw_path and _is_valid_utf8(raw_path):
+            path = raw_path
+            line = _positive_start_line(finding.line_number)
+            end_line = _end_line(finding)
+        elif raw_path:
+            path = ""
+            line = None
+            end_line = None
+            display_path = raw_path
+        else:
+            path = ""
+            line = None
+            end_line = None
+            if catalog_skill_label:
+                fallback_to_anchor = True
 
     suggestion = _clean_text(finding.suggestion) if finding.suggestion else ""
     message = _clean_text(finding.message)
     if suggestion:
         message = f"{message} Suggestion: {suggestion}"
-    if fallback_to_anchor:
+    if display_path:
+        message = _qualify_message(message, display_path)
+    elif fallback_to_anchor:
         label = _combine_labels("" if path else skill_label, member_label)
         message = _qualify_message(message, label)
     return _Annotation(
-        level=_level_for_severity(severity),
+        level=level,
         kind="finding",
         severity=severity,
         path=path,
@@ -494,6 +541,7 @@ def _annotations_for_result(
                 validator,
                 effective_workspace,
                 scan_root,
+                advisory=advisory,
                 default_path=default_path,
                 skill_label=skill_label,
                 catalog_skill_label=catalog_label,
@@ -505,7 +553,7 @@ def _annotations_for_result(
     incomplete_reasons = {_incomplete_reason(result, tool) for tool in result.incomplete_scans}
     for error in result.independent_errors():
         is_gate = error in gate_failures
-        if advisory or (error in incomplete_reasons and not is_gate):
+        if error in incomplete_reasons and not is_gate:
             continue
         if result.incomplete_scans and not is_gate:
             # Other diagnostics from an incomplete scan, such as a scanner's further
@@ -522,7 +570,7 @@ def _annotations_for_result(
             continue
         annotations.append(
             _Annotation(
-                level="error",
+                level="warning" if advisory else "error",
                 kind="gate" if is_gate else "error",
                 severity="high",
                 path=default_path,
@@ -743,22 +791,28 @@ def catalog_annotation(
     if level == "error" and not blocking:
         level = "warning"
     if file_path is None:
-        path = None
+        raw_path = None
     elif follow_links:
-        path = _github_file_path(str(file_path), workspace_root, scan_root)
+        raw_path = _raw_github_file_path(str(file_path), workspace_root, scan_root)
     else:
-        path = _link_github_file_path(file_path, workspace_root, scan_root)
+        raw_path = _raw_link_github_file_path(file_path, workspace_root, scan_root)
+    if raw_path and _is_valid_utf8(raw_path):
+        path = raw_path
+        qualified = _clean_text(message)
+    else:
+        path = ""
+        qualified = _qualify_message(message, raw_path or "")
     return asdict(
         _Annotation(
             level=level,
             kind="finding",
             severity=severity,
-            path=path or "",
+            path=path,
             line=None,
             end_line=None,
             check=_clean_text(check, max_len=_TITLE_MAX),
             title=_title("catalog", check),
-            message=_clean_text(message),
+            message=qualified,
         )
     )
 

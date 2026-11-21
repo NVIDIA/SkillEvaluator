@@ -693,6 +693,21 @@ def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() ->
     }
 
 
+@pytest.mark.parametrize("condition", ["with", "without"])
+def test_real_stop_on_pass_trial_scans_each_known_case_once(condition: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    cases = {first, second, "third-case-with-a-long-descriptive-name"}
+    matcher = token_usage._CaseMatcher(cases)
+    trial_id = f"demo-codex-{condition}-{second}-attempt001__trial"
+
+    with patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match:
+        resolved = matcher.match(first[:32], trial_id)
+
+    assert resolved == second
+    assert sorted(call.args for call in match.call_args_list) == sorted((trial_id, case) for case in cases)
+
+
 def test_an_arm_that_died_keeps_its_tokens_on_the_canonical_case() -> None:
     # Both arms were killed before scoring, so only the cut trial name exists.
     def killed(suffix: str) -> dict[str, Any]:

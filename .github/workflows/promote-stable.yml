@@ -5,6 +5,14 @@ on:
   workflow_run:
     workflows: [SkillEvaluator release published]
     types: [completed]
+  workflow_call:
+    inputs:
+      expected-release:
+        type: string
+        required: true
+    secrets:
+      STABLE_CHANNEL_APP_PRIVATE_KEY:
+        required: true
   workflow_dispatch:
     inputs:
       expected-release:
@@ -16,25 +24,28 @@ on:
         type: string
         required: false
 
-concurrency:
-  group: skillevaluator-stable
-  cancel-in-progress: false
-  queue: max
-
 permissions: {}
 
 jobs:
   promote:
-    # Accept only the relay's release event for automatic promotion.
+    # Reusable workflows use the caller's workflow identity.
     if: >-
       github.repository == 'NVIDIA/SkillEvaluator' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.event == 'release' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' ||
+         github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main')) ||
+       (github.event_name == 'workflow_run' &&
+        github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' &&
+        github.event.workflow_run.event == 'release' &&
         github.event.workflow_run.conclusion == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: stable-channel
+    concurrency:
+      group: skillevaluator-stable
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
     steps:

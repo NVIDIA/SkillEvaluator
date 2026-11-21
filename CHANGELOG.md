@@ -77,7 +77,8 @@ All notable changes to SkillEvaluator are documented in this file.
   when their bare name is one of the neutral planning or bookkeeping names (for
   example `task`, `update_plan`, `spawn_agent`, `wait`, `agent`, or `todowrite`);
   an MCP tool named `skill` no longer produces a false Skill-tool activation.
-  Codex `tier3 import-traces` candidates also use `mcp__server__tool` labels.
+  Codex `tier3 import-traces` candidates also use `mcp__server__tool` labels,
+  retaining the tool name when a long server label must be shortened.
   Harbor-provided Codex trajectories and their existing MCP classification are
   unchanged.
 - Bedrock preflight and host inference now sign requests with IAM credentials

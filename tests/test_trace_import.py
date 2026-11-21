@@ -214,6 +214,41 @@ def test_codex_mcp_candidates_use_qualified_tool_labels(server, label):
     assert observed["tool_calls"] == [f'{label}: {{"query": "requirements"}}']
 
 
+@pytest.mark.parametrize("server_length", [234, 235, 243, 1024])
+def test_codex_mcp_candidate_output_keeps_tools_visible_with_long_servers(workspace, server_length):
+    skill, export, review = workspace
+    server = "project__" + "x" * (server_length - len("project__"))
+    tools = ["lookup", "summarize"]
+    events = [
+        {
+            "type": "item.completed",
+            "item": {
+                "type": "mcp_tool_call",
+                "id": f"mcp-{index}",
+                "server": server,
+                "tool": tool,
+                "arguments": {"query": "requirements"},
+                "result": {"content": [{"type": "text", "text": "recorded result"}]},
+                "status": "completed",
+            },
+        }
+        for index, tool in enumerate(tools)
+    ]
+    write_export(export, [session(agent="codex", agent_log="\n".join(map(json.dumps, events)))])
+
+    result = CliRunner().invoke(cli, ["tier3", "import-traces", str(skill), str(export), "-o", str(review)])
+
+    assert result.exit_code == 0, result.output
+    observed = json.loads((review / "candidates.json").read_text())["candidates"][0]["observed"]
+    assert observed["trajectory_source"] == "codex log"
+    summaries = observed["tool_calls"]
+    assert len(summaries) == len(set(summaries)) == 2
+    for tool, summary in zip(tools, summaries, strict=True):
+        assert len(summary) <= 250
+        assert summary.startswith("mcp__")
+        assert summary.split(": ", 1)[0].endswith(f"__{tool}")
+
+
 def test_prompt_recovered_from_trajectory():
     doc, _ = build_candidates(
         json.dumps(

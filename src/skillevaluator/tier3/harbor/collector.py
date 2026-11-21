@@ -124,6 +124,7 @@ _COLLECTOR_IDENTITY_KEYS = (
     "_trusted_case_identity_unresolved",
 )
 TRIAL_DIAGNOSTIC_ARTIFACTS = ("result.json", "config.json", "exception.txt", "trial.log")
+STEP_VERIFIER_ARTIFACTS = ("test-stdout.txt",)
 AGENT_LOG_ARTIFACTS = (
     "trajectory.json",
     "cursor-cli.txt",
@@ -1415,6 +1416,44 @@ def _copy_trial_artifacts(
     return copied
 
 
+def _copy_step_artifacts(trial_dir: Path, trial_out: Path) -> list[str]:
+    """Publish each named step's redacted trajectory and verifier output under ``steps/<name>/``.
+
+    A partial episode keeps the steps that ran even when its merged trajectory is incomplete.
+    """
+    names = _expected_step_trajectory_names(trial_dir)
+    if names is None:
+        return []
+    trajectories = {path.parent.parent.name: path for path in _ordered_step_trajectory_paths(trial_dir)}
+    copied: list[str] = []
+    for name in names:
+        if _safe_trial_path_component(name) != name:
+            continue
+        step_out = trial_out / "steps" / name
+        trajectory_path = trajectories.get(name)
+        trajectory: dict[str, Any] | None = None
+        if trajectory_path is not None:
+            try:
+                trajectory, _reference_key = _materialize_trajectory_file(trajectory_path.parent, trajectory_path.name)
+            except (OSError, SecurePathError, _TrajectoryMergeError, RecursionError):
+                trajectory = None
+        safe_trajectory = _redacted_trajectory_data(trajectory) if trajectory is not None else None
+        if safe_trajectory is not None:
+            step_out.mkdir(parents=True, exist_ok=True)
+            (step_out / "trajectory.json").write_text(
+                json.dumps(safe_trajectory, separators=(",", ":"), ensure_ascii=True, allow_nan=False),
+                encoding="utf-8",
+            )
+            copied.append(f"steps/{name}/trajectory.json")
+        for artifact_name in STEP_VERIFIER_ARTIFACTS:
+            src = trial_dir / "steps" / name / "verifier" / artifact_name
+            if src.exists() or src.is_symlink():
+                ok, _record = _write_redacted_text_copy(src, step_out / artifact_name, source_root=trial_dir)
+                if ok:
+                    copied.append(f"steps/{name}/{artifact_name}")
+    return copied
+
+
 def _record_skipped_trajectory(trial_out: Path, reason: str) -> None:
     """Persist a value-free explanation when canonical trajectory output is omitted."""
     manifest_path = trial_out / "artifact_manifest.json"
@@ -1613,6 +1652,7 @@ def _save_unscored_trials(
         trial_out = trials_dir / persisted_names.get(trial_src.name, "unknown")
         trial_out.mkdir(parents=True, exist_ok=True)
         copied = _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+        copied.extend(_copy_step_artifacts(trial_src, trial_out))
         materialized_trajectory, trajectory_reason = _materialized_trial_trajectory(trial_src, None)
         safe_trajectory = (
             _redacted_trajectory_data(materialized_trajectory) if materialized_trajectory is not None else None
@@ -5482,7 +5522,11 @@ _LLM_JUDGE_METRICS = ("accuracy", "goal_accuracy", "behavior_check")
 
 
 def _harbor_multi_step_reward_strategy(result: dict[str, Any]) -> str | None:
-    """Read the task's strategy when its staged configuration is still available."""
+    """Read the strategy NeMo Gym reported, else the task's when its staged configuration is still available."""
+    gym = result.get("nemo_gym")
+    if result.get("execution_backend") == "nemo-gym" and isinstance(gym, dict):
+        strategy = gym.get("turn_reward_strategy")
+        return strategy if isinstance(strategy, str) and strategy in {"final", "mean"} else None
     config = result.get("config")
     task = config.get("task") if isinstance(config, dict) else None
     paths = {
@@ -6668,6 +6712,8 @@ def _save_trials(
 
         if trial_src:
             _copy_trial_artifacts(trial_src, trial_out, include_root_trajectory=False)
+            if not reward.get("_step_name"):
+                _copy_step_artifacts(trial_src, trial_out)
         if safe_materialized_traj:
             (trial_out / "trajectory.json").write_text(
                 json.dumps(

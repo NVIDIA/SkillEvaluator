@@ -14,6 +14,7 @@ extra findings are counted on that summary rather than omitted silently.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Collection, Iterator
 from contextlib import contextmanager, suppress
@@ -29,6 +30,7 @@ from skillevaluator.reporting.sarif_reporter import (
     _finding_severity_value,
     _positive_start_line,
     _resolve_artifact_path,
+    _resolve_for_reporting,
     _workspace_relative_path,
 )
 from skillevaluator.utils.redaction import redact_sensitive_text
@@ -82,6 +84,28 @@ def _is_valid_utf8(text: str) -> bool:
     return True
 
 
+def _native_posix_path(file_path: str, scan_root: Path | None) -> Path | None:
+    """Return *file_path* as given when its backslash is part of an existing POSIX file name.
+
+    On POSIX a backslash is an ordinary file name character, so a tracked
+    ``design\\notes.md`` must not be rewritten to ``design/notes.md``.
+    """
+    if os.sep != "/" or "\\" not in file_path:
+        return None
+    path = Path(file_path)
+    if not path.is_absolute():
+        if scan_root is None:
+            return None
+        candidate = scan_root / path
+    else:
+        candidate = path
+    try:
+        exists = os.path.lexists(candidate)
+    except (OSError, ValueError):
+        return None
+    return path if exists else None
+
+
 def _raw_github_file_path(
     file_path: object,
     workspace_root: Path | None,
@@ -90,7 +114,11 @@ def _raw_github_file_path(
     """Return a repository-relative POSIX path, or None when the path is outside the repo."""
     if not isinstance(file_path, str) or not file_path.strip():
         return None
-    path = _resolve_artifact_path(file_path, scan_root)
+    native = _native_posix_path(file_path, scan_root)
+    if native is None:
+        path = _resolve_artifact_path(file_path, scan_root)
+    else:
+        path = _resolve_for_reporting(native if native.is_absolute() or scan_root is None else scan_root / native)
     if workspace_root is not None and (path.is_absolute() or path.root):
         relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
         if relative is None:

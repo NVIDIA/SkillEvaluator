@@ -1148,3 +1148,44 @@ def test_merged_plugin_finding_outside_workspace_omits_bogus_file(tmp_path: Path
     assert anchored_props["file"] == "skills/parent/SKILL.md"
     assert "line" not in anchored_props
     assert "::demo: Missing YAML frontmatter" in anchored_error
+
+
+@pytest.mark.skipif(os.name == "nt", reason="a backslash is a file name character only on POSIX")
+def test_tracked_backslash_file_name_keeps_native_posix_path(tmp_path: Path) -> None:
+    git = shutil.which("git")
+    if git is None:
+        pytest.skip("git is not installed")
+    repo = tmp_path / "repo"
+    skill = repo / "alpha"
+    (skill / "design").mkdir(parents=True)
+    (skill / "design\\notes.md").write_text("literal backslash\n", encoding="utf-8")
+    (skill / "design" / "notes.md").write_text("nested file\n", encoding="utf-8")
+    subprocess.run([git, "init", "-q", str(repo)], check=True)
+    subprocess.run([git, "-C", str(repo), "add", "-A"], check=True)
+    tracked = subprocess.run(
+        [git, "-C", str(repo), "ls-files", "-z"],
+        check=True,
+        capture_output=True,
+        text=True,
+    ).stdout.split("\0")
+    assert "alpha/design\\notes.md" in tracked
+    assert "alpha/design/notes.md" in tracked
+
+    result = ValidationResult(validator_name="SCHEMA")
+    for index, name in enumerate(("design\\notes.md", "design/notes.md"), start=1):
+        result.add_finding(
+            Finding(
+                category="SCHEMA",
+                severity=Severity.HIGH,
+                check_name="schema",
+                message=f"issue {index}",
+                file_path=name,
+                line_number=index,
+            )
+        )
+    text = GitHubReporter(workspace_root=repo, scan_root=skill).render_all([result])
+    errors = [line for line in _commands(text) if line.startswith("::error ")]
+    literal = next(line for line in errors if "issue 1" in line)
+    nested = next(line for line in errors if "issue 2" in line)
+    assert _runner_properties(literal)["file"] == "alpha/design\\notes.md"
+    assert _runner_properties(nested)["file"] == "alpha/design/notes.md"

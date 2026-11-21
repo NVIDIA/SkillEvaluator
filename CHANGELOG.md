@@ -68,6 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Pre-commit skill mapping stays inside its repository root. A changed directory
+  link checks the skill containing the link instead of the linked target, and
+  paths outside the checkout no longer select unrelated skills.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

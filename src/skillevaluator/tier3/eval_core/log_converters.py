@@ -82,6 +82,9 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
         except json.JSONDecodeError:
             continue
 
+        if not isinstance(evt, dict):
+            continue
+
         et = evt.get("type")
         if et == "assistant":
             msg = evt.get("message")
@@ -292,6 +295,9 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
         except json.JSONDecodeError:
             continue
 
+        if not isinstance(evt, dict):
+            continue
+
         say = evt.get("say", "")
         ask = evt.get("ask", "")
         evt_text = evt.get("text", "")
@@ -301,6 +307,9 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
                 tool_data = json.loads(evt_text)
             except (json.JSONDecodeError, TypeError):
                 tool_data = {}
+
+            if not isinstance(tool_data, dict):
+                continue
 
             tool_name = tool_data.get("tool", "")
             if tool_name == "useSkill":

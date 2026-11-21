@@ -305,7 +305,7 @@ def test_local_rewrite_moves_the_task_text_into_an_instruction_env_var(monkeypat
     assert _AGENT_INSTRUCTION_ENV_RE.fullmatch(env_var)  # the local env keeps it verbatim
     shell_var = env_var.lower()
     assert f'{shell_var}="${env_var}"; unset {env_var};' in command
-    assert f'"{shell_var}" 2>&1 </dev/null' in command  # pi's prompt argument
+    assert f'"${shell_var}" 2>&1 </dev/null' in command  # the prompt argument expands the shell variable
 
 
 def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
@@ -340,7 +340,7 @@ def test_local_rewrite_keeps_a_bare_config_path_prompt(monkeypatch):
     assert "PI_CODING_AGENT_DIR=/logs/agent/pi-agent pi --print --mode json --model m" in command
     (env_var,) = [key for key in env if key.startswith("PI_INSTRUCTION_")]
     assert env[env_var] == instruction
-    assert f'"{env_var.lower()}" 2>&1 </dev/null' in command
+    assert f'"${env_var.lower()}" 2>&1 </dev/null' in command
 
 
 def test_local_host_substitutions_stay_off_the_task_text(monkeypatch):
@@ -440,6 +440,57 @@ def test_local_task_text_survives_the_environments_final_path_rewrite(monkeypatc
     assert instruction not in command and "/workspace" not in command
     assert str(paths.agent_dir) in command  # the launcher's own log path did map to the host
     assert subprocess.run(["sh", "-n", "-c", command], check=False).returncode == 0
+
+
+def test_local_prompt_argument_reaches_the_child_process_argv(monkeypatch, tmp_path):
+    """The launch expands the instruction env var into pi's argv (macOS Seatbelt check)."""
+    import os
+
+    from harbor.agents.installed.pi import Pi
+
+    agent = object.__new__(SkillEvaluatorLocalPi)
+    agent.mcp_servers = []
+    instruction = "Quote the literal paths /workspace/input and /logs/agent/pi.txt\nin the answer."
+    agent._instruction = instruction
+    agent._quoted_instruction = shlex.quote(instruction)
+    captured = {}
+
+    async def raw_exec(_self, _environment, command, env=None, **_kwargs):
+        captured["command"] = command
+        captured["env"] = env
+        return SimpleNamespace(return_code=0)
+
+    monkeypatch.setattr(Pi, "exec_as_agent", raw_exec)
+
+    asyncio.run(
+        agent.exec_as_agent(
+            object(),
+            "PI_CODING_AGENT_DIR=/tmp/harbor-pi-agent pi --print "
+            + shlex.quote(instruction)
+            + " 2>&1 </dev/null | stdbuf -oL tee /logs/agent/pi.txt",
+        )
+    )
+
+    # Run the assembled command through a real shell with a stub pi that records its argv.
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    record = tmp_path / "argv.txt"
+    (bin_dir / "pi").write_text(
+        "#!/bin/sh\n{ printf 'ARG:%s\\n' \"$@\"; env | grep -c '^PI_INSTRUCTION_' || true; } > \"$RECORD\"\n",
+        encoding="utf-8",
+    )
+    (bin_dir / "pi").chmod(0o755)
+    run_env = {
+        **{k: v for k, v in captured["env"].items() if k in os.environ or k.startswith("PI_INSTRUCTION_")},
+        "PATH": f"{bin_dir}:{os.environ['PATH']}",
+        "RECORD": str(record),
+    }
+    subprocess.run(["sh", "-c", str(captured["command"])], env=run_env, cwd=tmp_path, check=False)
+
+    text = record.read_text()
+    assert f"ARG:{instruction}" in text  # the task text is pi's argument, byte-identical
+    assert "ARG:pi_instruction_" not in text  # not the literal variable name
+    assert text.endswith("0\n")  # the env var was unset before pi ran
 
 
 def test_built_in_cloud_modes_route_pi_through_the_pinned_wrapper(tmp_path):

@@ -676,6 +676,34 @@ def test_pi_hidden_matches_pis_boolean_semantics(tmp_path: Path, value: str, hid
     assert invalid is (not hidden and value.strip('"') in {"true", "yes"})
 
 
+def test_pi_hidden_matches_pis_semantics_for_quoted_keys_and_anchors(tmp_path: Path):
+    """A quoted key and an anchored/aliased scalar map the same as the plain spelling."""
+    for extra in ('"disable-model-invocation": true\n', "disable-model-invocation: &flag true\n", "flag: &flag true\ndisable-model-invocation: *flag\n"):
+        skill = _skill(tmp_path / f"q{abs(hash(extra)) % 1000}", extra=extra)
+        rows = _rows(skill)
+
+        assert "PI-HIDDEN" in _ids(rows, "pi"), extra
+        assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi"), extra
+
+
+def test_direct_root_duplicate_scan_stays_inside_the_skills_root(tmp_path: Path):
+    """A loose .pi/skills/SKILL.md must not collide with same-named skills outside the root."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing duplicates.\n---\nBody\n", encoding="utf-8"
+    )
+    example = tmp_path / "proj" / ".pi" / "notes" / "example"
+    example.mkdir(parents=True)
+    (example / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing duplicates.\n---\nBody\n", encoding="utf-8"
+    )
+
+    rows = _rows(root)
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-NAME-COLLISION" not in _ids(rows, "pi")
+
+
 def test_pi_trust_covers_a_manifest_directly_at_the_root(tmp_path: Path):
     """A .pi/skills/SKILL.md with no child folder still counts as installed at the root."""
     root = tmp_path / "proj" / ".pi" / "skills"
@@ -701,6 +729,9 @@ def test_harness_check_accepts_the_documented_mixed_case_manifest(tmp_path: Path
 
     assert result.exit_code == 0, result.output
     assert "No skills found" not in result.output
+    # The schema summary gives the canonical-name diagnostic, not the generic rerun.
+    assert "no canonical SKILL.md" in result.output
+    assert "SKILL.md not found in skill directory" not in result.output
     rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
     assert rows[0]["harness"] == "pi" and rows[0]["status"] == "loads"
 

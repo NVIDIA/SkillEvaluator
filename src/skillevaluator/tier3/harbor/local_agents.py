@@ -792,7 +792,7 @@ class SkillEvaluatorLocalPi(SkillEvaluatorPi):
             command = (
                 f'{shell_var}="${env_var}"; unset {env_var}; '
                 + before.replace(". ~/.nvm/nvm.sh; ", "")  # host CLI resolved from PATH
-                + f'"{shell_var}"'
+                + f'"${shell_var}"'
                 + launch_tail
                 + after.replace("| stdbuf -oL tee ", "| tee ")  # hosts may lack GNU coreutils' stdbuf
             )

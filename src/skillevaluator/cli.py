@@ -3259,7 +3259,19 @@ def harness_check(
     from skillevaluator.validators.schema import SchemaValidator
 
     for skill in block:
-        schema = SchemaValidator().validate(Path(skill))
+        skill_path = Path(skill)
+        names = [p.name for p in skill_path.iterdir()] if skill_path.is_dir() else []
+        # Case-insensitive filesystems answer exists() for Skill.md too, so
+        # the check compares exact names. pi also loads a mixed-case manifest;
+        # re-running the tier 1 check would only re-report the missing canonical name.
+        if "SKILL.md" not in names and any(n.casefold() == "skill.md" for n in names):
+            click.echo(
+                f"Tier 1 schema also fails for {skill_path.name}: no canonical SKILL.md "
+                "(pi additionally loads Skill.md and skill.md at some depths). "
+                "Run `skillevaluator validate --tiers 1` for details."
+            )
+            continue
+        schema = SchemaValidator().validate(skill_path)
         if not schema.passed and schema.errors:
             click.echo(
                 f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "

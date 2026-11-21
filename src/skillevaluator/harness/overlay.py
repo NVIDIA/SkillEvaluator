@@ -310,8 +310,30 @@ def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
     """
     if data.get(key) is not True:
         return False
-    match = re.search(rf"(?m)^{re.escape(key)}:[ \t]*(.*?)[ \t]*(?:#.*)?$", fm_yaml)
-    return match is not None and match.group(1) in ("true", "True", "TRUE")
+    from yaml.nodes import MappingNode, ScalarNode
+
+    try:
+        # BaseLoader keeps every scalar a string (with .style telling plain vs
+        # quoted) and compose() already resolves anchors and aliases to nodes.
+        document = yaml.compose(fm_yaml, Loader=yaml.BaseLoader)
+    except yaml.YAMLError:
+        return True  # unparseable frontmatter is reported by its own finding
+
+    def plain_true(node: object) -> bool:
+        return isinstance(node, ScalarNode) and node.style is None and node.value in ("true", "True", "TRUE")
+
+    def walk(node: object) -> bool | None:
+        if not isinstance(node, MappingNode):
+            return None
+        for key_node, value_node in node.value:
+            if isinstance(key_node, ScalarNode) and key_node.value == key:
+                return plain_true(value_node)
+            found = walk(value_node)
+            if found is not None:
+                return found
+        return None
+
+    return walk(document) is True
 
 
 def _shipped_paths(skill_path: Path) -> list[Path]:
@@ -710,6 +732,11 @@ def _catalog_base(skill: Path) -> Path | None:
     """The skills folder a skill is installed in: a harness root, or a workspace ``skills/`` folder (OpenClaw)."""
     root, depth = _install_root(skill)
     if root is not None:
+        # A skill sitting directly at the skills root (pi's loose manifests)
+        # scans that root itself; parents[0] would start one folder above it.
+        parts = _link_location_parts(skill)
+        if "/".join(parts[-len(root.removeprefix("~/").split("/")) :]) == root.removeprefix("~/"):
+            return skill.absolute()
         return skill.absolute().parents[depth]
     parent = skill.absolute().parent
     return parent if parent.name == "skills" else None

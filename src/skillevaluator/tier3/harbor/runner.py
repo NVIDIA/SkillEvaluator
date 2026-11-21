@@ -184,6 +184,7 @@ from skillevaluator.tier3_environments import (
     HARBOR_ENVIRONMENT_ALIAS_KWARGS,
     HARBOR_ENVIRONMENT_EXTRAS,
     HARBOR_ENVIRONMENT_KWARGS,
+    HARBOR_NATIVE_ENV_MODES,
     HARBOR_VERSION,
     SKILLEVALUATOR_GKE_EXTRA_ENVIRONMENT_KWARGS,
     EnvironmentBackendError,
@@ -5184,7 +5185,7 @@ def _private_agent_paths(
                 from skillevaluator.tier3.harbor import LOCAL_AGENT_IMPORT_PATHS
 
                 base = LOCAL_AGENT_IMPORT_PATHS.get(agent)
-            elif base is None and env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES | {"gke"}:
+            elif base is None and env_mode in HARBOR_NATIVE_ENV_MODES | {"gke"}:
                 defaults = (
                     DOCKER_AGENT_IMPORT_PATHS
                     if env_mode in HARBOR_DOCKER_ENGINE_ENV_MODES

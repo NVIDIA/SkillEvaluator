@@ -239,6 +239,20 @@ Its help must describe a standalone positional `TARGET`, `tasks`, `task_dir`,
 be collected. The Gym implementation must execute inside Docker and resolve task
 environment templates; a host-only agent harness does not meet this contract.
 
+A native multi-step task reports its steps in order in `turns`, each with its own
+`verifier_return_code` and `verifier_logs_dir`; Gym leaves the top-level pair unset.
+SkillEvaluator keeps each step's rewards, verifier files and trajectory under the step's
+name, as for a Harbor multi-step trial, and scores the attempt once by the task's
+`multi_step_reward_strategy` as Gym reports it in `turn_reward_strategy`: `final` takes
+the last step's rewards, and `mean` averages each reward key over the steps that ran,
+counting a key a step did not report as 0. The attempt is unscored when a step was masked,
+failed, or produced no verifier result, when Gym marked the episode failed, or when the
+strategy is missing or unsupported. For a step with no verifier result, Gym's own `mean`
+counts it as 0 and Harbor leaves it out; SkillEvaluator does neither, so a step the
+verifier never graded is never part of a score. An episode Gym stopped after a step
+missed its `min_reward` is scored over the steps that ran, as on Harbor. Tests cover this
+with source-shaped Gym rollouts; a live multi-step Gym run has not been recorded yet.
+
   </Accordion>
   <Accordion title="Options, saved configuration, and retained artifacts">
 

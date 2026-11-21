@@ -68,6 +68,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 budget accounting keeps incomplete token, cost, and judge-call evidence
+  unmeasured instead of accepting partial subtotals or malformed judge logs as
+  zero calls, stopping further admissions under the affected configured limit.
+  Only retained ATIF trajectory and verifier artifact locations contribute;
+  copied skill examples named trajectory.json or judge_attempts.json do not
+  consume or invalidate the attempt budget.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

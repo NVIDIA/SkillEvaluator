@@ -19,6 +19,12 @@ on:
       bundle_artifact:
         description: Artifact containing the bundle and packaged descriptors
         value: ${{ jobs.onboarding.outputs.bundle_artifact }}
+      bundle_artifact_id:
+        description: Numeric artifact ID for the exact generated bundle
+        value: ${{ jobs.onboarding.outputs.bundle_artifact_id }}
+      bundle_artifact_digest:
+        description: SHA-256 digest of the generated bundle artifact archive
+        value: ${{ jobs.onboarding.outputs.bundle_artifact_digest }}
 
 permissions: {}
 
@@ -132,6 +138,8 @@ jobs:
     outputs:
       image_digest: ${{ needs.publish.outputs.image_digest }}
       bundle_artifact: ${{ steps.bundle.outputs.artifact }}
+      bundle_artifact_id: ${{ steps.retained.outputs.artifact-id }}
+      bundle_artifact_digest: ${{ steps.retained.outputs.artifact-digest }}
     env:
       VERSION: ${{ inputs.version }}
       SOURCE_SHA: ${{ inputs.source_sha }}
@@ -168,6 +176,7 @@ jobs:
           path: ${{ runner.temp }}/public-image-verification
           retention-days: 30
       - name: Upload pinned bundle and consumers
+        id: retained
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: ci-bundle-${{ inputs.version }}

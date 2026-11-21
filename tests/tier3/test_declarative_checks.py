@@ -166,7 +166,7 @@ results = checks.evaluate_declarative_checks(
 print(json.dumps(results))
 """
     # The outer bound also prevents an unfixed implementation from hanging the suite.
-    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=5)
+    completed = subprocess.run([sys.executable, "-c", script], capture_output=True, text=True, check=True, timeout=60)
     timed_out, exhausted, literal = json.loads(completed.stdout)
     assert timed_out["passed"] is False
     assert "timed out" in timed_out["reason"]

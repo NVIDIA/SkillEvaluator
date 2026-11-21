@@ -745,6 +745,51 @@ class TestLicenseFileDetection:
         assert result.passed
         assert "Apache-2.0" in result.metadata.get("license", "")
 
+    @pytest.mark.parametrize("license_name", ["LICENSE", "COPYING"])
+    @pytest.mark.parametrize("strict_mode", [False, True])
+    def test_license_symlink_outside_skill_is_not_read(self, tmp_path: Path, license_name: str, strict_mode: bool):
+        """A license file that is a symlink out of the skill must not supply the skill's license."""
+        host_file = tmp_path / "host_license.txt"
+        host_file.write_text(APACHE_2_LICENSE_TEXT, encoding="utf-8")
+        skill_dir = tmp_path / "no-declared-license"
+        skill_dir.mkdir()
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: no-declared-license\ndescription: Skill with no license declaration\n---\n\n# Demo\n",
+            encoding="utf-8",
+        )
+        try:
+            (skill_dir / license_name).symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = LicenseValidator(strict_mode=strict_mode).validate(skill_dir)
+
+        assert result.metadata.get("license") is None
+        assert result.metadata.get("license_status") != "allowed"
+        assert result.metadata.get("license_source") != "license_file"
+        problems = result.errors if strict_mode else result.warnings
+        assert any("No license information found" in message for message in problems)
+        assert result.passed is not strict_mode
+
+    def test_license_symlink_inside_skill_is_still_read(self, tmp_path: Path):
+        skill_dir = tmp_path / "inside-license-link"
+        (skill_dir / "legal").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text(
+            "---\nname: inside-license-link\ndescription: Skill with a linked license file\n---\n\n# Demo\n",
+            encoding="utf-8",
+        )
+        (skill_dir / "legal" / "apache.txt").write_text(APACHE_2_LICENSE_TEXT, encoding="utf-8")
+        try:
+            (skill_dir / "LICENSE").symlink_to(skill_dir / "legal" / "apache.txt")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = LicenseValidator().validate(skill_dir)
+
+        assert result.passed
+        assert result.metadata.get("license") == "Apache-2.0"
+        assert result.metadata.get("license_source") == "license_file"
+
     def test_detects_mit_license_file(self, tmp_path: Path):
         """Test detection of MIT from LICENSE file only."""
         skill_dir = tmp_path / "mit-only"

@@ -219,7 +219,7 @@ def _read_stable_json(
     opened, raw = observed
     try:
         payload = json.loads(raw.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError):
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError):
         return None
     return payload, opened, raw
 

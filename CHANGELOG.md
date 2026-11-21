@@ -68,6 +68,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Keep deeply nested retained JSON from aborting run discovery and Tier 3
+  history. Undecodable runs are excluded from the latest-run fallback; history
+  also isolates recursive retained metadata during JSON export, while keeping
+  healthy runs readable.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

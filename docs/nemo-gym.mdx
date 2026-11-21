@@ -254,7 +254,9 @@ missed its `min_reward` is scored over the steps that ran, as on Harbor. Gym exp
 each turn's own input and new output even when `turn_sessions` is `continue`, so the
 merged trajectory keeps every turn's steps in order and never treats a turn that opens
 like the previous one as a repeat. The live case status shown during the run applies
-the same rules. Judge attribution follows
+the same rules and, for every Gym attempt, the finished run's pass verdict: an attempt
+that misses its goal under standard grading shows as failed, and one whose verifier
+names a different case than the staged task shows as an error. Judge attribution follows
 `turn_reward_strategy` too, so a `final` attempt names only the last step's judges. The
 published trial keeps each step's redacted trajectory and verifier output under
 `steps/<name>/` after the run's job folder is removed. Tests cover this with

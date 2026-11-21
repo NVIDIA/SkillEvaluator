@@ -145,6 +145,10 @@ def test_explicit_dataset_preserves_non_files_fixture_paths(tmp_path: Path) -> N
         (["x" * 127 + ".z"], ["x" * 127]),
         (["x" * 128] * 2, ["x" * 128, "x" * 126 + "-2"]),
         (
+            ["x" * 128] * 10,
+            ["x" * 128, *("x" * 126 + f"-{index}" for index in range(2, 10)), "x" * 125 + "-10"],
+        ),
+        (
             ["x" * 128, "x" * 126 + "-2", "x" * 128],
             ["x" * 128, "x" * 126 + "-2", "x" * 126 + "-3"],
         ),
@@ -164,6 +168,7 @@ def test_explicit_dataset_preserves_non_files_fixture_paths(tmp_path: Path) -> N
         "long",
         "truncation-dot",
         "long-duplicate",
+        "two-digit-suffix",
         "long-suffix",
         "unchanged",
         "unchanged-sanitization",

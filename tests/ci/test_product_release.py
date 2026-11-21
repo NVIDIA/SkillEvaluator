@@ -20,7 +20,7 @@ from zipfile import ZipFile
 import pytest
 import yaml
 
-from ci import release_bundle, stable_channel
+from ci import github_release, release_bundle, stable_channel
 
 VERSION = "1.0.2"
 WHEEL = f"skillevaluator-{VERSION}-py3-none-any.whl"
@@ -187,6 +187,155 @@ def test_assembles_generated_bundle_and_verifies_exact_assets(release):
     verified = release_command(repo, source, "verify-assets", "--assets", assets)
     assert verified.returncode == 1
     assert "manifest" in verified.stderr
+
+
+@pytest.mark.parametrize(
+    ("invalid", "error"),
+    [
+        (None, ""),
+        ("changelog", "no dated entry"),
+        ("worktree-only-heading", "no dated entry"),
+        ("removed-worktree-heading", ""),
+        ("digest", "does not match the reviewed release digest"),
+        ("missing-image", "does not match the reviewed release digest"),
+        ("source", "does not match the reviewed source"),
+    ],
+)
+def test_validate_checks_the_reviewed_changelog_and_live_public_image(release, monkeypatch, capsys, invalid, error):
+    repo, _, dist, assets, candidate = release
+    changelog = repo / "CHANGELOG.md"
+    dated = f"# Changelog\n\n## {VERSION} - 2026-11-20\n\nPublished changes.\n"
+    undated = f"# Changelog\n\n## {VERSION}\n\nPublished changes.\n"
+    changelog.write_text(undated if invalid in ("changelog", "worktree-only-heading") else dated, encoding="utf-8")
+    source = commit(repo)
+    result = release_command(repo, source, "assemble", "--dist", dist, "--output", assets)
+    assert result.returncode == 0, result.stderr
+    if invalid == "worktree-only-heading":
+        changelog.write_text(dated, encoding="utf-8")
+    if invalid == "removed-worktree-heading":
+        changelog.write_text(undated, encoding="utf-8")
+    repository = "ghcr.io/nvidia/skillevaluator-tier1"
+    published = {"digest": f"{repository}@sha256:{'b' * 64}", "missing-image": None}.get(invalid, IMAGE)
+    lookups = []
+
+    def resolve_image(repo_name, source_revision):
+        lookups.append((repo_name, source_revision))
+        return published
+
+    def unexpected_write(*_, **__):
+        pytest.fail("Release validation must avoid GitHub writes")
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(github_release.release_image, "resolve_digest", resolve_image)
+    monkeypatch.setattr(github_release, "api", unexpected_write)
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "github_release.py",
+            "verify-release-metadata",
+            "--version",
+            VERSION,
+            "--source-sha",
+            candidate if invalid == "source" else source,
+            "--assets",
+            str(assets),
+        ],
+    )
+    assert github_release.main() == (1 if error else 0)
+    stderr = capsys.readouterr().err
+    if error:
+        assert error in stderr
+    else:
+        assert not stderr
+    if invalid in (None, "removed-worktree-heading", "digest", "missing-image"):
+        assert lookups == [(repository, candidate)]
+
+
+@pytest.mark.parametrize(
+    "artifact_change",
+    [
+        None,
+        "manifest-digest",
+        "source-sha",
+        "wheel-bytes",
+        "extra-file",
+        "wrong-run",
+        "duplicate-artifact",
+        "archive-digest",
+    ],
+)
+def test_publish_acquires_only_the_exact_validated_release(release, monkeypatch, artifact_change):
+    repo, source, dist, validated, candidate = release
+    result = release_command(repo, source, "assemble", "--dist", dist, "--output", validated)
+    assert result.returncode == 0, result.stderr
+    original = {path.name: path.read_bytes() for path in validated.iterdir()}
+    manifest_sha256 = digest(original["artifact-manifest.json"])
+    archive = io.BytesIO()
+    with ZipFile(archive, "w") as zip_file:
+        for name, data in original.items():
+            zip_file.writestr(name, b"changed" if artifact_change == "wheel-bytes" and name == WHEEL else data)
+        if artifact_change == "extra-file":
+            zip_file.writestr("other.zip", b"unexpected")
+    zipped = archive.getvalue()
+
+    def api(path):
+        if path == "actions/runs/123/attempts/2":
+            return {
+                "id": 123,
+                "run_attempt": 2,
+                "head_branch": "main",
+                "head_sha": "a" * 40,
+                "event": "workflow_dispatch",
+                "path": ".github/workflows/release.yml",
+                "head_repository": {"id": 42, "full_name": "NVIDIA/SkillEvaluator"},
+                "repository": {"id": 42, "full_name": "NVIDIA/SkillEvaluator"},
+                "display_title": f"Validate release · SkillEvaluator {VERSION}",
+                "status": "completed",
+                "conclusion": "success",
+            }
+
+        assert path == f"actions/runs/123/artifacts?name=validated-release-{VERSION}-123-2"
+        artifact = {
+            "id": 789,
+            "name": f"validated-release-{VERSION}-123-2",
+            "expired": False,
+            "size_in_bytes": len(zipped),
+            "digest": "sha256:" + ("b" * 64 if artifact_change == "archive-digest" else digest(zipped)),
+            "workflow_run": {
+                "id": 456 if artifact_change == "wrong-run" else 123,
+                "repository_id": 42,
+                "head_repository_id": 42,
+                "head_branch": "main",
+                "head_sha": "a" * 40,
+            },
+        }
+        artifacts = [artifact, {**artifact, "id": 790}] if artifact_change == "duplicate-artifact" else [artifact]
+        return {"total_count": len(artifacts), "artifacts": artifacts}
+
+    def download(args, *, stdout, check):
+        assert args == ["gh", "api", "repos/NVIDIA/SkillEvaluator/actions/artifacts/789/zip"]
+        assert check
+        assert artifact_change not in ("wrong-run", "duplicate-artifact")
+        stdout.write(zipped)
+
+    monkeypatch.chdir(repo)
+    monkeypatch.setattr(github_release, "tag_target", lambda _: None)
+    monkeypatch.setattr(github_release, "get_release", lambda _: None)
+    monkeypatch.setattr(github_release, "api", api)
+    monkeypatch.setattr(github_release.subprocess, "run", download)
+
+    if artifact_change == "manifest-digest":
+        manifest_sha256 = "a" * 64
+    if artifact_change == "source-sha":
+        source = candidate
+    output = validated.with_name("publish")
+    if artifact_change:
+        with pytest.raises(ValueError, match=r"manifest|exactly the five release files|validation artifact"):
+            github_release.acquire_publication(VERSION, source, output, "123-2", manifest_sha256)
+    else:
+        assert github_release.acquire_publication(VERSION, source, output, "123-2", manifest_sha256) is True
+        assert {path.name: path.read_bytes() for path in output.iterdir()} == original
 
 
 def test_real_uv_build_output_assembles(release, tmp_path):

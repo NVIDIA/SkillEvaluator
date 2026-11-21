@@ -68,6 +68,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Agent JSONL log reconstruction preserves Unicode line separators inside command,
+  observation and response strings instead of treating them as record boundaries.
+  Previously, a Claude Code log whose skill-read record held such a separator lost
+  that record and could score `skill_execution` 0 instead of 1.
+  A CR-only `agent_log` string in an `import-traces` export is no longer split into
+  records and is reported as an unsupported agent log format; agent log files read
+  from a trial directory are unaffected because they are read with newline
+  normalization.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

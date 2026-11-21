@@ -29,7 +29,8 @@ from typing import Any
 from skillevaluator.tier3.attempt_verdict import attempt_verdict
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-_VERIFIER_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json", "test-stdout.txt")
+_REWARD_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json")
+_VERIFIER_FILES = (*_REWARD_FILES, "test-stdout.txt")
 _TURN_REWARD_STRATEGIES = ("mean", "final")
 _TURN_METADATA = ("turn_sessions", "turn_reward_strategy", "stopped_after_turn", "turns_without_verifier_result")
 _NO_REWARDS = "the task verifier wrote no reward.json or numeric reward.txt"
@@ -125,13 +126,12 @@ def write_task_case_ids(gym_arm_dir: Path, task_case_ids: dict[str, str]) -> Non
     (gym_arm_dir / TASK_CASE_IDS_FILE).write_text(json.dumps(task_case_ids, indent=2), encoding="utf-8")
 
 
-def rollout_verdict(
-    row: dict[str, Any], task_name: str, case_id: str, pass_threshold: float, scratch_parent: Path
-) -> bool | None:
+def rollout_verdict(row: dict[str, Any], task_name: str, case_id: str, pass_threshold: float) -> bool | None:
     """Return whether a Gym rollout passes as the finished run judges it, or ``None`` when it is unscored.
 
-    The rollout is written to a scratch job under ``scratch_parent`` as the runner writes it, then read with
-    the collector's reward extraction, scoreability checks and attempt verdict, as ``harbor_job_passed`` is.
+    The rollout is written as the runner writes it, with only the files the verdict reads, to a scratch job
+    in the system temporary folder, so the run folder is only read. The job is then read with the
+    collector's reward extraction, scoreability checks and attempt verdict, as ``harbor_job_passed`` is.
     """
     from skillevaluator.tier3.harbor.collector import (
         _extract_rewards,
@@ -141,9 +141,11 @@ def rollout_verdict(
     )
 
     task_case_ids = {task_name: case_id}
-    with tempfile.TemporaryDirectory(prefix=".live-", dir=scratch_parent) as scratch:
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-gym-live-") as scratch:
         job_dir = Path(scratch) / "job"
-        write_job_from_rollouts([row], job_dir, eval_name="live", task_case_ids=task_case_ids, n_attempts=1)
+        write_job_from_rollouts(
+            [row], job_dir, eval_name="live", task_case_ids=task_case_ids, n_attempts=1, verdict_only=True
+        )
         rewards, _failures = _partition_scoreable_rewards(_extract_rewards(job_dir, task_entry_id_map=task_case_ids))
     attempts = _logical_attempt_rewards(rewards)
     if not attempts:
@@ -254,7 +256,7 @@ def _episode_rewards(
 
 
 def _multi_step_outcome(
-    row: dict[str, Any], trial_dir: Path, case_id: str
+    row: dict[str, Any], trial_dir: Path, case_id: str, *, verdict_only: bool = False
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
     """Write a multi-step episode's steps and return its rewards, why it is unscored, and its result fields.
 
@@ -273,7 +275,7 @@ def _multi_step_outcome(
         step_dir = trial_dir / "steps" / name
         logs_dir = turn.get("verifier_logs_dir")
         if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-            _copy_verifier_logs(Path(logs_dir), step_dir)
+            _copy_verifier_logs(Path(logs_dir), step_dir, verdict_only=verdict_only, step=True)
         step_failure = _failure_text(turn)
         steps.append(_verified_rewards(step_dir / "verifier", case_id) if not step_failure else (None, step_failure))
     fields["step_results"] = [
@@ -290,17 +292,27 @@ def _multi_step_outcome(
     return ({**rewards, "entry_id": case_id} if rewards is not None else None), failure, fields
 
 
-def _copy_verifier_logs(logs_dir: Path, trial_dir: Path) -> None:
+def _copy_verifier_logs(logs_dir: Path, trial_dir: Path, *, verdict_only: bool = False, step: bool = False) -> None:
+    """Copy a Gym verifier's files and trajectory into a trial or into one of its step folders.
+
+    With ``verdict_only``, copy only what the attempt verdict reads: the reward files, and a trial's own
+    trajectory when it is small enough for the collector to read and check for an agent that never started.
+    """
+    from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES
+
     verifier_dir = trial_dir / "verifier"
     verifier_dir.mkdir(parents=True, exist_ok=True)
-    for name in _VERIFIER_FILES:
+    for name in _REWARD_FILES if verdict_only else _VERIFIER_FILES:
         source = logs_dir / name
         if source.is_file() and not source.is_symlink():
             shutil.copyfile(source, verifier_dir / name)
     trajectory = logs_dir / "trajectory.json"
-    if trajectory.is_file() and not trajectory.is_symlink():
-        (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(trajectory, trial_dir / "agent" / "trajectory.json")
+    if not trajectory.is_file() or trajectory.is_symlink():
+        return
+    if verdict_only and (step or trajectory.stat().st_size > DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES):
+        return
+    (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
+    shutil.copyfile(trajectory, trial_dir / "agent" / "trajectory.json")
 
 
 def write_job_from_rollouts(
@@ -311,10 +323,12 @@ def write_job_from_rollouts(
     task_case_ids: dict[str, str],
     n_attempts: int,
     failures: dict[str, list[str]] | None = None,
+    verdict_only: bool = False,
 ) -> list[str]:
     """Write one collector job directory from Gym rollouts and return the run errors.
 
-    ``task_case_ids`` maps each staged task folder name to its evals.json case id.
+    ``task_case_ids`` maps each staged task folder name to its evals.json case id. With ``verdict_only``,
+    a trial gets only the verifier files its attempt verdict reads, not the evidence a report publishes.
     """
     job_dir.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -352,11 +366,11 @@ def write_job_from_rollouts(
             rewards: dict[str, Any] | None = None
             step_fields: dict[str, Any] = {}
             if row.get("turns") is not None:
-                rewards, failure, step_fields = _multi_step_outcome(row, trial_dir, case_id)
+                rewards, failure, step_fields = _multi_step_outcome(row, trial_dir, case_id, verdict_only=verdict_only)
             else:
                 logs_dir = row.get("verifier_logs_dir")
                 if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-                    _copy_verifier_logs(Path(logs_dir), trial_dir)
+                    _copy_verifier_logs(Path(logs_dir), trial_dir, verdict_only=verdict_only)
                 failure = _failure_text(row)
                 if not failure:
                     rewards, failure = _verified_rewards(trial_dir / "verifier", case_id)

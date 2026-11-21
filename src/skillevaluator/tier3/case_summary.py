@@ -1620,14 +1620,14 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     return ERROR
 
 
-def _gym_live_mark(row: dict[str, Any], task: str, case_id: str, gym_root: Path, pass_threshold: float) -> str:
+def _gym_live_mark(row: dict[str, Any], task: str, case_id: str, pass_threshold: float) -> str:
     from skillevaluator.tier3.nemo_gym.results import rollout_verdict
 
     # Gym appends a rollout only once its verifier logs are written, so each line is judged once.
     key = hashlib.sha256(json.dumps([row, task, case_id, pass_threshold], sort_keys=True).encode()).hexdigest()
     mark = _GYM_LIVE_MARKS.get(key)
     if mark is None:
-        passed = rollout_verdict(row, task, case_id, pass_threshold, gym_root)
+        passed = rollout_verdict(row, task, case_id, pass_threshold)
         mark = ERROR if passed is None else PASS if passed else FAIL
         if len(_GYM_LIVE_MARKS) >= _MAX_GYM_LIVE_MARKS:
             _GYM_LIVE_MARKS.clear()
@@ -1664,7 +1664,7 @@ def _add_gym_live_marks(
                 case_id = case_ids.get(task)
                 if not isinstance(case_id, str) or not case_id:
                     case_id = task
-                mark = _gym_live_mark(row, task, case_id, gym_root, pass_threshold)
+                mark = _gym_live_mark(row, task, case_id, pass_threshold)
                 marks.setdefault(agent, {}).setdefault(key, {}).setdefault(task, []).append(mark)
     return True
 

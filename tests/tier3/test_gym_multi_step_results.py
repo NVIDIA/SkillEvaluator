@@ -11,14 +11,16 @@ top-level verifier fields unset, so the adapter writes Harbor's multi-step trial
 from __future__ import annotations
 
 import json
+import os
 import shutil
+import tempfile
 from pathlib import Path
 from typing import Any
 
 import pytest
 
 from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS, case_marks, live_case_marks
-from skillevaluator.tier3.harbor.collector import collect_harbor_results
+from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES, collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.nemo_gym.results import write_job_from_rollouts, write_task_case_ids
 
@@ -614,6 +616,70 @@ def test_live_marks_judge_each_rollout_once_and_leave_no_scratch(
     assert [path.name for path in (out / "_nemo-gym").iterdir()] == ["codex-with"]
 
 
+def _graded_rollout(logs: Path, trajectory_bytes: int = 0) -> dict[str, Any]:
+    logs.mkdir()
+    _graded(logs, 1.0)
+    trajectory = json.dumps(_trajectory(logs.name)).ljust(trajectory_bytes)
+    (logs / "trajectory.json").write_text(trajectory, encoding="utf-8")
+    (logs / "test-stdout.txt").write_text("verifier output\n", encoding="utf-8")
+    return {"task_id": "login-task", "verifier_return_code": 0, "verifier_logs_dir": str(logs)}
+
+
+def test_live_marks_need_no_write_access_to_the_run_folder(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out, scratch = tmp_path / "out", tmp_path / "scratch"
+    scratch.mkdir()
+    monkeypatch.setattr(tempfile, "tempdir", str(scratch))
+    episode = _episode([_graded_turn(tmp_path, name, 1.0) for name in ("first", "second")], task="login-task")
+    _live_arm(out, [episode, _graded_rollout(tmp_path / "single")])
+    gym_root = out / "_nemo-gym"
+    for folder in (gym_root / "codex-with", gym_root):
+        folder.chmod(0o555)
+    try:
+        if os.access(gym_root, os.W_OK):
+            pytest.skip("this account can write to a read-only folder")
+        marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+    finally:
+        for folder in (gym_root, gym_root / "codex-with"):
+            folder.chmod(0o755)
+
+    assert marks == {"codex": {"with_skill": {"login-task": [PASS, PASS]}}}
+    assert list(scratch.iterdir()) == []
+
+
+def test_live_marks_copy_only_what_the_verdict_reads(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    out = tmp_path / "out"
+    episode = _episode(
+        [_graded_turn(tmp_path / "episode", name, 1.0) for name in ("first", "second")], task="login-task"
+    )
+    rows = [
+        episode,
+        _graded_rollout(tmp_path / "small"),
+        # The collector reads no more of a trajectory than this, so a larger one cannot change the verdict.
+        _graded_rollout(tmp_path / "large", DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES + 1),
+    ]
+    _live_arm(out, rows)
+    copied: list[str] = []
+    copyfile = shutil.copyfile
+
+    def record(source: Path, target: Path) -> Any:
+        copied.append(Path(source).relative_to(tmp_path).as_posix())
+        return copyfile(source, target)
+
+    monkeypatch.setattr(shutil, "copyfile", record)
+
+    marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+
+    assert marks == {"codex": {"with_skill": {"login-task": [PASS, PASS, PASS]}}}
+    rewards = ("reward.json", "skill_evaluator_reward.json")
+    assert sorted(copied) == sorted(
+        [
+            *(f"episode/gym-logs/{step}/{name}" for step in ("first", "second") for name in rewards),
+            *(f"{label}/{name}" for label in ("small", "large") for name in rewards),
+            "small/trajectory.json",
+        ]
+    )
+
+
 def test_live_marks_apply_the_final_verdict_and_staged_case_to_single_steps(tmp_path: Path) -> None:
     out, jobs = tmp_path / "out", tmp_path / "jobs"
     _stage_native_task(out, "with")
@@ -639,3 +705,25 @@ def test_live_marks_apply_the_final_verdict_and_staged_case_to_single_steps(tmp_
 
     assert live == [FAIL, ERROR, PASS, ERROR]
     assert sorted(live) == sorted(final)
+
+
+def test_live_marks_still_read_the_trajectory_of_an_agent_that_never_started(tmp_path: Path) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+    row = _graded_rollout(tmp_path / "never-started")
+    # A tokenless trajectory that names an auth failure is an agent that never started, which stays unscored.
+    tokenless = _trajectory("never-started") | {"final_metrics": {}}
+    tokenless["steps"][0]["message"] = "API Error: 401 Unauthorized"
+    Path(row["verifier_logs_dir"], "trajectory.json").write_text(json.dumps(tokenless), encoding="utf-8")
+    _live_arm(out, [row])
+
+    marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+
+    assert marks == {"codex": {"with_skill": {"login-task": [ERROR]}}}
+    write_job_from_rollouts(
+        [row], jobs / "demo-codex-with", eval_name="codex__m", task_case_ids={"login-task": "auth-login"}, n_attempts=1
+    )
+    results = collect_harbor_results(
+        "demo", ["codex"], out, jobs, skip_baseline=True, expected_cases=1, expected_case_ids=["auth-login"]
+    )
+    assert results["agents"]["codex"]["scored_attempts"] == 0

@@ -256,18 +256,23 @@ def _openclaw_read_chars(text: str) -> int:
     return _OPENCLAW_READ_OVERHEAD + len(text.encode("utf-16-le", "surrogatepass")) // 2 + extra
 
 
-def _read_manifest(skill_path: Path) -> tuple[Path, bytes, str, str, dict[str, Any]]:
-    manifest = next(
-        (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
-    )
-    if not manifest.is_file() and skill_path.is_dir():
-        # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
-        # roots, nested under .agents/skills); an explicit-file check can point
-        # at a directory whose only manifest is that casing.
+def _read_manifest(skill_path: Path, explicit: Path | None = None) -> tuple[Path, bytes, str, str, dict[str, Any]]:
+    if explicit is not None:
+        # An explicitly selected manifest stands for its folder; never rediscover
+        # a differently cased sibling (distinct only on case-sensitive filesystems).
+        manifest = explicit
+    else:
         manifest = next(
-            (p for p in sorted(skill_path.iterdir()) if p.is_file() and p.name.casefold() == "skill.md"),
-            manifest,
+            (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
         )
+        if not manifest.is_file() and skill_path.is_dir():
+            # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
+            # roots, nested under .agents/skills); an explicit-file check can point
+            # at a directory whose only manifest is that casing.
+            manifest = next(
+                (p for p in sorted(skill_path.iterdir()) if p.is_file() and p.name.casefold() == "skill.md"),
+                manifest,
+            )
     raw = manifest.read_bytes() if manifest.is_file() else b""
     text = raw.decode("utf-8-sig", errors="replace")
     match = FRONTMATTER_PATTERN.match(text)
@@ -302,11 +307,13 @@ def _is_true(value: Any) -> bool:
 
 
 def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
-    """pi 1.6.0 (js-yaml core schema) reads only the unquoted boolean spellings.
+    """pi 1.6.0 (js-yaml core schema) reads the boolean spellings plain or !!bool-tagged.
 
     PyYAML (YAML 1.1) also coerces ``yes``/``on`` to True, and a quoted
     ``"true"`` stays a string for pi while ``_is_true`` accepts it — so the
-    raw scalar decides when the parsed value is a bool.
+    raw scalar decides when the parsed value is a bool. An explicit ``!!bool``
+    tag resolves a quoted scalar in js-yaml too. The top-level key wins over a
+    ``metadata`` copy, and the last duplicate wins (last_key_wins).
     """
     if data.get(key) is not True:
         return False
@@ -320,18 +327,26 @@ def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
         return True  # unparseable frontmatter is reported by its own finding
 
     def plain_true(node: object) -> bool:
-        return isinstance(node, ScalarNode) and node.style is None and node.value in ("true", "True", "TRUE")
+        # js-yaml's core schema also resolves an explicit !!bool tag, so the tag
+        # carries a quoted scalar the way the plain style carries an unquoted one.
+        return (
+            isinstance(node, ScalarNode)
+            and node.value in ("true", "True", "TRUE")
+            and (node.style is None or node.tag == "tag:yaml.org,2002:bool")
+        )
 
     def walk(node: object) -> bool | None:
         if not isinstance(node, MappingNode):
             return None
+        top = nested = None
         for key_node, value_node in node.value:
             if isinstance(key_node, ScalarNode) and key_node.value == key:
-                return plain_true(value_node)
-            found = walk(value_node)
-            if found is not None:
-                return found
-        return None
+                top = plain_true(value_node)
+            else:
+                found = walk(value_node)
+                if found is not None:
+                    nested = found
+        return top if top is not None else nested
 
     return walk(document) is True
 
@@ -504,13 +519,14 @@ def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
     return ignored
 
 
-def skill_facts(skill_path: Path, catalog: Catalog | None = None) -> dict[str, Any]:
+def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path | None = None) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
     ``catalog`` describes the other skills installed alongside this one; without it the
-    catalog facts are zero and catalog rules are skipped.
+    catalog facts are zero and catalog rules are skipped. ``manifest`` overrides
+    manifest discovery when the check selected an explicit manifest file.
     """
-    manifest, raw, text, fm_yaml, data = _read_manifest(skill_path)
+    manifest, raw, text, fm_yaml, data = _read_manifest(skill_path, manifest)
     description = data.get("description")
     tools = data.get("allowed-tools")
     trigger = _TRIGGER_RE.search(description) if isinstance(description, str) else None
@@ -680,10 +696,10 @@ class Catalog:
     descriptions: dict[Path, str] | None = None
 
     @classmethod
-    def of(cls, skills: list[Path], base: Path | None = None) -> Catalog:
+    def of(cls, skills: list[Path], base: Path | None = None, manifests: dict[Path, Path] | None = None) -> Catalog:
         names, descriptions, chars = {}, {}, 0
         for skill in skills:
-            _, _, _, _, data = _read_manifest(skill)
+            _, _, _, _, data = _read_manifest(skill, (manifests or {}).get(skill.resolve()))
             names[skill.resolve()] = _skill_name(skill, data)
             description = data.get("description")
             chars += len(description) if isinstance(description, str) else 0
@@ -742,14 +758,20 @@ def _catalog_base(skill: Path) -> Path | None:
     return parent if parent.name == "skills" else None
 
 
-def _catalog_of(group: list[Path]) -> Catalog:
+def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) -> Catalog:
     base = _catalog_base(group[0])
     if base is not None:
-        return Catalog.of(_find_skills(base) or group, base)
-    return Catalog.of(group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None)
+        return Catalog.of(_find_skills(base) or group, base, manifests)
+    return Catalog.of(
+        group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests
+    )
 
 
-def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) -> dict[Path, dict[str, Any]]:
+def facts_for(
+    skills: list[Path],
+    profiles: list[dict[str, Any]] | None = None,
+    manifests: dict[Path, Path] | None = None,
+) -> dict[Path, dict[str, Any]]:
     """Facts per skill, with the catalog they are installed in.
 
     A skill installed in a skills folder (e.g. ``.claude/skills``, or an OpenClaw workspace ``skills/``) is
@@ -757,18 +779,20 @@ def facts_for(skills: list[Path], profiles: list[dict[str, Any]] | None = None) 
     installations. Skills outside any skills folder that are given together form their own catalog.
 
     ``profiles`` are the harnesses being checked: only the user-level skills folders they read are searched for
-    same-named copies (every known folder when omitted).
+    same-named copies (every known folder when omitted). ``manifests`` maps a skill folder
+    to the manifest file an explicit check selected for it.
     """
+    explicit = {folder.resolve(): file for folder, file in (manifests or {}).items()}
     groups: dict[Path | None, list[Path]] = {}
     for skill in skills:
         base = _catalog_base(skill)
         groups.setdefault(base.resolve() if base else None, []).append(skill)
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
-        catalogs.update(dict.fromkeys(group, _catalog_of(group)))
+        catalogs.update(dict.fromkeys(group, _catalog_of(group, explicit)))
     user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
     user_skills: dict[Path, dict[Path, str]] = {}
-    facts = {skill: skill_facts(skill, catalogs[skill]) for skill in skills}
+    facts = {skill: skill_facts(skill, catalogs[skill], explicit.get(skill.resolve())) for skill in skills}
     for skill_facts_ in facts.values():
         skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills, user_roots)
     return facts

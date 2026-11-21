@@ -69,7 +69,14 @@ def test_clean_skill_loads_everywhere(tmp_path: Path):
 def test_duplicate_key_is_not_loaded_by_strict_parsers(tmp_path: Path):
     status = _status(_skill(tmp_path, extra="description: Use when a second value is given.\n"))
 
-    assert status["codex"] == status["copilot-cli"] == status["openclaw"] == status["opencode"] == status["pi"] == "not_loaded"
+    assert (
+        status["codex"]
+        == status["copilot-cli"]
+        == status["openclaw"]
+        == status["opencode"]
+        == status["pi"]
+        == "not_loaded"
+    )
     assert status["claude-code"] == "loads"
 
 
@@ -391,9 +398,15 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
     rows = _rows(skills / "filler-000")
 
     assert rows["opencode"]["status"] == "degraded"
-    assert {"CC-PRECEDENCE", "CX-DUP-NAME", "CP-DUP-NAME", "HM-DUP-NAME", "OW-DUP-NAME", "OC-DUP-NAME", "PI-NAME-COLLISION"} <= {
-        f["id"] for r in rows.values() for f in r["findings"]
-    }
+    assert {
+        "CC-PRECEDENCE",
+        "CX-DUP-NAME",
+        "CP-DUP-NAME",
+        "HM-DUP-NAME",
+        "OW-DUP-NAME",
+        "OC-DUP-NAME",
+        "PI-NAME-COLLISION",
+    } <= {f["id"] for r in rows.values() for f in r["findings"]}
     assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
     assert "lists both" in next(f["message"] for f in rows["hermes"]["findings"] if f["id"] == "HM-DUP-NAME")
 
@@ -503,10 +516,10 @@ def test_unreadable_user_skill_does_not_abort_the_check(tmp_path: Path, monkeypa
     _install(home / ".claude" / "skills", "report")
     read_manifest = overlay._read_manifest
 
-    def read(path: Path):
+    def read(path: Path, explicit=None):
         if path.name == "broken":
             raise PermissionError(13, "Permission denied")
-        return read_manifest(path)
+        return read_manifest(path, explicit)
 
     monkeypatch.setattr(overlay, "_read_manifest", read)
     skill = _install(tmp_path / "project" / ".claude" / "skills", "report")
@@ -678,12 +691,46 @@ def test_pi_hidden_matches_pis_boolean_semantics(tmp_path: Path, value: str, hid
 
 def test_pi_hidden_matches_pis_semantics_for_quoted_keys_and_anchors(tmp_path: Path):
     """A quoted key and an anchored/aliased scalar map the same as the plain spelling."""
-    for extra in ('"disable-model-invocation": true\n', "disable-model-invocation: &flag true\n", "flag: &flag true\ndisable-model-invocation: *flag\n"):
+    for extra in (
+        '"disable-model-invocation": true\n',
+        "disable-model-invocation: &flag true\n",
+        "flag: &flag true\ndisable-model-invocation: *flag\n",
+    ):
         skill = _skill(tmp_path / f"q{abs(hash(extra)) % 1000}", extra=extra)
         rows = _rows(skill)
 
         assert "PI-HIDDEN" in _ids(rows, "pi"), extra
         assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi"), extra
+
+
+def test_pi_hidden_resolves_pi_bool_tag_on_quoted_scalar(tmp_path: Path):
+    """js-yaml's core schema resolves an explicit !!bool tag, so !!bool "true" hides the skill for pi."""
+    skill = _skill(tmp_path, extra='disable-model-invocation: !!bool "true"\n')
+    rows = _rows(skill)
+
+    assert "PI-HIDDEN" in _ids(rows, "pi")
+    assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi")
+
+
+def test_pi_hidden_reads_the_top_level_value_over_a_metadata_copy(tmp_path: Path):
+    """pi resolves the top-level key; a metadata mapping holding the same key doesn't override it."""
+    skill = tmp_path / "skills" / "demo-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Use when checking harness compatibility.\n"
+        "metadata:\n"
+        "  author: Demo User <demo@example.com>\n"
+        "  disable-model-invocation: false\n"
+        "disable-model-invocation: true\n"
+        f"---\n{BODY}",
+        encoding="utf-8",
+    )
+    rows = _rows(skill)
+
+    assert "PI-HIDDEN" in _ids(rows, "pi")
+    assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi")
 
 
 def test_direct_root_duplicate_scan_stays_inside_the_skills_root(tmp_path: Path):
@@ -725,7 +772,9 @@ def test_harness_check_accepts_the_documented_mixed_case_manifest(tmp_path: Path
     skill.parent.mkdir(parents=True)
     skill.write_text("---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8")
 
-    result = CliRunner().invoke(cli, ["harness-check", str(skill), "--harness", "pi", "--json", str(tmp_path / "h.json")])
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
 
     assert result.exit_code == 0, result.output
     assert "No skills found" not in result.output
@@ -734,6 +783,32 @@ def test_harness_check_accepts_the_documented_mixed_case_manifest(tmp_path: Path
     assert "SKILL.md not found in skill directory" not in result.output
     rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
     assert rows[0]["harness"] == "pi" and rows[0]["status"] == "loads"
+
+
+def test_explicit_manifest_argument_evaluates_that_exact_file(tmp_path: Path):
+    """With Skill.md and skill.md siblings (case-sensitive filesystem), an explicit
+    Skill.md path evaluates that file's front matter, not a rediscovered sibling."""
+    skill = tmp_path / "proj" / ".agents" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "Skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\ndisable-model-invocation: true\n---\nBody\n",
+        encoding="utf-8",
+    )
+    (skill / "skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8"
+    )
+    if (skill / "Skill.md").samefile(skill / "skill.md"):
+        pytest.skip("case-insensitive filesystem: distinct-cased siblings are one file")
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill / "Skill.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    ids = [f["id"] for f in rows[0]["findings"]]
+    assert "PI-HIDDEN" in ids  # the selected Skill.md hides the skill; the skill.md sibling would not
+    assert "PI-HIDDEN-INVALID" not in ids
 
 
 def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):

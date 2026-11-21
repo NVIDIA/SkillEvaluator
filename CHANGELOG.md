@@ -9,6 +9,16 @@ All notable changes to SkillEvaluator are documented in this file.
 - Update LiteLLM and the minimum AWS SDK version in the optional LLM and
   Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
   overrides when bearer authentication is configured.
+- Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
+  installs to include upstream security fixes.
+- Raise the Tier 3 MCP Python SDK floor to 1.30.0 for upstream security fixes.
+- Update filelock, multidict, pip, and certifi in the optional LLM, Tier 2,
+  Tier 3, and dependency audit installs to include upstream security fixes.
+- Build the public Docker image and managed GitLab jobs from a digest-pinned
+  Python 3.12.16 image to protect the pip bootstrap against the affected
+  eMudhra certificates. On Windows, use `python -m pip` with a patched Python
+  release to install the security or all extra so an older pip can upgrade
+  during installation.
 
 ### Changed
 

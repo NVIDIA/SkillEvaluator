@@ -16,6 +16,7 @@ import zipfile
 from importlib.metadata import metadata
 from pathlib import Path
 
+import yaml
 from click.testing import CliRunner
 from packaging.requirements import Requirement
 from packaging.specifiers import SpecifierSet
@@ -522,7 +523,7 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
         if package["name"] in prerelease_guarded:
             assert Version(package["version"]).is_prerelease is False
     assert versions["cryptography"] >= Version("48.0.1")
-    assert versions["msgpack"] >= Version("1.2.1")
+    assert versions["msgpack"] >= Version("1.2.3")
     assert versions["pydantic-settings"] >= Version("2.14.2")
 
 
@@ -534,9 +535,13 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     for package in _lock()["package"]:
         all_lock_versions.setdefault(package["name"], []).append(Version(package["version"]))
 
-    assert "mcp>=1.28.1,<2" in tier3
+    assert "mcp>=1.30.0,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
-    assert "oauthlib>=4.0.0" in tier3
+    assert "oauthlib>=4.0.1" in tier3
+    assert {"aiohttp>=3.14.4,<4", "fsspec>=2026.6.0", "urllib3>=2.8.0,<3"} <= set(extras["llm"])
+    assert {"msgpack>=1.2.3", "urllib3>=2.8.0,<3"} <= set(extras["security"])
+    assert {"filelock>=4.2.1,<5", "multidict>=6.9.1,<7"} <= set(extras["llm"])
+    assert {"certifi>=2026.10.19", "filelock>=4.2.1,<5", "pip>=26.2.2"} <= set(extras["security"])
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -544,8 +549,12 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     assert all(
         "opentelemetry" not in requirement.lower() for requirements in extras.values() for requirement in requirements
     )
-    assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
+    assert all(version >= Version("1.30.0") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
+    assert all(version >= Version("2026.10.19") for version in all_lock_versions["certifi"])
+    assert all(version >= Version("4.2.1") for version in all_lock_versions["filelock"])
+    assert all(version >= Version("6.9.1") for version in all_lock_versions["multidict"])
+    assert all(version >= Version("26.2.2") for version in all_lock_versions["pip"])
     # The optional dashboard uses Streamlit's protobuf transport. It does not
     # restore the removed evaluator telemetry integration or its dependencies.
     protobuf_consumers = {
@@ -555,10 +564,10 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     }
     assert protobuf_consumers == {"streamlit"}
     # Older Streamlit releases silently ignore the launcher's server.allowedHosts setting.
-    assert extras["dashboard"] == ["streamlit>=1.61,<2"]
+    assert extras["dashboard"] == ["streamlit>=1.61,<2", "urllib3>=2.8.0,<3"]
     assert all(version >= Version("1.61") for version in all_lock_versions["streamlit"])
     assert not any("streamlit" in dependency for dependency in project["project"]["dependencies"])
-    assert all(version >= Version("4.0.0") for version in all_lock_versions["oauthlib"])
+    assert all(version >= Version("4.0.1") for version in all_lock_versions["oauthlib"])
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 
 
@@ -687,7 +696,14 @@ def test_public_slim_docker_image_uses_only_distribution_dependencies() -> None:
     dockerfile = (REPO_ROOT / "Dockerfile").read_text(encoding="utf-8")
 
     assert "skillevaluator[tier2,tier3,security]" in extras["all"]
-    assert re.search(r"^FROM python:3\.12-slim$", dockerfile, flags=re.MULTILINE)
+    base = re.search(r"^FROM (python:(3\.12\.\d+)-slim@sha256:[a-f0-9]{64})$", dockerfile, flags=re.MULTILINE)
+    assert base is not None
+    assert Version(base[2]) >= Version("3.12.16")
+    gitlab = REPO_ROOT / "ci" / "gitlab"
+    all_tiers = yaml.safe_load((gitlab / "all-tiers.yml").read_text(encoding="utf-8"))
+    feedback = list(yaml.safe_load_all((gitlab / "feedback.yml").read_text(encoding="utf-8")))[-1]
+    assert all_tiers[".skill-evaluation-tools"]["image"] == base[1]
+    assert feedback["skill-evaluation-feedback"]["image"] == base[1]
 
     public_install = 'python -m pip install --no-cache-dir ".[all]"'
     install_run = next(

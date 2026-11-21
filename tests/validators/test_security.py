@@ -647,6 +647,59 @@ description: A skill documenting REST API endpoints
         home_paths = [f.metadata["matched_value"] for f in result.findings if f.check_name == "home_paths"]
         assert home_paths == ["/home/alice/"]
 
+    def test_pii_scan_does_not_read_symlink_pointing_outside_skill(self, tmp_path: Path):
+        """A symlinked file that leaves the skill is skipped, so host content never reaches a finding."""
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        host_file = tmp_path / "host_file.txt"
+        host_file.write_text("contact alice.host@acme-widgets.net token=HOSTMARKER\n", encoding="utf-8")
+        try:
+            (skill_dir / "references" / "notes.md").symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 1
+        assert not [f for f in result.findings if f.check_name == "emails"]
+        assert "HOSTMARKER" not in " ".join([*result.errors, *result.warnings, *result.messages])
+        assert "alice.host" not in " ".join(str(f.metadata) + (f.line_content or "") for f in result.findings)
+
+    def test_pii_scan_still_reads_symlink_pointing_inside_skill(self, tmp_path: Path):
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        (skill_dir / "references" / "real.md").write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        try:
+            (skill_dir / "alias.md").symlink_to(skill_dir / "references" / "real.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 3
+        email_findings = [f for f in result.findings if f.check_name == "emails"]
+        assert len(email_findings) == 1
+        occurrences = {o["file"] for o in email_findings[0].metadata["occurrences"]}
+        assert occurrences == {"alias.md", "references/real.md"}
+
+    def test_scan_file_for_pii_refuses_symlink_outside_skill_root(self, tmp_path: Path):
+        """The reader itself enforces the boundary, not only the walker that feeds it."""
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        host_file = tmp_path / "host_file.md"
+        host_file.write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        link = skill_dir / "notes.md"
+        try:
+            link.symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        validator = SecurityValidator()
+        assert validator._scan_file_for_pii(link, set(), skill_root=skill_dir) == []
+        assert validator._scan_file_for_pii(host_file, set(), skill_root=tmp_path)
+
     def test_detects_non_placeholder_email(self, tmp_path: Path):
         """Test detection of a non-placeholder email address."""
         skill_dir = tmp_path / "email-skill"

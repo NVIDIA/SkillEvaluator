@@ -22,7 +22,7 @@ SkillEvaluator checks AI agent skills and plugins, and measures a skill's effect
 on task results: start with quality checks, then compare runs with and without a skill.
 
 Catch skill issues before merge. Connect your repository to SkillEvaluator with a
-[CI template](https://docs.nvidia.com/skills/skillevaluator/repository-integration#copy-a-template)
+[CI template](https://docs.nvidia.com/skills/skillevaluator/repository-integration)
 for automated quality and security gates, without building or maintaining
 evaluation code.
 
@@ -89,7 +89,7 @@ Check every skill change. Run in your GitHub repo to open a setup PR:
 skillevaluator ci init
 ```
 
-[Guided setup and CI templates](#bring-skill-evaluation-to-your-repository) for GitHub and GitLab.
+**Start here:** [Guided setup for GitHub and GitLab](#bring-skill-evaluation-to-your-repository).
 
 </td>
 <td width="33%">
@@ -165,7 +165,7 @@ Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
 3. Complete [scanner setup](docs/installation-options.mdx#system-tools), start Docker, and [prepare a reviewed dataset](docs/prepare-dataset.mdx). Install every tier, set the provider and key, then validate:
 
 ```bash
-pip install "skillevaluator[all]"
+python -m pip install "skillevaluator[all]"
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 skillevaluator validate ./my-skill
@@ -179,6 +179,9 @@ needs Docker running; add `--tiers 1,2` to skip it. More in
 [Build walkthrough](docs/quickstart.mdx#use-nvidia-build) and [provider configuration](docs/configuration.mdx).
 
 ## Bring skill evaluation to your repository
+
+> **Start here: [Repository integration guide](https://docs.nvidia.com/skills/skillevaluator/repository-integration)**,
+> install to first passing check on GitHub or GitLab. Below is the summary.
 
 **Minimal setup. No evaluation code to write or maintain.** Choose your skill
 folders and thresholds to get automated validation, security scanning and
@@ -202,8 +205,7 @@ skillevaluator ci init
 Choose checks and optional hosted feedback, then review the setup PR.
 [CLI setup guide](https://docs.nvidia.com/skills/skillevaluator/cli-onboarding).
 
-**Manual setup:** copy a filled-in template from [CI templates](ci/bundles/README.md).
-No local CLI needed.
+**Manual setup (no CLI):** copy a filled-in template from [CI templates](ci/bundles/README.md).
 
 | Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
@@ -212,13 +214,11 @@ No local CLI needed.
 | GitHub PR comments without hosting | [Optional comments](ci/bundles/1.0.1/comment-skill-checks.yml) | Second workflow; complete [comment setup](ci/bundles/1.0.1/README.md#pr-comment-setup) |
 | GitHub hosted reports and PR comments | [Optional publisher](ci/bundles/1.0.1/publish-skill-reports.yml) | Second workflow; complete [publisher setup](ci/bundles/1.0.1/README.md#one-time-publisher-setup) |
 
-Choose one optional feedback workflow. These templates run Tier 1 quality and
-security checks without a model key; see [all-tier CI setup](https://docs.nvidia.com/skills/skillevaluator/advanced-ci)
-to add deduplication and live agent evaluation.
+Pick one optional feedback workflow. These run Tier 1 checks without a model
+key; [all-tier CI setup](https://docs.nvidia.com/skills/skillevaluator/advanced-ci)
+adds deduplication and live agent evaluation.
 
-See [GitHub](https://docs.nvidia.com/skills/skillevaluator/github-actions) and
-[GitLab](https://docs.nvidia.com/skills/skillevaluator/gitlab-ci) setup,
-[template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
+Also: [template reference](ci/templates/README.md) and [report examples](ci/examples/README.md).
 
 ## Three-tier overview
 

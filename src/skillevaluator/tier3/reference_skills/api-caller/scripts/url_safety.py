@@ -17,10 +17,15 @@ def validate_http_url(url: str) -> str:
     return url
 
 
-def _swagger2_base_url(spec: dict, spec_url: str | None) -> str:
+def _swagger2_base_url(spec: dict, spec_url: str | None, *, operation: dict | None = None) -> str:
     """Build a Swagger 2.0 base URL from schemes, host and basePath, defaulting to the spec URL."""
     origin = urlparse(spec_url) if spec_url else None
-    schemes = spec.get("schemes") or []
+    raw_schemes = (
+        operation["schemes"]
+        if isinstance(operation, dict) and operation.get("schemes") is not None
+        else spec.get("schemes")
+    )
+    schemes = [] if raw_schemes is None else raw_schemes
     if not isinstance(schemes, list):
         raise ValueError("Swagger 2.0 schemes must be a list")
     http_schemes = [scheme for scheme in schemes if scheme in {"http", "https"}]
@@ -74,12 +79,13 @@ def resolve_openapi_server_url(
     """Return the API base URL: servers[0].url (OpenAPI 3) or schemes/host/basePath (Swagger 2.0).
 
     OpenAPI 3 servers are checked on the operation, then the path item, then the
-    document, falling back to the spec URL origin. Relative URLs are resolved against
-    the spec URL, which should be the final URL after redirects. Server variable
-    defaults are applied.
+    document, falling back to the spec URL origin; Swagger 2.0 operation schemes
+    override document schemes. Relative URLs are resolved against the spec URL,
+    which should be the final URL after redirects. Server variable defaults are
+    applied.
     """
     if str(spec.get("swagger", "")).startswith("2"):
-        return _swagger2_base_url(spec, spec_url)
+        return _swagger2_base_url(spec, spec_url, operation=operation)
     servers = _select_openapi_servers(spec, path_item, operation)
     if servers:
         server = servers[0] if isinstance(servers[0], dict) else {}

@@ -10,9 +10,11 @@ code quality issues, and potential bugs via CWE/OWASP patterns.
 from __future__ import annotations
 
 import glob
+import math
 import os
 from fnmatch import fnmatch
 from pathlib import Path
+from time import monotonic
 
 from skillevaluator.config import CONFIG_DIR
 from skillevaluator.constants import SCAN_EXCLUDED_DIRS, SCAN_EXCLUDED_FILES
@@ -85,6 +87,13 @@ REQUIRE_SEMGREP_ENV = "SKILLEVALUATOR_REQUIRE_SEMGREP"
 # ``.bandit`` when ``--ini`` is not given.
 BANDIT_INI_PATH = (CONFIG_DIR / "bandit.ini").resolve()
 _BANDIT_INI_REPORT_LIMIT = 5
+# One scan gets this many seconds, however many Bandit runs it takes.
+_BANDIT_TIMEOUT = 120
+# The most bytes of file names that one Bandit run is given. Windows allows
+# 32,767 characters for a command line.
+_BANDIT_NAMED_FILES_BYTES = 24_000
+# The most scan errors of a scan that are written out.
+_BANDIT_ERROR_LIMIT = 3
 
 
 def _skill_bandit_ini_files(skill_path: Path) -> list[str]:
@@ -200,16 +209,6 @@ class CodeRiskValidator(ValidatorBase):
         # resolve() so a skill dir named like an option token (e.g.
         # "--exclude=*") cannot be parsed as a scanner flag.
         root = skill_path.resolve()
-        args = ["-r", str(root), "-f", "json", "-q", "-ll"]
-        # This also replaces Bandit's own default list, which is matched as
-        # substrings and has ".git" in it.
-        args.extend(["--exclude", ",".join(self._bandit_excludes(root))])
-        # Without --ini, Bandit walks the scanned tree for a ``.bandit`` file and
-        # applies its ``skips`` / ``tests`` / ``configfile`` settings, so a skill
-        # could switch off the checks that would flag it. Point Bandit at a
-        # packaged, empty INI instead, and keep ``# nosec`` comments from
-        # suppressing findings.
-        args.extend(["--ini", str(BANDIT_INI_PATH), "--ignore-nosec"])
 
         for ini_file in _skill_bandit_ini_files(skill_path):
             result.add_warning(
@@ -217,39 +216,151 @@ class CodeRiskValidator(ValidatorBase):
                 "Bandit settings and # nosec comments are not applied"
             )
 
-        tool_result = Tools.bandit.run(args, timeout=120)
-
-        if tool_result.error_message:
-            result.add_warning(tool_result.error_message)
-            result.mark_scan_incomplete("bandit")
-        elif tool_result.exit_code in (0, 1):
-            # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
+        runs = self._bandit_runs(root)
+        issues: list[dict] = []
+        errors = 0
+        complete = True
+        # With nothing left to scan there is no run, and the scan is done.
+        recorded = not runs
+        if recorded:
             result.record_scanner("bandit", Tools.bandit.version)
-            self._process_bandit_output(tool_result.stdout, result, exit_code=tool_result.exit_code)
-        else:
-            error_msg = tool_result.stderr or tool_result.stdout
-            result.add_warning(f"Bandit error (exit code {tool_result.exit_code}): {error_msg[:200]}")
+        deadline = monotonic() + _BANDIT_TIMEOUT
+        for targets, excludes in runs:
+            # The runs share the time one run had, so a scan takes no longer
+            # than before.
+            timeout = math.ceil(deadline - monotonic())
+            if timeout <= 0:
+                result.add_warning(f"{Tools.bandit.name} timed out after {_BANDIT_TIMEOUT} seconds")
+                result.mark_scan_incomplete("bandit")
+                complete = False
+                break
+            args = [*targets, "-f", "json", "-q", "-ll"]
+            # This also replaces Bandit's own default list, which is matched as
+            # substrings and has ".git" in it.
+            args.extend(["--exclude", excludes])
+            # Without --ini, Bandit walks the scanned tree for a ``.bandit`` file and
+            # applies its ``skips`` / ``tests`` / ``configfile`` settings, so a skill
+            # could switch off the checks that would flag it. Point Bandit at a
+            # packaged, empty INI instead, and keep ``# nosec`` comments from
+            # suppressing findings.
+            args.extend(["--ini", str(BANDIT_INI_PATH), "--ignore-nosec"])
+
+            tool_result = Tools.bandit.run(args, timeout=timeout)
+
+            if not tool_result.error_message and tool_result.exit_code in (0, 1):
+                # Exit code 0 = clean, 1 = findings; both emit JSON on stdout
+                if not recorded:
+                    result.record_scanner("bandit", Tools.bandit.version)
+                    recorded = True
+                found, scan_errors = self._read_bandit_output(
+                    tool_result.stdout,
+                    result,
+                    exit_code=tool_result.exit_code,
+                    error_limit=_BANDIT_ERROR_LIMIT - errors,
+                )
+                issues.extend(found)
+                errors += len(scan_errors or ())
+                complete = complete and scan_errors == []
+                continue
+            if tool_result.error_message:
+                result.add_warning(tool_result.error_message)
+            else:
+                error_msg = tool_result.stderr or tool_result.stdout
+                result.add_warning(f"Bandit error (exit code {tool_result.exit_code}): {error_msg[:200]}")
+            # The scan is incomplete from here, whatever a later run finds.
             result.mark_scan_incomplete("bandit")
+            complete = False
+            break
+
+        if recorded:
+            self._report_bandit_issues(result, issues, complete)
 
         return result
 
+    def _bandit_runs(self, root: Path) -> list[tuple[list[str], str]]:
+        """The targets and the ``--exclude`` value of each Bandit run that the scan of *root* takes.
+
+        One run over the tree is enough when the exclude patterns hide what
+        the scan leaves out and nothing else. They can hide more. Bandit's
+        ``*`` also matches a path separator, so ``test_*.py`` matches every
+        Python file below a directory such as ``test_tools``, and Bandit
+        also reads each entry as plain text. A file that the patterns hide
+        and the scan covers is therefore passed by name, in a run that
+        excludes nothing and opens no other file. Bandit adds its own ``*``
+        to an entry that is the path of a directory, and the entry then no
+        longer hides what it should. With such an entry every file is passed
+        by name, and Bandit does not walk the tree at all.
+        """
+        excludes = self._bandit_excludes(root)
+        files = self._bandit_files(root)
+        runs: list[tuple[list[str], str]] = []
+        # os.path.isdir is the call Bandit makes. It is False for a path that
+        # cannot be read, where Path.is_dir raises.
+        if not any(os.path.isdir(entry) for entry in excludes):  # noqa: PTH112
+            runs.append((["-r", str(root)], ",".join(excludes)))
+            files = [file for file in files if any(fnmatch(file, entry) or entry in file for entry in excludes)]
+        named: list[list[str]] = []
+        size = 0
+        for file in files:
+            # The name, a space after it and the quotes it may get. A
+            # character takes no more room on a Windows command line than it
+            # has bytes here.
+            needed = len(os.fsencode(file)) + 3
+            if not named or size + needed > _BANDIT_NAMED_FILES_BYTES:
+                named.append([])
+                size = 0
+            named[-1].append(file)
+            size += needed
+        runs.extend((batch, "") for batch in named)
+        return runs
+
+    def _bandit_files(self, root: Path) -> list[str]:
+        """The files below *root* that the Bandit scan covers, under the paths Bandit gives them.
+
+        Bandit reads the ``*.py`` and ``*.pyw`` files of a tree and does not
+        follow a link to a directory. The scan leaves out the artifact
+        directories, and the test directories and test files when tests are
+        excluded.
+        """
+        skipped = self._bandit_directory_names(root)
+        files: list[str] = []
+        for current, directories, names in os.walk(str(root)):
+            directories[:] = [name for name in directories if not any(fnmatch(name, pattern) for pattern in skipped)]
+            for name in names:
+                if not (fnmatch(name, "*.py") or fnmatch(name, "*.pyw")):
+                    continue
+                if self.exclude_tests and self._is_test_name(name):
+                    continue
+                files.append(str(Path(current, name)))
+        return sorted(files)
+
     def _bandit_excludes(self, root: Path) -> list[str]:
-        """Patterns for the artifact directories Bandit skips below *root*, and for test directories when tests are excluded.
+        """Patterns for what Bandit skips below *root*.
 
         Tier 1 artifact dirs (evals/, results/, versions/, ...) hold snapshot
         copies of the live skill, and scanning them produces duplicate
         findings. Bandit drops a file when an ``--exclude`` entry is a
         substring of its whole path, so a bare name such as "test" also hid
-        every file of a skill called "webapp-testing". Each name is
-        therefore written as two patterns anchored at *root*, one for a
+        every file of a skill called "webapp-testing". Each directory name
+        is therefore written as two patterns anchored at *root*, one for a
         directory of that name right below it and one for any depth, so the
-        option has the same size for a small skill and a large tree. Test
-        files outside those directories are matched by name, see
-        ``_bandit_test_file_patterns``.
+        option has the same size for a small skill and a large tree. When
+        tests are excluded, the ``test_*.py`` and ``*_test.py`` files are
+        matched by name in the same way, so that Bandit does not open them.
         """
         # Bandit splits the option at every comma, so a comma in the path is
         # written as "?". Every scanned path starts with this same root.
         prefix = glob.escape(str(root)).replace(",", "?")
+        patterns: list[str] = []
+        for name in self._bandit_directory_names(root):
+            for parent in (prefix, f"{prefix}{os.sep}*"):
+                patterns.append(f"{parent}{os.sep}{name}{os.sep}*")
+        if self.exclude_tests:
+            patterns += [f"{prefix}{os.sep}{name}" for name in ("*_test.py", "test_*.py", f"*{os.sep}test_*.py")]
+        return sorted(patterns)
+
+    def _bandit_directory_names(self, root: Path) -> list[str]:
+        """Patterns for the names of the directories that the scan of *root* leaves out at any depth."""
         names = [glob.escape(name) for name in sorted({"tests", "test"})] if self.exclude_tests else []
         # A differently cased spelling is the same artifact directory where
         # the filesystem ignores case, as for the other Tier 1 scans.
@@ -260,42 +371,7 @@ class CodeRiskValidator(ValidatorBase):
                 if ignores_case
                 else glob.escape(name)
             )
-        patterns: list[str] = []
-        for name in names:
-            for parent in (prefix, f"{prefix}{os.sep}*"):
-                patterns.append(self._bandit_pattern(f"{parent}{os.sep}{name}"))
-        if self.exclude_tests:
-            patterns.extend(self._bandit_test_file_patterns(root, prefix))
-        return sorted(patterns)
-
-    def _bandit_test_file_patterns(self, root: Path, prefix: str) -> list[str]:
-        """Patterns for the ``test_*.py`` and ``*_test.py`` files below *root*, so that Bandit does not open them.
-
-        A pattern is listed only where it hides nothing else. A test file
-        that is then not covered is read by Bandit and left out of the
-        report, see ``_is_test_file``. Bandit's ``*`` also matches a path
-        separator, so ``test_*.py`` matches every Python file below a
-        directory such as ``test_tools``. Bandit also matches an entry as
-        plain text, and adds its own ``*`` to one that is a directory, so a
-        pattern is left out when a path begins with its text.
-        """
-        patterns = [f"{prefix}{os.sep}*_test.py"]
-        if not self._has_code_below_test_named_directory(root):
-            patterns += [f"{prefix}{os.sep}test_*.py", f"{prefix}{os.sep}*{os.sep}test_*.py"]
-        return [
-            pattern for pattern in patterns if not any(Path(pattern).parent.glob(f"{glob.escape(Path(pattern).name)}*"))
-        ]
-
-    def _has_code_below_test_named_directory(self, root: Path) -> bool:
-        """Whether a directory whose name starts with ``test_`` holds a Python file that is not a test."""
-        skipped = {"tests", "test", *SCAN_EXCLUDED_DIRS}
-        for current, directories, files in os.walk(root):
-            directories[:] = [name for name in directories if name not in skipped]
-            if not any(fnmatch(part, "test_*") for part in Path(current).relative_to(root).parts):
-                continue
-            if any(fnmatch(name, "*.py") and not self._is_test_name(name) for name in files):
-                return True
-        return False
+        return names
 
     @staticmethod
     def _ignores_case(root: Path) -> bool:
@@ -310,61 +386,39 @@ class CodeRiskValidator(ValidatorBase):
     def _is_test_name(name: str) -> bool:
         return fnmatch(name, "test_*.py") or fnmatch(name, "*_test.py")
 
-    @classmethod
-    def _is_test_file(cls, entry: object) -> bool:
-        """Whether a Bandit finding or scan error is about a ``test_*.py`` or ``*_test.py`` file.
-
-        These are dropped from the report. Most never get there, because
-        ``_bandit_test_file_patterns`` keeps Bandit from opening them. One
-        ``--exclude`` entry per file would cover the rest, and made the
-        option grow with the number of test files, past what a Windows
-        command line holds.
-        """
-        return cls._is_test_name(Path(str(entry.get("filename") or "")).name if isinstance(entry, dict) else "")
-
-    @staticmethod
-    def _bandit_pattern(directory: str) -> str:
-        """The pattern for everything below the directory pattern *directory*, as one ``--exclude`` entry.
-
-        Bandit adds its own ``*`` to an entry that is the path of a directory,
-        which would then match one level too deep, so the entry must not be
-        one. That only happens when a folder is literally named ``*``.
-        """
-        for wildcard in ("*", "?*", "*?"):
-            pattern = f"{directory}{os.sep}{wildcard}"
-            if not Path(pattern).is_dir():
-                break
-        return pattern
-
-    def _process_bandit_output(
+    def _read_bandit_output(
         self,
         output: str,
         result: ValidationResult,
         *,
         exit_code: int | None = None,
-    ) -> None:
-        """Parse Bandit JSON output and report issues."""
+        error_limit: int = _BANDIT_ERROR_LIMIT,
+    ) -> tuple[list[dict], list | None]:
+        """Parse the JSON output of one Bandit run.
+
+        Return its issues and its scan errors, with None in their place for
+        a report that cannot be used. No more than *error_limit* of the scan
+        errors are written out.
+        """
         data = parse_json_output(output)
         if not isinstance(data, dict):
             result.add_error("Bandit did not return valid JSON; scan did not complete")
             result.mark_scan_incomplete("bandit")
-            return
+            return [], None
 
         issues = data.get("results")
         if not isinstance(issues, list) or not all(isinstance(issue, dict) for issue in issues):
             result.add_error("Bandit JSON report is missing a valid 'results' list; scan did not complete")
             result.mark_scan_incomplete("bandit")
-            return
+            return [], None
 
         errors = data.get("errors", [])
         if not isinstance(errors, list):
             result.add_error("Bandit JSON field 'errors' must be a list; scan did not complete")
             result.mark_scan_incomplete("bandit")
-            return
-        if self.exclude_tests:
-            errors = [error for error in errors if not self._is_test_file(error)]
+            return [], None
         if errors:
-            for error in errors[:3]:
+            for error in errors[: max(error_limit, 0)]:
                 detail = error.get("reason") or error.get("message") if isinstance(error, dict) else str(error)
                 result.add_error(f"Bandit scan error: {str(detail or 'Unknown error')[:200]}")
             result.mark_scan_incomplete("bandit")
@@ -372,16 +426,17 @@ class CodeRiskValidator(ValidatorBase):
         if exit_code == 1 and not issues:
             result.add_error("Bandit findings exit code 1 did not include findings; scan did not complete")
             result.mark_scan_incomplete("bandit")
-            return
+            return [], errors or None
         if exit_code == 0 and issues:
             result.add_error("Bandit returned findings with clean exit code 0; scanner status is inconsistent")
             result.mark_scan_incomplete("bandit")
-        # After the exit code checks, which are about everything Bandit found.
-        if self.exclude_tests:
-            issues = [issue for issue in issues if not self._is_test_file(issue)]
 
+        return issues, errors
+
+    def _report_bandit_issues(self, result: ValidationResult, issues: list[dict], complete: bool) -> None:
+        """Report the issues of a scan, which is *complete* when each of its Bandit runs ran and read every file."""
         if not issues:
-            if not errors:
+            if complete:
                 result.add_success(
                     check_name="bandit",
                     message="Bandit: No security issues found",

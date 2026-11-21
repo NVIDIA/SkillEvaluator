@@ -1155,6 +1155,24 @@ def _skillspector_scoring_match_identity(
     return ("finding", finding) if finding else ("row", index)
 
 
+def _skillspector_quoted_path(path: str) -> str:
+    """Quote a report path on one line, preserving spaces and whole escape sequences."""
+    limit = _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS
+    quoted = json.dumps(path[:limit], ensure_ascii=True)
+    if len(quoted) <= limit:
+        return quoted
+
+    remaining = limit - len('""...')
+    parts = []
+    for character in path:
+        escaped = json.dumps(character, ensure_ascii=True)[1:-1]
+        if len(escaped) > remaining:
+            break
+        parts.append(escaped)
+        remaining -= len(escaped)
+    return '"' + "".join(parts) + '"...'
+
+
 def _skillspector_report_text(value: object) -> str | None:
     """Return untrusted report text as one bounded line, or ``None`` when it is not text."""
     if not isinstance(value, str):
@@ -4947,7 +4965,7 @@ class SecurityValidator(ValidatorBase):
                     )
                     if unsupported is not None:
                         result.add_error(
-                            f"SkillSpector reported a binary exclusion for {_skillspector_report_text(unsupported)}. "
+                            f"SkillSpector reported a binary exclusion for {_skillspector_quoted_path(unsupported)}. "
                             "SkillEvaluator only accepts verified passive PNGs for this exclusion; "
                             "security scan did not complete"
                         )

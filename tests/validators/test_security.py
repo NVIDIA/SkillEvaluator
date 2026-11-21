@@ -8946,10 +8946,37 @@ def test_unaccepted_binary_scope_exclusion(mock_tools, tmp_path: Path, exclusion
     assert not result.passed
     assert result.is_incomplete
     if exclusion == "documented":
-        assert any("binary exclusion for data.dat" in error for error in result.errors)
+        assert any('binary exclusion for "data.dat"' in error for error in result.errors)
         assert not any("inventory contradicts" in error for error in result.errors)
     else:
         assert any("inventory contradicts analysis completeness" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["   ", " data.dat ", 'a"b.dat', "line\nbreak\x1b.dat", "x" * 192 + "\u202e" * 12],
+    ids=["only-spaces", "edge-spaces", "quote", "control-characters", "bounded-escaping"],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_binary_exclusion_quotes_report_path(mock_tools, sample_skill_dir, path: str) -> None:
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    next(c for c in payload["components"] if c["path"] == "data.dat")["path"] = path
+    payload["analysis_completeness"]["scope_exclusions"][0]["path"] = path
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.is_incomplete
+    [message] = [error for error in result.errors if "binary exclusion for " in error]
+    shown = message.split("binary exclusion for ", 1)[1].split(". SkillEvaluator", 1)[0]
+    assert shown.isascii() and shown.isprintable()
+    if len(json.dumps(path)) <= 200:
+        assert json.loads(shown) == path
+    else:
+        assert len(shown) <= 200
+        assert shown.endswith("...")
+        assert path.startswith(json.loads(shown[:-3]))
 
 
 @patch("skillevaluator.validators.security.Tools")

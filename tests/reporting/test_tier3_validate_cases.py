@@ -551,11 +551,11 @@ def test_excluded_binary_is_named_in_what_to_fix():
     security = ValidationResult(validator_name="Security Scan", passed=False)
     security.mark_scan_incomplete("skillspector")
     security.metadata["scanners"] = {"skillspector": "2.13.6"}
-    security.add_error("SkillSpector reported a binary exclusion for data.dat; security scan did not complete")
+    security.add_error('SkillSpector reported a binary exclusion for "data.dat"; security scan did not complete')
 
     _, rows = summarize_tier1([security])
     text = _text(rows)
-    assert "binary exclusion for data.dat" in text
+    assert 'binary exclusion for "data.dat"' in text
     assert "or skip it: --skip security" in text
     assert "not installed" not in text
 

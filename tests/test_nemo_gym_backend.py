@@ -1379,6 +1379,40 @@ def test_config_errors_let_cli_overrides_win(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("setting", "error"),
+    [
+        pytest.param(
+            "harbor:\n  trial_retries: 2\n",
+            "harbor.trial_retries is not supported with --backend nemo-gym yet",
+            id="trial-retries",
+        ),
+        pytest.param("plugin:\n  load: wrapper\n", "plugin.load is not supported with --backend nemo-gym", id="load"),
+        pytest.param(
+            "plugin:\n  lift_mode: effectiveness\n",
+            "plugin.lift_mode is not supported with --backend nemo-gym",
+            id="lift-mode",
+        ),
+    ],
+)
+def test_config_errors_reject_settings_gym_does_not_read(tmp_path: Path, setting: str, error: str) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(f"schema_version: 1\n{setting}", encoding="utf-8")
+    assert nemo_gym_config_errors(tmp_path) == [error]
+
+
+def test_config_errors_accept_zero_trial_retries_and_an_empty_block(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(
+        "schema_version: 1\nplugin: {}\nharbor:\n  trial_retries: 0\n", encoding="utf-8"
+    )
+    assert nemo_gym_config_errors(tmp_path) == []
+
+
 def test_workflow_preflight_rejects_environment_kwarg(tmp_path: Path) -> None:
     import click
 

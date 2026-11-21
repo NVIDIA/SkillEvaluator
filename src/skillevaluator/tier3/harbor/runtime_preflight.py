@@ -161,6 +161,7 @@ _BEDROCK_INVALID_CONFIGURATION_ERRORS: tuple[type[BaseException], ...] = (
 for _error_name, _target in (
     ("LoginError", "authentication"),
     ("InvalidChecksumConfigError", "configuration"),
+    ("InvalidEndpointConfigurationError", "configuration"),
     ("UnknownTokenProviderError", "configuration"),
     ("UnsupportedServiceProtocolsError", "configuration"),
 ):
@@ -752,6 +753,7 @@ from skillevaluator.provider_config import (
     _get_google_access_token,
     _is_vertex_openapi_endpoint,
     _parse_vertex_openapi_metadata,
+    has_bedrock_bearer_token,
 )
 
 
@@ -1290,14 +1292,11 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
         )
         session = boto3.session.Session()
         _validate_bedrock_local_sdk_configuration(session)
-        bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK")
-        if (
-            isinstance(bearer_token, str)
-            and bearer_token.strip()
-            and any(not 0x21 <= ord(character) <= 0x7E for character in bearer_token)
-        ):
+        bearer_token = os.environ.get("AWS_BEARER_TOKEN_BEDROCK", "")
+        has_bearer_token = has_bedrock_bearer_token()
+        if has_bearer_token and any(not 0x21 <= ord(character) <= 0x7E for character in bearer_token):
             raise InvalidConfigError(error_msg="Bedrock bearer token contains invalid characters")
-        if not isinstance(bearer_token, str) or not bearer_token.strip():
+        if not has_bearer_token:
             metadata_unavailable = _monitor_bedrock_metadata_unavailability(session)
             get_credentials = getattr(session, "get_credentials", None)
             if callable(get_credentials):
@@ -1313,6 +1312,9 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
                         )
                     raise NoCredentialsError
                 credentials.get_frozen_credentials()
+            # Botocore treats any set bearer variable, even a blank one, as a token.
+            # Pin SigV4 so the clients use the credentials checked above.
+            request_config = request_config.merge(BotoConfig(signature_version="v4"))
         bedrock = session.client(
             "bedrock",
             region_name=provider.region or "us-west-2",
@@ -1323,9 +1325,19 @@ def _probe_bedrock_model(provider: ProviderConfig, *, timeout_seconds: float) ->
             region_name=provider.region or "us-west-2",
             config=request_config,
         )
-        if (_bedrock_client_uses_tls(bedrock) or _bedrock_client_uses_tls(bedrock_runtime)) and (
-            _is_invalid_bedrock_ca_bundle(session)
-        ):
+        catalog_uses_tls = _bedrock_client_uses_tls(bedrock)
+        runtime_uses_tls = _bedrock_client_uses_tls(bedrock_runtime)
+        if has_bearer_token and not (catalog_uses_tls and runtime_uses_tls):
+            # A constant detail names the cause and keeps the token and endpoint out of the output.
+            return ModelProbeResult(
+                False,
+                provider.provider,
+                provider.model,
+                "Bedrock bearer authentication (AWS_BEARER_TOKEN_BEDROCK) requires https:// Bedrock endpoints; "
+                "use an HTTPS endpoint override or unset the token",
+                failure_kind=ModelCatalogFailureKind.INVALID_CONFIGURATION,
+            )
+        if (catalog_uses_tls or runtime_uses_tls) and _is_invalid_bedrock_ca_bundle(session):
             raise InvalidConfigError(error_msg="configured AWS CA bundle cannot be loaded")
         region_name = provider.region or "us-west-2"
         catalog_authoritative = _is_native_bedrock_endpoint(

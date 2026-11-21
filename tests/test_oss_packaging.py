@@ -18,6 +18,7 @@ from pathlib import Path
 
 from click.testing import CliRunner
 from packaging.requirements import Requirement
+from packaging.specifiers import SpecifierSet
 from packaging.utils import canonicalize_name
 from packaging.version import Version
 
@@ -152,16 +153,18 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
         requirement for requirement in llm_requirements if canonicalize_name(requirement.name) == "litellm"
     ]
 
-    assert base_names.isdisjoint({"harbor", "litellm"})
+    assert base_names.isdisjoint({"boto3", "harbor", "litellm"})
+    aws_sdk = next(requirement for requirement in llm_requirements if requirement.name == "boto3")
+    assert aws_sdk.specifier == SpecifierSet(">=1.44.0")
     assert len(harbor_requirements) == 1
     assert harbor_requirements[0].extras == {"gke"}
     assert HARBOR_VERSION == "0.25.0"
     assert str(harbor_requirements[0].specifier) == f"=={HARBOR_VERSION}"
     assert len(litellm_requirements) == 1
     litellm_specifier = litellm_requirements[0].specifier
-    assert litellm_specifier.contains(Version("1.92.0"), prereleases=True)
-    assert litellm_specifier.contains(Version("1.93.0"), prereleases=True)
-    assert not litellm_specifier.contains(Version("1.94.0.dev0"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.93.2"), prereleases=True)
+    assert litellm_specifier.contains(Version("1.110.2"), prereleases=True)
+    assert not litellm_specifier.contains(Version("1.111.0.dev0"), prereleases=True)
     declared_names = base_names | {
         canonicalize_name(Requirement(raw).name) for requirements in extras.values() for raw in requirements
     }
@@ -170,9 +173,12 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     lock = _lock()
     locked_versions = {
         name: [Version(package["version"]) for package in lock["package"] if package["name"] == name]
-        for name in ("harbor", "litellm")
+        for name in ("boto3", "botocore", "harbor", "litellm")
     }
     assert locked_versions["harbor"] == [Version(HARBOR_VERSION)]
+    for name in ("boto3", "botocore"):
+        assert len(locked_versions[name]) == 1
+        assert locked_versions[name][0] >= Version("1.44.0")
     assert len(locked_versions["litellm"]) == 1
     assert litellm_specifier.contains(locked_versions["litellm"][0], prereleases=True)
 
@@ -181,7 +187,7 @@ def test_harbor_dependency_contract_keeps_base_install_isolated() -> None:
     locked_harbor = [requirement for requirement in locked_requirements if requirement["name"] == "harbor"]
     locked_litellm = [requirement for requirement in locked_requirements if requirement["name"] == "litellm"]
     assert [requirement["specifier"] for requirement in locked_harbor] == [f"=={HARBOR_VERSION}"]
-    assert [requirement["specifier"] for requirement in locked_litellm] == [">=1.92.0,<1.94.0.dev0"]
+    assert [SpecifierSet(requirement["specifier"]) for requirement in locked_litellm] == [litellm_specifier]
 
 
 def test_harbor_environment_extra_mapping_matches_installed_metadata() -> None:
@@ -516,7 +522,7 @@ def test_release_lock_avoids_accidental_prereleases_and_known_fixed_versions() -
         if package["name"] in prerelease_guarded:
             assert Version(package["version"]).is_prerelease is False
     assert versions["cryptography"] >= Version("48.0.1")
-    assert versions["msgpack"] >= Version("1.2.1")
+    assert versions["msgpack"] >= Version("1.2.3")
     assert versions["pydantic-settings"] >= Version("2.14.2")
 
 
@@ -528,9 +534,11 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     for package in _lock()["package"]:
         all_lock_versions.setdefault(package["name"], []).append(Version(package["version"]))
 
-    assert "mcp>=1.28.1,<2" in tier3
+    assert "mcp>=1.30.0,<2" in tier3
     assert "pyjwt[crypto]>=2.13.0" in tier3
-    assert "oauthlib>=4.0.0" in tier3
+    assert "oauthlib>=4.0.1" in tier3
+    assert {"aiohttp>=3.14.4,<4", "fsspec>=2026.6.0", "urllib3>=2.8.0,<3"} <= set(extras["llm"])
+    assert {"msgpack>=1.2.3", "urllib3>=2.8.0,<3"} <= set(extras["security"])
     assert "telemetry" not in extras
     assert all(
         "protobuf" not in requirement.lower() for requirements in extras.values() for requirement in requirements
@@ -538,7 +546,7 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     assert all(
         "opentelemetry" not in requirement.lower() for requirements in extras.values() for requirement in requirements
     )
-    assert all(version >= Version("1.28.1") for version in all_lock_versions["mcp"])
+    assert all(version >= Version("1.30.0") for version in all_lock_versions["mcp"])
     assert all(version >= Version("2.13.0") for version in all_lock_versions["pyjwt"])
     # The optional dashboard uses Streamlit's protobuf transport. It does not
     # restore the removed evaluator telemetry integration or its dependencies.
@@ -549,10 +557,10 @@ def test_release_lock_enforces_nspect_remediation_floors_without_removed_telemet
     }
     assert protobuf_consumers == {"streamlit"}
     # Older Streamlit releases silently ignore the launcher's server.allowedHosts setting.
-    assert extras["dashboard"] == ["streamlit>=1.61,<2"]
+    assert extras["dashboard"] == ["streamlit>=1.61,<2", "urllib3>=2.8.0,<3"]
     assert all(version >= Version("1.61") for version in all_lock_versions["streamlit"])
     assert not any("streamlit" in dependency for dependency in project["project"]["dependencies"])
-    assert all(version >= Version("4.0.0") for version in all_lock_versions["oauthlib"])
+    assert all(version >= Version("4.0.1") for version in all_lock_versions["oauthlib"])
     assert not any(name.startswith("opentelemetry") for name in all_lock_versions)
 
 
@@ -923,7 +931,7 @@ def test_tier3_docs_name_the_supported_harbor_backend_version() -> None:
     assert f"The `tier3` extra installs Harbor {HARBOR_VERSION}" in normalized
     assert "The exact Harbor pin is deliberate" in normalized
     assert f"stable Harbor {HARBOR_VERSION} rather than unreleased `main`" in normalized
-    assert "litellm>=1.92.0,<1.94.0.dev0" in normalized
+    assert "litellm>=1.110.2,<1.111.0.dev0" in normalized
     assert "static Tier 1 installs do not pull it in" in normalized
     assert "0.13.2" not in normalized
     assert "0.22.0" not in normalized

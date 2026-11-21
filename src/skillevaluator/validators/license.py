@@ -25,7 +25,13 @@ from skillevaluator.constants import (
     SPDX_LICENSE_PATTERN,
 )
 from skillevaluator.logging_config import get_logger
-from skillevaluator.validators.base import Finding, ValidationResult, ValidatorBase, iter_scannable_files
+from skillevaluator.validators.base import (
+    Finding,
+    ValidationResult,
+    ValidatorBase,
+    iter_scannable_files,
+    path_resolves_inside,
+)
 from skillevaluator.validators.frontmatter_parser import parse_frontmatter
 
 logger = get_logger(__name__)
@@ -353,6 +359,10 @@ class LicenseValidator(ValidatorBase):
         for license_name in LICENSE_FILE_NAMES:
             license_path = asset_path / license_name
             if not license_path.is_file() or not _is_license_declaration_filename(license_name):
+                continue
+            # A link that leaves the asset is reported by the symlink boundary
+            # check; it is never read, so outside text cannot decide the license.
+            if license_path.is_symlink() and not path_resolves_inside(license_path, asset_path):
                 continue
             try:
                 content = license_path.read_text(encoding="utf-8", errors="ignore")

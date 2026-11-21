@@ -1586,7 +1586,9 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
-    with collect_annotations() as annotations:
+    raw_workspace_root = job.get("workspace_root")
+    workspace_root = Path(raw_workspace_root) if isinstance(raw_workspace_root, str) and raw_workspace_root else None
+    with collect_annotations(workspace_root=workspace_root) as annotations:
         result = CliRunner().invoke(cli, job["argv"])
     json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
@@ -1810,6 +1812,7 @@ def _print_catalog_github_annotations(
     ctx: click.Context,
     *,
     catalog_root: Path,
+    workspace_root: Path | None = None,
     skill_dirs: list[Path],
     skill_annotations: dict[str, list[dict]],
     failures: list[tuple[str, str]],
@@ -1831,7 +1834,7 @@ def _print_catalog_github_annotations(
         return
     from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 
-    roots = _report_roots(catalog_root)
+    resolved_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
     names = {skill_dir.relative_to(catalog_root).as_posix(): skill_dir for skill_dir in skill_dirs}
 
     def manifest(name: str) -> Path | None:
@@ -1859,7 +1862,7 @@ def _print_catalog_github_annotations(
             severity=severity,
             blocking=blocking,
             file_path=file_path or manifest(name),
-            workspace_root=roots["repository_root"],
+            workspace_root=resolved_workspace_root,
             scan_root=catalog_root,
             follow_links=follow_links,
         )
@@ -1928,11 +1931,13 @@ def _validate_catalog(
         )
 
     discovery_problems = discovery_problems or {}
+    catalog_workspace_root = _report_roots(resolved_target)["repository_root"]
     if workers > 1:
         _validate_catalog_parallel(
             ctx,
             skill_dirs=skill_dirs,
             catalog_root=resolved_target,
+            workspace_root=catalog_workspace_root,
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
@@ -1963,7 +1968,7 @@ def _validate_catalog(
             }
             reason = ""
             try:
-                with collect_annotations() as skill_annotations:
+                with collect_annotations(workspace_root=catalog_workspace_root) as skill_annotations:
                     try:
                         ctx.invoke(validate, **overrides)
                     finally:
@@ -2003,6 +2008,7 @@ def _validate_catalog(
     _print_catalog_github_annotations(
         ctx,
         catalog_root=resolved_target,
+        workspace_root=catalog_workspace_root,
         skill_dirs=skill_dirs,
         skill_annotations=github_annotations,
         failures=failures,
@@ -2024,6 +2030,7 @@ def _validate_catalog_parallel(
     *,
     skill_dirs: list[Path],
     catalog_root: Path,
+    workspace_root: Path | None = None,
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
@@ -2038,6 +2045,7 @@ def _validate_catalog_parallel(
         _print_catalog_summary(0, [], output_dir)
         return
 
+    catalog_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
     workdir = str(Path.cwd())
     make_view_console().print(
         f"[dim]Validating {len(skill_dirs)} skills with {workers} worker"
@@ -2050,6 +2058,7 @@ def _validate_catalog_parallel(
             "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_name, catalog_root=catalog_root),
             "cwd": workdir,
             "output_dir": str(output_dir / skill_name),
+            "workspace_root": str(catalog_workspace_root),
         }
         for skill_dir in skill_dirs
         if skill_dir not in discovery_problems
@@ -2091,6 +2100,7 @@ def _validate_catalog_parallel(
     _print_catalog_github_annotations(
         ctx,
         catalog_root=catalog_root,
+        workspace_root=catalog_workspace_root,
         skill_dirs=skill_dirs,
         skill_annotations=worker_annotations,
         failures=failures,

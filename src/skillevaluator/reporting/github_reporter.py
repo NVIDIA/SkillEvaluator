@@ -135,14 +135,35 @@ def _same_path(first: Path, second: Path) -> bool:
         return first == second
 
 
+def _path_is_within(path: Path, root: Path) -> bool:
+    try:
+        path.resolve().relative_to(root.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return _same_path(path, root)
+    return True
+
+
 def _effective_workspace_root(
     workspace_root: Path | None,
     scan_root: Path | None,
     catalog_root: Path | None,
+    *,
+    catalog_workspace_root: Path | None = None,
 ) -> Path | None:
-    """Use *catalog_root* when no outer repository root was resolved for *scan_root*."""
+    """Return the workspace root that member annotations resolve against.
+
+    In a catalog run, an explicit *catalog_workspace_root* from the parent takes
+    precedence so nested Git roots inside the catalog still resolve against the
+    outer checkout. Without it, a per-skill *workspace_root* that is absent,
+    equal to *scan_root*, or nested inside *catalog_root* falls back to
+    *catalog_root*.
+    """
+    if catalog_workspace_root is not None:
+        return catalog_workspace_root
     if catalog_root is not None and (
-        workspace_root is None or (scan_root is not None and _same_path(workspace_root, scan_root))
+        workspace_root is None
+        or (scan_root is not None and _same_path(workspace_root, scan_root))
+        or _path_is_within(workspace_root, catalog_root)
     ):
         return catalog_root
     return workspace_root
@@ -380,6 +401,7 @@ def _finding_annotation(
     *,
     default_path: str = "",
     skill_label: str = "",
+    catalog_skill_label: str = "",
 ) -> _Annotation:
     severity = _finding_severity_value(finding)
     metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
@@ -410,6 +432,8 @@ def _finding_annotation(
         path = _github_file_path(finding.file_path, workspace_root, scan_root) or ""
         line = _positive_start_line(finding.line_number) if path else None
         end_line = _end_line(finding) if path else None
+        if not path and catalog_skill_label:
+            fallback_to_anchor = True
 
     suggestion = _clean_text(finding.suggestion) if finding.suggestion else ""
     message = _clean_text(finding.message)
@@ -436,6 +460,8 @@ def _annotations_for_result(
     workspace_root: Path | None,
     scan_root: Path | None,
     catalog_root: Path | None = None,
+    *,
+    catalog_workspace_root: Path | None = None,
 ) -> list[_Annotation]:
     validator = result.validator_name or "check"
     advisory = _advisory(result)
@@ -444,9 +470,22 @@ def _annotations_for_result(
     if is_cleanly_skipped(result) and result_status(result) == Status.SKIPPED:
         return annotations
 
-    effective_workspace = _effective_workspace_root(workspace_root, scan_root, catalog_root)
+    effective_workspace = _effective_workspace_root(
+        workspace_root,
+        scan_root,
+        catalog_root,
+        catalog_workspace_root=catalog_workspace_root,
+    )
     default_path = _skill_manifest_path(effective_workspace, scan_root) or ""
-    skill_label = "" if default_path else _catalog_skill_label(scan_root, catalog_root, workspace_root)
+    catalog_label = (
+        (_relative_skill_path(scan_root, catalog_root) or "")
+        if scan_root is not None and catalog_root is not None
+        else ""
+    )
+    skill_label = catalog_label or (
+        "" if default_path else _catalog_skill_label(scan_root, catalog_root, effective_workspace)
+    )
+    unanchored_label = "" if default_path else skill_label
 
     for finding in result.findings:
         annotations.append(
@@ -457,6 +496,7 @@ def _annotations_for_result(
                 scan_root,
                 default_path=default_path,
                 skill_label=skill_label,
+                catalog_skill_label=catalog_label,
             )
         )
 
@@ -476,7 +516,7 @@ def _annotations_for_result(
                     validator,
                     error,
                     default_path=default_path,
-                    skill_label=skill_label,
+                    skill_label=unanchored_label,
                 )
             )
             continue
@@ -490,7 +530,7 @@ def _annotations_for_result(
                 end_line=None,
                 check="gate_failure" if is_gate else "error",
                 title=_title(validator, "gate_failure" if is_gate else "error"),
-                message=_qualify_message(error, skill_label),
+                message=_qualify_message(error, unanchored_label),
             )
         )
 
@@ -507,7 +547,7 @@ def _annotations_for_result(
                 end_line=None,
                 check="warning",
                 title=_title(validator, "warning"),
-                message=_qualify_message(warning, skill_label),
+                message=_qualify_message(warning, unanchored_label),
             )
         )
 
@@ -522,7 +562,7 @@ def _annotations_for_result(
                 end_line=None,
                 check=f"incomplete/{tool}",
                 title=_title(validator, f"incomplete/{tool}"),
-                message=_qualify_message(_incomplete_reason(result, tool), skill_label),
+                message=_qualify_message(_incomplete_reason(result, tool), unanchored_label),
             )
         )
 
@@ -541,7 +581,7 @@ def _annotations_for_result(
                 end_line=None,
                 check="gate_failure",
                 title=_title(validator, "gate_failure"),
-                message=_qualify_message(_failure_reason(result), skill_label),
+                message=_qualify_message(_failure_reason(result), unanchored_label),
             )
         )
     return annotations
@@ -645,21 +685,27 @@ def _write_stdout(text: str) -> None:
 # print_all records each skill's annotations here instead of printing them, so
 # the catalog can print one capped stream and one summary for the whole job.
 _collector: ContextVar[list[dict] | None] = ContextVar("github_annotation_collector", default=None)
+_collector_workspace_root: ContextVar[Path | None] = ContextVar(
+    "github_annotation_collector_workspace_root", default=None
+)
 
 
 @contextmanager
-def collect_annotations() -> Iterator[list[dict]]:
+def collect_annotations(*, workspace_root: Path | None = None) -> Iterator[list[dict]]:
     """Collect GitHub annotations from every render in this context instead of printing them.
 
     Each entry is a plain, picklable dict, so a catalog worker process can return
-    its entries to the parent.
+    its entries to the parent. When *workspace_root* is given, collected member
+    annotations resolve paths against that shared catalog workspace root.
     """
     collected: list[dict] = []
-    token = _collector.set(collected)
+    collector_token = _collector.set(collected)
+    workspace_token = _collector_workspace_root.set(workspace_root)
     try:
         yield collected
     finally:
-        _collector.reset(token)
+        _collector_workspace_root.reset(workspace_token)
+        _collector.reset(collector_token)
 
 
 def _collected_status(entries: list[dict]) -> str | None:
@@ -761,11 +807,13 @@ class GitHubReporter(ReporterBase):
         workspace_root: Path | None = None,
         scan_root: Path | None = None,
         catalog_root: Path | None = None,
+        catalog_workspace_root: Path | None = None,
         report_formats: tuple[str, ...] = (),
     ) -> None:
         self.workspace_root = workspace_root
         self.scan_root = scan_root
         self.catalog_root = catalog_root
+        self.catalog_workspace_root = catalog_workspace_root
         self.report_formats = report_formats
 
     @property
@@ -780,9 +828,20 @@ class GitHubReporter(ReporterBase):
         return self.render_all([result])
 
     def annotations(self, results: list[ValidationResult]) -> list[_Annotation]:
+        shared_workspace = (
+            self.catalog_workspace_root if self.catalog_workspace_root is not None else _collector_workspace_root.get()
+        )
         annotations: list[_Annotation] = []
         for result in results:
-            annotations.extend(_annotations_for_result(result, self.workspace_root, self.scan_root, self.catalog_root))
+            annotations.extend(
+                _annotations_for_result(
+                    result,
+                    self.workspace_root,
+                    self.scan_root,
+                    self.catalog_root,
+                    catalog_workspace_root=shared_workspace,
+                )
+            )
         return annotations
 
     def render_all(self, results: list[ValidationResult]) -> str:

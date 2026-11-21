@@ -405,7 +405,10 @@ JUnit when a CI system ingests test reports rather than workflow commands.
 when the target is not in a Git repository), using the same resolution rules
 as SARIF and JUnit. GitHub resolves it against the checkout. `line=` (and
 `endLine=` when recorded) is included when the finding has a location.
-`file` is omitted when the path is outside the repository. `title=` is the
+`file` is omitted when the path is outside the repository. In a catalog run,
+member skill annotations resolve paths against the catalog's repository root
+(including across nested Git repositories), or omit `file` and prefix the
+message with the catalog-relative skill path when outside that workspace. `title=` is the
 check group and check name, and always comes last, so a path that ends in a
 space keeps it when the runner parses the command. An incomplete scan is never a clean log: each
 unfinished scanner is a warning, and the run ends with one `::notice`

@@ -916,6 +916,92 @@ def test_pathless_finding_falls_back_to_catalog_skill_path_outside_workspace(tmp
     assert alpha_warning != bravo_warning
 
 
+def test_catalog_nested_git_repos_anchor_annotations_to_catalog_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _inline_process_pool(monkeypatch)
+    outer = tmp_path / "outer"
+    repo_a = outer / "repoA"
+    repo_b = outer / "repoB"
+    repo_a.mkdir(parents=True)
+    repo_b.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(outer)], check=True)
+    subprocess.run(["git", "init", "-q", str(repo_a)], check=True)
+    subprocess.run(["git", "init", "-q", str(repo_b)], check=True)
+
+    _write_license_catalog_skill(repo_a / "alpha", with_license=False)
+    _write_license_catalog_skill(repo_b / "alpha", with_license=True)
+    repo_a_w1 = _run_license_catalog(outer, tmp_path / "reports-a-1", workers=1)
+    repo_a_w2 = _run_license_catalog(outer, tmp_path / "reports-a-2", workers=2)
+    assert _commands(repo_a_w1) == _commands(repo_a_w2)
+    repo_a_warnings = [line for line in _commands(repo_a_w1) if line.startswith("::warning ")]
+    assert len(repo_a_warnings) == 1, repo_a_w1
+    repo_a_props = _runner_properties(repo_a_warnings[0])
+    assert repo_a_props["file"] == "repoA/alpha/SKILL.md"
+    assert "line" not in repo_a_props
+    assert "repoB" not in repo_a_warnings[0]
+
+    _write_license_catalog_skill(repo_a / "alpha", with_license=True)
+    _write_license_catalog_skill(repo_b / "alpha", with_license=False)
+    repo_b_w1 = _run_license_catalog(outer, tmp_path / "reports-b-1", workers=1)
+    repo_b_w2 = _run_license_catalog(outer, tmp_path / "reports-b-2", workers=2)
+    assert _commands(repo_b_w1) == _commands(repo_b_w2)
+    repo_b_warnings = [line for line in _commands(repo_b_w1) if line.startswith("::warning ")]
+    assert len(repo_b_warnings) == 1, repo_b_w1
+    repo_b_props = _runner_properties(repo_b_warnings[0])
+    assert repo_b_props["file"] == "repoB/alpha/SKILL.md"
+    assert "line" not in repo_b_props
+    assert "repoA" not in repo_b_warnings[0]
+    assert _commands(repo_a_w1) != _commands(repo_b_w1)
+
+    # Regular finding paths across nested Git roots also anchor to the catalog workspace;
+    # member paths outside that workspace omit file= and prefix the catalog-relative skill path.
+    outside = tmp_path / "outside" / "secret.md"
+    outside.parent.mkdir()
+    outside.write_text("x\n", encoding="utf-8")
+    regular = ValidationResult(validator_name="SCHEMA")
+    regular.add_finding(
+        Finding(
+            category="SCHEMA",
+            severity=Severity.HIGH,
+            check_name="frontmatter",
+            message="Invalid frontmatter",
+            file_path="SKILL.md",
+            line_number=2,
+        )
+    )
+    regular.add_finding(
+        Finding(
+            category="SECRET",
+            severity=Severity.MEDIUM,
+            check_name="external_ref",
+            message="Referenced external file",
+            file_path=str(outside),
+            line_number=5,
+        )
+    )
+    subcatalog = outer / "catalog"
+    nested_repo = subcatalog / "repoA"
+    nested_repo.mkdir(parents=True)
+    subprocess.run(["git", "init", "-q", str(nested_repo)], check=True)
+    _write_license_catalog_skill(nested_repo / "alpha", with_license=True)
+    nested_text = GitHubReporter(
+        workspace_root=nested_repo,
+        scan_root=nested_repo / "alpha",
+        catalog_root=subcatalog,
+        catalog_workspace_root=outer,
+    ).render_all([regular])
+    nested_error = next(line for line in _commands(nested_text) if line.startswith("::error "))
+    nested_warning = next(line for line in _commands(nested_text) if line.startswith("::warning "))
+    error_props = _runner_properties(nested_error)
+    assert error_props["file"] == "catalog/repoA/alpha/SKILL.md"
+    assert error_props["line"] == "2"
+    warning_props = _runner_properties(nested_warning)
+    assert "file" not in warning_props
+    assert "line" not in warning_props
+    assert "::repoA/alpha: Referenced external file" in nested_warning
+
+
 def test_merged_plugin_finding_annotates_real_workspace_path(tmp_path: Path) -> None:
     repo = tmp_path / "repo"
     plugin = repo / "plugin"

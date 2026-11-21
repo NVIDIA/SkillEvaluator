@@ -3,8 +3,15 @@
 
 from __future__ import annotations
 
+import json
+import os
 import re
+import subprocess
+import sys
+from math import isfinite
 from pathlib import Path
+from queue import Empty, Queue
+from threading import TIMEOUT_MAX, Thread
 from typing import Any
 
 if __package__:
@@ -29,6 +36,121 @@ SUPPORTED_CHECK_TYPES = (
     "output_matches",
     "output_contains",
 )
+
+_PATTERN_TIMEOUT_SECONDS = 1.0
+_PATTERN_BUDGET_SECONDS = 5.0
+_PATTERN_STARTUP_TIMEOUT_SECONDS = 10.0
+_PATTERN_WORKER = """
+import json
+import re
+import sys
+from time import monotonic
+
+pattern, text = json.load(sys.stdin)
+print(json.dumps(["ready"]), flush=True)
+started = monotonic()
+try:
+    matched = re.search(pattern, text) is not None
+except (re.error, RecursionError, OverflowError) as exc:
+    kind, detail = "error", str(exc)
+else:
+    kind, detail = "match" if matched else "no_match", None
+elapsed = monotonic() - started
+print(json.dumps([kind, detail, elapsed]), flush=True)
+"""
+
+
+def _pattern_worker_messages(worker: subprocess.Popen[str], payload: str, messages: Queue[str | None]) -> None:
+    try:
+        with worker.stdin:
+            worker.stdin.write(payload)
+        for line in worker.stdout:
+            messages.put(line)
+    except (OSError, UnicodeError, ValueError):
+        pass
+    finally:
+        messages.put(None)
+
+
+def _pattern_limit(name: str, default: float) -> float:
+    try:
+        value = float(os.environ.get(name, ""))
+    except ValueError:
+        return default
+    if not isfinite(value) or value <= 0:
+        return default
+    # Queue.get uses a platform lock timeout, which can overflow even for a
+    # finite Python float. Keep every configured wait within its supported range.
+    return min(value, TIMEOUT_MAX)
+
+
+def _output_pattern_matches(
+    pattern: str, text: str, budget: list[float], timeout_seconds: float
+) -> tuple[bool | None, str | None]:
+    """Keep Python re semantics while bounding a pattern's compilation and matching."""
+    timeout = min(timeout_seconds, budget[0])
+    if timeout <= 0:
+        return False, "the regular expression time budget was exhausted"
+    if not sys.executable:
+        return None, "the regular expression worker could not be started"
+    timeout_reason = (
+        "the regular expression time budget was exhausted"
+        if budget[0] < timeout_seconds
+        else "the regular expression timed out"
+    )
+    try:
+        with subprocess.Popen(
+            [sys.executable, "-I", "-c", _PATTERN_WORKER],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            encoding="ascii",
+        ) as worker:
+            messages: Queue[str | None] = Queue()
+            reader = Thread(target=_pattern_worker_messages, args=(worker, json.dumps([pattern, text]), messages))
+            try:
+                reader.start()
+                try:
+                    ready = messages.get(timeout=_PATTERN_STARTUP_TIMEOUT_SECONDS)
+                except Empty:
+                    return None, "the regular expression worker did not become ready"
+                if ready != '["ready"]\n':
+                    return None, "the regular expression worker returned an invalid result"
+                try:
+                    output = messages.get(timeout=timeout)
+                except Empty:
+                    budget[0] -= timeout
+                    return False, timeout_reason
+                try:
+                    worker.wait(timeout=_PATTERN_STARTUP_TIMEOUT_SECONDS)
+                except subprocess.TimeoutExpired:
+                    return None, "the regular expression worker failed"
+                if worker.returncode != 0:
+                    return None, "the regular expression worker failed"
+            finally:
+                if worker.poll() is None:
+                    worker.kill()
+                worker.wait()
+                if reader.ident is not None:
+                    reader.join()
+    except (OSError, RuntimeError):
+        return None, "the regular expression worker could not be started"
+    try:
+        kind, detail, elapsed = json.loads(output) if output is not None else []
+        if type(elapsed) not in (int, float) or not isfinite(elapsed) or elapsed < 0:
+            raise ValueError("invalid worker duration")
+    except (ValueError, TypeError, OverflowError):
+        return None, "the regular expression worker returned an invalid result"
+    budget[0] -= elapsed
+    if elapsed > timeout:
+        return False, timeout_reason
+    if kind == "match" and detail is None:
+        return True, None
+    if kind == "no_match" and detail is None:
+        return False, None
+    if kind == "error" and isinstance(detail, str):
+        return None, "it is not a valid regular expression: " + detail
+    return None, "the regular expression worker returned an invalid result"
 
 
 def validate_declarative_checks(value: object) -> list[str]:
@@ -181,6 +303,8 @@ def evaluate_declarative_checks(
     results = []
     if not isinstance(checks, list):
         return results
+    pattern_timeout = _pattern_limit("SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC", _PATTERN_TIMEOUT_SECONDS)
+    pattern_budget = [_pattern_limit("SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC", _PATTERN_BUDGET_SECONDS)]
     for check in checks:
         if not isinstance(check, dict):
             results.append({"type": None, "passed": None, "reason": "Declarative check must be an object"})
@@ -245,11 +369,13 @@ def evaluate_declarative_checks(
             )
         elif check_type == "output_matches":
             expected = check.get("pattern", "")
-            try:
-                passed = re.search(str(expected), final_response) is not None
-            except re.error as exc:
-                passed = None
-                reason = f"Could not check output pattern because it is not a valid regular expression: {exc}"
+            passed, problem = _output_pattern_matches(str(expected), final_response, pattern_budget, pattern_timeout)
+            if problem is not None:
+                reason = (
+                    f"Output pattern failed because {problem}"
+                    if passed is False
+                    else f"Could not check output pattern because {problem}"
+                )
             else:
                 reason = (
                     f"Final response matches /{expected}/"

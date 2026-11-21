@@ -1189,3 +1189,37 @@ def test_tracked_backslash_file_name_keeps_native_posix_path(tmp_path: Path) -> 
     nested = next(line for line in errors if "issue 2" in line)
     assert _runner_properties(literal)["file"] == "alpha/design\\notes.md"
     assert _runner_properties(nested)["file"] == "alpha/design/notes.md"
+
+
+def test_backslash_symlink_outside_workspace_keeps_native_posix_path(tmp_path: Path) -> None:
+    if os.sep != "/":
+        pytest.skip("backslash is a separator on Windows")
+    repo = tmp_path / "repo"
+    skill = repo / "alpha"
+    (skill / "design").mkdir(parents=True)
+    (skill / "design" / "notes.md").write_text("nested file\n", encoding="utf-8")
+    outside = tmp_path / "outside.md"
+    outside.write_text("outside\n", encoding="utf-8")
+    try:
+        (skill / "design\\notes.md").symlink_to(outside)
+    except OSError:
+        pytest.skip("symlinks are not supported")
+
+    result = ValidationResult(validator_name="SCHEMA")
+    for index, name in enumerate(("design\\notes.md", "design/notes.md"), start=1):
+        result.add_finding(
+            Finding(
+                category="SCHEMA",
+                severity=Severity.HIGH,
+                check_name="schema",
+                message=f"issue {index}",
+                file_path=name,
+                line_number=index,
+            )
+        )
+    text = GitHubReporter(workspace_root=repo, scan_root=skill).render_all([result])
+    errors = [line for line in _commands(text) if line.startswith("::error ")]
+    link = next(line for line in errors if "issue 1" in line)
+    nested = next(line for line in errors if "issue 2" in line)
+    assert _runner_properties(link)["file"] == "alpha/design\\notes.md"
+    assert _runner_properties(nested)["file"] == "alpha/design/notes.md"

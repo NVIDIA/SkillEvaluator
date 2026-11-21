@@ -106,6 +106,31 @@ def _native_posix_path(file_path: str, scan_root: Path | None) -> Path | None:
     return path if exists else None
 
 
+def _native_workspace_relative_path(native: Path, workspace_root: Path, scan_root: Path | None) -> Path | None:
+    """Return a native POSIX path relative to the workspace root, or ``None``.
+
+    Like ``_workspace_relative_path``, but the unresolved fallback for a
+    symlink whose target is outside the workspace keeps backslashes in the
+    file name instead of reading them as separators.
+    """
+    root = _resolve_for_reporting(workspace_root)
+    if native.is_absolute():
+        absolute = native
+    elif scan_root is not None:
+        absolute = _resolve_for_reporting(scan_root) / native
+    else:
+        return None
+    candidates = [_resolve_for_reporting(absolute)]
+    if ".." not in native.parts:
+        candidates.append(Path(os.path.normpath(absolute)))
+    for candidate in candidates:
+        try:
+            return candidate.relative_to(root)
+        except ValueError:
+            continue
+    return None
+
+
 def _raw_github_file_path(
     file_path: object,
     workspace_root: Path | None,
@@ -120,7 +145,10 @@ def _raw_github_file_path(
     else:
         path = _resolve_for_reporting(native if native.is_absolute() or scan_root is None else scan_root / native)
     if workspace_root is not None and (path.is_absolute() or path.root):
-        relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
+        if native is None:
+            relative = _workspace_relative_path(path, file_path, workspace_root, scan_root)
+        else:
+            relative = _native_workspace_relative_path(native, workspace_root, scan_root)
         if relative is None:
             return None
         return relative.as_posix()

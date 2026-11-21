@@ -4,6 +4,22 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Security
+
+- Update LiteLLM and the minimum AWS SDK version in the optional LLM and
+  Tier 3 installs. Bedrock preflight and host inference reject HTTP endpoint
+  overrides when bearer authentication is configured.
+- Update aiohttp, fsspec, msgpack, OAuthLib, and urllib3 in the optional
+  installs to include upstream security fixes.
+- Raise the Tier 3 MCP Python SDK floor to 1.30.0 for upstream security fixes.
+- Update filelock, multidict, pip, and certifi in the optional LLM, Tier 2,
+  Tier 3, and dependency audit installs to include upstream security fixes.
+- Build the public Docker image and managed GitLab jobs from a digest-pinned
+  Python 3.12.16 image to protect the pip bootstrap against the affected
+  eMudhra certificates. On Windows, use `python -m pip` with a patched Python
+  release to install the security or all extra so an older pip can upgrade
+  during installation.
+
 ### Changed
 
 - Claude Code log recovery pairs batched and delayed tool results without repeatedly
@@ -55,6 +71,45 @@ All notable changes to SkillEvaluator are documented in this file.
 - Pre-commit skill mapping stays inside its repository root. A changed directory
   link checks the skill containing the link instead of the linked target, and
   paths outside the checkout no longer select unrelated skills.
+- Bedrock preflight and host inference now sign requests with IAM credentials
+  when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
+  a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
+  `Authorization: Bearer` header, and host inference failed with an illegal
+  header value. This includes models called through the Bedrock Responses
+  route.
+- Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
+  The fence length exceeds any backtick run in the rendered content. File and
+  skill labels are escaped and length-limited. The judge is instructed to
+  treat the fenced content and labels as skill data and follow the rubric.
+- Tier 1 file walkers skip symlinks and Windows directory junctions whose
+  target resolves outside the skill directory (or is missing), so the PII,
+  secrets, Unicode, license and link checks no longer read or quote files from
+  elsewhere on the host through a symlinked `references/` entry. The
+  dependency audit and the license check apply the same rule to root
+  `requirements.txt`, `requirements-dev.txt` and `LICENSE`/`COPYING` files, and
+  the unpinned-dependency warning quotes only the package name, never the whole
+  line. Symlinks that resolve inside the skill still scan as before. Code
+  Integrity & Hygiene records a low-severity `symlink_outside_skill` finding
+  naming each skipped link by its path inside the skill, never by its target.
+- Tier 1 code risk no longer lets a skill configure its own Bandit scan. A
+  `.bandit` file shipped in the skill (at the root or nested, for example
+  `scripts/.bandit`) with `skips` or `tests`, or `# nosec` comments on risky
+  lines, previously removed findings such as `subprocess.call(..., shell=True)`
+  (B602) and `eval()` (B307) so the check passed. Bandit now runs with a
+  packaged empty `--ini` and `--ignore-nosec`, the findings are reported, and
+  a `.bandit` file in the skill is flagged as ignored.
+- The LLM finding verifier's prompt now keeps skill content out of instruction
+  space. File context is wrapped in a backtick fence longer than any backtick
+  run in the file, so a skill cannot close the fence early or leave it open to
+  swallow the finding and the closing instruction. File paths and finding
+  fields have line breaks escaped so each stays on its own line, and the
+  system prompt states that file content and finding fields are untrusted data
+  whose embedded instructions must not be followed and count against a
+  false-positive verdict. Previously a crafted skill file could steer a
+  high-confidence `false_positive` verdict and downgrade a HIGH finding to INFO.
+- Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
+  unreadable candidate logs, preserving source priority and reporting skipped
+  artifacts while recovering available evidence from later agent logs.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
@@ -63,6 +118,17 @@ All notable changes to SkillEvaluator are documented in this file.
   list) now report zero tool seconds even when LLM timing is missing or invalid.
   Previously, those missing/invalid-LLM cases had no timing, so the arm's
   tool-seconds total was `N/A`.
+- Eval datasets and `evals/config.yml` in YAML, Docker Compose files that ship with
+  a skill, and the `--policy` and `--quality-config` files are read within the
+  structured-data limits. Chained YAML merge keys no longer take memory and time
+  that double with each level (a 943-byte file took over a gigabyte), and nested
+  aliases no longer expand when a dataset is staged or a policy value is
+  stringified. A file over a limit is an invalid dataset, policy or config, not
+  an out-of-memory kill. JSON datasets nested past the parser's recursion limit
+  are invalid datasets, not a traceback. A YAML dataset must stay within 1,024
+  items per list or mapping and 20,000 nodes. A quality config with nesting past
+  100 levels or an integer past 14,000 bits is refused with a structure-limit
+  message instead of the settings' own error.
 - Tier 1 frontmatter and manifest readers (`quality_score`, `schema`,
   `frontmatter_parser`, `markdown`, `plugin_schema`, `skillspector_scope`) and the
   harness compatibility overlay use the
@@ -176,6 +242,16 @@ All notable changes to SkillEvaluator are documented in this file.
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown
   producers, joined shell words and link traversal keep the finding.
+- The calculator reference skill refuses Boolean constants and caps whole-number
+  results at 1000 digits; results that involve a division or a decimal number
+  stay within the floating-point range (about 1.8e308), as before. It checks
+  exponentiation before computing it, so integer results of 1001 to 4300
+  digits, which printed before, now return
+  `Error: result is too large`. Larger, infinite or non-real results report an
+  error instead of hanging or raising a cryptic conversion error. The limits
+  apply to intermediate values as well as the final result, so
+  `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
+  `Error: result is too large` because each power has 1001 digits.
 
 ## 1.0.1 - 2026-11-17
 

@@ -3,6 +3,7 @@
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -174,3 +175,18 @@ def test_plugin_policy_blocks_reject_unknown_shapes(tmp_path, document):
     path.write_text(document)
     with pytest.raises(ValueError):
         load_policy_file(path)
+
+
+def test_hook_endpoint_grants_do_not_apply_to_mcp_targets():
+    from skillevaluator.plugin_dependency_audit import collect_endpoint_targets
+
+    mcp = SimpleNamespace(name="server", file=".mcp.json", config={"url": "https://192.168.1.10/mcp"})
+    hook = SimpleNamespace(id="hook", file="hooks.json", url="https://192.168.1.10/events")
+    targets = collect_endpoint_targets(
+        [mcp],
+        [hook],
+        allowed_hosts=("corp.example",),
+        hook_allowed_urls=("https://192.168.1.10/events",),
+    )
+    assert targets[0].allowed_hosts == ("corp.example",)
+    assert targets[1].allowed_hosts == ("corp.example", "192.168.1.10")

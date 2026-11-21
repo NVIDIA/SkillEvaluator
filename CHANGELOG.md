@@ -68,6 +68,19 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Trajectories rebuilt from native Codex logs preserve recorded MCP server and
+  tool names, including server names containing `__`, for scoring and plugin
+  reports. Full identities are checked before display-label truncation, and
+  oversized names and names containing control characters are not trusted for
+  identity matching.
+  In rebuilt logs, MCP tools count as MCP work rather than neutral planning even
+  when their bare name is one of the neutral planning or bookkeeping names (for
+  example `task`, `update_plan`, `spawn_agent`, `wait`, `agent`, or `todowrite`);
+  an MCP tool named `skill` no longer produces a false Skill-tool activation.
+  Codex `tier3 import-traces` candidates also use `mcp__server__tool` labels,
+  retaining the tool name when a long server label must be shortened.
+  Harbor-provided Codex trajectories and their existing MCP classification are
+  unchanged.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

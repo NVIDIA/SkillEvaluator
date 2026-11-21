@@ -908,6 +908,12 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
 
         if item_type == "mcp_tool_call":
             tool = str(item.get("tool") or "mcp_tool")
+            server = item.get("server")
+            mcp_extra = {}
+            if isinstance(server, str) and server:
+                bare_tool = tool.removeprefix(f"mcp__{server}__")
+                mcp_extra = {"mcp_server": server, "mcp_tool": bare_tool}
+                tool = f"mcp__{server}__{bare_tool}"
             arguments = item.get("arguments")
             if not isinstance(arguments, dict):
                 arguments = {}
@@ -926,6 +932,8 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                 ],
                 "observation": {"results": []},
             }
+            if mcp_extra:
+                step["tool_calls"][0]["extra"] = mcp_extra
             observation = _codex_mcp_observation(item)
             if observation:
                 step["observation"]["results"].append(

@@ -67,6 +67,7 @@ from skillevaluator.utils.path_security import (
 from skillevaluator.utils.process_environment import child_process_env
 from skillevaluator.utils.redaction import is_sensitive_key, redact_sensitive_text
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -1749,21 +1750,10 @@ def prebuild_task_environments(dataset_dirs: list[Path]) -> int:
 
 def _load_evals(evals_path: Path) -> list[dict[str, Any]]:
     """Load normalized dataset entries from evals.json/jsonl/yaml."""
-    from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
+    from skillevaluator.tier3.dataset_utils import normalize_dataset_entries, parse_dataset_text
 
     payload = _read_regular_evals_file(evals_path).decode("utf-8")
-    suffix = evals_path.suffix.casefold()
-    if suffix == ".jsonl":
-        data: Any = [json.loads(line) for raw_line in payload.splitlines() if (line := raw_line.strip())]
-    elif suffix in {".yaml", ".yml"}:
-        import yaml
-
-        data = yaml.safe_load(payload)
-    elif suffix == ".json":
-        data = json.loads(payload)
-    else:
-        raise ValueError(f"Unsupported dataset format: {suffix}")
-    return normalize_dataset_entries(data)
+    return normalize_dataset_entries(parse_dataset_text(payload, evals_path.suffix))
 
 
 def _evaluator_node_fingerprint(metadata: os.stat_result) -> tuple[int, int, int, int, int, int, int]:
@@ -2969,8 +2959,6 @@ def _dockerfile_resolved_build_context_sources(
 
 def _compose_build_arg_overrides(env_dir: Path, dockerfile: Path) -> dict[str, str | None]:
     """Return literal build-arg overrides for Compose services that build *dockerfile*."""
-    import yaml
-
     compose_files = [env_dir / name for name in ("docker-compose.yaml", "docker-compose.yml")]
     compose_files = [compose for compose in compose_files if compose.is_file()]
     if not compose_files:
@@ -2979,8 +2967,8 @@ def _compose_build_arg_overrides(env_dir: Path, dockerfile: Path) -> dict[str, s
     overrides: dict[str, str | None] = {}
     for compose in compose_files:
         try:
-            content = yaml.safe_load(compose.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
+            content = load_bounded_yaml(compose.read_text(encoding="utf-8"), last_key_wins=True)
+        except (OSError, StructuredDataError) as exc:
             raise ValueError(f"Cannot safely resolve custom Docker Compose build args: {exc}") from exc
         services = content.get("services", {}) if isinstance(content, dict) else {}
         if not isinstance(services, dict):
@@ -3182,9 +3170,7 @@ def _ensure_empty_compose_input_compatibility(env_dir: Path, *, has_input: bool)
     compose_path = _custom_compose_path(env_dir)
     if compose_path is None:
         return
-    import yaml
-
-    content = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
+    content = load_bounded_yaml(compose_path.read_text(encoding="utf-8"), last_key_wins=True)
     services = content.get("services", {}) if isinstance(content, dict) else {}
     recipes: list[tuple[Path, Path | None, str | None, dict[str, str | None], bool, set[str]]] = []
     for service in services.values():
@@ -3454,11 +3440,9 @@ def _validate_and_sanitize_custom_compose(
     don't need host ports — the main container reaches them via the compose
     network hostname (e.g. ``postgres:5432``).
     """
-    import yaml
-
     try:
-        content = yaml.safe_load(compose_path.read_text(encoding="utf-8"))
-    except (OSError, yaml.YAMLError) as exc:
+        content = load_bounded_yaml(compose_path.read_text(encoding="utf-8"), last_key_wins=True)
+    except (OSError, StructuredDataError) as exc:
         raise ValueError(f"Custom Docker Compose file cannot be read safely: {exc}") from exc
     if not isinstance(content, dict):
         raise ValueError("Custom Docker Compose file must contain a top-level mapping")
@@ -3548,6 +3532,8 @@ def _validate_and_sanitize_custom_compose(
     _validate_compose_interpolation(content, allowed_env)
 
     if changed and sanitize:
+        import yaml
+
         compose_path.write_text(yaml.dump(content, default_flow_style=False), encoding="utf-8")
 
 
@@ -6487,11 +6473,9 @@ def _native_projection_entry_ids(native_dir: Path) -> tuple[str, ...]:
 
 def _decode_projection_config(payload: bytes) -> tuple[dict[str, Any], bool]:
     """Decode only the source-selection hint from already-secured config bytes."""
-    import yaml
-
     try:
-        raw = yaml.safe_load(payload.decode("utf-8"))
-    except (UnicodeError, yaml.YAMLError):
+        raw = load_bounded_yaml(payload.decode("utf-8"), last_key_wins=True)
+    except (UnicodeError, StructuredDataError):
         return {}, False
     if not isinstance(raw, dict):
         return {}, False
@@ -6508,9 +6492,7 @@ def _evaluator_projection_selection(
     bind_full_evidence_sources: bool,
 ) -> _EvaluatorProjectionSelection:
     """Resolve the evaluator projection and a post-copy selection signature."""
-    import yaml
-
-    from skillevaluator.tier3.dataset_utils import normalize_dataset_entries
+    from skillevaluator.tier3.dataset_utils import normalize_dataset_entries, parse_dataset_text
     from skillevaluator.tier3.evals_config import CONFIG_FILENAMES, MAX_EVALS_CONFIG_BYTES
 
     evals_dir = skill_path / "evals"
@@ -6539,18 +6521,9 @@ def _evaluator_projection_selection(
         dataset_payload = _read_regular_evals_file(dataset_path, allowed_root=evals_dir)
         dataset_digest = hashlib.sha256(dataset_payload).hexdigest()
         try:
-            decoded = dataset_payload.decode("utf-8")
-            suffix = dataset_path.suffix.casefold()
-            if suffix == ".jsonl":
-                raw_entries: Any = [json.loads(line) for raw_line in decoded.splitlines() if (line := raw_line.strip())]
-            elif suffix in {".yaml", ".yml"}:
-                raw_entries = yaml.safe_load(decoded)
-            elif suffix == ".json":
-                raw_entries = json.loads(decoded)
-            else:
-                raise ValueError(f"Unsupported dataset format: {suffix}")
+            raw_entries = parse_dataset_text(dataset_payload.decode("utf-8"), dataset_path.suffix)
             entries = normalize_dataset_entries(raw_entries)
-        except (UnicodeError, TypeError, ValueError, yaml.YAMLError):
+        except (UnicodeError, TypeError, ValueError):
             # Invalid datasets do not have a meaningful fixture selection. Copy
             # the dataset itself and let normal task staging report its error.
             dataset_valid = False

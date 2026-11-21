@@ -57,6 +57,9 @@ _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _BRIDGE_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _BRIDGE_ARTIFACT_MAX_PATHS = 10_000
+# POSIX replaces a masked log entry through directory descriptors; elsewhere the
+# atomic output writer is used.
+_REPLACE_THROUGH_DIRECTORY_DESCRIPTORS = os.name == "posix"
 # Local mode runs the CLI installed on the host, not the release Harbor installs
 # in other environments. These are the oldest releases that run each model family.
 _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
@@ -124,7 +127,8 @@ def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
     Links are never followed and special files are never opened. On POSIX a
     file is masked by renaming a fresh copy over its name inside the pinned
     folder, so no other name for a hard-linked file changes. Elsewhere the
-    atomic output writer is used, which refuses hard-linked files.
+    atomic output writer is used, which refuses hard-linked files and files
+    that changed since they were read.
     Return the entries that may still hold a capability: files over the size
     limit, entries that could not be listed, read or replaced, and the first
     entry past the path limit.
@@ -169,29 +173,38 @@ def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
                         # Equal-length masking also preserves offsets in opaque artifacts.
                         safe = safe.replace(value, b"*" * len(value))
                     if safe != raw:
-                        if os.name == "posix":
+                        if _REPLACE_THROUGH_DIRECTORY_DESCRIPTORS:
                             _replace_bridge_artifact(secure_root, relative, opened, safe)
                         else:
-                            # Windows pins the opened parent chain against renames.
-                            write_output_file_atomically(path, safe)
+                            # Windows pins the opened parent chain against renames. The
+                            # read was checked against this path metadata, so the writer
+                            # leaves a file that changed since the read in place.
+                            write_output_file_atomically(path, safe, expected=metadata)
                 except (OSError, ValueError):
                     unmasked.append(relative.as_posix())
             directories[:] = descend
     return unmasked
 
 
-def _bridge_artifacts_masked(logs_dir: Path, tokens: set[str]) -> bool:
-    """Mask capabilities in retained native artifacts; return whether none can remain."""
+def _bridge_artifacts_masked(logs_dir: Path, tokens: set[str], agent_logger: logging.Logger) -> bool:
+    """Mask capabilities in retained native artifacts; return whether none can remain.
+
+    The warning goes to the agent's Harbor logger, which reaches the trial and
+    job logs, with every recorded capability masked in the entry it names.
+    """
     try:
         unmasked = _redact_bridge_artifacts(logs_dir, tokens)
     except (OSError, ValueError) as exc:
         unmasked = [str(exc)]
     if unmasked:
-        logger.warning(
+        first = unmasked[0]
+        for token in sorted(tokens, key=len, reverse=True):
+            first = first.replace(token, "*" * len(token))
+        agent_logger.warning(
             "Could not mask the NVIDIA Build bridge credential in %d agent log entries under %s, starting with %s.",
             len(unmasked),
             logs_dir,
-            unmasked[0],
+            first,
         )
     return not unmasked
 
@@ -1114,14 +1127,14 @@ class _NvidiaBuildBridgeAgent:
         # Harbor downloads native logs after run() has already cleaned up the
         # bridge. Keep its capabilities private until that retention boundary.
         tokens = getattr(self, "_nvidia_build_artifact_tokens", set())
-        if not _bridge_artifacts_masked(self.logs_dir, tokens):
+        if not _bridge_artifacts_masked(self.logs_dir, tokens, self.logger):
             # Never convert logs that may still hold a capability. Keep it recorded
             # so Harbor's recovery call after a later trial error skips them too.
             return
         try:
             super().populate_context_post_run(context)
         finally:
-            if _bridge_artifacts_masked(self.logs_dir, tokens):
+            if _bridge_artifacts_masked(self.logs_dir, tokens, self.logger):
                 self._nvidia_build_artifact_tokens = set()
 
 

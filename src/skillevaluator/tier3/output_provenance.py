@@ -141,8 +141,12 @@ def _assert_output_parent_still_declared(path: Path, expected: os.stat_result) -
         raise ValueError(f"Generated output directory changed while writing: {path}")
 
 
-def write_output_file_atomically(path: Path, payload: bytes) -> None:
-    """Durably replace one evaluator-owned output file with complete bytes."""
+def write_output_file_atomically(path: Path, payload: bytes, *, expected: os.stat_result | None = None) -> None:
+    """Durably replace one evaluator-owned output file with complete bytes.
+
+    With ``expected`` (path metadata from the same stat family as ``lstat``),
+    a destination that no longer matches it is left in place and rejected.
+    """
     validate_output_directory_path(path.parent)
     try:
         parent_metadata = path.parent.lstat()
@@ -156,6 +160,10 @@ def write_output_file_atomically(path: Path, payload: bytes) -> None:
         descriptor = -1
         try:
             existing = _inspect_atomic_destination(path, directory_fd=directory_fd)
+            if expected is not None and (
+                existing is None or _artifact_fingerprint(existing) != _artifact_fingerprint(expected)
+            ):
+                raise ValueError(f"Generated output destination changed before writing: {path}")
             existing_mode = stat.S_IMODE(existing.st_mode) if existing is not None else None
             for _ in range(32):
                 candidate = path.parent / f".{path.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp"

@@ -201,7 +201,8 @@ def test_bridge_artifact_redaction_never_writes_through_a_parent_swapped_during_
     outside = tmp_path / "outside"
     (outside / "e").mkdir(parents=True)
     host_file = outside / "e" / "a.txt"
-    host_file.write_bytes(b"host data\n")
+    if kind == "single":
+        host_file.write_bytes(b"host data\n")
     logs = tmp_path / "agent"
     folder = logs / "d"
     (folder / "e").mkdir(parents=True)
@@ -209,9 +210,13 @@ def test_bridge_artifact_redaction_never_writes_through_a_parent_swapped_during_
     try:
         (tmp_path / "link").symlink_to(outside, target_is_directory=True)
         if kind == "hardlink":
-            os.link(folder / "e" / "a.txt", folder / "e" / "z.txt")
+            # The outside name is a second name for the file that is read, so only
+            # the no-follow parent traversal keeps the masked copy out of it.
+            os.link(folder / "e" / "a.txt", host_file)
     except OSError:
         pytest.skip("platform cannot create these links")
+    host_bytes = host_file.read_bytes()
+    host_inode = host_file.stat().st_ino
 
     real_read = SecureRoot.read_bytes
 
@@ -240,8 +245,62 @@ def test_bridge_artifact_redaction_never_writes_through_a_parent_swapped_during_
 
     assert _redact_bridge_artifacts(logs, {token}) == ["d/e/a.txt"]
     assert folder.is_symlink()
-    assert host_file.read_bytes() == b"host data\n"
+    assert host_file.stat().st_ino == host_inode
+    assert host_file.read_bytes() == host_bytes
     assert sorted(path.name for path in (outside / "e").iterdir()) == ["a.txt"]
+
+
+@pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])
+@pytest.mark.parametrize("moment", ["after_read", "while_copying"])
+def test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, branch: str, moment: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    if branch == "directory_descriptors" and os.name != "posix":
+        pytest.skip("descriptor-anchored replacement is POSIX-only")
+    # Windows uses the atomic writer; forcing it here runs that path on every platform.
+    monkeypatch.setattr(local_agents, "_REPLACE_THROUGH_DIRECTORY_DESCRIPTORS", branch == "directory_descriptors")
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    log = logs / "claude-code.txt"
+    original = "ordinary output " + token + "\n"
+    log.write_text(original, encoding="utf-8")
+    appended = False
+
+    def append() -> None:
+        # The container can still be writing the log folder while Harbor collects it.
+        nonlocal appended
+        appended = True
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write("appended line\n")
+
+    if moment == "after_read":
+        real_read = SecureRoot.read_bytes
+
+        def read_then_append(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+            result = real_read(self, relative_path, max_bytes, **kwargs)
+            append()
+            return result
+
+        monkeypatch.setattr(SecureRoot, "read_bytes", read_then_append)
+    else:
+        real_fsync = os.fsync
+
+        def fsync_then_append(descriptor: int) -> None:
+            # Append once the masked copy is durable but before it is renamed over the entry.
+            real_fsync(descriptor)
+            if not appended and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                append()
+
+        monkeypatch.setattr(os, "fsync", fsync_then_append)
+
+    assert local_agents._redact_bridge_artifacts(logs, {token}) == ["claude-code.txt"]
+    assert appended
+    assert log.read_text(encoding="utf-8") == original + "appended line\n"
+    assert sorted(path.name for path in logs.iterdir()) == ["claude-code.txt"]
 
 
 def test_bridge_artifacts_with_in_folder_links_are_redacted_across_harbor_recovery_call(
@@ -317,7 +376,8 @@ def test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call(
     logs = tmp_path / "agent"
     logs.mkdir()
     (logs / "claude-code.txt").write_text("ordinary output " + token, encoding="utf-8")
-    (logs / "large.jsonl").write_text("x" * 100 + token, encoding="utf-8")
+    # The warning names this entry, so the token must be masked in the name too.
+    (logs / f"large-{token}.jsonl").write_text("x" * 100 + token, encoding="utf-8")
     if limit == "size":
         monkeypatch.setattr(local_agents, "_BRIDGE_ARTIFACT_MAX_BYTES", 100)
     else:
@@ -330,7 +390,7 @@ def test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call(
 
     monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
     context = AgentContext()
-    with caplog.at_level("WARNING", logger=local_agents.__name__):
+    with caplog.at_level("WARNING"):
         for _ in range(2):
             if context.is_empty():
                 agent.populate_context_post_run(context)
@@ -339,7 +399,15 @@ def test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call(
     assert not (logs / "trajectory.json").exists()
     assert token not in (logs / "claude-code.txt").read_text(encoding="utf-8")
     assert agent._nvidia_build_artifact_tokens == {token}
-    assert "Could not mask the NVIDIA Build bridge credential" in caplog.text
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Could not mask the NVIDIA Build bridge credential")
+        # The agent's Harbor logger reaches trial.log and job.log; the module logger has no handler there.
+        and record.name == agent.logger.name
+    ]
+    assert len(warnings) == 2
+    assert all(message.endswith(f"starting with large-{'*' * len(token)}.jsonl.") for message in warnings)
     assert token not in caplog.text
 
 

@@ -99,6 +99,22 @@ def test_atomic_output_accepts_windows_crt_descriptor_identity(
     assert not list(tmp_path.glob(".result.json.*.tmp"))
 
 
+def test_atomic_output_leaves_a_destination_that_changed_since_expected_in_place(tmp_path: Path) -> None:
+    destination = tmp_path / "result.json"
+    destination.write_bytes(b"old")
+    expected = destination.lstat()
+    with destination.open("ab") as handle:
+        handle.write(b" appended")
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        output_provenance.write_output_file_atomically(destination, b"complete", expected=expected)
+
+    assert destination.read_bytes() == b"old appended"
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+    output_provenance.write_output_file_atomically(destination, b"complete", expected=destination.lstat())
+    assert destination.read_bytes() == b"complete"
+
+
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX descriptor-relative rename support")
 def test_atomic_output_parent_swap_cannot_publish_outside_validated_directory(
     tmp_path: Path,

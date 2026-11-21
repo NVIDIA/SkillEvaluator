@@ -205,8 +205,13 @@ All notable changes to SkillEvaluator are documented in this file.
   before Harbor converts the logs, the trial skips the conversion, so it has
   no `trajectory.json` and no usage counts. With a token or cost budget, such
   a trial counts as unmeasured usage, so the run stops admitting further
-  attempts. A warning about unmasked files is written to the Harbor process's
-  standard error, which SkillEvaluator keeps only when the Harbor run fails.
+  attempts. The limits apply to every file in the agent log folder, whether
+  or not it holds the credential, including the skills Harbor copies to
+  `sessions/skills/` for Claude Code, so a skill with a file over 64 MiB makes
+  NVIDIA Build Claude Code trials lose their `trajectory.json` and usage
+  counts. A warning about unmasked files, with the credential masked in the
+  file name it reports, is written to the trial's `trial.log` and the job's
+  `job.log`.
 
 ## 1.0.1 - 2026-11-17
 

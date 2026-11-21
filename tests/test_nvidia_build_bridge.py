@@ -2749,10 +2749,11 @@ def test_malformed_backend_tool_name_is_gateway_error_before_stream(
     assert json.loads(body)["error"]["type"] == "backend_error"
     assert "event:" not in body
     assert "bad.tool" not in body
-    deadline = time.monotonic() + 1
-    while bridge_services.bridge_server.active_workers and time.monotonic() < deadline:
-        time.sleep(0.005)
-    assert f"status=502 path={route} error=invalid_backend_response" in bridge_services.log_path.read_text()
+    # The bridge sends the 502 before it writes the log line.
+    assert bridge_services.bridge_server.wait_for_workers(timeout=5), "bridge worker did not finish"
+    assert f"status=502 path={route} error=invalid_backend_response" in bridge_services.log_path.read_text(
+        encoding="utf-8"
+    )
 
 
 def test_anthropic_tool_arguments_are_validated_before_first_event() -> None:

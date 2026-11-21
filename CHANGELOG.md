@@ -205,9 +205,10 @@ All notable changes to SkillEvaluator are documented in this file.
 - Retained aggregate Harbor jobs include a provenance log identifying their real
   source jobs, allowing Harbor analysis to discover the merged trials without
   implying an independent execution.
-- Custom grader reward validation keeps numeric range checks compatible with
-  Python 3.9 while continuing to reject boolean, non-finite and out-of-range
-  scores.
+- Custom graders on task images whose `python3` is 3.9 no longer fail with a
+  `TypeError` that scored every trial 0.0, including the SkillEvaluator default
+  score in `default_plus_custom` mode; rerun affected evaluations. Boolean,
+  non-finite and out-of-range scores are still rejected.
 
 ## 1.0.1 - 2026-11-17
 

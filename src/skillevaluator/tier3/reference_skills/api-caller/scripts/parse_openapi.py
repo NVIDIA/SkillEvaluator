@@ -115,15 +115,25 @@ def parse_spec(spec: dict, filter_path: str | None = None, spec_url: str | None 
                     merged.update({(parameter["name"], parameter["in"]): parameter for parameter in parameters})
                     parameters = list(merged.values())
 
-                operation_base_url = resolve_openapi_server_url(spec, spec_url, path_item=methods, operation=details)
                 op = {
                     "method": method.upper(),
                     "path": path,
-                    "full_url": join_url_path(operation_base_url, path),
-                    "operation_id": details.get("operationId", ""),
-                    "summary": details.get("summary", "")[:100],
-                    "parameters": parse_parameters(parameters),
                 }
+                try:
+                    operation_base_url = resolve_openapi_server_url(
+                        spec, spec_url, path_item=methods, operation=details
+                    )
+                except ValueError as exc:
+                    op["error"] = str(exc)
+                else:
+                    op["full_url"] = join_url_path(operation_base_url, path)
+                op.update(
+                    {
+                        "operation_id": details.get("operationId", ""),
+                        "summary": details.get("summary", "")[:100],
+                        "parameters": parse_parameters(parameters),
+                    }
+                )
 
                 # Parse request body for POST/PUT/PATCH
                 if method in ["post", "put", "patch"]:

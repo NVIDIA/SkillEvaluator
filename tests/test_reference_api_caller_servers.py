@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -62,11 +63,17 @@ def _load_script(module_name: str):
 
 
 def _run_script(script: str, *args: str) -> subprocess.CompletedProcess[str]:
+    env = os.environ.copy()
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "http_proxy", "https_proxy", "all_proxy"):
+        env.pop(name, None)
+    env["NO_PROXY"] = "127.0.0.1"
+    env["no_proxy"] = "127.0.0.1"
     return subprocess.run(
         [sys.executable, str(SCRIPTS_DIR / script), *args],
         check=False,
         capture_output=True,
         text=True,
+        env=env,
     )
 
 
@@ -612,5 +619,131 @@ def test_operation_server_rejects_disallowed_scheme() -> None:
     with pytest.raises(ValueError, match="Only absolute HTTP or HTTPS URLs are supported"):
         caller.build_url_from_spec(spec, "/pets", {}, spec_url="http://docs.example/openapi.json")
 
+    parsed = parser.parse_spec(spec, spec_url="http://docs.example/openapi.json")
+    assert len(parsed["operations"]) == 1
+    assert "full_url" not in parsed["operations"][0]
+    assert parsed["operations"][0]["error"] == "Only absolute HTTP or HTTPS URLs are supported"
+
+
+def test_swagger2_operation_schemes_override_document_schemes() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec_url = "http://docs.example/v2/swagger.json"
+    spec = {
+        "swagger": "2.0",
+        "host": "api.example.com",
+        "basePath": "/v2",
+        "schemes": ["http"],
+        "paths": {
+            "/pets/secure": {
+                "get": {
+                    "operationId": "getSecurePet",
+                    "schemes": ["https"],
+                }
+            },
+            "/pets/plain": {
+                "get": {
+                    "operationId": "getPlainPet",
+                }
+            },
+            "/pets/multi": {
+                "get": {
+                    "operationId": "getMultiSchemePet",
+                    "schemes": ["ws", "http", "https"],
+                }
+            },
+        },
+    }
+
+    secure_path, _method, secure_op = caller.find_operation(spec, "getSecurePet")
+    plain_path, _method, plain_op = caller.find_operation(spec, "getPlainPet")
+    multi_path, _method, multi_op = caller.find_operation(spec, "getMultiSchemePet")
+
+    assert (
+        caller.build_url_from_spec(spec, secure_path, {}, spec_url=spec_url, operation=secure_op)
+        == "https://api.example.com/v2/pets/secure"
+    )
+    assert (
+        caller.build_url_from_spec(spec, plain_path, {}, spec_url=spec_url, operation=plain_op)
+        == "http://api.example.com/v2/pets/plain"
+    )
+    assert (
+        caller.build_url_from_spec(spec, multi_path, {}, operation=multi_op) == "https://api.example.com/v2/pets/multi"
+    )
+
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+    assert parsed["base_url"] == "http://api.example.com/v2"
+    by_id = {op["operation_id"]: op for op in parsed["operations"]}
+    assert by_id["getSecurePet"]["full_url"] == "https://api.example.com/v2/pets/secure"
+    assert by_id["getPlainPet"]["full_url"] == "http://api.example.com/v2/pets/plain"
+
+    parsed_without_origin = parser.parse_spec(spec)
+    by_id_without_origin = {op["operation_id"]: op for op in parsed_without_origin["operations"]}
+    assert by_id_without_origin["getMultiSchemePet"]["full_url"] == "https://api.example.com/v2/pets/multi"
+
+    with pytest.raises(ValueError, match=r"Swagger 2\.0 schemes must be a list"):
+        caller.build_url_from_spec(spec, "/pets/secure", {}, spec_url=spec_url, operation={"schemes": "https"})
+    with pytest.raises(ValueError, match="no HTTP or HTTPS scheme"):
+        caller.build_url_from_spec(spec, "/pets/secure", {}, spec_url=spec_url, operation={"schemes": ["ws"]})
+
+
+def test_parse_openapi_isolates_per_operation_server_errors_and_fails_on_document_errors() -> None:
+    parser = _load_script("parse_openapi")
+    spec_url = "http://docs.example/openapi.json"
+    spec = {
+        "openapi": "3.0.3",
+        "info": {"title": "Mixed", "version": "1.0.0"},
+        "servers": [{"url": "http://doc.example/v1"}],
+        "paths": {
+            "/health": {
+                "get": {
+                    "operationId": "getHealth",
+                    "summary": "Healthy endpoint",
+                }
+            },
+            "/regional": {
+                "get": {
+                    "operationId": "getRegional",
+                    "servers": [{"url": "https://{region}.api.example/v1", "variables": {"region": {}}}],
+                }
+            },
+            "/broken-path": {
+                "servers": [{"url": "file:///etc/passwd"}],
+                "post": {
+                    "operationId": "postBrokenPath",
+                },
+            },
+        },
+    }
+
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+
+    assert parsed["base_url"] == "http://doc.example/v1"
+    assert parsed["total_operations"] == 3
+    by_id = {op["operation_id"]: op for op in parsed["operations"]}
+    assert by_id["getHealth"]["full_url"] == "http://doc.example/v1/health"
+    assert "error" not in by_id["getHealth"]
+    assert "full_url" not in by_id["getRegional"]
+    assert by_id["getRegional"]["error"] == "server variable 'region' has no default"
+    assert "full_url" not in by_id["postBrokenPath"]
+    assert by_id["postBrokenPath"]["error"] == "Only absolute HTTP or HTTPS URLs are supported"
+
     with pytest.raises(ValueError, match="Only absolute HTTP or HTTPS URLs are supported"):
-        parser.parse_spec(spec, spec_url="http://docs.example/openapi.json")
+        parser.parse_spec(
+            {
+                "openapi": "3.0.3",
+                "servers": [{"url": "file:///etc/passwd"}],
+                "paths": {"/health": {"get": {"operationId": "getHealth"}}},
+            },
+            spec_url=spec_url,
+        )
+
+    with pytest.raises(ValueError, match="no HTTP or HTTPS scheme"):
+        parser.parse_spec(
+            {
+                "swagger": "2.0",
+                "schemes": ["ws"],
+                "paths": {"/health": {"get": {"operationId": "getHealth"}}},
+            },
+            spec_url=spec_url,
+        )

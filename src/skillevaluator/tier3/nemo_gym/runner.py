@@ -54,7 +54,12 @@ from skillevaluator.tier3.nemo_gym.backend import (
     nemo_gym_version,
     uses_native_harbor_tasks,
 )
-from skillevaluator.tier3.nemo_gym.results import read_rollout_failures, read_rollouts, write_job_from_rollouts
+from skillevaluator.tier3.nemo_gym.results import (
+    read_rollout_failures,
+    read_rollouts,
+    write_job_from_rollouts,
+    write_task_case_ids,
+)
 
 __all__ = ["MODEL_API_KEY_ENV", "MODEL_URL_ENV", "RUN_TIMEOUT_ENV"]
 
@@ -1181,6 +1186,7 @@ def run_nemo_gym_eval(
                         },
                     )
                     task_case_ids = _task_case_ids(arm_dir)
+                    write_task_case_ids(gym_root / f"{agent}-{arm}", task_case_ids)
                     case_ids = case_ids or sorted(set(task_case_ids.values()))
                     staged_task_paths += [task for task in task_paths if task.is_dir()]
                     planned.append((agent, arm, arm_dir, task_case_ids))

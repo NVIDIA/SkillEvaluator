@@ -320,10 +320,6 @@ class SchemaValidator(ValidatorBase):
                 result.merge_advisories_with_prefix(skill_result, skill_dir.name)
             else:
                 result.merge_with_prefix(skill_result, skill_dir.name)
-                # merge_with_prefix copies errors/warnings, but not severity
-                # counters. Count findings once in this collection's summary.
-                for finding in skill_result.findings:
-                    result.summary.tally_severity(finding.severity)
 
         result.merge(self._validate_metadata_id_uniqueness(declared_ids, skill_path))
         return result

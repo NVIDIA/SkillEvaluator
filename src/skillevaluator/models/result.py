@@ -818,8 +818,14 @@ class ValidationResult:
             )
 
         # Merge summary
+        self.summary.files_scanned += other.summary.files_scanned
+        self.summary.checks_performed += other.summary.checks_performed
         self.summary.errors += other.summary.errors
         self.summary.warnings += other.summary.warnings
+        self.summary.critical_count += other.summary.critical_count
+        self.summary.high_count += other.summary.high_count
+        self.summary.medium_count += other.summary.medium_count
+        self.summary.low_count += other.summary.low_count
 
     def merge_advisories_with_prefix(self, other: ValidationResult, prefix: str) -> None:
         """Carry a *passing* sub-result's nonblocking findings into this one.

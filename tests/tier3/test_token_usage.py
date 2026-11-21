@@ -8,9 +8,11 @@ from __future__ import annotations
 import copy
 import json
 from typing import Any
+from unittest.mock import patch
 
 import pytest
 
+from skillevaluator.tier3 import token_usage
 from skillevaluator.tier3.harbor.collector import _pass_summary
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
 from skillevaluator.tier3.token_usage import build_token_usage, normalize_token_counts
@@ -631,6 +633,48 @@ _LONG_CASE = "huggingface-factory-peft-sft-local-return"
 _CUT_CASE = _LONG_CASE[:32].rstrip("_-")
 
 
+def test_truncated_case_names_do_not_scan_stop_on_pass_matches() -> None:
+    cases = [f"case-{index:03d}-with-a-long-descriptive-name" for index in range(50)]
+    agent = _agent([_trial(case[:32], 100, 20) for case in cases], [_trial(case[:32], 90, 10) for case in cases])
+
+    class CountedCases(set[str]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    class CountedAttempts(list[token_usage._Attempt]):
+        iterations = 0
+
+        def __iter__(self):
+            self.iterations += 1
+            return super().__iter__()
+
+    counted_cases = CountedCases(token_usage._known_cases(agent, frozenset(cases)))
+    counted_attempts = {}
+    collect_attempts = token_usage._agent_attempts
+
+    def collect_counted_attempts(*args, **kwargs):
+        counted_attempts.update({arm: CountedAttempts(rows) for arm, rows in collect_attempts(*args, **kwargs).items()})
+        return counted_attempts
+
+    with (
+        patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match,
+        patch.object(token_usage, "_known_cases", return_value=counted_cases),
+        patch.object(token_usage, "_agent_attempts", side_effect=collect_counted_attempts),
+    ):
+        usage = build_token_usage({"codex": agent}, dataset_case_ids=cases)
+
+    assert usage is not None
+    assert [row["entry_id"] for row in usage["agents"]["codex"]["cases"]] == cases
+    assert match.call_count == 0
+    assert counted_cases.iterations == 1
+    assert set(counted_attempts) == {"with_skill", "baseline"}
+    for arm, attempts in counted_attempts.items():
+        assert 0 < attempts.iterations < len(cases), arm
+
+
 def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() -> None:
     # The scored arm recorded Harbor's cut trial name; the other arm the full one.
     agent = _agent([_trial(_CUT_CASE, 100, 20)], [_trial(_LONG_CASE, 90, 10)])
@@ -647,6 +691,21 @@ def test_a_cut_case_name_never_becomes_a_second_row_beside_its_dataset_case() ->
         "dataset_case_ids": 1,
         "unmatched_case_ids": [],
     }
+
+
+@pytest.mark.parametrize("condition", ["with", "without"])
+def test_real_stop_on_pass_trial_scans_each_known_case_once(condition: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    cases = {first, second, "third-case-with-a-long-descriptive-name"}
+    matcher = token_usage._CaseMatcher(cases)
+    trial_id = f"demo-codex-{condition}-{second}-attempt001__trial"
+
+    with patch.object(token_usage, "_stop_on_pass_case", wraps=token_usage._stop_on_pass_case) as match:
+        resolved = matcher.match(first[:32], trial_id)
+
+    assert resolved == second
+    assert sorted(call.args for call in match.call_args_list) == sorted((trial_id, case) for case in cases)
 
 
 def test_an_arm_that_died_keeps_its_tokens_on_the_canonical_case() -> None:
@@ -718,6 +777,43 @@ def test_two_dataset_ids_with_the_same_cut_name_are_never_guessed() -> None:
     rows = {row["entry_id"]: row for row in usage["agents"]["codex"]["cases"]}
     assert rows[_CUT_CASE]["case_id_in_dataset"] is False
     assert usage["case_id_validation"]["unmatched_case_ids"] == [_CUT_CASE]
+
+
+@pytest.mark.parametrize("attempt_suffix", ["-attempt001__trial", "-attempt0__trial", "-attempt1__"])
+def test_stop_on_pass_evidence_keeps_priority_over_a_unique_cut_label(attempt_suffix: str) -> None:
+    first = "first-case-with-a-long-descriptive-name"
+    second = "second-case-with-a-long-descriptive-name"
+    trial = _trial(first[:32], 100, 20)
+    trial["trial_id"] = f"demo-codex-with-{second}{attempt_suffix}"
+
+    usage = build_token_usage({"codex": _agent([trial], [])}, dataset_case_ids=[first, second])
+
+    assert usage is not None
+    rows = usage["agents"]["codex"]["cases"]
+    expected = second if attempt_suffix == "-attempt001__trial" else first
+    assert [row["entry_id"] for row in rows] == [expected]
+    assert rows[0]["with_skill"]["totals"]["total_tokens"] == 120
+
+
+def test_cut_name_resolution_is_local_to_each_agents_known_cases() -> None:
+    first = "same-long-description-prefix-for-first-case"
+    second = "same-long-description-prefix-for-second-case"
+    assert first[:32] == second[:32]
+    agents = {
+        name: _agent([_trial(case, 100, 20)], [], unscored=[_trial(case[:32], 40, 4)])
+        for name, case in (("first", first), ("second", second))
+    }
+    original = copy.deepcopy(agents)
+
+    usage = build_token_usage(agents)
+
+    assert usage is not None
+    for name, case in (("first", first), ("second", second)):
+        rows = usage["agents"][name]["cases"]
+        assert [row["entry_id"] for row in rows] == [case]
+        assert rows[0]["with_skill"]["totals"]["total_tokens"] == 164
+        assert rows[0]["with_skill"]["coverage"]["unscored_attempts"] == 1
+    assert agents == original
 
 
 def test_an_agent_without_scores_still_gets_canonical_case_rows() -> None:

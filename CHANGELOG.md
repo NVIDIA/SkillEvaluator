@@ -68,6 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
+  repeated whole-dataset scans for truncated Harbor names and per-case totals
+  while preserving ambiguous-name handling and stop-on-pass precedence.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

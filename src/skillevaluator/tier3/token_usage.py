@@ -35,7 +35,6 @@ arm scored and measured; this module does not change them.
 from __future__ import annotations
 
 import re
-from collections import Counter
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -170,8 +169,8 @@ def _stop_on_pass_case(trial_id: str, case: str) -> bool:
     )
 
 
-def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
-    """Map an attempt to its case when exactly one case matches.
+class _CaseMatcher:
+    """Resolve labels against one agent's cases, indexing Harbor's cut names once.
 
     Every attempt is resolved against the dataset's IDs, scored or not: a
     scored attempt whose ``entry_id`` fell back to Harbor's cut of the case
@@ -182,15 +181,25 @@ def _matching_case(label: str, trial_id: str, known_cases: set[str]) -> str:
     name, a stop-on-pass trial name or Harbor's 32-character cut of the case
     name decides.
     """
-    if label in known_cases:
-        return label
-    for matches in (
-        [case for case in known_cases if _stop_on_pass_case(trial_id, case)],
-        [case for case in known_cases if case[:_HARBOR_TRIAL_NAME_CHARS].rstrip("_-") == label],
-    ):
-        if len(matches) == 1:
-            return matches[0]
-    return label
+
+    def __init__(self, known_cases: set[str]) -> None:
+        self.known_cases = known_cases
+        self.cut_names: dict[str, str | None] = {}
+        for case in known_cases:
+            cut = case[:_HARBOR_TRIAL_NAME_CHARS].rstrip("_-")
+            self.cut_names[cut] = None if cut in self.cut_names else case
+
+    def match(self, label: str, trial_id: str) -> str:
+        if label in self.known_cases:
+            return label
+        # Ordinary Harbor names cannot match a stop-on-pass attempt. Avoid a
+        # full case scan for those names while retaining its precedence.
+        if _STOP_ON_PASS_ATTEMPT.search(trial_id) is not None:
+            matches = [case for case in self.known_cases if _stop_on_pass_case(trial_id, case)]
+            if len(matches) == 1:
+                return matches[0]
+        matched = self.cut_names.get(label)
+        return matched if matched is not None else label
 
 
 def _attempt_tokens(row: Mapping[str, Any]) -> dict[str, Any] | None:
@@ -219,7 +228,7 @@ def _known_cases(agent: Mapping[str, Any], dataset_cases: frozenset[str]) -> set
     return known
 
 
-def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str, list[_Attempt]]:
+def _agent_attempts(agent: Mapping[str, Any], matcher: _CaseMatcher) -> dict[str, list[_Attempt]]:
     attempts: dict[str, list[_Attempt]] = {}
     for arm, _condition, key, usage_key in _ARMS:
         attempts[arm] = []
@@ -236,7 +245,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
                 continue
             attempts[arm].append(
                 _Attempt(
-                    _matching_case(_case_label(trial), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    matcher.match(_case_label(trial), trial_id if isinstance(trial_id, str) else ""),
                     _attempt_tokens(trial),
                     trial.get("scored") is not False,
                 )
@@ -250,7 +259,7 @@ def _agent_attempts(agent: Mapping[str, Any], known_cases: set[str]) -> dict[str
             trial_id = row.get("trial_id")
             attempts[arm].append(
                 _Attempt(
-                    _matching_case(_case_label(row), trial_id if isinstance(trial_id, str) else "", known_cases),
+                    matcher.match(_case_label(row), trial_id if isinstance(trial_id, str) else ""),
                     _attempt_tokens(row),
                     scored,
                 )
@@ -295,7 +304,7 @@ def _arm_expected(agent: Mapping[str, Any], condition: str, observed: int) -> in
     return max(observed, expected + (_count(record.get("recovered_attempts_total")) or 0))
 
 
-def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[str]) -> dict[str, Mapping[str, Any]]:
+def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, matcher: _CaseMatcher) -> dict[str, Mapping[str, Any]]:
     """Return an arm's pass@k record per case, under the case names the rows use.
 
     Two keys can canonicalize onto one case, Harbor's cut of a name beside the
@@ -308,9 +317,9 @@ def _pass_at_k_cases(agent: Mapping[str, Any], condition: str, known_cases: set[
     """
     ranked: dict[str, tuple[tuple[int, int], Mapping[str, Any]]] = {}
     for case, record in _mapping(_pass_at_k_branch(agent, condition).get("cases")).items():
-        name = _matching_case(str(case), "", known_cases)
+        name = matcher.match(str(case), "")
         fields = _mapping(record)
-        rank = (int(str(case) in known_cases), _count(fields.get("attempts_skipped")) or 0)
+        rank = (int(str(case) in matcher.known_cases), _count(fields.get("attempts_skipped")) or 0)
         if name not in ranked or rank > ranked[name][0]:
             ranked[name] = (rank, fields)
     return {name: fields for name, (_rank, fields) in ranked.items()}
@@ -497,9 +506,9 @@ def _withheld_arm_blockers(agent: Mapping[str, Any], arms: Mapping[str, Mapping[
 def _agent_usage(
     agent: Mapping[str, Any], unexecuted: frozenset[str], dataset_cases: frozenset[str]
 ) -> dict[str, Any] | None:
-    known_cases = _known_cases(agent, dataset_cases)
-    attempts = _agent_attempts(agent, known_cases)
-    pass_at_k = {condition: _pass_at_k_cases(agent, condition, known_cases) for _a, condition, _k, _u in _ARMS}
+    matcher = _CaseMatcher(_known_cases(agent, dataset_cases))
+    attempts = _agent_attempts(agent, matcher)
+    pass_at_k = {condition: _pass_at_k_cases(agent, condition, matcher) for _a, condition, _k, _u in _ARMS}
     arms: dict[str, dict[str, Any]] = {}
     for arm, condition, _key, _unscored in _ARMS:
         not_run = _condition_not_run(
@@ -514,7 +523,14 @@ def _agent_usage(
     if all(summary["coverage"]["status"] == "not_run" for summary in arms.values()):
         return None
     withheld = _withheld_arm_blockers(agent, arms)
-    cases_by_arm = {arm: Counter(attempt.case for attempt in attempts[arm]) for arm in arms}
+    attempts_by_case: dict[str, dict[str, list[_Attempt]]] = {}
+    for arm in arms:
+        grouped = attempts_by_case[arm] = {}
+        for attempt in attempts[arm]:
+            grouped.setdefault(attempt.case, []).append(attempt)
+    cases_by_arm = {
+        arm: {case: len(rows) for case, rows in grouped.items()} for arm, grouped in attempts_by_case.items()
+    }
     # An arm without attempts already says why there is no change.
     scope = (
         [("case_scope_mismatch", "The arms ran different cases or attempts per case.")]
@@ -528,7 +544,7 @@ def _agent_usage(
     ):
         case_arms = {}
         for arm, condition, _key, _unscored in _ARMS:
-            case_attempts = [attempt for attempt in attempts[arm] if attempt.case == case]
+            case_attempts = attempts_by_case[arm].get(case, [])
             case_arms[arm] = _arm_summary(
                 case_attempts,
                 expected=0

@@ -422,11 +422,13 @@ many more were not annotated and names the file report formats requested with `-
 If the run writes no requested report files, it suggests rerunning with `-r github,json`.
 A catalog run (a folder of skills, with any `--workers` value) prints one
 capped stream and one summary for the whole catalog, after every skill has
-finished, rather than one per skill. The summary counts match
+finished, rather than one per skill. The checked and passed counts match
 `catalog-summary.json`, and catalog-level findings such as a duplicate
 `metadata.id` are annotated on each affected skill's `SKILL.md` within the same
-caps. A skill whose only problem is an incomplete scan stays counted as
-incomplete.
+caps. `catalog-summary.json` counts a skill whose only problem is an incomplete
+scan as `failed` for gating (and the exit code is non-zero), while the
+annotation summary shows those skills in a separate `incomplete` count rather
+than under `failed`.
 Finding text is escaped per GitHub's workflow-command rules and stripped of
 control characters; credential-shaped values are masked like the other
 reporters. A planted newline or `::add-mask` / `::stop-commands` payload

@@ -4,7 +4,7 @@
 """URL checks shared by the api-caller scripts."""
 
 import re
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin, urlparse, urlsplit, urlunsplit
 
 _PLACEHOLDER = re.compile(r"\{([^{}]+)\}")
 
@@ -15,6 +15,41 @@ def validate_http_url(url: str) -> str:
     if parsed.scheme not in {"http", "https"} or not parsed.netloc:
         raise ValueError("Only absolute HTTP or HTTPS URLs are supported")
     return url
+
+
+def _remove_dot_segments(path: str) -> str:
+    """RFC 3986 section 5.2.4 dot-segment removal that keeps empty segments."""
+    output: list[str] = []
+    segments = path.split("/")
+    for segment in segments:
+        if segment == ".":
+            continue
+        if segment == "..":
+            if len(output) > 1:
+                output.pop()
+            continue
+        output.append(segment)
+    if segments[-1] in {".", ".."}:
+        output.append("")
+    return "/".join(output)
+
+
+def _resolve_reference(base: str, reference: str) -> str:
+    """Resolve a URL reference against base per RFC 3986.
+
+    urljoin drops empty segments when it merges a relative path, so 'api//v2'
+    would lose its '//'. Relative-path references are merged here instead;
+    everything else still goes through urljoin, which keeps them intact.
+    """
+    ref = urlsplit(reference)
+    if ref.scheme or ref.netloc or not ref.path or ref.path.startswith("/"):
+        return urljoin(base, reference)
+    base_parts = urlsplit(base)
+    if base_parts.netloc and not base_parts.path:
+        merged = "/" + ref.path
+    else:
+        merged = base_parts.path[: base_parts.path.rfind("/") + 1] + ref.path
+    return urlunsplit((base_parts.scheme, base_parts.netloc, _remove_dot_segments(merged), ref.query, ref.fragment))
 
 
 def _swagger2_base_url(spec: dict, spec_url: str | None, *, operation: dict | None = None) -> str:
@@ -109,7 +144,7 @@ def resolve_openapi_server_url(
         return str(variable["default"])
 
     server_url = _PLACEHOLDER.sub(replace_variable, server_url)
-    resolved = urljoin(spec_url, server_url) if spec_url else server_url
+    resolved = _resolve_reference(spec_url, server_url) if spec_url else server_url
     if urlparse(resolved).scheme:
         validate_http_url(resolved)
     return resolved

@@ -221,6 +221,39 @@ def test_blank_server_url_resolves_to_spec_directory(server_url: str) -> None:
     assert result == "https://petstore3.swagger.io/api/v3/pet/1"
 
 
+def test_relative_server_keeps_empty_path_segments() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec = {"servers": [{"url": "api//v2"}], "paths": {"/pets": {"get": {"operationId": "listPets"}}}}
+    spec_url = "https://example.invalid/docs/openapi.json"
+
+    result = caller.build_url_from_spec(spec, "/pets", {}, spec_url=spec_url)
+    parsed = parser.parse_spec(spec, spec_url=spec_url)
+
+    assert result == "https://example.invalid/docs/api//v2/pets"
+    assert parsed["base_url"] == "https://example.invalid/docs/api//v2"
+    assert parsed["operations"][0]["full_url"] == "https://example.invalid/docs/api//v2/pets"
+
+
+@pytest.mark.parametrize(
+    ("server_url", "expected"),
+    [
+        ("./api//v2/../v3", "https://example.invalid/docs/api//v3"),
+        ("../api", "https://example.invalid/api"),
+        ("../../../api", "https://example.invalid/api"),
+        (".", "https://example.invalid/docs/"),
+        ("api/v1?x=1", "https://example.invalid/docs/api/v1?x=1"),
+    ],
+)
+def test_relative_server_dot_segments_follow_rfc3986(server_url: str, expected: str) -> None:
+    url_safety = _load_script("url_safety")
+    spec = {"servers": [{"url": server_url}]}
+
+    result = url_safety.resolve_openapi_server_url(spec, "https://example.invalid/docs/openapi.json")
+
+    assert result == expected
+
+
 def test_blank_server_url_keeps_directory_spec_url_path() -> None:
     caller = _load_script("call_api")
     spec = {"servers": [{"url": ""}]}

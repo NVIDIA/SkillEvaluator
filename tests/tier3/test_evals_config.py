@@ -330,6 +330,7 @@ def test_load_evals_config_accepts_a_list_at_the_entry_limit(tmp_path):
         ),
         pytest.param("schema_version: 1\nskill_workspace:\n  on: invalid\n", "skill_workspace", id="skill-workspace"),
         pytest.param("schema_version: 1\ngrading:\n  2: invalid\n", "grading", id="grading"),
+        pytest.param("schema_version: 1\nplugin:\n  1: invalid\n", "plugin", id="plugin"),
     ],
 )
 def test_load_evals_config_rejects_non_string_keys(tmp_path, document, field):

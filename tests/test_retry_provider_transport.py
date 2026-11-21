@@ -417,6 +417,30 @@ def test_bedrock_mantle_provider_checks_http_override_after_alias(isolated_provi
         assert not isolated_provider_environment
 
 
+def test_bedrock_mantle_alias_uses_configured_region(isolated_provider_environment, monkeypatch, loopback_tls):
+    litellm = pytest.importorskip("litellm")
+    from litellm.caching.llm_caching_handler import LLMClientCache
+
+    tls_context, ca_bundle = loopback_tls
+    monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")
+    monkeypatch.setenv("BEDROCK_MANTLE_REGION", "invalid_region")
+    monkeypatch.setenv("SSL_VERIFY", str(ca_bundle))
+    monkeypatch.setattr(litellm, "in_memory_llm_clients_cache", LLMClientCache(), raising=False)
+    monkeypatch.setattr(litellm, "drop_params", True)
+    model = "anthropic.claude-3-haiku-20240307-v1:0"
+    monkeypatch.setattr(litellm, "model_alias_map", {f"bedrock/{model}": "bedrock_mantle/openai.gpt-5.5"})
+    with _server([200], tls_context) as sink:
+        client = _client(
+            monkeypatch,
+            f"https://127.0.0.1:{sink.server_port}",
+            model=model,
+            endpoint_variable="BEDROCK_MANTLE_API_BASE",
+        )
+        assert client.completions("system", "user") == "recovered"
+        assert sink.paths == ["/openai/v1/responses"]
+        assert sink.bearer_requests == 1
+
+
 def test_bedrock_responses_bridge_checks_runtime_instead_of_chat_route(isolated_provider_environment, monkeypatch):
     litellm = pytest.importorskip("litellm")
     monkeypatch.setenv("AWS_BEARER_TOKEN_BEDROCK", "loopback-bearer-token")

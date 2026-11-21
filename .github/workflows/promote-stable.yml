@@ -5,31 +5,47 @@ on:
   workflow_run:
     workflows: [SkillEvaluator release published]
     types: [completed]
+  workflow_call:
+    inputs:
+      expected-release:
+        type: string
+        required: true
+    secrets:
+      STABLE_CHANNEL_APP_PRIVATE_KEY:
+        required: true
   workflow_dispatch:
     inputs:
+      expected-release:
+        description: Reviewed release tag to promote (vX.Y.Z)
+        type: string
+        required: true
       bootstrap-sha:
         description: Reviewed main commit SHA for the first promotion of v1.0.1
         type: string
         required: false
 
-concurrency:
-  group: skillevaluator-stable
-  cancel-in-progress: false
-
 permissions: {}
 
 jobs:
   promote:
-    # Accept only the relay's release event for automatic promotion.
+    # Reusable workflows use the caller's workflow identity.
     if: >-
       github.repository == 'NVIDIA/SkillEvaluator' &&
       github.ref == 'refs/heads/main' &&
-      (github.event_name == 'workflow_dispatch' ||
-       (github.event.workflow_run.event == 'release' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' ||
+         github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main')) ||
+       (github.event_name == 'workflow_run' &&
+        github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' &&
+        github.event.workflow_run.event == 'release' &&
         github.event.workflow_run.conclusion == 'success'))
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: stable-channel
+    concurrency:
+      group: skillevaluator-stable
+      cancel-in-progress: false
+      queue: max
     permissions:
       contents: read
     steps:
@@ -48,6 +64,8 @@ jobs:
       - name: Verify the published release and promote its workflows
         env:
           GH_TOKEN: ${{ github.token }}
+          RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+          STABLE_EXPECTED_RELEASE: ${{ inputs.expected-release }}
           STABLE_PUSH_TOKEN: ${{ steps.writer.outputs.token }}
           STABLE_BOOTSTRAP_SHA: ${{ inputs.bootstrap-sha }}
         run: bash ci/promote_stable.sh

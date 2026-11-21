@@ -90,6 +90,7 @@ from skillevaluator.validators.base import (
     ValidationResult,
     ValidatorBase,
     iter_scannable_files,
+    path_resolves_inside,
 )
 from skillevaluator.validators.hook_review_artifact import HookReviewArtifact, capture_hook_review_artifact
 from skillevaluator.validators.hook_waivers import HookWaiver, load_hook_waivers
@@ -6971,6 +6972,14 @@ class SecurityValidator(ValidatorBase):
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
+
+        # A symlink that leaves the skill would make the report quote lines from
+        # a file the skill author never shipped; the walker already drops such
+        # links, and this keeps direct callers of the reader on the same boundary.
+        boundary = file_path.parent if skill_root is None else skill_root
+        if file_path.is_symlink() and not path_resolves_inside(file_path, boundary):
+            logger.warning(f"Skipping {file_path.name}: symlink target is outside the skill")
+            return []
 
         try:
             content = file_path.read_text(encoding="utf-8-sig", errors="ignore")

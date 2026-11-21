@@ -88,6 +88,8 @@ def test_long_multiline_signature_survives_minimum_length_filter():
         ),
         ("def transform() -> lambda value: value:", ' return "implementation detail"\n', ""),
         ("class Converter:", ' implementation = "detail"\n', ""),
+        ("def cafééé():", " x: int = 1\n", ""),
+        ("class Cafééé:", " x: int = 1\n", ""),
         ("def convert[T: str](value: T) -> T:", " return value\n", ""),
     ],
 )

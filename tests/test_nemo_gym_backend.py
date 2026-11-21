@@ -14,6 +14,7 @@ import click
 import pytest
 
 from skillevaluator.evaluation.options import EvaluationOptions
+from skillevaluator.tier3.case_summary import ERROR, PASS, live_case_marks
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.nemo_gym.backend import (
     DEFAULT_EXECUTION_BACKEND,
@@ -615,8 +616,11 @@ with output.open("w") as rows:
             if os.environ.get("FAKE_GYM_REWARD_TXT"):
                 (logs / "reward.txt").write_text("1\\n")
             else:
-                (logs / "reward.json").write_text(json.dumps({{"overall": 0.75}}))
-                (logs / "skill_evaluator_reward.json").write_text(json.dumps({{"overall": 0.75}}))
+                rewards = {{"overall": 0.75}}
+                if os.environ.get("FAKE_GYM_ENTRY_ID"):
+                    rewards["entry_id"] = os.environ["FAKE_GYM_ENTRY_ID"]
+                (logs / "reward.json").write_text(json.dumps(rewards))
+                (logs / "skill_evaluator_reward.json").write_text(json.dumps(rewards))
             row = {{"_ng_task_id": {{"taskset": tasks.name, "task_id": task.name}}, "verifier_return_code": 0,
                     "verifier_logs_dir": str(logs), "episode_id": {{"rollout_id": f"r{{attempt}}", "attempt": 0}}}}
             if os.environ.get("FAKE_GYM_FAILURE"):
@@ -672,7 +676,13 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
         gym_runner,
         "_GYM_HOST_ENV_VARS",
         gym_runner._GYM_HOST_ENV_VARS
-        | {"FAKE_GYM_ENV_LOG", "FAKE_GYM_REWARD_TXT", "FAKE_GYM_FAILURE", "FAKE_GYM_EXTRA_ROLLOUT"},
+        | {
+            "FAKE_GYM_ENV_LOG",
+            "FAKE_GYM_REWARD_TXT",
+            "FAKE_GYM_FAILURE",
+            "FAKE_GYM_EXTRA_ROLLOUT",
+            "FAKE_GYM_ENTRY_ID",
+        },
     )
     monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "host-only-key")
@@ -2287,6 +2297,27 @@ def test_gym_run_starts_the_reporter_with_its_run_dir(tmp_path: Path, monkeypatc
     assert len(reporter.plans) == 1
     plan = reporter.plans[0]
     assert plan.output_dir == result["run_dir"] and plan.case_count == 2 and plan.matrix_trials == 4
+
+
+@pytest.mark.parametrize(("verified_case", "expected", "scored"), [("auth-login", PASS, 1), ("other-case", ERROR, 0)])
+def test_live_marks_keep_the_runners_case_map_after_it_removes_the_staged_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_case: str, expected: str, scored: int
+) -> None:
+    config = "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    task_toml = _native_task(skill) / "task.toml"
+    task_toml.write_text(task_toml.read_text().replace('entry_id = "case-001"', 'entry_id = "auth-login"'))
+    monkeypatch.setenv("FAKE_GYM_ENTRY_ID", verified_case)
+
+    result = _run_fake_gym(skill, tmp_path, skip_baseline=True)
+
+    run_dir = Path(result["run_dir"])
+    assert not (run_dir / "_harbor-tasks").exists()
+    arm = run_dir / "_nemo-gym" / "codex-with"
+    assert json.loads((arm / "task_case_ids.json").read_text()) == {"case-001": "auth-login"}
+    marks, _running = live_case_marks(run_dir, ["codex"], pass_threshold=0.5)
+    assert marks == {"codex": {"with_skill": {"case-001": [expected]}}}
+    assert result["agents"]["codex"]["num_trials_with"] == scored
 
 
 def test_live_marks_score_reward_logs_and_skip_normalized_gym_jobs(tmp_path: Path) -> None:

@@ -20,7 +20,7 @@ import pytest
 from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS, case_marks, live_case_marks
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
-from skillevaluator.tier3.nemo_gym.results import write_job_from_rollouts
+from skillevaluator.tier3.nemo_gym.results import write_job_from_rollouts, write_task_case_ids
 
 CASES = {"case-1": "case-1"}
 
@@ -483,24 +483,50 @@ def test_live_marks_score_multi_step_episodes_as_the_final_result_does(tmp_path:
     assert final == ["case case-1 attempt 3: step 'second': test.sh timed out"]
 
 
-def _graded(logs: Path, goal_accuracy: float, *, entry_id: str | None = None, **sidecar: Any) -> None:
-    rewards: dict[str, Any] = {**dict.fromkeys(DEFAULT_METRICS, 1.0), "goal_accuracy": goal_accuracy, "overall": 0.95}
+def _graded(
+    logs: Path, goal_accuracy: float, *, entry_id: str | None = None, overall: float = 0.95, **sidecar: Any
+) -> None:
+    rewards: dict[str, Any] = {
+        **dict.fromkeys(DEFAULT_METRICS, 1.0),
+        "goal_accuracy": goal_accuracy,
+        "overall": overall,
+    }
     if entry_id is not None:
         rewards["entry_id"] = entry_id
     (logs / "reward.json").write_text(json.dumps(rewards), encoding="utf-8")
     (logs / "skill_evaluator_reward.json").write_text(json.dumps(rewards | sidecar), encoding="utf-8")
 
 
-def _graded_turn(base: Path, name: str, goal_accuracy: float, entry_id: str | None = None) -> dict[str, Any]:
-    turn = _turn(base, name, 0.95)
-    _graded(Path(turn["verifier_logs_dir"]), goal_accuracy, entry_id=entry_id)
+def _graded_turn(
+    base: Path, name: str, goal_accuracy: float, entry_id: str | None = None, overall: float = 0.95
+) -> dict[str, Any]:
+    turn = _turn(base, name, overall)
+    _graded(Path(turn["verifier_logs_dir"]), goal_accuracy, entry_id=entry_id, overall=overall)
     return turn
 
 
-def _live_and_final_marks(out: Path, jobs: Path, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+def _judge_failed(logs: Path) -> dict[str, Any]:
+    """Write what the built-in verifier writes when a required judge fails, and return how Gym records its exit."""
+    scores: dict[str, Any] = {**dict.fromkeys(DEFAULT_METRICS, 1.0), "accuracy": None}
+    rewards = {metric: score for metric, score in scores.items() if score is not None} | {"overall": 0.0}
+    (logs / "reward.json").write_text(json.dumps(rewards), encoding="utf-8")
+    sidecar = scores | {
+        "details": {"accuracy": {"score": None, "status": "error", "reason": "judge request timed out"}},
+        "evaluation_status": "failed",
+        "evaluation_errors": {"accuracy": "judge request timed out"},
+    }
+    (logs / "skill_evaluator_reward.json").write_text(json.dumps(sidecar), encoding="utf-8")
+    return {"reward": 0.0, "verifier_rewards": rewards, "verifier_return_code": 1, "verifier_logs_dir": str(logs)}
+
+
+def _live_arm(out: Path, rows: list[dict[str, Any]]) -> None:
     arm = out / "_nemo-gym" / "codex-with"
-    arm.mkdir(parents=True)
+    write_task_case_ids(arm, {"login-task": "auth-login"})
     (arm / "rollouts.jsonl").write_text("".join(json.dumps(row) + "\n" for row in rows), encoding="utf-8")
+
+
+def _live_and_final_marks(out: Path, jobs: Path, rows: list[dict[str, Any]]) -> tuple[list[str], list[str]]:
+    _live_arm(out, rows)
     live, running = live_case_marks(out, ["codex"], pass_threshold=0.5)
     assert running == set()
     write_job_from_rollouts(
@@ -535,33 +561,57 @@ def test_live_marks_apply_the_final_verdict_and_staged_case_to_episodes(tmp_path
         ]
         return _episode(turns, task="login-task", turn_reward_strategy=strategy)
 
+    judged = _graded_turn(tmp_path / "judge-failed", "first", 1.0, overall=1.0)
+    failed_judge = _turn(tmp_path / "judge-failed", "second", 1.0)
+    failed_judge |= _judge_failed(Path(failed_judge["verifier_logs_dir"]))
     rows = [
         episode("goal-met", 1.0),
         # Overall clears the threshold, but standard grading requires the goal.
         episode("goal-missed", 0.5),
         episode("other-case", 1.0, second_entry_id="other-case"),
         episode("staged-case", 1.0, second_entry_id="auth-login"),
+        # Under mean the two steps still reach the threshold, but a step's required judge failed.
+        _episode([judged, failed_judge], task="login-task", turn_reward_strategy=strategy),
     ]
 
     live, final = _live_and_final_marks(out, jobs, rows)
 
-    assert live == [PASS, FAIL, ERROR, PASS]
+    assert live == [PASS, FAIL, ERROR, PASS, ERROR]
     assert sorted(live) == sorted(final)
 
 
-def test_live_marks_keep_a_verified_case_after_its_staged_task_is_removed(tmp_path: Path) -> None:
+def test_live_marks_keep_the_staged_case_after_the_staged_tasks_are_removed(tmp_path: Path) -> None:
     out = tmp_path / "out"
     _stage_native_task(out, "with")
-    turns = [_graded_turn(tmp_path, name, 1.0, "auth-login") for name in ("first", "second")]
-    arm = out / "_nemo-gym" / "codex-with"
-    arm.mkdir(parents=True)
-    (arm / "rollouts.jsonl").write_text(json.dumps(_episode(turns, task="login-task")) + "\n", encoding="utf-8")
+    rows = [
+        _episode([_graded_turn(tmp_path / case, name, 1.0, case) for name in ("first", "second")], task="login-task")
+        for case in ("auth-login", "other-case")
+    ]
+    _live_arm(out, rows)
     # The run removes its staged tasks before the live view stops polling.
     shutil.rmtree(out / "_harbor-tasks")
 
     marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
 
-    assert marks == {"codex": {"with_skill": {"login-task": [PASS]}}}
+    assert marks == {"codex": {"with_skill": {"login-task": [PASS, ERROR]}}}
+
+
+def test_live_marks_judge_each_rollout_once_and_leave_no_scratch(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3.nemo_gym import results
+
+    out = tmp_path / "out"
+    _live_arm(out, [_episode([_graded_turn(tmp_path, name, 1.0) for name in ("first", "second")], task="login-task")])
+    judged: list[str] = []
+    verdict = results.rollout_verdict
+    monkeypatch.setattr(results, "rollout_verdict", lambda row, *args: judged.append(args[0]) or verdict(row, *args))
+
+    polls = [live_case_marks(out, ["codex"], pass_threshold=0.5)[0] for _ in range(2)]
+
+    assert polls == [{"codex": {"with_skill": {"login-task": [PASS]}}}] * 2
+    assert judged == ["login-task"]
+    assert [path.name for path in (out / "_nemo-gym").iterdir()] == ["codex-with"]
 
 
 def test_live_marks_apply_the_final_verdict_and_staged_case_to_single_steps(tmp_path: Path) -> None:
@@ -575,14 +625,17 @@ def test_live_marks_apply_the_final_verdict_and_staged_case_to_single_steps(tmp_
         return {"task_id": "login-task", "verifier_return_code": 0, "verifier_logs_dir": str(logs)}
 
     not_applicable = {"details": {"goal_accuracy": {"status": "not_applicable"}}}
+    judge_failed = tmp_path / "judge-failed"
+    judge_failed.mkdir()
     rows = [
         rollout("goal-missed", 0.5),
         rollout("other-case", 1.0, entry_id="other-case"),
         # The collector reads the sidecar's N/A goal back into the reward, so only Overall decides.
         rollout("goal-not-applicable", 0.0, **not_applicable),
+        {"task_id": "login-task", **_judge_failed(judge_failed)},
     ]
 
     live, final = _live_and_final_marks(out, jobs, rows)
 
-    assert live == [FAIL, ERROR, PASS]
+    assert live == [FAIL, ERROR, PASS, ERROR]
     assert sorted(live) == sorted(final)

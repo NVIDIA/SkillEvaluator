@@ -397,6 +397,8 @@ def _fixed_size_chunks(text: str, max_chars: int, overlap_chars: int) -> list[st
         chunk = text[start:end].strip()
         if chunk:
             chunks.append(chunk)
+        if end >= len(text):
+            break
         start += max_chars - overlap_chars
     return chunks
 

@@ -68,6 +68,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Declarative command-success checks retain recorded exit status for a single
+  script command whose quoted path contains spaces. Pipeline tails (`|` and `|&`)
+  and negated commands (`!` and `time [-p] [--] !`) remain unattributed instead
+  of using another process's status or the inverse of the script's status.
+  A trailing shell comment containing `|&` does not hide the script's recorded
+  status; quoted or escaped hashes still leave real pipelines unattributed.
+  A shell comment that follows a command substitution, a backtick expansion or
+  a non-identifier parameter expansion leaves status unattributed, because
+  quoting nested inside the expansion can hide where the comment starts,
+  including Bash expansion openers split by line continuations. A comment ahead
+  of such an expansion does not affect status. Plain braced identifier
+  arguments retain their recorded status, and Zsh keeps its distinct
+  continuation behavior. Commentless expansions also retain status when quoted
+  output filenames contain literal hashes; real pipelines remain unattributed.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

@@ -56,45 +56,80 @@ def test_existing_host_patterns_and_ip_notation_remain_supported():
     assert ValidationPolicy(mcp_allowed_private_hosts=entries).mcp_allowed_private_hosts == entries
 
 
+def test_allowlist_entries_are_stripped_and_deduplicated():
+    policy = ValidationPolicy(
+        mcp_allowed_private_hosts=(" localhost ", "localhost", "*.corp.example "),
+        hook_allowed_urls=(" https://hooks.example.test/ ", "https://hooks.example.test/"),
+    )
+    assert policy.mcp_allowed_private_hosts == ("localhost", "*.corp.example")
+    assert policy.hook_allowed_urls == ("https://hooks.example.test/",)
+
+
 @pytest.mark.parametrize(
-    "value",
+    ("value", "match"),
     [
-        "localhost",
-        {"host": "localhost"},
-        [True],
-        [1],
-        [""],
-        ["x" * 256],
-        ["a"] * 65,
-        ["local\nlocalhost"],
-        ["169.254.169.254"],
-        ["metadata.google.internal"],
-        ["https://localhost"],
-        ["localhost/path"],
-        ["localhost:9000"],
-        ["*"],
+        ("localhost", "must be a list of at most 64 strings"),
+        ({"host": "localhost"}, "must be a list of at most 64 strings"),
+        ([True], "nonempty strings of at most 255 characters"),
+        ([1], "nonempty strings of at most 255 characters"),
+        ([""], "nonempty strings of at most 255 characters"),
+        (["x" * 256], "nonempty strings of at most 255 characters"),
+        (["a"] * 65, "must be a list of at most 64 strings"),
+        (["local\nlocalhost"], "control or invisible"),
+        (["local\u200bhost"], "control or invisible"),
+        (["localhost\u0000"], "control or invisible"),
+        (["169.254.169.254"], "cloud metadata"),
+        (["metadata.google.internal"], "cloud metadata"),
+        (["https://localhost"], "invalid URL prefix"),
+        (["localhost/path"], "invalid IP address or network"),
+        (["localhost:9000"], "invalid IP address or network"),
+        (["*"], "invalid host wildcard"),
+        (["user@localhost"], "invalid host pattern"),
+        (["a?b"], "invalid host pattern"),
+        (["a#b"], "invalid host pattern"),
+        (["a\\b"], "invalid host pattern"),
+        (["%2A"], "invalid host pattern"),
+        (["a%20b"], "invalid host pattern"),
+        (["example.com%3a8080"], "invalid host pattern"),
+        (["user%40localhost"], "invalid host pattern"),
+        (["0.0.0.0%2F0"], "invalid host pattern"),
+        ([".corp.example"], r"starts with '\.'.*\*\.suffix"),
+        (["\uff0ecorp.example"], r"starts with '\.'"),
+        (["example..com"], "empty label"),
+        (["*..corp.example"], "empty label"),
     ],
 )
-def test_invalid_mcp_host_entries_fail_closed(value):
-    with pytest.raises(ValueError):
+def test_invalid_mcp_host_entries_fail_closed(value, match):
+    with pytest.raises(ValueError, match=match):
         ValidationPolicy(mcp_allowed_private_hosts=value)
 
 
 @pytest.mark.parametrize(
-    "value",
+    ("value", "match"),
     [
-        ["https://user:secret@hooks.example.test"],
-        ["https://hooks.example.test/path?token=secret"],
-        ["https://hooks.example.test/#fragment"],
-        ["https://169.254.169.254/latest"],
-        ["ftp://hooks.example.test"],
-        ["x" * 2049],
-        ["https://hooks.example.test/\u202e"],
+        (["https://user:secret@hooks.example.test"], "invalid URL prefix"),
+        (["https://hooks.example.test/path?token=secret"], "invalid URL prefix"),
+        (["https://hooks.example.test/#fragment"], "invalid URL prefix"),
+        # Only the URL-ambiguity check rejects a percent-encoded host.
+        (["https://hooks%2Eexample.test/"], "invalid URL prefix"),
+        (["https://169.254.169.254/latest"], "cloud metadata"),
+        (["ftp://hooks.example.test"], "HTTP or HTTPS"),
+        (["x" * 2049], "nonempty strings of at most 2048 characters"),
+        (["https://hooks.example.test/\u202e"], "control or invisible"),
+        (["http://*/"], "invalid host wildcard"),
+        (["http://*.*/"], "invalid host wildcard"),
+        (["https://.hooks.example.test/"], r"starts with '\.'"),
+        (["https://hooks..example.test/"], "empty label"),
     ],
 )
-def test_invalid_hook_url_prefixes_fail_closed(value):
-    with pytest.raises(ValueError):
+def test_invalid_hook_url_prefixes_fail_closed(value, match):
+    with pytest.raises(ValueError, match=match):
         ValidationPolicy(hook_allowed_urls=value)
+
+
+def test_hook_url_prefixes_keep_the_host_wildcard_form():
+    entries = ("https://*.hooks.example.test/events", "hooks.example.test")
+    assert ValidationPolicy(hook_allowed_urls=entries).hook_allowed_urls == entries
 
 
 @pytest.mark.parametrize("value", ["true", 1, [], {}])
@@ -119,6 +154,16 @@ def test_custom_overlay_preserves_omitted_keys_and_allows_explicit_clearing(tmp_
     cleared = load_policy_file(path)
     assert cleared.mcp_allowed_private_hosts == cleared.hook_allowed_urls == ()
     assert cleared.resolve_endpoints is False
+
+
+def test_null_block_keeps_the_base_value_and_null_resolve_clears_it(tmp_path, monkeypatch):
+    base = ValidationPolicy(mcp_allowed_private_hosts=("localhost",), resolve_endpoints=True)
+    monkeypatch.setattr(policy_module, "load_profile", lambda _name: base)
+    path = tmp_path / "policy.yml"
+    path.write_text("mcp: null\nendpoints:\n  resolve: null\n", encoding="utf-8")
+    loaded = load_policy_file(path)
+    assert loaded.mcp_allowed_private_hosts == ("localhost",)
+    assert loaded.resolve_endpoints is False
 
 
 @pytest.mark.parametrize(

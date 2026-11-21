@@ -43,7 +43,9 @@ __all__ = [
     "ValidationSummary",
     "ValidatorBase",
     "continue_on_failure_scope",
+    "iter_outside_symlinks",
     "iter_scannable_files",
+    "path_resolves_inside",
 ]
 
 # When enabled (via ``run_validation`` honoring ``--continue-on-failure``),
@@ -86,6 +88,12 @@ def iter_scannable_files(
     directories are not followed.
     Skips generated publishing artifacts listed in ``excluded_files`` (defaults
     to :data:`SCAN_EXCLUDED_FILES`) by basename, case-insensitively.
+    Skips symlinked files whose target resolves outside ``root`` (or does not
+    exist), so that Tier 1 readers never open content that lives outside the
+    skill being scanned. Symlinks that resolve inside ``root`` are returned
+    like regular files. Windows directory junctions are never descended into,
+    for the same reason symlinked directories are not followed. Use
+    :func:`iter_outside_symlinks` to report the entries this filter left out.
 
     If ``root`` is itself a file, returns ``[root]`` when its suffix matches
     one of ``extensions`` and its basename is not excluded (no directory walk
@@ -127,14 +135,66 @@ def iter_scannable_files(
     out: list[Path] = []
     for dirpath, dirnames, filenames in os.walk(root):
         base = Path(dirpath)
-        dirnames[:] = [d for d in dirnames if not matches_filesystem_name(base / d, excluded)]
+        dirnames[:] = [
+            d for d in dirnames if not matches_filesystem_name(base / d, excluded) and not os.path.isjunction(base / d)
+        ]
         for name in filenames:
             if not name.endswith(suffixes):
                 continue
-            if matches_filesystem_name(base / name, excluded_basenames):
+            candidate = base / name
+            if matches_filesystem_name(candidate, excluded_basenames):
                 continue
-            out.append(Path(dirpath) / name)
+            if _is_outside_link(candidate, root):
+                continue
+            out.append(candidate)
     return out
+
+
+def path_resolves_inside(path: Path, root: Path) -> bool:
+    """Return True when ``path`` resolves to a location inside the resolved ``root``.
+
+    Both paths are resolved strictly, so a dangling symlink or an unreadable
+    target counts as outside. ``root`` itself counts as inside.
+    """
+    try:
+        resolved = path.resolve(strict=True)
+        boundary = root.resolve(strict=True)
+    except (OSError, RuntimeError):
+        return False
+    return resolved == boundary or resolved.is_relative_to(boundary)
+
+
+def _is_outside_link(path: Path, root: Path) -> bool:
+    """Return True for a symlink or Windows junction whose target is outside ``root`` or missing."""
+    return (path.is_symlink() or os.path.isjunction(path)) and not path_resolves_inside(path, root)
+
+
+def iter_outside_symlinks(root: Path, excluded_dirs: Iterable[str] | None = None) -> list[Path]:
+    """Return symlinks and Windows junctions under ``root`` whose target is outside ``root`` or missing.
+
+    Symlinked files, symlinked directories and directory junctions are
+    reported, so a caller can tell users which entries the Tier 1 walkers left
+    out. The walk never follows symlinked directories or junctions and prunes
+    ``excluded_dirs`` (defaults to :data:`SCAN_EXCLUDED_DIRS`) the same way
+    :func:`iter_scannable_files` does. The result is sorted and holds the link
+    paths, never their targets.
+    """
+    excluded = SCAN_EXCLUDED_DIRS if excluded_dirs is None else frozenset(excluded_dirs)
+    if not root.is_dir():
+        return []
+
+    out: list[Path] = []
+    for dirpath, dirnames, filenames in os.walk(root):
+        base = Path(dirpath)
+        dirnames[:] = [d for d in dirnames if not matches_filesystem_name(base / d, excluded)]
+        for name in (*dirnames, *filenames):
+            candidate = base / name
+            if _is_outside_link(candidate, root):
+                out.append(candidate)
+        # ``os.walk`` withholds symlinked directories but enters a junction as if
+        # it were a plain directory, so drop junctions before the walk descends.
+        dirnames[:] = [d for d in dirnames if not os.path.isjunction(base / d)]
+    return sorted(out)
 
 
 class ValidatorBase(ABC):

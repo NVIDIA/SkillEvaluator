@@ -18,7 +18,7 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
         return ()
     # Default policies stay cheap for ordinary skills and base installations.
     from skillevaluator.plugin_component_risk import hook_url_entry_problem
-    from skillevaluator.validators.mcp_static import HostAllowlist, classify_endpoint_host
+    from skillevaluator.validators.mcp_static import classify_endpoint_host
     from skillevaluator.validators.url_policy import url_ambiguities
 
     normalized = []
@@ -39,8 +39,11 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
             if parsed.scheme.lower() not in {"http", "https"}:
                 raise ValueError(f"{key} URL prefixes must use HTTP or HTTPS")
             host = parsed.hostname
+            if host:
+                _check_host_pattern(host, key)
         else:
-            if any(char.isspace() for char in entry) or any(char in entry for char in "@?#\\"):
+            # The host matcher percent-decodes an entry, so '%' could spell any rejected character.
+            if any(char.isspace() for char in entry) or any(char in entry for char in "%@?#\\"):
                 raise ValueError(f"{key} contains an invalid host pattern")
             if "/" in entry or ":" in entry:
                 try:
@@ -49,17 +52,28 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
                     )
                 except ValueError as exc:
                     raise ValueError(f"{key} contains an invalid IP address or network") from exc
-            if "*" in entry and (not entry.startswith("*.") or "*" in entry[2:]):
-                raise ValueError(f"{key} contains an invalid host wildcard")
-            hosts = HostAllowlist.from_entries((entry,))
-            if not (hosts.names or hosts.suffixes or hosts.networks):
-                raise ValueError(f"{key} contains an invalid host pattern")
+            _check_host_pattern(entry, key)
             host = entry
         endpoint = classify_endpoint_host(host) if host else None
         if endpoint is not None and endpoint.kind == "metadata":
             raise ValueError(f"{key} cannot allow cloud metadata endpoints")
         normalized.append(entry)
     return tuple(dict.fromkeys(normalized))
+
+
+def _check_host_pattern(host: str, key: str) -> None:
+    """Reject a host that the matcher would keep as a name no real host can have."""
+    from skillevaluator.validators.mcp_static import HostAllowlist
+
+    if "*" in host and (not host.startswith("*.") or "*" in host[2:]):
+        raise ValueError(f"{key} contains an invalid host wildcard")
+    hosts = HostAllowlist.from_entries((host,))
+    if not (hosts.names or hosts.suffixes or hosts.networks):
+        raise ValueError(f"{key} contains an invalid host pattern")
+    if any(name.startswith(".") for name in hosts.names):
+        raise ValueError(f"{key} contains a host that starts with '.'; use the '*.suffix' form to allow subdomains")
+    if any(".." in name for name in (*hosts.names, *hosts.suffixes)):
+        raise ValueError(f"{key} contains a host with an empty label")
 
 
 def plugin_policy_block(data: dict, name: str, known: set[str]) -> dict:

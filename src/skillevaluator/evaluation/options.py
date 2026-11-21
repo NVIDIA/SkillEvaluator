@@ -104,12 +104,12 @@ class DatasetOptions:
 
 @dataclass(frozen=True)
 class PluginOptions:
-    """Plugin runtime controls; unset values defer to authored configuration.
+    """Run controls for a prepared runtime package, validated on construction.
 
-    ``policy`` is the operator's validation policy. Its severity overrides
-    decide which manifest and component findings refuse the run before any
-    agent starts, as they decide Tier 1 blocking. ``None`` keeps each check's
-    default severity.
+    Every field is unset by default (``None`` or empty). Construction checks
+    every field except ``repo_root`` and normalizes the two allowlists by the
+    validation policy rules. The class only holds these values; it applies
+    none of them. ``policy`` must be a ``ValidationPolicy`` when given.
     """
 
     plugin_load: str | None = None

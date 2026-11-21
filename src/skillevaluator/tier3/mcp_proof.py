@@ -18,11 +18,14 @@ The plugin chooses both the URL and the header template, so a ``${VAR}`` or
 ``$VAR`` reference is expanded from the host environment only when the user
 grants that variable through ``EvidenceOptions.env_grants`` (``NAME`` for every server,
 ``NAME=HOST`` or ``NAME@SERVER`` for one); a header that references any other
-variable is not sent, and the variable is never read. Each server's detail
-records which variables were sent to which host. The whole probe, DNS lookup
-included, runs under one deadline, and a transport error that the ``mcp``
-client only logs (an oversized body, an off-origin SSE endpoint) ends the
-probe at once.
+variable is not sent, and the variable is never read. A granted variable that
+is unset or empty leaves its header out. Once the host resolves and passes the
+endpoint policy, each server's detail names the granted variables its headers
+carry for that host, before any error text, as a probe that fails may not have
+sent them; a DNS failure or a server that is not probed names none, as nothing
+was sent. The whole probe, DNS lookup included, runs under one deadline, and a
+transport error that the ``mcp`` client only logs (an oversized body, an
+off-origin SSE endpoint) ends the probe at once.
 
 After the run, :func:`apply_in_agent_mcp_proof` updates each server from the
 with-plugin arm's ``plugin_signals_summary.mcp_calls.by_server`` and each
@@ -250,20 +253,20 @@ def declared_mcp_proof(targets: Iterable[Mapping[str, Any]], detail: str = NOT_R
 def _resolve_headers(
     headers: Mapping[str, Any], environ: Mapping[str, str], expand_env: Iterable[str] = ()
 ) -> tuple[dict[str, str], list[str], list[str], list[str]]:
-    """Return ``(headers to send, unset variables, withheld variables, sent variables)``.
+    """Return ``(headers to send, unset variables, withheld variables, variables placed in headers)``.
 
     A header whose ``${VAR}``/``$VAR`` references all name variables in
     ``expand_env`` (the names opted in for this server) is sent with them
-    resolved from ``environ``; one that references an opted-in but unset
-    variable is dropped (``unset``). A header that references any variable not
-    opted in for this server is dropped without reading that variable
-    (``withheld``). Literal headers are sent as declared.
+    resolved from ``environ``; one that references an opted-in but unset or
+    empty variable is dropped (``unset``). A header that references any
+    variable not opted in for this server is dropped without reading that
+    variable (``withheld``). Literal headers are sent as declared.
     """
     allowed = frozenset(expand_env)
     resolved: dict[str, str] = {}
     missing: list[str] = []
     withheld: list[str] = []
-    sent: list[str] = []
+    placed: list[str] = []
     for key, value in headers.items():
         if not isinstance(key, str) or not isinstance(value, str):
             continue
@@ -277,22 +280,28 @@ def _resolve_headers(
             missing.extend(unset)
             continue
         resolved[key] = _HEADER_REF_RE.sub(lambda match: environ[match.group(1) or match.group(2)], value)
-        sent.extend(names)
-    return resolved, sorted(set(missing)), sorted(set(withheld)), sorted(set(sent))
+        placed.extend(names)
+    return resolved, sorted(set(missing)), sorted(set(withheld)), sorted(set(placed))
 
 
-def _header_note(missing: list[str], withheld: list[str], sent: list[str] | None = None, host: str = "") -> str:
+def _header_note(missing: list[str], withheld: list[str], granted: list[str] | None = None, host: str = "") -> str:
+    # Granted, not sent: a probe that fails may not have sent its headers.
     note = ""
-    if sent:
-        note += f"; sent {', '.join(sent)} to {host or 'the server'}"
+    if granted:
+        note += f"; granted {', '.join(granted)} for {host or 'the server'}"
     if withheld:
         note += (
             f"; headers not sent because they reference host variables without a private environment grant "
             f"for this server: {', '.join(withheld)}"
         )
     if missing:
-        note += f"; headers skipped because unset: {', '.join(missing)}"
+        note += f"; headers skipped because unset or empty: {', '.join(missing)}"
     return note
+
+
+def _failure_detail(kind: str, error: str, note: str) -> str:
+    """Detail of a failed probe: the header note comes first, so the length cap cuts the error, not the note."""
+    return f"{kind} probe failed{note}; error: {error}" if note else f"{kind} probe failed: {error}"
 
 
 def _address_policy(address: str, allowlist: HostAllowlist, *, name_allowed: bool, label: str) -> bool:
@@ -713,7 +722,11 @@ def probe_mcp_server(
     server), ``NAME=HOST`` (servers whose URL host is HOST) or ``NAME@SERVER``
     (that server). Only names opted in for this server are read from
     ``environ`` (the process environment when ``None``) into its declared
-    headers, and the detail records which names were sent to which host.
+    headers. Once the host resolves and passes the endpoint policy, the
+    detail names the granted variables this server's headers carry for its
+    host, and those left out because they are unset or empty, before any
+    error text, so that cutting a long error to ``MAX_DETAIL_CHARS`` keeps
+    them. A DNS failure or a refused endpoint names none, as nothing was sent.
     ``total_timeout`` bounds the whole probe, DNS lookup included.
     """
     url = str(target.get("url") or "")
@@ -729,12 +742,12 @@ def probe_mcp_server(
     except _ProbeRefused as refused:
         return _entry(refused.status, refused.detail)
     raw_headers = target.get("headers")
-    headers, missing, withheld, sent = _resolve_headers(
+    headers, missing, withheld, granted = _resolve_headers(
         raw_headers if isinstance(raw_headers, Mapping) else {},
         os.environ if environ is None else environ,
         _allowed_env(target, [parse_env_grant(value) for value in expand_env]),
     )
-    note = _header_note(missing, withheld, sent, _target_host(url))
+    note = _header_note(missing, withheld, granted, _target_host(url))
     try:
         import anyio
         import mcp  # noqa: F401 -- availability check
@@ -744,7 +757,7 @@ def probe_mcp_server(
         )
     remaining = total_timeout - (time.monotonic() - started)
     if remaining <= 0:
-        return _entry(STATUS_UNREACHABLE, f"{kind} probe failed: timed out after {total_timeout:g}s")
+        return _entry(STATUS_UNREACHABLE, _failure_detail(kind, f"timed out after {total_timeout:g}s", note))
     try:
         tools, schemas = anyio.run(
             lambda: _probe_session(url, kind, headers, addresses=addresses, total_timeout=remaining)
@@ -755,10 +768,10 @@ def probe_mcp_server(
         cause = _root_cause(exc)
         message = str(cause) or type(cause).__name__
         if isinstance(cause, _ProbeFailed):
-            return _entry(STATUS_UNREACHABLE, f"{kind} probe failed: {message}{note}")
+            return _entry(STATUS_UNREACHABLE, _failure_detail(kind, message, note))
         if isinstance(cause, TimeoutError):
             message = f"timed out after {total_timeout:g}s"
-        return _entry(STATUS_UNREACHABLE, f"{kind} probe failed: {type(cause).__name__}: {message}{note}")
+        return _entry(STATUS_UNREACHABLE, _failure_detail(kind, f"{type(cause).__name__}: {message}", note))
     entry = _entry(STATUS_REACHABLE_HOST, f"initialize and tools/list succeeded over {kind}{note}", tools)
     if schemas:
         entry["input_schemas"] = schemas

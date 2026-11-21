@@ -19,11 +19,10 @@ try:
 except ModuleNotFoundError:
     from ci.model_config import agent_model_overrides, model_environment
 
-from skillevaluator.tier3.commands import resolve_agents
-from skillevaluator.tier3.harbor.local_runtime import managed_install_argv, managed_runtime_prefix
-
 
 def install_agent(agent: str) -> None:
+    from skillevaluator.tier3.harbor.local_runtime import managed_install_argv, managed_runtime_prefix
+
     argv = managed_install_argv(agent)
     # Runs the same pinned install that local setup offers, at the release Harbor installs for Docker runs.
     subprocess.run(argv, check=True, timeout=600)
@@ -36,6 +35,8 @@ def main() -> int:
         print("Three-tier CI supports docker and local environments only.")
         return 2
     try:
+        from skillevaluator.tier3.commands import resolve_agents
+
         doctor_env = model_environment(dict(os.environ), 3)
         models = agent_model_overrides(dict(os.environ))
         agents = resolve_agents(

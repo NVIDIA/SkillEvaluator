@@ -2528,6 +2528,8 @@
             {% endfor %}
             {% for result in scope.results %}
                 {% set execution_errors = result | additional_errors %}
+                {# A catalog setup record compares nothing; it is titled by its own name, like other checks. #}
+                {% set titled = scope.id == 'other' or result | catalog_setup_record %}
                 {% if execution_errors %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     <strong>{{ 'Execution errors' if result.is_incomplete else 'Errors' }}</strong>
@@ -2543,9 +2545,9 @@
                     <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
                     {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
                 </div>
-                {% elif result.passed and not result.findings and ((scope.id == 'other' and result.success_details) or scope.completed == scope.results | length) %}
+                {% elif result.passed and not result.findings and ((titled and result.success_details) or (not titled and scope.completed == scope.results | length)) %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
-                    {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">{{ result.validator_name if scope.id == 'other' else 'No semantic overlaps detected.' }}</strong>
+                    {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">{{ result.validator_name if titled else 'No semantic overlaps detected.' }}</strong>
                     {% if result.success_details %}
                     <ul style="margin:0.5rem 0 0;padding-left:1.25rem;font-size:0.85rem;color:var(--text-secondary);">
                         {% for d in result.success_details %}<li>{{ d.message }}</li>{% endfor %}

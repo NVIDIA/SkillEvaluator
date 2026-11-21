@@ -50,6 +50,11 @@ def _normalized_name(result: ValidationResult) -> str:
     return " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
 
 
+def is_catalog_setup_record(result: ValidationResult) -> bool:
+    """Return whether a result only builds, loads or saves a catalog and compares nothing."""
+    return _normalized_name(result) == _CATALOG_SETUP_NAME
+
+
 def _scope(result: ValidationResult) -> str | None:
     name = _normalized_name(result)
     if name == "plugin dependency deduplication":
@@ -105,7 +110,7 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         for result in members:
             # A catalog setup record completes by building or loading the
             # catalog; its index size is not a pairwise collection scan.
-            setup = scope == "across" and _normalized_name(result) == _CATALOG_SETUP_NAME
+            setup = scope == "across" and is_catalog_setup_record(result)
             budget = result.metadata.get("plugin_context_budget")
             if isinstance(budget, dict):
                 limits, consumed = budget.get("limits"), budget.get("consumed")

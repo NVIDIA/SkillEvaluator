@@ -411,9 +411,14 @@ def test_catalog_summary_is_tier2_similarity_evidence(tmp_path, embedding, provi
     else:
         assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (5, 4, 4, 4)
         assert not any("Pairwise" in note or "not applicable" in note for note in across.notes)
+        # The setup record compares nothing, so it keeps its own title, never the clean-comparison banner.
+        assert "No semantic overlaps detected." not in section
+        assert f"{plugin_commands.CATALOG_SUMMARY_NAME}</strong>" in section
+        assert "Indexed 2 skills and 2 plugins" in section
 
 
 def test_loaded_catalog_summary_counts_as_completed_similarity_evidence(tmp_path, embedding):
+    from skillevaluator.reporting.html import HTMLReporter
     from skillevaluator.reporting.tier2_views import tier2_scope_views
 
     catalog = tmp_path / "catalog.json"
@@ -425,3 +430,27 @@ def test_loaded_catalog_summary_counts_as_completed_similarity_evidence(tmp_path
     across = tier2_scope_views(results)[1]
     assert across.results[0].validator_name == plugin_commands.CATALOG_SUMMARY_NAME
     assert (across.completed, across.duplicates, across.catalog_entries) == (3, 2, 2)
+    section = HTMLReporter(include_timestamp=False).render_all(results).split('id="tier2-across"', 1)[1]
+    section = section.split("</section>", 1)[0]
+    assert "No semantic overlaps detected." not in section
+    assert f"{plugin_commands.CATALOG_SUMMARY_NAME}</strong>" in section
+    assert "Loaded 2 catalog entries" in section
+
+
+def test_clean_comparisons_keep_their_banner_beside_the_catalog_setup_record(tmp_path, embedding):
+    from skillevaluator.reporting.html import HTMLReporter
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    catalog = tmp_path / "catalog.json"
+    similarity(make_plugin(tmp_path / "source", "source"), save_catalog=catalog)
+    embedding.embed = lambda texts: [[0.0, 1.0] for _ in texts]
+
+    results = similarity(make_plugin(tmp_path / "target", "target"), catalog=catalog)
+
+    assert all(r.passed and not r.findings for r in results), [r.errors for r in results]
+    across = tier2_scope_views(results)[1]
+    assert (across.completed, across.duplicates) == (3, 0)
+    section = HTMLReporter(include_timestamp=False).render_all(results).split('id="tier2-across"', 1)[1]
+    section = section.split("</section>", 1)[0]
+    assert section.count("No semantic overlaps detected.") == 2
+    assert f"{plugin_commands.CATALOG_SUMMARY_NAME}</strong>" in section

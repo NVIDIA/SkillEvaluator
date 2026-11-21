@@ -169,6 +169,46 @@ metadata:
         assert result.passed, f"Expected validation to pass. Errors: {result.errors}"
         assert any("fastapi-setup" in msg.lower() for msg in result.messages)
 
+    @pytest.mark.parametrize("ancestor", [0, 1, 2])
+    def test_reference_warning_survives_workflow_aggregation(self, validator, valid_workflow_dir, ancestor):
+        reference = valid_workflow_dir / "references" / "api-design.mdc"
+        reference.write_text(
+            reference.read_text().replace('parent_workflow: "fastapi-setup"', 'parent_workflow: "another-workflow"')
+        )
+        individual = validator._validate_reference_file(reference, valid_workflow_dir.name)
+        assert individual.passed
+        assert len(individual.warnings) == 1
+        root = valid_workflow_dir if ancestor == 0 else valid_workflow_dir.parents[ancestor - 1]
+
+        result = validator.validate(root)
+
+        assert result.passed, result.errors
+        prefix = "" if ancestor == 0 else "[fastapi-setup] "
+        assert result.warnings == [f"{prefix}[reference/api-design] {individual.warnings[0]}"]
+        assert result.summary.warnings == 1
+
+    @pytest.mark.parametrize("ancestor", [1, 2])
+    @pytest.mark.parametrize("include_failure", [False, True])
+    def test_collection_keeps_passing_workflow_warnings(self, validator, valid_workflow_dir, ancestor, include_failure):
+        manifest = valid_workflow_dir / "workflow-rules.mdc"
+        manifest.write_text(manifest.read_text().replace("Test User <testuser@example.com>", "Test User"))
+        individual = validator.validate(valid_workflow_dir)
+        assert individual.passed
+        assert len(individual.warnings) == 1
+        if include_failure:
+            broken = valid_workflow_dir.parent / "broken-workflow"
+            broken.mkdir()
+            (broken / "workflow-rules.mdc").write_text("---\n---\n")
+
+        result = validator.validate(valid_workflow_dir.parents[ancestor - 1])
+
+        assert result.passed is not include_failure
+        assert result.warnings == [f"[fastapi-setup] {individual.warnings[0]}"]
+        assert result.summary.warnings == 1
+        assert any(detail.check_name == "fastapi-setup" for detail in result.success_details)
+        if include_failure:
+            assert all(error.startswith("[broken-workflow] ") for error in result.errors)
+
     @pytest.mark.parametrize("relative_path", ["workflow-rules.mdc", "references/api-design.mdc"])
     @pytest.mark.parametrize("key", ["123", "true", "false", "null", "2026-01-01"])
     def test_non_string_frontmatter_key_returns_validation_error(

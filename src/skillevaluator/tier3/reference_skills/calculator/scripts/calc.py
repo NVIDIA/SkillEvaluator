@@ -133,6 +133,7 @@ CONVERSIONS = {
     ("meters", "feet"): lambda m: m * 3.28084,
     ("feet", "meters"): lambda f: f / 3.28084,
 }
+SUPPORTED_UNITS = ", ".join(dict.fromkeys(unit for pair in CONVERSIONS for unit in pair))
 
 
 def try_conversion(expr: str) -> str | None:
@@ -148,7 +149,7 @@ def try_conversion(expr: str) -> str | None:
     to_unit = m.group(3).lower()
     fn = CONVERSIONS.get((from_unit, to_unit))
     if fn is None:
-        return None
+        raise ValueError(f"Unknown conversion: {from_unit} to {to_unit}. Supported units: {SUPPORTED_UNITS}")
     result = fn(value)
     return f"{value:g} {from_unit} = {result:.4g} {to_unit}"
 
@@ -170,7 +171,11 @@ def main():
 
     expr = " ".join(sys.argv[1:])
 
-    conv = try_conversion(expr)
+    try:
+        conv = try_conversion(expr)
+    except ValueError as e:
+        print(f"Error: {e}", file=sys.stderr)
+        sys.exit(1)
     if conv:
         print(conv)
         return

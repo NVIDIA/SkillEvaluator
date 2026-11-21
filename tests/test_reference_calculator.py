@@ -91,6 +91,25 @@ def test_input_beyond_a_conversion_or_percentage_is_rejected(expression: str) ->
 
 
 @pytest.mark.parametrize(
+    ("expression", "units"),
+    [
+        ("100 celsius to kelvin", "celsius to kelvin"),
+        ("5 miles to kilometers", "miles to kilometers"),
+        ("10 Inches to CM", "inches to cm"),
+        ("-3 km to km", "km to km"),
+    ],
+)
+def test_unsupported_conversions_name_the_supported_units(expression: str, units: str) -> None:
+    result = _calc(expression)
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() == (
+        f"Error: Unknown conversion: {units}. Supported units: celsius, fahrenheit, miles, km, kg, lbs, meters, feet"
+    )
+
+
+@pytest.mark.parametrize(
     "expression",
     [
         "9**9**9",

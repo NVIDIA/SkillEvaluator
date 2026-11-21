@@ -249,6 +249,11 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- The calculator reference skill reports an unsupported unit pair, such as
+  `100 celsius to kelvin`, as `Error: Unknown conversion: celsius to kelvin.`
+  followed by the supported units, as its troubleshooting table describes.
+  These requests previously fell through to arithmetic parsing and printed a
+  Python syntax error.
 
 ## 1.0.1 - 2026-11-17
 

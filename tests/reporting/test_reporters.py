@@ -3186,7 +3186,8 @@ def test_reports_are_written_for_a_file_name_that_is_not_utf8(
     if report_format == "github":
         captured = capsys.readouterr()
         assert "Unexpected" in captured.out
-        assert "file=skill/caf%25E9.md" in captured.out or "file=skill/caf%E9.md" in captured.out
+        assert "file=" not in captured.out
+        assert r"skill/caf\xe9.md: Unexpected" in captured.out
         assert not output_dir.exists() or list(output_dir.iterdir()) == []
         return
 

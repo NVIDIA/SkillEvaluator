@@ -10,13 +10,18 @@ from skillevaluator.models.result import ValidationResult
 
 
 class _SourceWaivers:
-    """Match immutable scan-view paths against their original logical paths."""
+    """Match immutable scan-view paths against their original logical paths.
 
-    def __init__(self, waivers, view: Path, source: Path):
-        self.waivers, self.view, self.source = waivers, view, source
+    Coverage is recorded for the whole target, so a waiver review row names
+    its file relative to the target (``skills/a/SKILL.md``), as the PII
+    findings do, rather than relative to the member skill's scan unit.
+    """
 
-    def cover(self, path: Path) -> None:
-        self.waivers.cover(self.source / path.relative_to(self.view))
+    def __init__(self, waivers, view: Path, source: Path, root: Path):
+        self.waivers, self.view, self.source, self.root = waivers, view, source, root
+
+    def cover(self, _path: Path) -> None:
+        self.waivers.cover(self.root)
 
     def matcher(self, path: Path):
         return self.waivers.matcher(self.source / path.relative_to(self.view))
@@ -58,6 +63,9 @@ def run_public_plugin_validation(
     folder of skills. The ``security`` check then accepts no SkillSpector
     missing reference, because the plugin's instructions may name a file
     elsewhere in the folder.
+
+    ``schema`` cannot be skipped: the manifest and component check always
+    runs and is reported under it.
     """
     from skillevaluator.cli_core import resolve_plugin_path
     from skillevaluator.constants import PLUGIN_CONTAINED_MODE, PLUGIN_MANIFEST_TYPE, PLUGIN_MODE
@@ -72,6 +80,10 @@ def run_public_plugin_validation(
     if unknown:
         result = ValidationResult(validator_name="Tier 1 option validation")
         result.add_error(f"Unknown Tier 1 check(s): {', '.join(sorted(unknown))}")
+        return [result]
+    if "schema" in skipped:
+        result = ValidationResult(validator_name="Tier 1 option validation")
+        result.add_error("The schema check cannot be skipped: the manifest and component check always runs.")
         return [result]
     active = enabled - skipped
     selected = active - {"dependency", "harness"}
@@ -117,14 +129,18 @@ def run_public_plugin_validation(
                 )
 
         def mapped_option(path):
+            # SkillSpector excludes only the exact --baseline file, so a
+            # baseline inside the target must point at the staged copy that
+            # is scanned. A baseline that was not staged keeps its own path.
             if path is None:
                 return None
-            absolute = path.absolute()
+            absolute = Path(path).expanduser().resolve()
             for unit in sorted(views, key=lambda item: len(Path(item).parts), reverse=True):
-                source = source_root / unit
+                source = (Path(source_root) / unit).resolve()
                 if absolute.is_relative_to(source):
-                    return views[unit] / absolute.relative_to(source)
-            return path
+                    candidate = views[unit] / absolute.relative_to(source)
+                    return candidate if candidate.is_file() else absolute
+            return absolute
 
         security = SnapshotSecurityValidator(
             use_llm=use_llm,
@@ -155,7 +171,7 @@ def run_public_plugin_validation(
 
         def pii_scan(view):
             if loaded_waivers is not None:
-                pii._pii_waivers = _SourceWaivers(loaded_waivers, view, source_by_view[view])
+                pii._pii_waivers = _SourceWaivers(loaded_waivers, view, source_by_view[view], plugin_root)
             try:
                 return verify(pii._scan_for_pii(view), pii, view)
             finally:
@@ -273,6 +289,8 @@ def run_public_plugin_validation(
     )
     for result in results:
         result.validator_name = public_names.get(result.validator_name, result.validator_name)
+        if result.metadata.get("plugin_check") == "dependency":
+            result.validator_name = "Dependency Vulnerability Audit"
         scan = scan_names.get(result.metadata.get("plugin_check"))
         if scan is not None and result.validator_name == "Security & PII Scanning":
             result.validator_name = scan[0]
@@ -291,8 +309,6 @@ def run_public_plugin_validation(
         check = "code-integrity" if check in {"hygiene", "secrets"} else check
         if "endpoint_resolution" in result.metadata:
             check = "schema"
-        elif result.validator_name == "Dependency Vulnerability Audit":
-            check = "dependency"
         public.stamp_publication_evidence([result], tier=1, check_id=check)
         public.stamp_tier1_required_checks([result], skill_like=skill_members_present)
     omitted = [(check, name) for check in enabled & skipped for name in public._SKIPPED_VALIDATORS[check]]

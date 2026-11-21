@@ -436,6 +436,8 @@ def run_plugin_validation(
                 )
                 snapshot_result.mark_scan_incomplete("plugin-source-tree")
                 results.append(snapshot_result)
+        if fail_fast and not snapshot_result.passed:
+            return finish()
     declarations = inventory.all_mcp_declarations()
     if options.audit_dependencies:
         if on_check is not None:
@@ -454,6 +456,7 @@ def run_plugin_validation(
         reader = PluginRootReader(root)
         inputs = collect_audit_inputs(reader, source_files, mcp=declarations)
         audit = run_dependency_audits(reader, inputs)
+        audit.metadata["plugin_check"] = "dependency"
         if not source_complete:
             audit.mark_scan_incomplete("dependency-source-discovery")
         results.append(audit)
@@ -480,6 +483,8 @@ def run_plugin_validation(
         results.append(result)
         if on_check_complete is not None:
             on_check_complete("endpoint-resolution", result)
+        if fail_fast and not result.passed:
+            return finish()
     if options.claude_validate:
         if on_check is not None:
             on_check("claude-validate")

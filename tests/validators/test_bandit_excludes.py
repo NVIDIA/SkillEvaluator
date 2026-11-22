@@ -247,11 +247,93 @@ def test_one_run_when_the_patterns_hide_nothing_else(mock_run, tmp_path: Path) -
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_file_that_a_pattern_hides_is_passed_by_name(mock_run, tmp_path: Path) -> None:
+def test_skill_with_a_hidden_file_takes_one_run_by_name(mock_run, tmp_path: Path) -> None:
     skill = _skill(tmp_path / "webapp-testing")
     (skill / "test_tools").mkdir()
     for name in ("launch.py", "test_launch.py", "window.pyw"):
         (skill / "test_tools" / name).write_text(RISKY, encoding="utf-8")
+
+    (by_name,) = _bandit_runs(mock_run, skill)
+
+    # The pattern for test_*.py hides test_tools/launch.py. Every file of the
+    # scan fits one command line, so one run is given them all by name. It
+    # excludes nothing and opens no test file.
+    covered = LIVE_FILES | {"test_tools/launch.py", "test_tools/window.pyw"}
+    assert _named_files(by_name) == sorted(str(skill.resolve() / relative) for relative in covered)
+    assert by_name[by_name.index("--exclude") + 1] == ""
+
+
+@patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
+@patch.object(Tools.bandit, "run")
+def test_large_package_named_like_a_test_file_takes_one_run(
+    mock_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A run starts Bandit again, so a package of 2,001 ordinary modules in a
+    # folder such as test_tools is not split over more runs than its names need.
+    skill = _skill(tmp_path / "webapp-testing")
+    (skill / "test_tools").mkdir()
+    for index in range(2001):
+        (skill / "test_tools" / f"module_{index:04d}.py").write_text("VALUE = 1\n", encoding="utf-8")
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 1_000_000)
+
+    (by_name,) = _bandit_runs(mock_run, skill)
+
+    assert len(_named_files(by_name)) == 2001 + len(LIVE_FILES)
+    # Where a command line is as short as on Windows the names take several
+    # runs, and no more of them than the names need.
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 24_000)
+    runs = _bandit_runs(mock_run, skill)
+    names = sum(len(os.fsencode(name)) + 3 for args in runs for name in _named_files(args))
+    assert 1 < len(runs) <= names // 24_000 + 2
+    assert sum("test_tools" in name for args in runs for name in _named_files(args)) == 2001
+
+
+@pytest.mark.parametrize(
+    ("limit", "room"),
+    [
+        (2_097_152, (2_097_152 - 8) // 4),
+        (40_000, 24_000),
+        (2**62, 1_000_000),
+        (-1, 24_000),
+        (ValueError("no such name"), 24_000),
+        (None, 24_000),
+    ],
+    ids=[
+        "a-quarter-of-what-is-left",
+        "never-below-the-windows-room",
+        "never-above-a-million",
+        "unknown-limit",
+        "unknown-name",
+        "no-sysconf",
+    ],
+)
+def test_room_for_file_names_comes_from_the_system(monkeypatch: pytest.MonkeyPatch, limit: object, room: int) -> None:
+    def sysconf(name: str) -> int:
+        assert name == "SC_ARG_MAX"
+        if isinstance(limit, Exception):
+            raise limit
+        return limit
+
+    # The name, the value, "=" and the byte that ends them make eight bytes.
+    monkeypatch.setattr(os, "environ", {"HOME": "/x"})
+    if limit is None:
+        # Windows has no os.sysconf.
+        monkeypatch.delattr(os, "sysconf", raising=False)
+    else:
+        monkeypatch.setattr(os, "sysconf", sysconf, raising=False)
+
+    assert code_risk._bandit_named_files_bytes() == room
+
+
+@patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
+@patch.object(Tools.bandit, "run")
+def test_file_that_a_pattern_hides_is_passed_by_name(mock_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    skill = _skill(tmp_path / "webapp-testing")
+    (skill / "test_tools").mkdir()
+    for name in ("launch.py", "test_launch.py", "window.pyw"):
+        (skill / "test_tools" / name).write_text(RISKY, encoding="utf-8")
+    # With no room for all the files on one command line, the tree is walked.
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 1)
 
     whole_tree, by_name = _bandit_runs(mock_run, skill)
 
@@ -268,7 +350,9 @@ def test_file_that_a_pattern_hides_is_passed_by_name(mock_run, tmp_path: Path) -
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_files_passed_by_name_keep_each_command_line_bounded(mock_run, tmp_path: Path) -> None:
+def test_files_passed_by_name_keep_each_command_line_bounded(
+    mock_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     # Windows allows 32,767 characters for a command line. A name with
     # letters outside ASCII takes more room than it has characters.
     skill = _skill(tmp_path / "webapp-testing")
@@ -276,12 +360,14 @@ def test_files_passed_by_name_keep_each_command_line_bounded(mock_run, tmp_path:
     hidden = [skill.resolve() / "test_tools" / f"module_{index:03d}_{'ü' * 60}.py" for index in range(600)]
     for file in hidden:
         file.write_text(RISKY, encoding="utf-8")
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: code_risk._BANDIT_NAMED_FILES_BYTES)
 
-    whole_tree, *by_name = _bandit_runs(mock_run, skill)
+    by_name = [args for args in _bandit_runs(mock_run, skill) if args[0] != "-r"]
 
-    assert whole_tree[0] == "-r" and len(by_name) > 2
+    assert len(by_name) > 2
     assert all(sum(len(os.fsencode(arg)) + 3 for arg in args) < 32_767 - 2_000 for args in by_name)
-    assert [name for args in by_name for name in _named_files(args)] == [str(file) for file in hidden]
+    named = [name for args in by_name for name in _named_files(args)]
+    assert [name for name in named if "test_tools" in name] == [str(file) for file in hidden]
 
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
@@ -292,7 +378,7 @@ def test_runs_of_one_scan_share_its_time(mock_run, tmp_path: Path, monkeypatch: 
     (skill / "test_tools").mkdir()
     for name in ("first.py", "second.py", "third.py"):
         (skill / "test_tools" / name).write_text(RISKY, encoding="utf-8")
-    monkeypatch.setattr(code_risk, "_BANDIT_NAMED_FILES_BYTES", 1)
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 1)
     clock = iter([0.0, 0.0, 50.0, 100.0, 150.0])
     monkeypatch.setattr(code_risk, "monotonic", lambda: next(clock))
     mock_run.return_value = CLEAN
@@ -307,10 +393,13 @@ def test_runs_of_one_scan_share_its_time(mock_run, tmp_path: Path, monkeypatch: 
 
 @patch.object(Tools.bandit, "_path", "/usr/bin/bandit")
 @patch.object(Tools.bandit, "run")
-def test_scan_errors_of_all_runs_are_written_out_three_at_most(mock_run, tmp_path: Path) -> None:
+def test_scan_errors_of_all_runs_are_written_out_three_at_most(
+    mock_run, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     skill = _skill(tmp_path / "webapp-testing")
     (skill / "test_tools").mkdir()
     (skill / "test_tools" / "launch.py").write_text(RISKY, encoding="utf-8")
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 1)
     errors = [
         {"filename": f"file_{index}.py", "reason": "syntax error while parsing AST from file"} for index in range(2)
     ]
@@ -388,6 +477,7 @@ def _report(*files: Path) -> ToolResult:
 def test_two_runs_make_one_report(
     mock_run,
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
     whole_tree: list[str] | None,
     by_name: list[str] | None,
     flagged: list[str],
@@ -397,6 +487,7 @@ def test_two_runs_make_one_report(
     skill = _skill(tmp_path / "webapp-testing").resolve()
     (skill / "test_tools").mkdir()
     (skill / "test_tools" / "launch.py").write_text(RISKY, encoding="utf-8")
+    monkeypatch.setattr(code_risk, "_bandit_named_files_bytes", lambda: 1)
     timed_out = ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message="bandit timed out")
     mock_run.side_effect = [
         timed_out if files is None else _report(*(skill / relative for relative in files))

@@ -89,9 +89,11 @@ BANDIT_INI_PATH = (CONFIG_DIR / "bandit.ini").resolve()
 _BANDIT_INI_REPORT_LIMIT = 5
 # One scan gets this many seconds, however many Bandit runs it takes.
 _BANDIT_TIMEOUT = 120
-# The most bytes of file names that one Bandit run is given. Windows allows
-# 32,767 characters for a command line.
+# The most bytes of file names that one Bandit run is given on Windows, which
+# allows 32,767 characters for a command line. Other systems allow more, see
+# _bandit_named_files_bytes, and no run is given more than the second number.
 _BANDIT_NAMED_FILES_BYTES = 24_000
+_BANDIT_NAMED_FILES_BYTES_MOST = 1_000_000
 # The most scan errors of a scan that are written out.
 _BANDIT_ERROR_LIMIT = 3
 
@@ -109,6 +111,24 @@ def _skill_bandit_ini_files(skill_path: Path) -> list[str]:
     except OSError:
         pass
     return sorted(found)
+
+
+def _bandit_named_files_bytes() -> int:
+    """The most bytes of file names that one Bandit run is given by name.
+
+    Where the system tells how much room the arguments and the environment
+    of a new process have between them, this is a quarter of what the
+    environment leaves. The rest is for the other arguments and for what the
+    system adds to each one. Windows does not tell, and has its fixed limit.
+    A system with no limit on the stack reports more room than it gives, so
+    the number is kept below a million.
+    """
+    try:
+        room = os.sysconf("SC_ARG_MAX")
+    except (AttributeError, OSError, ValueError):
+        return _BANDIT_NAMED_FILES_BYTES
+    environment = sum(len(os.fsencode(name)) + len(os.fsencode(value)) + 2 for name, value in os.environ.items())
+    return min(_BANDIT_NAMED_FILES_BYTES_MOST, max(_BANDIT_NAMED_FILES_BYTES, (room - environment) // 4))
 
 
 class CodeRiskValidator(ValidatorBase):
@@ -289,30 +309,44 @@ class CodeRiskValidator(ValidatorBase):
         excludes nothing and opens no other file. Bandit adds its own ``*``
         to an entry that is the path of a directory, and the entry then no
         longer hides what it should. With such an entry every file is passed
-        by name, and Bandit does not walk the tree at all.
+        by name, and Bandit does not walk the tree at all. The same is done
+        when that takes fewer runs than a run over the tree and the runs for
+        the hidden files after it.
         """
         excludes = self._bandit_excludes(root)
         files = self._bandit_files(root)
-        runs: list[tuple[list[str], str]] = []
+        by_name = [(batch, "") for batch in self._bandit_batches(files)]
         # os.path.isdir is the call Bandit makes. It is False for a path that
         # cannot be read, where Path.is_dir raises.
-        if not any(os.path.isdir(entry) for entry in excludes):  # noqa: PTH112
-            runs.append((["-r", str(root)], ",".join(excludes)))
-            files = [file for file in files if any(fnmatch(file, entry) or entry in file for entry in excludes)]
-        named: list[list[str]] = []
+        if any(os.path.isdir(entry) for entry in excludes):  # noqa: PTH112
+            return by_name
+        whole_tree = [(["-r", str(root)], ",".join(excludes))]
+        hidden = [file for file in files if any(fnmatch(file, entry) or entry in file for entry in excludes)]
+        if not hidden:
+            return whole_tree
+        # Each run starts Bandit again. The files often all fit one command
+        # line, and one run then does what the run over the tree and a run
+        # for the hidden files would do between them.
+        whole_tree += [(batch, "") for batch in self._bandit_batches(hidden)]
+        return by_name if len(by_name) < len(whole_tree) else whole_tree
+
+    @staticmethod
+    def _bandit_batches(files: list[str]) -> list[list[str]]:
+        """Split *files* into the lists that one Bandit run each is given by name."""
+        room = _bandit_named_files_bytes()
+        batches: list[list[str]] = []
         size = 0
         for file in files:
             # The name, a space after it and the quotes it may get. A
             # character takes no more room on a Windows command line than it
             # has bytes here.
             needed = len(os.fsencode(file)) + 3
-            if not named or size + needed > _BANDIT_NAMED_FILES_BYTES:
-                named.append([])
+            if not batches or size + needed > room:
+                batches.append([])
                 size = 0
-            named[-1].append(file)
+            batches[-1].append(file)
             size += needed
-        runs.extend((batch, "") for batch in named)
-        return runs
+        return batches
 
     def _bandit_files(self, root: Path) -> list[str]:
         """The files below *root* that the Bandit scan covers, under the paths Bandit gives them.

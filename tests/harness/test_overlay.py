@@ -13,8 +13,8 @@ from tests.yaml_alias_fixtures import alias_bomb_skill_md, alias_graph_lines, de
 
 from skillevaluator.cli import cli
 from skillevaluator.harness import HARNESS_STATUSES, evaluate_harnesses, facts_for, load_profiles, overlay, skill_facts
-from skillevaluator.harness.overlay import PROFILES_DIR, _description_words
-from skillevaluator.harness.report import harness_block, harness_note, harness_panel
+from skillevaluator.harness.overlay import PROFILES_DIR, _description_words, listed_description
+from skillevaluator.harness.report import _LISTING, harness_block, harness_note, harness_panel
 from skillevaluator.models.result import Severity
 from skillevaluator.reporting.console_ui import final_check_ticker_row, summarize_tier1
 from skillevaluator.tier1.commands import DEFAULT_CHECKS, run_validation
@@ -1018,6 +1018,37 @@ def test_hidden_listing_mode_renders_in_verbose_reports(tmp_path: Path):
     )
     assert result.exit_code == 0, result.output
     assert "hidden (not in the model list)" in result.output
+
+
+_LISTING_MODES = ("cut", "name_only", "dropped", "hidden", "shortened")  # "full" is skipped by the grid
+_LISTING_INPUTS = {
+    "cut": ({"listing": {"cut": 10}}, {}),
+    "dropped": ({"listing": {"drop_over_utf16": 10}}, {}),
+    "hidden": ({"listing": {"hidden_when": "pi_disable_model_invocation"}}, {"pi_disable_model_invocation": True}),
+    "name_only": ({"listing": {}}, {"description_text": ""}),
+    "shortened": ({"listing": {"budget": {"desc_chars": 10}}}, {}),
+}
+
+
+@pytest.mark.parametrize("mode", _LISTING_MODES)
+def test_every_listing_mode_renders_in_verbose_panel(tmp_path: Path, mode: str):
+    """Both verbose entry points share harness_panel(verbose=True): every mode the facts
+    layer can emit must have a _LISTING entry there (r9 shipped `hidden` and crashed both)."""
+    profile, fact_overrides = _LISTING_INPUTS[mode]
+    facts = {
+        "description_text": "Use when checking harness compatibility.",
+        "description_utf16_units": 44,
+        "catalog_size": 1,
+        "catalog_desc_chars": 44,
+        **fact_overrides,
+    }
+    listed = listed_description(profile, facts)
+    assert listed["mode"] == mode
+
+    block = harness_block(run_validation(_skill(tmp_path), checks="harness"))
+    rows = next(rows for rows in block.values() if any(r["harness"] == "pi" for r in rows))
+    next(r for r in rows if r["harness"] == "pi")["listed"] = listed
+    assert _LISTING[mode].format(limit=listed.get("limit", "")) in _render(harness_panel(block, verbose=True))
 
 
 def test_harness_check_ignores_an_explicit_non_manifest_file(tmp_path: Path):

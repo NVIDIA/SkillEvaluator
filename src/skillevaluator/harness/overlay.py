@@ -323,54 +323,12 @@ def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
     never looks at a ``metadata`` copy. Returns ``None`` when the key is
     absent, ``False`` when present but not pi's ``true``; the last duplicate wins.
     """
-    from yaml.events import (
-        AliasEvent,
-        MappingEndEvent,
-        MappingStartEvent,
-        ScalarEvent,
-        SequenceEndEvent,
-        SequenceStartEvent,
-    )
+    from yaml.events import ScalarEvent
 
-    # Raw parser events keep what the composer erases: an explicit tag on a
-    # plain scalar (!!str true stays a string) and on the merge key itself.
-    try:
-        events = list(yaml.parse(fm_yaml))
-    except (yaml.YAMLError, RecursionError):
-        return None  # unparseable frontmatter is reported by its own finding
-    anchors: dict[str, tuple] = {}
-
-    def walk(index: int) -> tuple[tuple, int]:
-        event = events[index]
-        index += 1
-        if isinstance(event, ScalarEvent):
-            node = ("scalar", event)
-            if event.anchor:
-                anchors[event.anchor] = node
-            return node, index
-        if isinstance(event, AliasEvent):
-            return ("alias", event.anchor), index
-        mapping = isinstance(event, MappingStartEvent)
-        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor)
-        if event.anchor:
-            anchors[event.anchor] = node
-        end = MappingEndEvent if mapping else SequenceEndEvent
-        while not isinstance(events[index], end):
-            if mapping:
-                key_node, index = walk(index)
-            value_node, index = walk(index)
-            node[1].append((key_node, value_node) if mapping else value_node)
-        return node, index + 1
-
-    try:
-        pos = 0
-        while pos < len(events) and not isinstance(
-            events[pos], (MappingStartEvent, SequenceStartEvent, ScalarEvent, AliasEvent)
-        ):
-            pos += 1
-        root, _ = walk(pos)
-    except (IndexError, RecursionError, yaml.YAMLError):
+    parsed = _pi_frontmatter(fm_yaml)
+    if parsed is None:
         return None
+    root, anchors = parsed
     if root[0] != "mapping":
         return None
 
@@ -398,7 +356,12 @@ def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
         elif event.value == key and event.tag in (None, "tag:yaml.org,2002:str"):
             value = node_bool(value_node)
     if value is None:
+        # A !!merge value may be one mapping or an alias to it. A sequence is
+        # NOT merged: pi's parser warns "merge used for seq collection" and
+        # keeps the key literal (verified against 1.6.0), so only mappings count.
         for candidate in merged:
+            if candidate[0] == "sequence":
+                continue
             target = candidate if candidate[0] == "mapping" else anchors.get(candidate[1])
             if not target or target[0] != "mapping":
                 continue
@@ -584,7 +547,12 @@ def _claude_ignored_values(data: dict[str, Any]) -> list[str]:
     return ignored
 
 
-def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path | None = None) -> dict[str, Any]:
+def skill_facts(
+    skill_path: Path,
+    catalog: Catalog | None = None,
+    manifest: Path | None = None,
+    canonical: Catalog | None = None,
+) -> dict[str, Any]:
     """Compute the facts profile rules refer to (see profiles README).
 
     ``catalog`` describes the other skills installed alongside this one; without it the
@@ -630,12 +598,17 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
     # pi's YAML parser (eemeli/yaml) rejects duplicate keys and tab indentation,
     # so the skill is dropped and hidden findings must not suggest /skill:name.
     pi_dropped = duplicate_keys or tab_indent
+    # The description as pi 1.6.0 resolves it (YAML 1.2 core: plain yes/on are strings).
+    pi_description = _pi_description(fm_yaml) if fm_yaml else None
     pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
     # A file pi never discovers cannot hide the skill or need a value fix.
     pi_not_discovered = actual_manifest_name != "SKILL.md" and (
         "SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path)
     )
     duplicates = catalog.duplicates(manifest, name) if catalog else []
+    # Non-pi harnesses never discover pi's loose manifests: their name clashes
+    # come from the canonical catalog (SKILL.md folders) only.
+    canonical_dups = canonical.duplicates(manifest, name) if canonical is not None else duplicates
     lookalikes = catalog.lookalikes(manifest) if catalog else []
     return {
         "skill_name": name,
@@ -701,8 +674,12 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
         "catalog_size": catalog.size if catalog else 0,
         "catalog_desc_chars": catalog.desc_chars if catalog else 0,
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
-        "duplicate_name": bool(duplicates),
-        "duplicate_paths": ", ".join(duplicates[:3]),
+        "duplicate_name": bool(canonical_dups),
+        "duplicate_paths": ", ".join(canonical_dups[:3]),
+        "pi_duplicate_name": bool(duplicates),
+        "pi_duplicate_paths": ", ".join(duplicates[:3]),
+        "pi_description_invalid": pi_description is None,
+        "pi_not_loaded": pi_dropped or pi_not_discovered,
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
 
@@ -877,8 +854,115 @@ def _pi_add_ignore_line(patterns: list[str], line: str, prefix: str) -> None:
     patterns.append(("!" if negated else "") + prefix + pattern)
 
 
+# Plain scalars pi's parser (eemeli/yaml, YAML 1.2 core) resolves away from a
+# string: booleans, null and numbers. YAML 1.1 words like "yes" stay strings.
+_CORE_NON_STRING = re.compile(
+    r"^(?:[+-]?(?:[0-9]+|[0-9]*\.[0-9]+)(?:[eE][+-]?[0-9]+)?|0x[0-9a-fA-F]+|0o[0-7]+|"
+    r"true|True|TRUE|false|False|FALSE|null|Null|NULL|~)$"
+)
+
+
+def _pi_frontmatter(fm_yaml: str, *, reject_duplicate_keys: bool = False):
+    """Parse frontmatter into a node tree the way pi's parser (eemeli/yaml, YAML 1.2 core) sees it.
+
+    Raw parser events keep what the composer erases: explicit tags on plain
+    scalars and on merge keys. Returns ``(root, anchors)`` or ``None`` when the
+    text is not valid YAML (bad syntax, and, when ``reject_duplicate_keys``,
+    a repeated top-level key).
+    """
+    from yaml.events import (
+        AliasEvent,
+        MappingEndEvent,
+        MappingStartEvent,
+        ScalarEvent,
+        SequenceEndEvent,
+        SequenceStartEvent,
+    )
+
+    try:
+        events = list(yaml.parse(fm_yaml))
+    except (yaml.YAMLError, RecursionError):
+        return None  # unparseable frontmatter is reported by its own finding
+    anchors: dict[str, tuple] = {}
+
+    def walk(index: int) -> tuple[tuple, int]:
+        event = events[index]
+        index += 1
+        if isinstance(event, ScalarEvent):
+            node = ("scalar", event)
+            if event.anchor:
+                anchors[event.anchor] = node
+            return node, index
+        if isinstance(event, AliasEvent):
+            return ("alias", event.anchor), index
+        mapping = isinstance(event, MappingStartEvent)
+        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor)
+        if event.anchor:
+            anchors[event.anchor] = node
+        end = MappingEndEvent if mapping else SequenceEndEvent
+        while not isinstance(events[index], end):
+            if mapping:
+                key_node, index = walk(index)
+            value_node, index = walk(index)
+            node[1].append((key_node, value_node) if mapping else value_node)
+        return node, index + 1
+
+    try:
+        pos = 0
+        while pos < len(events) and not isinstance(
+            events[pos], (MappingStartEvent, SequenceStartEvent, ScalarEvent, AliasEvent)
+        ):
+            pos += 1
+        root, _ = walk(pos)
+    except (IndexError, RecursionError, yaml.YAMLError):
+        return None
+    if reject_duplicate_keys and root[0] == "mapping":
+        seen: set[str] = set()
+        for key_node, _ in root[1]:
+            if key_node[0] == "scalar" and key_node[1].value in seen:
+                return None  # duplicate keys make the document unparseable for pi
+            if key_node[0] == "scalar":
+                seen.add(key_node[1].value)
+    return root, anchors
+
+
+def _pi_node_string(node: tuple, anchors: dict[str, tuple]) -> str | None:
+    """The string pi's YAML 1.2 core schema resolves *node* to, or ``None`` if it is not a string."""
+    if node[0] == "alias":
+        node = anchors.get(node[1]) or ("missing",)
+    if node[0] != "scalar":
+        return None
+    event = node[1]
+    if event.tag not in (None, "tag:yaml.org,2002:str"):
+        return None  # an explicit bool/int/float/null tag resolves away from string
+    if event.tag == "tag:yaml.org,2002:str" or event.style is not None:
+        return event.value  # quoted or explicitly tagged strings stay strings
+    return event.value if event.value and _CORE_NON_STRING.match(event.value) is None else None
+
+
+def _pi_description(fm_yaml: str) -> str | None:
+    """The description as pi resolves it: ``None`` when absent, non-string, or empty."""
+    parsed = _pi_frontmatter(fm_yaml, reject_duplicate_keys=True) if fm_yaml else None
+    if parsed is None or parsed[0][0] != "mapping":
+        return None
+    root, anchors = parsed
+    for key_node, value_node in root[1]:
+        if (
+            key_node[0] == "scalar"
+            and key_node[1].value == "description"
+            and key_node[1].tag
+            in (
+                None,
+                "tag:yaml.org,2002:str",
+            )
+        ):
+            resolved = _pi_node_string(value_node, anchors)
+            return resolved if resolved and resolved.strip() else None
+    return None
+
+
 def _pi_loadable(manifest: Path) -> bool:
-    """Whether pi loads *manifest* as a skill: parseable frontmatter carrying a description."""
+    """Whether pi 1.6.0 loads *manifest*: valid frontmatter (no duplicate keys) with a non-empty description."""
     try:
         raw = manifest.read_text(encoding="utf-8", errors="replace")
     except OSError:
@@ -886,12 +970,7 @@ def _pi_loadable(manifest: Path) -> bool:
     match = FRONTMATTER_PATTERN.match(raw)
     if match is None:
         return False
-    try:
-        data = load_bounded_yaml(match.group(1), last_key_wins=True)
-    except (StructuredDataError, yaml.YAMLError, RecursionError, ValueError):
-        return False
-    description = data.get("description") if isinstance(data, dict) else None
-    return isinstance(description, str) and description.strip() != ""
+    return _pi_description(match.group(1)) is not None
 
 
 def _pi_manifests(base: Path) -> list[Path]:
@@ -953,10 +1032,9 @@ def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) ->
     base = _catalog_base(group[0])
     if base is not None:
         if _pi_skills_mode(base) is not None:
-            discovered = _pi_manifests(base)
-            if discovered:
-                # pi's own discovery: every loose .md file it loads is its own skill
-                return Catalog.of(discovered, base, manifests)
+            # pi's own discovery: every loose .md file it loads is its own skill;
+            # an empty census stands, ignore rules may exclude everything.
+            return Catalog.of(_pi_manifests(base), base, manifests)
         return Catalog.of(_find_skills(base) or group, base, manifests)
     return Catalog.of(
         group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests
@@ -988,7 +1066,16 @@ def facts_for(
         catalogs.update(dict.fromkeys(group, _catalog_of(group, explicit)))
     user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
     user_skills: dict[Path, dict[Path, str]] = {}
-    facts = {skill: skill_facts(skill, catalogs[skill], explicit.get(skill.resolve())) for skill in skills}
+    # Canonical-catalog name clashes for non-pi harnesses sharing a pi-mode folder.
+    canonical: dict[Path, Catalog] = {}
+    for base_, members in groups.items():
+        if base_ is not None and _pi_skills_mode(base_) is not None:
+            canon = Catalog.of(_find_skills(base_) or members, base_, explicit)
+            canonical.update(dict.fromkeys(members, canon))
+    facts = {
+        skill: skill_facts(skill, catalogs[skill], explicit.get(skill.resolve()), canonical.get(skill))
+        for skill in skills
+    }
     for skill_facts_ in facts.values():
         skill_facts_["user_copies"] = _user_copies(skill_facts_, user_skills, user_roots)
     return facts
@@ -1049,6 +1136,11 @@ def _utf16_units(value: Any) -> int:
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
+    dropped_when = listing.get("dropped_when")
+    if dropped_when and facts.get(dropped_when):
+        # The harness never loaded this file (unparseable or undiscovered):
+        # nothing is listed at all, and no invocation works either.
+        return {"mode": "dropped", "text": ""}
     hidden_when = listing.get("hidden_when")
     if hidden_when and facts.get(hidden_when):
         # The harness omits the skill from the model list entirely; the explicit

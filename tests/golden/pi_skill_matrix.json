@@ -1,5 +1,5 @@
 {
-  "generator": "pi-probe.mjs",
+  "generator": "generate_pi_skill_matrix.mjs",
   "pi_version": "1.6.0",
   "cases": [
     {
@@ -315,6 +315,102 @@
           "description": "Use when testing ignores.",
           "disableModelInvocation": false,
           "filePath": "check/skill.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-first-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-explicit-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "desc-yes-plain",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "dy",
+          "description": "yes",
+          "disableModelInvocation": false,
+          "filePath": "skills/dy/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "desc-true-plain",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": [
+        {
+          "type": "warning",
+          "message": "description is required",
+          "path": "<root>/skills/dt/SKILL.md"
+        }
+      ]
+    },
+    {
+      "id": "dup-desc-keys-loose",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "ok",
+          "description": "fine",
+          "disableModelInvocation": false,
+          "filePath": "skills/ok.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-all-empty-census",
+      "pi_version": "1.6.0",
+      "skills": [],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-order-probe",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-seq-single",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
         }
       ],
       "diagnostics": []

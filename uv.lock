@@ -1,5 +1,5 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.12, <3.15"
 resolution-markers = [
     "python_full_version >= '3.14' and sys_platform == 'win32'",
@@ -2630,6 +2630,7 @@ dependencies = [
     { name = "jinja2" },
     { name = "markdown-it-py" },
     { name = "packaging" },
+    { name = "pathspec" },
     { name = "pydantic" },
     { name = "pyyaml" },
     { name = "regex" },
@@ -2729,6 +2730,7 @@ requires-dist = [
     { name = "oauthlib", marker = "extra == 'tier3'", specifier = ">=4.0.1" },
     { name = "openai", marker = "extra == 'llm'", specifier = ">=2.21.0" },
     { name = "packaging", specifier = ">=24" },
+    { name = "pathspec", specifier = ">=0.12,<2" },
     { name = "pip-audit", marker = "extra == 'security'", specifier = ">=2.10.0" },
     { name = "playwright", marker = "extra == 'dev'", specifier = "==1.65.2" },
     { name = "pydantic", specifier = ">=2.11.0" },

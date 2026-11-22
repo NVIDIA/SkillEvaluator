@@ -159,6 +159,7 @@ _LISTING = {
     "cut": "cut to {limit} chars",
     "name_only": "name only",
     "dropped": "not listed",
+    "hidden": "hidden (not in the model list)",
     "shortened": "shortened (over list budget)",
 }
 

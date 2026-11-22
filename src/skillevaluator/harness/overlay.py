@@ -14,6 +14,7 @@ from itertools import groupby
 from pathlib import Path
 from typing import Any
 
+import pathspec
 import yaml
 
 from skillevaluator.constants import (
@@ -316,33 +317,102 @@ def _is_true(value: Any) -> bool:
 def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
     """Resolve ``key`` at the top level the way pi 1.6.0's parser does (eemeli/yaml, YAML 1.2 core).
 
-    Merge keys (``<<``, tagged or not) stay an ordinary key — eemeli/yaml does
-    not resolve them, so a merged copy never applies — and only the top level
-    is read: pi never looks at a ``metadata`` copy. Returns ``None`` when the
-    top level carries no such key, ``False`` when it does but is not pi's
-    plain or ``!!bool``-tagged ``true``; the last duplicate wins.
+    An implicit ``<<`` stays an ordinary key — eemeli/yaml does not resolve it —
+    but an explicitly tagged ``!!merge`` key merges its mapping, and an explicit
+    top-level key still beats a merged copy. Only the top level is read: pi
+    never looks at a ``metadata`` copy. Returns ``None`` when the key is
+    absent, ``False`` when present but not pi's ``true``; the last duplicate wins.
     """
-    from yaml.nodes import MappingNode, ScalarNode
+    from yaml.events import (
+        AliasEvent,
+        MappingEndEvent,
+        MappingStartEvent,
+        ScalarEvent,
+        SequenceEndEvent,
+        SequenceStartEvent,
+    )
 
+    # Raw parser events keep what the composer erases: an explicit tag on a
+    # plain scalar (!!str true stays a string) and on the merge key itself.
     try:
-        # BaseLoader keeps every scalar a string (with .style telling plain vs
-        # quoted) and compose() already resolves anchors and aliases to nodes.
-        document = yaml.compose(fm_yaml, Loader=yaml.BaseLoader)
+        events = list(yaml.parse(fm_yaml))
     except (yaml.YAMLError, RecursionError):
         return None  # unparseable frontmatter is reported by its own finding
-    if not isinstance(document, MappingNode):
+    anchors: dict[str, tuple] = {}
+
+    def walk(index: int) -> tuple[tuple, int]:
+        event = events[index]
+        index += 1
+        if isinstance(event, ScalarEvent):
+            node = ("scalar", event)
+            if event.anchor:
+                anchors[event.anchor] = node
+            return node, index
+        if isinstance(event, AliasEvent):
+            return ("alias", event.anchor), index
+        mapping = isinstance(event, MappingStartEvent)
+        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor)
+        if event.anchor:
+            anchors[event.anchor] = node
+        end = MappingEndEvent if mapping else SequenceEndEvent
+        while not isinstance(events[index], end):
+            if mapping:
+                key_node, index = walk(index)
+            value_node, index = walk(index)
+            node[1].append((key_node, value_node) if mapping else value_node)
+        return node, index + 1
+
+    try:
+        pos = 0
+        while pos < len(events) and not isinstance(
+            events[pos], (MappingStartEvent, SequenceStartEvent, ScalarEvent, AliasEvent)
+        ):
+            pos += 1
+        root, _ = walk(pos)
+    except (IndexError, RecursionError, yaml.YAMLError):
+        return None
+    if root[0] != "mapping":
         return None
 
+    def scalar_bool(event: ScalarEvent) -> bool:
+        if event.tag == "tag:yaml.org,2002:bool":
+            # An explicit !!bool resolves even a quoted scalar.
+            return event.value in ("true", "True", "TRUE")
+        if event.style is not None or event.tag is not None:
+            return False  # quoted, or explicitly tagged (e.g. !!str): a string
+        return event.value in ("true", "True", "TRUE")  # plain scalar, core schema
+
+    def node_bool(node: tuple) -> bool:
+        # An alias resolves to its anchored node the way pi's parser does.
+        target = node if node[0] == "scalar" else anchors.get(node[1]) if node[0] == "alias" else None
+        return bool(target and target[0] == "scalar" and scalar_bool(target[1]))
+
     value: bool | None = None
-    for key_node, value_node in document.value:
-        if isinstance(key_node, ScalarNode) and key_node.value == key:
-            value = (
-                isinstance(value_node, ScalarNode)
-                and value_node.value in ("true", "True", "TRUE")
-                # An explicit !!bool tag resolves a quoted scalar in pi's core
-                # schema too; any other quoted or plain spelling stays a string.
-                and (value_node.style is None or value_node.tag == "tag:yaml.org,2002:bool")
-            )
+    merged: list[tuple] = []
+    for key_node, value_node in root[1]:
+        event = key_node[1]
+        if not isinstance(event, ScalarEvent):
+            continue
+        if event.tag == "tag:yaml.org,2002:merge":
+            merged.append(value_node)
+        elif event.value == key and event.tag in (None, "tag:yaml.org,2002:str"):
+            value = node_bool(value_node)
+    if value is None:
+        for candidate in merged:
+            target = candidate if candidate[0] == "mapping" else anchors.get(candidate[1])
+            if not target or target[0] != "mapping":
+                continue
+            for key_node, value_node in target[1]:
+                event = key_node[1]
+                if (
+                    isinstance(event, ScalarEvent)
+                    and event.value == key
+                    and event.tag in (None, "tag:yaml.org,2002:str")
+                ):
+                    value = node_bool(value_node)
+                    break
+            if value is not None:
+                break
     return value
 
 
@@ -561,6 +631,10 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
     # so the skill is dropped and hidden findings must not suggest /skill:name.
     pi_dropped = duplicate_keys or tab_indent
     pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
+    # A file pi never discovers cannot hide the skill or need a value fix.
+    pi_not_discovered = actual_manifest_name != "SKILL.md" and (
+        "SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path)
+    )
     duplicates = catalog.duplicates(manifest, name) if catalog else []
     lookalikes = catalog.lookalikes(manifest) if catalog else []
     return {
@@ -570,8 +644,7 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
-        "pi_manifest_ignored": actual_manifest_name != "SKILL.md"
-        and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path)),
+        "pi_manifest_ignored": pi_not_discovered,
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -600,9 +673,10 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
-        "pi_disable_model_invocation": pi_hidden is True and not pi_dropped,
+        "pi_disable_model_invocation": pi_hidden is True and not pi_dropped and not pi_not_discovered,
         "pi_hidden_value_invalid": pi_hidden is False
         and not pi_dropped
+        and not pi_not_discovered
         and _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
@@ -776,49 +850,112 @@ def _catalog_base(skill: Path) -> Path | None:
     return parent if parent.name == "skills" else None
 
 
-def _pi_skills_root(base: Path) -> bool:
-    """Whether *base* is a .pi skills root pi scans with its own discovery (loose .md files are skills too)."""
+def _pi_skills_mode(base: Path) -> str | None:
+    """How pi 1.6.0 scans *base*: "pi" roots keep loose .md files at the root, .agents/skills keeps them only nested."""
     posix = base.absolute().as_posix()
-    return posix.endswith("/.pi/skills") or posix.endswith("/.pi/agent/skills")
+    if posix.endswith("/.pi/skills") or posix.endswith("/.pi/agent/skills"):
+        return "pi"
+    if posix.endswith("/.agents/skills"):
+        return "agents"
+    return None
+
+
+PI_IGNORE_FILES = (".gitignore", ".ignore", ".fdignore")
+
+
+def _pi_add_ignore_line(patterns: list[str], line: str, prefix: str) -> None:
+    """Add one .gitignore line the way pi's ignore setup does (dist/core/skills.js addIgnoreRules)."""
+    trimmed = line.strip()
+    if not trimmed or (trimmed.startswith("#") and not trimmed.startswith("\\#")):
+        return
+    pattern, negated = line, False
+    if pattern.startswith("!"):
+        negated, pattern = True, pattern[1:]
+    elif pattern.startswith("\\!"):
+        pattern = pattern[1:]
+    pattern = pattern.removeprefix("/")
+    patterns.append(("!" if negated else "") + prefix + pattern)
+
+
+def _pi_loadable(manifest: Path) -> bool:
+    """Whether pi loads *manifest* as a skill: parseable frontmatter carrying a description."""
+    try:
+        raw = manifest.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return False
+    match = FRONTMATTER_PATTERN.match(raw)
+    if match is None:
+        return False
+    try:
+        data = load_bounded_yaml(match.group(1), last_key_wins=True)
+    except (StructuredDataError, yaml.YAMLError, RecursionError, ValueError):
+        return False
+    description = data.get("description") if isinstance(data, dict) else None
+    return isinstance(description, str) and description.strip() != ""
 
 
 def _pi_manifests(base: Path) -> list[Path]:
-    """Manifest files pi 1.6.0 discovers under a skills root (dist/core/skills.js).
+    """Manifest files pi 1.6.0 accepts under a skills root (dist/core/skills.js).
 
     A folder short-circuits on the exact ``SKILL.md`` spelling — a differently
-    cased sibling is invisible to it; without one, loose ``.md`` files load
-    only at the scanned root and subfolders recurse looking for ``SKILL.md``.
+    cased sibling is invisible to it — and without one, loose ``.md`` files load
+    at the scanned root (".pi" roots) or only nested (``.agents/skills``),
+    while subfolders recurse. Entries matched by the root's ignore files are
+    skipped, and only files whose frontmatter parses with a description load.
     """
+    mode = _pi_skills_mode(base) or "pi"
 
-    def scan(folder: Path, root_level: bool) -> list[Path]:
+    def scan(folder: Path, root_level: bool, patterns: list[str]) -> list[Path]:
         try:
             children = sorted(folder.iterdir())
         except OSError:
             return []
+        prefix = "" if folder == base else folder.relative_to(base).as_posix() + "/"
+        for name in PI_IGNORE_FILES:
+            path = folder / name
+            if path.is_file():
+                try:
+                    lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                except OSError:
+                    continue
+                for line in lines:
+                    _pi_add_ignore_line(patterns, line, prefix)
+        spec = pathspec.GitIgnoreSpec.from_lines(patterns)
+
+        def ignored(child: Path, directory: bool) -> bool:
+            rel = child.relative_to(base).as_posix()
+            return bool(spec.match_file(rel + "/" if directory else rel))
+
         # pi compares entry names exactly, so on a case-insensitive filesystem
         # skill.md is not the canonical spelling here.
-        if any(child.name == "SKILL.md" for child in children):
-            return [folder / "SKILL.md"]
+        canonical = next((c for c in children if c.name == "SKILL.md"), None)
+        if canonical is not None and canonical.is_file() and not ignored(canonical, False):
+            return [canonical] if _pi_loadable(canonical) else []
         found: list[Path] = []
         for child in children:
             if child.name.startswith(".") or child.name == "node_modules":
                 continue
-            if child.is_dir():
-                found.extend(scan(child, False))
-            elif root_level and child.is_file() and child.name.endswith(".md"):
+            is_dir = child.is_dir()
+            if ignored(child, is_dir):
+                continue
+            if is_dir:
+                found.extend(scan(child, False, patterns))
+            elif (
+                child.is_file() and child.name.endswith(".md") and (mode == "pi") == root_level and _pi_loadable(child)
+            ):
                 found.append(child)
         return found
 
-    return scan(base, True)
+    return scan(base, True, [])
 
 
 def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) -> Catalog:
     base = _catalog_base(group[0])
     if base is not None:
-        if _pi_skills_root(base):
+        if _pi_skills_mode(base) is not None:
             discovered = _pi_manifests(base)
             if discovered:
-                # pi's own discovery: every loose root .md file is its own skill
+                # pi's own discovery: every loose .md file it loads is its own skill
                 return Catalog.of(discovered, base, manifests)
         return Catalog.of(_find_skills(base) or group, base, manifests)
     return Catalog.of(

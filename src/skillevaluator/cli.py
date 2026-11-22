@@ -3268,7 +3268,9 @@ def harness_check(
         # the canonical sibling.
         selected = (
             requested_file
-            if requested_file is not None and requested_file.parent.resolve() == skill_path.resolve()
+            if requested_file is not None
+            and requested_file.name.casefold() == "skill.md"
+            and requested_file.parent.resolve() == skill_path.resolve()
             else None
         )
         if "SKILL.md" not in names and any(n.casefold() == "skill.md" for n in names):

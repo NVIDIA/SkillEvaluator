@@ -45,6 +45,7 @@ dependencies = [
     "jinja2>=3.1",
     "markdown-it-py>=4.2,<5",
     "packaging>=24",
+    "pathspec>=0.12,<2",
     "pydantic>=2.11.0",
     "pyyaml>=6.0",
     # Dataset-authored signal patterns require a per-match timeout.

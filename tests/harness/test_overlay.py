@@ -892,7 +892,7 @@ def test_harness_check_schema_diagnostics_follow_the_selected_manifest(tmp_path:
     skill = tmp_path / "proj" / ".pi" / "skills" / "demo"
     skill.mkdir(parents=True)
     broken = "---\nname: demo\ndescription: Use when testing [unclosed\n---\nBody\n"
-    good = "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n"
+    good = "---\nname: demo\ndescription: Use when testing casing.\n---\n# Demo\nBody\n"
     (skill / "SKILL.md").write_text(broken, encoding="utf-8")
     (skill / "Skill.md").write_text(good, encoding="utf-8")
     if (skill / "Skill.md").samefile(skill / "SKILL.md"):
@@ -967,6 +967,126 @@ def test_hidden_pi_skills_leave_the_model_list_empty(tmp_path: Path):
 
     assert rows["pi"]["listed"] == {"mode": "hidden", "text": ""}
     assert "PI-HIDDEN" in _ids(rows, "pi")  # explicit /skill:name invocation is still reported
+
+
+def test_pi_hidden_keeps_explicit_tag_semantics(tmp_path: Path):
+    """An explicit !!str tag keeps the value a string (pi stays visible), while an
+    explicitly tagged !!merge key resolves its mapping and hides the skill."""
+    skill = tmp_path / "skills" / "demo-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Use when checking harness compatibility.\n"
+        "disable-model-invocation: !!str true\n"
+        f"---\n{BODY}",
+        encoding="utf-8",
+    )
+    rows = _rows(skill)
+
+    assert "PI-HIDDEN" not in _ids(rows, "pi")  # pi keeps the string value visible
+    assert "PI-HIDDEN-INVALID" in _ids(rows, "pi")  # other parsers read a truthy string
+
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Use when checking harness compatibility.\n"
+        "metadata: &defaults\n"
+        "  disable-model-invocation: true\n"
+        "!!merge <<: *defaults\n"
+        f"---\n{BODY}",
+        encoding="utf-8",
+    )
+    rows = _rows(skill)
+
+    assert "PI-HIDDEN" in _ids(rows, "pi")  # an explicit !!merge resolves in pi's parser
+    assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi")
+
+
+def test_hidden_listing_mode_renders_in_verbose_reports(tmp_path: Path):
+    """The verbose entry points must render the hidden listing mode instead of crashing (KeyError)."""
+    skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill), "--harness", "pi", "--verbose", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "hidden (not in the model list)" in result.output
+
+    result = CliRunner().invoke(
+        cli, ["validate", str(skill), "--tiers", "1", "--checks", "harness", "--harness", "pi", "--verbose"]
+    )
+    assert result.exit_code == 0, result.output
+    assert "hidden (not in the model list)" in result.output
+
+
+def test_harness_check_ignores_an_explicit_non_manifest_file(tmp_path: Path):
+    """Passing a README.md sibling to harness-check keeps the canonical skill's row
+    and its schema diagnostics; the README is not a manifest any harness selects."""
+    skill = tmp_path / "proj" / ".pi" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\n---\n# Demo\nBody\n", encoding="utf-8"
+    )
+    (skill / "README.md").write_text("---\nname: broken: [unclosed\n---\nBody\n", encoding="utf-8")
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill / "README.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    assert "Tier 1 schema also fails" not in result.output
+    assert "README" not in result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    assert rows[0]["status"] == "loads"  # the canonical SKILL.md row
+
+
+def test_pi_census_counts_only_files_pi_loads(tmp_path: Path):
+    """Files the root's ignore rules exclude, or loose files without a description,
+    never load in pi, so they cannot collide with the valid skill."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / ".gitignore").write_text("ignored.md\n", encoding="utf-8")
+    (root / "ignored.md").write_text(
+        "---\nname: demo\ndescription: Use when testing collisions.\n---\nB\n", encoding="utf-8"
+    )
+    (root / "skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing collisions.\n---\nB\n", encoding="utf-8"
+    )
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(root / "skill.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    assert "PI-NAME-COLLISION" not in [f["id"] for f in rows[0]["findings"]]
+
+    (root / ".gitignore").unlink()
+    (root / "ignored.md").unlink()
+    (root / "nodesc.md").write_text("---\nname: demo\n---\nB\n", encoding="utf-8")
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(root / "skill.md"), "--harness", "pi", "--json", str(tmp_path / "h2.json")]
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h2.json").read_text())["harness_compatibility"].values()))
+    assert "PI-NAME-COLLISION" not in [f["id"] for f in rows[0]["findings"]]
+
+
+def test_pi_census_includes_nested_agents_root_manifests(tmp_path: Path):
+    """pi loads loose .md files nested under .agents/skills; two same-named ones collide."""
+    folder = tmp_path / "proj" / ".agents" / "skills" / "demo"
+    folder.mkdir(parents=True)
+    for name in ("aaa.md", "skill.md"):
+        (folder / name).write_text(
+            f"---\nname: demo\ndescription: Use when testing collisions ({name}).\n---\nB\n", encoding="utf-8"
+        )
+
+    result = CliRunner().invoke(
+        cli,
+        ["harness-check", str(folder / "skill.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")],
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    collision = next(f for f in rows[0]["findings"] if f["id"] == "PI-NAME-COLLISION")
+    assert "aaa.md" in collision["message"]
 
 
 def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):

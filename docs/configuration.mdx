@@ -196,6 +196,37 @@ export OPENAI_API_KEY='sk-...'
 ```
 </Note>
 
+## Provider recipes
+
+Any service that speaks the OpenAI Chat Completions and Embeddings APIs works through the `openai-compatible` provider; SkillEvaluator does not need a named entry for it. Set the base URL, the key and the exact catalog IDs the service uses. These recipes cover services users have asked about; the same four variables apply to any other gateway or aggregator.
+
+<Tabs>
+  <Tab title="AI/ML API" language="aimlapi">
+    ```bash title="AI/ML API through openai-compatible"
+    export SKILL_EVAL_LLM_PROVIDER=openai-compatible
+    export SKILL_EVAL_LLM_BASE_URL=https://api.aimlapi.com/v1
+    export SKILL_EVAL_LLM_API_KEY='your-aimlapi-key'
+    export SKILL_EVAL_LLM_MODEL=openai/gpt-6.1-sol
+    export SKILL_EVAL_EMBEDDING_MODEL=openai/text-embedding-3-small
+    ```
+
+    Model IDs are vendor-prefixed in the AI/ML API catalog (`openai/...`, `anthropic/...`); use them as written. `skillevaluator doctor --verify-models` lists what the key can reach.
+  </Tab>
+  <Tab title="Self-hosted or other gateway" language="gateway">
+    ```bash title="Generic OpenAI-compatible gateway"
+    export SKILL_EVAL_LLM_PROVIDER=openai-compatible
+    export SKILL_EVAL_LLM_BASE_URL='https://gateway.example.com/v1'
+    export SKILL_EVAL_LLM_API_KEY='your-gateway-key'
+    export SKILL_EVAL_LLM_MODEL='exact-catalog-id'
+    export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
+    ```
+
+    If the gateway needs a routing header, set `SKILL_EVAL_LLM_EXTRA_HEADERS` (see [Environment variables](/skills/skillevaluator/environment-variables)). For a server with no embeddings endpoint, point `SKILL_EVAL_EMBEDDING_PROVIDER` and `SKILL_EVAL_EMBEDDING_BASE_URL` at one that has it.
+  </Tab>
+</Tabs>
+
+Tier 3 agents inherit the same URL and key with the gateway defaults described in the OpenAI-compatible tab above; override agent models with `--agent-model` when the gateway's catalog IDs differ.
+
 ## Fully local setup
 
 The `openai-compatible` provider accepts any local OpenAI-compatible server (Ollama, vLLM, llama.cpp, NVIDIA NIM), so Tier 2 can run with no external calls at all. Example recipe using Ollama in Docker:

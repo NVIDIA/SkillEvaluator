@@ -1368,9 +1368,10 @@ def test_rubric_eval_three_skill_folder_mixed_counts_each_member(
     from skillevaluator.validators.rubric_eval import RubricJudge
 
     monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
-    # A forced color terminal leaves Rich's cursor restore on the same line as
-    # the first workflow command. The annotation has to start the line.
-    monkeypatch.delenv("FORCE_COLOR", raising=False)
+    # A forced color terminal must not leave Rich's progress escapes on the
+    # same line as the first workflow command. The annotation has to start the line.
+    monkeypatch.setenv("FORCE_COLOR", "1")
+    monkeypatch.setenv("GITHUB_ACTIONS", "true")
     folder = _rubric_skill_folder(tmp_path)
     replies = [_rubric_reply(9), _rubric_reply(8), _rubric_reply(5)]
 
@@ -1378,6 +1379,11 @@ def test_rubric_eval_three_skill_folder_mixed_counts_each_member(
         cli_result = CliRunner().invoke(cli, ["rubric-eval", str(folder), "-r", "github"])
 
     assert cli_result.exit_code == 1, cli_result.output
+    command_lines = [
+        line for line in cli_result.output.splitlines() if any(c in line for c in ("::error", "::warning", "::notice"))
+    ]
+    assert command_lines
+    assert all(line.startswith(("::error", "::warning", "::notice")) for line in command_lines), command_lines
     errors = [line for line in _commands(cli_result.output) if line.startswith("::error ")]
     assert len(errors) == 1
     assert _runner_properties(errors[0])["file"] == "charlie/SKILL.md"

@@ -708,6 +708,10 @@ def emit_reports(
             catalog_root=catalog_root,
             report_formats=report_formats,
         )
+        if console.is_terminal:
+            # A stopped Rich status leaves its cursor-restore escapes without a newline;
+            # workflow commands are only parsed at the start of a line.
+            console.line()
         github_reporter.print_all(results)
 
     html_tabs = _derive_html_tabs(results)

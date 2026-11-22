@@ -342,6 +342,31 @@ def test_confirmed_failure_with_incomplete_scan_emits_one_gate_error() -> None:
     assert any("incomplete/semgrep" in line for line in _commands(covered_text) if line.startswith("::warning"))
 
 
+def test_gate_error_names_the_blocking_finding_before_a_coverage_error() -> None:
+    """A coverage error recorded first stays a warning; the gate error names the finding."""
+    result = ValidationResult(validator_name="Code Risk Analysis")
+    result.add_error("bandit could not read scripts/broken.py")
+    result.mark_scan_incomplete("bandit")
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.MEDIUM,
+            check_name="B307:eval",
+            message="Use of eval detected",
+            file_path="scripts/run.py",
+            line_number=4,
+        ),
+        is_error=True,
+    )
+    text = GitHubReporter().render_all([result])
+    errors = [line for line in _commands(text) if line.startswith("::error")]
+    assert len(errors) == 1
+    assert "title=Code Risk Analysis/gate_failure" in errors[0]
+    assert "Use of eval detected" in errors[0]
+    assert "could not read" not in errors[0]
+    assert any("incomplete/bandit" in line for line in _commands(text) if line.startswith("::warning"))
+
+
 def test_advisory_failure_keeps_required_incomplete_scan() -> None:
     scan = ValidationResult(validator_name="Security Scan")
     scan.mark_scan_incomplete("skillspector")

@@ -25,7 +25,7 @@ from typing import TYPE_CHECKING
 
 from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
 from skillevaluator.reporting.base import ReporterBase, get_skip_reason, is_cleanly_skipped, passes_required_gate
-from skillevaluator.reporting.run_status import Status, resolve_run_status, result_status
+from skillevaluator.reporting.run_status import Status, finding_blocks, resolve_run_status, result_status
 from skillevaluator.reporting.sarif_reporter import (
     _finding_severity_value,
     _positive_start_line,
@@ -399,6 +399,11 @@ def _title(validator: str, check: str) -> str:
 
 
 def _failure_reason(result: ValidationResult) -> str:
+    # A blocking finding is the gate's reason. Scanners can record coverage
+    # errors before findings, and those already surface as incomplete warnings.
+    blocking = next((finding for finding in result.findings if finding_blocks(result, finding)), None)
+    if blocking is not None:
+        return blocking.to_legacy_string()
     if result.errors:
         return result.errors[0]
     metadata = result.metadata if isinstance(result.metadata, dict) else {}

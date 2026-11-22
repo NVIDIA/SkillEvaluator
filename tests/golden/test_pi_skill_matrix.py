@@ -11,11 +11,24 @@ against what the pinned loader actually did.
 """
 
 import json
+import shutil
+import tempfile
 from pathlib import Path
 
 import pytest
 
 from skillevaluator.harness.overlay import _pi_manifests, _pi_top_level_bool
+
+
+def _fs_case_sensitive() -> bool:
+    probe = Path(tempfile.mkdtemp())
+    try:
+        (probe / "A").write_text("a")
+        (probe / "a").write_text("b")
+        return (probe / "A").read_text() == "a"
+    finally:
+        shutil.rmtree(probe, ignore_errors=True)
+
 
 GOLDEN_DIR = Path(__file__).resolve().parent
 GOLDEN = json.loads((GOLDEN_DIR / "pi_skill_matrix.json").read_text())
@@ -55,6 +68,8 @@ def golden_expected_files(case: dict) -> list[str]:
 @pytest.mark.parametrize("case", GOLDEN["cases"], ids=lambda c: c["id"])
 def test_pi_discovery_matches_golden(tmp_path, case):
     """Manifests our model selects == manifests the real pi 1.6.0 loader selected."""
+    if case["id"] == "skillmd-dir-no-loose" and not _fs_case_sensitive():
+        pytest.skip("fixture needs a case-sensitive filesystem")
     root = build_case(tmp_path, case["id"])
     ours = sorted(p.relative_to(root).as_posix() for p in _pi_manifests(root))
     assert ours == golden_expected_files(case)
@@ -67,6 +82,8 @@ def test_pi_discovery_matches_golden(tmp_path, case):
 )
 def test_pi_hidden_flag_matches_golden(tmp_path, case):
     """disable-model-invocation as pi resolves it == _pi_top_level_bool on the same frontmatter."""
+    if case["id"] == "skillmd-dir-no-loose" and not _fs_case_sensitive():
+        pytest.skip("fixture needs a case-sensitive filesystem")
     skill = next(s for s in case["skills"] if s["filePath"].endswith("SKILL.md"))
     fm = (build_case(tmp_path, case["id"]) / strip_target(case, skill["filePath"])).read_text().split("---")[1]
     ours = _pi_top_level_bool(fm, "disable-model-invocation")

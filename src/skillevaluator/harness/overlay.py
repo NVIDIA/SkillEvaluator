@@ -199,6 +199,42 @@ def _pi_manifest_ignored(skill_path: Path) -> bool:
     return False
 
 
+def _pi_ignored_by_rules(skill_path: Path) -> bool:
+    """Whether pi's ignore files (matched case-insensitively) exclude this path under a pi root."""
+    try:
+        posix = skill_path.absolute().as_posix()
+        roots = [root for root in _PI_ROOT_FAMILIES if "/" + root + "/" in posix + "/" or posix.endswith("/" + root)]
+        if not roots:
+            return False
+        root = max(roots, key=len)
+        base = Path(posix[: posix.rindex(root) + len(root)])
+        folders = []
+        folder = skill_path.absolute().parent
+        while True:
+            folders.append(folder)
+            if folder in (base, folder.parent):
+                break
+            folder = folder.parent
+        patterns: list[str] = []
+        for folder in reversed(folders):
+            prefix = "" if folder == base else folder.relative_to(base).as_posix() + "/"
+            for name in PI_IGNORE_FILES:
+                path = folder / name
+                if path.is_file():
+                    try:
+                        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
+                    except OSError:
+                        continue
+                    for line in lines:
+                        _pi_add_ignore_line(patterns, line, prefix)
+        if not patterns:
+            return False
+        spec = pathspec.GitIgnoreSpec.from_lines(patterns)
+        return bool(spec.match_file(skill_path.absolute().relative_to(base).as_posix().lower()))
+    except (ValueError, OSError):
+        return False  # outside any recognizable pi root
+
+
 # OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
 _OPENCLAW_CJK = (
     (3, ((0xB7, 0xB7), (0x3000, 0x319F), (0x4E00, 0x9FA5), (0xAC00, 0xD7AF), (0xFF01, 0xFF60))),
@@ -352,20 +388,29 @@ def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
         if not isinstance(event, ScalarEvent):
             continue
         if event.tag == "tag:yaml.org,2002:merge":
-            merged.append(value_node)
+            # The value's own tag tells the placements apart: `<<: !!merge [...]`
+            # (tag on value) warns and never merges sequences; `!!merge <<: [...]`
+            # (tag on key) merges entries first-wins (verified against pi 1.6.0).
+            tag = value_node[3] if len(value_node) > 3 else None
+            merged.append((value_node, tag != "tag:yaml.org,2002:merge"))
         elif event.value == key and event.tag in (None, "tag:yaml.org,2002:str"):
             value = node_bool(value_node)
     if value is None:
         # A !!merge value may be one mapping or an alias to it. A sequence is
         # NOT merged: pi's parser warns "merge used for seq collection" and
         # keeps the key literal (verified against 1.6.0), so only mappings count.
-        for candidate in merged:
+        stack = list(reversed(merged))
+        while stack and value is None:
+            candidate, seq_ok = stack.pop()
+            if candidate[0] == "alias":
+                candidate = anchors.get(candidate[1]) or ("missing",)
             if candidate[0] == "sequence":
+                if seq_ok:
+                    stack.extend((item, True) for item in reversed(candidate[1]))
                 continue
-            target = candidate if candidate[0] == "mapping" else anchors.get(candidate[1])
-            if not target or target[0] != "mapping":
+            if candidate[0] != "mapping":
                 continue
-            for key_node, value_node in target[1]:
+            for key_node, value_node in candidate[1]:
                 event = key_node[1]
                 if (
                     isinstance(event, ScalarEvent)
@@ -599,17 +644,20 @@ def skill_facts(
     # so the skill is dropped and hidden findings must not suggest /skill:name.
     pi_dropped = duplicate_keys or tab_indent
     # The description as pi 1.6.0 resolves it (YAML 1.2 core: plain yes/on are strings).
-    pi_description = _pi_description(fm_yaml) if fm_yaml else None
+    pi_fm = FRONTMATTER_PATTERN.match(text)
+    pi_description = _pi_description(pi_fm.group(1)) if pi_fm else None
     pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
     # A file pi never discovers cannot hide the skill or need a value fix.
-    pi_not_discovered = actual_manifest_name != "SKILL.md" and (
-        "SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path)
+    pi_not_discovered = _pi_ignored_by_rules(skill_path) or (
+        actual_manifest_name != "SKILL.md"
+        and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path))
     )
     duplicates = catalog.duplicates(manifest, name) if catalog else []
     # Non-pi harnesses never discover pi's loose manifests: their name clashes
     # come from the canonical catalog (SKILL.md folders) only.
     canonical_dups = canonical.duplicates(manifest, name) if canonical is not None else duplicates
     lookalikes = catalog.lookalikes(manifest) if catalog else []
+    listed_catalog = canonical if canonical is not None else catalog
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
@@ -671,15 +719,18 @@ def skill_facts(
         "uses_arguments_placeholder": "$ARGUMENTS" in body,
         "uses_claude_skill_dir": "${CLAUDE_SKILL_DIR}" in body,
         **_bundle_facts(skill_path, manifest),
-        "catalog_size": catalog.size if catalog else 0,
-        "catalog_desc_chars": catalog.desc_chars if catalog else 0,
+        # Listing budgets follow what the harness actually scans: the canonical
+        # catalog, not pi's census (which also holds pi-only loose manifests).
+        "catalog_size": listed_catalog.size if listed_catalog else 0,
+        "catalog_desc_chars": listed_catalog.desc_chars if listed_catalog else 0,
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
         "duplicate_name": bool(canonical_dups),
         "duplicate_paths": ", ".join(canonical_dups[:3]),
         "pi_duplicate_name": bool(duplicates),
         "pi_duplicate_paths": ", ".join(duplicates[:3]),
+        "pi_description_text": pi_description or "",
         "pi_description_invalid": pi_description is None,
-        "pi_not_loaded": pi_dropped or pi_not_discovered,
+        "pi_not_loaded": pi_dropped or pi_not_discovered or pi_description is None,
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
 
@@ -850,8 +901,8 @@ def _pi_add_ignore_line(patterns: list[str], line: str, prefix: str) -> None:
         negated, pattern = True, pattern[1:]
     elif pattern.startswith("\\!"):
         pattern = pattern[1:]
-    pattern = pattern.removeprefix("/")
-    patterns.append(("!" if negated else "") + prefix + pattern)
+    pattern = pattern.removeprefix("/").lower()
+    patterns.append(("!" if negated else "") + prefix.lower() + pattern)
 
 
 # Plain scalars pi's parser (eemeli/yaml, YAML 1.2 core) resolves away from a
@@ -896,7 +947,7 @@ def _pi_frontmatter(fm_yaml: str, *, reject_duplicate_keys: bool = False):
         if isinstance(event, AliasEvent):
             return ("alias", event.anchor), index
         mapping = isinstance(event, MappingStartEvent)
-        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor)
+        node: tuple = ("mapping" if mapping else "sequence", [], event.anchor, event.tag)
         if event.anchor:
             anchors[event.anchor] = node
         end = MappingEndEvent if mapping else SequenceEndEvent
@@ -1002,7 +1053,7 @@ def _pi_manifests(base: Path) -> list[Path]:
         spec = pathspec.GitIgnoreSpec.from_lines(patterns)
 
         def ignored(child: Path, directory: bool) -> bool:
-            rel = child.relative_to(base).as_posix()
+            rel = child.relative_to(base).as_posix().lower()
             return bool(spec.match_file(rel + "/" if directory else rel))
 
         # pi compares entry names exactly, so on a case-insensitive filesystem

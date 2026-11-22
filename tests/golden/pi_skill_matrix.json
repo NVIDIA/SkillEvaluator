@@ -229,8 +229,8 @@
       "skills": [
         {
           "name": "demo",
-          "description": "Use when testing collisions.",
-          "disableModelInvocation": false,
+          "description": "Use when testing tags.",
+          "disableModelInvocation": true,
           "filePath": "SKILL.md"
         }
       ],
@@ -411,6 +411,45 @@
           "description": "merged",
           "disableModelInvocation": false,
           "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-key-tag-first-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": true,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "merge-key-tag-explicit-wins",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "mergey",
+          "description": "merged",
+          "disableModelInvocation": false,
+          "filePath": "skills/mergey/SKILL.md"
+        }
+      ],
+      "diagnostics": []
+    },
+    {
+      "id": "ignore-rule-case-insensitive",
+      "pi_version": "1.6.0",
+      "skills": [
+        {
+          "name": "zzz",
+          "description": "kept",
+          "disableModelInvocation": false,
+          "filePath": "skills/zzz.md"
         }
       ],
       "diagnostics": []

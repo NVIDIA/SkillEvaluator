@@ -292,6 +292,36 @@
       "targets": [
         "skills"
       ]
+    },
+    {
+      "id": "merge-key-tag-first-wins",
+      "files": {
+        "skills/mergey/SKILL.md": "---\na: &one\n  disable-model-invocation: true\nb: &two\n  disable-model-invocation: false\nname: mergey\ndescription: merged\n!!merge <<: [*one, *two]\n---\nBody.\n"
+      },
+      "targets": [
+        "skills"
+      ]
+    },
+    {
+      "id": "merge-key-tag-explicit-wins",
+      "files": {
+        "skills/mergey/SKILL.md": "---\na: &one\n  disable-model-invocation: true\nb: &two\n  disable-model-invocation: false\nname: mergey\ndescription: merged\n!!merge <<: [*one, *two]\ndisable-model-invocation: false\n---\nBody.\n"
+      },
+      "targets": [
+        "skills"
+      ]
+    },
+    {
+      "id": "ignore-rule-case-insensitive",
+      "files": {
+        "skills/.gitignore": "AAA.md\n",
+        "skills/aaa.md": "---\nname: aaa\ndescription: lower\n---\nB.\n",
+        "skills/AAA.md": "---\nname: AAA\ndescription: upper\n---\nB.\n",
+        "skills/zzz.md": "---\nname: zzz\ndescription: kept\n---\nB.\n"
+      },
+      "targets": [
+        "skills"
+      ]
     }
   ]
 }

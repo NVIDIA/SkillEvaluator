@@ -6,7 +6,7 @@ roots:
   user: [~/.pi/agent/skills, ~/.agents/skills]
   project_requires_trust: true
 limits: {desc_cap: none, body_cap: none}
-listing: {dropped_when: pi_not_loaded, hidden_when: pi_disable_model_invocation}
+listing: {dropped_when: pi_not_loaded, hidden_when: pi_disable_model_invocation, text_fact: pi_description_text}
 rules:
   - {id: PI-ROOT, when: "install_root not in roots", effect: not_loaded, outcome: not found, message: "pi reads project .pi/skills and .agents/skills, and user ~/.pi/agent/skills and ~/.agents/skills.", fix: "Install it under one of those skills roots.", confidence: high}
   - {id: PI-TRUST, when: "install_root in roots.project", effect: advisory, message: "Project skills load only after the project is trusted; print and JSON runs skip them unless --approve, a saved decision or defaultProjectTrust: always applies.", fix: "Install under ~/.agents/skills, or pass --approve when the project's skills are trusted.", confidence: high}

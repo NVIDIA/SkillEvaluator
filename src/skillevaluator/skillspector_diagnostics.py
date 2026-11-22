@@ -85,8 +85,7 @@ def completeness_record(completeness: dict, stage: str) -> dict:
         "ledger_exceptions": exceptions,
         "limitations": [_text(value) for value in limits[:_MAX_LIMITATIONS]],
         "omitted_exceptions": omitted_exceptions,
-        # Rows this record retains out of every row the scanner reported, so a
-        # reader can see "N of M" without summing two fields.
+        # Retained and total rows for these gaps, before any folder-level record cap.
         "ledger_rows_retained": len(exceptions),
         "ledger_rows_total": len(exceptions) + omitted_exceptions,
         "omitted_limitations": max(0, len(limits) - _MAX_LIMITATIONS),

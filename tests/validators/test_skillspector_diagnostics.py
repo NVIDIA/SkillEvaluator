@@ -269,7 +269,7 @@ def test_ledger_keeps_every_row_of_a_realistic_library_and_states_the_totals():
     assert again["ledger_rows_total"] == 50
 
 
-def test_gate_message_names_reported_rows_and_cap(monkeypatch):
+def test_gate_message_names_gap_ledger_rows_and_cap(monkeypatch):
     import skillevaluator.skillspector_diagnostics as diagnostics
 
     monkeypatch.setattr(diagnostics, "_MAX_ROWS", 2)
@@ -293,4 +293,7 @@ def test_gate_message_names_reported_rows_and_cap(monkeypatch):
     assert SecurityValidator._validate_skillspector_report(payload, 0, False, "skillspector", result)
     record = result.metadata["skillspector_completeness"]["records"][0]
     assert record["ledger_rows_retained"] == 2 and record["ledger_rows_total"] == 5
-    assert any("reported 5 ledger rows, with 3 beyond the per-record limit" in error for error in result.errors)
+    assert any(
+        "The completeness ledger for these gaps has 5 rows, with 3 beyond the per-record limit" in error
+        for error in result.errors
+    )

@@ -4669,7 +4669,7 @@ class SecurityValidator(ValidatorBase):
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
                         if diagnostic["omitted_exceptions"]:
                             message = (
-                                f"{message}. The scan reported {diagnostic['ledger_rows_total']} ledger rows, "
+                                f"{message}. The completeness ledger for these gaps has {diagnostic['ledger_rows_total']} rows, "
                                 f"with {diagnostic['omitted_exceptions']} beyond the per-record limit"
                             )
                         result.fail_gate(message)

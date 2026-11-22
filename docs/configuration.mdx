@@ -198,7 +198,7 @@ export OPENAI_API_KEY='sk-...'
 
 ## Provider recipes
 
-Any service that speaks the OpenAI Chat Completions and Embeddings APIs works through the `openai-compatible` provider; SkillEvaluator does not need a named entry for it. Set the base URL, the key and the exact catalog IDs the service uses. These recipes cover services users have asked about; the same four variables apply to any other gateway or aggregator.
+Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Completions. Tier 2 also needs an OpenAI-compatible embeddings endpoint, which can be on the same gateway or a separate service. Set the base URL, key, and model IDs for the operations you use.
 
 <Tabs>
   <Tab title="AI/ML API" language="aimlapi">
@@ -207,10 +207,10 @@ Any service that speaks the OpenAI Chat Completions and Embeddings APIs works th
     export SKILL_EVAL_LLM_BASE_URL=https://api.aimlapi.com/v1
     export SKILL_EVAL_LLM_API_KEY='your-aimlapi-key'
     export SKILL_EVAL_LLM_MODEL=openai/gpt-6.1-sol
-    export SKILL_EVAL_EMBEDDING_MODEL=openai/text-embedding-3-small
+    export SKILL_EVAL_EMBEDDING_MODEL=text-embedding-3-small
     ```
 
-    Model IDs are vendor-prefixed in the AI/ML API catalog (`openai/...`, `anthropic/...`); use them as written. `skillevaluator doctor --verify-models` lists what the key can reach.
+    Use the exact IDs from the [AI/ML API chat model card](https://aimlapi.com/models/openai-gpt-6-1-sol) and the [embeddings API reference](https://docs.aimlapi.com/api-references/embedding-models/openai/text-embedding-3-small). `skillevaluator models` lists visible chat model candidates. Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
   </Tab>
   <Tab title="Self-hosted or other gateway" language="gateway">
     ```bash title="Generic OpenAI-compatible gateway"
@@ -221,11 +221,22 @@ Any service that speaks the OpenAI Chat Completions and Embeddings APIs works th
     export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
     ```
 
-    If the gateway needs a routing header, set `SKILL_EVAL_LLM_EXTRA_HEADERS` (see [Environment variables](/skills/skillevaluator/environment-variables)). For a server with no embeddings endpoint, point `SKILL_EVAL_EMBEDDING_PROVIDER` and `SKILL_EVAL_EMBEDDING_BASE_URL` at one that has it.
+    For routing headers on host-side chat requests, use `SKILL_EVAL_LLM_EXTRA_HEADERS`. Embeddings and Tier 3 runtimes use their own provider configuration. See [Environment variables](/skills/skillevaluator/environment-variables).
+
+    If embeddings use a separate OpenAI-compatible service, set its provider, URL, model ID, and credential together.
+
+    ```bash title="Separate OpenAI-compatible embedding service"
+    export SKILL_EVAL_EMBEDDING_PROVIDER=openai-compatible
+    export SKILL_EVAL_EMBEDDING_BASE_URL='https://embeddings.example.com/v1'
+    export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
+    export SKILL_EVAL_EMBEDDING_API_KEY='your-embedding-service-key'
+    ```
+
+    Supply the embedding service's own key because the compatible embedding provider defaults to the chat key when its key is unset.
   </Tab>
 </Tabs>
 
-Tier 3 agents inherit the same URL and key with the gateway defaults described in the OpenAI-compatible tab above; override agent models with `--agent-model` when the gateway's catalog IDs differ.
+For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. See the OpenAI-compatible tab above for agent endpoints, Claude Code's credential overrides, and the `--agent-model` option.
 
 ## Fully local setup
 

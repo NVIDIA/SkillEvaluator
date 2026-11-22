@@ -616,6 +616,37 @@ def test_live_marks_judge_each_rollout_once_and_leave_no_scratch(
     assert [path.name for path in (out / "_nemo-gym").iterdir()] == ["codex-with"]
 
 
+def test_live_marks_keep_the_polled_runs_verdicts_past_the_cache_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from skillevaluator.tier3 import case_summary
+    from skillevaluator.tier3.nemo_gym import results
+
+    monkeypatch.setattr(case_summary, "_GYM_LIVE_MARKS", {})
+    monkeypatch.setattr(case_summary, "_MAX_GYM_LIVE_MARKS", 2)
+    judged: list[str] = []
+    verdict = results.rollout_verdict
+    monkeypatch.setattr(results, "rollout_verdict", lambda row, *args: judged.append(args[0]) or verdict(row, *args))
+    out = tmp_path / "out"
+    rows = [_graded_rollout(tmp_path / f"rollout-{index}") for index in range(3)]
+
+    judged_per_poll = []
+    for count in (2, 2, 3, 3, 3):
+        _live_arm(out, rows[:count])
+        before = len(judged)
+        marks, _running = live_case_marks(out, ["codex"], pass_threshold=0.5)
+        judged_per_poll.append(len(judged) - before)
+        assert marks == {"codex": {"with_skill": {"login-task": [PASS] * count}}}
+
+    # The run being polled keeps every verdict, even with more rollouts than the cap.
+    assert judged_per_poll == [2, 0, 1, 0, 0]
+    # Past the cap, a run that is no longer polled gives up its verdicts.
+    other = tmp_path / "other"
+    _live_arm(other, [_graded_rollout(tmp_path / "other-rollout")])
+    live_case_marks(other, ["codex"], pass_threshold=0.5)
+    assert list(case_summary._GYM_LIVE_MARKS) == [str(other / "_nemo-gym")]
+
+
 def _graded_rollout(logs: Path, trajectory_bytes: int = 0) -> dict[str, Any]:
     logs.mkdir()
     _graded(logs, 1.0)

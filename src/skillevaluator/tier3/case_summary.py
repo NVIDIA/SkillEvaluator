@@ -1591,7 +1591,8 @@ def load_case_marks(run_dir: Path) -> dict[str, dict[str, dict[str, list[str]]]]
 
 
 _LIVE_VARIANTS = {"with": "with_skill", "without": "without_skill"}
-_GYM_LIVE_MARKS: dict[str, str] = {}
+# Gym run folder -> mark of each rollout its last poll read, the least recently polled run first.
+_GYM_LIVE_MARKS: dict[str, dict[str, str]] = {}
 _MAX_GYM_LIVE_MARKS = 65536
 
 
@@ -1620,19 +1621,39 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     return ERROR
 
 
-def _gym_live_mark(row: dict[str, Any], task: str, case_id: str, pass_threshold: float) -> str:
+def _gym_live_mark(
+    row: dict[str, Any],
+    task: str,
+    case_id: str,
+    pass_threshold: float,
+    judged: Mapping[str, str],
+    seen: dict[str, str],
+) -> str:
     from skillevaluator.tier3.nemo_gym.results import rollout_verdict
 
     # Gym appends a rollout only once its verifier logs are written, so each line is judged once.
     key = hashlib.sha256(json.dumps([row, task, case_id, pass_threshold], sort_keys=True).encode()).hexdigest()
-    mark = _GYM_LIVE_MARKS.get(key)
+    mark = seen.get(key) or judged.get(key)
     if mark is None:
         passed = rollout_verdict(row, task, case_id, pass_threshold)
         mark = ERROR if passed is None else PASS if passed else FAIL
-        if len(_GYM_LIVE_MARKS) >= _MAX_GYM_LIVE_MARKS:
-            _GYM_LIVE_MARKS.clear()
-        _GYM_LIVE_MARKS[key] = mark
+    seen[key] = mark
     return mark
+
+
+def _keep_gym_live_marks(run: str, seen: dict[str, str]) -> None:
+    """Keep the verdicts of the rollouts a Gym run holds now for its next poll.
+
+    Past ``_MAX_GYM_LIVE_MARKS`` verdicts, the runs polled longest ago are dropped; the run just polled
+    keeps all of its verdicts, so a poll judges only the rollouts appended since the last one.
+    """
+    _GYM_LIVE_MARKS.pop(run, None)
+    _GYM_LIVE_MARKS[run] = seen
+    kept = sum(len(marks) for marks in list(_GYM_LIVE_MARKS.values()))
+    for other in [other for other in list(_GYM_LIVE_MARKS) if other != run]:
+        if kept <= _MAX_GYM_LIVE_MARKS:
+            break
+        kept -= len(_GYM_LIVE_MARKS.pop(other, {}))
 
 
 def _add_gym_live_marks(
@@ -1648,6 +1669,8 @@ def _add_gym_live_marks(
     gym_root = run_dir / "_nemo-gym"
     if not gym_root.is_dir() or gym_root.is_symlink():
         return False
+    judged = _GYM_LIVE_MARKS.get(str(gym_root), {})
+    seen: dict[str, str] = {}
     for agent in agents:
         for variant, key in _LIVE_VARIANTS.items():
             arm = gym_root / f"{agent}-{variant}"
@@ -1664,8 +1687,9 @@ def _add_gym_live_marks(
                 case_id = case_ids.get(task)
                 if not isinstance(case_id, str) or not case_id:
                     case_id = task
-                mark = _gym_live_mark(row, task, case_id, pass_threshold)
+                mark = _gym_live_mark(row, task, case_id, pass_threshold, judged, seen)
                 marks.setdefault(agent, {}).setdefault(key, {}).setdefault(task, []).append(mark)
+    _keep_gym_live_marks(str(gym_root), seen)
     return True
 
 

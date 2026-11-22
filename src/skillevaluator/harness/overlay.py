@@ -188,14 +188,17 @@ _PI_ROOT_FAMILIES = {
 
 
 def _pi_manifest_ignored(skill_path: Path) -> bool:
-    """Whether pi skips a non-SKILL.md manifest at this depth under its roots."""
+    """Whether pi skips a non-SKILL.md manifest at this depth under its roots.
+
+    Verified against the pinned loader: a loose ``.md`` file loads directly in any
+    skills root (both root families) and nested only under ``.agents/skills``.
+    """
     parts = _link_location_parts(skill_path)
     for root, family in _PI_ROOT_FAMILIES.items():
         size = len(root.split("/"))
         for index in range(len(parts) - size, -1, -1):  # dir == root allowed: loose manifest
             if "/".join(parts[index : index + size]) == root:
-                direct = index + size == len(parts)
-                return family == "agents" if direct else family == "pi"
+                return False if index + size == len(parts) else family == "pi"
     return False
 
 
@@ -303,7 +306,11 @@ def _read_manifest(skill_path: Path, explicit: Path | None = None) -> tuple[Path
         # answers exists() for every spelling, which would construct a path that
         # no longer identifies the actual file.
         present = {p.name: p for p in skill_path.iterdir()} if skill_path.is_dir() else {}
-        manifest = next((present[n] for n in SKILL_MANIFEST_VARIANTS if n in present), skill_path / "SKILL.md")
+        manifest = (
+            skill_path
+            if skill_path.is_file()
+            else next((present[n] for n in SKILL_MANIFEST_VARIANTS if n in present), skill_path / "SKILL.md")
+        )
         if not manifest.is_file() and skill_path.is_dir():
             # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
             # roots, nested under .agents/skills); an explicit-file check can point
@@ -648,7 +655,8 @@ def skill_facts(
     pi_description = _pi_description(pi_fm.group(1)) if pi_fm else None
     pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
     # A file pi never discovers cannot hide the skill or need a value fix.
-    pi_not_discovered = _pi_ignored_by_rules(skill_path) or (
+    # The ignore rules match the file pi reads, not the folder an explicit check selects.
+    pi_not_discovered = _pi_ignored_by_rules(manifest if manifest is not None else skill_path) or (
         actual_manifest_name != "SKILL.md"
         and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path))
     )
@@ -656,7 +664,11 @@ def skill_facts(
     # Non-pi harnesses never discover pi's loose manifests: their name clashes
     # come from the canonical catalog (SKILL.md folders) only.
     canonical_dups = canonical.duplicates(manifest, name) if canonical is not None else duplicates
-    lookalikes = catalog.lookalikes(manifest) if catalog else []
+    lookalikes = (
+        (canonical if canonical is not None else catalog).lookalikes(manifest)
+        if canonical is not None or catalog
+        else []
+    )
     listed_catalog = canonical if canonical is not None else catalog
     return {
         "skill_name": name,
@@ -723,13 +735,16 @@ def skill_facts(
         # catalog, not pi's census (which also holds pi-only loose manifests).
         "catalog_size": listed_catalog.size if listed_catalog else 0,
         "catalog_desc_chars": listed_catalog.desc_chars if listed_catalog else 0,
+        # What this harness's own scan saw (pi census counts, Codex/Claude scan counts).
+        "census_size": catalog.size if catalog else 0,
+        "census_desc_chars": catalog.desc_chars if catalog else 0,
         "catalog_base": str(catalog.base) if catalog and catalog.base else "",
         "duplicate_name": bool(canonical_dups),
         "duplicate_paths": ", ".join(canonical_dups[:3]),
         "pi_duplicate_name": bool(duplicates),
         "pi_duplicate_paths": ", ".join(duplicates[:3]),
         "pi_description_text": pi_description or "",
-        "pi_description_invalid": pi_description is None,
+        "pi_description_invalid": pi_description is None and not pi_dropped,
         "pi_not_loaded": pi_dropped or pi_not_discovered or pi_description is None,
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
@@ -1029,8 +1044,8 @@ def _pi_manifests(base: Path) -> list[Path]:
 
     A folder short-circuits on the exact ``SKILL.md`` spelling — a differently
     cased sibling is invisible to it — and without one, loose ``.md`` files load
-    at the scanned root (".pi" roots) or only nested (``.agents/skills``),
-    while subfolders recurse. Entries matched by the root's ignore files are
+    at the scanned root (any name, both root families) and nested only under
+    ``.agents/skills``, while subfolders recurse. Entries matched by the root's ignore files are
     skipped, and only files whose frontmatter parses with a description load.
     """
     mode = _pi_skills_mode(base) or "pi"
@@ -1071,7 +1086,10 @@ def _pi_manifests(base: Path) -> list[Path]:
             if is_dir:
                 found.extend(scan(child, False, patterns))
             elif (
-                child.is_file() and child.name.endswith(".md") and (mode == "pi") == root_level and _pi_loadable(child)
+                child.is_file()
+                and child.name.endswith(".md")
+                and (root_level or mode == "agents")
+                and _pi_loadable(child)
             ):
                 found.append(child)
         return found
@@ -1182,6 +1200,12 @@ def _user_copies(
 
 def _utf16_units(value: Any) -> int:
     return len(value.encode("utf-16-le", "surrogatepass")) // 2 if isinstance(value, str) else 0
+
+
+def listing_fact(profile: dict[str, Any], facts: dict[str, Any], key: str, default: str) -> str:
+    """Fact name for this profile's catalog row counts (e.g. pi counts its own census)."""
+    name = (profile.get("listing") or {}).get(key, default)
+    return name if name in facts else default
 
 
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
@@ -1430,8 +1454,8 @@ def evaluate_profile(
         findings=findings,
         listed=listed_description(profile, facts),
         catalog={
-            "size": facts["catalog_size"],
-            "desc_chars": facts["catalog_desc_chars"],
+            "size": facts[listing_fact(profile, facts, "size_fact", "catalog_size")],
+            "desc_chars": facts[listing_fact(profile, facts, "chars_fact", "catalog_desc_chars")],
             "folder": facts["catalog_base"],
         },
     )

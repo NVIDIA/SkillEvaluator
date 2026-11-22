@@ -1287,9 +1287,10 @@ def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
     assert rows["pi"]["status"] == "not_loaded"
     assert "PI-CASING" in _ids(rows, "pi")
 
-    # Loose at .agents/skills: mode "agents" loads only the exact name at the root.
+    # Loose at .agents/skills: mode "agents" loads any .md name at the root too
+    # (verified against the pinned loader: skill.md and alpha.md both load).
     # Sibling control: a working named child skill next to the loose manifest
-    # keeps loading, and the fix must not recommend hiding it.
+    # keeps loading.
     agents_root = tmp_path / "proj3" / ".agents" / "skills"
     loose = _loose_skill(agents_root)
     sky = agents_root / "sky"
@@ -1298,10 +1299,8 @@ def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
         "---\nname: sky\ndescription: Use when testing siblings.\n---\nBody\n", encoding="utf-8"
     )
     rows = _rows(loose)
-    assert rows["pi"]["status"] == "not_loaded"
-    finding = next(f for f in rows["pi"]["findings"] if f["id"] == "PI-CASING")
-    assert "named child folder" in finding["fix"]
-    assert "sibling" in finding["fix"]
+    assert rows["pi"]["status"] == "loads"
+    assert "PI-CASING" not in _ids(rows, "pi")
     rows = _rows(sky)
     assert rows["pi"]["status"] == "loads"
     assert "PI-CASING" not in _ids(rows, "pi")

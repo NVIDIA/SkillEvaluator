@@ -691,6 +691,44 @@ def _annotations_for_result(
     return annotations
 
 
+def _rubric_member_counts(results: list[ValidationResult]) -> tuple[int, int, int, int] | None:
+    """Return per-skill counts when *results* folds a multi-skill rubric folder run."""
+    member_lists: list[tuple[ValidationResult, list[object]]] = []
+    for result in results:
+        metadata = result.metadata if isinstance(result.metadata, dict) else {}
+        members = metadata.get("rubric_eval_members")
+        if isinstance(members, list) and members:
+            member_lists.append((result, members))
+    if len(member_lists) != 1:
+        return None
+    result, members = member_lists[0]
+    advisory = _advisory(result)
+    passed = failed = incomplete = 0
+    for member in members:
+        if not isinstance(member, dict):
+            return None
+        skill = member.get("skill")
+        if not isinstance(skill, str) or not skill:
+            return None
+        status = "passed" if advisory else member.get("status")
+        if status == "passed":
+            passed += 1
+        elif status == "failed":
+            failed += 1
+        elif status == "incomplete":
+            incomplete += 1
+        else:
+            return None
+    other_results = [item for item in results if item is not result]
+    if other_results:
+        other_headline = resolve_run_status(other_results).headline
+        if other_headline == Status.FAILED and not failed:
+            return None
+        if other_headline == Status.INCOMPLETE and not (failed or incomplete):
+            return None
+    return len(members), passed, failed, incomplete
+
+
 def _skill_counts(results: list[ValidationResult]) -> tuple[int, int, int, int]:
     """Return (checked, passed, failed, incomplete) for this render.
 
@@ -699,6 +737,9 @@ def _skill_counts(results: list[ValidationResult]) -> tuple[int, int, int, int]:
     """
     if not results:
         return 0, 0, 0, 0
+    member_counts = _rubric_member_counts(results)
+    if member_counts is not None:
+        return member_counts
     headline = resolve_run_status(results).headline
     if headline == Status.FAILED:
         return 1, 0, 1, 0

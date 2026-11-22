@@ -1223,3 +1223,106 @@ def test_backslash_symlink_outside_workspace_keeps_native_posix_path(tmp_path: P
     nested = next(line for line in errors if "issue 2" in line)
     assert _runner_properties(link)["file"] == "alpha/design\\notes.md"
     assert _runner_properties(nested)["file"] == "alpha/design/notes.md"
+
+
+def _rubric_reply(score: int) -> str:
+    import json
+
+    from skillevaluator.constants import RUBRIC_CRITERIA
+
+    passed = score >= 7
+    return json.dumps(
+        {
+            "overall_pass": passed,
+            "score": score * 10,
+            "summary": "ok" if passed else "below threshold",
+            "checks": [
+                {
+                    "id": criterion["id"],
+                    "criterion": criterion["criterion"],
+                    "pass": passed,
+                    "score": score,
+                    "notes": f"Score {score} for {criterion['id']}",
+                }
+                for criterion in RUBRIC_CRITERIA
+            ],
+        }
+    )
+
+
+def _rubric_skill_folder(tmp_path: Path) -> Path:
+    folder = tmp_path / "skills"
+    for name in ("alpha", "bravo", "charlie"):
+        skill = folder / name
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            f"---\nname: {name}\ndescription: Use when testing rubric folder reporting for {name}.\n---\n\n# {name}\n",
+            encoding="utf-8",
+        )
+    return folder
+
+
+def test_rubric_eval_three_skill_folder_mixed_counts_each_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import patch
+
+    from skillevaluator.reporting.github_reporter import collect_annotations
+    from skillevaluator.tier1.commands import run_rubric_eval
+    from skillevaluator.validators.rubric_eval import RubricJudge
+
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    folder = _rubric_skill_folder(tmp_path)
+    replies = [_rubric_reply(9), _rubric_reply(8), _rubric_reply(5)]
+
+    with patch.object(RubricJudge, "completions", side_effect=replies):
+        cli_result = CliRunner().invoke(cli, ["rubric-eval", str(folder), "-r", "github"])
+
+    assert cli_result.exit_code == 1, cli_result.output
+    errors = [line for line in _commands(cli_result.output) if line.startswith("::error ")]
+    assert len(errors) == 1
+    assert _runner_properties(errors[0])["file"] == "charlie/SKILL.md"
+    assert _summary(cli_result.output).startswith(
+        "::notice title=SkillEvaluator::3 skills checked, 2 passed, 1 failed, 0 incomplete"
+    )
+
+    with (
+        patch.object(RubricJudge, "completions", side_effect=replies),
+        collect_annotations(workspace_root=folder) as collected,
+    ):
+        GitHubReporter(workspace_root=folder, scan_root=folder).print_all(run_rubric_eval(folder))
+
+    assert len(collected) == 1
+    assert collected[0]["counts"] == [3, 2, 1, 0]
+
+
+def test_rubric_eval_three_skill_folder_all_pass_counts_each_member(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from unittest.mock import patch
+
+    from skillevaluator.reporting.github_reporter import collect_annotations
+    from skillevaluator.tier1.commands import run_rubric_eval
+    from skillevaluator.validators.rubric_eval import RubricJudge
+
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    folder = _rubric_skill_folder(tmp_path)
+    replies = [_rubric_reply(9), _rubric_reply(8), _rubric_reply(9)]
+
+    with patch.object(RubricJudge, "completions", side_effect=replies):
+        cli_result = CliRunner().invoke(cli, ["rubric-eval", str(folder), "-r", "github"])
+
+    assert cli_result.exit_code == 0, cli_result.output
+    assert not [line for line in _commands(cli_result.output) if line.startswith("::error")]
+    assert _summary(cli_result.output).startswith(
+        "::notice title=SkillEvaluator::3 skills checked, 3 passed, 0 failed, 0 incomplete"
+    )
+
+    with (
+        patch.object(RubricJudge, "completions", side_effect=replies),
+        collect_annotations(workspace_root=folder) as collected,
+    ):
+        GitHubReporter(workspace_root=folder, scan_root=folder).print_all(run_rubric_eval(folder))
+
+    assert len(collected) == 1
+    assert collected[0]["counts"] == [3, 3, 0, 0]

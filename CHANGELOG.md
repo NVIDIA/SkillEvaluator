@@ -62,6 +62,8 @@ All notable changes to SkillEvaluator are documented in this file.
   route.
 - Bedrock inference checks HTTPS on the endpoint selected for the request,
   so an unused HTTP override no longer blocks a valid HTTPS route.
+- Bedrock Mantle honors the configured AWS region for model aliases when
+  `BEDROCK_MANTLE_REGION` contains an invalid fallback value.
 - `tier3 validate` now exits nonzero when `evals/` is missing, matching the
   error it reports.
 - Scanner install hints in `health-check` and `doctor` now match the host:

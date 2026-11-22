@@ -128,6 +128,7 @@ def _require_https_for_bedrock_bearer_endpoint(setting: str, endpoint: str | Non
 def _bedrock_bearer_runtime_override(
     model: str,
     *,
+    aws_region_name: str | None,
     aliases: Mapping[str, str],
     sdk_api_base: str | None,
     has_fallbacks: bool,
@@ -136,6 +137,7 @@ def _bedrock_bearer_runtime_override(
     from litellm.llms.bedrock.common_utils import BedrockModelInfo
     from litellm.responses.bridge_check import responses_api_bridge_check
     from litellm.secret_managers.main import get_secret_str
+    from litellm.types.router import GenericLiteLLMParams
     from litellm.utils import ProviderConfigManager, get_llm_provider
 
     if has_fallbacks:
@@ -144,7 +146,9 @@ def _bedrock_bearer_runtime_override(
             _require_https_for_bedrock_bearer_endpoint(setting, get_secret_str(setting))
         _require_https_for_bedrock_bearer_endpoint("LiteLLM api_base", sdk_api_base)
 
-    model, provider, _, api_base = get_llm_provider(model=aliases.get(model, model))
+    # Resolve the Mantle region with the same request parameter as the completion.
+    params = GenericLiteLLMParams(aws_region_name=aws_region_name)
+    model, provider, _, api_base = get_llm_provider(model=aliases.get(model, model), litellm_params=params)
     if provider not in {"bedrock", "bedrock_mantle"}:
         return None
 
@@ -152,7 +156,9 @@ def _bedrock_bearer_runtime_override(
     model_info, model = responses_api_bridge_check(model, provider, api_base=api_base)
     native_responses = False
     if model_info.get("mode") == "responses":
-        model, provider, _, api_base = get_llm_provider(model=model, custom_llm_provider=provider, api_base=api_base)
+        model, provider, _, api_base = get_llm_provider(
+            model=model, custom_llm_provider=provider, api_base=api_base, litellm_params=params
+        )
         native_responses = (
             ProviderConfigManager.get_provider_responses_api_config(provider, model=model, api_base=api_base)
             is not None
@@ -160,7 +166,7 @@ def _bedrock_bearer_runtime_override(
         if not native_responses and model in aliases:
             # The reverse bridge calls completion again with the stripped model and provider.
             model, provider, _, api_base = get_llm_provider(
-                model=aliases[model], custom_llm_provider=provider, api_base=api_base
+                model=aliases[model], custom_llm_provider=provider, api_base=api_base, litellm_params=params
             )
     route = BedrockModelInfo.get_bedrock_route(model) if not native_responses else None
 
@@ -908,6 +914,7 @@ class LLMClient:
                 if has_bearer_token:
                     endpoint = _bedrock_bearer_runtime_override(
                         config.litellm_model,
+                        aws_region_name=config.region,
                         aliases=litellm.model_alias_map or {},
                         sdk_api_base=litellm.api_base,
                         has_fallbacks=bool(litellm.model_fallbacks),

@@ -74,7 +74,12 @@ All notable changes to SkillEvaluator are documented in this file.
   again: advisory-only findings leave a skill passing, and a
   `--min-score` gate or a HIGH finding fails only the skill it names, so the HTML
   skill cards, the JSON `skills[]` entries and the contributor summary agree with
-  the overall result.
+  the overall result. The verdict is reconstructed from finding severity and each
+  member's labelled gate failures, so a member that failed a different way — an
+  incomplete scan (`mark_scan_incomplete`) or a legacy `add_error` line with only
+  advisory findings — still reads as passed in `skills[]` and the skill cards.
+  Recording each member's own status in `merge_with_prefix` would close that, and
+  is left for a follow-up.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

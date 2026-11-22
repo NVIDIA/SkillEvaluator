@@ -1897,6 +1897,30 @@ def _print_catalog_github_annotations(
                     blocking=bool(conflict.get("blocking")),
                 )
             )
+    catalog_level = {name for name, _reason in id_failures} | {
+        path.relative_to(catalog_root).as_posix() for path in discovery_problems
+    }
+    for name, reason in failures:
+        if name in catalog_level:
+            continue
+        entries = skill_annotations.get(name, [])
+        own = [item for entry in entries for item in entry["annotations"]]
+        if any(item["level"] == "error" for item in own):
+            continue
+        # A member the summary counts as incomplete keeps its warnings.
+        failed_count = sum(entry["counts"][2] for entry in entries)
+        if not failed_count and sum(entry["counts"][3] for entry in entries):
+            continue
+        # The catalog failed this member, but nothing it rendered says why.
+        extra.append(
+            annotation(
+                name,
+                check="catalog_failure",
+                message=f"{name}: {reason or 'validation failed'}",
+                severity="high",
+                blocking=True,
+            )
+        )
     print_collected_annotations(
         {name: skill_annotations.get(name, []) for name in names},
         failed={name for name, _reason in failures},

@@ -748,6 +748,28 @@ def test_catalog_summary_counts_duplicate_metadata_id_failures(
     assert summaries == ["::notice title=SkillEvaluator::2 skills checked, 0 passed, 2 failed, 0 incomplete"]
 
 
+@pytest.mark.parametrize("workers", [1, 2])
+def test_catalog_annotates_a_failed_member_with_no_error_of_its_own(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int
+) -> None:
+    _inline_process_pool(monkeypatch)
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    catalog = _catalog_with_ids(tmp_path, ["first-id", "second-id"])
+    reports = tmp_path / "reports"
+    reports.mkdir()
+    # A regular file where skill-01's report directory belongs fails that member
+    # without any finding of its own.
+    (reports / "skill-01").write_text("not a directory", encoding="utf-8")
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers))
+
+    assert result.exit_code == 1, result.output
+    errors = [line for line in _commands(result.output) if line.startswith("::error")]
+    assert len(errors) == 1, result.output
+    assert "catalog_failure" in errors[0]
+    assert "file=skill-01/SKILL.md" in errors[0]
+    assert _summary(result.output).endswith("2 skills checked, 1 passed, 1 failed, 0 incomplete")
+
+
 def test_catalog_unique_metadata_ids_still_pass(tmp_path: Path) -> None:
     catalog = _catalog_with_ids(tmp_path, ["first-id", "second-id"])
     reports = tmp_path / "reports"

@@ -2179,10 +2179,19 @@ def _split_member_label(check_name: str) -> tuple[str | None, str]:
     Returns ``(label, check_name)``; ``label`` is ``None`` when the check name
     carries no label.
     """
-    if check_name.startswith("[") and "] " in check_name:
-        label, _, remainder = check_name.partition("] ")
-        return label[1:], remainder
-    return None, check_name
+    if not check_name.startswith("["):
+        return None, check_name
+    end = check_name.find("]")
+    if end < 0:
+        return None, check_name
+    # A member name may itself contain "]"; merge_with_prefix writes the label as
+    # "[name] " and the finding path stops at the first "]", so both sides read the
+    # same substring and cannot disagree about which member a record belongs to.
+    label = check_name[1:end]
+    if not label:
+        return None, check_name
+    remainder = check_name[end + 1:]
+    return label, remainder[1:] if remainder.startswith(" ") else remainder
 
 
 def _finding_blocks(finding: Any) -> bool:
@@ -2616,6 +2625,15 @@ class HTMLReporter(ReporterBase):
             # score keep that verdict here; the parent's ``passed`` describes
             # the whole folder, not any one member.
             for failed_label in _gate_failed_member_labels(result):
+                # A member can fail a gate before it records any success detail
+                # (quality_score calls fail_gate and returns), so create the entry
+                # rather than dropping the only trace it left in the report.
+                if failed_label not in skills:
+                    skills[failed_label] = {
+                        "passed": True,
+                        "validators": {},
+                        "issue_count": 0,
+                    }
                 if failed_label in skills:
                     skills[failed_label]["passed"] = False
                     skills[failed_label]["validators"].setdefault(

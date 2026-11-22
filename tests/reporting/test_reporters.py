@@ -1463,12 +1463,61 @@ def test_folder_merges_keep_one_entry_per_skill_with_that_skills_verdict() -> No
         ("alpha", True),
         ("beta", True),
     ]
-    assert "[alpha] quality_score" not in html_skill_names(json_data)
+    assert "[alpha] quality_score" not in json_skill_names(json_data)
 
 
-def html_skill_names(json_data: dict) -> set[str]:
+def json_skill_names(json_data: dict) -> set[str]:
     """Return the skill names a JSON report lists, for identity assertions."""
     return {entry["name"] for entry in json_data["skills"]}
+
+
+def test_gate_failure_creates_the_member_it_names() -> None:
+    """A member that fails a gate before recording a success detail still appears.
+
+    ``quality_score`` calls ``fail_gate`` and returns before ``add_success`` when
+    frontmatter exceeds the YAML complexity limits, so its only trace in the
+    merged result is a prefixed gate failure. Skipping it listed the healthy
+    sibling alone while the collection itself was failed.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+
+    good = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    good.add_success("quality_score", "Score: 95.2/100 (Grade: A)", overall_score=95.2, grade="A")
+    collection.merge_with_prefix(good, "good")
+
+    poor = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    poor.fail_gate("Score: 61.0/100 is below the minimum of 90")
+    collection.merge_with_prefix(poor, "poor")
+
+    assert not collection.passed, "the gate failure must fail the collection"
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["good", "poor"]
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {"good": True, "poor": False}
+
+
+def test_gate_failure_survives_merge_order() -> None:
+    """The gate loop must not depend on which member was merged first."""
+    for order in (("good", "poor"), ("poor", "good")):
+        collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        members = {
+            "good": None,
+            "poor": None,
+        }
+        for name in order:
+            member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+            if name == "good":
+                member.add_success("quality_score", "Score: 95.2/100", overall_score=95.2, grade="A")
+            else:
+                member.fail_gate("Score: 61.0/100 is below the minimum of 90")
+            members[name] = member
+            collection.merge_with_prefix(member, name)
+
+        skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+        assert {name: data["passed"] for name, data in skills_by_name.items()} == {
+            "good": True,
+            "poor": False,
+        }, f"merge order {order} changed the verdicts"
 
 
 def test_folder_marks_only_the_members_whose_own_result_failed() -> None:

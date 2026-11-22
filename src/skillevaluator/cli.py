@@ -3258,23 +3258,32 @@ def harness_check(
         raise click.ClickException(f"No skills found in {target_path}")
     from skillevaluator.validators.schema import SchemaValidator
 
+    requested_file = target_path if target_path.is_file() else None
     for skill in block:
         skill_path = Path(skill)
         names = [p.name for p in skill_path.iterdir()] if skill_path.is_dir() else []
         # Case-insensitive filesystems answer exists() for Skill.md too, so
-        # the check compares exact names. pi also loads a mixed-case manifest;
-        # re-running the tier 1 check would only re-report the missing canonical name.
+        # the check compares exact names. An explicit file argument keeps its
+        # identity: the tier 1 diagnostics follow the selected manifest, not
+        # the canonical sibling.
+        selected = (
+            requested_file
+            if requested_file is not None and requested_file.parent.resolve() == skill_path.resolve()
+            else None
+        )
         if "SKILL.md" not in names and any(n.casefold() == "skill.md" for n in names):
             click.echo(
                 f"Tier 1 schema also fails for {skill_path.name}: no canonical SKILL.md "
                 "(pi additionally loads Skill.md and skill.md at some depths). "
                 "Run `skillevaluator validate --tiers 1` for details."
             )
-            continue
-        schema = SchemaValidator().validate(skill_path)
+            if selected is None:
+                continue
+        schema = SchemaValidator().validate(selected.parent if selected else skill_path, manifest=selected)
         if not schema.passed and schema.errors:
+            name = selected.name if selected else Path(skill).name
             click.echo(
-                f"Tier 1 schema also fails for {Path(skill).name}: {schema.errors[0].split(' in /', 1)[0]}. "
+                f"Tier 1 schema also fails for {name}: {schema.errors[0].split(' in /', 1)[0]}. "
                 "Run `skillevaluator validate --tiers 1` for details."
             )
     if json_path is not None:

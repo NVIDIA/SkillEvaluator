@@ -407,7 +407,9 @@ def test_duplicate_names_report_each_harness_winner(tmp_path: Path):
         "OC-DUP-NAME",
         "PI-NAME-COLLISION",
     } <= {f["id"] for r in rows.values() for f in r["findings"]}
-    assert "(filler-copy)" in next(f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME")
+    assert "(filler-copy/SKILL.md)" in next(
+        f["message"] for f in rows["opencode"]["findings"] if f["id"] == "OC-DUP-NAME"
+    )
     assert "lists both" in next(f["message"] for f in rows["hermes"]["findings"] if f["id"] == "HM-DUP-NAME")
 
 
@@ -809,6 +811,162 @@ def test_explicit_manifest_argument_evaluates_that_exact_file(tmp_path: Path):
     ids = [f["id"] for f in rows[0]["findings"]]
     assert "PI-HIDDEN" in ids  # the selected Skill.md hides the skill; the skill.md sibling would not
     assert "PI-HIDDEN-INVALID" not in ids
+
+
+def test_pi_hidden_ignores_an_implicit_yaml_merge(tmp_path: Path):
+    """pi's YAML parser (eemeli/yaml 2.x) keeps ``<<`` an ordinary key, so a merged
+    disable-model-invocation never applies (pi 1.6.0 keeps the skill visible)."""
+    skill = tmp_path / "skills" / "demo-skill"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Use when checking harness compatibility.\n"
+        "metadata: &defaults\n"
+        "  disable-model-invocation: true\n"
+        "<<: *defaults\n"
+        f"---\n{BODY}",
+        encoding="utf-8",
+    )
+    rows = _rows(skill)
+
+    assert "PI-HIDDEN" not in _ids(rows, "pi")
+    assert "PI-HIDDEN-INVALID" not in _ids(rows, "pi")  # the value never reached the top level
+
+    # An explicit top-level key still resolves over the merged copy.
+    (skill / "SKILL.md").write_text(
+        "---\n"
+        "name: demo-skill\n"
+        "description: Use when checking harness compatibility.\n"
+        "metadata: &defaults\n"
+        "  disable-model-invocation: false\n"
+        "<<: *defaults\n"
+        "disable-model-invocation: true\n"
+        f"---\n{BODY}",
+        encoding="utf-8",
+    )
+    assert "PI-HIDDEN" in _ids(_rows(skill), "pi")
+
+
+def test_duplicate_keys_drop_the_skill_without_an_explicit_invocation_suggestion(tmp_path: Path):
+    """Duplicate top-level keys are a parse error for pi's YAML parser: the skill is
+    dropped and /skill:name stays unavailable, so PI-HIDDEN must not suggest it."""
+    skill = _skill(tmp_path, extra="disable-model-invocation: false\ndisable-model-invocation: true\n")
+    rows = _rows(skill)
+
+    assert "PI-FRONTMATTER-DUPKEYS" in _ids(rows, "pi")
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-HIDDEN" not in _ids(rows, "pi")
+    assert "/skill:" not in " ".join(f["message"] for f in rows["pi"]["findings"])
+
+
+def test_explicit_manifest_next_to_a_canonical_sibling_is_not_discovered(tmp_path: Path):
+    """With Skill.md and SKILL.md siblings (case-sensitive filesystem), pi discovers
+    only SKILL.md, so an explicit Skill.md check reports the skill as not loaded."""
+    skill = tmp_path / "proj" / ".pi" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n", encoding="utf-8"
+    )
+    (skill / "Skill.md").write_text(
+        "---\nname: demo\ndescription: Use when testing casing.\ndisable-model-invocation: true\n---\nBody\n",
+        encoding="utf-8",
+    )
+    if (skill / "Skill.md").samefile(skill / "SKILL.md"):
+        pytest.skip("case-insensitive filesystem: distinct-cased siblings are one file")
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(skill / "Skill.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    ids = [f["id"] for f in rows[0]["findings"]]
+    assert rows[0]["status"] == "not_loaded"
+    assert "PI-CASING" in ids
+    assert "PI-HIDDEN" not in ids  # a file pi never discovers cannot be hidden
+
+
+def test_harness_check_schema_diagnostics_follow_the_selected_manifest(tmp_path: Path):
+    """With Skill.md and SKILL.md siblings, the Tier 1 line reports the selected
+    file's schema state, not the canonical sibling's."""
+    skill = tmp_path / "proj" / ".pi" / "skills" / "demo"
+    skill.mkdir(parents=True)
+    broken = "---\nname: demo\ndescription: Use when testing [unclosed\n---\nBody\n"
+    good = "---\nname: demo\ndescription: Use when testing casing.\n---\nBody\n"
+    (skill / "SKILL.md").write_text(broken, encoding="utf-8")
+    (skill / "Skill.md").write_text(good, encoding="utf-8")
+    if (skill / "Skill.md").samefile(skill / "SKILL.md"):
+        pytest.skip("case-insensitive filesystem: distinct-cased siblings are one file")
+
+    result = CliRunner().invoke(cli, ["harness-check", str(skill / "Skill.md"), "--harness", "pi"])
+    # The selected Skill.md is valid; the broken canonical sibling must not be reported.
+    assert "Tier 1 schema also fails" not in result.output
+
+    (skill / "Skill.md").write_text(broken, encoding="utf-8")
+    (skill / "SKILL.md").write_text(good, encoding="utf-8")
+    result = CliRunner().invoke(cli, ["harness-check", str(skill / "Skill.md"), "--harness", "pi"])
+    assert "Tier 1 schema also fails for Skill.md" in result.output
+
+
+def test_pi_never_loads_an_uppercase_md_extension(tmp_path: Path):
+    """A loose SKILL.MD under .pi/skills casefolds to skill.md, but pi compares the
+    extension exactly and never discovers it."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / "SKILL.MD").write_text(
+        "---\nname: demo\ndescription: Use when testing extensions.\n---\nBody\n", encoding="utf-8"
+    )
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(root / "SKILL.MD"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    assert rows[0]["status"] == "not_loaded"
+    assert "PI-CASING" in [f["id"] for f in rows[0]["findings"]]
+
+
+def test_pi_collision_check_enumerates_loose_root_manifests(tmp_path: Path):
+    """pi discovers aaa.md and skill.md as two loose skills in .pi/skills; checking
+    the exact skill.md path reports the name collision between them."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    for name in ("aaa.md", "skill.md"):
+        (root / name).write_text(
+            f"---\nname: demo\ndescription: Use when testing duplicates ({name}).\n---\nBody\n",
+            encoding="utf-8",
+        )
+
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(root / "skill.md"), "--harness", "pi", "--json", str(tmp_path / "h.json")]
+    )
+    assert result.exit_code == 0, result.output
+    rows = next(iter(json.loads((tmp_path / "h.json").read_text())["harness_compatibility"].values()))
+    collision = next(f for f in rows[0]["findings"] if f["id"] == "PI-NAME-COLLISION")
+    assert "aaa.md" in collision["message"]
+
+    # A named child SKILL.md next to the loose manifest collides the same way.
+    nested = root / "aaa"
+    nested.mkdir()
+    (nested / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Use when testing duplicates (nested).\n---\nBody\n", encoding="utf-8"
+    )
+    result = CliRunner().invoke(
+        cli, ["harness-check", str(root / "skill.md"), "--harness", "pi", "--json", str(tmp_path / "h2.json")]
+    )
+    rows = next(iter(json.loads((tmp_path / "h2.json").read_text())["harness_compatibility"].values()))
+    collision = next(f for f in rows[0]["findings"] if f["id"] == "PI-NAME-COLLISION")
+    assert "aaa.md" in collision["message"] and "aaa/SKILL.md" in collision["message"]
+
+
+def test_hidden_pi_skills_leave_the_model_list_empty(tmp_path: Path):
+    """pi omits a disable-model-invocation skill from the model list: the listed
+    field is empty even though the description is present."""
+    skill = _skill(tmp_path, extra="disable-model-invocation: true\n")
+    rows = _rows(skill)
+
+    assert rows["pi"]["listed"] == {"mode": "hidden", "text": ""}
+    assert "PI-HIDDEN" in _ids(rows, "pi")  # explicit /skill:name invocation is still reported
 
 
 def test_codex_policy_makes_disable_model_invocation_effective_in_codex(tmp_path: Path):

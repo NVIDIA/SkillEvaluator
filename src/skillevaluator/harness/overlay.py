@@ -262,15 +262,22 @@ def _read_manifest(skill_path: Path, explicit: Path | None = None) -> tuple[Path
         # a differently cased sibling (distinct only on case-sensitive filesystems).
         manifest = explicit
     else:
-        manifest = next(
-            (skill_path / n for n in SKILL_MANIFEST_VARIANTS if (skill_path / n).exists()), skill_path / "SKILL.md"
-        )
+        # Pick the variant by its real on-disk name: a case-insensitive filesystem
+        # answers exists() for every spelling, which would construct a path that
+        # no longer identifies the actual file.
+        present = {p.name: p for p in skill_path.iterdir()} if skill_path.is_dir() else {}
+        manifest = next((present[n] for n in SKILL_MANIFEST_VARIANTS if n in present), skill_path / "SKILL.md")
         if not manifest.is_file() and skill_path.is_dir():
             # pi 1.6.0 also loads a mixed-case Skill.md (loose at the .pi skills
             # roots, nested under .agents/skills); an explicit-file check can point
-            # at a directory whose only manifest is that casing.
+            # at a directory whose only manifest is that casing. The extension
+            # itself is compared exactly, so SKILL.MD is never a manifest.
             manifest = next(
-                (p for p in sorted(skill_path.iterdir()) if p.is_file() and p.name.casefold() == "skill.md"),
+                (
+                    p
+                    for p in sorted(skill_path.iterdir())
+                    if p.is_file() and p.name.endswith(".md") and p.name.casefold() == "skill.md"
+                ),
                 manifest,
             )
     raw = manifest.read_bytes() if manifest.is_file() else b""
@@ -306,49 +313,37 @@ def _is_true(value: Any) -> bool:
     return value is True or (isinstance(value, str) and value.strip().lower() == "true")
 
 
-def _pi_strict_bool(fm_yaml: str, data: dict[str, Any], key: str) -> bool:
-    """pi 1.6.0 (js-yaml core schema) reads the boolean spellings plain or !!bool-tagged.
+def _pi_top_level_bool(fm_yaml: str, key: str) -> bool | None:
+    """Resolve ``key`` at the top level the way pi 1.6.0's parser does (eemeli/yaml, YAML 1.2 core).
 
-    PyYAML (YAML 1.1) also coerces ``yes``/``on`` to True, and a quoted
-    ``"true"`` stays a string for pi while ``_is_true`` accepts it — so the
-    raw scalar decides when the parsed value is a bool. An explicit ``!!bool``
-    tag resolves a quoted scalar in js-yaml too. The top-level key wins over a
-    ``metadata`` copy, and the last duplicate wins (last_key_wins).
+    Merge keys (``<<``, tagged or not) stay an ordinary key — eemeli/yaml does
+    not resolve them, so a merged copy never applies — and only the top level
+    is read: pi never looks at a ``metadata`` copy. Returns ``None`` when the
+    top level carries no such key, ``False`` when it does but is not pi's
+    plain or ``!!bool``-tagged ``true``; the last duplicate wins.
     """
-    if data.get(key) is not True:
-        return False
     from yaml.nodes import MappingNode, ScalarNode
 
     try:
         # BaseLoader keeps every scalar a string (with .style telling plain vs
         # quoted) and compose() already resolves anchors and aliases to nodes.
         document = yaml.compose(fm_yaml, Loader=yaml.BaseLoader)
-    except yaml.YAMLError:
-        return True  # unparseable frontmatter is reported by its own finding
+    except (yaml.YAMLError, RecursionError):
+        return None  # unparseable frontmatter is reported by its own finding
+    if not isinstance(document, MappingNode):
+        return None
 
-    def plain_true(node: object) -> bool:
-        # js-yaml's core schema also resolves an explicit !!bool tag, so the tag
-        # carries a quoted scalar the way the plain style carries an unquoted one.
-        return (
-            isinstance(node, ScalarNode)
-            and node.value in ("true", "True", "TRUE")
-            and (node.style is None or node.tag == "tag:yaml.org,2002:bool")
-        )
-
-    def walk(node: object) -> bool | None:
-        if not isinstance(node, MappingNode):
-            return None
-        top = nested = None
-        for key_node, value_node in node.value:
-            if isinstance(key_node, ScalarNode) and key_node.value == key:
-                top = plain_true(value_node)
-            else:
-                found = walk(value_node)
-                if found is not None:
-                    nested = found
-        return top if top is not None else nested
-
-    return walk(document) is True
+    value: bool | None = None
+    for key_node, value_node in document.value:
+        if isinstance(key_node, ScalarNode) and key_node.value == key:
+            value = (
+                isinstance(value_node, ScalarNode)
+                and value_node.value in ("true", "True", "TRUE")
+                # An explicit !!bool tag resolves a quoted scalar in pi's core
+                # schema too; any other quoted or plain spelling stays a string.
+                and (value_node.style is None or value_node.tag == "tag:yaml.org,2002:bool")
+            )
+    return value
 
 
 def _shipped_paths(skill_path: Path) -> list[Path]:
@@ -552,8 +547,22 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
     custom = {k: v for k, v in data.items() if str(k) not in _KNOWN_FIELDS}
     platforms = data.get("platforms")
     name = _skill_name(skill_path, data)
-    duplicates = catalog.duplicates(skill_path, name) if catalog else []
-    lookalikes = catalog.lookalikes(skill_path) if catalog else []
+    # pi compares real entry names; on a case-insensitive filesystem the
+    # discovered manifest path carries the canonical spelling while the
+    # entry is cased differently, so resolve the actual name first.
+    actual_manifest_name = (
+        manifest.name
+        if manifest.name in names
+        else next((n for n in names if n.casefold() == manifest.name.casefold()), manifest.name)
+    )
+    duplicate_keys = bool(_duplicate_frontmatter_keys(fm_yaml))
+    tab_indent = _tab_indent_breaks_yaml(fm_yaml)
+    # pi's YAML parser (eemeli/yaml) rejects duplicate keys and tab indentation,
+    # so the skill is dropped and hidden findings must not suggest /skill:name.
+    pi_dropped = duplicate_keys or tab_indent
+    pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
+    duplicates = catalog.duplicates(manifest, name) if catalog else []
+    lookalikes = catalog.lookalikes(manifest) if catalog else []
     return {
         "skill_name": name,
         "description_text": description if isinstance(description, str) else "",
@@ -561,7 +570,8 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
-        "pi_manifest_ignored": "SKILL.md" not in names and _pi_manifest_ignored(skill_path),
+        "pi_manifest_ignored": actual_manifest_name != "SKILL.md"
+        and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path)),
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -584,15 +594,16 @@ def skill_facts(skill_path: Path, catalog: Catalog | None = None, manifest: Path
         "trigger_end": trigger.end() if trigger else None,
         "name_missing": "name" not in data,
         "frontmatter_bom": raw.startswith(b"\xef\xbb\xbf"),
-        "frontmatter_duplicate_keys": bool(_duplicate_frontmatter_keys(fm_yaml)),
-        "frontmatter_tab_indent": _tab_indent_breaks_yaml(fm_yaml),
+        "frontmatter_duplicate_keys": duplicate_keys,
+        "frontmatter_tab_indent": tab_indent,
         "allowed_tools_shape": "none"
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
-        "pi_disable_model_invocation": _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
-        "pi_hidden_value_invalid": _is_true(data.get("disable-model-invocation"))
-        and not _pi_strict_bool(fm_yaml, data, "disable-model-invocation"),
+        "pi_disable_model_invocation": pi_hidden is True and not pi_dropped,
+        "pi_hidden_value_invalid": pi_hidden is False
+        and not pi_dropped
+        and _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
         "claude_ignored_values": "; ".join(_claude_ignored_values(data)),
@@ -699,17 +710,24 @@ class Catalog:
     def of(cls, skills: list[Path], base: Path | None = None, manifests: dict[Path, Path] | None = None) -> Catalog:
         names, descriptions, chars = {}, {}, 0
         for skill in skills:
-            _, _, _, _, data = _read_manifest(skill, (manifests or {}).get(skill.resolve()))
-            names[skill.resolve()] = _skill_name(skill, data)
+            # Loose manifest files (pi's root .md skills) stand for their folder;
+            # entries key on the manifest file so an explicit check can match it.
+            folder = skill.parent if skill.is_file() else skill
+            # A file entry is its own explicit manifest; a folder entry only uses
+            # the manifest an explicit check selected for it.
+            manifest, _, _, _, data = _read_manifest(
+                folder, skill if skill.is_file() else (manifests or {}).get(folder.resolve())
+            )
+            names[manifest.resolve()] = _skill_name(folder, data)
             description = data.get("description")
             chars += len(description) if isinstance(description, str) else 0
-            descriptions[skill.resolve()] = description if isinstance(description, str) else ""
+            descriptions[manifest.resolve()] = description if isinstance(description, str) else ""
         return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
 
-    def lookalikes(self, skill: Path) -> list[str]:
+    def lookalikes(self, manifest: Path) -> list[str]:
         """Other skills here whose description has nearly the same words as this one's."""
         descriptions = self.descriptions or {}
-        own = skill.resolve()
+        own = manifest.resolve()
         words = _description_words(descriptions.get(own, ""))
         if len(words) < _LOOKALIKE_MIN_WORDS:
             return []
@@ -721,8 +739,8 @@ class Catalog:
             and _jaccard(words, _description_words(text)) >= _LOOKALIKE_OVERLAP
         ]
 
-    def duplicates(self, skill: Path, name: str) -> list[str]:
-        own = skill.resolve()
+    def duplicates(self, manifest: Path, name: str) -> list[str]:
+        own = manifest.resolve()
         return [self._display(other) for other, other_name in self.names.items() if other != own and other_name == name]
 
     def _display(self, path: Path) -> str:
@@ -758,9 +776,50 @@ def _catalog_base(skill: Path) -> Path | None:
     return parent if parent.name == "skills" else None
 
 
+def _pi_skills_root(base: Path) -> bool:
+    """Whether *base* is a .pi skills root pi scans with its own discovery (loose .md files are skills too)."""
+    posix = base.absolute().as_posix()
+    return posix.endswith("/.pi/skills") or posix.endswith("/.pi/agent/skills")
+
+
+def _pi_manifests(base: Path) -> list[Path]:
+    """Manifest files pi 1.6.0 discovers under a skills root (dist/core/skills.js).
+
+    A folder short-circuits on the exact ``SKILL.md`` spelling — a differently
+    cased sibling is invisible to it; without one, loose ``.md`` files load
+    only at the scanned root and subfolders recurse looking for ``SKILL.md``.
+    """
+
+    def scan(folder: Path, root_level: bool) -> list[Path]:
+        try:
+            children = sorted(folder.iterdir())
+        except OSError:
+            return []
+        # pi compares entry names exactly, so on a case-insensitive filesystem
+        # skill.md is not the canonical spelling here.
+        if any(child.name == "SKILL.md" for child in children):
+            return [folder / "SKILL.md"]
+        found: list[Path] = []
+        for child in children:
+            if child.name.startswith(".") or child.name == "node_modules":
+                continue
+            if child.is_dir():
+                found.extend(scan(child, False))
+            elif root_level and child.is_file() and child.name.endswith(".md"):
+                found.append(child)
+        return found
+
+    return scan(base, True)
+
+
 def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) -> Catalog:
     base = _catalog_base(group[0])
     if base is not None:
+        if _pi_skills_root(base):
+            discovered = _pi_manifests(base)
+            if discovered:
+                # pi's own discovery: every loose root .md file is its own skill
+                return Catalog.of(discovered, base, manifests)
         return Catalog.of(_find_skills(base) or group, base, manifests)
     return Catalog.of(
         group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests
@@ -853,6 +912,11 @@ def _utf16_units(value: Any) -> int:
 def listed_description(profile: dict[str, Any], facts: dict[str, Any]) -> dict[str, Any]:
     """What the profile says this harness puts in the model's skill list for the description."""
     listing = profile.get("listing") or {}
+    hidden_when = listing.get("hidden_when")
+    if hidden_when and facts.get(hidden_when):
+        # The harness omits the skill from the model list entirely; the explicit
+        # invocation that still works is reported by its own finding.
+        return {"mode": "hidden", "text": ""}
     text = facts[listing.get("text_fact", "description_text")]
     budget = listing.get("budget") or {}
     over_budget = facts["catalog_size"] and (

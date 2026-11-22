@@ -77,9 +77,27 @@ def test_invalid_utf8_dataset_is_rejected(tmp_path: Path, suffix: str) -> None:
 
 @pytest.mark.parametrize("suffix", [".yaml", ".yml"])
 @pytest.mark.parametrize("tag", ["int", "float", "bool", "timestamp"])
-def test_invalid_dataset_scalar_does_not_echo_prompt_text(tmp_path: Path, suffix: str, tag: str) -> None:
+def test_invalid_dataset_scalar_keeps_location_without_prompt_text(tmp_path: Path, suffix: str, tag: str) -> None:
     dataset_path = tmp_path / f"evals{suffix}"
     dataset_path.write_text(f"- id: scalar\n  question: !!{tag} private prompt text\n", encoding="utf-8")
 
-    with pytest.raises(StructuredDataSyntaxError, match=r"^Input is not valid YAML$"):
+    with pytest.raises(StructuredDataSyntaxError) as caught:
         load_dataset_entries(dataset_path)
+
+    assert str(caught.value) == "Input is not valid YAML: line 2, column 13: cannot parse a value"
+    assert "private prompt text" not in str(caught.value)
+
+
+@pytest.mark.parametrize("suffix", [".yaml", ".yml"])
+def test_invalid_dataset_date_keeps_its_own_source_location(tmp_path: Path, suffix: str) -> None:
+    dataset_path = tmp_path / f"evals{suffix}"
+    dataset_path.write_text(
+        "# Synthetic dataset\n\n- id: date\n  question: Synthetic prompt\n  ground_truth: 2026-02-30\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(StructuredDataSyntaxError) as caught:
+        load_dataset_entries(dataset_path)
+
+    assert str(caught.value) == "Input is not valid YAML: line 5, column 17: cannot parse a value"
+    assert "2026-02-30" not in str(caught.value)

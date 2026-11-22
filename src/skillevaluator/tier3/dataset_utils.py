@@ -210,10 +210,11 @@ def _yaml_syntax_message(error: StructuredDataSyntaxError) -> str:
     column are what the author needs to find the mistake.
     """
     cause = error.__cause__
+    mark = getattr(cause, "problem_mark", None)
+    if not isinstance(cause, yaml.YAMLError) or mark is None:
+        return str(error)
     if isinstance(cause, ScalarConstructionError):
-        return str(error)
-    if not isinstance(cause, yaml.YAMLError) or getattr(cause, "problem_mark", None) is None:
-        return str(error)
+        return f"{error!s}: line {mark.line + 1}, column {mark.column + 1}: cannot parse a value"
     context = getattr(cause, "context", None)
     detail = _yaml_error_detail(cause)
     return f"{error!s}: {context}; {detail}" if context else f"{error!s}: {detail}"

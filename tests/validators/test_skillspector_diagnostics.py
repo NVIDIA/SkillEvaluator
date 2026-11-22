@@ -126,7 +126,8 @@ def test_diagnostic_text_and_lists_are_bounded_redacted_and_idempotent():
     assert "must not persist" not in encoded and "\\u001b" not in encoded and "\\n" not in encoded
     wrapped = {"records": [record], "omitted_records": 0}
     assert sanitize_completeness(wrapped) == wrapped
-    merged = merge_completeness(wrapped, {"records": [record] * 520})
+    small_record = completeness_record({"ledger_exceptions": [{"path": "guide.md"}]}, "skillspector")
+    merged = merge_completeness(wrapped, {"records": [small_record] * 520})
     assert len(merged["records"]) == 512
     assert merged["omitted_records"] == 9
     assert merged["records"][0]["ledger_rows_total"] == 505
@@ -268,7 +269,7 @@ def test_ledger_keeps_every_row_of_a_realistic_library_and_states_the_totals():
     assert again["ledger_rows_total"] == 50
 
 
-def test_gate_message_names_retained_rows_when_the_cap_applies(monkeypatch):
+def test_gate_message_names_reported_rows_and_cap(monkeypatch):
     import skillevaluator.skillspector_diagnostics as diagnostics
 
     monkeypatch.setattr(diagnostics, "_MAX_ROWS", 2)
@@ -292,4 +293,4 @@ def test_gate_message_names_retained_rows_when_the_cap_applies(monkeypatch):
     assert SecurityValidator._validate_skillspector_report(payload, 0, False, "skillspector", result)
     record = result.metadata["skillspector_completeness"]["records"][0]
     assert record["ledger_rows_retained"] == 2 and record["ledger_rows_total"] == 5
-    assert any("retains 2 of 5 ledger rows" in error for error in result.errors)
+    assert any("reported 5 ledger rows, with 3 beyond the per-record limit" in error for error in result.errors)

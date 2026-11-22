@@ -120,11 +120,14 @@ def merge_completeness(left: object, right: object, *, prefix: str | None = None
     if not a and not b:
         return {}
     incoming = b.get("records", [])
-    if prefix is not None:
-        incoming = [{**record, "skill": _text(prefix)} for record in incoming]
-    return sanitize_completeness(
-        {
-            "records": a.get("records", []) + incoming,
-            "omitted_records": a.get("omitted_records", 0) + b.get("omitted_records", 0),
-        }
-    )
+    if prefix is not None and incoming:
+        skill = _text(prefix)
+        incoming = [{**record, "skill": skill} for record in incoming]
+    records = a.get("records", []) + incoming
+    omitted = _count(a.get("omitted_records", 0) + b.get("omitted_records", 0))
+    # Both sets of records are already projected. Cap the combined list
+    # without redacting all of its rows again.
+    return {
+        "records": records[:_MAX_RECORDS],
+        "omitted_records": omitted + max(0, len(records) - _MAX_RECORDS),
+    }

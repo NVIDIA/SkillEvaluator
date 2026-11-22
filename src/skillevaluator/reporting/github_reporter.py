@@ -711,11 +711,15 @@ def _rubric_member_counts(results: list[ValidationResult]) -> tuple[int, int, in
     for result in results:
         metadata = result.metadata if isinstance(result.metadata, dict) else {}
         members = metadata.get("rubric_eval_members")
-        if isinstance(members, list) and members:
+        if isinstance(members, list):
             member_lists.append((result, members))
     if len(member_lists) != 1:
         return None
     result, members = member_lists[0]
+    if not members:
+        # A folder run whose discovery found no skill evaluated none; its
+        # discovery error still fails the run.
+        return (0, 0, 0, 0) if len(results) == 1 else None
     advisory = _advisory(result)
     passed = failed = incomplete = 0
     for member in members:

@@ -672,6 +672,9 @@ class RubricEvalValidator(ValidatorBase):
                 "summary": "No skills found in target directory",
                 "checks": [],
             }
+            # An empty member list marks a folder run that evaluated no skill,
+            # unlike a single-skill run, which has no member list.
+            result.metadata["rubric_eval_members"] = []
             return result
 
         result = ValidationResult(

@@ -1406,6 +1406,26 @@ def _rubric_skill_folder(tmp_path: Path) -> Path:
     return folder
 
 
+@pytest.mark.parametrize("readme", [False, True])
+def test_rubric_eval_folder_with_no_skills_counts_zero_checked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, readme: bool
+) -> None:
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    folder = tmp_path / "skills"
+    folder.mkdir()
+    if readme:
+        (folder / "README.md").write_text("# Skills\n", encoding="utf-8")
+    reports = tmp_path / "reports"
+
+    cli_result = CliRunner().invoke(cli, ["rubric-eval", str(folder), "-r", "github,json", "-o", str(reports)])
+
+    assert cli_result.exit_code == 1, cli_result.output
+    assert "No skills found in target directory" in cli_result.output
+    assert _summary(cli_result.output).startswith(
+        "::notice title=SkillEvaluator::0 skills checked, 0 passed, 0 failed, 0 incomplete"
+    )
+
+
 def test_rubric_eval_three_skill_folder_mixed_counts_each_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

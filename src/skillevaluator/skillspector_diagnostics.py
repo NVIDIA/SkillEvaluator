@@ -7,8 +7,13 @@ from __future__ import annotations
 
 import unicodedata
 
-_MAX_RECORDS = 64
-_MAX_ROWS = 20
+# Per-result and per-record caps keep the JSON report bounded against a hostile
+# or runaway scanner payload. Real libraries stay well below them: a 227-skill
+# library with 521 ledger rows was cut to 268 under the old 20-row cap, which
+# hid half of the incomplete scope (#861). Each record states how many rows it
+# retains out of the total, so any truncation that does occur is visible.
+_MAX_RECORDS = 512
+_MAX_ROWS = 500
 _MAX_LIMITATIONS = 8
 
 
@@ -73,12 +78,17 @@ def completeness_record(completeness: dict, stage: str) -> dict:
         if diagnostic is not None:
             item["parser_diagnostic"] = diagnostic
         exceptions.append(item)
+    omitted_exceptions = max(0, len(rows) - _MAX_ROWS)
     return {
         "stage": stage if isinstance(stage, str) and stage in {"skillspector", "skillspector-llm"} else "unknown",
         "reported_status": "partial",
         "ledger_exceptions": exceptions,
         "limitations": [_text(value) for value in limits[:_MAX_LIMITATIONS]],
-        "omitted_exceptions": max(0, len(rows) - _MAX_ROWS),
+        "omitted_exceptions": omitted_exceptions,
+        # Rows this record retains out of every row the scanner reported, so a
+        # reader can see "N of M" without summing two fields.
+        "ledger_rows_retained": len(exceptions),
+        "ledger_rows_total": len(exceptions) + omitted_exceptions,
         "omitted_limitations": max(0, len(limits) - _MAX_LIMITATIONS),
     }
 
@@ -94,6 +104,7 @@ def sanitize_completeness(value: object) -> dict:
         record = completeness_record(source, source.get("stage"))
         for key in ("omitted_exceptions", "omitted_limitations"):
             record[key] += _count(source.get(key))
+        record["ledger_rows_total"] = record["ledger_rows_retained"] + record["omitted_exceptions"]
         if "skill" in source:
             record["skill"] = _text(source["skill"])
         records.append(record)

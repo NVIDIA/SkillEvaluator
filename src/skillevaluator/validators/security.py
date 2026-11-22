@@ -4667,6 +4667,12 @@ class SecurityValidator(ValidatorBase):
                         if not gap_rows and not other_gaps and diagnostic["limitations"]:
                             # No incomplete file to name: the limitation is the only stated reason.
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        if diagnostic["omitted_exceptions"]:
+                            # Say so where the gate is read, not only in the JSON record.
+                            message = (
+                                f"{message}. The JSON report retains {diagnostic['ledger_rows_retained']} of "
+                                f"{diagnostic['ledger_rows_total']} ledger rows for this skill"
+                            )
                         result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 

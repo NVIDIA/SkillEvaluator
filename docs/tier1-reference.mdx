@@ -997,10 +997,13 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     name for a file, report that detection issue to SkillSpector.
 
     For more detail, each JSON result's `skillspector_completeness.records`
-    retains the scan stage, up to 20 ledger exceptions, analyzer names, and up
-    to eight limitations. Omission counts make truncation explicit. Folder
-    reports retain the skill name with each record. These diagnostics never
-    turn an incomplete scan into a pass.
+    retains the scan stage, up to 500 ledger exceptions per skill, analyzer
+    names, and up to eight limitations. Each record states
+    `ledger_rows_retained` and `ledger_rows_total`, and `omitted_exceptions`
+    counts any rows the cap left out, so truncation is explicit; when it
+    happens, the gate message also says how many rows the report retains.
+    Folder reports keep up to 512 records and retain the skill name with each.
+    These diagnostics never turn an incomplete scan into a pass.
   </Accordion>
   <Accordion title="Gitleaks is not installed">
     On Linux and macOS, SkillEvaluator downloads Gitleaks on first use. If that

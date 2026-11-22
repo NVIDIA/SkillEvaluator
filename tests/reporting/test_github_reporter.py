@@ -367,6 +367,32 @@ def test_gate_error_names_the_blocking_finding_before_a_coverage_error() -> None
     assert any("incomplete/bandit" in line for line in _commands(text) if line.startswith("::warning"))
 
 
+@pytest.mark.parametrize("severity", [Severity.LOW, Severity.HIGH])
+def test_incomplete_reason_comes_from_scan_diagnostics_not_findings(severity: Severity) -> None:
+    result = ValidationResult(validator_name="Code Risk Analysis")
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=severity,
+            check_name="B307:eval",
+            message="Use of eval detected",
+            file_path="scripts/run.py",
+            line_number=4,
+        ),
+        is_error=severity is Severity.HIGH,
+    )
+    result.add_warning("bandit could not read scripts/broken.py")
+    result.mark_scan_incomplete("bandit")
+    commands = _commands(GitHubReporter().render_all([result]))
+    incomplete = [line for line in commands if "incomplete/bandit" in line]
+    assert len(incomplete) == 1, commands
+    assert "could not read scripts/broken.py" in incomplete[0]
+    assert "Use of eval detected" not in incomplete[0]
+    findings = [line for line in commands if "Use of eval detected" in line and "gate_failure" not in line]
+    assert len(findings) == 1, commands
+    assert "file=scripts/run.py" in findings[0]
+
+
 def test_advisory_failure_keeps_required_incomplete_scan() -> None:
     scan = ValidationResult(validator_name="Security Scan")
     scan.mark_scan_incomplete("skillspector")

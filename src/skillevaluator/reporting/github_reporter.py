@@ -384,7 +384,9 @@ def _advisory(result: ValidationResult) -> bool:
 
 def _incomplete_reason(result: ValidationResult, tool: str) -> str:
     needle = tool.casefold()
-    for text in (*result.warnings, *result.errors):
+    # Only scanner diagnostics explain coverage; a finding's legacy line can
+    # name the scanner in its tag without saying why the scan was incomplete.
+    for text in (*result.independent_warnings(), *result.independent_errors()):
         if isinstance(text, str) and needle in text.casefold():
             return text
     return f"{tool} scan did not complete"

@@ -670,10 +670,17 @@ def _annotations_for_result(
             )
         )
 
+    # A confirmed failure outranks an incomplete scan, so that scan's warning does
+    # not cover the gate. An error annotation already on the result does. An
+    # incomplete-only result, which is not a confirmed failure, stays a warning.
+    confirmed_failed = result_status(result) == Status.FAILED
     if (
         not advisory
-        and not passes_required_gate(result)
-        and not any(item.kind in {"gate", "error", "incomplete"} or item.level == "error" for item in annotations)
+        and (confirmed_failed or not passes_required_gate(result))
+        and not any(
+            item.level == "error" or (not confirmed_failed and item.kind in {"gate", "error", "incomplete"})
+            for item in annotations
+        )
     ):
         annotations.append(
             _Annotation(

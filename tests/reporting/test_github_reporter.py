@@ -271,6 +271,77 @@ def test_advisory_errors_count_toward_warning_cap_without_failing_summary() -> N
     assert "2 more were not annotated" in summary
 
 
+def _blocking_medium_code_risk() -> ValidationResult:
+    result = ValidationResult(validator_name="Code Risk Analysis")
+    result.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.MEDIUM,
+            check_name="B307:eval",
+            message="Use of eval detected",
+            file_path="scripts/run.py",
+            line_number=4,
+        ),
+        is_error=True,
+    )
+    return result
+
+
+def _with_incomplete_semgrep(result: ValidationResult) -> ValidationResult:
+    result.mark_scan_incomplete("semgrep")
+    result.add_warning("semgrep scan did not complete")
+    return result
+
+
+def test_confirmed_failure_with_incomplete_scan_emits_one_gate_error() -> None:
+    """A confirmed failure stays an error when the same result has an incomplete scanner."""
+    failed = _with_incomplete_semgrep(_blocking_medium_code_risk())
+    text = GitHubReporter().render_all([failed])
+    errors = [line for line in _commands(text) if line.startswith("::error")]
+    warnings = [line for line in _commands(text) if line.startswith("::warning")]
+    assert len(errors) == 1
+    assert "title=Code Risk Analysis/gate_failure" in errors[0]
+    assert "Use of eval detected" in errors[0]
+    assert any("incomplete/semgrep" in line for line in warnings)
+    assert "1 skill checked, 0 passed, 1 failed, 0 incomplete" in _summary(text)
+
+    incomplete = ValidationResult(validator_name="Security Scan")
+    incomplete.mark_scan_incomplete("skillspector")
+    incomplete.add_warning("skillspector timed out after 300 seconds")
+    incomplete_text = GitHubReporter().render_all([incomplete])
+    incomplete_commands = _commands(incomplete_text)
+    assert not any(line.startswith("::error") for line in incomplete_commands)
+    assert any("incomplete/skillspector" in line and line.startswith("::warning") for line in incomplete_commands)
+    assert "1 skill checked, 0 passed, 0 failed, 1 incomplete" in _summary(incomplete_text)
+
+    advisory = _with_incomplete_semgrep(_blocking_medium_code_risk())
+    advisory.metadata["gating"] = {"tier": 1, "blocking": False}
+    advisory_text = GitHubReporter().render_all([advisory])
+    advisory_commands = _commands(advisory_text)
+    assert not any(line.startswith("::error") for line in advisory_commands)
+    assert any(line.startswith("::warning") for line in advisory_commands)
+    assert "1 skill checked, 1 passed, 0 failed, 0 incomplete" in _summary(advisory_text)
+
+    covered = ValidationResult(validator_name="Code Risk Analysis")
+    covered.add_structured_finding(
+        Finding(
+            category="BANDIT",
+            severity=Severity.HIGH,
+            check_name="B102:exec",
+            message="Use of exec detected",
+            file_path="scripts/run.py",
+            line_number=8,
+        ),
+        is_error=True,
+    )
+    covered_text = GitHubReporter().render_all([_with_incomplete_semgrep(covered)])
+    covered_errors = [line for line in _commands(covered_text) if line.startswith("::error")]
+    assert len(covered_errors) == 1
+    assert "gate_failure" not in covered_errors[0]
+    assert "B102" in covered_errors[0]
+    assert any("incomplete/semgrep" in line for line in _commands(covered_text) if line.startswith("::warning"))
+
+
 def test_advisory_failure_keeps_required_incomplete_scan() -> None:
     scan = ValidationResult(validator_name="Security Scan")
     scan.mark_scan_incomplete("skillspector")
@@ -1272,6 +1343,9 @@ def test_rubric_eval_three_skill_folder_mixed_counts_each_member(
     from skillevaluator.validators.rubric_eval import RubricJudge
 
     monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    # A forced color terminal leaves Rich's cursor restore on the same line as
+    # the first workflow command. The annotation has to start the line.
+    monkeypatch.delenv("FORCE_COLOR", raising=False)
     folder = _rubric_skill_folder(tmp_path)
     replies = [_rubric_reply(9), _rubric_reply(8), _rubric_reply(5)]
 

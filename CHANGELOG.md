@@ -263,7 +263,12 @@ notes below describe the new policy and backend configuration behavior.
   again: advisory-only findings leave a skill passing, and a
   `--min-score` gate or a HIGH finding fails only the skill it names, so the HTML
   skill cards, the JSON `skills[]` entries and the contributor summary agree with
-  the overall result.
+  the overall result. The verdict is reconstructed from finding severity and each
+  member's labelled gate failures, so a member that failed a different way — an
+  incomplete scan (`mark_scan_incomplete`) or a legacy `add_error` line with only
+  advisory findings — still reads as passed in `skills[]` and the skill cards.
+  Recording each member's own status in `merge_with_prefix` would close that, and
+  is left for a follow-up.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

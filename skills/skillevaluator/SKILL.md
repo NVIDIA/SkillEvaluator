@@ -134,7 +134,7 @@ do. Report no score, lift or verdict for that tier.
    - `pipx install --python python3.13 "skillevaluator[all]"`
    - `python3 -m pip install --upgrade "skillevaluator[all]"` inside an active
      virtual environment whose Python is 3.12-3.14 (on an older Python, pip
-     installs an empty `0.0.0a0` placeholder with no `skillevaluator` command)
+     installs the empty placeholder release 0.0.0a0 without a `skillevaluator` command)
    - with no install, prefix each command with `uvx --python 3.13 --from "skillevaluator[all]"`
 
    The same permission rule covers isolated installs, `uvx` provisioning,

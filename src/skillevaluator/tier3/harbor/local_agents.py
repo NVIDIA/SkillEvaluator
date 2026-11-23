@@ -142,8 +142,13 @@ def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
     values = sorted((token.encode("utf-8") for token in tokens), key=len, reverse=True)
     unmasked: list[str] = []
     seen = 0
+
+    def record_walk_error(error: OSError) -> None:
+        failed = Path(error.filename) if error.filename else logs_dir
+        unmasked.append(failed.relative_to(logs_dir).as_posix() if failed.is_relative_to(logs_dir) else ".")
+
     with SecureRoot(logs_dir) as secure_root:
-        for current, directories, names in os.walk(logs_dir, onerror=lambda exc: unmasked.append(str(exc.filename))):
+        for current, directories, names in os.walk(logs_dir, onerror=record_walk_error):
             parent = Path(current)
             descend: list[str] = []
             for name in sorted([*directories, *names]):

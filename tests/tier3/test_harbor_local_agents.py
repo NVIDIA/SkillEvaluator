@@ -3,6 +3,7 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import shlex
@@ -248,6 +249,28 @@ def test_bridge_artifact_redaction_never_writes_through_a_parent_swapped_during_
     assert host_file.stat().st_ino == host_inode
     assert host_file.read_bytes() == host_bytes
     assert sorted(path.name for path in (outside / "e").iterdir()) == ["a.txt"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [("agent/sessions", "sessions"), ("agent", "."), (None, "."), ("outside", ".")],
+)
+def test_bridge_artifact_listing_errors_use_relative_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, filename: str | None, expected: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    error = PermissionError(errno.EACCES, "access denied", str(tmp_path / filename) if filename else None)
+
+    def fail_walk(_root: Path, *, onerror):
+        onerror(error)
+        return iter(())
+
+    monkeypatch.setattr(local_agents.os, "walk", fail_walk)
+
+    assert local_agents._redact_bridge_artifacts(logs, {"synthetic-capability"}) == [expected]
 
 
 @pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])

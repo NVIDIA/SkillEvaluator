@@ -49,11 +49,14 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
             folded = unicodedata.normalize("NFKC", entry)
             if any(char.isspace() for char in folded) or any(char in folded for char in "%@?#\\"):
                 raise ValueError(f"{key} contains an invalid host pattern")
+            bracketed = folded.startswith("[") and folded.endswith("]")
+            # The matcher strips ASCII brackets before folding, so an entry
+            # whose brackets only become ASCII here would remain a literal name.
+            if bracketed and not (entry.startswith("[") and entry.endswith("]")):
+                raise ValueError(f"{key} contains an invalid IP address or network")
             if "/" in folded or ":" in folded:
                 try:
-                    ipaddress.ip_network(
-                        folded[1:-1] if folded.startswith("[") and folded.endswith("]") else folded, strict=False
-                    )
+                    ipaddress.ip_network(folded[1:-1] if bracketed else folded, strict=False)
                 except ValueError as exc:
                     raise ValueError(f"{key} contains an invalid IP address or network") from exc
             _check_host_pattern(entry, key)

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 import pytest
 
 from skillevaluator.validators import policy as policy_module
+from skillevaluator.validators.mcp_static import HostAllowlist, classify_endpoint_host
 from skillevaluator.validators.policy import ValidationPolicy, load_policy_file
 
 
@@ -55,6 +56,33 @@ def test_allowlists_are_typed_redacted_and_order_independent():
 def test_existing_host_patterns_and_ip_notation_remain_supported():
     entries = ("localhost", "*.corp.example", "10.0.0.0/8", "::1", "[::1]")
     assert ValidationPolicy(mcp_allowed_private_hosts=entries).mcp_allowed_private_hosts == entries
+
+
+@pytest.mark.parametrize("setting", ["mcp_allowed_private_hosts", "hook_allowed_urls"])
+@pytest.mark.parametrize(
+    "entry", ["\uff3b::1\uff3d", "\uff3b127.0.0.1\uff3d", "\uff3b10.0.0.0/8\uff3d", "\uff3b::1]", "[::1\uff3d"]
+)
+def test_bare_ip_allowlist_entries_reject_brackets_the_matcher_cannot_parse(setting, entry):
+    with pytest.raises(ValueError, match="invalid IP address or network"):
+        ValidationPolicy(**{setting: (entry,)})
+
+
+@pytest.mark.parametrize(
+    "entry,allowed,denied",
+    [
+        ("[::1]", "::1", "127.0.0.1"),
+        ("\uff11\uff12\uff17\uff0e\uff10\uff0e\uff10\uff0e\uff11", "127.0.0.1", "127.0.0.2"),
+        ("\uff11\uff10\uff0e\uff10\uff0e\uff10\uff0e\uff10\uff0f\uff18", "10.1.2.3", "192.168.1.1"),
+        ("münchen.corp.example", "xn--mnchen-3ya.corp.example", "other.corp.example"),
+    ],
+)
+def test_bare_allowlist_keeps_accepted_matcher_normalization(entry, allowed, denied):
+    policy = ValidationPolicy(mcp_allowed_private_hosts=(entry,))
+    hosts = HostAllowlist.from_entries(policy.mcp_allowed_private_hosts)
+
+    assert policy.mcp_allowed_private_hosts == (entry,)
+    assert hosts.allows_host(allowed, classify_endpoint_host(allowed))
+    assert not hosts.allows_host(denied, classify_endpoint_host(denied))
 
 
 def test_allowlist_entries_are_stripped_and_deduplicated():

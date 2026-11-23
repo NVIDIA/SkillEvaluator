@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Bound declarative output-pattern checks with isolated Python regex workers and a shared
+  matching budget, preserving Python regex semantics and later checks. Interpreter
+  startup and JSON transfer have a separate startup allowance and do not consume
+  the matching budget; invalid patterns remain unscored across output encodings.
+  Pattern timeouts and exhausted matching budgets count as failed checks, so
+  slow failing patterns cannot increase the behavior score. Operators can
+  configure the per-pattern deadline and shared budget through the existing
+  verifier environment.
+
 ## 1.1.0 - 2026-11-22
 
 ### Highlights

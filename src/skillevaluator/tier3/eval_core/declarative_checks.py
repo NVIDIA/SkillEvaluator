@@ -92,7 +92,13 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     if status is None:
         return None
     command = _command_text(call)
-    tokens = _script_invocation._shell_tokens(command)
+    shell, modelled = _tool_call_shell(call)
+    if not modelled:
+        return None
+    tokens = _script_invocation._shell_tokens(command, strip_comment_text=True, _shell=shell)
+    if not tokens:
+        # Uncertain comment boundaries are not evidence of a simple command.
+        return None
     if any(
         token
         in {
@@ -121,7 +127,7 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
     segments: list[list[str]] = [[]]
     separators: list[str] = []
     for token in tokens:
-        if token in _SHELL_SEPARATORS:
+        if token in _SHELL_SEPARATORS or token == "|&":
             if not segments[-1]:
                 return None
             separators.append(token)
@@ -130,9 +136,19 @@ def _script_exit_status(call: dict[str, Any], script: str) -> int | None:
             segments[-1].append(token)
     if not segments[-1]:
         return None
-    shell, modelled = _tool_call_shell(call)
-    if not modelled:
-        return None
+    if len(segments) == 1:
+        # A negated shell pipeline records the inverse of the script status.
+        words = segments[0]
+        start = 0
+        if words[0] == "time":
+            start = 1
+            # Newer Bash also accepts ``--`` to end the options of ``time``.
+            while start < len(words) and words[start] in {"-p", "--"}:
+                start += 1
+        if start < len(words) and words[start] == "!":
+            return None
+        # Joining decoded tokens would lose quoted argument boundaries.
+        return status if _cmd_executes_script(command, script, _shell=shell) is True else None
     invocations = [
         index
         for index, segment in enumerate(segments)

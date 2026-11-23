@@ -859,6 +859,28 @@ def _is_runtime_evaluator_directory(path: Path) -> bool:
     return any(os.path.lexists(path / f"dataset{extension}") for extension in DATASET_EXTENSIONS)
 
 
+def _is_member_dataset_path(path: Path, source_root: Path) -> bool:
+    """Return whether *path* is in an evaluator directory of *source_root* or of a skill inside it.
+
+    Applies the agent-visible skill copy's rule (see ``_runtime_skill_copy_ignore``)
+    to an authored source staged as repository context: ``evals/``, or a legacy
+    ``eval/`` holding a dataset, directly under the source root or under any
+    directory with a skill manifest.
+    """
+    root = Path(os.path.abspath(source_root))  # noqa: PTH100 -- lexical, as the repository walk
+    try:
+        parts = Path(os.path.abspath(path)).relative_to(root).parts  # noqa: PTH100
+    except ValueError:
+        return False
+    owner = root
+    for part in parts:
+        candidate = owner / part
+        if (owner == root or _skill_manifest(owner) is not None) and _is_runtime_evaluator_directory(candidate):
+            return True
+        owner = candidate
+    return False
+
+
 def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] = ()):
     """Build a root-aware ignore callback for an agent-visible skill copy."""
 
@@ -1306,6 +1328,15 @@ def _stage_repo_context(
     if not source_skill_path:
         return {"mode": "none", "files": []}
 
+    authored_source = False
+    if mode == "full":
+        from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+        authored = runtime_source_path(source_skill_path)
+        if authored != source_skill_path:
+            authored_source = True
+            excluded_roots = (*excluded_roots, authored / "evals")
+        source_skill_path = authored
     source_skill_path = source_skill_path.resolve()
     skill_md = _skill_manifest(source_skill_path)
     repo_root = resolve_repo_context_root(source_skill_path)
@@ -1343,7 +1374,10 @@ def _stage_repo_context(
             repo_root,
             authenticated_output_roots,
             resolved_excluded_roots,
-            lambda path: publication_source_path_is_excluded(source_skill_path, path),
+            lambda path: (
+                publication_source_path_is_excluded(source_skill_path, path)
+                or (authored_source and _is_member_dataset_path(path, source_skill_path))
+            ),
         ):
             if _is_excluded_output(src):
                 continue
@@ -4583,6 +4617,15 @@ def _prepare_native_environment(
     """Stage SkillEvaluator runtime additions into a copied native Harbor task."""
     env_dir = task_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        (env_dir / "repo-context.json").lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError(
+            f"native Harbor task '{task_dir.name}' environment must not contain repo-context.json; "
+            "that path is reserved for generated repository-context metadata"
+        )
     if not has_skill and not baseline_aliases_prevalidated:
         _check_baseline_skill_candidates_do_not_alias_target(
             skill_path,

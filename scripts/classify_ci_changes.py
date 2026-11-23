@@ -32,6 +32,7 @@ TESTS_ROOT = b"tests"
 TIER3_PLATFORM_TESTS = frozenset(
     {
         b"tests/embedding/test_catalog.py",
+        b"tests/test_harbor_local_environment.py",
         b"tests/test_harbor_local_mode.py",
         b"tests/test_harbor_local_sandbox.py",
         b"tests/test_harbor_runtime_preflight.py",

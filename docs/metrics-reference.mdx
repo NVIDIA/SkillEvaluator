@@ -490,6 +490,15 @@ Efficiency are areas of a static documentation score. Tier 3's Correctness,
 Discoverability, Effectiveness and Efficiency are measured from agent runs. They
 are different quantities with overlapping names.
 
+A high Tier 1 Discoverability score means the skill follows the static
+documentation checks. If Tier 3 [`skill_execution`](#skill_execution) is low,
+inspect the trial's `activation_validation` through the HTML report's
+**Download JSON** export or the
+[retained-run export recipe](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation).
+When `observed_activation` is `unknown`, the evidence cannot distinguish missed
+routing from problems after activation. When it is `invoked`, review
+`activation_validation.evidence_scopes[].workflow` for post-activation diagnostics.
+
 ## Recompute any number from the JSON report
 
 Every published number can be rebuilt from the results tree described in

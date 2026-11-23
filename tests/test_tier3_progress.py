@@ -4118,6 +4118,23 @@ def test_runner_returns_structured_error_and_cleans_partial_snapshot_on_enospc(
     assert transitions.count(("run-finished", "failed")) == 1
 
 
+def test_ordinary_harbor_warns_about_plugin_only_config(tmp_path, monkeypatch, caplog) -> None:
+    from skillevaluator.tier3.evals_config import load_evals_config
+
+    runner, skill = _stub_runner(monkeypatch, tmp_path)
+    monkeypatch.setattr(runner, "load_evals_config", load_evals_config)
+    (skill / "evals" / "config.yml").write_text(
+        "schema_version: 1\nharbor:\n  trial_retries: 2\nplugin:\n  load: native\n  lift_mode: integration\n",
+        encoding="utf-8",
+    )
+
+    runner.run_harbor_eval(skill, ["codex"])
+
+    assert "Only prepared plugin runs use these settings" in caplog.text
+    for name in ("harbor.trial_retries", "plugin.load", "plugin.lift_mode"):
+        assert name in caplog.text
+
+
 @pytest.mark.parametrize("kind", ["symlink", "hardlink"])
 def test_runner_returns_error_for_unsafe_evals_config(tmp_path: Path, kind: str) -> None:
     from skillevaluator.tier3.harbor import runner

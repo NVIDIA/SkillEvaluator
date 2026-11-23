@@ -159,6 +159,8 @@ All notable changes to SkillEvaluator are documented in this file.
   whose embedded instructions must not be followed and count against a
   false-positive verdict. Previously a crafted skill file could steer a
   high-confidence `false_positive` verdict and downgrade a HIGH finding to INFO.
+- NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
+  such as `case` and `case-` retain separate rewards, trajectories and attempt records.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.

@@ -209,6 +209,29 @@ def test_results_inside_the_source_must_use_its_results_directories(tmp_path, mo
         assert calls == []
 
 
+def test_results_directory_accepts_trusted_platform_root_alias(tmp_path, monkeypatch):
+    from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
+
+    root = _plugin(tmp_path.resolve() / "plugin")
+    real_prefix = Path("/private/var")
+    alias = Path("/var")
+    if not root.is_relative_to(real_prefix) or canonicalize_trusted_root_alias(alias) != real_prefix:
+        pytest.skip("requires the trusted macOS /var root alias")
+    aliased_root = alias / root.relative_to(real_prefix)
+    seen = []
+    monkeypatch.setattr(
+        EvaluationService,
+        "evaluate",
+        lambda _self, options, **_kw: seen.append(options.results_dir) or {"execution_status": "succeeded"},
+    )
+
+    evaluate_plugin(EvaluationOptions(root, agents="claude-code", results_dir=aliased_root / "results"))
+    monkeypatch.chdir(aliased_root)
+    evaluate_plugin(EvaluationOptions(aliased_root, agents="claude-code", results_dir=Path("results")))
+
+    assert [path.resolve() for path in seen] == [root / "results", root / "results"]
+
+
 def test_evals_results_needs_an_existing_evals_directory(tmp_path, monkeypatch):
     root = _plugin(tmp_path / "plugin")
     monkeypatch.setattr(EvaluationService, "evaluate", lambda *_a, **_kw: pytest.fail("refused run reached the engine"))

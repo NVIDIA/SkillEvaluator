@@ -62,8 +62,12 @@ def _check_results_location(source: Path, results: Path) -> None:
     digest between run start and run end.
     """
     from skillevaluator.tier3.harbor.adapter import _path_is_canonically_contained, _path_is_excluded
+    from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 
-    results = results.expanduser()
+    # Match the digest and output-directory validation for trusted platform
+    # aliases such as macOS /var. Keep other symlinks visible to those checks.
+    source = canonicalize_trusted_root_alias(source.absolute())
+    results = canonicalize_trusted_root_alias(results.expanduser().absolute())
     if not _path_is_excluded(results, (source,)):
         return
     allowed = [source / "results"]

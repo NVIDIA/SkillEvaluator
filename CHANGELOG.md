@@ -354,6 +354,18 @@ All notable changes to SkillEvaluator are documented in this file.
   followed by the supported units, as its troubleshooting table describes.
   These requests previously fell through to arithmetic parsing and printed a
   Python syntax error.
+- Reject malformed NVIDIA Build backend tool-call names before Anthropic or
+  Responses streams start, so invalid model output cannot poison replayed tool history.
+- Local directory downloads disable macOS-generated AppleDouble tar entries
+  so extended attributes do not create nonexistent source-file errors. Real
+  user-authored `._` files and existing containment checks are preserved.
+- Retained aggregate Harbor jobs include a provenance log identifying their real
+  source jobs, allowing Harbor analysis to discover the merged trials without
+  implying an independent execution.
+- Custom graders on task images whose `python3` is 3.9 no longer fail with a
+  `TypeError` that scored every trial 0.0, including the SkillEvaluator default
+  score in `default_plus_custom` mode; rerun affected evaluations. Boolean,
+  non-finite and out-of-range scores are still rejected.
 
 ## 1.0.1 - 2026-11-17
 

@@ -404,6 +404,7 @@ jobs:
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
+          tests/test_harbor_local_environment.py::test_contained_download_keeps_authored_dot_underscore_files_without_generated_metadata
           tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias
 
   # Tier 2 is platform-independent Python, and Linux and Windows run the same

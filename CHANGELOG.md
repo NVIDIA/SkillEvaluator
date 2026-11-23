@@ -33,6 +33,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- Clarify what Tier 1 Discoverability scores and where to find evidence of
+  skill activation in Tier 3.
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,
   and explain how to add automated quality and security gates to a skills
   repository without maintaining evaluation code.

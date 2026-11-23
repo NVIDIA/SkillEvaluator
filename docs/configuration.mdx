@@ -213,7 +213,7 @@ Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Com
     export SKILL_EVAL_EMBEDDING_MODEL=text-embedding-3-small
     ```
 
-    Use the exact IDs from the [AI/ML API chat model card](https://aimlapi.com/models/openai-gpt-6-1-sol) and the [embeddings API reference](https://docs.aimlapi.com/api-references/embedding-models/openai/text-embedding-3-small). `skillevaluator models` lists visible chat model candidates. Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
+    Use the exact IDs from the [AI/ML API chat model card](https://aimlapi.com/models/openai-gpt-6-1-sol) and the [embeddings API reference](https://docs.aimlapi.com/api-references/embedding-models/openai/text-embedding-3-small). `skillevaluator models` lists a filtered view of the gateway catalog. Check the vendor's Chat Completions support before choosing another model.
   </Tab>
   <Tab title="Self-hosted or other gateway" language="gateway">
     ```bash title="Generic OpenAI-compatible gateway"
@@ -242,7 +242,9 @@ Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Com
   </Tab>
 </Tabs>
 
-For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. See the OpenAI-compatible tab above for agent endpoints, Claude Code's credential overrides, and the `--agent-model` option.
+The Tier 2 probe requires `skillevaluator[tier2]` or `skillevaluator[all]`. See [Installation options](/skills/skillevaluator/installation-options). Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
+
+For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. To use the same gateway with Claude Code, clear inherited overrides with `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` before running Tier 3. For a separate Claude endpoint, set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` together using that endpoint's own key. See the OpenAI-compatible tab above for agent endpoints and the `--agent-model` option.
 
 ## Fully local setup
 

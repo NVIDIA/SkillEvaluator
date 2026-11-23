@@ -4,6 +4,27 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+## 1.1.1 - 2026-11-23
+
+The complete 1.1 release includes the changes in the
+[1.1.0 changelog](https://github.com/NVIDIA/SkillEvaluator/blob/v1.1.0/CHANGELOG.md#L18).
+It carries forward support for optional stable Tier 1 CI channels,
+reviewed plugin-hook waivers, tighter security checks, and improved Tier 2 and
+Tier 3 reports.
+
+### Highlights
+
+- Add GitHub Actions annotations with `-r github` for workflows that run the
+  CLI. Findings appear as workflow errors, warnings, and notices.
+  [GitHub Actions guide](https://docs.nvidia.com/skills/skillevaluator/github-actions)
+- Preserve ordered evaluation evidence and clearer scan status. Tier 1 reports
+  distinguish incomplete and skipped checks, while Tier 2 reports count
+  similarity matches and affected entries separately.
+  [Reports guide](https://docs.nvidia.com/skills/skillevaluator/reports)
+- Carry forward Harbor fixes for macOS downloads and Python 3.9 task graders,
+  bounded bridge-token masking, and a dedicated
+  [NeMo Gym guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym).
+
 ### Fixed
 
 - Bound declarative output-pattern checks with isolated Python regex workers and a shared

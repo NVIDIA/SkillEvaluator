@@ -198,11 +198,14 @@ export OPENAI_API_KEY='sk-...'
 
 ## Provider recipes
 
-Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Completions. Tier 2 also needs an OpenAI-compatible embeddings endpoint, which can be on the same gateway or a separate service. Set the base URL, key, and model IDs for the operations you use.
+Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Completions. Tier 2 also needs an OpenAI-compatible embeddings endpoint, which can be on the same gateway or a separate service. Set the base URL, key, and model IDs for the operations you use. The same-gateway examples clear inherited embedding overrides, chat headers, and OpenAI organization and project settings before configuring the new endpoint.
 
 <Tabs>
   <Tab title="AI/ML API" language="aimlapi">
     ```bash title="AI/ML API through openai-compatible"
+    unset SKILL_EVAL_EMBEDDING_PROVIDER SKILL_EVAL_EMBEDDING_BASE_URL \
+      SKILL_EVAL_EMBEDDING_API_KEY SKILL_EVAL_LLM_EXTRA_HEADERS \
+      OPENAI_ORG_ID OPENAI_PROJECT_ID
     export SKILL_EVAL_LLM_PROVIDER=openai-compatible
     export SKILL_EVAL_LLM_BASE_URL=https://api.aimlapi.com/v1
     export SKILL_EVAL_LLM_API_KEY='your-aimlapi-key'
@@ -214,6 +217,9 @@ Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Com
   </Tab>
   <Tab title="Self-hosted or other gateway" language="gateway">
     ```bash title="Generic OpenAI-compatible gateway"
+    unset SKILL_EVAL_EMBEDDING_PROVIDER SKILL_EVAL_EMBEDDING_BASE_URL \
+      SKILL_EVAL_EMBEDDING_API_KEY SKILL_EVAL_LLM_EXTRA_HEADERS \
+      OPENAI_ORG_ID OPENAI_PROJECT_ID
     export SKILL_EVAL_LLM_PROVIDER=openai-compatible
     export SKILL_EVAL_LLM_BASE_URL='https://gateway.example.com/v1'
     export SKILL_EVAL_LLM_API_KEY='your-gateway-key'
@@ -221,7 +227,7 @@ Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Com
     export SKILL_EVAL_EMBEDDING_MODEL='exact-embedding-id'
     ```
 
-    For routing headers on host-side chat requests, use `SKILL_EVAL_LLM_EXTRA_HEADERS`. Embeddings and Tier 3 runtimes use their own provider configuration. See [Environment variables](/skills/skillevaluator/environment-variables).
+    For routing headers on host-side chat requests, set `SKILL_EVAL_LLM_EXTRA_HEADERS` for the current gateway after running the recipe. Embeddings and Tier 3 runtimes use their own provider configuration. See [Environment variables](/skills/skillevaluator/environment-variables).
 
     If embeddings use a separate OpenAI-compatible service, set its provider, URL, model ID, and credential together.
 

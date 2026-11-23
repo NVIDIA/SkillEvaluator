@@ -5,7 +5,7 @@ no-key Tier 1 onboarding, use the [template catalog](../README.md),
 [GitHub guide](../../../docs/github-actions.mdx) or
 [GitLab guide](../../../docs/gitlab-ci.mdx).
 
-The all-tier CLI was already included in 0.9.0. The 1.0.1 release refreshes its
+The all-tier CLI was already included in 0.9.0. The 1.2.0 release refreshes its
 verified pins; plain `skillevaluator ci init` and manual Tier 1 bundles retain
 their existing scope.
 A successful setup command is configuration preparation, not a completed CI
@@ -59,7 +59,7 @@ agent CLIs on the selected CI runner. This setup supports these two modes only.
 
 The default `ci init` setup remains Tier 1 only. Opt in with `--tiers 1,2,3`
 to select the installed release's bundled `ci-release-all-tiers.json`. For
-1.0.1 pins, install its release package when available, or use the reviewed
+1.2.0 pins, install its release package after publication, or use the reviewed
 source installation before publication. Existing committed callers are not
 silently upgraded by installing a newer package.
 It must declare schema version 2 and `all-tiers-github` or `all-tiers-gitlab`,

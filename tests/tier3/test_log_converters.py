@@ -283,7 +283,7 @@ def test_codex_mcp_tool_call_preserves_result():
     assert traj is not None
     tcs = extract_tool_calls_as_dicts(traj)
     assert len(tcs) == 1
-    assert tcs[0]["action"] == "lookup"
+    assert tcs[0]["action"] == "mcp__demo__lookup"
     assert "found skill" in tcs[0]["observation"]
 
 

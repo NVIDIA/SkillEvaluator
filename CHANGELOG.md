@@ -30,6 +30,9 @@ All notable changes to SkillEvaluator are documented in this file.
   when the catalog has no eligible entries to compare against.
   These queries return an empty result without constructing the provider
   client, including when that provider is missing or unreachable.
+- The all-tier CI bootstrap rejects an unsupported `SKILL_EVAL_ENV_MODE`
+  without first loading the Tier 3 runtime (Harbor), so the rejection is
+  faster; its message and exit code are unchanged.
 - The Tier 1 summary line counts every check without complete evidence,
   including one whose scanner is not installed, as `N incomplete` instead of
   `N didn't run`. The quiet verdict headline uses the same statuses as the

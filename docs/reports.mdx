@@ -171,8 +171,9 @@ full rows remain in each trial's `reward.json`.
 
 The HTML Tier 2 view separates **Intra-Skill** (redundant content among
 its files) from **Inter-Skill** (catalog or collection comparisons). Each
-scope shows Checks completed, Duplicate findings, Affected files or skills,
-and Catalog entries compared. Completion uses recorded comparison
+scope shows Checks completed, Duplicate findings (Similarity matches in the
+Inter-Skill scope), Affected files or entries, and Catalog entries compared.
+Completion uses recorded comparison
 evidence; a completed check can still fail its gate because it found duplicates.
 Refused LLM classifications and file safety errors remain visible findings,
 but do not count as confirmed duplicates within a skill.
@@ -181,9 +182,14 @@ A completed comparison with no matches shows zero. A skipped catalog comparison,
 missing metadata, or an incomplete scan shows the recorded reason and unavailable
 counts. Target against catalog comparisons exclude the target's recorded self
 entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
-as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
-so equal display names do not merge distinct skills. Token or context savings
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file, skill or
+catalog entry paths, so equal display names do not merge distinct skills. Token or context savings
 are not estimated from duplicate counts.
+
+Tier 2 results that belong to neither scope, such as dependency-reference
+checks, appear in a separate **Other checks** tab under "Other recorded checks".
+That tab has no summary counts. It lists each result with its own errors and
+findings, and names each clean result with its check name and recorded details.
 
 HTML, terminal, and Markdown reports link every recorded Harbor job to its
 **Results** and available **Analysis**. HTML uses concise labels from the

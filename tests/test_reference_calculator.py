@@ -109,6 +109,17 @@ def test_unsupported_conversions_name_the_supported_units(expression: str, units
     )
 
 
+def test_unknown_conversion_error_clips_long_unit_names() -> None:
+    result = _calc(f"1 {'x' * 32768} to {'y' * 32768}")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert result.stderr.strip() == (
+        f"Error: Unknown conversion: {'x' * 17}... to {'y' * 17}.... "
+        "Supported units: celsius, fahrenheit, miles, km, kg, lbs, meters, feet"
+    )
+
+
 @pytest.mark.parametrize(
     "expression",
     [

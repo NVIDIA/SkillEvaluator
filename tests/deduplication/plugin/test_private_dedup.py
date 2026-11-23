@@ -785,3 +785,47 @@ def test_post_context_source_swap_blocks_catalog_provider_work(modules, tmp_path
     blocked = [result for result in results if result.metadata.get("security_failure")]
     assert blocked and all(not result.passed for result in blocked)
     assert len(client.calls) == 1
+
+
+@pytest.mark.parametrize("members", [("skills/a", "skills/b"), ()])
+def test_late_unsafe_source_round_trips_beside_context_results(modules, tmp_path, monkeypatch, members):
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.html import HTMLReporter
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.retained import retained_results
+    from skillevaluator.utils.secure_fs import SecurePathError
+
+    inv = inventory(tmp_path / "bundle", skill_paths=members or ("skills/a",))
+    monkeypatch.setattr(modules.profile, "plugin_inventory_for_root", lambda _path: inv)
+    load, loads = modules.commands.load_plugin_profile, []
+
+    def reload_unsafe(path):
+        loads.append(path)
+        if len(loads) > 1:
+            raise SecurePathError("unsafe_path", "unsafe", relative_path="skills/b/link.md")
+        return load(path)
+
+    def context(_profile, **_kwargs):
+        rows = []
+        for member in members:
+            row = ValidationResult(validator_name="Context Deduplication")
+            row.add_success("context_dedup", "Compared content")
+            row.metadata["bundled_skill"] = member
+            rows.append(row)
+        return rows
+
+    monkeypatch.setattr(modules.commands, "load_plugin_profile", reload_unsafe)
+    monkeypatch.setattr(modules.commands, "run_plugin_skill_context_dedup", context)
+    _, _, path = load_catalog(modules, tmp_path, skills=[skill_entry("other")])
+    results = modules.commands.run_plugin_dedup_scan(inv.root, catalog=path, run_context=bool(members))
+    assert len(loads) == 2
+    assert [r.metadata.get("security_failure", False) for r in results if r.validator_name == "Context Deduplication"][
+        -1
+    ]
+
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    restored = retained_results(payload)
+    assert [r.validator_name for r in restored] == [r.validator_name for r in results]
+    assert [r.metadata.get("bundled_skill") for r in restored] == [r.metadata.get("bundled_skill") for r in results]
+    assert json.loads(JSONReporter(include_timestamp=False).render_all(restored)) == payload
+    assert "Bundle source could not be read safely" in HTMLReporter().render_all(restored)

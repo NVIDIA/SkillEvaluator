@@ -528,6 +528,9 @@ class JSONReporter(ReporterBase):
         catalog_target = result.metadata.get("plugin_catalog_target")
         if isinstance(catalog_target, dict):
             data["plugin_catalog_target"] = catalog_target
+        source_stage = result.metadata.get("bundle_source_stage")
+        if isinstance(source_stage, str):
+            data["bundle_source_stage"] = source_stage
 
         return data
 

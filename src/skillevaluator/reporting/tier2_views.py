@@ -181,7 +181,9 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
             excluded = _count(compared.get("self_matches_excluded"))
             bundled = _count(compared.get("bundled_skills")) if compared_check == "skill_catalog_comparison" else None
             compared_count = tier2_catalog_entries_compared(compared_check, compared)
-            no_eligible_entries = compared_count == 0
+            # The skill catalog check keeps its existing note and completion rule.
+            skill_catalog = compared_check == "catalog_compared"
+            no_eligible_entries = compared_count == 0 and not skill_catalog
             if no_eligible_entries:
                 notes.append("Comparison not applicable: no eligible catalog entries after self exclusion.")
             # A collection index of fewer than two entries has nothing to compare pairwise.
@@ -211,7 +213,10 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                     else "one target"
                 )
                 notes.append(
-                    f"Compared {target} against {compared_count} catalog entries. Skipped {excluded} self pairs."
+                    f"Compared one target against {compared_count} catalog entries; {excluded} self entries excluded."
+                    if skill_catalog
+                    else f"Compared {target} against {compared_count} catalog entries. "
+                    f"Skipped {excluded} self pair{'s' if excluded != 1 else ''}."
                 )
             elif not (setup and finished):
                 catalog_known = False

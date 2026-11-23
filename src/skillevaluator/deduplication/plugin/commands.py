@@ -208,8 +208,12 @@ def run_plugin_skill_context_dedup(
     return _budget_results(results, budget)
 
 
-def _security_result(error):
+def _security_result(error, *, stage=None):
     result = ValidationResult(validator_name="Context Deduplication")
+    if stage is not None:
+        # A later stage's refusal follows the per-member context rows; its
+        # stage keeps it distinct from them in saved reports.
+        result.metadata["bundle_source_stage"] = stage
     result.add_finding(
         Finding(
             "PLUGIN_SECURITY",
@@ -291,7 +295,7 @@ def run_plugin_dedup_scan(
             )
         )
     except SecurePathError as exc:
-        results.append(_security_result(exc))
+        results.append(_security_result(exc, stage="catalog"))
         results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
     except (ValueError, SimilarityConfigError) as exc:
         reason = llm_failure_diagnostic(exc) if isinstance(exc, SimilarityConfigError) else str(exc)

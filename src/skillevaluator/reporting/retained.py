@@ -183,7 +183,7 @@ def retained_results(
     rows = payload.get("results")
     _require(isinstance(rows, list) and 0 < len(rows) <= 1000, "Report requires nonempty results")
     results = []
-    seen: dict[str, set[str | None]] = {}
+    seen: dict[tuple[str, str | None], set[str | None]] = {}
     mappings = {
         "quality": "quality_scores",
         "workflow": "workflow",
@@ -205,15 +205,20 @@ def retained_results(
         name = _text(row.get("validator"), "validator")
         scope = None
         target = None
+        stage = None
         if name == "Context Deduplication" and "bundled_skill" in row:
             scope = _text(row["bundled_skill"], "bundled_skill")
             _require(bool(scope), "Invalid bundled_skill")
+        elif name == "Context Deduplication" and "bundle_source_stage" in row:
+            # A later stage's unsafe-source refusal is unique within that stage.
+            stage = _text(row["bundle_source_stage"], "bundle_source_stage")
+            _require(stage == "catalog", "Invalid bundle_source_stage")
         elif name in {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"} and "plugin_catalog_target" in row:
             target = mapping(row["plugin_catalog_target"], "plugin_catalog_target")
             _text(target.get("name"), "plugin_catalog_target.name")
             scope = _text(target.get("path"), "plugin_catalog_target.path")
             _require(bool(scope), "Invalid plugin_catalog_target.path")
-        scopes = seen.setdefault(name, set())
+        scopes = seen.setdefault((name, stage), set())
         _require(
             bool(name) and scope not in scopes and None not in scopes and (scope is not None or not scopes),
             "Validator names must be nonempty and unique within their scope",
@@ -266,6 +271,8 @@ def retained_results(
             metadata["plugin_catalog_target"] = target
         elif scope is not None:
             metadata["bundled_skill"] = scope
+        elif stage is not None:
+            metadata["bundle_source_stage"] = stage
         for source, dest in mappings.items():
             if source in row:
                 metadata[dest] = mapping(row[source], source)

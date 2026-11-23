@@ -117,6 +117,22 @@ def test_catalog_counts_self_exclusion_and_pairwise_is_not_catalog():
     assert "Pairwise comparison of 3 collection entries; no catalog used." in across.notes
 
 
+@pytest.mark.parametrize(("total", "excluded"), [(2, 1), (1, 1)])
+def test_skill_catalog_comparison_keeps_its_note_and_completion(total, excluded):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    # A skill catalog holding only the target still records one completed check.
+    catalog = ValidationResult(validator_name="Similarity Check")
+    catalog.add_success("catalog_compared", "Compared", catalog_entry_count=total, self_matches_excluded=excluded)
+    across = tier2_scope_views([catalog])[1]
+    assert (across.completed, across.catalog_entries) == (1, total - excluded)
+    assert across.notes == (
+        f"Compared one target against {total - excluded} catalog entries; {excluded} self entries excluded.",
+    )
+    section = HTMLReporter(include_timestamp=False).render_all([catalog]).split('id="tier2-across"', 1)[1]
+    assert "No semantic overlaps detected." in section.split("</section>", 1)[0]
+
+
 def test_partial_and_unknown_evidence_does_not_claim_complete_or_zero():
     from skillevaluator.reporting.tier2_views import tier2_scope_views
 

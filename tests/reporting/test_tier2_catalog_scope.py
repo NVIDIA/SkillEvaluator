@@ -11,6 +11,7 @@ from skillevaluator.deduplication.plugin.catalog_checks import check_catalog_plu
 from skillevaluator.deduplication.plugin.profile import BundledSkill, PluginProfile
 from skillevaluator.embedding.extractor import ContentEntry
 from skillevaluator.embedding.registry import RegistryEntry
+from skillevaluator.models.result import ValidationResult
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.tier2_views import tier2_scope_views
 
@@ -247,3 +248,10 @@ def test_empty_native_catalog_comparisons_remain_optional_skips(tmp_path):
 
     assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (0, None, None, None)
     assert len(across.skips) == 2
+
+
+def test_bundle_catalog_note_counts_a_single_self_pair():
+    result = ValidationResult(validator_name="Inter-Plugin Deduplication")
+    result.add_success("plugin_catalog_comparison", "Compared", catalog_entries=3, self_matches_excluded=1)
+    notes = tier2_scope_views([result])[1].notes
+    assert "Compared one target against 2 catalog entries. Skipped 1 self pair." in notes

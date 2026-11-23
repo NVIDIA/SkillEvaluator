@@ -439,7 +439,7 @@ def test_catalog_summary_is_tier2_similarity_evidence(tmp_path, embedding, provi
         assert "Indexed 2 skills and 2 plugins" in section
 
 
-def test_loaded_catalog_summary_counts_as_completed_similarity_evidence(tmp_path, embedding):
+def test_loaded_catalog_summary_is_similarity_evidence(tmp_path, embedding):
     from skillevaluator.reporting.html import HTMLReporter
     from skillevaluator.reporting.tier2_views import tier2_scope_views
 

@@ -315,6 +315,12 @@ All notable changes to SkillEvaluator are documented in this file.
   or `.git`, such as `webapp-testing` or `.github/skills/`, left no file to
   scan and the check passed. Only real test and artifact folders and test
   files inside the skill are skipped now, and the Tier 1 reference says which.
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations. The general console fix
+  item quotes the first three diagnostics, each shortened to one bounded line,
+  and counts the rest. If a check has mixed scanner outcomes, its setup item
+  reads `<check> incomplete: <scanner> not installed`, beside any check that
+  `didn't run`, and analysis diagnostics appear in a separate item.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -403,12 +409,21 @@ All notable changes to SkillEvaluator are documented in this file.
   `TypeError` that scored every trial 0.0, including the SkillEvaluator default
   score in `default_plus_custom` mode; rerun affected evaluations. Boolean,
   non-finite and out-of-range scores are still rejected.
-- Partial scanner results retain their actual diagnostics and recorded versions
-  instead of being described as missing installations. The general console fix
-  item quotes the first three diagnostics, each shortened to one bounded line,
-  and counts the rest. If a check has mixed scanner outcomes, its setup item
-  reads `<check> incomplete: <scanner> not installed`, beside any check that
-  `didn't run`, and analysis diagnostics appear in a separate item.
+- Redact generated NVIDIA Build bridge credentials from retained agent logs,
+  session files, and trajectories. Masking keeps file sizes and recorded usage
+  metrics. Files that cannot be masked (files over 64 MiB, anything past the
+  first 10,000 files and folders in the agent log folder, and entries that
+  cannot be listed, read or replaced) keep their contents. If that happens
+  before Harbor converts the logs, the trial skips the conversion, so it has
+  no `trajectory.json` and no usage counts. With a token or cost budget, such
+  a trial counts as unmeasured usage, so the run stops admitting further
+  attempts. The limits apply to every file in the agent log folder, whether
+  or not it holds the credential, including the skills Harbor copies to
+  `sessions/skills/` for Claude Code, so a skill with a file over 64 MiB makes
+  NVIDIA Build Claude Code trials lose their `trajectory.json` and usage
+  counts. A warning about unmasked files, with the credential masked in the
+  file name it reports, is written to the trial's `trial.log` and the job's
+  `job.log`.
 
 ## 1.0.1 - 2026-11-17
 

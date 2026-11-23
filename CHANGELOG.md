@@ -70,12 +70,43 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Dataset coverage includes cases with valid declarative checks in behavior coverage,
   so checks-only cases no longer incorrectly claim that `behavior_check` is unavailable.
+- Agent JSONL log reconstruction preserves Unicode line separators inside command,
+  observation and response strings instead of treating them as record boundaries.
+  Previously, a Claude Code log whose skill-read record held such a separator lost
+  that record and could score `skill_execution` 0 instead of 1.
+  A CR-only `agent_log` string in an `import-traces` export is no longer split into
+  records and is reported as an unsupported agent log format; agent log files read
+  from a trial directory are unaffected because they are read with newline
+  normalization.
+- Declarative command-success checks retain recorded exit status for a single
+  script command whose quoted path contains spaces. Pipeline tails (`|` and `|&`)
+  and negated commands (`!` and `time [-p] [--] !`) remain unattributed instead
+  of using another process's status or the inverse of the script's status.
+  A trailing shell comment containing `|&` does not hide the script's recorded
+  status; quoted or escaped hashes still leave real pipelines unattributed.
+  A shell comment that follows a command substitution, a backtick expansion or
+  a non-identifier parameter expansion leaves status unattributed, because
+  quoting nested inside the expansion can hide where the comment starts,
+  including Bash expansion openers split by line continuations. A comment ahead
+  of such an expansion does not affect status. Plain braced identifier
+  arguments retain their recorded status, and Zsh keeps its distinct
+  continuation behavior. Commentless expansions also retain status when quoted
+  output filenames contain literal hashes; real pipelines remain unattributed.
+- Baseline task identities include authored `repo-context.json` files outside
+  the generated metadata location, so changed task inputs invalidate reuse.
+  Native Harbor tasks reject authored `environment/repo-context.json` because
+  that exact path is reserved for generated repository-context metadata.
+- Similarity scores stay correct for extremely small embedding vectors.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
   `Authorization: Bearer` header, and host inference failed with an illegal
   header value. This includes models called through the Bedrock Responses
   route.
+- Bedrock inference checks HTTPS on the endpoint selected for the request,
+  so an unused HTTP override no longer blocks a valid HTTPS route.
+- Bedrock Mantle honors the configured AWS region for model aliases when
+  `BEDROCK_MANTLE_REGION` contains an invalid fallback value.
 - Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
@@ -190,6 +221,13 @@ All notable changes to SkillEvaluator are documented in this file.
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and
   rate-limited calls stop when the requested wait exceeds the retry budget.
+- `--stop-on-pass` combined with a run budget (`--max-agent-tokens`,
+  `--max-judge-calls`, `--max-attempts-total` or `--max-cost-usd`) now stops
+  each arm after its own first pass, as it does without a budget. An arm that
+  had already passed was run again until the other arm passed in the same
+  attempt, and the run then failed with `Excess scored attempts`. With
+  `--max-attempts-total`, an arm asking for an attempt on its own can still
+  use a slot left over after a both-arm request did not fit.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -237,6 +275,12 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- The text-analyzer reference skill counts a sentence end only when `.`, `!` or
+  `?` is followed by whitespace or the end of the text, so file names, decimals
+  and version numbers stay in one sentence. Closing quotes, Markdown emphasis
+  and citation or footnote markers such as `[1]` or `[^1]` after the terminator
+  still end it. `--file` on a directory or an unreadable path prints `Error:`
+  on stderr and exits 1 instead of a traceback.
 - Restore a temporary-cleanup exemption for a narrow, NUL-delimited
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown

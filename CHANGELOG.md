@@ -68,6 +68,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Full-body embeddings stop windowing a long section once a window reaches its end,
+  avoiding extra embedding inputs and pooled weight for already-covered tails.
+  Rebuild saved full-body catalogs to use the corrected pooling.
 - Trajectories rebuilt from native Codex logs preserve recorded MCP server and
   tool names, including server names containing `__`, for scoring and plugin
   reports. Full identities are checked before display-label truncation, and

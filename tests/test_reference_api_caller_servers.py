@@ -155,6 +155,21 @@ def test_relative_server_is_resolved_against_spec_url() -> None:
     assert result == "https://petstore3.swagger.io/api/v3/pet/1"
 
 
+def test_relative_server_preserves_query_and_fragment_when_joining_operation() -> None:
+    caller = _load_script("call_api")
+    parser = _load_script("parse_openapi")
+    spec = {
+        "servers": [{"url": "/api/v3?tenant=acme#overview"}],
+        "paths": {"/pets": {"get": {"operationId": "listPets"}}},
+    }
+
+    discovered = parser.parse_spec(spec, spec_url=PETSTORE_SPEC_URL)
+    called = caller.build_url_from_spec(spec, "/pets", {"tag": "dog"}, spec_url=PETSTORE_SPEC_URL)
+
+    assert discovered["operations"][0]["full_url"] == "https://petstore3.swagger.io/api/v3/pets?tenant=acme#overview"
+    assert called == "https://petstore3.swagger.io/api/v3/pets?tenant=acme&tag=dog#overview"
+
+
 def test_spec_without_servers_uses_spec_origin() -> None:
     caller = _load_script("call_api")
 

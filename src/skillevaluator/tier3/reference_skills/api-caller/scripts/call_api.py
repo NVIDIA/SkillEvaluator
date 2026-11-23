@@ -172,12 +172,7 @@ def build_url_from_spec(
         name = url_path[leftover + 1 : closing] if closing != -1 else url_path[leftover + 1 :]
         raise ValueError(f"missing path parameter '{name}'")
 
-    url = join_url_path(base_url, url_path)
-
-    if query_params:
-        url += "?" + urlencode(query_params)
-
-    return url
+    return join_url_path(base_url, url_path, query=urlencode(query_params))
 
 
 def _parse_json_argument(value: str | None, label: str, expected_type: type | None = None) -> object | None:

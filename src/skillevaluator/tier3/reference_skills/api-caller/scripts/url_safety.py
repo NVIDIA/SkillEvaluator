@@ -150,12 +150,17 @@ def resolve_openapi_server_url(
     return resolved
 
 
-def join_url_path(base: str, path: str) -> str:
-    """Join a server base URL and an operation path without '//' or dropped segments."""
-    if not path:
-        return base
-    if base.endswith("/") and path.startswith("/"):
-        return base[:-1] + path
-    if not base.endswith("/") and not path.startswith("/"):
-        return f"{base}/{path}"
-    return base + path
+def join_url_path(base: str, path: str, *, query: str = "") -> str:
+    """Append an operation path and encoded query string to a server URL."""
+    parts = urlsplit(base)
+    joined_path = parts.path
+    if path:
+        base_ends_with_slash = joined_path.endswith("/")
+        operation_starts_with_slash = path.startswith("/")
+        if base_ends_with_slash and operation_starts_with_slash:
+            joined_path = joined_path[:-1]
+        elif not base_ends_with_slash and not operation_starts_with_slash:
+            joined_path += "/"
+        joined_path += path
+    combined_query = "&".join(filter(None, (parts.query, query)))
+    return urlunsplit((parts.scheme, parts.netloc, joined_path, combined_query, parts.fragment))

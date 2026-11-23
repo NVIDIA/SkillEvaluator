@@ -282,6 +282,12 @@ The staged task also has explicit compatibility boundaries:
   `setup_commands`. Those surfaces can seed or observe agent behavior before
   the evaluated skill runs. They remain available for a with-skill-only
   `--skip-baseline` run.
+- `environment/repo-context.json` is reserved for SkillEvaluator's generated
+  repository-context metadata. Staging rejects a native task that ships that
+  file, in every arm and grading mode. A file with the same name at any other
+  path, for example `environment/fixtures/repo-context.json`, is an ordinary
+  task input: it is staged unchanged, and editing it changes the task content
+  that baseline reuse compares.
 
 ## Validate the contract
 

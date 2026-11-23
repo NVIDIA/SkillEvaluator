@@ -26,6 +26,30 @@ def test_planned_attempts_and_attempt_cap():
     assert "Budget exhausted (attempts 1 of 1)" in budget_line(budget.metadata())
 
 
+@pytest.mark.parametrize("pair_first", [True, False], ids=["pair-first", "single-arm-first"])
+def test_attempt_cap_denying_a_pair_leaves_the_last_slot_for_a_single_arm(pair_first):
+    def unit(case_id, attempt, arms):
+        return [{"agent": "a", "arm": arm, "case_id": case_id, "attempt": attempt} for arm in arms]
+
+    budget = BudgetController(max_attempts_total=5, planned=12)
+    assert budget.admit_many(unit("c1", 1, ["with", "without"]))
+    assert budget.admit_many(unit("c2", 1, ["with", "without"]))
+    pair, single = unit("c2", 2, ["with", "without"]), unit("c1", 2, ["without"])
+    admitted = {len(request): budget.admit_many(request) for request in ((pair, single) if pair_first else (single, pair))}
+
+    # Four of the five slots are taken. The pair does not fit and is not
+    # split, and the single arm gets the last slot whichever asked first.
+    assert admitted == {2: False, 1: True}
+    metadata = budget.metadata()
+    assert metadata["started_attempts"] == 5
+    assert metadata["exhausted_limit"] == "attempts"
+    assert [(row["case_id"], row["arm"], row["attempt"]) for row in metadata["not_run"]] == [
+        ("c2", "with", 2),
+        ("c2", "without", 2),
+    ]
+    assert not budget.admit_many(unit("c1", 3, ["without"]))
+
+
 def test_token_and_cost_admission():
     prices = PriceBook({"model": Price(input_per_mtok=1.0, output_per_mtok=2.0)})
     budget = BudgetController(max_agent_tokens=10, max_cost_usd=1.0, price_book=prices, planned=2)

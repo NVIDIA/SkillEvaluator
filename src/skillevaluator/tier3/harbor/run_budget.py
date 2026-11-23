@@ -176,8 +176,9 @@ class BudgetController:
                     raise BudgetCancelledError("Run budget admission cancelled")
                 if len(set(keys)) != len(keys) or any(key in self._in_flight for key in keys):
                     raise ValueError("Attempt is already reserved")
-                self.exhausted_limit = self._admission_limit(len(attempts))
-                if self.exhausted_limit is not None:
+                limit = self._admission_limit(len(attempts))
+                if limit is not None:
+                    self.exhausted_limit = limit
                     return self._deny(attempts)
                 bounded = (
                     ("agent_tokens", self.max_agent_tokens, self.used_agent_tokens),
@@ -228,7 +229,10 @@ class BudgetController:
         return False
 
     def _admission_limit(self, unit_size: int) -> str | None:
-        if self.exhausted_limit is not None:
+        # The attempt cap is checked for every request. A unit that did not fit
+        # the slots left says nothing about a smaller one, so that denial does
+        # not stop later admission the way the other limits do.
+        if self.exhausted_limit not in (None, "attempts"):
             return self.exhausted_limit
         if self.max_attempts_total is not None and self._started + unit_size > self.max_attempts_total:
             return "attempts"

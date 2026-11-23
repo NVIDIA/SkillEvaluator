@@ -16,6 +16,7 @@ from skillevaluator.cli import cli
 from skillevaluator.cli_help import render_help
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
+from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.secrets import SecretsValidator
 
@@ -1510,25 +1511,31 @@ def test_validate_github_reports_every_bandit_scan_error_as_warning(tmp_path: Pa
         encoding="utf-8",
     )
 
-    def bandit_errors(_path: Path, **_kwargs) -> list[ValidationResult]:
-        result = ValidationResult(validator_name="Code Risk", validator_description="Code risk")
-        output = json.dumps(
-            {
-                "results": [],
-                "errors": [
-                    {"filename": "a.py", "reason": "syntax error while parsing AST from file"},
-                    {"filename": "b.py", "reason": "exception while scanning file"},
-                ],
-            }
-        )
-        CodeRiskValidator()._process_bandit_output(output, result, exit_code=0)
-        return [result]
+    for name in ("a.py", "b.py"):
+        (skill / name).write_text("x = 1\n", encoding="utf-8")
+    output = json.dumps(
+        {
+            "results": [],
+            "errors": [
+                {"filename": "a.py", "reason": "syntax error while parsing AST from file"},
+                {"filename": "b.py", "reason": "exception while scanning file"},
+            ],
+        }
+    )
+    scan = ToolResult(success=True, stdout=output, stderr="", exit_code=0)
+    monkeypatch.setattr(Tools.bandit, "_path", "bandit")
+    monkeypatch.setattr(Tools.bandit, "_version", "1.9.4")
+    monkeypatch.setattr(Tools.bandit, "run", lambda *_args, **_kwargs: scan)
+
+    def bandit_errors(path: Path, **_kwargs) -> list[ValidationResult]:
+        return [CodeRiskValidator(use_semgrep=False).validate(path)]
 
     monkeypatch.setattr("skillevaluator.cli.run_validation", bandit_errors)
-
+    reports = tmp_path / "reports"
     result = CliRunner().invoke(
         cli,
-        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "github"],
+        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "github", "-o", str(reports)],
+        catch_exceptions=False,
     )
 
     assert result.exit_code != 0, result.output

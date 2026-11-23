@@ -114,6 +114,48 @@ def test_real_catalog_comparisons_report_completion_and_match_counts(tmp_path, m
     assert results == before
 
 
+@pytest.mark.parametrize("include_external,entry_count", [(False, 2), (True, 3)])
+def test_two_bundled_skills_count_distinct_catalog_entries(tmp_path, include_external, entry_count):
+    # The external entry is below the threshold for both skills but still compared.
+    profile, catalog = _catalog_results(tmp_path, matches=False)
+    [first_skill] = profile.bundled_skills
+    peer_path = profile.root / "skills/peer"
+    peer = ContentEntry("peer", "Peer member", str(peer_path), "skill", "Run the task.")
+    profile = replace(
+        profile,
+        members=("member", "peer"),
+        bundled_skills=(first_skill, BundledSkill("skills/peer", peer_path, peer)),
+    )
+    catalog_peer = replace(
+        catalog.skills[0], name="peer", path="source/skills/peer", entry_id="skill:source/skills/peer"
+    )
+    entries = (catalog.skills[0], catalog_peer)
+    if include_external:
+        entries += catalog.skills[1:]
+    catalog = replace(catalog, skills=entries, plugins=(replace(catalog.plugins[0], members=profile.members),))
+
+    result = check_catalog_skills(profile, catalog, threshold=0.9)
+
+    assert {(finding.file_path, finding.metadata["catalog_path"]) for finding in result.findings} == {
+        ("skills/member", "source/skills/peer"),
+        ("skills/peer", "source/skills/member"),
+    }
+    across = tier2_scope_views([result])[1]
+    assert (across.completed, across.duplicates, across.catalog_entries) == (1, 2, entry_count)
+    assert f"Compared 2 bundled skills against {entry_count} catalog entries. Skipped 2 self pairs." in across.notes
+    output = HTMLReporter(include_timestamp=False).render_all([result])
+    section = output.split('id="tier2-across"', 1)[1].split("</section>", 1)[0]
+    assert f"Catalog entries compared</dt><dd>{entry_count}</dd>" in section
+
+    # Old reports recorded excluded pairs and their paths, without the distinct count.
+    del result.success_details[0].metadata["compared_catalog_entries"]
+    legacy = tier2_scope_views([result])[1]
+    assert (legacy.completed, legacy.catalog_entries) == (1, entry_count)
+    del result.success_details[0].metadata["excluded_catalog_paths"]
+    ambiguous = tier2_scope_views([result])[1]
+    assert (ambiguous.completed, ambiguous.catalog_entries) == (1, None)
+
+
 def test_real_catalog_findings_remain_recorded_when_a_comparison_is_incomplete(tmp_path):
     profile, catalog = _catalog_results(tmp_path, matches=True)
     results = [

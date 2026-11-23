@@ -128,6 +128,20 @@ def test_cluster_reviews_and_prompt_characters_debit_the_shared_remaining_budget
     assert used["prompt_chars_submitted"] <= 3000
 
 
+@pytest.mark.parametrize("limit", [7, 8])
+def test_retained_context_keeps_multiple_bundle_members(tmp_path, embedding, limit):
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.retained import retained_results
+
+    embedding.dimension = 2
+    profile = load_plugin_profile(plugin(tmp_path / "plugin", [3, 2]))
+    results = run_plugin_skill_context_dedup(profile, max_scalar_comparisons=limit)
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    restored = retained_results(payload)
+    assert [r.metadata["bundled_skill"] for r in restored] == ["skills/member-00", "skills/member-01"]
+    assert [r.is_incomplete for r in restored] == [False, limit == 7]
+
+
 def test_context_budget_survives_json_and_retained_html(tmp_path, embedding):
     from skillevaluator.reporting.html import HTMLReporter
     from skillevaluator.reporting.json_reporter import JSONReporter

@@ -2545,7 +2545,7 @@
                     <strong style="color:var(--warning-color);">Incomplete scanner evidence:</strong>
                     {{ result.incomplete_scans | join(', ') }} did not produce trustworthy evidence. Restore the scanner and rerun validation.
                 </div>
-                {% elif result.passed and not result.findings and ((titled and result.success_details) or (not titled and scope.completed == scope.results | length)) %}
+                {% elif result.passed and not result.findings and ((titled and result.success_details) or (not titled and scope.completed == scope.comparison_count)) %}
                 <div style="background:var(--bg-secondary);border:1px solid var(--border-color);border-radius:8px;padding:1rem;margin:0.75rem 0;">
                     {{ icons.checkmark | safe }} <strong style="color:var(--success-color);">{{ result.validator_name if titled else 'No semantic overlaps detected.' }}</strong>
                     {% if result.success_details %}

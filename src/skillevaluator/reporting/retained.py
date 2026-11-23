@@ -183,7 +183,7 @@ def retained_results(
     rows = payload.get("results")
     _require(isinstance(rows, list) and 0 < len(rows) <= 1000, "Report requires nonempty results")
     results = []
-    seen = set()
+    seen: dict[str, set[str | None]] = {}
     mappings = {
         "quality": "quality_scores",
         "workflow": "workflow",
@@ -203,8 +203,22 @@ def retained_results(
     for row in rows:
         _require(isinstance(row, dict), "Result must be an object")
         name = _text(row.get("validator"), "validator")
-        _require(bool(name) and name not in seen, "Validator names must be nonempty and unique")
-        seen.add(name)
+        scope = None
+        target = None
+        if name == "Context Deduplication" and "bundled_skill" in row:
+            scope = _text(row["bundled_skill"], "bundled_skill")
+            _require(bool(scope), "Invalid bundled_skill")
+        elif name in {"Inter-Skill Deduplication", "Inter-Plugin Deduplication"} and "plugin_catalog_target" in row:
+            target = mapping(row["plugin_catalog_target"], "plugin_catalog_target")
+            _text(target.get("name"), "plugin_catalog_target.name")
+            scope = _text(target.get("path"), "plugin_catalog_target.path")
+            _require(bool(scope), "Invalid plugin_catalog_target.path")
+        scopes = seen.setdefault(name, set())
+        _require(
+            bool(name) and scope not in scopes and None not in scopes and (scope is not None or not scopes),
+            "Validator names must be nonempty and unique within their scope",
+        )
+        scopes.add(scope)
         _require(type(row.get("passed")) is bool, "Result passed must be boolean")
         summary = mapping(row.get("summary"), "summary")
         for field in fields(ValidationSummary):
@@ -248,6 +262,10 @@ def retained_results(
             )
         legacy = mapping(row.get("legacy"), "legacy")
         metadata = {}
+        if target is not None:
+            metadata["plugin_catalog_target"] = target
+        elif scope is not None:
+            metadata["bundled_skill"] = scope
         for source, dest in mappings.items():
             if source in row:
                 metadata[dest] = mapping(row[source], source)

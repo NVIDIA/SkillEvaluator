@@ -30,6 +30,8 @@ def _results(*, context="complete", check_id="context-optimization"):
         result = ValidationResult(validator_name="Context Deduplication")
         if context == "complete":
             result.add_success("context_dedup", "Analyzed local skill content")
+        elif context == "insufficient":
+            result.add_success("context_dedup", "Not enough content to compare")
         elif context == "skipped":
             result.metadata.update(skipped=True, optional_skip=True)
             result.add_warning("Context comparison disabled")
@@ -79,6 +81,7 @@ def test_optional_catalog_skips_allow_completed_context_and_survive_retention():
         ("complete", "PASS", "PASSED WITH OBSERVATIONS"),
         ("absent", "INCOMPLETE", "INCOMPLETE"),
         ("empty", "INCOMPLETE", "INCOMPLETE"),
+        ("insufficient", "INCOMPLETE", "INCOMPLETE"),
         ("skipped", "INCOMPLETE", "INCOMPLETE"),
         ("incomplete", "INCOMPLETE", "INCOMPLETE"),
     ],
@@ -102,7 +105,7 @@ def test_benchmark_tier2_table_keeps_required_catalog_skip_incomplete():
     assert "| Tier 2 | Semantic deduplication | **INCOMPLETE** |" in rendered
 
 
-@pytest.mark.parametrize("context", ["absent", "empty", "skipped", "incomplete"])
+@pytest.mark.parametrize("context", ["absent", "empty", "skipped", "incomplete", "insufficient"])
 def test_optional_catalog_skips_cannot_replace_context_analysis(context):
     results = _results(context=context)
     assert assess_publication(results, expected_skill_name="demo").status == "incomplete"
@@ -214,3 +217,28 @@ def test_executed_catalog_comparison_can_cover_other_inapplicable_catalog_type()
     compared.metadata.pop("optional_skip")
     compared.add_success("skill_catalog_comparison", "Compared local catalog skills")
     assert assess_publication(results, expected_skill_name="demo").status == "pass"
+
+
+@pytest.mark.parametrize("entry_count", [0, -1, False, "0"])
+def test_catalog_comparison_with_no_eligible_entries_cannot_waive_skips(entry_count):
+    results = _results(context="absent", check_id="similarity")
+    compared = results[-2]
+    compared.metadata.pop("skipped")
+    compared.metadata.pop("optional_skip")
+    compared.add_success("skill_catalog_comparison", "No eligible catalog skills", compared_catalog_entries=entry_count)
+    assert assess_publication(results, expected_skill_name="demo").status == "incomplete"
+
+
+def test_legacy_self_only_catalog_comparison_cannot_waive_skips():
+    results = _results(context="absent", check_id="similarity")
+    compared = results[-2]
+    compared.metadata.pop("skipped")
+    compared.metadata.pop("optional_skip")
+    compared.add_success(
+        "skill_catalog_comparison",
+        "Compared local catalog skills",
+        catalog_entries=1,
+        bundled_skills=1,
+        self_matches_excluded=1,
+    )
+    assert assess_publication(results, expected_skill_name="demo").status == "incomplete"

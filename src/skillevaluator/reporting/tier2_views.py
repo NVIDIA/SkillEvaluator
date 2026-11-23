@@ -6,7 +6,13 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import additional_errors, get_skip_reason, is_cleanly_skipped
+from skillevaluator.reporting.base import (
+    additional_errors,
+    get_skip_reason,
+    is_cleanly_skipped,
+    tier2_catalog_entries_compared,
+    tier2_context_insufficiency,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
@@ -36,6 +42,10 @@ class Tier2ScopeView:
     catalog_not_applicable: bool = False
     not_run: bool = False
     skips: tuple[Tier2SkipView, ...] = ()
+
+    @property
+    def comparison_count(self) -> int:
+        return sum(not is_catalog_setup_record(result) for result in self.results)
 
 
 def _count(value: object) -> int | None:
@@ -164,21 +174,21 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 and isinstance(analysis, dict)
                 and _count(analysis.get("candidates_total")) is not None
             )
-            insufficient = any(
-                detail.check_name == "context_dedup"
-                and detail.message in {"No text files found in skill directory", "Not enough content to compare"}
-                for detail in result.success_details
-            )
+            insufficient = tier2_context_insufficiency(result)
             if insufficient:
-                notes.append(
-                    "Comparison not applicable: "
-                    + next(detail.message for detail in result.success_details if detail.check_name == "context_dedup")
-                )
+                notes.append(f"Comparison not applicable: {insufficient}")
+            compared = details.get(compared_check, {})
+            excluded = _count(compared.get("self_matches_excluded"))
+            bundled = _count(compared.get("bundled_skills")) if compared_check == "skill_catalog_comparison" else None
+            compared_count = tier2_catalog_entries_compared(compared_check, compared)
+            no_eligible_entries = compared_count == 0
+            if no_eligible_entries:
+                notes.append("Comparison not applicable: no eligible catalog entries after self exclusion.")
             # A collection index of fewer than two entries has nothing to compare pairwise.
             single_entry = scope == "across" and entries is not None and entries < 2 and compared_check is None
             if single_entry:
                 notes.append(f"Comparison not applicable: the collection index has {entries} entry; pairs need two.")
-            clean_skip = is_cleanly_skipped(result) or insufficient or single_entry
+            clean_skip = is_cleanly_skipped(result) or insufficient or single_entry or no_eligible_entries
             finished = (
                 recorded_completion
                 and (not isinstance(analysis, dict) or analysis_complete or optional_catalog_analysis)
@@ -186,25 +196,22 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 and not additional_errors(result)
                 and not clean_skip
             )
-            completed += bool(finished)
+            completed += bool(finished and not setup)
             all_complete = all_complete and bool(finished)
             if not finished and not clean_skip:
                 known = False
                 unfinished = True
-            compared = details.get(compared_check)
-            compared = compared if isinstance(compared, dict) else {}
-            catalog_count_key = "catalog_entry_count" if compared_check == "catalog_compared" else "catalog_entries"
-            total, excluded = _count(compared.get(catalog_count_key)), _count(compared.get("self_matches_excluded"))
-            if total is not None and excluded is not None and excluded <= total and finished:
-                catalog_counts.append(total - excluded)
-                bundled = _count(compared.get("bundled_skills"))
+            if no_eligible_entries:
+                catalog_counts.append(0)
+            elif compared_count is not None and finished:
+                catalog_counts.append(compared_count)
                 target = (
                     f"{bundled} bundled skill{'s' if bundled != 1 else ''}"
                     if compared_check == "skill_catalog_comparison" and bundled is not None
                     else "one target"
                 )
                 notes.append(
-                    f"Compared {target} against {total - excluded} catalog entries; {excluded} self entries excluded."
+                    f"Compared {target} against {compared_count} catalog entries. Skipped {excluded} self pairs."
                 )
             elif not (setup and finished):
                 catalog_known = False

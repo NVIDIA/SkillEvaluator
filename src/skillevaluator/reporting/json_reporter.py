@@ -522,6 +522,12 @@ class JSONReporter(ReporterBase):
         context_budget = result.metadata.get("plugin_context_budget")
         if isinstance(context_budget, dict):
             data["plugin_context_budget"] = context_budget
+        bundled_skill = result.metadata.get("bundled_skill")
+        if isinstance(bundled_skill, str):
+            data["bundled_skill"] = bundled_skill
+        catalog_target = result.metadata.get("plugin_catalog_target")
+        if isinstance(catalog_target, dict):
+            data["plugin_catalog_target"] = catalog_target
 
         return data
 

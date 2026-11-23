@@ -2031,6 +2031,47 @@ def result_has_execution_evidence(result: ValidationResult) -> bool:
     return bool(result.success_details or result.findings or result.summary.checks_performed > 0)
 
 
+def tier2_context_insufficiency(result: ValidationResult) -> str | None:
+    """Read the producer's explicit reason that no context comparison ran."""
+    return next(
+        (
+            detail.message
+            for detail in result.success_details
+            if detail.check_name == "context_dedup"
+            and detail.message in {"No text files found in skill directory", "Not enough content to compare"}
+        ),
+        None,
+    )
+
+
+def tier2_catalog_entries_compared(check_name: str | None, metadata: dict[str, Any]) -> int | None:
+    """Recover a distinct-entry count only when the comparison evidence supports it."""
+
+    def count(key: str) -> int | None:
+        value = metadata.get(key)
+        return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
+
+    total = count("catalog_entry_count" if check_name == "catalog_compared" else "catalog_entries")
+    excluded = count("self_matches_excluded")
+    bundled = count("bundled_skills") if check_name == "skill_catalog_comparison" else None
+    targets = bundled or 1
+    if total is None or excluded is None or excluded > total * targets:
+        return None
+    if "compared_catalog_entries" in metadata:
+        distinct = count("compared_catalog_entries")
+        return distinct if distinct is not None and distinct <= total else None
+    if targets == 1:
+        return total - excluded
+    if excluded == total * targets:
+        return 0
+    # With multiple targets, an entry is still compared if any target did not skip it.
+    paths = metadata.get("excluded_catalog_paths")
+    all_paths_skipped_once = (
+        isinstance(paths, list) and all(isinstance(path, str) for path in paths) and len(set(paths)) == excluded
+    )
+    return total if excluded < targets or all_paths_skipped_once else None
+
+
 def _optional_tier2_catalog_skip(result: ValidationResult, results: list[ValidationResult]) -> bool:
     """Allow optional catalog absence only alongside the same check's real analysis.
 
@@ -2063,12 +2104,27 @@ def _optional_tier2_catalog_skip(result: ValidationResult, results: list[Validat
         or not clean_outcome(result, Status.SKIPPED)
     ):
         return False
-    semantic_names = {"Context Deduplication"} if producer.check_id == "context-optimization" else catalog_names
+    context_check = producer.check_id == "context-optimization"
+    semantic_names = {"Context Deduplication"} if context_check else catalog_names
+
+    def has_comparison(peer: ValidationResult) -> bool:
+        if context_check:
+            return result_has_execution_evidence(peer) and tier2_context_insufficiency(peer) is None
+        for detail in peer.success_details:
+            if detail.check_name in {"skill_catalog_comparison", "plugin_catalog_comparison"}:
+                count = tier2_catalog_entries_compared(detail.check_name, detail.metadata)
+                if count is None and "compared_catalog_entries" not in detail.metadata:
+                    # Legacy comparison records did not always carry counts.
+                    return True
+                if count is not None and count > 0:
+                    return True
+        return False
+
     return any(
         peer.validator_name in semantic_names
         and result_publication_evidence(peer) == producer
         and clean_outcome(peer, Status.PASSED)
-        and result_has_execution_evidence(peer)
+        and has_comparison(peer)
         for peer in results
     )
 

@@ -114,8 +114,30 @@ def test_collection_v2_catalog_reuses_fresh_vectors(tmp_path, embedding):
     assert sum(r.validator_name == "Inter-Plugin Deduplication" for r in result) == 2
     assert any(f.category == "INTER_PLUGIN" for r in result for f in r.findings)
     across = tier2_scope_views(result)[1]
-    # The catalog setup record counts with the four comparisons; it adds no catalog entries.
-    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (5, 4, 4, 4)
+    assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (4, 4, 4, 4)
+
+
+def test_collection_catalog_targets_round_trip(tmp_path, embedding):
+    from skillevaluator.reporting.json_reporter import JSONReporter
+    from skillevaluator.reporting.retained import retained_results
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    root = tmp_path / "collection"
+    make_plugin(root / "one", "one")
+    make_plugin(root / "two", "two")
+    results = similarity(root)
+    payload = json.loads(JSONReporter(include_timestamp=False).render_all(results))
+    restored = retained_results(payload)
+
+    assert [r.metadata["plugin_catalog_target"]["path"] for r in restored[1:]] == ["one", "one", "two", "two"]
+    assert tier2_scope_views(restored)[1].affected == tier2_scope_views(results)[1].affected == 4
+
+
+def test_self_only_catalog_does_not_count_completed_comparisons(tmp_path, embedding):
+    from skillevaluator.reporting.tier2_views import tier2_scope_views
+
+    across = tier2_scope_views(similarity(make_plugin(tmp_path / "bundle")))[1]
+    assert across.completed == across.catalog_entries == 0
 
 
 def test_existing_v1_skill_catalog_can_be_used_for_a_plugin(tmp_path, embedding):
@@ -409,7 +431,7 @@ def test_catalog_summary_is_tier2_similarity_evidence(tmp_path, embedding, provi
         assert (across.completed, across.catalog_entries) == (None, None)
         assert "Embedding provider error" in section
     else:
-        assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (5, 4, 4, 4)
+        assert (across.completed, across.duplicates, across.affected, across.catalog_entries) == (4, 4, 4, 4)
         assert not any("Pairwise" in note or "not applicable" in note for note in across.notes)
         # The setup record compares nothing, so it keeps its own title, never the clean-comparison banner.
         assert "No semantic overlaps detected." not in section
@@ -429,7 +451,7 @@ def test_loaded_catalog_summary_counts_as_completed_similarity_evidence(tmp_path
     assert all(r.passed for r in results), [r.errors for r in results]
     across = tier2_scope_views(results)[1]
     assert across.results[0].validator_name == plugin_commands.CATALOG_SUMMARY_NAME
-    assert (across.completed, across.duplicates, across.catalog_entries) == (3, 2, 2)
+    assert (across.completed, across.duplicates, across.catalog_entries) == (2, 2, 2)
     section = HTMLReporter(include_timestamp=False).render_all(results).split('id="tier2-across"', 1)[1]
     section = section.split("</section>", 1)[0]
     assert "No semantic overlaps detected." not in section
@@ -449,7 +471,7 @@ def test_clean_comparisons_keep_their_banner_beside_the_catalog_setup_record(tmp
 
     assert all(r.passed and not r.findings for r in results), [r.errors for r in results]
     across = tier2_scope_views(results)[1]
-    assert (across.completed, across.duplicates) == (3, 0)
+    assert (across.completed, across.duplicates) == (2, 0)
     section = HTMLReporter(include_timestamp=False).render_all(results).split('id="tier2-across"', 1)[1]
     section = section.split("</section>", 1)[0]
     assert section.count("No semantic overlaps detected.") == 2

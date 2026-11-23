@@ -45,12 +45,14 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
                     raise ValueError(f"{key} URL prefix host must be exact. Use a bare wildcard host pattern instead.")
         else:
             # The host matcher percent-decodes an entry, so '%' could spell any rejected character.
-            if any(char.isspace() for char in entry) or any(char in entry for char in "%@?#\\"):
+            # It also folds fullwidth forms to ASCII, so check the folded spelling as well.
+            folded = unicodedata.normalize("NFKC", entry)
+            if any(char.isspace() for char in folded) or any(char in folded for char in "%@?#\\"):
                 raise ValueError(f"{key} contains an invalid host pattern")
-            if "/" in entry or ":" in entry:
+            if "/" in folded or ":" in folded:
                 try:
                     ipaddress.ip_network(
-                        entry[1:-1] if entry.startswith("[") and entry.endswith("]") else entry, strict=False
+                        folded[1:-1] if folded.startswith("[") and folded.endswith("]") else folded, strict=False
                     )
                 except ValueError as exc:
                     raise ValueError(f"{key} contains an invalid IP address or network") from exc

@@ -49,9 +49,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
-- Configuration docs gain a "Provider recipes" section showing how to use AI/ML API
-  and any other OpenAI-compatible gateway or aggregator through the
-  `openai-compatible` provider, without a named provider entry.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
   command hooks in an exact, reviewed plugin package. Applied waivers are
   reported and clear only the matching unmodeled-hook gate.
@@ -63,6 +60,9 @@ All notable changes to SkillEvaluator are documented in this file.
   records the release, commit, image, pipeline, and job.
 - A dedicated [NeMo Gym integration guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
   with setup, reviewed-dataset evaluation, reports, and troubleshooting.
+- Configuration docs gain a "Provider recipes" section showing how to use AI/ML API
+  and any other OpenAI-compatible gateway or aggregator through the
+  `openai-compatible` provider, without a named provider entry.
 - `SKILL_EVAL_LLM_EXTRA_HEADERS` sends extra HTTP headers on host-side
   `openai-compatible` chat calls through the shared LLM client. A `{uuid}`
   placeholder becomes one random UUID per client. Harbor verifier judges,

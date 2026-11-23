@@ -1556,27 +1556,40 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("interrupt", [False, True])
-def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, interrupt: bool) -> None:
+def test_successful_gym_teardown_completes_cleanup_progress(
+    tmp_path: Path, interrupt: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+    import subprocess
     import sys
 
     from skillevaluator.tier3.nemo_gym.runner import _run_gym
 
-    script = "import os, signal, time; time.sleep(0.5); "
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
     if interrupt:
-        script += "os.kill(os.getppid(), signal.SIGINT); "
-    script += "time.sleep(60)"
+        real_wait = subprocess.Popen.wait
+        sent = False
+
+        def interrupt_first_wait(process, timeout=None):
+            nonlocal sent
+            if not sent and process.args == command:
+                sent = True
+                # Send SIGINT only once the group exists and the runner is waiting.
+                signal.raise_signal(signal.SIGINT)
+            return real_wait(process, timeout=timeout)
+
+        monkeypatch.setattr(subprocess.Popen, "wait", interrupt_first_wait)
+
     reporter = _RecordingReporter()
     with (tmp_path / "gym.log").open("w") as log:
 
         def run():
             return _run_gym(
-                [sys.executable, "-c", script],
+                command,
                 cwd=tmp_path,
                 env=dict(os.environ),
                 log=log,
-                # A delayed first SIGINT must not race timeout cleanup and
-                # accidentally exercise the second-interrupt abort path.
-                timeout_s=30 if interrupt else 1,
+                timeout_s=1,
                 reporter=reporter,
             )
 

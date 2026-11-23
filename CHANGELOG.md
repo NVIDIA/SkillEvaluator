@@ -4,6 +4,68 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Bound declarative output-pattern checks with isolated Python regex workers and a shared
+  matching budget, preserving Python regex semantics and later checks. Interpreter
+  startup and JSON transfer have a separate startup allowance and do not consume
+  the matching budget; invalid patterns remain unscored across output encodings.
+  Pattern timeouts and exhausted matching budgets count as failed checks, so
+  slow failing patterns cannot increase the behavior score. Operators can
+  configure the per-pattern deadline and shared budget through the existing
+  verifier environment.
+
+## 1.1.0 - 2026-11-22
+
+### Highlights
+
+- **Stable CI channels.** Opt into promoted Tier 1 releases for GitHub Actions or
+  GitLab CI after the first promotion. Use `skillevaluator ci init --channel stable`
+  for GitHub or the stable include for GitLab. [GitHub guide](https://docs.nvidia.com/skills/skillevaluator/github-actions#follow-the-latest-stable-release) · [GitLab guide](https://docs.nvidia.com/skills/skillevaluator/gitlab-ci#follow-the-latest-stable-release)
+- **Reviewed plugin hooks.** Use `--hook-waivers FILE` to record approval for
+  eligible command hooks in a specific reviewed package. Reports show which
+  waivers applied, and other findings and coverage gaps still affect the scan.
+  [Hook waiver guide](https://docs.nvidia.com/skills/skillevaluator/tier1-reference#reviewed-command-hook-waivers)
+- **Stronger security scans.** SkillSpector 2.13.6, bounded YAML and JSON parsing,
+  and tighter Bandit and filesystem rules improve scans of untrusted skills.
+- **Clearer evaluation reports.** Tier 1 distinguishes incomplete scans, checks
+  that never ran, and checks that do not apply. Tier 2 counts similarity matches
+  and affected entries separately and shows other recorded evidence in its own tab.
+  [Reports guide](https://docs.nvidia.com/skills/skillevaluator/reports)
+- **More reliable Tier 3 evaluations.** Budgeted `--stop-on-pass` stops each arm
+  after its own first pass. Legacy dataset validation rejects malformed cases, and
+  log recovery keeps usable evidence. Harbor fixes macOS downloads and custom
+  graders on Python 3.9, and keeps source-job provenance in aggregate results.
+  It also masks temporary NVIDIA Build bridge tokens in retained agent output
+  within the limits below. [Harbor fixes](https://github.com/NVIDIA/SkillEvaluator/pull/849)
+- **Easier provider setup and diagnostics.** Configure custom headers for host-side
+  OpenAI-compatible chat. Bedrock checks the selected endpoint and configured
+  region. Use `doctor --json` for machine-readable readiness, or follow the
+  new [NeMo Gym guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym)
+  to run the existing integration.
+
+### Upgrade notes
+
+Python 3.12–3.14 remains supported. Managed SkillSpector uses a separate Python
+3.12 or 3.13 environment. Recheck version-bound scanner baselines after upgrading.
+Skill-owned Bandit configuration and `# nosec` no longer suppress findings.
+YAML datasets have a 1,024-item limit per list or mapping. Large flat datasets can
+use JSON or JSONL. Bedrock bearer authentication requires HTTPS for the selected
+endpoint. `tier3 validate` exits nonzero when `evals/` is missing.
+Rerun affected evaluations that used custom graders on Harbor task images with
+Python 3.9. NVIDIA Build bridge trials can lose trajectory and usage data when
+a retained file cannot be masked before conversion. Budgeted runs can stop
+early when agent token or cost data is unavailable. Check trial warnings.
+Validation now checks operator allowlist settings when present. The detailed
+notes below describe the new policy and backend configuration behavior.
+
+### New Contributors
+
+- [@sm18lr88](https://github.com/sm18lr88) made their first contribution in [#796](https://github.com/NVIDIA/SkillEvaluator/pull/796)
+- [@cf3901646](https://github.com/cf3901646) made their first contribution in [#762](https://github.com/NVIDIA/SkillEvaluator/pull/762)
+- [@mengqing88](https://github.com/mengqing88) made their first contribution in [#822](https://github.com/NVIDIA/SkillEvaluator/pull/822)
+- [@qipchip31](https://github.com/qipchip31) made their first contribution in [#826](https://github.com/NVIDIA/SkillEvaluator/pull/826)
+
 ### Security
 
 - Update LiteLLM and the minimum AWS SDK version in the optional LLM and
@@ -22,6 +84,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Changed
 
+- Tier 2 HTML reports count similarity matches and affected entries separately
+  from catalog entries compared. Other recorded results, including dependency
+  checks, have their own tab and do not inflate the comparison totals.
 - Claude Code log recovery pairs batched and delayed tool results without repeatedly
   scanning earlier tool calls, reducing reconstruction time for long trajectories.
 - Tier 3 lift intervals compute faster when every case has the same lift;
@@ -392,6 +457,22 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- Tier 3 security grading now reads `rm` that `eval`, `env -S` or a
+  `git grep -O` pager runs, with `$'...'` words decoded and joined, so
+  `eval '$CMD -rf /workspace'` and `env -S 'rm\_-rf\_/workspace'` receive a
+  destructive-command finding, and so does a quoted `rm` command name such as
+  `"rm" -rf /workspace`, in `bash -c` text or text a here-document feeds to a
+  shell only beside other `rm` text. Other commands keep their reading, so
+  `grep 'rm' -rn .` and an array literal such as `cmd=("rm" -rf build)` do
+  not receive it. The `rm` pattern now runs in linear time: `rm -` and
+  40,000 letters `r` take milliseconds instead of 10 to 13 seconds. Text the
+  lexer cannot split is read in one pass, command by command, where more
+  than 65,536 distinct `rm` fragments get it, and so does a command read for
+  a quoted `rm` name or for `eval`, `env -S` or pager text that may run
+  `rm`, also one inside such text, when it is over 64 KiB or 4,096 tokens.
+  These readings stop once the texts they check count 256 KiB of a trace,
+  each word, shell operator and substitution counting 10 characters more,
+  and the rest of the trace keeps its earlier reading.
 - The text-analyzer reference skill counts a sentence end only when `.`, `!` or
   `?` is followed by whitespace or the end of the text, so file names, decimals
   and version numbers stay in one sentence. Closing quotes, Markdown emphasis
@@ -492,23 +573,6 @@ All notable changes to SkillEvaluator are documented in this file.
   as `url_safety.py`, as a case's `expected_script` when the skill has a script
   that does something when run. A skill with one script, or only helpers, keeps
   its previous choice.
-
-- Tier 3 security grading now reads `rm` that `eval`, `env -S` or a
-  `git grep -O` pager runs, with `$'...'` words decoded and joined, so
-  `eval '$CMD -rf /workspace'` and `env -S 'rm\_-rf\_/workspace'` receive a
-  destructive-command finding, and so does a quoted `rm` command name such as
-  `"rm" -rf /workspace`, in `bash -c` text or text a here-document feeds to a
-  shell only beside other `rm` text. Other commands keep their reading, so
-  `grep 'rm' -rn .` and an array literal such as `cmd=("rm" -rf build)` do
-  not receive it. The `rm` pattern now runs in linear time: `rm -` and
-  40,000 letters `r` take milliseconds instead of 10 to 13 seconds. Text the
-  lexer cannot split is read in one pass, command by command, where more
-  than 65,536 distinct `rm` fragments get it, and so does a command read for
-  a quoted `rm` name or for `eval`, `env -S` or pager text that may run
-  `rm`, also one inside such text, when it is over 64 KiB or 4,096 tokens.
-  These readings stop once the texts they check count 256 KiB of a trace,
-  each word, shell operator and substitution counting 10 characters more,
-  and the rest of the trace keeps its earlier reading.
 
 ## 1.0.0 - 2026-11-17
 

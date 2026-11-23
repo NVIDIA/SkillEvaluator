@@ -165,7 +165,7 @@ Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
 3. Complete [scanner setup](docs/installation-options.mdx#system-tools), start Docker, and [prepare a reviewed dataset](docs/prepare-dataset.mdx). Install every tier, set the provider and key, then validate:
 
 ```bash
-pip install "skillevaluator[all]"
+python -m pip install "skillevaluator[all]"
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 skillevaluator validate ./my-skill

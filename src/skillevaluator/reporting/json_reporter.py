@@ -519,6 +519,18 @@ class JSONReporter(ReporterBase):
         work_limit = result.metadata.get("work_limit")
         if isinstance(work_limit, dict):
             data["work_limit"] = work_limit
+        context_budget = result.metadata.get("plugin_context_budget")
+        if isinstance(context_budget, dict):
+            data["plugin_context_budget"] = context_budget
+        bundled_skill = result.metadata.get("bundled_skill")
+        if isinstance(bundled_skill, str):
+            data["bundled_skill"] = bundled_skill
+        catalog_target = result.metadata.get("plugin_catalog_target")
+        if isinstance(catalog_target, dict):
+            data["plugin_catalog_target"] = catalog_target
+        source_stage = result.metadata.get("bundle_source_stage")
+        if isinstance(source_stage, str):
+            data["bundle_source_stage"] = source_stage
 
         return data
 

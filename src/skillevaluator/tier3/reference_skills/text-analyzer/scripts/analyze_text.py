@@ -11,6 +11,15 @@ import sys
 from collections import Counter
 from pathlib import Path
 
+# A run of .!? ends a sentence only when it is followed by whitespace or the
+# end of the text. Closing quotes or brackets, Markdown emphasis markers and
+# numeric citation or footnote markers directly after the terminator still
+# count (He said "go." Then / (see above.) Next / **done.** Next / 1993.[1] The
+# / Done.[^1] Next). Periods inside tokens such as input.txt, 3.14, or v1.2.3
+# are not sentence ends. The lookbehind starts a match only at the first
+# terminator of a run, so long runs split in linear time.
+_SENTENCE_END = re.compile("(?<![.!?])[.!?]+(?:[\"')\\]}\u201d\u2019\u00bb\u203a*_]|\\[\\^?\\d+\\])*(?:\\s+|$)")
+
 
 def analyze(text: str) -> dict:
     lines = text.splitlines()
@@ -19,8 +28,7 @@ def analyze(text: str) -> dict:
     word_count = len(words)
     line_count = len(lines)
 
-    sentences = [s.strip() for s in re.split(r"[.!?]+", text) if s.strip()]
-    sentence_count = len(sentences)
+    sentence_count = len([part for part in _SENTENCE_END.split(text) if part.strip()])
 
     avg_word_len = round(sum(len(w) for w in words) / max(word_count, 1), 2)
 
@@ -65,10 +73,27 @@ def main():
 
     if args.file:
         path = Path(args.file)
-        if not path.exists():
+        # The read decides: Path.exists() and is_dir() report False for a
+        # path they cannot stat on Python 3.14, which hid permission errors.
+        try:
+            text = path.read_text(encoding="utf-8", errors="replace")
+        except (FileNotFoundError, NotADirectoryError):
             print(f"Error: file not found: {args.file}", file=sys.stderr)
             sys.exit(1)
-        text = path.read_text(encoding="utf-8", errors="replace")
+        except IsADirectoryError:
+            print(f"Error: not a file: {args.file}", file=sys.stderr)
+            sys.exit(1)
+        except OSError as exc:
+            # Windows refuses to open a directory with PermissionError.
+            try:
+                is_dir = path.is_dir()
+            except OSError:
+                is_dir = False
+            if is_dir:
+                print(f"Error: not a file: {args.file}", file=sys.stderr)
+            else:
+                print(f"Error: cannot read file: {args.file} ({exc.strerror})", file=sys.stderr)
+            sys.exit(1)
     else:
         text = args.text
 

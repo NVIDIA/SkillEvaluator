@@ -29,7 +29,7 @@ def advisory_severity(severity):
     return Severity.MEDIUM if severity in (Severity.HIGH, Severity.CRITICAL) else severity
 
 
-def record_similarity(result, key, *, status, catalog_entries, matches, reason=None):
+def record_similarity(result, key, *, status, catalog_entries, matches, reason=None, optional_skip=False):
     result.metadata.setdefault("plugin", {})[key] = {
         "status": status,
         "catalog_entries": catalog_entries,
@@ -38,17 +38,34 @@ def record_similarity(result, key, *, status, catalog_entries, matches, reason=N
     }
     result.metadata["advisory_tier2"] = True
     if status == "skipped":
-        result.metadata.update(scan_status="skipped", optional_skip=True)
-        result.add_warning(reason or "Comparison did not run")
+        reason = reason or "Comparison did not run"
+        result.metadata.update(scan_status="skipped", skipped=True, skip_reason=reason, optional_skip=optional_skip)
+        result.add_warning(reason)
 
 
-def skipped_result(name, description, key, reason, *, catalog_entries=0):
+def skipped_result(name, description, key, reason, *, catalog_entries=0, optional=True):
     result = ValidationResult(validator_name=name, validator_description=description)
-    record_similarity(result, key, status="skipped", catalog_entries=catalog_entries, matches=[], reason=reason)
+    record_similarity(
+        result,
+        key,
+        status="skipped",
+        catalog_entries=catalog_entries,
+        matches=[],
+        reason=reason,
+        optional_skip=optional,
+    )
     return result
 
 
-def self_plugin_entries(profile, catalog):
+def self_plugin_entries(profile, catalog, self_prefix=None):
+    """Return the target's own catalog bundle entries.
+
+    A catalog built in the same run records each target at a known prefix, so
+    only that entry is self. A loaded catalog does not say where the target
+    is, so a matching manifest fingerprint identifies it instead.
+    """
+    if self_prefix is not None:
+        return [e for e in catalog.plugins if e.path == self_prefix]
     return [e for e in catalog.plugins if e.source_fingerprint == profile.source_fingerprint]
 
 
@@ -63,8 +80,12 @@ def _threshold(value):
     _validate_threshold(value)
 
 
-def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATALOG_TOP_K):
-    """C-inter compares every comparable effective skill; names never identify self."""
+def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATALOG_TOP_K, self_prefix=None):
+    """C-inter compares every comparable effective skill; names never identify self.
+
+    ``self_prefix`` is the target's path in a catalog built in the same run;
+    only the skill entries at that prefix are then excluded as self.
+    """
     _threshold(threshold)
     _top_k(top_k)
     comparable = [s for s in profile.bundled_skills if s.entry is not None]
@@ -80,13 +101,17 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
     for skill in profile.bundled_skills:
         if skill.entry is None:
             result.add_warning(f"Skill {skill.root_relative} was not compared: {skill.skip_reason}")
-    prefixes = [entry.path for entry in self_plugin_entries(profile, catalog)]
+    prefixes = [entry.path for entry in self_plugin_entries(profile, catalog, self_prefix)]
     scores = catalog.score([s.entry.embedding_text for s in comparable], catalog.skills)
     matches = []
     excluded_paths = set()
+    compared_paths = set()
     excluded = 0
     for skill, scored in zip(comparable, scores, strict=True):
-        if catalog.plugins:
+        if self_prefix is not None:
+            self_paths = {(PurePosixPath(self_prefix) / skill.root_relative).as_posix()}
+            fingerprint = None
+        elif catalog.plugins:
             self_paths = {(PurePosixPath(prefix) / skill.root_relative).as_posix() for prefix in prefixes}
             fingerprint = None
         else:
@@ -99,7 +124,9 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
             if entry.path in self_paths and (fingerprint is None or entry.content_fingerprint == fingerprint):
                 excluded += 1
                 excluded_paths.add(entry.path)
-            elif score >= threshold:
+                continue
+            compared_paths.add(entry.path)
+            if score >= threshold:
                 candidates.append((entry, score))
         candidates.sort(key=lambda pair: (-pair[1], pair[0].path))
         for entry, score in candidates[:top_k]:
@@ -131,6 +158,7 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
         "Compared bundle skills with the local catalog",
         bundled_skills=len(comparable),
         catalog_entries=len(catalog.skills),
+        compared_catalog_entries=len(compared_paths),
         self_matches_excluded=excluded,
         excluded_catalog_paths=sorted(excluded_paths),
     )
@@ -138,21 +166,27 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
     return result
 
 
-def _llm_verdicts(profile, candidates, *, llm_model, result):
+def _llm_verdicts(profile, candidates, *, llm_model, result, allowance=None):
     from skillevaluator.inference import LLMClient
 
     from .llm_analyzer import analyze_inter_plugin, build_inter_plugin_prompt, validate_prompt_batch
 
     verdicts = [None] * len(candidates)
+    skip_reason = None
     try:
         prompts = [
             build_inter_plugin_prompt(profile=profile, existing=e, similarity_score=s, member_overlap=o)
             for e, s, o in candidates
         ]
         validate_prompt_batch(prompts)
-        client = LLMClient(model=llm_model, max_tokens=2048)
+        if allowance is not None and not allowance.reserve(prompts):
+            skip_reason = "this run's verdict call or prompt allowance is used up"
+        else:
+            client = LLMClient(model=llm_model, max_tokens=2048)
     except Exception as exc:
-        result.add_warning(f"Optional bundle verdict skipped: {llm_failure_diagnostic(exc)}")
+        skip_reason = llm_failure_diagnostic(exc)
+    if skip_reason is not None:
+        result.add_warning(f"Optional bundle verdict skipped: {skip_reason}")
         result.metadata["llm_analysis"] = {"status": "skipped", "candidates_total": len(candidates)}
         return verdicts
     failed = 0
@@ -170,8 +204,22 @@ def _llm_verdicts(profile, candidates, *, llm_model, result):
     return verdicts
 
 
-def check_catalog_plugins(profile, catalog, *, threshold, llm_verdict=False, llm_model=None, top_k=INTER_PLUGIN_TOP_K):
-    """B retains name collisions even when an optional verdict finds distinct functionality."""
+def check_catalog_plugins(
+    profile,
+    catalog,
+    *,
+    threshold,
+    llm_verdict=False,
+    llm_model=None,
+    top_k=INTER_PLUGIN_TOP_K,
+    self_prefix=None,
+    verdict_allowance=None,
+):
+    """B retains name collisions even when an optional verdict finds distinct functionality.
+
+    ``self_prefix`` is the target's path in a catalog built in the same run.
+    ``verdict_allowance`` bounds optional verdict requests across one run.
+    """
     _threshold(threshold)
     _top_k(top_k)
     if not catalog.plugins or profile.description is None:
@@ -183,7 +231,8 @@ def check_catalog_plugins(profile, catalog, *, threshold, llm_verdict=False, llm
             catalog_entries=len(catalog.plugins),
         )
     result = ValidationResult(validator_name=INTER_PLUGIN_NAME, validator_description=INTER_PLUGIN_DESCRIPTION)
-    self_ids = {e.entry_id for e in self_plugin_entries(profile, catalog)}
+    self_entries = self_plugin_entries(profile, catalog, self_prefix)
+    self_ids = {e.entry_id for e in self_entries}
     candidates = []
     for entry, similarity in catalog.score([profile.embedding_text], catalog.plugins)[0]:
         if entry.entry_id in self_ids:
@@ -198,7 +247,7 @@ def check_catalog_plugins(profile, catalog, *, threshold, llm_verdict=False, llm
     total = len(candidates)
     candidates = candidates[:top_k]
     verdicts = (
-        _llm_verdicts(profile, candidates, llm_model=llm_model, result=result)
+        _llm_verdicts(profile, candidates, llm_model=llm_model, result=result, allowance=verdict_allowance)
         if llm_verdict and candidates
         else [None] * len(candidates)
     )
@@ -233,7 +282,13 @@ def check_catalog_plugins(profile, catalog, *, threshold, llm_verdict=False, llm
                 advisory_severity(native),
                 classification,
                 f"Bundle '{profile.name}' overlaps catalog bundle '{entry.name}' ({entry.path}); score {score:.3f}, member overlap {overlap:.3f}"
-                + ("; same name with a different manifest" if collision else ""),
+                + (
+                    ""
+                    if not collision
+                    else "; same name and identical manifest"
+                    if entry.source_fingerprint == profile.source_fingerprint
+                    else "; same name with a different manifest"
+                ),
                 file_path=profile.manifest,
                 suggestion=verdict.suggestion
                 if verdict and verdict.suggestion
@@ -259,8 +314,9 @@ def check_catalog_plugins(profile, catalog, *, threshold, llm_verdict=False, llm
         "plugin_catalog_comparison",
         "Compared bundle with the local catalog",
         catalog_entries=len(catalog.plugins),
+        compared_catalog_entries=len(catalog.plugins) - len(self_ids),
         self_matches_excluded=len(self_ids),
-        excluded_catalog_paths=sorted(e.path for e in self_plugin_entries(profile, catalog)),
+        excluded_catalog_paths=sorted(e.path for e in self_entries),
     )
     record_similarity(
         result, INTER_PLUGIN_KEY, status="compared", catalog_entries=len(catalog.plugins), matches=matches

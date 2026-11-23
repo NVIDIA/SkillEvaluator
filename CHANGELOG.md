@@ -100,6 +100,8 @@ All notable changes to SkillEvaluator are documented in this file.
   records and is reported as an unsupported agent log format; agent log files read
   from a trial directory are unaffected because they are read with newline
   normalization.
+- Claude Code and Cline log reconstruction skips non-object JSON events and
+  Cline tool payloads instead of discarding valid surrounding evidence with an exception.
 - Declarative command-success checks retain recorded exit status for a single
   script command whose quoted path contains spaces. Pipeline tails (`|` and `|&`)
   and negated commands (`!` and `time [-p] [--] !`) remain unattributed instead

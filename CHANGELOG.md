@@ -349,6 +349,11 @@ All notable changes to SkillEvaluator are documented in this file.
   `Cancelled:` group after Completed. They were counted in the progress total
   but never printed, so a list whose only task was cancelled showed just the
   `Task List (0/1 completed)` header.
+- The calculator reference skill reports an unsupported unit pair, such as
+  `100 celsius to kelvin`, as `Error: Unknown conversion: celsius to kelvin.`
+  followed by the supported units, as its troubleshooting table describes.
+  These requests previously fell through to arithmetic parsing and printed a
+  Python syntax error.
 
 ## 1.0.1 - 2026-11-17
 

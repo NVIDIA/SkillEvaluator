@@ -345,6 +345,10 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- The task-list reference skill's `list` operation shows cancelled tasks in a
+  `Cancelled:` group after Completed. They were counted in the progress total
+  but never printed, so a list whose only task was cancelled showed just the
+  `Task List (0/1 completed)` header.
 
 ## 1.0.1 - 2026-11-17
 

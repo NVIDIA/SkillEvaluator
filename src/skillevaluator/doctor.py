@@ -13,7 +13,7 @@ from __future__ import annotations
 import importlib.util
 import math
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from rich.box import SIMPLE
@@ -21,7 +21,7 @@ from rich.console import Console
 from rich.table import Table
 
 from skillevaluator import __version__
-from skillevaluator.utils.rich_markup import escape_markup
+from skillevaluator.utils.rich_markup import escape_markup, strip_terminal_controls
 
 Row = tuple[str, str, str]
 
@@ -47,9 +47,13 @@ _MINIMUM_SCANNER_VERSIONS: dict[str, tuple[int, int, int]] = {
 _SCANNER_LABELS = {"skillspector": "SkillSpector"}
 _VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
 _PROBE_TEXT = "SkillEvaluator readiness check"
+_STATUS_RANK = {"pass": 0, "warn": 1, "fail": 2}
 
 # emoji=False: ":name:" codes in configuration values must print literally.
 console = Console(emoji=False)
+
+TIER3_EXTRA_MISSING = "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again."
+TIER3_EXTRA_MISSING_ROWS: list[Row] = [("Tier 3 extra", "fail", TIER3_EXTRA_MISSING)]
 
 
 def _probe_run_options(command: str) -> dict[str, Any]:
@@ -230,6 +234,59 @@ def readiness_rows(
     return rows
 
 
+def failed_readiness(rows: Sequence[Row]) -> bool:
+    """Return True when any readiness row failed."""
+    return any(status == "fail" for _, status, _ in rows)
+
+
+def worst_readiness_status(statuses: Iterable[str]) -> str:
+    """Return the worst of ``pass``, ``warn``, and ``fail``."""
+    worst = "pass"
+    for status in statuses:
+        if _STATUS_RANK[status] > _STATUS_RANK[worst]:
+            worst = status
+    return worst
+
+
+def print_readiness_table(rows: Sequence[Row], *, title: str, output: Console | None = None) -> None:
+    """Print the doctor table. Default human output uses this renderer."""
+    table = Table(title=title, box=SIMPLE, show_edge=False)
+    table.add_column("Check", style="bold")
+    table.add_column("Status")
+    table.add_column("Details")
+    status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
+    for name, status, detail in rows:
+        style = status_styles[status]
+        table.add_row(escape_markup(str(name)), f"[{style}]{status}[/{style}]", escape_markup(str(detail)))
+    (output or console).print(table)
+
+
+def readiness_payload(*, command: str, tiers: Sequence[tuple[str, Sequence[Row]]]) -> dict[str, Any]:
+    """Build the stable ``--json`` object for doctor and health-check."""
+    encoded = []
+    for tier, rows in tiers:
+        encoded.append(
+            {
+                "tier": tier,
+                "status": worst_readiness_status(status for _, status, _ in rows),
+                "checks": [
+                    {
+                        "check": strip_terminal_controls(str(name)),
+                        "status": status,
+                        "detail": strip_terminal_controls(str(detail)),
+                    }
+                    for name, status, detail in rows
+                ],
+            }
+        )
+    return {
+        "schema_version": 1,
+        "command": command,
+        "tiers": encoded,
+        "status": worst_readiness_status(item["status"] for item in encoded),
+    }
+
+
 def doctor(
     *,
     tier: str,
@@ -239,13 +296,5 @@ def doctor(
 ) -> int:
     """Print Tier 1 or Tier 2 readiness and return 1 when any check failed."""
     rows = readiness_rows(tier=tier, checks=checks, verify_models=verify_models, timeout=timeout)
-    table = Table(title=f"SkillEvaluator Doctor (Tier {tier})", box=SIMPLE, show_edge=False)
-    table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Details")
-    status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
-    for name, status, detail in rows:
-        style = status_styles[status]
-        table.add_row(escape_markup(name), f"[{style}]{status}[/{style}]", escape_markup(detail))
-    console.print(table)
-    return 1 if any(status == "fail" for _, status, _ in rows) else 0
+    print_readiness_table(rows, title=f"SkillEvaluator Doctor (Tier {tier})")
+    return 1 if failed_readiness(rows) else 0

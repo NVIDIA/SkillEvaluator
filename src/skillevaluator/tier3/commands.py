@@ -882,7 +882,7 @@ def evaluate(
         reporter.close()
 
 
-def doctor(
+def readiness_rows(
     *,
     agents: str | None,
     env_mode: str,
@@ -891,8 +891,8 @@ def doctor(
     agent_model: tuple[str, ...] = (),
     environment_kwargs: Mapping[str, Any] | None = None,
     backend: str | None = None,
-) -> int:
-    """Check whether live evaluation dependencies are available."""
+) -> list[tuple[str, str, str]]:
+    """Return live-evaluation ``(check, pass|warn|fail, detail)`` rows."""
     from skillevaluator.tier3.evals_config import parse_environment_kwarg_overrides
     from skillevaluator.tier3.nemo_gym.backend import NEMO_GYM_BACKEND, normalize_backend
 
@@ -1044,16 +1044,33 @@ def doctor(
                     detail = probe.detail
                 rows.append((f"{agent} model", status, detail))
 
-    table = Table(title="SkillEvaluator Doctor", box=SIMPLE, show_edge=False)
-    table.add_column("Check", style="bold")
-    table.add_column("Status")
-    table.add_column("Details")
-    status_styles = {"pass": "green", "warn": "yellow", "fail": "red"}
-    for name, status, detail in rows:
-        style = status_styles[status]
-        table.add_row(escape_markup(str(name)), f"[{style}]{status}[/{style}]", escape_markup(str(detail)))
-    console.print(table)
-    return 1 if any(row[1] == "fail" for row in rows) else 0
+    return rows
+
+
+def doctor(
+    *,
+    agents: str | None,
+    env_mode: str,
+    environment_kwarg: tuple[str, ...] = (),
+    verify_models: bool = False,
+    agent_model: tuple[str, ...] = (),
+    environment_kwargs: Mapping[str, Any] | None = None,
+    backend: str | None = None,
+) -> int:
+    """Check whether live evaluation dependencies are available."""
+    from skillevaluator.doctor import failed_readiness, print_readiness_table
+
+    rows = readiness_rows(
+        agents=agents,
+        env_mode=env_mode,
+        environment_kwarg=environment_kwarg,
+        verify_models=verify_models,
+        agent_model=agent_model,
+        environment_kwargs=environment_kwargs,
+        backend=backend,
+    )
+    print_readiness_table(rows, title="SkillEvaluator Doctor", output=console)
+    return 1 if failed_readiness(rows) else 0
 
 
 def _docker_daemon_error(env: Mapping[str, str]) -> str | None:

@@ -1931,6 +1931,8 @@ def _validate_chat_tool_call(tool_call: Any) -> None:
         or not isinstance(function.get("arguments"), str)
     ):
         raise BridgePayloadError("tool calls require function name and string arguments")
+    if not _is_chat_tool_name(function["name"]):
+        raise BridgePayloadError("tool call name is unsupported by NVIDIA Build")
 
 
 if __name__ == "__main__":

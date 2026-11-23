@@ -28,9 +28,16 @@ from skillevaluator.constants import (
     SIMILARITY_DEFAULT_MAX_SCALAR_COMPARISONS,
     SIMILARITY_MAX_ENTRIES,
 )
-from skillevaluator.doctor import DEFAULT_PROBE_TIMEOUT_SEC, MAX_PROBE_TIMEOUT_SEC
+from skillevaluator.doctor import (
+    DEFAULT_PROBE_TIMEOUT_SEC,
+    MAX_PROBE_TIMEOUT_SEC,
+    TIER3_EXTRA_MISSING,
+    TIER3_EXTRA_MISSING_ROWS,
+    failed_readiness,
+    readiness_payload,
+)
 from skillevaluator.harness.report import harness_block, harness_note, harness_panel, write_json_block
-from skillevaluator.logging_config import setup_logging
+from skillevaluator.logging_config import route_logs_to, setup_logging
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.precommit import CHECKS
 from skillevaluator.quality_config import QualityConfigError, load_quality_config
@@ -4376,6 +4383,11 @@ def _doctor_tier_options(*, timeout_help: str):
     return decorate
 
 
+def _json_option(func):
+    """Add ``--json`` shared by doctor, health-check, and tier3 doctor."""
+    return click.option("--json", "as_json", is_flag=True, help="Emit machine-readable JSON.")(func)
+
+
 def _tier3_doctor_options(func):
     """Add the Tier 3 options shared by doctor and tier3 doctor."""
     func = click.option(
@@ -4416,6 +4428,7 @@ def _run_doctor(
     agent_model: tuple[str, ...] = (),
     verify_models: bool = False,
     backend: str = "harbor",
+    as_json: bool = False,
 ) -> int:
     """Validate every option before any probe, then check each selected tier in order."""
     selected_tiers = ("1", "2", "3") if tier == "all" else (tier,)
@@ -4440,40 +4453,74 @@ def _run_doctor(
     )
 
     # Tiers are independent: a failed tier never hides the readiness of the next.
+    if as_json:
+        from rich.console import Console as _LogConsole
+
+        route_logs_to(_LogConsole(stderr=True, emoji=False))
+    collected: list[tuple[str, list[tuple[str, str, str]]]] = []
     exit_codes = []
-    for selected in selected_tiers:
-        if selected == "3":
-            try:
-                from skillevaluator.tier3.commands import doctor as tier3_doctor
-            except ImportError as exc:
-                from skillevaluator.tier3.extras import is_missing_tier3_extra
+    try:
+        for selected in selected_tiers:
+            if selected == "3":
+                try:
+                    if as_json:
+                        from skillevaluator.tier3.commands import readiness_rows as collect_tier3
+                    else:
+                        from skillevaluator.tier3.commands import doctor as collect_tier3
+                except ImportError as exc:
+                    from skillevaluator.tier3.extras import is_missing_tier3_extra
 
-                if not is_missing_tier3_extra(exc):
-                    raise
-                click.echo(
-                    "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.", err=True
-                )
-                exit_codes.append(1)
-                continue
+                    if not is_missing_tier3_extra(exc):
+                        raise
+                    if as_json:
+                        collected.append(("3", list(TIER3_EXTRA_MISSING_ROWS)))
+                    else:
+                        click.echo(TIER3_EXTRA_MISSING, err=True)
+                    exit_codes.append(1)
+                    continue
 
-            exit_codes.append(
-                tier3_doctor(
-                    agents=agents,
-                    env_mode=env_mode,
-                    environment_kwarg=environment_kwarg,
-                    verify_models=verify_models,
-                    agent_model=agent_model,
-                    environment_kwargs=parsed_environment_kwargs,
-                    backend=backend,
-                )
+                tier3_options = {
+                    "agents": agents,
+                    "env_mode": env_mode,
+                    "environment_kwarg": environment_kwarg,
+                    "verify_models": verify_models,
+                    "agent_model": agent_model,
+                    "environment_kwargs": parsed_environment_kwargs,
+                    "backend": backend,
+                }
+                if as_json:
+                    rows = collect_tier3(**tier3_options)
+                    collected.append(("3", rows))
+                    exit_codes.append(1 if failed_readiness(rows) else 0)
+                else:
+                    exit_codes.append(collect_tier3(**tier3_options))
+            else:
+                if as_json:
+                    from skillevaluator.doctor import readiness_rows as collect_lower
+                else:
+                    from skillevaluator.doctor import doctor as collect_lower
+
+                lower_options = {
+                    "tier": selected,
+                    "checks": checks,
+                    "verify_models": verify_models,
+                    "timeout": timeout,
+                }
+                if as_json:
+                    rows = collect_lower(**lower_options)
+                    collected.append((selected, rows))
+                    exit_codes.append(1 if failed_readiness(rows) else 0)
+                else:
+                    exit_codes.append(collect_lower(**lower_options))
+        if as_json:
+            payload = readiness_payload(command=ctx.command.name, tiers=collected)
+            click.echo(
+                json.dumps(payload, ensure_ascii=json_needs_ascii(payload, getattr(sys.stdout, "encoding", None)))
             )
-        else:
-            from skillevaluator.doctor import doctor as lower_tier_doctor
-
-            exit_codes.append(
-                lower_tier_doctor(tier=selected, checks=checks, verify_models=verify_models, timeout=timeout)
-            )
-    return 1 if any(exit_codes) else 0
+        return 1 if any(exit_codes) else 0
+    finally:
+        if as_json:
+            route_logs_to(None)
 
 
 @cli.command()
@@ -4489,6 +4536,7 @@ def _run_doctor(
         "Tier 2 sends one embedding and one chat request."
     ),
 )
+@_json_option
 @click.pass_context
 def doctor(ctx: click.Context, **options: Any) -> None:
     """Check live-evaluation readiness, or select another tier with --tier."""
@@ -4502,6 +4550,7 @@ def doctor(ctx: click.Context, **options: Any) -> None:
     is_flag=True,
     help="Check resolved agent-model catalog reachability with a live credential-bearing request.",
 )
+@_json_option
 @click.pass_context
 def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
     """Check live-evaluation runtime readiness."""
@@ -4523,6 +4572,7 @@ def tier3_doctor_command(ctx: click.Context, **options: Any) -> None:
     multiple=True,
     help="Harbor environment constructor kwarg, KEY=VALUE. Repeat for multiple values; never pass secrets.",
 )
+@_json_option
 @click.pass_context
 def health_check(ctx: click.Context, **options: Any) -> None:
     """Quick readiness check for the CLI and selected live-eval backend, or another tier with --tier."""

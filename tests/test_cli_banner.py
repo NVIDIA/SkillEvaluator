@@ -8,7 +8,6 @@ import os
 import shutil
 import sys
 
-import click
 import pytest
 from click.testing import CliRunner
 
@@ -122,11 +121,10 @@ def test_banner_respects_terminal_color_capabilities(terminal, monkeypatch):
 
 
 def test_nested_help_does_not_show_banner(terminal):
-    parent = click.Context(cli, info_name="skillevaluator")
-    tier = cli.get_command(parent, "tier1")
-    ctx = click.Context(tier, info_name="tier1", parent=parent, color=False)
-
-    assert render_help(tier, ctx).startswith("Usage: skillevaluator tier1")
+    with cli.make_context("skillevaluator", [], resilient_parsing=True) as parent:
+        tier = cli.get_command(parent, "tier1")
+        with tier.make_context("tier1", [], parent=parent, resilient_parsing=True, color=False) as ctx:
+            assert render_help(tier, ctx).startswith("Usage: skillevaluator tier1")
 
 
 @pytest.mark.parametrize(

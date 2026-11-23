@@ -29,6 +29,7 @@ from .catalog_checks import (
     check_catalog_skills,
     skipped_result,
 )
+from .context_budget import ContextWorkBudget, validate_plugin_context_limits
 from .intra_plugin_validator import IntraPluginValidator
 from .profile import load_plugin_profile
 
@@ -51,13 +52,28 @@ _UNSAFE = frozenset(
 )
 
 
-def _skip_context(reason, **metadata):
+def _context_result():
     result = ValidationResult(
         validator_name="Context Deduplication",
         validator_description="Compare content within each effective bundle skill",
     )
-    result.metadata.update(advisory_tier2=True, scan_status="skipped", optional_skip=True, **metadata)
+    result.metadata.update(advisory_tier2=True, optional_skip=False)
+    return result
+
+
+def _skip_context(reason):
+    result = _context_result()
+    result.metadata.update(scan_status="skipped", skipped=True, skip_reason=reason)
     result.add_warning(reason)
+    return result
+
+
+def _context_work_limit(reason, *, check_name, **metadata):
+    result = _context_result()
+    result.metadata.update(scan_status="incomplete", work_limit_exceeded=True, **metadata)
+    result.metadata["work_limit"] = {"check_name": check_name, **metadata}
+    result.mark_scan_incomplete("bundle-context")
+    result.add_error(reason)
     return result
 
 
@@ -79,20 +95,38 @@ def _advisory(result):
     return result
 
 
-def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_model=None):
+def _budget_results(results, budget):
+    for result in results:
+        result.metadata["plugin_context_budget"] = budget.snapshot()
+    return results
+
+
+def run_plugin_skill_context_dedup(
+    profile, *, threshold=0.8, model=None, llm_model=None, max_chunks=None, max_scalar_comparisons=None
+):
     """Run C-intra for unique effective skill directories with an aggregate call allowance."""
+    validate_plugin_context_limits(max_chunks, max_scalar_comparisons)
+    budget = ContextWorkBudget(
+        MAX_PLUGIN_DEDUP_CHUNKS if max_chunks is None else max_chunks,
+        MAX_PLUGIN_DEDUP_SCALAR_COMPARISONS if max_scalar_comparisons is None else max_scalar_comparisons,
+        MAX_PLUGIN_DEDUP_LLM_CALLS,
+        MAX_PLUGIN_DEDUP_PROMPT_CHARS,
+    )
     skills = profile.bundled_skills
     if len(skills) > MAX_PLUGIN_DEDUP_SKILLS:
-        return [
-            _skip_context(
-                "Bundle skill limit exceeded before provider work",
-                work_limit_exceeded=True,
-                actual_skills=len(skills),
-                skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
-            )
-        ]
+        return _budget_results(
+            [
+                _context_work_limit(
+                    "Bundle skill limit exceeded before provider work",
+                    check_name="plugin_skill_count_limit",
+                    actual_skills=len(skills),
+                    skill_limit=MAX_PLUGIN_DEDUP_SKILLS,
+                )
+            ],
+            budget,
+        )
     if not skills:
-        return [_skip_context("No effective skill directories to compare")]
+        return _budget_results([_skip_context("Not applicable: no effective skill directories to compare")], budget)
     # Capture all skill text before any provider work. The same bounded
     # snapshots feed the existing validator, avoiding a second filesystem read.
     snapshots = []
@@ -101,7 +135,15 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
         try:
             collected = collect_files(skill.path)
         except SkillCollectionError as exc:
-            result = ValidationResult(validator_name="Context Deduplication")
+            result = _context_result()
+            if exc.check_name not in _UNSAFE:
+                result.mark_scan_incomplete("bundle-context-collection")
+            if exc.check_name.endswith("_limit"):
+                result.metadata["work_limit"] = {
+                    "check_name": exc.check_name,
+                    "file_path": (Path(skill.root_relative) / exc.rel_path).as_posix(),
+                    **exc.metadata,
+                }
             result.add_finding(
                 Finding(
                     "CONTENT_DEDUP",
@@ -113,33 +155,37 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
                     metadata=exc.metadata,
                 )
             )
-            return [_advisory(result)]
+            return _budget_results([_advisory(result)], budget)
         total_files += len(collected)
         total_text_bytes += sum(len(file.content.encode("utf-8")) for file in collected)
         total_chunks += sum(len(chunk_file(file)) for file in collected)
+        budget.chunks_collected = total_chunks
         if (
-            total_chunks > MAX_PLUGIN_DEDUP_CHUNKS
+            total_chunks > budget.chunk_limit
             or total_text_bytes > MAX_PLUGIN_DEDUP_TEXT_BYTES
             or total_files > MAX_PLUGIN_DEDUP_FILES
         ):
-            return [
-                _skip_context(
-                    "Aggregate bundle content limit exceeded before provider work",
-                    work_limit_exceeded=True,
-                    actual_chunks=total_chunks,
-                    actual_text_bytes=total_text_bytes,
-                    actual_files=total_files,
-                )
-            ]
+            return _budget_results(
+                [
+                    _context_work_limit(
+                        "Aggregate bundle content limit exceeded before provider work",
+                        check_name="plugin_content_limit",
+                        actual_chunks=total_chunks,
+                        chunk_limit=budget.chunk_limit,
+                        actual_text_bytes=total_text_bytes,
+                        text_byte_limit=MAX_PLUGIN_DEDUP_TEXT_BYTES,
+                        actual_files=total_files,
+                        file_limit=MAX_PLUGIN_DEDUP_FILES,
+                    )
+                ],
+                budget,
+            )
         snapshots.append(collected)
-    per_skill = min(50, MAX_PLUGIN_DEDUP_LLM_CALLS // len(skills))
     validator = IntraSkillValidator(
         threshold=threshold,
         embedding_model=model,
         llm_model=llm_model,
-        max_llm_clusters=per_skill,
-        _max_scalar_comparisons=MAX_PLUGIN_DEDUP_SCALAR_COMPARISONS // len(skills),
-        _max_total_prompt_chars=MAX_PLUGIN_DEDUP_PROMPT_CHARS // len(skills),
+        _aggregate_budget=budget,
     )
     results = []
     for skill, collected in zip(skills, snapshots, strict=True):
@@ -156,14 +202,18 @@ def run_plugin_skill_context_dedup(profile, *, threshold=0.8, model=None, llm_mo
                 relative = "."
             finding.file_path = (Path(skill.root_relative) / relative).as_posix()
         result.metadata.update(
-            bundled_skill=skill.root_relative, max_llm_calls=per_skill, aggregate_max_llm_calls=per_skill * len(skills)
+            bundled_skill=skill.root_relative, max_llm_calls=50, aggregate_max_llm_calls=budget.llm_call_limit
         )
         results.append(result)
-    return results
+    return _budget_results(results, budget)
 
 
-def _security_result(error):
+def _security_result(error, *, stage=None):
     result = ValidationResult(validator_name="Context Deduplication")
+    if stage is not None:
+        # A later stage's refusal follows the per-member context rows; its
+        # stage keeps it distinct from them in saved reports.
+        result.metadata["bundle_source_stage"] = stage
     result.add_finding(
         Finding(
             "PLUGIN_SECURITY",
@@ -179,10 +229,10 @@ def _security_result(error):
     return result
 
 
-def _catalog_skips(reason):
+def _catalog_skips(reason, *, optional=False):
     return [
-        skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason),
-        skipped_result(INTER_PLUGIN_NAME, INTER_PLUGIN_DESCRIPTION, INTER_PLUGIN_KEY, reason),
+        skipped_result(INTER_SKILL_NAME, INTER_SKILL_DESCRIPTION, INTER_SKILL_KEY, reason, optional=optional),
+        skipped_result(INTER_PLUGIN_NAME, INTER_PLUGIN_DESCRIPTION, INTER_PLUGIN_KEY, reason, optional=optional),
     ]
 
 
@@ -196,6 +246,8 @@ def run_plugin_dedup_scan(
     catalog=None,
     similarity_threshold=0.9,
     llm_verdict=False,
+    max_chunks=None,
+    max_scalar_comparisons=None,
 ):
     """A, C-intra, then fresh local-catalog C-inter and B; no public registration."""
     results = [IntraPluginValidator().validate(plugin_root)]
@@ -215,7 +267,14 @@ def run_plugin_dedup_scan(
         results.extend(_catalog_skips(str(exc)))
         return results
     results.extend(
-        run_plugin_skill_context_dedup(profile, threshold=threshold, model=model, llm_model=llm_model)
+        run_plugin_skill_context_dedup(
+            profile,
+            threshold=threshold,
+            model=model,
+            llm_model=llm_model,
+            max_chunks=max_chunks,
+            max_scalar_comparisons=max_scalar_comparisons,
+        )
         if run_context
         else [_skip_context("Context comparison disabled")]
     )
@@ -223,7 +282,7 @@ def run_plugin_dedup_scan(
         results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
         return results
     if catalog is None:
-        results.extend(_catalog_skips("No local catalog supplied"))
+        results.extend(_catalog_skips("No local catalog supplied", optional=True))
         return results
     try:
         # C-intra can take minutes. Use the current declarations and contents.
@@ -236,7 +295,7 @@ def run_plugin_dedup_scan(
             )
         )
     except SecurePathError as exc:
-        results.append(_security_result(exc))
+        results.append(_security_result(exc, stage="catalog"))
         results.extend(_catalog_skips("Unsafe bundle source; catalog comparisons did not run"))
     except (ValueError, SimilarityConfigError) as exc:
         reason = llm_failure_diagnostic(exc) if isinstance(exc, SimilarityConfigError) else str(exc)

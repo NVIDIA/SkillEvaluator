@@ -4,42 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
-## 1.1.1 - 2026-11-23
-
-The complete 1.1 release includes the changes in the
-[1.1.0 changelog](https://github.com/NVIDIA/SkillEvaluator/blob/v1.1.0/CHANGELOG.md#L18).
-It carries forward support for optional stable Tier 1 CI channels,
-reviewed plugin-hook waivers, tighter security checks, and improved Tier 2 and
-Tier 3 reports.
+## 1.2.0 - 2026-11-23
 
 ### Highlights
 
-- Add GitHub Actions annotations with `-r github` for workflows that run the
-  CLI. Findings appear as workflow errors, warnings, and notices.
+- **GitHub Actions annotations.** Export findings with `-r github` to show
+  workflow errors, warnings and notices alongside CI results.
   [GitHub Actions guide](https://docs.nvidia.com/skills/skillevaluator/github-actions)
-- Preserve ordered evaluation evidence and clearer scan status. Tier 1 reports
-  distinguish incomplete and skipped checks, while Tier 2 reports count
-  similarity matches and affected entries separately.
-  [Reports guide](https://docs.nvidia.com/skills/skillevaluator/reports)
-- Carry forward Harbor fixes for macOS downloads and Python 3.9 task graders,
-  bounded bridge-token masking, and a dedicated
-  [NeMo Gym guide](https://docs.nvidia.com/skills/skillevaluator/nemo-gym).
-
-### Fixed
-
-- Bound declarative output-pattern checks with isolated Python regex workers and a shared
-  matching budget, preserving Python regex semantics and later checks. Interpreter
-  startup and JSON transfer have a separate startup allowance and do not consume
-  the matching budget; invalid patterns remain unscored across output encodings.
-  Pattern timeouts and exhausted matching budgets count as failed checks, so
-  slow failing patterns cannot increase the behavior score. Operators can
-  configure the per-pattern deadline and shared budget through the existing
-  verifier environment.
-
-## 1.1.0 - 2026-11-22
-
-### Highlights
-
 - **Stable CI channels.** Opt into promoted Tier 1 releases for GitHub Actions or
   GitLab CI after the first promotion. Use `skillevaluator ci init --channel stable`
   for GitHub or the stable include for GitLab. [GitHub guide](https://docs.nvidia.com/skills/skillevaluator/github-actions#follow-the-latest-stable-release) · [GitLab guide](https://docs.nvidia.com/skills/skillevaluator/gitlab-ci#follow-the-latest-stable-release)
@@ -220,6 +191,15 @@ notes below describe the new policy and backend configuration behavior.
   workspace.
 
 ### Fixed
+
+- Bound declarative output-pattern checks with isolated Python regex workers and a shared
+  matching budget, preserving Python regex semantics and later checks. Interpreter
+  startup and JSON transfer have a separate startup allowance and do not consume
+  the matching budget; invalid patterns remain unscored across output encodings.
+  Pattern timeouts and exhausted matching budgets count as failed checks, so
+  slow failing patterns cannot increase the behavior score. Operators can
+  configure the per-pattern deadline and shared budget through the existing
+  verifier environment.
 
 - Full-body embeddings stop windowing a long section once a window reaches its end,
   avoiding extra embedding inputs and pooled weight for already-covered tails.

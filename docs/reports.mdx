@@ -766,7 +766,9 @@ completed run directly:
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied, and
   `incomplete_sections`, `required_complete` and `required_missing` say which
-  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence did not reach the judge whole. For `accuracy` and `goal_accuracy`,
+  `incomplete_sections` names the sections that did not reach the judge
+  whole. A `behavior_check` whose required
   evidence is incomplete is reported as an evaluation error with no score,
   which also leaves the trial's `overall_score` null; see
   [evidence budgets](/skills/skillevaluator/tier3-grading#evidence-budgets).

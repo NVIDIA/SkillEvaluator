@@ -30,6 +30,18 @@ All notable changes to SkillEvaluator are documented in this file.
   when the catalog has no eligible entries to compare against.
   These queries return an empty result without constructing the provider
   client, including when that provider is missing or unreachable.
+- Validation policy files accept `mcp.allowed_private_hosts`,
+  `hooks.allowed_urls` and `endpoints.resolve`. These blocks were ignored with an
+  `Ignoring unknown top-level key(s)` warning; now a malformed block stops
+  `validate --policy` with an error, and a valid one changes the policy digest
+  recorded in result metadata and adds entry counts, never the hosts or URLs,
+  to the policy summary. A hook URL prefix requires an exact host. Use a bare
+  wildcard host pattern to allow all paths on its matching subdomains.
+- `evals/config.yml` accepts `harbor.trial_retries` (0 to 5) and an optional
+  `plugin` block with `load` and `lift_mode`, which were rejected as unknown
+  keys. These settings are reserved for prepared runtime packages. Harbor skill
+  runs warn when they ignore these settings. `--backend nemo-gym` rejects a
+  config that sets `trial_retries` above 0, `load` or `lift_mode`.
 - The all-tier CI bootstrap rejects an unsupported `SKILL_EVAL_ENV_MODE`
   without first loading the Tier 3 runtime (Harbor), so the rejection is
   faster; its message and exit code are unchanged.

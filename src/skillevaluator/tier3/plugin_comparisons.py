@@ -190,6 +190,10 @@ class ComparisonRuntime:
         self.data = {"status": "not_collected", "agents": {}, "errors": []}
         self.loose_plan = LoosePartsPlan(requested=self.options.loose_parts, order=self.agents)
 
+    def source_path(self, default: Path) -> Path:
+        resolve = getattr(self.native, "source_path", None)
+        return resolve(default) if callable(resolve) else default
+
     def configure_agent_routes(self, paths: Mapping[str, str]) -> None:
         """Bind the coordinator-resolved routes once for this engine attempt."""
         self.task_sets = {}

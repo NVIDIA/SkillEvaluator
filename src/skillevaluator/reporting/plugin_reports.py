@@ -29,10 +29,21 @@ def mark_incomplete_plugin_package(result: ValidationResult, engine_result: obje
         result.mark_scan_incomplete("plugin-components")
 
 
+def _snapshot_records_incomplete_package(payload: dict) -> bool:
+    # The runtime projection writes a "preparation" limitation exactly when the
+    # prepared package was incomplete. The saved result.json has no package
+    # provenance, so a report rebuilt from the run directory reads it here.
+    return any(
+        section["key"] == "diagnostics" and any(row[0] == "preparation" for row in section["rows"])
+        for section in payload["sections"]
+    )
+
+
 def attach_saved_plugin_evidence(result: ValidationResult, run_dir: Path, engine_result: dict | None) -> None:
     """Attach passive evidence without changing the canonical score payload.
 
-    The result is also marked incomplete when the prepared plugin package was incomplete.
+    The result is also marked incomplete when the prepared plugin package was
+    incomplete, as recorded by the live run or by its saved snapshot.
     """
     from skillevaluator.reporting.plugin_runtime_io import RUNTIME_REPORT_FILENAME, load_plugin_runtime_report
 
@@ -52,7 +63,10 @@ def attach_saved_plugin_evidence(result: ValidationResult, run_dir: Path, engine
             report = runtime_report_from_payload(live)
         else:
             report = load_plugin_runtime_report(run_dir)
-        result.metadata["plugin_runtime_report"] = report.payload()
+        payload = report.payload()
+        result.metadata["plugin_runtime_report"] = payload
+        if _snapshot_records_incomplete_package(payload):
+            result.mark_scan_incomplete("plugin-components")
     except (OSError, ValueError):
         result.metadata["plugin_runtime_report_error"] = "Saved plugin runtime evidence is unavailable"
         result.add_warning("Saved plugin runtime evidence is unavailable")

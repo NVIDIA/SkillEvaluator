@@ -295,7 +295,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Partial scanner results retain their actual diagnostics and recorded versions
   instead of being described as missing installations. Their console fix item
   quotes the first three diagnostics, each shortened to one bounded line, and
-  counts the rest.
+  counts the rest. If a check has mixed scanner outcomes, installation advice
+  names the missing scanner and analysis diagnostics appear separately.
 
 ## 1.0.1 - 2026-11-17
 

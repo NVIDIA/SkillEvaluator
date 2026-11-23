@@ -118,6 +118,31 @@ def test_partial_analysis_and_missing_scanner_keep_their_separate_recoveries():
     assert "--skip security" not in text
 
 
+@pytest.mark.parametrize("merged", [False, True])
+def test_partial_and_missing_scanners_in_the_same_check_keep_separate_recoveries(tmp_path, merged):
+    result = ValidationResult(validator_name="Code Risk Analysis", metadata={"gating": {"tier": 1, "blocking": True}})
+    evidence = ValidationResult() if merged else result
+    evidence.record_scanner("bandit", "1.9.4")
+    evidence.mark_scan_incomplete("bandit")
+    evidence.add_error("Bandit scan error: syntax error while parsing")
+    evidence.mark_scan_incomplete("semgrep")
+    evidence.add_warning("semgrep not installed. Install with: uv tool install semgrep")
+    if merged:
+        result.merge_with_prefix(evidence, "demo")
+
+    _passed, rows = summarize_tier1([result], lineup=["code-integrity"])
+    text = _text(rows)
+
+    assert "Bandit 1.9.4, scan incomplete · Semgrep didn't run" in text
+    assert "code incomplete:" in text
+    assert "Bandit scan error: syntax error while parsing" in text
+    assert "semgrep not installed" in text
+    assert "bandit, semgrep not installed" not in text
+    assert "code didn't run" not in text
+    assert "uv tool install semgrep" in text
+    assert "Code Risk Analysis was incomplete in Tier 1" in _headline(tmp_path, [result])
+
+
 def test_an_advisory_about_a_missing_package_cannot_become_a_scanner_installation_error():
     result = ValidationResult(validator_name="Security Scan")
     result.record_scanner("skillspector", "2.11.2")
@@ -244,6 +269,20 @@ def test_incomplete_fix_quotes_only_the_first_bounded_diagnostics():
     assert "line 4 requires" not in problem
     assert len(problem) < 700
     assert "see detailed reports for full diagnostics" in _text(rows)
+
+
+def test_incomplete_fix_counts_diagnostics_with_a_common_truncated_prefix():
+    result = ValidationResult(validator_name="Dependency Vulnerability Audit")
+    result.mark_scan_incomplete("pip-audit")
+    prefix = "pyproject.toml: " + "a" * 2000
+    for declaration in (1, 2, 2, 3, 4):
+        result.add_warning(f"{prefix}: declaration {declaration} requires an exact pin")
+
+    _passed, rows = summarize_tier1([result])
+    problem = _text([row for row in rows if row.label == "scan"])
+
+    assert problem.count("pyproject.toml:") == 3
+    assert problem.endswith("; and 1 more")
 
 
 def _not_applicable(validator_name, check, message):

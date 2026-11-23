@@ -933,12 +933,13 @@ def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
             if versions.get(scanner, "unknown") == "unknown":
                 versions[scanner] = version
             states.setdefault(scanner, set()).add("ran")
+        setup = _scanner_setup_diagnostics(r)
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
                 if scan != scanner and scanner in r.scanners:
                     state = "llm"
                 else:
-                    state = "missing" if _scanner_setup_issue(r) else "incomplete"
+                    state = "missing" if scan in setup else "incomplete"
                 states.setdefault(scanner, set()).add(state)
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
@@ -1317,9 +1318,10 @@ def summarize_tier1(
     items += [item for r in failed for item in _unresolved_reference_fixes(r)]
     items += [item for r in broken for item in _later_gate_fixes(r)]
     non_llm = [r for r in incomplete if not _only_llm_stages_missing(r) and not _unresolved_reference_fixes(r)]
-    if partial := [r for r in non_llm if not _scanner_setup_issue(r)]:
+    setup_diagnostics = [(r, _scanner_setup_diagnostics(r)) for r in non_llm]
+    if partial := [r for r, setup in setup_diagnostics if not setup or set(r.incomplete_scans) - setup.keys()]:
         items.append(_incomplete_fix(partial))
-    if setup := [r for r in non_llm if _scanner_setup_issue(r)]:
+    if setup := [r for r, diagnostics in setup_diagnostics if diagnostics]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))
@@ -1388,18 +1390,49 @@ _INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
 
 
 _DOWNLOAD_FAILED = re.compile(r"couldn't (?:download|set up) .+? \((?:[^()]|\([^()]*\))*\)")
-_MISSING_SCANNER = re.compile(r"\bnot installed\b|\bnot found in PATH\b", re.IGNORECASE)
+_SETUP_SCANNER = re.compile(
+    r"^(?:\[(?:(?!\] )[^\n])*\] )*(?:"
+    r"(?P<missing>[\w-]+) (?:not installed|(?:binary )?not found in PATH)\b"
+    r"|couldn't (?:download|set up) (?P<download>[\w-]+)\b)",
+    re.IGNORECASE,
+)
+
+
+def _scanner_setup_diagnostics(result: ValidationResult) -> dict[str, list[str]]:
+    """Attribute explicit setup diagnostics to the scan they prevented."""
+    scans = set(result.incomplete_scans)
+    if not scans:
+        return {}
+    diagnostics: dict[str, list[str]] = {}
+    for text in map(str, [*result.independent_warnings(), *result.independent_errors()]):
+        if match := _SETUP_SCANNER.match(text):
+            scanner = (match["missing"] or match["download"]).lower()
+            scan = scanner if scanner in scans else f"{scanner}-llm"
+            if scan in scans:
+                diagnostics.setdefault(scan, []).append(text)
+    return diagnostics
 
 
 def _scanner_setup_issue(result: ValidationResult) -> bool:
-    """Only explicit installation diagnostics justify a scanner setup explanation."""
-    return any(
-        _DOWNLOAD_FAILED.search(text) or _INSTALL_HINT.search(text) or _MISSING_SCANNER.search(text)
-        for text in map(str, [*result.independent_warnings(), *result.independent_errors()])
+    """True when setup issues prevented the entire check from running."""
+    return (
+        bool(result.incomplete_scans)
+        and not result.scanners
+        and set(result.incomplete_scans) == _scanner_setup_diagnostics(result).keys()
     )
 
 
 _INCOMPLETE_DIAGNOSTICS_SHOWN = 3
+
+
+def _analysis_diagnostics(result: ValidationResult) -> list[str]:
+    setup = _scanner_setup_diagnostics(result)
+    setup_messages = {message for messages in setup.values() for message in messages}
+    for messages in (result.gate_failures, result.independent_errors(), result.independent_warnings()):
+        if diagnostics := [str(message) for message in messages if str(message) not in setup_messages]:
+            return diagnostics
+    scans = ", ".join(scan for scan in result.incomplete_scans if scan not in setup)
+    return [f"{scans} did not produce complete evidence"]
 
 
 def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
@@ -1409,19 +1442,10 @@ def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
     each bounded, and counts the rest; the detailed reports keep every diagnostic.
     """
     checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
-    diagnostics = list(
-        dict.fromkeys(
-            _bounded_console_line(str(message), limit=_FIX_TEXT_LIMIT)
-            for result in results
-            for message in (
-                result.gate_failures
-                or result.independent_errors()
-                or result.independent_warnings()
-                or [f"{', '.join(result.incomplete_scans)} did not produce complete evidence"]
-            )
-        )
-    )
-    shown = diagnostics[:_INCOMPLETE_DIAGNOSTICS_SHOWN]
+    diagnostics = list(dict.fromkeys(message for result in results for message in _analysis_diagnostics(result)))
+    shown = [
+        _bounded_console_line(message, limit=_FIX_TEXT_LIMIT) for message in diagnostics[:_INCOMPLETE_DIAGNOSTICS_SHOWN]
+    ]
     more = len(diagnostics) - len(shown)
     return FixItem(
         "scan",
@@ -1432,17 +1456,23 @@ def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
 
 def _setup_fix(results: list[ValidationResult]) -> FixItem:
     """One item for checks that could not run because a scanner is missing or failed to download."""
-    scanners = list(dict.fromkeys(name for r in results for name in r.incomplete_scans))
+    setup = [(result, _scanner_setup_diagnostics(result)) for result in results]
+    scanners = list(dict.fromkeys(scan for _, diagnostics in setup for scan in diagnostics))
     hints: list[str] = []
     failed_downloads: list[str] = []
-    for r in results:
-        for text in map(str, [*r.independent_warnings(), *r.independent_errors()]):
+    for _, diagnostics in setup:
+        for text in (message for messages in diagnostics.values() for message in messages):
             if (download := _DOWNLOAD_FAILED.search(text)) and download.group(0) not in failed_downloads:
                 failed_downloads.append(download.group(0))
             match = _INSTALL_HINT.search(text)
             if match and match.group(1) not in hints:
                 hints.append(match.group(1))
-    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    checks = ", ".join(
+        dict.fromkeys(
+            _short_name(r.validator_name) if _scanner_setup_issue(r) else ", ".join(diagnostics)
+            for r, diagnostics in setup
+        )
+    )
     skip = ",".join(dict.fromkeys(_skip_name(r.validator_name) for r in results))
     if failed_downloads:
         hosts = "github.com and pypi.org" if any("set up" in d for d in failed_downloads) else "github.com"

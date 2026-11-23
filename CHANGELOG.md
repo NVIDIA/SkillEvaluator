@@ -6,8 +6,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## 1.1.1 - 2026-11-23
 
-The complete 1.1 release includes the changes described in the 1.1.0 section
-below. It carries forward support for optional stable Tier 1 CI channels,
+The complete 1.1 release includes the changes in the
+[1.1.0 changelog](https://github.com/NVIDIA/SkillEvaluator/blob/v1.1.0/CHANGELOG.md#L18).
+It carries forward support for optional stable Tier 1 CI channels,
 reviewed plugin-hook waivers, tighter security checks, and improved Tier 2 and
 Tier 3 reports.
 

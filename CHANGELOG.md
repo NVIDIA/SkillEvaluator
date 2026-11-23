@@ -68,6 +68,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Baseline task identities include authored `repo-context.json` files outside
+  the generated metadata location, so changed task inputs invalidate reuse.
+  Native Harbor tasks reject authored `environment/repo-context.json` because
+  that exact path is reserved for generated repository-context metadata.
 - Similarity scores stay correct for extremely small embedding vectors.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when

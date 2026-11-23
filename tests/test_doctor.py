@@ -6,14 +6,17 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 import sys
 from types import ModuleType, SimpleNamespace
 
 import httpx
 import pytest
+from click.testing import CliRunner
 
 from skillevaluator import doctor as readiness
+from skillevaluator.cli import cli
 from skillevaluator.utils import tool_runner
 from skillevaluator.utils.tool_runner import ExternalTool, Tools
 
@@ -405,3 +408,206 @@ def test_tier2_live_failures_are_reported_without_provider_bodies(provider_api, 
     assert "secret-canary" not in output
     # The chat probe still runs after the embedding probe fails, and neither retries.
     assert [request.url.path for request in provider_api.requests] == ["/v1/embeddings", "/v1/chat/completions"]
+
+
+def test_readiness_payload_rolls_up_worst_status() -> None:
+    payload = readiness.readiness_payload(
+        command="doctor",
+        tiers=[
+            ("1", [("SkillSpector", "warn", "version not reported; /x")]),
+            ("2", [("Embedding provider", "pass", "nv_build / m")]),
+            ("3", [("Harbor agents", "fail", "Unknown: nope")]),
+        ],
+    )
+
+    assert payload["schema_version"] == 1
+    assert payload["command"] == "doctor"
+    assert [tier["tier"] for tier in payload["tiers"]] == ["1", "2", "3"]
+    assert [tier["status"] for tier in payload["tiers"]] == ["warn", "pass", "fail"]
+    assert payload["status"] == "fail"
+    assert payload["tiers"][0]["checks"][0] == {
+        "check": "SkillSpector",
+        "status": "warn",
+        "detail": "version not reported; /x",
+    }
+
+
+def test_readiness_payload_strips_terminal_controls() -> None:
+    hostile = "\x1b]8;;https://example.invalid\x1b\\click\x1b]8;;\x1b\\\x9b2J\x1b[31mred\tok"
+    payload = readiness.readiness_payload(command="doctor", tiers=[("2", [(f"LLM {hostile}", "warn", hostile)])])
+
+    check = payload["tiers"][0]["checks"][0]
+    assert check == {"check": "LLM click2Jred\tok", "status": "warn", "detail": "click2Jred\tok"}
+
+
+def test_default_table_output_matches_shared_renderer(scanners, capsys) -> None:
+    rows = readiness.readiness_rows(tier="1", checks="code")
+
+    assert readiness.doctor(tier="1", checks="code") == 0
+    printed = capsys.readouterr().out
+    readiness.print_readiness_table(rows, title="SkillEvaluator Doctor (Tier 1)")
+    rendered = capsys.readouterr().out
+
+    assert printed == rendered
+    assert "SkillEvaluator Doctor (Tier 1)" in printed
+    assert "Bandit" in printed
+
+
+def test_cli_without_json_prints_the_same_table(scanners, monkeypatch, capsys) -> None:
+    monkeypatch.setenv("COLUMNS", "200")
+    assert readiness.doctor(tier="1", checks="code") == 0
+    expected = capsys.readouterr().out
+
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "code"])
+
+    assert result.exit_code == 0, result.output
+    assert result.output == expected
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.output)
+
+
+def test_json_tier1_ready(scanners) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["schema_version"] == 1
+    assert payload["command"] == "doctor"
+    assert payload["status"] == "pass"
+    assert payload["tiers"][0]["tier"] == "1"
+    names = [check["check"] for check in payload["tiers"][0]["checks"]]
+    assert names[0] == "CLI package"
+    assert "SkillSpector" in names
+
+
+def test_json_names_a_missing_scanner_and_exits_one(scanners, monkeypatch) -> None:
+    monkeypatch.setattr(Tools.bandit, "_path", None)
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "code", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "fail"
+    bandit = next(check for check in payload["tiers"][0]["checks"] if check["check"] == "Bandit")
+    assert bandit["status"] == "fail"
+    assert "not installed" in bandit["detail"]
+
+
+def test_json_reports_a_malformed_override(scanners, monkeypatch) -> None:
+    monkeypatch.setenv("SKILLEVALUATOR_BANDIT_PATH", "relative/bandit")
+    monkeypatch.setattr(Tools, "bandit", ExternalTool("Bandit", "bandit", override_env="SKILLEVALUATOR_BANDIT_PATH"))
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "code", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    bandit = next(check for check in payload["tiers"][0]["checks"] if check["check"] == "Bandit")
+    assert bandit["status"] == "fail"
+    assert "SKILLEVALUATOR_BANDIT_PATH must name an absolute executable file" in bandit["detail"]
+
+
+def test_json_warn_only_exits_zero(scanners) -> None:
+    scanners.output["semgrep"] = "development build\n"
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "code", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["status"] == "warn"
+    semgrep = next(check for check in payload["tiers"][0]["checks"] if check["check"] == "Semgrep")
+    assert semgrep["status"] == "warn"
+    assert "version not reported" in semgrep["detail"]
+
+
+def test_json_stdout_contains_only_json(scanners) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    json.loads(result.output)
+    assert result.output.lstrip().startswith("{")
+    assert "SkillEvaluator Doctor" not in result.output
+    stderr = getattr(result, "stderr", "") or ""
+    assert "SkillEvaluator Doctor" not in stderr
+
+
+def test_json_stdout_parses_when_skillspector_path_is_set(scanners, monkeypatch, tmp_path) -> None:
+    executable = tmp_path / "skillspector"
+    executable.write_text("#!/bin/sh\necho 'SkillSpector v2.13.4'\n", encoding="utf-8")
+    executable.chmod(0o755)
+    monkeypatch.setenv("SKILLEVALUATOR_SKILLSPECTOR_PATH", str(executable))
+    loaded: list[object] = []
+
+    class _LoadOnUse:
+        def __getattr__(self, name: str):
+            if not loaded:
+                loaded.append(
+                    ExternalTool(
+                        "skillspector",
+                        "skillspector",
+                        prefer_interpreter_sibling=True,
+                        override_env="SKILLEVALUATOR_SKILLSPECTOR_PATH",
+                        managed=True,
+                    )
+                )
+            return getattr(loaded[0], name)
+
+    monkeypatch.setattr(Tools, "skillspector", _LoadOnUse())
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "1", "--checks", "security", "--json"])
+
+    payload = json.loads(result.stdout)
+    assert payload["command"] == "doctor"
+    spector = next(check for check in payload["tiers"][0]["checks"] if check["check"] == "SkillSpector")
+    assert "SKILLEVALUATOR_SKILLSPECTOR_PATH" in spector["detail"]
+    assert "WARNING" not in result.stdout
+    assert "Using explicit" not in result.stdout
+
+
+def test_fresh_process_with_skillspector_path_keeps_stdout_json() -> None:
+    """Pins the import-time half: building ``Tools`` must not log to stdout."""
+    env = {**os.environ, "SKILLEVALUATOR_SKILLSPECTOR_PATH": sys.executable}
+
+    imported = subprocess.run(
+        [sys.executable, "-c", "import skillevaluator.cli"],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert imported.returncode == 0, imported.stderr
+    assert imported.stdout == ""
+
+    doctor_run = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from skillevaluator.cli import cli; "
+            "sys.argv = ['skillevaluator', 'doctor', '--tier', '1', '--checks', 'security', '--json']; cli()",
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        check=False,
+        timeout=120,
+    )
+    payload = json.loads(doctor_run.stdout)
+    assert payload["command"] == "doctor"
+    assert "Using explicit" not in doctor_run.stdout
+    assert "Using explicit" in doctor_run.stderr
+
+
+def test_health_check_json_uses_command_name(scanners) -> None:
+    result = CliRunner().invoke(cli, ["health-check", "--tier", "1", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["command"] == "health-check"
+    assert payload["tiers"][0]["tier"] == "1"
+
+
+def test_json_tier2_offline(provider_api) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "2", "--json"])
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.output)
+    assert payload["tiers"][0]["tier"] == "2"
+    checks = {check["check"]: check for check in payload["tiers"][0]["checks"]}
+    assert checks["Embedding provider"]["status"] == "pass"
+    assert "Embedding model" not in checks
+    assert provider_api.requests == []

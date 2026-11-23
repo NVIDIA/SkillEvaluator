@@ -49,6 +49,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `doctor`, `health-check`, and `tier3 doctor` accept `--json` to print the
+  same readiness rows as one JSON object on stdout, so CI can read scanner
+  and credential failures without scraping the table. Guided installation is
+  not part of this change.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
   command hooks in an exact, reviewed plugin package. Applied waivers are
   reported and clear only the matching unmodeled-hook gate.

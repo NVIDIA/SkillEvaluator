@@ -143,6 +143,24 @@ def test_partial_and_missing_scanners_in_the_same_check_keep_separate_recoveries
     assert "Code Risk Analysis was incomplete in Tier 1" in _headline(tmp_path, [result])
 
 
+@pytest.mark.parametrize(
+    ("last_label", "diagnostic", "scanner_row"),
+    [
+        ("", "semgrep not installed.", "Semgrep didn't run"),
+        ("", "Semgrep scan error: dependency not installed.", "Semgrep incomplete"),
+        ("[invalid\nlabel] ", "semgrep not installed.", "Semgrep incomplete"),
+    ],
+)
+def test_scanner_setup_diagnostics_after_repeated_labels(last_label, diagnostic, scanner_row):
+    result = ValidationResult(validator_name="Code Risk Analysis")
+    result.mark_scan_incomplete("semgrep")
+    result.add_warning("[collection] [member[1]] " * 4096 + last_label + diagnostic)
+
+    _passed, rows = summarize_tier1([result])
+
+    assert _text([row for row in rows if row.label == "scanners"]) == scanner_row
+
+
 def test_an_advisory_about_a_missing_package_cannot_become_a_scanner_installation_error():
     result = ValidationResult(validator_name="Security Scan")
     result.record_scanner("skillspector", "2.11.2")

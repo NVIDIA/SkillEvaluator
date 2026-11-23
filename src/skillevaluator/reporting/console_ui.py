@@ -1391,9 +1391,8 @@ _INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
 
 _DOWNLOAD_FAILED = re.compile(r"couldn't (?:download|set up) .+? \((?:[^()]|\([^()]*\))*\)")
 _SETUP_SCANNER = re.compile(
-    r"^(?:\[(?:(?!\] )[^\n])*\] )*(?:"
     r"(?P<missing>[\w-]+) (?:not installed|(?:binary )?not found in PATH)\b"
-    r"|couldn't (?:download|set up) (?P<download>[\w-]+)\b)",
+    r"|couldn't (?:download|set up) (?P<download>[\w-]+)\b",
     re.IGNORECASE,
 )
 
@@ -1405,7 +1404,15 @@ def _scanner_setup_diagnostics(result: ValidationResult) -> dict[str, list[str]]
         return {}
     diagnostics: dict[str, list[str]] = {}
     for text in map(str, [*result.independent_warnings(), *result.independent_errors()]):
-        if match := _SETUP_SCANNER.match(text):
+        # Merged results can have several bracketed labels. Consume each
+        # delimiter once and retain the original diagnostic for display.
+        start = 0
+        while text.startswith("[", start):
+            end = text.find("] ", start + 1)
+            if end < 0 or text.find("\n", start, end) >= 0:
+                break
+            start = end + 2
+        if match := _SETUP_SCANNER.match(text, start):
             scanner = (match["missing"] or match["download"]).lower()
             scan = scanner if scanner in scans else f"{scanner}-llm"
             if scan in scans:

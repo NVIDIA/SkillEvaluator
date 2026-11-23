@@ -1382,7 +1382,7 @@ def test_custom_grader_runner_rejects_malformed_custom_metrics_container(malform
 
 @pytest.mark.parametrize(
     "invalid_score",
-    [math.nan, math.inf, -math.inf, -0.01, 1.01, 1e308, 10**400],
+    [math.nan, math.inf, -math.inf, -0.01, 1.01, 1e308, 10**400, True, False],
     ids=[
         "nan",
         "positive-infinity",
@@ -1391,6 +1391,8 @@ def test_custom_grader_runner_rejects_malformed_custom_metrics_container(malform
         "above-one",
         "huge-finite",
         "unrepresentable-integer",
+        "boolean-true",
+        "boolean-false",
     ],
 )
 def test_custom_grader_runner_rejects_invalid_overall_and_custom_scores(

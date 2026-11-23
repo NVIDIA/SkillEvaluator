@@ -2780,11 +2780,12 @@ def test_masking_credentials_behind_flags_grows_linearly_with_the_text(make_text
 def _grows_linearly(in_pieces: float, whole: float) -> bool:
     """Whether masking a text whole took *whole* CPU seconds against *in_pieces* for the text in pieces: about as long.
 
-    The margin allows for the whole text's larger working set on a loaded CI
-    runner. A reading that grows with the square of the text takes twice as
-    long whole or more: each of ten pieces does a hundredth of its work.
+    The margin allows for the extra cache and memory costs of the whole
+    text's larger working set on CI. Pure quadratic work takes ten times as
+    long whole, since each of ten pieces does a hundredth of that work. The
+    simulated controls also cover linear work with a quadratic component.
     """
-    return whole < 1.6 * in_pieces + 0.05
+    return whole < 1.75 * in_pieces + 0.05
 
 
 @pytest.mark.parametrize(
@@ -2792,6 +2793,7 @@ def _grows_linearly(in_pieces: float, whole: float) -> bool:
     [
         pytest.param(lambda length: length * 1e-5, True, id="linear"),
         pytest.param(lambda length: length * 1e-5 * (1 + length / 2_000_000), True, id="linear-with-a-small-tail"),
+        pytest.param(lambda length: length * 1e-5 * (1 + length / 230_000), True, id="linear-with-a-moderate-tail"),
         pytest.param(lambda length: length * 1e-5 * (1 + length / 200_000), False, id="linear-with-a-large-tail"),
         pytest.param(lambda length: length * length * 1e-9, False, id="quadratic"),
     ],

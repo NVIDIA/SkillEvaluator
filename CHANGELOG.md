@@ -345,6 +345,15 @@ All notable changes to SkillEvaluator are documented in this file.
   apply to intermediate values as well as the final result, so
   `10**1000 - 10**1000`, which printed `Result: 0` before, now returns
   `Error: result is too large` because each power has 1001 digits.
+- The task-list reference skill's `list` operation shows cancelled tasks in a
+  `Cancelled:` group after Completed. They were counted in the progress total
+  but never printed, so a list whose only task was cancelled showed just the
+  `Task List (0/1 completed)` header.
+- The calculator reference skill reports an unsupported unit pair, such as
+  `100 celsius to kelvin`, as `Error: Unknown conversion: celsius to kelvin.`
+  followed by the supported units, as its troubleshooting table describes.
+  These requests previously fell through to arithmetic parsing and printed a
+  Python syntax error.
 - Reject malformed NVIDIA Build backend tool-call names before Anthropic or
   Responses streams start, so invalid model output cannot poison replayed tool history.
 - Local directory downloads disable macOS-generated AppleDouble tar entries

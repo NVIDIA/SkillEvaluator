@@ -75,6 +75,10 @@ def _check_host_pattern(host: str, key: str) -> None:
     if any(name.startswith(".") for name in hosts.names):
         raise ValueError(f"{key} contains a host that starts with '.'; use the '*.suffix' form to allow subdomains")
     names = (*hosts.names, *hosts.suffixes)
+    # Host patterns already had their wildcard removed by the matcher. A
+    # remaining asterisk is a literal introduced by normalization.
+    if any("*" in name for name in names):
+        raise ValueError(f"{key} contains an invalid host wildcard")
     if any(".." in name for name in names):
         raise ValueError(f"{key} contains a host with an empty label")
     if not hosts.networks and any(

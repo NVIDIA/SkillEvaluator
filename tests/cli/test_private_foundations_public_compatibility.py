@@ -105,7 +105,7 @@ def test_forced_private_format_cli_preserves_failure_and_all_reports(
     assert sarif["runs"][0]["results"][0]["ruleId"].endswith("/manifest_missing")
 
 
-def test_private_policy_keys_do_not_change_public_policy(tmp_path: Path) -> None:
+def test_plugin_policy_keys_are_explicit_and_redacted_in_the_public_summary(tmp_path: Path) -> None:
     baseline = tmp_path / "baseline.yaml"
     baseline.write_text("{}\n", encoding="utf-8")
     candidate = tmp_path / "candidate.yaml"
@@ -119,4 +119,11 @@ def test_private_policy_keys_do_not_change_public_policy(tmp_path: Path) -> None
     actual = load_policy_file(candidate).to_dict()
     expected.pop("source")
     actual.pop("source")
+    assert actual["digest"] != expected["digest"]
+    assert actual.pop("mcp_allowed_private_host_count") == 1
+    assert actual.pop("hook_allowed_url_count") == 1
+    assert actual.pop("resolve_endpoints") is True
+    actual.pop("digest")
+    expected.pop("digest")
     assert actual == expected
+    assert "10.0.0.1" not in json.dumps(actual) and "example.com" not in json.dumps(actual)

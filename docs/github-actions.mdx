@@ -119,6 +119,12 @@ Failed scans retain their available reports too. The HTML separates the
 **verdict** from the **quality score**: a high score does not override a failed
 required security or schema check.
 
+If you run the CLI in your own workflow step instead of the reusable scanner,
+add `github` to `-r` (for example `skillevaluator validate ./skills --tiers 1 -r cli,github`)
+to print inline annotations without a SARIF upload. GitHub shows at most 10
+error, 10 warning, and 10 notice annotations per step; see
+[GitHub annotations](/skills/skillevaluator/reports#github-annotations).
+
 <AccordionGroup>
   <Accordion title="Use advisory enforcement">
     The 1.0.1 bundle pins a matching workflow and scanner image with

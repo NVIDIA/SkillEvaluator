@@ -16,6 +16,7 @@ from skillevaluator.cli import cli
 from skillevaluator.cli_help import render_help
 from skillevaluator.models.result import Finding, Severity, ValidationResult
 from skillevaluator.tier3.harbor.runner import format_harbor_view_command
+from skillevaluator.utils.tool_runner import ToolResult, Tools
 from skillevaluator.validators.code_risk import CodeRiskValidator
 from skillevaluator.validators.secrets import SecretsValidator
 
@@ -102,9 +103,10 @@ def test_top_level_help_groups_commands_by_workflow() -> None:
 
 
 def test_help_emits_color_when_enabled() -> None:
-    ctx = click.Context(cli, info_name="skillevaluator", color=True)
-    colored = render_help(cli, ctx, width=80)
-    plain = render_help(cli, click.Context(cli, info_name="skillevaluator", color=False), width=80)
+    with cli.make_context("skillevaluator", [], resilient_parsing=True, color=True) as ctx:
+        colored = render_help(cli, ctx, width=80)
+    with cli.make_context("skillevaluator", [], resilient_parsing=True, color=False) as ctx:
+        plain = render_help(cli, ctx, width=80)
 
     assert "\x1b[" in colored
     assert "\x1b[" not in plain
@@ -1607,6 +1609,78 @@ def test_cli_environment_kwargs_sensitive_credential_exits_code_2_without_traceb
     assert "Invalid value for '--ek'" in result.output
     assert "Sensitive key or value detected" in result.output
     assert "Traceback" not in result.output
+
+
+def test_validate_github_reports_scanner_crash_as_warning(tmp_path: Path, monkeypatch) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Exercise the GitHub mapping for a scanner that did not complete.\n---\n",
+        encoding="utf-8",
+    )
+
+    def crashed_scan(_path: Path, **_kwargs) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="Code Risk", validator_description="Code risk")
+        result.add_error("Bandit did not return valid JSON; scan did not complete")
+        result.mark_scan_incomplete("bandit")
+        return [result]
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", crashed_scan)
+
+    result = CliRunner().invoke(
+        cli,
+        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "github"],
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "::warning" in result.output
+    assert "incomplete/bandit" in result.output
+    assert "did not complete" in result.output
+    assert "::notice title=SkillEvaluator::" in result.output
+    assert "::error" not in result.output
+
+
+def test_validate_github_reports_every_bandit_scan_error_as_warning(tmp_path: Path, monkeypatch) -> None:
+    skill = tmp_path / "demo"
+    skill.mkdir()
+    (skill / "SKILL.md").write_text(
+        "---\nname: demo\ndescription: Exercise the GitHub mapping for a scanner with several errors.\n---\n",
+        encoding="utf-8",
+    )
+
+    for name in ("a.py", "b.py"):
+        (skill / name).write_text("x = 1\n", encoding="utf-8")
+    output = json.dumps(
+        {
+            "results": [],
+            "errors": [
+                {"filename": "a.py", "reason": "syntax error while parsing AST from file"},
+                {"filename": "b.py", "reason": "exception while scanning file"},
+            ],
+        }
+    )
+    scan = ToolResult(success=True, stdout=output, stderr="", exit_code=0)
+    monkeypatch.setattr(Tools.bandit, "_path", "bandit")
+    monkeypatch.setattr(Tools.bandit, "_version", "1.9.4")
+    monkeypatch.setattr(Tools.bandit, "run", lambda *_args, **_kwargs: scan)
+
+    def bandit_errors(path: Path, **_kwargs) -> list[ValidationResult]:
+        return [CodeRiskValidator(use_semgrep=False).validate(path)]
+
+    monkeypatch.setattr("skillevaluator.cli.run_validation", bandit_errors)
+    reports = tmp_path / "reports"
+    result = CliRunner().invoke(
+        cli,
+        ["validate", "--no-tier3", str(skill), "--no-dedup", "--checks", "schema", "-r", "github", "-o", str(reports)],
+        catch_exceptions=False,
+    )
+
+    assert result.exit_code != 0, result.output
+    assert "::error" not in result.output
+    warnings = [line for line in result.output.splitlines() if line.startswith("::warning")]
+    assert any("syntax error while parsing AST" in line for line in warnings), result.output
+    assert any("exception while scanning file" in line for line in warnings), result.output
+    assert all("incomplete/bandit" in line for line in warnings), result.output
 
 
 def test_validate_junit_reports_scanner_crash_as_error(tmp_path: Path, monkeypatch) -> None:

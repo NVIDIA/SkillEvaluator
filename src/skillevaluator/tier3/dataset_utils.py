@@ -128,22 +128,25 @@ def normalize_dataset_entries(data: Any) -> list[dict[str, Any]]:
                 entries.append(_normalize_entry(entry, skill_name=skill_name, entry_index=idx))
             return entries
         if isinstance(data.get("cases"), list):
-            return [
-                _normalize_entry(entry, entry_index=index)
-                for index, entry in enumerate(data["cases"])
-                if isinstance(entry, dict)
-            ]
+            return _normalize_legacy_entries(data["cases"])
         return [_normalize_entry(data)]
 
     if isinstance(data, list):
-        return [
-            _normalize_entry(entry, entry_index=index) for index, entry in enumerate(data) if isinstance(entry, dict)
-        ]
+        return _normalize_legacy_entries(data)
 
     return []
 
 
 # ── private helpers ──────────────────────────────────────────────────────────
+
+
+def _normalize_legacy_entries(entries: list[Any]) -> list[dict[str, Any]]:
+    normalized: list[dict[str, Any]] = []
+    for index, entry in enumerate(entries):
+        if not isinstance(entry, dict):
+            raise ValueError(f"legacy dataset entry {index} must be an object, got {type(entry).__name__}")
+        normalized.append(_normalize_entry(entry, entry_index=index))
+    return normalized
 
 
 def _normalize_entry(

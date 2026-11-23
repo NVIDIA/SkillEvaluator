@@ -379,6 +379,12 @@ def nemo_gym_config_errors(
         errors.append("harbor.stop_on_pass is not supported with --backend nemo-gym yet")
     if agent_runtime_preflight is None and harbor.get("agent_runtime_preflight"):
         errors.append("harbor.agent_runtime_preflight applies to the Harbor backend only")
+    # No Gym run reads these settings; zero retries is Gym's own behavior.
+    if harbor.get("trial_retries"):
+        errors.append("harbor.trial_retries is not supported with --backend nemo-gym yet")
+    errors.extend(
+        f"plugin.{name} is not supported with --backend nemo-gym" for name in sorted(config.get("plugin") or {})
+    )
     if mcp_error := mcp_servers_error(skill_path):
         errors.append(mcp_error)
     if uses_native_harbor_tasks(skill_path, harbor.get("task_source", "auto")) and native_mcp_servers_declared(

@@ -38,7 +38,7 @@ Key `tier3 evaluate` flags: `-a, --agents` (`opencode`, `codex`,
 
 | Command | Purpose |
 | --- | --- |
-| `health-check [--tier 1\|2\|3\|all]` | Readiness; downloads pinned SkillSpector and Gitleaks when missing (ask first); `--checks` for Tier 1 scanners |
-| `doctor [--tier ...] [--env-mode M] [-a AGENTS] [--verify-models]` | Deeper readiness; `--verify-models` makes live catalog probes |
+| `health-check [--tier 1\|2\|3\|all] [--json]` | Readiness; downloads pinned SkillSpector and Gitleaks when missing (ask first); `--checks` for Tier 1 scanners; `--json` for CI |
+| `doctor [--tier ...] [--env-mode M] [-a AGENTS] [--verify-models] [--json]` | Deeper readiness; `--verify-models` makes live catalog probes; `--json` writes the same rows as JSON |
 | `models [--limit N] [--json]` | List provider catalog models |
 | `ci init`, `ci status`, `ci demo` | Guided GitHub CI setup |

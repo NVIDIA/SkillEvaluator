@@ -404,6 +404,7 @@ jobs:
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
+          tests/test_harbor_local_environment.py::test_contained_download_keeps_authored_dot_underscore_files_without_generated_metadata
           tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias
 
   # Tier 2 is platform-independent Python, and Linux and Windows run the same
@@ -479,6 +480,10 @@ jobs:
           tests/test_results_location_legacy_compatibility.py
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_redaction_never_follows_links_or_changes_outside_files
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_listing_errors_use_relative_entries
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported
+          tests/tier3/test_harbor_local_agents.py::test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call
           tests/utils/test_secure_fs_selected_reads.py
           tests/utils/test_secure_fs_platform.py
           tests/utils/test_secure_fs_bounded.py

@@ -917,26 +917,42 @@ _CHECK_SCANNERS = {"Security Scan": "skillspector", "Code Risk Analysis": "bandi
 
 
 def _scanners_row(results: list[ValidationResult]) -> list[TierRow]:
-    """The external scanners behind the Tier 1 checks, with their versions or why they did not run."""
-    states: dict[str, tuple[str, str]] = {}
+    """Scanner versions and incomplete evidence, retaining every member's scan state."""
+    versions: dict[str, str] = {}
+    states: dict[str, set[str]] = {}
     for r in results:
         if _is_user_skipped(r):
             if scanner := _CHECK_SCANNERS.get(r.validator_name):
-                states.setdefault(scanner, ("skipped", MUTED))
+                states.setdefault(scanner, set()).add("skipped")
             continue
         for scanner, version in r.scanners.items():
-            states[scanner] = (version, MUTED)
+            if scanner == "skillspector" and version == "unknown":
+                runtime_version = (r.metadata or {}).get("skillspector_version")
+                if isinstance(runtime_version, str) and runtime_version:
+                    version = runtime_version
+            if versions.get(scanner, "unknown") == "unknown":
+                versions[scanner] = version
+            states.setdefault(scanner, set()).add("ran")
+        setup = _scanner_setup_diagnostics(r)
         for scan in r.incomplete_scans:
             if (scanner := scan.removesuffix("-llm")) in _SCANNER_NAMES:
-                version = r.scanners.get(scanner)
-                if not version:
-                    state = "didn't run"
+                if scan != scanner and scanner in r.scanners:
+                    state = "llm"
                 else:
-                    state = f"{version}, LLM didn't run" if scan != scanner else f"{version}, scan incomplete"
-                states[scanner] = (state, f"bold {RED}")
+                    state = "missing" if scan in setup else "incomplete"
+                states.setdefault(scanner, set()).add(state)
     segments: list[tuple[str, str]] = []
     for scanner in [name for name in _SCANNER_NAMES if name in states]:
-        state, style = states[scanner]
+        version, observed = versions.get(scanner), states[scanner]
+        style = f"bold {RED}"
+        if "incomplete" in observed or ("missing" in observed and version):
+            state = f"{version}, scan incomplete" if version else "incomplete"
+        elif "llm" in observed:
+            state = f"{version}, LLM didn't run" if version else "LLM incomplete"
+        elif "missing" in observed:
+            state = "didn't run"
+        else:
+            state, style = version or "skipped", MUTED
         segments += [*([(" · ", FAINT)] if segments else []), (_SCANNER_NAMES[scanner], TEXT), (f" {state}", style)]
     return [TierRow("scanners", segments)] if segments else []
 
@@ -948,8 +964,9 @@ def _is_user_skipped(result: ValidationResult) -> bool:
 
 def _is_not_applicable(result: ValidationResult) -> bool:
     """True when a check was recorded as not applicable to the target instead of run."""
-    return (
-        _is_skipped(result) and not _is_user_skipped(result) and "not applicable" in get_skip_reason(result).casefold()
+    return not _is_user_skipped(result) and (
+        result_execution_status(result) == "not_applicable"
+        or (_is_skipped(result) and "not applicable" in get_skip_reason(result).casefold())
     )
 
 
@@ -1208,11 +1225,11 @@ def summarize_tier1(
     if sub_checks := sum(
         r.summary.checks_performed for r in results if outcome[id(r)] in {"pass", "fail", "incomplete"}
     ):
-        checks_segments.append((f" ({sub_checks} sub-checks)", MUTED))
+        checks_segments.append((f" ({sub_checks} sub-check{'s' if sub_checks != 1 else ''})", MUTED))
     if count["fail"]:
         checks_segments += [("  ·  ", FAINT), (f"{count['fail']} failed", f"bold {RED}")]
     if count["incomplete"]:
-        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} didn't run", f"bold {RED}")]
+        checks_segments += [("  ·  ", FAINT), (f"{count['incomplete']} incomplete", f"bold {RED}")]
     if count["skipped"]:
         checks_segments += [("  ·  ", FAINT), (f"{count['skipped']} skipped", MUTED)]
     if warnings:
@@ -1224,10 +1241,21 @@ def summarize_tier1(
         names = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in user_skipped))
         rows.append(TierRow("skipped", [(names, MUTED), ("  with --skip, not checked", FAINT)]))
     if not_applicable:
+        # A check key names every member of that check, so use it only when no other member ran; otherwise
+        # the row would list a check that the ticker marks as passed or failed.
+        ran = {_check_key(r.validator_name) for r in results if not _is_skipped(r)}
         names = ", ".join(
-            dict.fromkeys(_check_key(r.validator_name) or _short_name(r.validator_name) for r in not_applicable)
+            dict.fromkeys(
+                key if (key := _check_key(r.validator_name)) and key not in ran else _short_name(r.validator_name)
+                for r in not_applicable
+            )
         )
-        reason = _bounded_console_line(get_skip_reason(not_applicable[0]))
+        first = not_applicable[0]
+        reason = _bounded_console_line(
+            first.success_details[0].message
+            if first.success_details and not _is_skipped(first)
+            else get_skip_reason(first)
+        )
         rows += [TierRow("n/a", [(names, MUTED)]), TierRow("", [(reason, FAINT)], fit="wrap")]
 
     if advisory:
@@ -1289,7 +1317,19 @@ def summarize_tier1(
     items = [item for r in broken for item in _tier1_fixes(r)]
     items += [item for r in failed for item in _unresolved_reference_fixes(r)]
     items += [item for r in broken for item in _later_gate_fixes(r)]
-    if setup := [r for r in incomplete if not _only_llm_stages_missing(r) and not _unresolved_reference_fixes(r)]:
+    setup_diagnostics = []
+    for r in incomplete:
+        if _only_llm_stages_missing(r) or _unresolved_reference_fixes(r):
+            continue
+        # A rejected scanner report has a concrete error; installation help is misleading.
+        report_error = next((e for e in map(str, r.errors) if e.endswith("security scan did not complete")), None)
+        if set(r.incomplete_scans) == {"skillspector"} and report_error:
+            items.append(FixItem(_short_name(r.validator_name), report_error, ["or skip it: --skip security"]))
+        else:
+            setup_diagnostics.append((r, _scanner_setup_diagnostics(r)))
+    if partial := [r for r, setup in setup_diagnostics if not setup or set(r.incomplete_scans) - setup.keys()]:
+        items.append(_incomplete_fix(partial))
+    if setup := [r for r, diagnostics in setup_diagnostics if diagnostics]:
         items.append(_setup_fix(setup))
     if llm := [r for r in incomplete if _only_llm_stages_missing(r)]:
         items.append(_llm_fix(llm))
@@ -1358,30 +1398,109 @@ _INSTALL_HINT = re.compile(r"\b[Ii]nstall(?: [\w-]+)*? with: (.+?)\.?$")
 
 
 _DOWNLOAD_FAILED = re.compile(r"couldn't (?:download|set up) .+? \((?:[^()]|\([^()]*\))*\)")
+_SETUP_SCANNER = re.compile(
+    r"(?P<missing>[\w-]+) (?:not installed|(?:binary )?not found in PATH)\b"
+    r"|couldn't (?:download|set up) (?P<download>[\w-]+)\b",
+    re.IGNORECASE,
+)
+# A file label such as ``pyproject.toml: ``; ``[^\s:]`` keeps the match linear.
+_FILE_LABEL = re.compile(r"[^\s:]+: ")
+
+
+def _scanner_setup_diagnostics(result: ValidationResult) -> dict[str, list[str]]:
+    """Attribute explicit setup diagnostics to the scan they prevented."""
+    scans = set(result.incomplete_scans)
+    if not scans:
+        return {}
+    diagnostics: dict[str, list[str]] = {}
+    for text in map(str, [*result.independent_warnings(), *result.independent_errors()]):
+        # Merged results can have several bracketed labels. Consume each
+        # delimiter once and retain the original diagnostic for display.
+        start = 0
+        while text.startswith("[", start):
+            end = text.find("] ", start + 1)
+            if end < 0 or text.find("\n", start, end) >= 0:
+                break
+            start = end + 2
+        if (label := _FILE_LABEL.match(text, start)) and "." in label.group(0):
+            start = label.end()
+        if match := _SETUP_SCANNER.match(text, start):
+            scanner = (match["missing"] or match["download"]).lower()
+            scan = scanner if scanner in scans else f"{scanner}-llm"
+            if scan in scans:
+                diagnostics.setdefault(scan, []).append(text)
+    return diagnostics
+
+
+def _scanner_setup_issue(result: ValidationResult) -> bool:
+    """True when setup issues prevented the entire check from running."""
+    return (
+        bool(result.incomplete_scans)
+        and not result.scanners
+        and set(result.incomplete_scans) == _scanner_setup_diagnostics(result).keys()
+    )
+
+
+_INCOMPLETE_DIAGNOSTICS_SHOWN = 3
+
+
+def _analysis_diagnostics(result: ValidationResult) -> list[str]:
+    setup = _scanner_setup_diagnostics(result)
+    setup_messages = {message for messages in setup.values() for message in messages}
+    for messages in (result.gate_failures, result.independent_errors(), result.independent_warnings()):
+        if diagnostics := [str(message) for message in messages if str(message) not in setup_messages]:
+            return diagnostics
+    scans = ", ".join(scan for scan in result.incomplete_scans if scan not in setup)
+    return [f"{scans} did not produce complete evidence"]
+
+
+def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
+    """Keep partial, malformed and failed analyses separate from installation failures.
+
+    Some checks report one diagnostic per scanned item, so the item quotes only the first few,
+    each bounded, and counts the rest; the detailed reports keep every diagnostic.
+    """
+    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    diagnostics = list(dict.fromkeys(message for result in results for message in _analysis_diagnostics(result)))
+    shown = [
+        _bounded_console_line(message, limit=_FIX_TEXT_LIMIT) for message in diagnostics[:_INCOMPLETE_DIAGNOSTICS_SHOWN]
+    ]
+    more = len(diagnostics) - len(shown)
+    return FixItem(
+        "scan",
+        f"{checks} incomplete: {'; '.join(shown)}" + (f"; and {more} more" if more else ""),
+        ["resolve the reported scanner or input issues, then rerun; see detailed reports for full diagnostics"],
+    )
 
 
 def _setup_fix(results: list[ValidationResult]) -> FixItem:
-    """One item for checks that could not run because a scanner is missing or failed to download."""
-    scanners = list(dict.fromkeys(name for r in results for name in r.incomplete_scans))
+    """One item for checks with a scanner that is missing or failed to download."""
+    setup = [(result, _scanner_setup_diagnostics(result)) for result in results]
+    scanners = list(dict.fromkeys(scan for _, diagnostics in setup for scan in diagnostics))
     hints: list[str] = []
     failed_downloads: list[str] = []
-    for r in results:
-        for text in map(str, [*r.warnings, *r.errors]):
+    for _, diagnostics in setup:
+        for text in (message for messages in diagnostics.values() for message in messages):
             if (download := _DOWNLOAD_FAILED.search(text)) and download.group(0) not in failed_downloads:
                 failed_downloads.append(download.group(0))
             match = _INSTALL_HINT.search(text)
             if match and match.group(1) not in hints:
                 hints.append(match.group(1))
-    checks = ", ".join(dict.fromkeys(_short_name(r.validator_name) for r in results))
+    # The subject names checks; a check whose other scanners ran is incomplete, not unrun.
+    states: dict[str, list[str]] = {"didn't run": [], "incomplete": []}
+    for result, _ in setup:
+        state = "didn't run" if _scanner_setup_issue(result) else "incomplete"
+        states[state].append(_short_name(result.validator_name))
+    checks = ", ".join(f"{', '.join(dict.fromkeys(names))} {state}" for state, names in states.items() if names)
     skip = ",".join(dict.fromkeys(_skip_name(r.validator_name) for r in results))
     if failed_downloads:
         hosts = "github.com and pypi.org" if any("set up" in d for d in failed_downloads) else "github.com"
         actions = [f"check network access to {hosts}, then rerun"]
         actions += [f"or install it yourself: {hint}" for hint in hints]
-        problem = f"{checks} didn't run: {'; '.join(failed_downloads)}"
+        problem = f"{checks}: {'; '.join(failed_downloads)}"
     else:
         actions = list(hints)
-        problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
+        problem = f"{checks}: {', '.join(scanners) or 'a required scanner'} not installed"
     return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
 
 

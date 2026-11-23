@@ -24,6 +24,7 @@ if __package__:
         atif_content_text,
         normalized_tool_call_error_flag,
         normalized_tool_call_is_error,
+        recorded_mcp_identity,
     )
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
         iter_normalized_tool_calls as iter_tool_calls,
@@ -41,6 +42,7 @@ else:  # Standalone helper staged beside the verifier.
         atif_content_text,
         normalized_tool_call_error_flag,
         normalized_tool_call_is_error,
+        recorded_mcp_identity,
     )
     from codex_tool_call_normalizer import (
         iter_normalized_tool_calls as iter_tool_calls,
@@ -1424,6 +1426,8 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
                 "action_input": tc.get("arguments") or {},
                 "observation": _tool_call_observation(step, tc),
             }
+            if identity := recorded_mcp_identity(call["action"], tc.get("extra")):
+                call["extra"] = {"mcp_server": identity[0], "mcp_tool": identity[1]}
             # Keep Harbor's explicit success flag too: Claude Code results that
             # exited 0 carry no exit status line.
             if (is_error := normalized_tool_call_error_flag(step, tc)) is not None:

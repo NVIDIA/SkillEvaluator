@@ -19,8 +19,12 @@ none of them.
 scored tool calls that did productive work. For Claude Code, Codex and OpenCode
 tool names, reading, searching, listing, writing, editing or patching files,
 running commands and activating a skill are productive, and so are MCP tools
-named `mcp__server__tool` (Claude Code). Codex and OpenCode MCP calls are not
-recognized as MCP calls yet, so most of them count as wasted. Help, version and
+named `mcp__server__tool`, as Claude Code records them. When a missing or empty
+Harbor trajectory is rebuilt from `codex.txt`, the recorded MCP server and tool
+fields produce that name too, preserving server names containing `__`.
+Codex MCP calls in Harbor's existing graded trajectory are not yet recognized
+as MCP: their bare tool names, and OpenCode MCP names, are classified like other
+tool names, so most count as wasted. Help, version and
 install commands and searches rooted at `/` are wasted. Planning and
 bookkeeping calls, such as `TodoWrite`, `update_plan`, task lists,
 background-shell polling and sub-agent calls, are not counted, and a trial with

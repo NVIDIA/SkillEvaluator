@@ -113,9 +113,37 @@ def test_task_status_words_survive_persistence(
         "content": content,
         "status": status,
     }
-    if status != "cancelled":
-        assert content in listed.stdout
+    assert content in listed.stdout
     assert f"- [{checkbox}] task_1: {content} ({status})" in state_path.read_text(encoding="utf-8")
+
+
+def test_task_list_shows_cancelled_tasks(tmp_path: Path) -> None:
+    env = {"TASK_LIST_STATE_PATH": str(tmp_path / "todo.md")}
+
+    added = _run_script("tasks", "add_multiple", "--content", "Write docs; Ship; Announce", env=env)
+    completed = _run_script("tasks", "complete", "--task_id", "task_2", env=env)
+    cancelled = _run_script("tasks", "cancel", "--task_id", "task_3", env=env)
+    listed = _run_script("tasks", "list", env=env)
+
+    assert added.returncode == completed.returncode == cancelled.returncode == listed.returncode == 0
+    assert listed.stderr == ""
+    assert listed.stdout == (
+        "Task List (1/3 completed)\n"
+        "\nPending:\n  - [task_1] Write docs\n"
+        "\nCompleted:\n  - [task_2] Ship\n"
+        "\nCancelled:\n  - [task_3] Announce\n"
+    )
+
+
+def test_task_list_with_only_cancelled_tasks_shows_them(tmp_path: Path) -> None:
+    env = {"TASK_LIST_STATE_PATH": str(tmp_path / "todo.md")}
+
+    _run_script("tasks", "add", "--content", "Write docs", env=env)
+    _run_script("tasks", "cancel", "--task_id", "task_1", env=env)
+    listed = _run_script("tasks", "list", env=env)
+
+    assert listed.returncode == 0
+    assert listed.stdout == "Task List (0/1 completed)\n\nCancelled:\n  - [task_1] Write docs\n"
 
 
 @pytest.mark.parametrize(

@@ -36,6 +36,7 @@ if __package__:
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        recorded_mcp_identity,
     )
     from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 else:  # Standalone verifier: all dependencies are staged siblings.
@@ -46,6 +47,7 @@ else:  # Standalone verifier: all dependencies are staged siblings.
         AMBIGUOUS_OUTER_EXEC_OBSERVATION,
         UNOBSERVED_INNER_CALL,
         UNSUPPORTED_NATIVE_CODEX_EXEC,
+        recorded_mcp_identity,
     )
     from secret_redaction import redact_secrets_in_log_line
 
@@ -3558,9 +3560,10 @@ def _security_finding(
 _FINDING_EVIDENCE_SCAN_CHARS = 2000
 _FINDING_EVIDENCE_TRUNCATED = "<truncated>"
 _FINDING_EVIDENCE_PRIVATE_KEY_MARKER = "<redacted private key>"
+_FINDING_EVIDENCE_PRIVATE_KEY_BEGIN = r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----"
+_FINDING_EVIDENCE_PRIVATE_KEY_END = r"-----END [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----"
 _FINDING_EVIDENCE_PRIVATE_KEY_RE = re.compile(
-    r"-----BEGIN [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----.*?"
-    r"(?:-----END [A-Z ]{0,32}PRIVATE KEY(?: BLOCK)?-----|\Z)",
+    _FINDING_EVIDENCE_PRIVATE_KEY_BEGIN + r".*?(?:" + _FINDING_EVIDENCE_PRIVATE_KEY_END + r"|\Z)",
     re.DOTALL,
 )
 # A URL scheme is at most 32 characters here, so a long dotted run is read
@@ -15443,7 +15446,7 @@ def _session_input_is_text(value: Any) -> bool:
     return isinstance(value, str) and any(char.isprintable() and not char.isspace() for char in value)
 
 
-def _mcp_call_targets_root(name: str, args: dict[str, Any]) -> bool:
+def _mcp_call_targets_root(name: str, args: dict[str, Any], identity: tuple[str, str] | None = None) -> bool:
     """Whether an MCP call searches or lists the whole filesystem.
 
     Only filesystem tools count: a tool of a server whose name contains
@@ -15453,7 +15456,10 @@ def _mcp_call_targets_root(name: str, args: dict[str, Any]) -> bool:
     """
     if not name.startswith("mcp__"):
         return False
-    server, _, tool = name[len("mcp__") :].partition("__")
+    if identity is None:
+        server, _, tool = name[len("mcp__") :].partition("__")
+    else:
+        server, tool = (part.casefold() for part in identity)
     if "filesystem" not in server and not any(word in tool for word in _MCP_FILESYSTEM_SEARCH_WORDS):
         return False
     return any(
@@ -15478,7 +15484,10 @@ def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_sc
         search_action = "exec_command"
     cmd = _tool_efficiency_text(target)
     # A search rooted at "/" is waste even when it names the expected skill or script.
-    if _tool_searches_root(search_action, args, cmd, argv=_is_argv(target)) or _mcp_call_targets_root(name, args):
+    mcp_identity = recorded_mcp_identity(tc["action"], tc.get("extra"))
+    if _tool_searches_root(search_action, args, cmd, argv=_is_argv(target)) or _mcp_call_targets_root(
+        name, args, mcp_identity
+    ):
         return "wasted"
     if ("read" in name and expected_skill and expected_skill in cmd) or (
         runs_command and expected_script and expected_script in cmd

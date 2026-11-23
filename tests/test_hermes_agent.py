@@ -38,7 +38,12 @@ from harbor.trial.trial import Trial
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.commands import validate_agents
 from skillevaluator.tier3.eval_core.atif_helpers import _collect_file_change_evidence, extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_activation, check_script_execution, check_tool_efficiency
+from skillevaluator.tier3.eval_core.checks import (
+    check_activation,
+    check_script_execution,
+    check_security,
+    check_tool_efficiency,
+)
 from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS, HARBOR_AGENTS_EXPERIMENTAL
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.collector import AGENT_LOG_ARTIFACTS, _agent_log_runtime_failure_reason
@@ -297,6 +302,37 @@ def test_verifier_scores_raw_hermes_calls_like_the_harbor_export(tmp_path):
             assert _collect_file_change_evidence(raw) == _collect_file_change_evidence(exported) != []
 
 
+@pytest.mark.parametrize("exported", [False, True], ids=["raw", "exported"])
+@pytest.mark.parametrize(
+    ("requested", "resolved", "manifest", "activated"),
+    [
+        ("category/lookup-code", "lookup-code", "category/lookup-code/SKILL.md", True),
+        ("category/lookup-code", "decoy", "category/lookup-code/SKILL.md", False),
+        ("category/lookup-code", "lookup-code", "other/lookup-code/SKILL.md", False),
+        ("category/lookup-code", "lookup-code", None, False),
+        ("Lookup-Code", "lookup-code", None, False),
+        ("Lookup-Code", "lookup-code", "Lookup-Code/SKILL.md", False),
+        ("../lookup-code", "lookup-code", "../lookup-code/SKILL.md", False),
+    ],
+    ids=["categorized", "decoy", "wrong-category", "no-path", "case-only", "case-with-path", "traversal"],
+)
+def test_hermes_manifest_identity(tmp_path, exported, requested, resolved, manifest, activated):
+    """Pinned Hermes returns a relative manifest path and the resolved skill name."""
+    agent = _agent(tmp_path)
+    exporter = agent if exported else super(SkillEvaluatorHermes, agent)
+    payload = {"success": True, "name": resolved, "content": "# Instructions"}
+    if manifest is not None:
+        payload["path"] = manifest
+    session = _session(arguments={"name": requested}, observation=payload)
+    trajectory = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+    recorded = next(call for step in trajectory["steps"] for call in step.get("tool_calls", []))
+    assert recorded["function_name"] == ("read" if exported and activated else "skill_view")
+    calls = extract_tool_calls_as_dicts(trajectory)
+    assert check_activation(calls, "lookup-code")["score"] == (1.0 if activated else 0.0)
+    if activated:
+        assert calls[0]["action_input"] == {"path": f"/tmp/hermes/skills/{manifest}"}
+
+
 def test_terminal_conversion_and_token_context(tmp_path):
     agent = _agent(tmp_path)
     text = _session(tool="terminal", arguments={"command": "python lookup.py cobalt"})
@@ -395,6 +431,34 @@ def test_junie_terminal_stdout_is_not_a_hermes_status_record():
     assert extract_tool_calls_as_dicts({"steps": [step]}) == [
         {"action": "terminal", "action_input": call["arguments"], "observation": stdout}
     ]
+
+
+@pytest.mark.parametrize(
+    "results",
+    [[], [{"content": '{"exit_code":0,"output":""}'}], [{"source_call_id": "call", "content": "ok"}]],
+    ids=["missing", "unscoped", "plain-text"],
+)
+def test_security_scans_terminal_command_without_proof_of_execution(results):
+    call = {"tool_call_id": "call", "function_name": "terminal", "arguments": {"command": "rm -rf /"}}
+    step = {"source": "agent", "tool_calls": [call], "observation": {"results": results}}
+    calls = extract_tool_calls_as_dicts({"steps": [step]})
+    assert calls[0]["action"] == "terminal"
+    assert calls[0].get("is_error") is None
+    assert [finding["type"] for finding in check_security(calls)["findings"]] == ["destructive_command"]
+
+
+@pytest.mark.parametrize("arguments", [{"raw": "rm -rf /"}, {"command": "pwd", "raw": "rm -rf /"}])
+def test_terminal_output_alone_is_not_a_command(arguments):
+    call = {"action": "terminal", "action_input": arguments, "observation": "rm -rf /"}
+    assert check_security([call])["passed"]
+
+
+def test_unconfirmed_terminal_cd_does_not_clear_a_later_security_finding():
+    calls = [
+        {"action": "terminal", "action_input": {"command": "cd /tmp"}},
+        {"action": "bash", "action_input": {"command": "rm -rf relative"}},
+    ]
+    assert [finding["tool"] for finding in check_security(calls)["findings"]] == ["bash"]
 
 
 @pytest.mark.parametrize("result", [{"exit_code": 1}, {"error": "timed out"}, {"exit_code": 0}])

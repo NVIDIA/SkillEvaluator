@@ -9,6 +9,18 @@ HERMES_HOME = "/tmp/hermes"
 HERMES_TOOLS = ("terminal", "skill_view", "read_file")
 
 
+def _matches_categorized_manifest(skill: str, payload: dict[str, Any]) -> bool:
+    """A categorized lookup returns the leaf name and the relative path to SKILL.md."""
+    parts = skill.split("/")
+    return (
+        len(parts) > 1
+        and payload.get("name") == parts[-1]
+        and payload.get("path") == f"{skill}/SKILL.md"
+        and "\\" not in skill
+        and all(part not in ("", ".", "..", "SKILL.md") for part in parts)
+    )
+
+
 def normalize_hermes_call(
     name: str, arguments: dict[str, Any], content: str, *, native_session: bool = False
 ) -> tuple[str, dict[str, Any], bool | None]:
@@ -35,10 +47,13 @@ def normalize_hermes_call(
         if payload.get("success") is False or error:
             return name, arguments, True
         if payload.get("success") is True and isinstance(payload.get("content"), str) and payload["content"].strip():
-            if isinstance(skill, str) and skill and payload.get("name", skill) == skill and isinstance(file_path, str):
+            if isinstance(skill, str) and skill and isinstance(file_path, str):
+                same_name = payload.get("name", skill) == skill
                 if file_path in ("SKILL.md", "./SKILL.md"):
-                    return "read", {"path": f"{HERMES_HOME}/skills/{skill}/SKILL.md"}, None
-                return name, arguments, False
+                    if same_name or _matches_categorized_manifest(skill, payload):
+                        return "read", {"path": f"{HERMES_HOME}/skills/{skill}/SKILL.md"}, None
+                elif same_name:
+                    return name, arguments, False
             return name, arguments, None
         if native_session:
             return name, arguments, True

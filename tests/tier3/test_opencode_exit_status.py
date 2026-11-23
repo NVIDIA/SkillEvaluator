@@ -13,7 +13,7 @@ import pytest
 from harbor.models.agent.context import AgentContext
 
 from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_script_execution, check_tool_efficiency
+from skillevaluator.tier3.eval_core.checks import check_activation, check_script_execution, check_tool_efficiency
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
 from skillevaluator.tier3.eval_core.log_converters import load_trajectory_with_fallback
 from skillevaluator.tier3.eval_core.plugin_signals import compute_plugin_signals
@@ -82,6 +82,25 @@ def test_only_finished_bash_calls_gain_exit_evidence(tool, status, native_events
 def test_empty_events_remain_empty(tmp_path):
     agent = SkillEvaluatorOpenCode(logs_dir=tmp_path, model_name="openai/test-model")
     assert agent._convert_events_to_trajectory([]) is None
+
+
+def test_native_read_activation_uses_its_own_result(native_events, tmp_path):
+    part = native_events[1]["part"]
+    part.update(
+        tool="read",
+        state={"status": "error", "input": {"filePath": "/skills/report-builder/SKILL.md"}, "error": "not available"},
+    )
+    success = copy.deepcopy(native_events[1])
+    success["part"].update(
+        callID="call-other", state={"status": "completed", "input": part["state"]["input"], "output": "not available"}
+    )
+    native_events.insert(2, success)
+    original = copy.deepcopy(native_events)
+    failed, completed = _convert(SkillEvaluatorOpenCode, native_events, tmp_path)
+    assert not check_activation([failed], "report-builder")["passed"]
+    assert check_activation([completed], "report-builder")["passed"]
+    assert failed["observation"] == completed["observation"] == "not available"
+    assert native_events == original
 
 
 @pytest.mark.parametrize("status", ["completed", "error"])

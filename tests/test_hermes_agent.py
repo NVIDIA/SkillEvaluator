@@ -40,10 +40,12 @@ from skillevaluator.tier3.commands import validate_agents
 from skillevaluator.tier3.eval_core.atif_helpers import _collect_file_change_evidence, extract_tool_calls_as_dicts
 from skillevaluator.tier3.eval_core.checks import (
     check_activation,
+    check_error_recovery,
     check_script_execution,
     check_security,
     check_tool_efficiency,
 )
+from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
 from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS, HARBOR_AGENTS_EXPERIMENTAL
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.collector import AGENT_LOG_ARTIFACTS, _agent_log_runtime_failure_reason
@@ -311,10 +313,32 @@ def test_verifier_scores_raw_hermes_calls_like_the_harbor_export(tmp_path):
         ("category/lookup-code", "lookup-code", "other/lookup-code/SKILL.md", False),
         ("category/lookup-code", "lookup-code", None, False),
         ("Lookup-Code", "lookup-code", None, False),
-        ("Lookup-Code", "lookup-code", "Lookup-Code/SKILL.md", False),
+        ("Lookup-Code", "lookup-code", "Lookup-Code/SKILL.md", True),
+        ("Lookup-Code", "lookup-code", "lookup-code/SKILL.md", False),
+        ("Lookup-Code", "decoy", "Lookup-Code/SKILL.md", False),
         ("../lookup-code", "lookup-code", "../lookup-code/SKILL.md", False),
+        ("lookup-code", "lookup-code", "category/lookup-code/SKILL.md", True),
+        ("lookup-code", "lookup-code", "lookup-code.md", False),
+        ("lookup-code", "lookup-code", "../lookup-code/SKILL.md", False),
+        ("lookup-code", "lookup-code", "other/SKILL.md", False),
+        ("lookup-code", "lookup-code", "Lookup-Code/SKILL.md", True),
     ],
-    ids=["categorized", "decoy", "wrong-category", "no-path", "case-only", "case-with-path", "traversal"],
+    ids=[
+        "categorized",
+        "decoy",
+        "wrong-category",
+        "no-path",
+        "case-only",
+        "case-with-path",
+        "wrong-case-path",
+        "wrong-name",
+        "traversal",
+        "bare-categorized",
+        "legacy-file",
+        "returned-traversal",
+        "wrong-directory",
+        "frontmatter-lookup",
+    ],
 )
 def test_hermes_manifest_identity(tmp_path, exported, requested, resolved, manifest, activated):
     """Pinned Hermes returns a relative manifest path and the resolved skill name."""
@@ -331,6 +355,64 @@ def test_hermes_manifest_identity(tmp_path, exported, requested, resolved, manif
     assert check_activation(calls, "lookup-code")["score"] == (1.0 if activated else 0.0)
     if activated:
         assert calls[0]["action_input"] == {"path": f"/tmp/hermes/skills/{manifest}"}
+
+
+@pytest.mark.parametrize(
+    "metadata, activated", [({}, True), ({"file": "references/help.md"}, False), ({"path": None}, False)]
+)
+def test_hermes_manifest_result_metadata(tmp_path, metadata, activated):
+    session = _session(observation={"success": True, "name": "lookup-code", "content": "instructions", **metadata})
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        assert check_activation(extract_tool_calls_as_dicts(traj), "lookup-code")["passed"] is activated
+
+
+@pytest.mark.parametrize("failed", [True, False])
+def test_hermes_manifest_read_external_home(tmp_path, failed):
+    path = "/home/runner/.hermes/skills/lookup-code/SKILL.md"
+    result = {"error": f"File not found: {path}"} if failed else {"content": "instructions"}
+    session = _session(tool="read_file", arguments={"path": path}, observation=result)
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        assert check_activation(extract_tool_calls_as_dicts(traj), "lookup-code")["passed"] is not failed
+
+
+@pytest.mark.parametrize("exit_code", [7, 0])
+def test_hermes_terminal_exit_grading(tmp_path, exit_code):
+    result = {"output": "Input declined", "exit_code": exit_code}
+    session = _session(tool="terminal", arguments={"command": "python lookup.py"}, observation=result)
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        calls = extract_tool_calls_as_dicts(traj)
+        check = evaluate_declarative_checks(
+            [{"type": "command_succeeded", "script": "lookup.py"}],
+            tool_calls=calls,
+            final_response="",
+            workspace_roots=[],
+        )[0]
+        assert check["passed"] is (exit_code == 0)
+        assert check_error_recovery(calls, "lookup.py")["passed"] is (exit_code == 0)
+        assert check_script_execution(calls, "lookup.py")["passed"]
+
+
+@pytest.mark.parametrize("status", ["blocked", "pending_approval", "disabled", "error", None])
+def test_hermes_terminal_refusal_is_not_execution(tmp_path, status):
+    result = {
+        "status": status,
+        "output": "",
+        "error": "" if status == "pending_approval" else "not run",
+        "exit_code": -1,
+    }
+    if status is None:
+        result = {"error": "timeout must be a positive number of seconds (got 0)."}
+    session = _session(tool="terminal", arguments={"command": "python lookup.py"}, observation=result)
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        assert not check_script_execution(extract_tool_calls_as_dicts(traj), "lookup.py")["passed"]
 
 
 def test_terminal_conversion_and_token_context(tmp_path):
@@ -453,11 +535,16 @@ def test_terminal_output_alone_is_not_a_command(arguments):
     assert check_security([call])["passed"]
 
 
-def test_unconfirmed_terminal_cd_does_not_clear_a_later_security_finding():
-    calls = [
-        {"action": "terminal", "action_input": {"command": "cd /tmp"}},
-        {"action": "bash", "action_input": {"command": "rm -rf relative"}},
-    ]
+@pytest.mark.parametrize(
+    "steps",
+    [
+        [("bash", "cd /workspace/output"), ("terminal", "cd /etc"), ("bash", "rm -rf x")],
+        [("terminal", "cd /workspace/output"), ("bash", "rm -rf x")],
+    ],
+    ids=["might-leave-output", "might-not-enter-output"],
+)
+def test_unconfirmed_terminal_cd_does_not_clear_a_later_security_finding(steps):
+    calls = [{"action": tool, "action_input": {"command": command}} for tool, command in steps]
     assert [finding["tool"] for finding in check_security(calls)["findings"]] == ["bash"]
 
 

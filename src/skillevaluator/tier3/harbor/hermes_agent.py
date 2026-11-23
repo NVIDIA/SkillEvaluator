@@ -162,9 +162,11 @@ class SkillEvaluatorHermes(Hermes):
                     continue
                 result = results.get(call.tool_call_id)
                 content = result.content if result and isinstance(result.content, str) else ""
-                call.function_name, call.arguments, error = normalize_hermes_call(
+                call.function_name, call.arguments, error, observation = normalize_hermes_call(
                     call.function_name, call.arguments, content, native_session=True
                 )
+                if result and content != observation:
+                    result.content = observation
                 if result and error is not None:
                     extra = result.extra or {}
                     result.extra = {**extra, "tool_result_is_error": error or extra.get("tool_result_is_error") is True}

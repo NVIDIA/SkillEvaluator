@@ -1499,8 +1499,12 @@ def _iter_normalized_tool_calls_with_records(traj: dict[str, Any]):
                 extra = call.get("extra")
                 if not (isinstance(extra, dict) and extra.get("junie_agent_event_kind") == "TerminalBlockUpdatedEvent"):
                     content = _outer_tool_call_observation(step, call, include_unscoped=False)
-                    name, args, error = normalize_hermes_call(call["function_name"], call["arguments"], content)
+                    name, args, error, observation = normalize_hermes_call(
+                        call["function_name"], call["arguments"], content
+                    )
                     call.update(function_name=name, arguments=args)
+                    if observation != content:
+                        call["_atif_hermes_observation"] = observation
                     if error is not None:
                         call["_atif_hermes_is_error"] = error
             if normalized and _RECORD_FORMAT in normalized[0]:
@@ -1513,6 +1517,8 @@ def _normalized_tool_call_observation_with_records(step: dict[str, Any], tool_ca
     """Return a call's own record, else the outer observation when its owner is known."""
     if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and _RECORD_OBSERVATION in tool_call:
         return tool_call[_RECORD_OBSERVATION]
+    if "_atif_hermes_observation" in tool_call:
+        return tool_call["_atif_hermes_observation"]
     return _upstream_normalized_tool_call_observation(step, tool_call)
 
 

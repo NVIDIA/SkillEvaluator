@@ -186,8 +186,22 @@ class SkillEvaluatorOpenCode(OpenCode):
 
     def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:
         normalized = []
+        failed_reads: list[set[str]] = []
+        turn_failures: set[str] | None = None
         for event in events:
             part = event.get("part")
+            if event.get("type") == "step_start":
+                turn_failures = set()
+            elif event.get("type") == "step_finish" and turn_failures is not None:
+                failed_reads.append(turn_failures)
+                turn_failures = None
+            elif event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") == "read":
+                state = part.get("state")
+                call_id = part.get("callID", part.get("id"))
+                if turn_failures is not None and call_id and isinstance(state, dict) and state.get("status") == "error":
+                    turn_failures.add(call_id)
+                    output = state.get("error") or state.get("output") or ""
+                    event = {**event, "part": {**part, "state": {**state, "output": output}}}
             if event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") == "bash":
                 state = part.get("state")
                 if isinstance(state, dict) and state.get("status") in {"completed", "error"}:
@@ -200,7 +214,14 @@ class SkillEvaluatorOpenCode(OpenCode):
                         output = f"Exit code: {exit_code}\n{state.get('output') or ''}"
                         event = {**event, "part": {**part, "state": {**state, "output": output}}}
             normalized.append(event)
-        return super()._convert_events_to_trajectory(normalized)
+        trajectory = super()._convert_events_to_trajectory(normalized)
+        if trajectory and any(failed_reads):
+            agent_steps = (step for step in trajectory.steps if step.source == "agent")
+            for step, failures in zip(agent_steps, failed_reads, strict=True):
+                for result in step.observation.results if step.observation else ():
+                    if result.source_call_id in failures:
+                        result.extra = {**(result.extra or {}), "tool_result_is_error": True}
+        return trajectory
 
     async def ensure_system_dependencies(
         self,

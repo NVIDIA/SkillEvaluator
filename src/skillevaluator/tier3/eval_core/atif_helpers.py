@@ -417,6 +417,8 @@ def _tool_write_body(args: dict[str, Any], *, full: bool = False) -> str:
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")
+        elif key == "newString" and value == "":
+            snippets.append('newString: ""')
     patch = _patch_input_body(args)
     if patch:
         snippets.append(f"input:\n{patch}")

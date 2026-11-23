@@ -1494,6 +1494,13 @@ def test_opencode_file_changes_include_path_and_new_content(tool: str, body: dic
     assert "original" not in changes
 
 
+def test_opencode_file_changes_distinguish_deletion_from_missing_replacement() -> None:
+    for replacement, deleted in [({"newString": ""}, True), ({}, False)]:
+        traj = _opencode_call("edit", filePath="/workspace/output/result.txt", oldString="original", **replacement)
+        changes = _evidence_section(build_behavior_evidence(traj, "Remove the text."), "FILE CHANGES")
+        assert ('newString: ""' in changes.splitlines()) is deleted
+
+
 @pytest.mark.parametrize(
     ("patch", "expected_paths"),
     [

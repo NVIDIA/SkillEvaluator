@@ -9,22 +9,45 @@ HERMES_HOME = "/tmp/hermes"
 HERMES_TOOLS = ("terminal", "skill_view", "read_file")
 
 
-def _matches_categorized_manifest(skill: str, payload: dict[str, Any]) -> bool:
-    """A categorized lookup returns the leaf name and the relative path to SKILL.md."""
-    parts = skill.split("/")
-    return (
-        len(parts) > 1
-        and payload.get("name") == parts[-1]
-        and payload.get("path") == f"{skill}/SKILL.md"
-        and "\\" not in skill
-        and all(part not in ("", ".", "..", "SKILL.md") for part in parts)
+def _skill_directory(directory: str) -> bool:
+    return not any(char in directory for char in ("\\", ":", "\x00")) and all(
+        part not in ("", ".", "..", "SKILL.md") for part in directory.split("/")
     )
+
+
+def _manifest_path(skill: str, payload: dict[str, Any]) -> str | None:
+    """Keep the returned relative manifest path; only synthesize one for older results."""
+    if not _skill_directory(skill) or payload.get("file", "SKILL.md") not in ("SKILL.md", "./SKILL.md"):
+        return None
+    resolved = payload.get("name", skill)
+    if "path" not in payload:
+        return f"{skill}/SKILL.md" if resolved == skill else None
+    path = payload["path"]
+    if not isinstance(path, str) or not path.endswith("/SKILL.md"):
+        return None
+    directory = path.removesuffix("/SKILL.md")
+    if not _skill_directory(directory):
+        return None
+    leaf = directory.rsplit("/", 1)[-1]
+    if "/" in skill:
+        return path if directory == skill and resolved in (skill, leaf) else None
+    if leaf == skill and resolved == skill:
+        return path
+    if (
+        skill in (leaf, resolved)
+        and isinstance(resolved, str)
+        and leaf.isascii()
+        and resolved.isascii()
+        and leaf.lower() == resolved.lower()
+    ):
+        return path
+    return None
 
 
 def normalize_hermes_call(
     name: str, arguments: dict[str, Any], content: str, *, native_session: bool = False
-) -> tuple[str, dict[str, Any], bool | None]:
-    """Return the grading name, arguments and any outcome the result establishes."""
+) -> tuple[str, dict[str, Any], bool | None, str]:
+    """Return the grading name, arguments, error flag and observation."""
     try:
         payload = json.loads(content)
     except (ValueError, RecursionError):
@@ -34,37 +57,40 @@ def normalize_hermes_call(
     error = bool(payload.get("error"))
     if name == "terminal":
         has_exit_code = type(payload.get("exit_code")) is int
-        shell_result = (has_exit_code or error) and (native_session or isinstance(payload.get("output"), str))
+        has_output = isinstance(payload.get("output"), str)
+        shell_result = (has_exit_code and (native_session or has_output)) or (error and has_output)
         if shell_result and isinstance(arguments.get("command"), str):
-            return "bash", arguments, error or payload["exit_code"] != 0
+            if payload.get("status") in ("blocked", "pending_approval", "disabled", "error"):
+                return name, arguments, True, content
+            if has_exit_code:
+                content = f"Exit code: {payload['exit_code']}\n{content}"
+            return "bash", arguments, error or payload["exit_code"] != 0, content
         if error:
-            return name, arguments, True
+            return name, arguments, True, content
         if native_session:
-            return "bash", arguments, None
+            return "bash", arguments, None, content
     elif name == "skill_view":
         skill = arguments.get("name")
         file_path = arguments.get("file_path") or "SKILL.md"
         if payload.get("success") is False or error:
-            return name, arguments, True
+            return name, arguments, True, content
         if payload.get("success") is True and isinstance(payload.get("content"), str) and payload["content"].strip():
             if isinstance(skill, str) and skill and isinstance(file_path, str):
-                same_name = payload.get("name", skill) == skill
                 if file_path in ("SKILL.md", "./SKILL.md"):
-                    if same_name or _matches_categorized_manifest(skill, payload):
-                        return "read", {"path": f"{HERMES_HOME}/skills/{skill}/SKILL.md"}, None
-                elif same_name:
-                    return name, arguments, False
-            return name, arguments, None
+                    if manifest := _manifest_path(skill, payload):
+                        return "read", {"path": f"{HERMES_HOME}/skills/{manifest}"}, None, content
+                elif payload.get("name", skill) == skill:
+                    return name, arguments, False, content
+            return name, arguments, None, content
         if native_session:
-            return name, arguments, True
+            return name, arguments, True, content
     elif name == "read_file" and native_session:
-        return name, arguments, error or payload.get("success") is False
+        return name, arguments, error or payload.get("success") is False, content
     elif name == "read_file":
         path = arguments.get("path")
-        if (
-            isinstance(path, str)
-            and path.startswith(f"{HERMES_HOME}/skills/")
-            and (payload.get("success") is False or payload.get("error") == f"File not found: {path}")
+        if isinstance(path, str) and (
+            payload.get("error") == f"File not found: {path}"
+            or (path.endswith("/SKILL.md") and payload.get("success") is False)
         ):
-            return name, arguments, True
-    return name, arguments, None
+            return name, arguments, True, content
+    return name, arguments, None, content

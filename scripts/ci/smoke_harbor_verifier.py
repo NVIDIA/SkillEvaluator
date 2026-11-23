@@ -59,6 +59,20 @@ def check_staged(directory: Path) -> None:
     }
     assert all(result["passed"] for result in results.values()), results
     assert "details" not in results["efficiency"]
+    for exit_code in (0, 7):
+        payload = {"output": "Input declined", "exit_code": exit_code}
+        tool = {"tool_call_id": "c1", "function_name": "terminal", "arguments": {"command": "python scripts/calc.py"}}
+        result = {"source_call_id": "c1", "content": json.dumps(payload)}
+        trajectory = {"steps": [{"source": "agent", "tool_calls": [tool], "observation": {"results": [result]}}]}
+        calls = verifier["extract_tool_calls_as_dicts"](trajectory)
+        check = verifier["_shared_declarative_checks"].evaluate_declarative_checks(
+            [{"type": "command_succeeded", "script": "scripts/calc.py"}],
+            tool_calls=calls,
+            final_response="",
+            workspace_roots=[],
+        )[0]
+        assert check["passed"] is (exit_code == 0), check
+        assert verifier["check_error_recovery"](calls, "scripts/calc.py")["passed"] is (exit_code == 0)
     # Exercise the recent root-search and cleanup rules on the task interpreter,
     # including both sides of each classification boundary.
     for command, score in [("find / -name calc.py", 0.0), ("find /workspace -name calc.py", 1.0)]:

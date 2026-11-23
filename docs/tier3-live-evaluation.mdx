@@ -317,6 +317,12 @@ The run prints its output directory. By default, reports are saved under
 <div id="repeatable-activation-validation">
 
 <Accordion title="Activation and skill interactions">
+  The HTML report does not render the per-trial `activation_validation`
+  record. Open `report.html` and select **Download JSON** to inspect it in the
+  canonical export. Standalone `tier3 evaluate` does not accept `-r`, and its
+  bounded `result.json` does not include this record. You can also use the
+  [retained-run export recipe](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation).
+
   - [Skill interaction experiments](/skills/skillevaluator/tier3-experiments#skill-interaction-experiments)
   - [Repeatable activation validation](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation)
 </Accordion>

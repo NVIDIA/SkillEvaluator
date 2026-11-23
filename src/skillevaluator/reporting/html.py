@@ -109,7 +109,7 @@ from skillevaluator.reporting.presentation import (
 )
 from skillevaluator.reporting.run_status import Status, result_status, result_tier
 from skillevaluator.reporting.telemetry_view import build_telemetry_view
-from skillevaluator.reporting.tier2_views import tier2_scope_views
+from skillevaluator.reporting.tier2_views import is_catalog_setup_record, tier2_scope_views
 from skillevaluator.reporting.tier3_scope import (
     completed_agent_result,
     tolerated_baseline_agents,
@@ -2268,6 +2268,7 @@ class HTMLReporter(ReporterBase):
         environment.filters["related_paths"] = _related_paths
         environment.filters["finding_verification"] = finding_verification
         environment.filters["additional_errors"] = additional_errors
+        environment.filters["catalog_setup_record"] = is_catalog_setup_record
         environment.filters["adaptive_percent"] = _adaptive_percent
         environment.filters["adaptive_interval_percent"] = _adaptive_interval_percent
         environment.filters["skip_reason"] = get_skip_reason

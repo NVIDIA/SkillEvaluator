@@ -177,16 +177,33 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
             compared = compared if isinstance(compared, dict) else {}
             catalog_count_key = "catalog_entry_count" if compared_check == "catalog_compared" else "catalog_entries"
             total, excluded = _count(compared.get(catalog_count_key)), _count(compared.get("self_matches_excluded"))
-            if total is not None and excluded is not None and excluded <= total and finished:
-                catalog_counts.append(total - excluded)
-                bundled = _count(compared.get("bundled_skills"))
+            bundled = _count(compared.get("bundled_skills"))
+            compared_count = None
+            exclusion_unit = "self entries"
+            if total is not None and excluded is not None:
+                if compared_check == "skill_catalog_comparison" and "compared_catalog_entries" in compared:
+                    # Each bundled skill can skip its own pair with a catalog entry.
+                    # Another skill may still have compared against that entry.
+                    distinct = _count(compared.get("compared_catalog_entries"))
+                    if (
+                        distinct is not None
+                        and distinct <= total
+                        and bundled is not None
+                        and excluded <= total * bundled
+                    ):
+                        compared_count = distinct
+                        exclusion_unit = "self pairs"
+                elif excluded <= total:
+                    compared_count = total - excluded
+            if compared_count is not None and finished:
+                catalog_counts.append(compared_count)
                 target = (
                     f"{bundled} bundled skill{'s' if bundled != 1 else ''}"
                     if compared_check == "skill_catalog_comparison" and bundled is not None
                     else "one target"
                 )
                 notes.append(
-                    f"Compared {target} against {total - excluded} catalog entries; {excluded} self entries excluded."
+                    f"Compared {target} against {compared_count} catalog entries; {excluded} {exclusion_unit} excluded."
                 )
             else:
                 catalog_known = False

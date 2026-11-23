@@ -92,6 +92,7 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
     prefixes = [entry.path for entry in self_plugin_entries(profile, catalog)]
     scores = catalog.score([s.entry.embedding_text for s in comparable], catalog.skills)
     matches = []
+    compared_paths = set()
     excluded_paths = set()
     excluded = 0
     for skill, scored in zip(comparable, scores, strict=True):
@@ -108,7 +109,9 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
             if entry.path in self_paths and (fingerprint is None or entry.content_fingerprint == fingerprint):
                 excluded += 1
                 excluded_paths.add(entry.path)
-            elif score >= threshold:
+                continue
+            compared_paths.add(entry.path)
+            if score >= threshold:
                 candidates.append((entry, score))
         candidates.sort(key=lambda pair: (-pair[1], pair[0].path))
         for entry, score in candidates[:top_k]:
@@ -140,6 +143,7 @@ def check_catalog_skills(profile, catalog, *, threshold, top_k=INTER_SKILL_CATAL
         "Compared bundle skills with the local catalog",
         bundled_skills=len(comparable),
         catalog_entries=len(catalog.skills),
+        compared_catalog_entries=len(compared_paths),
         self_matches_excluded=excluded,
         excluded_catalog_paths=sorted(excluded_paths),
     )

@@ -68,6 +68,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Dataset coverage includes cases with valid declarative checks in behavior coverage,
+  so checks-only cases no longer incorrectly claim that `behavior_check` is unavailable.
 - Agent JSONL log reconstruction preserves Unicode line separators inside command,
   observation and response strings instead of treating them as record boundaries.
   Previously, a Claude Code log whose skill-read record held such a separator lost

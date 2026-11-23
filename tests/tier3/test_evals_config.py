@@ -330,12 +330,51 @@ def test_load_evals_config_accepts_a_list_at_the_entry_limit(tmp_path):
         ),
         pytest.param("schema_version: 1\nskill_workspace:\n  on: invalid\n", "skill_workspace", id="skill-workspace"),
         pytest.param("schema_version: 1\ngrading:\n  2: invalid\n", "grading", id="grading"),
+        pytest.param("schema_version: 1\nplugin:\n  1: invalid\n", "plugin", id="plugin"),
     ],
 )
 def test_load_evals_config_rejects_non_string_keys(tmp_path, document, field):
     skill = _skill_with_config(tmp_path, document)
 
     with pytest.raises(EvalsConfigError, match=rf": {re.escape(field)} keys must be strings$"):
+        load_evals_config(skill)
+
+
+@pytest.mark.parametrize("retries", [0, 5])
+def test_load_evals_config_reads_load_lift_mode_and_trial_retries(tmp_path, retries):
+    skill = _skill_with_config(
+        tmp_path,
+        f"schema_version: 1\nplugin:\n  load: native\n  lift_mode: ladder\nharbor:\n  trial_retries: {retries}\n",
+    )
+
+    config, _ = load_evals_config(skill)
+
+    assert config["plugin"] == {"load": "native", "lift_mode": "ladder"}
+    assert config["harbor"]["trial_retries"] == retries
+
+
+@pytest.mark.parametrize(
+    ("document", "message"),
+    [
+        pytest.param("harbor:\n  trial_retries: 6\n", r"harbor\.trial_retries must be between 0 and 5", id="retries-6"),
+        pytest.param("harbor:\n  trial_retries: -1\n", r"harbor\.trial_retries must be >= 0", id="retries-negative"),
+        pytest.param(
+            "harbor:\n  trial_retries: true\n", r"harbor\.trial_retries must be an integer", id="retries-bool"
+        ),
+        pytest.param(
+            "harbor:\n  trial_retries: 1.5\n", r"harbor\.trial_retries must be an integer", id="retries-float"
+        ),
+        pytest.param("plugin:\n  load: eager\n", r"plugin\.load must be one of: auto, native, wrapper", id="load"),
+        pytest.param("plugin:\n  lift_mode: all\n", r"plugin\.lift_mode must be one of: both, ", id="lift-mode"),
+        pytest.param("plugin:\n  loader: native\n", r"unknown plugin key\(s\): loader", id="unknown-key"),
+        pytest.param("plugin:\n", "plugin must be a mapping", id="null-block"),
+        pytest.param("plugin:\n  - load\n", "plugin must be a mapping", id="list-block"),
+    ],
+)
+def test_load_evals_config_rejects_invalid_load_lift_mode_and_trial_retries(tmp_path, document, message):
+    skill = _skill_with_config(tmp_path, f"schema_version: 1\n{document}")
+
+    with pytest.raises(EvalsConfigError, match=f": {message}"):
         load_evals_config(skill)
 
 

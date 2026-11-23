@@ -336,6 +336,37 @@ def test_bridge_artifact_redaction_never_lists_a_folder_swapped_for_a_link_durin
     assert {path: path.read_bytes() for path in outside.rglob("*") if path.is_file()} == host
 
 
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_redaction_reports_a_listed_folder_moved_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    (logs / "b").mkdir(parents=True)
+    (logs / "z").mkdir()
+    (logs / "b" / "s.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+    (logs / "z" / "t.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_move(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if Path(relative_path).as_posix() == "b/s.jsonl" and (logs / "z").exists():
+            # A process still writing the log folder moves a later sibling, already
+            # listed, to a name the pass has already visited.
+            (logs / "z").rename(logs / "a")
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_move)
+
+    # The moved folder is reported, so conversion is skipped rather than shipping its token.
+    assert _redact_bridge_artifacts(logs, {token}) == ["z"]
+    assert token in (logs / "a" / "t.jsonl").read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])
 @pytest.mark.parametrize("moment", ["after_read", "while_copying"])
 def test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported(

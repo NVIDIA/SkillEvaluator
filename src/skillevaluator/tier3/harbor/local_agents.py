@@ -104,17 +104,16 @@ def _bridge_folders_through_descriptors(secure_root: SecureRoot, unmasked: list[
     """List folders top-down through descriptors opened from the pinned log folder.
 
     No folder is opened by a path name: each one is reopened from the pinned
-    root without following links, so a folder swapped for a link during the
-    pass is reported instead of listed.
+    root without following links, so a folder swapped for a link, moved or
+    removed during the pass is reported instead of listed.
     """
     pending = [Path()]
     while pending:
         folder = pending.pop()
         try:
             directory_fd = _open_bridge_folder(secure_root, folder)
-        except FileNotFoundError:
-            continue
         except OSError:
+            # A listed folder that is gone or moved is reported too, as os.walk does.
             unmasked.append(folder.as_posix())
             continue
         descend: list[str] = []

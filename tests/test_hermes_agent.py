@@ -368,15 +368,63 @@ def test_hermes_manifest_result_metadata(tmp_path, metadata, activated):
         assert check_activation(extract_tool_calls_as_dicts(traj), "lookup-code")["passed"] is activated
 
 
-@pytest.mark.parametrize("failed", [True, False])
-def test_hermes_manifest_read_external_home(tmp_path, failed):
-    path = "/home/runner/.hermes/skills/lookup-code/SKILL.md"
-    result = {"error": f"File not found: {path}"} if failed else {"content": "instructions"}
+@pytest.mark.parametrize("failure", ["missing", "not-regular", None])
+@pytest.mark.parametrize("home", ["/home/runner", "~"])
+def test_hermes_manifest_read_external_home(tmp_path, failure, home):
+    path = f"{home}/.hermes/skills/calculator/SKILL.md"
+    resolved = "/home/runner/.hermes/skills/calculator/SKILL.md"
+    if failure == "missing":
+        result = {"error": f"File not found: {resolved}"}
+    elif failure == "not-regular":
+        result = {
+            "error": f"Cannot read '{resolved}': not a regular file (directory, FIFO, socket, or device). "
+            "Reading it could block indefinitely."
+        }
+    else:
+        result = {"content": "instructions"}
     session = _session(tool="read_file", arguments={"path": path}, observation=result)
     agent = _agent(tmp_path)
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
         traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
-        assert check_activation(extract_tool_calls_as_dicts(traj), "lookup-code")["passed"] is not failed
+        assert check_activation(extract_tool_calls_as_dicts(traj), "calculator")["score"] == (0.0 if failure else 1.0)
+
+
+@pytest.mark.parametrize(
+    "requested, manifest, score",
+    [
+        ("./calculator", "calculator/SKILL.md", 1.0),
+        ("./calculator", None, 1.0),
+        ("./calculator", "other/calculator/SKILL.md", 0.0),
+        ("./../calculator", "calculator/SKILL.md", 0.0),
+    ],
+)
+def test_hermes_relative_manifest_lookup(tmp_path, requested, manifest, score):
+    arguments = {"name": requested}
+    result = {"success": True, "name": "calculator", "content": "# Calculator"}
+    if manifest is None:
+        arguments["file_path"] = "SKILL.md"
+        result.update(name=requested, file="SKILL.md")
+    else:
+        result["path"] = manifest
+    session = _session(arguments=arguments, observation=result)
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        assert check_activation(extract_tool_calls_as_dicts(traj), "calculator")["score"] == score
+
+
+@pytest.mark.parametrize("output, score", [("", 1.0), ("grep: input: read error", 0.0)])
+def test_hermes_quiet_probe_recovery(tmp_path, output, score):
+    session = _session(
+        tool="terminal",
+        arguments={"command": "grep -q needle input"},
+        observation={"output": output, "exit_code": 1, "error": None},
+    )
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        calls = extract_tool_calls_as_dicts(traj)
+        assert check_error_recovery(calls, "scripts/calc.py")["score"] == score
 
 
 @pytest.mark.parametrize("exit_code", [7, 0, -1])
@@ -432,11 +480,15 @@ def test_hermes_terminal_refusal_is_not_execution(tmp_path, result, raw):
     assert [finding["type"] for finding in check_security(calls)["findings"]] == ["destructive_command"]
 
 
-@pytest.mark.parametrize("receipt", ["missing-result", "interrupted", "background-started", "background-acknowledged"])
+@pytest.mark.parametrize(
+    "receipt", ["missing-result", "interrupted", "background-started", "background-acknowledged", "yielded"]
+)
 def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
     background = receipt.startswith("background-")
     arguments = {"command": "python lookup.py", "background": background}
     result = {"output": "Background process started", "session_id": "proc_1", "pid": 42, "exit_code": 0, "error": None}
+    if receipt == "yielded":
+        result.update(output="working", status="yielded_to_background", exit_code=None, notify_on_complete=True)
     session = json.loads(_session(tool="terminal", arguments=arguments, observation=result))
     if receipt == "missing-result":
         session["messages"] = session["messages"][:2]
@@ -449,14 +501,15 @@ def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
             observation = next(step["observation"] for step in traj["steps"] if step.get("tool_calls"))
             observation["results"][0].setdefault("extra", {})["tool_result_is_error"] = False
         calls = extract_tool_calls_as_dicts(traj)
-        assert check_script_execution(calls, "lookup.py")["passed"] is background
+        started = background or receipt == "yielded"
+        assert check_script_execution(calls, "lookup.py")["passed"] is started
         check = evaluate_declarative_checks(
             [{"type": "command_succeeded", "script": "lookup.py"}],
             tool_calls=calls,
             final_response="",
             workspace_roots=[],
         )[0]
-        assert check["passed"] is (None if background else False)
+        assert check["passed"] is (None if started else False)
 
 
 @pytest.mark.parametrize(

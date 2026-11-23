@@ -59,9 +59,14 @@ def check_staged(directory: Path) -> None:
     }
     assert all(result["passed"] for result in results.values()), results
     assert "details" not in results["efficiency"]
-    for exit_code in (0, 7):
-        payload = {"output": "Input declined", "exit_code": exit_code}
-        tool = {"tool_call_id": "c1", "function_name": "terminal", "arguments": {"command": "python scripts/calc.py"}}
+    for command, exit_code, output, recovered in [
+        ("python scripts/calc.py", 0, "Input declined", True),
+        ("python scripts/calc.py", 7, "Input declined", False),
+        ("grep -q needle input", 1, "", True),
+        ("grep -q needle input", 1, "grep: input: read error", False),
+    ]:
+        payload = {"output": output, "exit_code": exit_code, "error": None}
+        tool = {"tool_call_id": "c1", "function_name": "terminal", "arguments": {"command": command}}
         result = {"source_call_id": "c1", "content": json.dumps(payload)}
         trajectory = {"steps": [{"source": "agent", "tool_calls": [tool], "observation": {"results": [result]}}]}
         calls = verifier["extract_tool_calls_as_dicts"](trajectory)
@@ -72,7 +77,7 @@ def check_staged(directory: Path) -> None:
             workspace_roots=[],
         )[0]
         assert check["passed"] is (exit_code == 0), check
-        assert verifier["check_error_recovery"](calls, "scripts/calc.py")["passed"] is (exit_code == 0)
+        assert verifier["check_error_recovery"](calls, "scripts/calc.py")["passed"] is recovered
     # Exercise the recent root-search and cleanup rules on the task interpreter,
     # including both sides of each classification boundary.
     for command, score in [("find / -name calc.py", 0.0), ("find /workspace -name calc.py", 1.0)]:

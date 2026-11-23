@@ -18,11 +18,12 @@ def _skill_directory(directory: str) -> bool:
 
 def _manifest_path(skill: str, payload: dict[str, Any]) -> str | None:
     """Keep the returned relative manifest path; only synthesize one for older results."""
-    if not _skill_directory(skill) or payload.get("file", "SKILL.md") not in ("SKILL.md", "./SKILL.md"):
+    directory_requested = skill.removeprefix("./")
+    if not _skill_directory(directory_requested) or payload.get("file", "SKILL.md") not in ("SKILL.md", "./SKILL.md"):
         return None
     resolved = payload.get("name", skill)
     if "path" not in payload:
-        return f"{skill}/SKILL.md" if resolved == skill else None
+        return f"{directory_requested}/SKILL.md" if resolved == skill else None
     path = payload["path"]
     if not isinstance(path, str) or not path.endswith("/SKILL.md"):
         return None
@@ -31,7 +32,7 @@ def _manifest_path(skill: str, payload: dict[str, Any]) -> str | None:
         return None
     leaf = directory.rsplit("/", 1)[-1]
     if "/" in skill:
-        return path if directory == skill and resolved in (skill, leaf) else None
+        return path if directory == directory_requested and resolved in (skill, directory_requested, leaf) else None
     if leaf == skill and resolved == skill:
         return path
     if (
@@ -61,6 +62,15 @@ def normalize_hermes_call(
             return name, arguments, True, content
         has_exit_code = type(payload.get("exit_code")) is int
         has_output = isinstance(payload.get("output"), str)
+        if (
+            payload.get("status") == "yielded_to_background"
+            and payload.get("exit_code", -1) is None
+            and payload.get("session_id")
+            and not error
+            and has_output
+            and isinstance(arguments.get("command"), str)
+        ):
+            return "bash", arguments, None, content
         shell_result = (has_exit_code and (native_session or has_output)) or (error and has_output)
         if shell_result and isinstance(arguments.get("command"), str):
             refused = payload.get("status") in ("blocked", "pending_approval", "disabled", "error", "degraded")
@@ -75,7 +85,7 @@ def normalize_hermes_call(
             ):
                 return "bash", arguments, None, content
             if has_exit_code:
-                content = f"Exit code: {payload['exit_code']}\n{content}"
+                content = f"{content.lstrip()}\nExit code: {payload['exit_code']}"
             return "bash", arguments, error or payload["exit_code"] != 0, content
         if error:
             return name, arguments, True, content
@@ -100,9 +110,10 @@ def normalize_hermes_call(
         return name, arguments, error or payload.get("success") is False, content
     elif name == "read_file":
         path = arguments.get("path")
+        read_error = payload.get("error")
         if isinstance(path, str) and (
-            payload.get("error") == f"File not found: {path}"
-            or (path.endswith("/SKILL.md") and payload.get("success") is False)
+            (isinstance(read_error, str) and read_error.startswith("File not found: "))
+            or (path.endswith("/SKILL.md") and (error or payload.get("success") is False))
         ):
             return name, arguments, True, content
     return name, arguments, None, content

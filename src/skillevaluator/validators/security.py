@@ -90,6 +90,7 @@ from skillevaluator.validators.base import (
     ValidationResult,
     ValidatorBase,
     iter_scannable_files,
+    path_resolves_inside,
 )
 from skillevaluator.validators.hook_review_artifact import HookReviewArtifact, capture_hook_review_artifact
 from skillevaluator.validators.hook_waivers import HookWaiver, load_hook_waivers
@@ -1155,6 +1156,24 @@ def _skillspector_scoring_match_identity(
     return ("finding", finding) if finding else ("row", index)
 
 
+def _skillspector_quoted_path(path: str) -> str:
+    """Quote a report path on one line, preserving spaces and whole escape sequences."""
+    limit = _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS
+    quoted = json.dumps(path[:limit], ensure_ascii=True)
+    if len(quoted) <= limit:
+        return quoted
+
+    remaining = limit - len('""...')
+    parts = []
+    for character in path:
+        escaped = json.dumps(character, ensure_ascii=True)[1:-1]
+        if len(escaped) > remaining:
+            break
+        parts.append(escaped)
+        remaining -= len(escaped)
+    return '"' + "".join(parts) + '"...'
+
+
 def _skillspector_report_text(value: object) -> str | None:
     """Return untrusted report text as one bounded line, or ``None`` when it is not text."""
     if not isinstance(value, str):
@@ -1579,31 +1598,30 @@ def _read_skillspector_passive_raster(root: SecureRoot, path: str, budget: int) 
     return len(data), metadata
 
 
-def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_root: Path | None) -> list[str]:
-    """Return the verified PNGs that account for the full inventory surplus."""
+def _skillspector_binary_exclusion_components(completeness: dict, components: object) -> dict[str, dict]:
+    """Match reported binary exclusions to the entire inventory surplus, without accepting them."""
     if not isinstance(components, list) or any(
         not isinstance(component, dict) or not isinstance(component.get("path"), str) for component in components
     ):
-        return []
+        return {}
     surplus = len(components) - completeness["total_components"]
     exclusions = completeness.get("scope_exclusions")
     references = completeness.get("references")
     if (
-        scanned_root is None
-        or not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
+        not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
         or not isinstance(exclusions, list)
         or len(exclusions) != surplus
         or not isinstance(references, list)
         or any(not isinstance(reference, dict) for reference in references)
         or _skillspector_reference_evidence_unmatched(completeness)
     ):
-        return []
+        return {}
 
     required_patterns = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS - {"static_yara"}
     paths: set[str] = set()
     for row in exclusions:
         if not isinstance(row, dict):
-            return []
+            return {}
         path = row.get("path")
         analyzers = row.get("analyzers")
         if (
@@ -1614,15 +1632,13 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
             or row.get("start_line") is not None
             or row.get("end_line") is not None
             or not isinstance(path, str)
-            or not path.lower().endswith(".png")
             or path in paths
-            or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
             or not isinstance(analyzers, list)
             or len(analyzers) != len(required_patterns)
             or not all(isinstance(analyzer, str) for analyzer in analyzers)
             or set(analyzers) != required_patterns
         ):
-            return []
+            return {}
         paths.add(path)
     if any(
         reference.get("status") == "resolved"
@@ -1630,18 +1646,32 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
         and target in paths
         for reference in references
     ):
-        return []
+        return {}
 
     by_path: dict[str, dict] = {}
     for component in components:
         path = component["path"]
         if path in paths:
             if path in by_path or _skillspector_scoring_source_scope(component) != ("", ""):
-                return []
+                return {}
             by_path[path] = component
     if by_path.keys() != paths:
-        return []
+        return {}
 
+    return by_path
+
+
+def _skillspector_excluded_pngs(by_path: dict[str, dict], scanned_root: Path | None) -> list[str]:
+    """Return only the excluded components verified as passive PNGs on disk."""
+    if (
+        scanned_root is None
+        or not by_path
+        or any(
+            not path.lower().endswith(".png") or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
+            for path in by_path
+        )
+    ):
+        return []
     budget = _PASSIVE_RASTER_MAX_BYTES
     identities: set[tuple[int, int]] = set()
     try:
@@ -1661,7 +1691,7 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
                 budget -= size
     except (OSError, SecurePathError):
         return []
-    return sorted(paths)
+    return sorted(by_path)
 
 
 def _skillspector_passive_raster_note(
@@ -4631,7 +4661,8 @@ class SecurityValidator(ValidatorBase):
                     other_gaps: list[str] = []
                     if gap_notes is None and without_hooks is not None and not gap_rows:
                         excluded_pngs = _skillspector_excluded_pngs(
-                            analysis_completeness, data.get("components"), scanned_root
+                            _skillspector_binary_exclusion_components(analysis_completeness, data.get("components")),
+                            scanned_root,
                         )
                         other_gaps = _skillspector_gaps_without_rows(
                             gap_statuses,
@@ -4927,9 +4958,20 @@ class SecurityValidator(ValidatorBase):
             covered_count = analysis_completeness["total_components"]
             if inventory_count != covered_count and not excluded_pngs:
                 if completeness_status == "complete":
-                    excluded_pngs = _skillspector_excluded_pngs(
-                        analysis_completeness, normalized_components, scanned_root
+                    binary_components = _skillspector_binary_exclusion_components(
+                        analysis_completeness, normalized_components
                     )
+                    unsupported = next(
+                        (path for path in sorted(binary_components) if not path.lower().endswith(".png")), None
+                    )
+                    if unsupported is not None:
+                        result.add_error(
+                            f"SkillSpector reported a binary exclusion for {_skillspector_quoted_path(unsupported)}. "
+                            "SkillEvaluator only accepts verified passive PNGs for this exclusion; "
+                            "security scan did not complete"
+                        )
+                        return False
+                    excluded_pngs = _skillspector_excluded_pngs(binary_components, scanned_root)
                 if not excluded_pngs:
                     result.add_error(
                         "skillspector JSON component inventory contradicts analysis completeness; "
@@ -6971,6 +7013,14 @@ class SecurityValidator(ValidatorBase):
         """
         if protected_usernames is None:
             protected_usernames = self._protected_home_usernames(file_path.parent)
+
+        # A symlink that leaves the skill would make the report quote lines from
+        # a file the skill author never shipped; the walker already drops such
+        # links, and this keeps direct callers of the reader on the same boundary.
+        boundary = file_path.parent if skill_root is None else skill_root
+        if file_path.is_symlink() and not path_resolves_inside(file_path, boundary):
+            logger.warning(f"Skipping {file_path.name}: symlink target is outside the skill")
+            return []
 
         try:
             content = file_path.read_text(encoding="utf-8-sig", errors="ignore")

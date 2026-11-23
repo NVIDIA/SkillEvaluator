@@ -766,7 +766,9 @@ completed run directly:
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied, and
   `incomplete_sections`, `required_complete` and `required_missing` say which
-  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence did not reach the judge whole. For `accuracy` and `goal_accuracy`,
+  `incomplete_sections` names the sections that did not reach the judge
+  whole. A `behavior_check` whose required
   evidence is incomplete is reported as an evaluation error with no score,
   which also leaves the trial's `overall_score` null; see
   [evidence budgets](/skills/skillevaluator/tier3-grading#evidence-budgets).
@@ -959,9 +961,12 @@ tool names, these calls are productive: reading, searching, listing, writing,
 editing or patching files (`Write`, `Edit`, `MultiEdit`, `apply_patch`, `LS`,
 OpenCode `list`, Codex `list_dir` and `grep_files`, and similar), running
 commands and activating a skill. MCP tools named `mcp__server__tool`, as Claude
-Code records them, are productive too. Codex records an MCP call under the bare
-tool name and OpenCode as `server_tool`, so these calls are classified by their
-name like any other tool, and most such names count as wasted. A Codex name
+Code records them, are productive too. When a missing or empty Harbor trajectory
+is rebuilt from `codex.txt`, the recorded `server` and `tool` fields produce the
+same MCP name and remain separate, so `__` inside a server name does not change
+its identity. Codex MCP calls in Harbor's existing graded trajectory are not yet
+recognized as MCP; their bare names and OpenCode names such as `server_tool` are
+classified like any other tool, and most such names count as wasted. A Codex name
 with a namespace, such as `functions.apply_patch`, is classified by the part
 after the last dot. Help, version and install commands are wasted, whether
 written as text or recorded as an argument list, as is any tool outside these
@@ -979,6 +984,14 @@ neutral, as is a `Monitor` watch with no command. A command typed with
 reason names how many calls were not counted. A trial whose only calls are
 neutral did no work: it scores tool efficiency 0.0, so its `skill_efficiency`
 is 0.0, the same as a trial with no tool calls.
+
+In rebuilt Codex logs, MCP tools count as MCP work instead of neutral planning
+even when their bare name is a neutral planning or bookkeeping name, such as
+`task`, `update_plan`, `spawn_agent`, `wait`, `agent` or `todowrite`. An MCP
+tool named `skill` also remains an MCP call; it does not count as a Skill-tool
+activation. These rules do not change Harbor-provided Codex trajectories.
+Candidates created by `tier3 import-traces` from Codex exports likewise retain
+the recorded MCP identity in `mcp__server__tool` labels.
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
 whether or not the command names the expected skill or script. This includes

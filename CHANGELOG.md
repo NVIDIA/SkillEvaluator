@@ -76,6 +76,10 @@ All notable changes to SkillEvaluator are documented in this file.
   `Authorization: Bearer` header, and host inference failed with an illegal
   header value. This includes models called through the Bedrock Responses
   route.
+- Bedrock inference checks HTTPS on the endpoint selected for the request,
+  so an unused HTTP override no longer blocks a valid HTTPS route.
+- Bedrock Mantle honors the configured AWS region for model aliases when
+  `BEDROCK_MANTLE_REGION` contains an invalid fallback value.
 - Tier 2 rubric prompts fence SKILL.md and each supplementary file preview.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
@@ -190,6 +194,13 @@ All notable changes to SkillEvaluator are documented in this file.
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and
   rate-limited calls stop when the requested wait exceeds the retry budget.
+- `--stop-on-pass` combined with a run budget (`--max-agent-tokens`,
+  `--max-judge-calls`, `--max-attempts-total` or `--max-cost-usd`) now stops
+  each arm after its own first pass, as it does without a budget. An arm that
+  had already passed was run again until the other arm passed in the same
+  attempt, and the run then failed with `Excess scored attempts`. With
+  `--max-attempts-total`, an arm asking for an attempt on its own can still
+  use a slot left over after a both-arm request did not fit.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.
@@ -237,6 +248,12 @@ All notable changes to SkillEvaluator are documented in this file.
   match. That reason in `skillspector_evidence.reasons` carries
   `line_source: "parser_diagnostic"`. Because the suggestion text changes, the `finding_id` of each such AE1
   finding changes once with this release.
+- The text-analyzer reference skill counts a sentence end only when `.`, `!` or
+  `?` is followed by whitespace or the end of the text, so file names, decimals
+  and version numbers stay in one sentence. Closing quotes, Markdown emphasis
+  and citation or footnote markers such as `[1]` or `[^1]` after the terminator
+  still end it. `--file` on a directory or an unreadable path prints `Error:`
+  on stderr and exits 1 instead of a traceback.
 - Restore a temporary-cleanup exemption for a narrow, NUL-delimited
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown

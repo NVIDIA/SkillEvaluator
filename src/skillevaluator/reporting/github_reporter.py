@@ -945,7 +945,7 @@ def print_collected_annotations(
     *skills* maps every catalog skill to the entries its own renders collected.
     The summary counts follow the catalog's final outcomes, not the per-skill
     renders: *failed* names every skill the catalog failed and *catalog_failed*
-    the ones failed by a catalog-level check, which no skill render saw. A skill
+    the ones failed by a catalog-level check or execution error. A skill
     the catalog failed only because its own scan did not complete stays
     incomplete. *catalog_annotations* join the per-skill ones before the cap.
     """

@@ -1571,7 +1571,11 @@ def _catalog_child_argv_from_ctx(
     return argv
 
 
-def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None, list[dict]]:
+class _ValidationGateFailure(click.ClickException):
+    """Validation completed and reported its results, but the required checks did not pass."""
+
+
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, str | None, bool, str | None, list[dict]]:
     """Run one catalog skill validation in a child process.
 
     The child's output is captured, so its GitHub annotations are collected and
@@ -1589,18 +1593,19 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
     raw_workspace_root = job.get("workspace_root")
     workspace_root = Path(raw_workspace_root) if isinstance(raw_workspace_root, str) and raw_workspace_root else None
     with collect_annotations(workspace_root=workspace_root) as annotations:
-        result = CliRunner().invoke(cli, job["argv"])
+        result = CliRunner().invoke(cli, job["argv"], standalone_mode=False)
     json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
-        return skill_name, True, "", json_report_name, annotations
+        return skill_name, None, False, json_report_name, annotations
     exc = result.exception
-    if isinstance(exc, SystemExit):
-        return skill_name, False, "validation failed", json_report_name, annotations
-    if exc is not None:
-        if isinstance(exc, click.ClickException):
-            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name, annotations
-        return skill_name, False, f"unexpected error: {exc}", json_report_name, annotations
-    return skill_name, False, "validation failed", json_report_name, annotations
+    if isinstance(exc, click.ClickException):
+        reason = exc.format_message()
+    elif exc is None or isinstance(exc, SystemExit):
+        reason = "validation failed"
+    else:
+        reason = f"unexpected error: {exc}"
+    execution_failed = not isinstance(exc, _ValidationGateFailure)
+    return skill_name, reason, execution_failed, json_report_name, annotations
 
 
 def _catalog_skill_entry(
@@ -1816,6 +1821,7 @@ def _print_catalog_github_annotations(
     skill_dirs: list[Path],
     skill_annotations: dict[str, list[dict]],
     failures: list[tuple[str, str]],
+    execution_failures: set[str],
     id_conflicts: list[dict[str, object]],
     id_failures: list[tuple[str, str]],
     discovery_problems: dict[Path, str],
@@ -1901,17 +1907,16 @@ def _print_catalog_github_annotations(
         path.relative_to(catalog_root).as_posix() for path in discovery_problems
     }
     for name, reason in failures:
-        if name in catalog_level:
-            continue
-        entries = skill_annotations.get(name, [])
-        own = [item for entry in entries for item in entry["annotations"]]
-        if any(item["level"] == "error" for item in own):
-            continue
-        # A member the summary counts as incomplete keeps its warnings.
-        failed_count = sum(entry["counts"][2] for entry in entries)
-        if not failed_count and sum(entry["counts"][3] for entry in entries):
-            continue
-        # The catalog failed this member, but nothing it rendered says why.
+        if name not in execution_failures:
+            if name in catalog_level:
+                continue
+            entries = skill_annotations.get(name, [])
+            if any(item["level"] == "error" for entry in entries for item in entry["annotations"]):
+                continue
+            # A member that only had incomplete checks keeps its warnings.
+            failed_count = sum(entry["counts"][2] for entry in entries)
+            if not failed_count and sum(entry["counts"][3] for entry in entries):
+                continue
         extra.append(
             annotation(
                 name,
@@ -1924,8 +1929,7 @@ def _print_catalog_github_annotations(
     print_collected_annotations(
         {name: skill_annotations.get(name, []) for name in names},
         failed={name for name, _reason in failures},
-        catalog_failed={name for name, _reason in id_failures}
-        | {path.relative_to(catalog_root).as_posix() for path in discovery_problems},
+        catalog_failed=catalog_level | execution_failures,
         catalog_annotations=extra,
         report_formats=report_formats,
     )
@@ -1970,6 +1974,7 @@ def _validate_catalog(
         return
 
     failures = [(path.relative_to(resolved_target).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     meta_key = "skillevaluator_catalog_report_root"
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
@@ -1990,7 +1995,6 @@ def _validate_catalog(
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
                 "catalog_root": resolved_target,
             }
-            reason = ""
             try:
                 with collect_annotations(workspace_root=catalog_workspace_root) as skill_annotations:
                     try:
@@ -1998,11 +2002,12 @@ def _validate_catalog(
                     finally:
                         github_annotations[skill_name] = skill_annotations
             except click.ClickException as exc:
-                reason = str(getattr(exc, "message", exc))
-                failures.append((skill_name, reason))
+                failures.append((skill_name, exc.format_message()))
+                if not isinstance(exc, _ValidationGateFailure):
+                    execution_failures.add(skill_name)
             except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-                reason = f"unexpected error: {exc}"
-                failures.append((skill_name, reason))
+                failures.append((skill_name, f"unexpected error: {exc}"))
+                execution_failures.add(skill_name)
             skill_reports[skill_name] = _consume_validate_json_report()
     finally:
         if previous_catalog_root is None:
@@ -2036,6 +2041,7 @@ def _validate_catalog(
         skill_dirs=skill_dirs,
         skill_annotations=github_annotations,
         failures=failures,
+        execution_failures=execution_failures,
         id_conflicts=id_conflicts,
         id_failures=id_failures,
         discovery_problems=discovery_problems,
@@ -2089,16 +2095,19 @@ def _validate_catalog_parallel(
         for skill_name in [skill_dir.relative_to(catalog_root).as_posix()]
     ]
     failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     worker_reports: dict[str, str | None] = {}
     worker_annotations: dict[str, list[dict]] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
         for future in as_completed(futures):
-            skill_name, passed, reason, json_report_name, annotations = future.result()
+            skill_name, reason, execution_failed, json_report_name, annotations = future.result()
             worker_reports[skill_name] = json_report_name
             worker_annotations[skill_name] = annotations
-            if not passed:
+            if reason is not None:
                 failures.append((skill_name, reason))
+            if execution_failed:
+                execution_failures.add(skill_name)
 
     id_conflicts, id_failures = _catalog_metadata_id_conflicts(
         policy,
@@ -2128,6 +2137,7 @@ def _validate_catalog_parallel(
         skill_dirs=skill_dirs,
         skill_annotations=worker_annotations,
         failures=failures,
+        execution_failures=execution_failures,
         id_conflicts=id_conflicts,
         id_failures=id_failures,
         discovery_problems=discovery_problems,
@@ -3324,7 +3334,7 @@ def validate(
     if harness_rows and not quiet:
         console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
-        raise click.ClickException("validation failed")
+        raise _ValidationGateFailure("validation failed")
 
 
 # Intro text shown under the grouped Tier 3 options in ``validate --help``.

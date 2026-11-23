@@ -796,6 +796,48 @@ def test_catalog_annotates_a_failed_member_with_no_error_of_its_own(
     assert _summary(result.output).endswith("2 skills checked, 1 passed, 1 failed, 0 incomplete")
 
 
+@pytest.mark.parametrize("workers", [1, 2])
+@pytest.mark.parametrize("report_blocked", [False, True])
+def test_catalog_reports_write_failure_even_when_scanner_is_incomplete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, workers: int, report_blocked: bool
+) -> None:
+    import json
+
+    def scan(skill_dir: Path, **_kwargs) -> list[ValidationResult]:
+        result = ValidationResult(validator_name="Security Scan")
+        if skill_dir.name == "skill-01":
+            result.mark_scan_incomplete("skillspector")
+        return [result]
+
+    _inline_process_pool(monkeypatch)
+    monkeypatch.setattr("skillevaluator.cli.run_validation", scan)
+    monkeypatch.setattr("skillevaluator.cli.resolve_git_root", lambda _path: None)
+    catalog = _catalog_with_ids(tmp_path, ["first-id", "second-id"])
+    reports = tmp_path / "reports"
+    if report_blocked:
+        (reports / "skill-01" / "BENCHMARK.md").mkdir(parents=True)
+
+    result = CliRunner().invoke(cli, _validate_catalog_args(catalog, reports, workers))
+
+    assert result.exit_code == 1, result.output
+    commands = _commands(result.output)
+    assert any(line.startswith("::warning") and "skillspector scan did not complete" in line for line in commands), (
+        result.output
+    )
+    errors = [line for line in commands if line.startswith("::error")]
+    if report_blocked:
+        assert len(errors) == 1, result.output
+        assert "catalog_failure" in errors[0]
+        assert "file=skill-01/SKILL.md" in errors[0]
+        assert "BENCHMARK.md" in errors[0]
+        summary = json.loads((reports / "catalog-summary.json").read_text(encoding="utf-8"))
+        assert "BENCHMARK.md" in summary["skills"][1]["reason"]
+        assert _summary(result.output).endswith("2 skills checked, 1 passed, 1 failed, 0 incomplete")
+    else:
+        assert not errors
+        assert _summary(result.output).endswith("2 skills checked, 1 passed, 0 failed, 1 incomplete")
+
+
 def test_catalog_unique_metadata_ids_still_pass(tmp_path: Path) -> None:
     catalog = _catalog_with_ids(tmp_path, ["first-id", "second-id"])
     reports = tmp_path / "reports"

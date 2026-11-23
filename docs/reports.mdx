@@ -404,13 +404,12 @@ JUnit when a CI system ingests test reports rather than workflow commands.
 Advisory (non-blocking) results emit `::warning` in place of `::error`, while
 blocking results keep `::error`; the required gate itself is unchanged.
 
-`file=` is the path relative to the Git repository root (the scanned folder
-when the target is not in a Git repository), using the same resolution rules
-as SARIF and JUnit except on POSIX when a backslash is part of an existing
-file name (for example a tracked `alpha/design\notes.md`, which keeps
-`file=alpha/design\notes.md` while SARIF and JUnit normalize it to
-`alpha/design/notes.md`). GitHub resolves it against the checkout. `line=` (and
-`endLine=` when recorded) is included when the finding has a location.
+`file=` is the path relative to the Git repository root, or to the scanned
+folder when the target is outside a Git repository. GitHub resolves it against
+the checkout. On POSIX, GitHub preserves a backslash in an existing file name.
+For a tracked `alpha/design\notes.md`, GitHub emits
+`file=alpha/design\notes.md` and SARIF and JUnit use `alpha/design/notes.md`.
+`line=` (and `endLine=` when recorded) is included when the finding has a location.
 `file` is omitted when the path is outside the repository. In a catalog run,
 member skill annotations resolve paths against the catalog's repository root
 (including across nested Git repositories), or omit `file` and prefix the

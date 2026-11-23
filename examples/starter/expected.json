@@ -16,7 +16,8 @@
   "evaluator_versions": {
     "1.0.0": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}},
     "1.0.1": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}},
-    "1.1.0": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}
+    "1.1.0": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}},
+    "1.1.1": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}
   },
   "checkout": {"quality": {"score": 88.8}, "regressed": {"score": 72.8}}
 }

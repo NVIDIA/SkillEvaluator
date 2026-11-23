@@ -172,8 +172,9 @@ full rows remain in each trial's `reward.json`.
 
 The HTML Tier 2 view separates **Intra-Skill** (redundant content among
 its files) from **Inter-Skill** (catalog or collection comparisons). Each
-scope shows Checks completed, Duplicate findings, Affected files or skills,
-and Catalog entries compared. Completion uses recorded comparison
+scope shows Checks completed, Duplicate findings (Similarity matches in the
+Inter-Skill scope), Affected files or entries, and Catalog entries compared.
+Completion uses recorded comparison
 evidence; a completed check can still fail its gate because it found duplicates.
 Refused LLM classifications and file safety errors remain visible findings,
 but do not count as confirmed duplicates within a skill.
@@ -182,9 +183,14 @@ A completed comparison with no matches shows zero. A skipped catalog comparison,
 missing metadata, or an incomplete scan shows the recorded reason and unavailable
 counts. Target against catalog comparisons exclude the target's recorded self
 entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
-as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
-so equal display names do not merge distinct skills. Token or context savings
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file, skill or
+catalog entry paths, so equal display names do not merge distinct skills. Token or context savings
 are not estimated from duplicate counts.
+
+Tier 2 results that belong to neither scope, such as dependency-reference
+checks, appear in a separate **Other checks** tab under "Other recorded checks".
+That tab has no summary counts. It lists each result with its own errors and
+findings, and names each clean result with its check name and recorded details.
 
 HTML, terminal, and Markdown reports link every recorded Harbor job to its
 **Results** and available **Analysis**. HTML uses concise labels from the
@@ -835,7 +841,9 @@ completed run directly:
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied, and
   `incomplete_sections`, `required_complete` and `required_missing` say which
-  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence did not reach the judge whole. For `accuracy` and `goal_accuracy`,
+  `incomplete_sections` names the sections that did not reach the judge
+  whole. A `behavior_check` whose required
   evidence is incomplete is reported as an evaluation error with no score,
   which also leaves the trial's `overall_score` null; see
   [evidence budgets](/skills/skillevaluator/tier3-grading#evidence-budgets).
@@ -1028,9 +1036,12 @@ tool names, these calls are productive: reading, searching, listing, writing,
 editing or patching files (`Write`, `Edit`, `MultiEdit`, `apply_patch`, `LS`,
 OpenCode `list`, Codex `list_dir` and `grep_files`, and similar), running
 commands and activating a skill. MCP tools named `mcp__server__tool`, as Claude
-Code records them, are productive too. Codex records an MCP call under the bare
-tool name and OpenCode as `server_tool`, so these calls are classified by their
-name like any other tool, and most such names count as wasted. A Codex name
+Code records them, are productive too. When a missing or empty Harbor trajectory
+is rebuilt from `codex.txt`, the recorded `server` and `tool` fields produce the
+same MCP name and remain separate, so `__` inside a server name does not change
+its identity. Codex MCP calls in Harbor's existing graded trajectory are not yet
+recognized as MCP; their bare names and OpenCode names such as `server_tool` are
+classified like any other tool, and most such names count as wasted. A Codex name
 with a namespace, such as `functions.apply_patch`, is classified by the part
 after the last dot. Help, version and install commands are wasted, whether
 written as text or recorded as an argument list, as is any tool outside these
@@ -1048,6 +1059,14 @@ neutral, as is a `Monitor` watch with no command. A command typed with
 reason names how many calls were not counted. A trial whose only calls are
 neutral did no work: it scores tool efficiency 0.0, so its `skill_efficiency`
 is 0.0, the same as a trial with no tool calls.
+
+In rebuilt Codex logs, MCP tools count as MCP work instead of neutral planning
+even when their bare name is a neutral planning or bookkeeping name, such as
+`task`, `update_plan`, `spawn_agent`, `wait`, `agent` or `todowrite`. An MCP
+tool named `skill` also remains an MCP call; it does not count as a Skill-tool
+activation. These rules do not change Harbor-provided Codex trajectories.
+Candidates created by `tier3 import-traces` from Codex exports likewise retain
+the recorded MCP identity in `mcp__server__tool` labels.
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
 whether or not the command names the expected skill or script. This includes

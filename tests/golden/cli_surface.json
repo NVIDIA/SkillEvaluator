@@ -860,6 +860,16 @@
           ],
           "param_type": "option",
           "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -1480,6 +1490,16 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -3316,6 +3336,16 @@
               "name": "verify_models",
               "opts": [
                 "--verify-models"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
               ],
               "param_type": "option",
               "type": "boolean"

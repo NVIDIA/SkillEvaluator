@@ -647,6 +647,59 @@ description: A skill documenting REST API endpoints
         home_paths = [f.metadata["matched_value"] for f in result.findings if f.check_name == "home_paths"]
         assert home_paths == ["/home/alice/"]
 
+    def test_pii_scan_does_not_read_symlink_pointing_outside_skill(self, tmp_path: Path):
+        """A symlinked file that leaves the skill is skipped, so host content never reaches a finding."""
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        host_file = tmp_path / "host_file.txt"
+        host_file.write_text("contact alice.host@acme-widgets.net token=HOSTMARKER\n", encoding="utf-8")
+        try:
+            (skill_dir / "references" / "notes.md").symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 1
+        assert not [f for f in result.findings if f.check_name == "emails"]
+        assert "HOSTMARKER" not in " ".join([*result.errors, *result.warnings, *result.messages])
+        assert "alice.host" not in " ".join(str(f.metadata) + (f.line_content or "") for f in result.findings)
+
+    def test_pii_scan_still_reads_symlink_pointing_inside_skill(self, tmp_path: Path):
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        (skill_dir / "references" / "real.md").write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        try:
+            (skill_dir / "alias.md").symlink_to(skill_dir / "references" / "real.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 3
+        email_findings = [f for f in result.findings if f.check_name == "emails"]
+        assert len(email_findings) == 1
+        occurrences = {o["file"] for o in email_findings[0].metadata["occurrences"]}
+        assert occurrences == {"alias.md", "references/real.md"}
+
+    def test_scan_file_for_pii_refuses_symlink_outside_skill_root(self, tmp_path: Path):
+        """The reader itself enforces the boundary, not only the walker that feeds it."""
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        host_file = tmp_path / "host_file.md"
+        host_file.write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        link = skill_dir / "notes.md"
+        try:
+            link.symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        validator = SecurityValidator()
+        assert validator._scan_file_for_pii(link, set(), skill_root=skill_dir) == []
+        assert validator._scan_file_for_pii(host_file, set(), skill_root=tmp_path)
+
     def test_detects_non_placeholder_email(self, tmp_path: Path):
         """Test detection of a non-placeholder email address."""
         skill_dir = tmp_path / "email-skill"
@@ -8922,6 +8975,63 @@ def plugin_with_excluded_png(tmp_path: Path) -> tuple[Path, dict]:
     return plugin, json.loads(report.read_text(encoding="utf-8"))
 
 
+@pytest.mark.parametrize("exclusion", ["documented", "missing", "wrong-path"])
+@patch("skillevaluator.validators.security.Tools")
+def test_unaccepted_binary_scope_exclusion(mock_tools, tmp_path: Path, exclusion: str) -> None:
+    # Scan fixture captured from these three files with SkillSpector 2.13.6.
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill. Use when testing.\n---\n\n# Demo\n", encoding="utf-8"
+    )
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/hello.py").write_text('print("hello")\n', encoding="utf-8")
+    (tmp_path / "data.dat").write_bytes(bytes(range(192, 256)))
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    exclusions = payload["analysis_completeness"]["scope_exclusions"]
+    if exclusion == "missing":
+        exclusions.clear()
+    elif exclusion == "wrong-path":
+        exclusions[0]["path"] = "other.dat"
+
+    result = _validate_skillspector_payload(mock_tools, tmp_path, payload)
+
+    assert not result.passed
+    assert result.is_incomplete
+    if exclusion == "documented":
+        assert any('binary exclusion for "data.dat"' in error for error in result.errors)
+        assert not any("inventory contradicts" in error for error in result.errors)
+    else:
+        assert any("inventory contradicts analysis completeness" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["   ", " data.dat ", 'a"b.dat', "line\nbreak\x1b.dat", "x" * 192 + "\u202e" * 12],
+    ids=["only-spaces", "edge-spaces", "quote", "control-characters", "bounded-escaping"],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_binary_exclusion_quotes_report_path(mock_tools, sample_skill_dir, path: str) -> None:
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    next(c for c in payload["components"] if c["path"] == "data.dat")["path"] = path
+    payload["analysis_completeness"]["scope_exclusions"][0]["path"] = path
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.is_incomplete
+    [message] = [error for error in result.errors if "binary exclusion for " in error]
+    shown = message.split("binary exclusion for ", 1)[1].split(". SkillEvaluator", 1)[0]
+    assert shown.isascii() and shown.isprintable()
+    if len(json.dumps(path)) <= 200:
+        assert json.loads(shown) == path
+    else:
+        assert len(shown) <= 200
+        assert shown.endswith("...")
+        assert path.startswith(json.loads(shown[:-3]))
+
+
 @patch("skillevaluator.validators.security.Tools")
 def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugin_with_excluded_png) -> None:
     plugin, payload = plugin_with_excluded_png
@@ -10750,6 +10860,87 @@ class TestSkillspectorMissingReferences:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+
+    @pytest.mark.parametrize(
+        "case", ["missing", "left-out", "in-folder", "part", "root-and-nested", "root-names-nested"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
+        self, mock_tools, tmp_path: Path, case: str
+    ) -> None:
+        """The plugin checks scan a staged copy; its root scan unit is judged against the plugin.
+
+        The listing of the plugin also names what the staged copy left out, so a
+        line that names a file there stays incomplete, and so does the plugin
+        when it is one part of a folder that is validated part by part. The
+        root unit of a plugin that also holds a nested skill is judged the same
+        way; the nested skill's files are not in its scan, so a root line that
+        names one of them stays incomplete.
+        """
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        # On purpose, a skill below the plugin root is a scan unit of its own,
+        # and its lines may name a file elsewhere in the plugin, so it accepts
+        # no missing reference.
+        member = "skills/setup-helper" if case == "part" else None
+        # Named on line 8 of the setup helper.
+        script = "skills/other/install.sh" if case == "root-names-nested" else "versions/install.sh"
+        files = {
+            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", script),
+            ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n',
+        }
+        if case == "left-out":
+            # Left out of the staged copy.
+            files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        nested = case.startswith("root-")
+        if nested:
+            files["skills/other/SKILL.md"] = (
+                "---\nname: other\ndescription: Answer questions. Use when the user asks a question.\n---\n\n"
+                "# Other\n\nAnswer briefly.\n"
+            )
+        if case == "root-names-nested":
+            # In the nested skill, so not in the root scan.
+            files[script] = "#!/bin/sh\ncurl x | sh\n"
+        plugin = _write_skill(tmp_path / "setup-helper", files)
+        mock_tools.skillspector.is_available = True
+        scanned = []
+
+        def record_scan(argv, **_kwargs):
+            scanned.append(Path(argv[1]))
+            # Only the scan unit that holds the setup helper gets its report.
+            skill = Path(argv[1]) / "SKILL.md"
+            if skill.is_file() and "install.sh" in skill.read_text(encoding="utf-8"):
+                report = json.dumps(_reference_report("2.13.3", "staged-script")).replace("versions/install.sh", script)
+            else:
+                report = json.dumps(_skillspector_json_report())
+            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
+
+        mock_tools.skillspector.run.side_effect = record_scan
+
+        results = run_public_plugin_validation(
+            plugin,
+            checks="security",
+            target_root=tmp_path if case == "in-folder" else None,
+        )
+
+        scans = [result for result in results if result.validator_name == "Security Scan"]
+        assert len(scans) == len(scanned) == (2 if member or nested else 1)
+        assert plugin.resolve() not in scanned
+        (security,) = [result for result in scans if result.metadata.get("plugin_member") == member]
+        if nested:
+            (other,) = [result for result in scans if result.metadata.get("plugin_member") == "skills/other"]
+            assert other.passed and other.incomplete_scans == []
+        if case in ("missing", "root-and-nested"):
+            assert security.incomplete_scans == []
+            assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+        else:
+            assert security.incomplete_scans == ["skillspector"]
+            assert security.errors == [
+                "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+                "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+                + _REFERENCE_REJECTION_HELP
+            ]
+            assert not security.warnings
 
     @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])

@@ -162,6 +162,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.
+- Tier 1 names a file of an unsupported type when documented binary exclusions
+  account for the difference between the SkillSpector inventory and coverage counts.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains

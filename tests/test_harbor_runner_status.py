@@ -692,11 +692,17 @@ def test_bounded_harbor_process_failure_reaps_windows_descendants(
         # the assertion checks the original process even if its PID is reused.
         deadline = time.monotonic() + 10
         try:
-            while not ready_path.is_file():
-                if process.poll() is not None or time.monotonic() >= deadline:
-                    raise RuntimeError("Windows process-tree fixture did not become ready")
-                time.sleep(0.01)
-            parent_pid, child_pid = map(int, ready_path.read_text(encoding="ascii").split())
+            while True:
+                try:
+                    process_ids = ready_path.read_text(encoding="ascii")
+                except (FileNotFoundError, PermissionError) as exc:
+                    # The renamed file can be visible before Windows lets us open it.
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError("Windows process-tree fixture did not become ready") from exc
+                    time.sleep(0.01)
+                else:
+                    break
+            parent_pid, child_pid = map(int, process_ids.split())
             child_handle = kernel32.OpenProcess(synchronize_and_terminate, False, child_pid)
             if not child_handle:
                 raise ctypes.WinError(ctypes.get_last_error())

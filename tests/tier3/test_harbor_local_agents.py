@@ -367,6 +367,42 @@ def test_bridge_artifact_redaction_reports_a_listed_folder_moved_during_the_pass
     assert token in (logs / "a" / "t.jsonl").read_text(encoding="utf-8")
 
 
+@pytest.mark.parametrize("through_descriptors", [True, False])
+def test_bridge_artifact_redaction_reports_a_listed_file_moved_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, through_descriptors: bool
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    if through_descriptors and os.name != "posix":
+        pytest.skip("folder descriptors require POSIX")
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", through_descriptors)
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    (logs / "a").mkdir(parents=True)
+    (logs / "z").mkdir()
+    first = logs / "z" / "s.jsonl"
+    source = logs / "z" / "t.jsonl"
+    moved = logs / "a" / "t.jsonl"
+    first.write_text(token, encoding="utf-8")
+    source.write_text(token, encoding="utf-8")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_move(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if relative_path == Path("z/s.jsonl"):
+            # The walk has already visited a/ and listed t.jsonl under z/.
+            source.rename(moved)
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_move)
+
+    assert local_agents._redact_bridge_artifacts(logs, {token}) == ["z/t.jsonl"]
+    assert token not in first.read_text(encoding="utf-8")
+    assert token in moved.read_text(encoding="utf-8")
+
+
 @pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])
 @pytest.mark.parametrize("moment", ["after_read", "while_copying"])
 def test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported(

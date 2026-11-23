@@ -225,6 +225,8 @@ def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
                     try:
                         metadata = lstat_entry(name)
                     except FileNotFoundError:
+                        # A listed entry may have moved into a folder already walked.
+                        unmasked.append(relative.as_posix())
                         continue
                     if stat_is_link_or_reparse(metadata):
                         continue

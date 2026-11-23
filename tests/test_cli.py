@@ -624,8 +624,15 @@ def doctor_calls(monkeypatch: pytest.MonkeyPatch) -> list[dict]:
     from skillevaluator.tier3 import commands as tier3_commands
 
     calls: list[dict] = []
+    stub_rows = [("CLI package", "pass", "skillevaluator test")]
     monkeypatch.setattr(readiness, "doctor", lambda **options: calls.append(options) or 0)
+    monkeypatch.setattr(readiness, "readiness_rows", lambda **options: calls.append(options) or list(stub_rows))
     monkeypatch.setattr(tier3_commands, "doctor", lambda **options: calls.append({"tier": "3", **options}) or 0)
+    monkeypatch.setattr(
+        tier3_commands,
+        "readiness_rows",
+        lambda **options: calls.append({"tier": "3", **options}) or list(stub_rows),
+    )
     return calls
 
 
@@ -849,6 +856,135 @@ def test_tier3_doctor_stays_live_evaluation_only(doctor_calls) -> None:
     assert result.exit_code == 0, result.output
     assert [call["tier"] for call in doctor_calls] == ["3"]
     assert doctor_calls[0]["verify_models"] is True
+
+
+@pytest.fixture
+def doctor_json_rows(monkeypatch: pytest.MonkeyPatch) -> dict[str, list[tuple[str, str, str]]]:
+    """Known rows for JSON rollup tests; no scanners, providers, or backends."""
+    import skillevaluator.doctor as readiness
+    from skillevaluator.tier3 import commands as tier3_commands
+
+    rows_by_tier = {
+        "1": [("CLI package", "pass", "skillevaluator test"), ("Semgrep", "warn", "version not reported; /x")],
+        "2": [("CLI package", "pass", "skillevaluator test"), ("Embedding provider", "pass", "nv_build / m")],
+        "3": [("CLI package", "pass", "skillevaluator test"), ("Harbor agents", "fail", "Unknown: nope")],
+    }
+    monkeypatch.setattr(readiness, "readiness_rows", lambda **options: list(rows_by_tier[options["tier"]]))
+    monkeypatch.setattr(tier3_commands, "readiness_rows", lambda **_options: list(rows_by_tier["3"]))
+    return rows_by_tier
+
+
+def test_json_tier_all_orders_tiers_and_rolls_up_status(doctor_json_rows) -> None:
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "all", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert [tier["tier"] for tier in payload["tiers"]] == ["1", "2", "3"]
+    assert [tier["status"] for tier in payload["tiers"]] == ["warn", "pass", "fail"]
+    assert payload["status"] == "fail"
+
+
+def test_health_check_json_tier_all_uses_command_name(doctor_json_rows) -> None:
+    result = CliRunner().invoke(cli, ["health-check", "--tier", "all", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["command"] == "health-check"
+    assert [tier["tier"] for tier in payload["tiers"]] == ["1", "2", "3"]
+
+
+def test_tier3_doctor_json_uses_tier3_rows(doctor_json_rows) -> None:
+    result = CliRunner().invoke(cli, ["tier3", "doctor", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert payload["command"] == "doctor"
+    assert payload["tiers"] == [
+        {
+            "tier": "3",
+            "status": "fail",
+            "checks": [
+                {"check": "CLI package", "status": "pass", "detail": "skillevaluator test"},
+                {"check": "Harbor agents", "status": "fail", "detail": "Unknown: nope"},
+            ],
+        }
+    ]
+
+
+def test_tier3_doctor_json_strips_terminal_controls(doctor_json_rows) -> None:
+    model = "m\x1b]8;;https://example.invalid\x07click\x1b]8;;\x07\x9b2Jz"
+    doctor_json_rows["3"][1] = ("Public LLM provider", "pass", f"openai / {model}")
+
+    result = CliRunner().invoke(cli, ["tier3", "doctor", "--json"])
+
+    assert result.exit_code == 0, result.output
+    assert not any(char in result.output for char in ("\x1b", "\x07", "\x9b"))
+    checks = json.loads(result.output)["tiers"][0]["checks"]
+    assert checks[1] == {"check": "Public LLM provider", "status": "pass", "detail": "openai / mclick2Jz"}
+
+
+def test_doctor_json_without_the_tier3_extra_is_a_fail_tier(monkeypatch) -> None:
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, ["doctor", "--json"])
+
+    assert result.exit_code == 1
+    payload = json.loads(result.output)
+    assert payload["status"] == "fail"
+    assert payload["tiers"] == [
+        {
+            "tier": "3",
+            "status": "fail",
+            "checks": [
+                {
+                    "check": "Tier 3 extra",
+                    "status": "fail",
+                    "detail": "Tier 3 dependencies are not installed. Install skillevaluator[tier3] and try again.",
+                }
+            ],
+        }
+    ]
+    stderr = getattr(result, "stderr", "") or ""
+    assert "dependencies are not installed" not in stderr
+    assert "SkillEvaluator Doctor" not in result.output
+
+
+def test_doctor_json_all_without_the_tier3_extra_includes_lower_tiers(monkeypatch) -> None:
+    import skillevaluator.doctor as readiness
+
+    monkeypatch.setattr(
+        readiness,
+        "readiness_rows",
+        lambda **options: [("CLI package", "pass", f"tier {options['tier']}")],
+    )
+    _fail_tier3_commands_import(monkeypatch, missing="harbor")
+
+    result = CliRunner().invoke(cli, ["doctor", "--tier", "all", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.output)
+    assert [tier["tier"] for tier in payload["tiers"]] == ["1", "2", "3"]
+    assert payload["tiers"][0]["checks"][0]["detail"] == "tier 1"
+    assert payload["tiers"][1]["checks"][0]["detail"] == "tier 2"
+    assert payload["tiers"][2]["checks"][0]["check"] == "Tier 3 extra"
+    assert payload["status"] == "fail"
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["doctor", "--json", "--tier", "1", "--agents", "codex"],
+        ["health-check", "--json", "--tier", "2", "--timeout", "5"],
+        ["tier3", "doctor", "--json", "--tier", "1"],
+    ],
+)
+def test_json_usage_error_exits_2_without_json(doctor_calls, args) -> None:
+    result = CliRunner().invoke(cli, args)
+
+    assert result.exit_code == 2, result.output
+    with pytest.raises(json.JSONDecodeError):
+        json.loads(result.output or "")
+    assert doctor_calls == []
 
 
 def test_removed_benchmark_authoring_command_is_unavailable() -> None:

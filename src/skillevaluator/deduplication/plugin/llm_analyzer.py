@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import json
 import math
+from dataclasses import dataclass
 
 from skillevaluator.constants import DESCRIPTION_MAX_LENGTH
 from skillevaluator.inference import LLMClientError, LLMVerdict
@@ -18,6 +19,9 @@ from .profile import MAX_PLUGIN_MEMBER_CHARS, MAX_PLUGIN_MEMBERS, PLUGIN_NAME_MA
 MAX_PROMPT_CHARS = 64_000
 MAX_TOTAL_PROMPT_CHARS = 1_000_000
 MAX_VERDICT_CALLS = 10
+# One run that compares several bundles shares these optional verdict limits.
+MAX_RUN_VERDICT_CALLS = 100
+MAX_RUN_PROMPT_CHARS = 1_000_000
 MAX_RESPONSE_SCALAR_CHARS = 8_192
 VALID_VERDICTS = frozenset({"WHOLE_DUPLICATE", "PARTIAL_OVERLAP", "UNIQUE"})
 SYSTEM_PROMPT = """Compare the purposes and capabilities of the two bundles.
@@ -78,6 +82,28 @@ def validate_prompt_batch(prompts):
         total += len(SYSTEM_PROMPT) + len(prompt)
     if total > MAX_TOTAL_PROMPT_CHARS:
         raise LLMClientError("Optional verdict aggregate prompt limit exceeded")
+
+
+@dataclass
+class VerdictAllowance:
+    """Optional verdict calls and prompt characters shared by every bundle in one run."""
+
+    call_limit: int = MAX_RUN_VERDICT_CALLS
+    prompt_char_limit: int = MAX_RUN_PROMPT_CHARS
+    calls_reserved: int = 0
+    prompt_chars_reserved: int = 0
+
+    def reserve(self, prompts) -> bool:
+        """Reserve a whole batch before its first request; refuse it if the run cannot cover it."""
+        chars = sum(len(SYSTEM_PROMPT) + len(prompt) for prompt in prompts)
+        if (
+            self.calls_reserved + len(prompts) > self.call_limit
+            or self.prompt_chars_reserved + chars > self.prompt_char_limit
+        ):
+            return False
+        self.calls_reserved += len(prompts)
+        self.prompt_chars_reserved += chars
+        return True
 
 
 def analyze_inter_plugin(client, user_prompt):

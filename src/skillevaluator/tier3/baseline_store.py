@@ -118,9 +118,9 @@ def baseline_task_tree_digest(task_dirs_by_agent: dict[str, Sequence[Path]]) -> 
             digest.update(len(header).to_bytes(8, "big"))
             digest.update(header)
             for path in sorted(task_dir.rglob("*")):
-                if path.name == "repo-context.json":
-                    continue
                 relative = path.relative_to(task_dir).as_posix()
+                if relative == "environment/repo-context.json":
+                    continue
                 if path.is_symlink():
                     content = b"symlink\0" + path.readlink().as_posix().encode("utf-8")
                 elif path.is_file():

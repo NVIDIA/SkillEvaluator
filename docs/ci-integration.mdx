@@ -177,6 +177,14 @@ when you want them.
 
 The same shape ports to any CI system: install, run `validate`, gate on the exit code, archive `reports/`.
 
+To require a complete scanner set before `validate`, without scraping the readiness table:
+
+```bash title="Scanner preflight"
+skillevaluator health-check --tier 1 --checks security,code-integrity,dependency --json > readiness.json
+```
+
+`--checks` names the checks whose scanners are probed; `dependency` is opt-in in `validate`, so it is listed here to include pip-audit with SkillSpector, Bandit, Semgrep and Gitleaks. The command exits `1` when any scanner is missing, misconfigured, or older than the supported release. The JSON names each failing check. Guided installation is not part of this command.
+
 ## Validating collections
 
 Point `validate` at a folder of skills and it validates each one:

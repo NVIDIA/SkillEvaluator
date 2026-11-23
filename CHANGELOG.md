@@ -185,6 +185,18 @@ notes below describe the new policy and backend configuration behavior.
   placeholder becomes one random UUID per client. Harbor verifier judges,
   embeddings, in-container agents, and reusable CI commands use separate
   configuration.
+- Add GitHub Actions annotation reports with `-r github`. The format prints
+  `::error`, `::warning`, and `::notice` workflow commands on stdout so a job
+  that runs the CLI can annotate the pull request without uploading SARIF.
+  Incomplete scanners are warnings, gate failures stay errors, and the run
+  ends with a summary notice that records how many findings were not annotated
+  under GitHub's per-step cap and how to see the omitted findings.
+  Catalog report-write failures appear as errors even when a scanner is incomplete.
+  Pathless skill findings anchor on the skill's `SKILL.md` when inside the
+  workspace, or include the skill's catalog-relative path.
+  Merged plugin and collection member findings resolve their unprefixed file
+  path, or fall back to the manifest anchor and member label when outside the
+  workspace.
 
 ### Fixed
 

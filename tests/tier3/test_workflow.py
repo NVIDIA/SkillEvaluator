@@ -499,12 +499,15 @@ def test_fifo_dataset_is_rejected_without_blocking(skill, configured):
     (skill / "evals").mkdir()
     os.mkfifo(skill / "evals" / "evals.json")
     command = (
+        "import faulthandler; "
         "from skillevaluator.cli import evaluate; "
         "from skillevaluator.tier3.workflow import build_tier3_workflow; "
+        "faulthandler.dump_traceback_later(5, exit=True); "
         "build_tier3_workflow(evaluate).main()"
     )
+    # Keep the five-second FIFO guard separate from cold CLI imports.
     result = subprocess.run(
-        [sys.executable, "-c", command, str(skill)], capture_output=True, text=True, timeout=5, check=False
+        [sys.executable, "-c", command, str(skill)], capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode != 0
     assert "regular non-linked file" in result.stderr.lower()
@@ -640,12 +643,15 @@ def test_legacy_fifo_is_rejected_without_blocking(skill, configured):
     (skill / "eval").mkdir()
     os.mkfifo(skill / "eval" / "dataset.json")
     command = (
+        "import faulthandler; "
         "from skillevaluator.cli import evaluate; "
         "from skillevaluator.tier3.workflow import build_tier3_workflow; "
+        "faulthandler.dump_traceback_later(5, exit=True); "
         "build_tier3_workflow(evaluate).main()"
     )
+    # Keep the five-second FIFO guard separate from cold CLI imports.
     result = subprocess.run(
-        [sys.executable, "-c", command, str(skill)], capture_output=True, text=True, timeout=5, check=False
+        [sys.executable, "-c", command, str(skill)], capture_output=True, text=True, timeout=60, check=False
     )
     assert result.returncode != 0
     assert "eval/dataset" in result.stderr

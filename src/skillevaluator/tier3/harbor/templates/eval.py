@@ -3073,6 +3073,147 @@ def _redact_judge_evidence_as_written(text):
     return _mask_judge_evidence_value_sites(redacted, sites) if sites else redacted
 
 
+_PRIVATE_KEY_BEGIN_RE = re.compile(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_BEGIN)
+_PRIVATE_KEY_END_RE = re.compile(_shared_checks._FINDING_EVIDENCE_PRIVATE_KEY_END)
+# A line of key data. PEM and PGP wrap it at 64 characters or more, and a key
+# written on one line or with escaped line breaks has runs of that length too.
+_PRIVATE_KEY_DATA_RE = re.compile(r"[A-Za-z0-9+/]{32}")
+# The last line of key data can be short, and a PGP block has a checksum line
+# after it. Either can follow a file name or a line number (grep -n, cat -n).
+_PRIVATE_KEY_LAST_LINE_RE = re.compile(r"[ \t]*(?:\S+:|\d+[ \t]+)?[A-Za-z0-9+/=]+[ \t\r]*")
+# The key data that a line ends with, matched on the line read backwards. It
+# has no "=" apart from its padding and the one that starts a PGP checksum.
+_PRIVATE_KEY_LINE_END_RE = re.compile(r"={0,2}[A-Za-z0-9+/]+=?")
+_PRIVATE_KEY_DIGITS_RE = re.compile(r"\d+")
+_PRIVATE_KEY_BLANKS_RE = re.compile(r" +|\t+")
+# The header lines that a PGP block and an encrypted PEM block have between
+# the header and the data, spelled as _line_start_shape leaves them.
+_PRIVATE_KEY_ARMOR_NAME_RE = re.compile(r"(?:Version|Comment|MessageID|Hash|Charset|Proc:Type|DEK:Info): ")
+_PRIVATE_KEY_CLOSING_LINE = "-----END PRIVATE KEY-----"
+
+
+def _line_start_shape(start):
+    """Return *start* with each number as one digit, each run of spaces or of tabs as one, and "-" as ":".
+
+    What a tool puts in front of the lines it prints (a line number, a time,
+    a file name) then reads the same on each of them, however wide a number
+    is. grep ends it with ":" on a line that matches and with "-" on the
+    lines it prints around one.
+    """
+    start = _PRIVATE_KEY_BLANKS_RE.sub(lambda found: found.group()[0], start.lstrip())
+    return _PRIVATE_KEY_DIGITS_RE.sub("0", start).replace("-", ":")
+
+
+def _private_key_data_lines(lines, before):
+    """Find the key data in *lines*, the first of which starts with a key header.
+
+    Return the index of the last line that has a long run of key characters,
+    or None, and for each line with a header the index of the last line of
+    the key data that follows it line after line, which is its own index
+    when none does.
+
+    A key can be wrapped at any width. So the lines right after a header
+    line are key data, one after the other, as long as each ends with key
+    characters and has nothing in front of them but what the header line
+    begins with (a file name, a line number, a time), both read as
+    _line_start_shape reads them. Key data has letters of both cases. Lines
+    that have one case between them, such as OK, a list of numbers or a list
+    of short hashes, are not taken for it. The lines an armored block has
+    between its header and its data can come first.
+    *before* is what stands in front of the first line on its own line.
+    """
+    last_long = None
+    key_lines = {}
+    header_line = 0
+    # What the header line begins with, while the lines in hand follow it.
+    start = None
+    for index, line in enumerate(lines):
+        if _PRIVATE_KEY_DATA_RE.search(line):
+            last_long = index
+        header = _PRIVATE_KEY_BEGIN_RE.search(line)
+        if header:
+            start = _line_start_shape(line[: header.start()] if index else before)
+            header_line = index
+            key_lines[index] = index
+            data_lines = upper = lower = False
+        elif start is not None:
+            body = line.rstrip(" \t\r")
+            data = _PRIVATE_KEY_LINE_END_RE.match(body[::-1])
+            if data and start.startswith(_line_start_shape(body[: len(body) - data.end()])):
+                data_lines = True
+                upper = upper or data.group() != data.group().lower()
+                lower = lower or data.group() != data.group().upper()
+                if upper and lower:
+                    key_lines[header_line] = index
+            elif data_lines or (body and not _is_armor_line(body, start)):
+                start = None
+    return last_long, key_lines
+
+
+def _is_armor_line(body, start):
+    """Whether *body* is a line an armored block can have between its header and its data.
+
+    That is one of the header lines of the block, behind something the
+    header line begins with, or a line that has nothing else on it, as an
+    empty line has behind a line number or a time. *start* is what the
+    header line begins with.
+    """
+    shape = _line_start_shape(body)
+    named = _PRIVATE_KEY_ARMOR_NAME_RE.search(shape)
+    return start.startswith(shape[: named.start()] if named else shape)
+
+
+def _close_open_private_key_blocks(text):
+    """End each private key block in *text* that has no END line.
+
+    The first such block runs at least to the last line after its header
+    that has a long run of key characters. The key data that follows a
+    header line after line belongs to the block of that header and to no
+    other. A header with no key data after it ends right after itself.
+    """
+    after_last_end = 0
+    for found in _PRIVATE_KEY_END_RE.finditer(text):
+        after_last_end = found.end()
+    header = _PRIVATE_KEY_BEGIN_RE.search(text, after_last_end)
+    if header is None:
+        return text
+    lines = text[header.start() :].split("\n")
+    last, key_lines = _private_key_data_lines(lines, text[text.rfind("\n", 0, header.start()) + 1 : header.start()])
+    if last is not None:
+        for _ in range(2):
+            if last + 1 < len(lines) and _PRIVATE_KEY_LAST_LINE_RE.fullmatch(lines[last + 1]):
+                last += 1
+    blocks = []
+    for start, stop in key_lines.items():
+        if not start and last is not None:
+            stop = max(stop, last)
+        if blocks and start <= blocks[-1][1]:
+            blocks[-1][1] = max(blocks[-1][1], stop)
+        else:
+            blocks.append([start, stop])
+    for start, stop in blocks:
+        if stop == start and (start or last is None):
+            lines[start] = _PRIVATE_KEY_BEGIN_RE.sub(
+                lambda found: found.group() + _PRIVATE_KEY_CLOSING_LINE, lines[start]
+            )
+        else:
+            lines[stop] += _PRIVATE_KEY_CLOSING_LINE
+    return text[: header.start()] + "\n".join(lines)
+
+
+def _redact_tool_result(text):
+    """Mask credentials in a tool result before the judges get an excerpt of it.
+
+    This is the masking of saved judge evidence, with one difference. That
+    masking reads a private key header with no END line as a key that runs to
+    the end of the text. A tool result often only mentions such a header (a
+    grep hit, a line of a README), and the end of the result is what its
+    excerpt is there to show. So the block is closed where its key data ends
+    before the result is masked.
+    """
+    return _redact_judge_evidence(_close_open_private_key_blocks(str(text)))
+
+
 def _verifier_output_dir():
     """Directory that receives skill_evaluator_reward.json (see write_reward_outputs)."""
     if (
@@ -4661,7 +4802,11 @@ def main():
         details["skill_efficiency"] = checks
 
     bundles = build_metric_evidence_bundles(
-        traj, question, ground_truth=ground_truth, expected_behavior=expected_behavior
+        traj,
+        question,
+        ground_truth=ground_truth,
+        expected_behavior=expected_behavior,
+        redact=_redact_tool_result,
     )
 
     # Every judge attempt below is saved to judge_attempts.json as it happens.

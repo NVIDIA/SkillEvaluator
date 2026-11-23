@@ -68,14 +68,6 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- The `skillspector_completeness` ledger in JSON reports keeps up to 500
-  exception rows per skill (was 20) and up to 512 records per report (was
-  64), and each record now states `ledger_rows_retained` and
-  `ledger_rows_total`. A 227-skill library whose scanner reported 521
-  incomplete rows previously showed 268, so fixing the visible rows did not
-  clear the gate; the omitted count was recorded but not surfaced. When the
-  cap applies, the security gate message counts the ledger rows for the
-  reported gaps, including how many exceed the per-record limit.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
@@ -86,6 +78,14 @@ All notable changes to SkillEvaluator are documented in this file.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
   treat the fenced content and labels as skill data and follow the rubric.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill (was 20) and up to 512 records per report (was
+  64), and each record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
 - Tier 1 file walkers skip symlinks and Windows directory junctions whose
   target resolves outside the skill directory (or is missing), so the PII,
   secrets, Unicode, license and link checks no longer read or quote files from

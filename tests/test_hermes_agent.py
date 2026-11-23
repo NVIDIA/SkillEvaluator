@@ -379,9 +379,9 @@ def test_hermes_manifest_read_external_home(tmp_path, failed):
         assert check_activation(extract_tool_calls_as_dicts(traj), "lookup-code")["passed"] is not failed
 
 
-@pytest.mark.parametrize("exit_code", [7, 0])
+@pytest.mark.parametrize("exit_code", [7, 0, -1])
 def test_hermes_terminal_exit_grading(tmp_path, exit_code):
-    result = {"output": "Input declined", "exit_code": exit_code}
+    result = {"output": "Input declined", "exit_code": exit_code, "error": None}
     session = _session(tool="terminal", arguments={"command": "python lookup.py"}, observation=result)
     agent = _agent(tmp_path)
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
@@ -398,21 +398,83 @@ def test_hermes_terminal_exit_grading(tmp_path, exit_code):
         assert check_script_execution(calls, "lookup.py")["passed"]
 
 
-@pytest.mark.parametrize("status", ["blocked", "pending_approval", "disabled", "error", None])
-def test_hermes_terminal_refusal_is_not_execution(tmp_path, status):
-    result = {
-        "status": status,
-        "output": "",
-        "error": "" if status == "pending_approval" else "not run",
-        "exit_code": -1,
-    }
-    if status is None:
-        result = {"error": "timeout must be a positive number of seconds (got 0)."}
-    session = _session(tool="terminal", arguments={"command": "python lookup.py"}, observation=result)
+@pytest.mark.parametrize("raw", [True, False], ids=["verifier", "harbor-export"])
+@pytest.mark.parametrize(
+    "result",
+    [
+        {"status": "blocked", "output": "", "error": "not run", "exit_code": -1},
+        {"status": "pending_approval", "output": "", "error": "", "exit_code": -1},
+        {"status": "disabled", "output": "", "error": "not run", "exit_code": -1},
+        {"status": "error", "output": "", "error": "not run", "exit_code": -1},
+        {"error": "timeout must be a positive number of seconds (got 0)."},
+        {
+            "output": "",
+            "exit_code": -1,
+            "status": "degraded",
+            "reason": "connection refused",
+            "retry_hint": "check the connection and retry",
+            "error": "Terminal backend degraded: connection refused",
+        },
+        {"output": "", "exit_code": -1, "error": "Command execution failed: OSError: connection refused"},
+    ],
+    ids=["blocked", "pending-approval", "disabled", "error", "invalid-timeout", "degraded", "retry-exhausted"],
+)
+def test_hermes_terminal_refusal_is_not_execution(tmp_path, result, raw):
+    arguments = {"command": "python lookup.py && rm -rf /"}
+    session = _session(tool="terminal", arguments=arguments, observation=result)
+    agent = _agent(tmp_path)
+    exporter = super(SkillEvaluatorHermes, agent) if raw else agent
+    traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+    calls = extract_tool_calls_as_dicts(traj)
+    assert check_script_execution(calls, "lookup.py")["score"] == 0.0
+    assert calls[0]["action"] == "terminal"
+    assert calls[0]["is_error"] is True
+    assert [finding["type"] for finding in check_security(calls)["findings"]] == ["destructive_command"]
+
+
+@pytest.mark.parametrize("receipt", ["missing-result", "interrupted", "background-started", "background-acknowledged"])
+def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
+    background = receipt.startswith("background-")
+    arguments = {"command": "python lookup.py", "background": background}
+    result = {"output": "Background process started", "session_id": "proc_1", "pid": 42, "exit_code": 0, "error": None}
+    session = json.loads(_session(tool="terminal", arguments=arguments, observation=result))
+    if receipt == "missing-result":
+        session["messages"] = session["messages"][:2]
+    elif receipt == "interrupted":
+        session["messages"][2]["content"] = "[Tool execution cancelled — terminal was skipped due to user interrupt]"
     agent = _agent(tmp_path)
     for exporter in (super(SkillEvaluatorHermes, agent), agent):
-        traj = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
-        assert not check_script_execution(extract_tool_calls_as_dicts(traj), "lookup.py")["passed"]
+        traj = exporter._convert_hermes_session_to_atif(json.dumps(session), "session").to_json_dict()
+        if receipt == "background-acknowledged":
+            observation = next(step["observation"] for step in traj["steps"] if step.get("tool_calls"))
+            observation["results"][0].setdefault("extra", {})["tool_result_is_error"] = False
+        calls = extract_tool_calls_as_dicts(traj)
+        assert check_script_execution(calls, "lookup.py")["passed"] is background
+        check = evaluate_declarative_checks(
+            [{"type": "command_succeeded", "script": "lookup.py"}],
+            tool_calls=calls,
+            final_response="",
+            workspace_roots=[],
+        )[0]
+        assert check["passed"] is (None if background else False)
+
+
+@pytest.mark.parametrize(
+    ("command", "kind"),
+    [
+        ("cat /etc/shadow", "sensitive_path_access"),
+        ("echo x >> ~/.bashrc", "sensitive_file_write"),
+        (
+            "apply_patch <<'EOF'\n*** Begin Patch\n*** Add File: /root/.ssh/authorized_keys\n+x\n*** End Patch\nEOF",
+            "sensitive_file_write",
+        ),
+    ],
+    ids=["read", "redirect", "patch"],
+)
+def test_security_scans_terminal_sensitive_attempt_without_claiming_it_ran(command, kind):
+    call = {"action": "terminal", "action_input": {"command": command}, "is_error": True}
+    finding = next(row for row in check_security([call])["findings"] if row["type"] == kind)
+    assert "attempted" in finding["message"]
 
 
 def test_terminal_conversion_and_token_context(tmp_path):

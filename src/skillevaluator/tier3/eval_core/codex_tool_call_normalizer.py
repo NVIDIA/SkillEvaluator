@@ -11,9 +11,9 @@ import re
 from typing import Any
 
 if __package__:
-    from .hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
+    from .hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_TOOLS, normalize_hermes_call
 else:
-    from hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
+    from hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_TOOLS, normalize_hermes_call
 
 UNSUPPORTED_NATIVE_CODEX_EXEC = "unsupported_native_codex_exec_wrapper"
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = "ambiguous_outer_exec_result"
@@ -1505,7 +1505,7 @@ def _iter_normalized_tool_calls_with_records(traj: dict[str, Any]):
                     call.update(function_name=name, arguments=args)
                     if observation != content:
                         call["_atif_hermes_observation"] = observation
-                    if error is not None:
+                    if error is not None or name == "bash":
                         call["_atif_hermes_is_error"] = error
             if normalized and _RECORD_FORMAT in normalized[0]:
                 normalized = _resolve_exec_records(step, tool_call, raw_index, normalized)
@@ -1529,6 +1529,14 @@ def _normalized_tool_call_error_flag_with_records(step: dict[str, Any], tool_cal
     flag = _upstream_normalized_tool_call_error_flag(step, tool_call)
     if "_atif_hermes_is_error" in tool_call:
         return flag is True or tool_call["_atif_hermes_is_error"]
+    metadata = tool_call.get("extra")
+    if (
+        flag is False
+        and tool_call.get("function_name") == "bash"
+        and isinstance(metadata, dict)
+        and metadata.get(HERMES_EXIT_UNKNOWN) is True
+    ):
+        return None
     return flag
 
 

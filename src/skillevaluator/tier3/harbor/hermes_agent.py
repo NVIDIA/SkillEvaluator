@@ -15,8 +15,12 @@ from harbor.agents.agent_auth_resolution import require_credential_env
 from harbor.agents.installed.base import with_prompt_template
 from harbor.agents.installed.hermes import Hermes
 
+from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import (
+    HERMES_EXIT_UNKNOWN,
+    HERMES_TOOLS,
+    normalize_hermes_call,
+)
 from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_HOME as _HOME
-from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
 from skillevaluator.tier3.harbor import HERMES_VERSION
 
 if TYPE_CHECKING:
@@ -165,6 +169,8 @@ class SkillEvaluatorHermes(Hermes):
                 call.function_name, call.arguments, error, observation = normalize_hermes_call(
                     call.function_name, call.arguments, content, native_session=True
                 )
+                if call.function_name == "bash" and error is None:
+                    call.extra = {**(call.extra or {}), HERMES_EXIT_UNKNOWN: True}
                 if result and content != observation:
                     result.content = observation
                 if result and error is not None:

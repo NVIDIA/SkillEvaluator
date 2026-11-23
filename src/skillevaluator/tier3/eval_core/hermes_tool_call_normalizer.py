@@ -6,6 +6,7 @@ import json
 from typing import Any
 
 HERMES_HOME = "/tmp/hermes"
+HERMES_EXIT_UNKNOWN = "hermes_process_exit_unknown"
 HERMES_TOOLS = ("terminal", "skill_view", "read_file")
 
 
@@ -56,18 +57,29 @@ def normalize_hermes_call(
         payload = {}
     error = bool(payload.get("error"))
     if name == "terminal":
+        if content == "[Tool execution cancelled — terminal was skipped due to user interrupt]":
+            return name, arguments, True, content
         has_exit_code = type(payload.get("exit_code")) is int
         has_output = isinstance(payload.get("output"), str)
         shell_result = (has_exit_code and (native_session or has_output)) or (error and has_output)
         if shell_result and isinstance(arguments.get("command"), str):
-            if payload.get("status") in ("blocked", "pending_approval", "disabled", "error"):
+            refused = payload.get("status") in ("blocked", "pending_approval", "disabled", "error", "degraded")
+            if refused or (has_exit_code and payload["exit_code"] == -1 and error):
                 return name, arguments, True, content
+            if (
+                has_exit_code
+                and payload["exit_code"] == 0
+                and not error
+                and payload.get("session_id")
+                and payload.get("output") == "Background process started"
+            ):
+                return "bash", arguments, None, content
             if has_exit_code:
                 content = f"Exit code: {payload['exit_code']}\n{content}"
             return "bash", arguments, error or payload["exit_code"] != 0, content
         if error:
             return name, arguments, True, content
-        if native_session:
+        if native_session and content:
             return "bash", arguments, None, content
     elif name == "skill_view":
         skill = arguments.get("name")

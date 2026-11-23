@@ -16,8 +16,9 @@ import shlex
 import stat
 import tempfile
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
-from contextlib import suppress
+from collections.abc import Awaitable, Callable, Iterator, Mapping
+from contextlib import closing, suppress
+from functools import partial
 from pathlib import Path, PurePosixPath
 from typing import TYPE_CHECKING, Any
 from urllib.parse import urlsplit
@@ -57,9 +58,9 @@ _NVIDIA_BUILD_FILE_BACKED_SENTINEL_KEY = "skillevaluator-file-backed-nvidia-key"
 _NVIDIA_BUILD_HOST_KEY_FILE_ENV = "SKILLEVALUATOR_NVIDIA_API_KEY_FILE"
 _BRIDGE_ARTIFACT_MAX_BYTES = 64 * 1024 * 1024
 _BRIDGE_ARTIFACT_MAX_PATHS = 10_000
-# POSIX replaces a masked log entry through directory descriptors; elsewhere the
-# atomic output writer is used.
-_REPLACE_THROUGH_DIRECTORY_DESCRIPTORS = os.name == "posix"
+# POSIX lists the log folder and replaces a masked log entry through directory
+# descriptors; elsewhere os.walk and the atomic output writer are used.
+_USE_DIRECTORY_DESCRIPTORS = os.name == "posix"
 # Local mode runs the CLI installed on the host, not the release Harbor installs
 # in other environments. These are the oldest releases that run each model family.
 _CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
@@ -78,6 +79,76 @@ def _same_bridge_artifact(current: os.stat_result, opened: os.stat_result) -> bo
     )
 
 
+def _open_bridge_folder(secure_root: SecureRoot, relative: Path) -> int:
+    """Open a folder under the pinned log folder, never following a link."""
+    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
+    directory_fd = secure_root.duplicate_posix_root_descriptor()
+    try:
+        for component in relative.parts:
+            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
+            os.close(directory_fd)
+            directory_fd = child_fd
+    except BaseException:
+        os.close(directory_fd)
+        raise
+    return directory_fd
+
+
+# Each listed folder: its path relative to the log folder, its sorted entry names,
+# a no-follow lstat for one of those names, and a list the caller fills with the
+# names to descend into.
+_BridgeFolder = tuple[Path, list[str], Callable[[str], os.stat_result], list[str]]
+
+
+def _bridge_folders_through_descriptors(secure_root: SecureRoot, unmasked: list[str]) -> Iterator[_BridgeFolder]:
+    """List folders top-down through descriptors opened from the pinned log folder.
+
+    No folder is opened by a path name: each one is reopened from the pinned
+    root without following links, so a folder swapped for a link during the
+    pass is reported instead of listed.
+    """
+    pending = [Path()]
+    while pending:
+        folder = pending.pop()
+        try:
+            directory_fd = _open_bridge_folder(secure_root, folder)
+        except FileNotFoundError:
+            continue
+        except OSError:
+            unmasked.append(folder.as_posix())
+            continue
+        descend: list[str] = []
+        try:
+            try:
+                with os.scandir(directory_fd) as entries:
+                    names = sorted(entry.name for entry in entries)
+            except OSError:
+                unmasked.append(folder.as_posix())
+                continue
+            yield folder, names, partial(os.stat, dir_fd=directory_fd, follow_symlinks=False), descend
+        finally:
+            os.close(directory_fd)
+        pending.extend(folder / name for name in reversed(descend))
+
+
+def _bridge_folders_by_path(logs_dir: Path, unmasked: list[str]) -> Iterator[_BridgeFolder]:
+    """List folders top-down with os.walk, which pins nothing; used off POSIX."""
+
+    def record_walk_error(error: OSError) -> None:
+        failed = Path(error.filename) if error.filename else logs_dir
+        unmasked.append(failed.relative_to(logs_dir).as_posix() if failed.is_relative_to(logs_dir) else ".")
+
+    for current, directories, names in os.walk(logs_dir, onerror=record_walk_error):
+        parent = Path(current)
+        descend: list[str] = []
+        yield parent.relative_to(logs_dir), sorted([*directories, *names]), partial(_lstat_in, parent), descend
+        directories[:] = descend
+
+
+def _lstat_in(parent: Path, name: str) -> os.stat_result:
+    return (parent / name).lstat()
+
+
 def _replace_bridge_artifact(secure_root: SecureRoot, relative: Path, opened: os.stat_result, payload: bytes) -> None:
     """Replace one log entry through descriptors anchored at the pinned log folder.
 
@@ -86,14 +157,9 @@ def _replace_bridge_artifact(secure_root: SecureRoot, relative: Path, opened: os
     the pinned root, and only this name is renamed over. Other names for a
     hard-linked file keep their bytes.
     """
-    directory_flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | getattr(os, "O_CLOEXEC", 0)
-    directory_fd = secure_root.duplicate_posix_root_descriptor()
+    directory_fd = _open_bridge_folder(secure_root, relative.parent)
     temporary: str | None = None
     try:
-        for component in relative.parts[:-1]:
-            child_fd = os.open(component, directory_flags, dir_fd=directory_fd)
-            os.close(directory_fd)
-            directory_fd = child_fd
         if not _same_bridge_artifact(os.stat(relative.name, dir_fd=directory_fd, follow_symlinks=False), opened):
             raise OSError(f"Agent log entry changed before masking: {relative.as_posix()}")
         candidate = f".{relative.name}.{os.getpid()}-{secrets.token_hex(8)}.tmp"
@@ -143,51 +209,49 @@ def _redact_bridge_artifacts(logs_dir: Path, tokens: set[str]) -> list[str]:
     unmasked: list[str] = []
     seen = 0
 
-    def record_walk_error(error: OSError) -> None:
-        failed = Path(error.filename) if error.filename else logs_dir
-        unmasked.append(failed.relative_to(logs_dir).as_posix() if failed.is_relative_to(logs_dir) else ".")
-
     with SecureRoot(logs_dir) as secure_root:
-        for current, directories, names in os.walk(logs_dir, onerror=record_walk_error):
-            parent = Path(current)
-            descend: list[str] = []
-            for name in sorted([*directories, *names]):
-                path = parent / name
-                relative = path.relative_to(logs_dir)
-                seen += 1
-                if seen > _BRIDGE_ARTIFACT_MAX_PATHS:
-                    unmasked.append(relative.as_posix())
-                    return unmasked
-                try:
-                    metadata = path.lstat()
-                except FileNotFoundError:
-                    continue
-                if stat_is_link_or_reparse(metadata):
-                    continue
-                if stat.S_ISDIR(metadata.st_mode):
-                    descend.append(name)
-                    continue
-                if not stat.S_ISREG(metadata.st_mode):
-                    continue
-                try:
-                    raw, opened = secure_root.read_bytes(
-                        relative, _BRIDGE_ARTIFACT_MAX_BYTES, expected=metadata, allow_hardlinks=True
-                    )
-                    safe = raw
-                    for value in values:
-                        # Equal-length masking also preserves offsets in opaque artifacts.
-                        safe = safe.replace(value, b"*" * len(value))
-                    if safe != raw:
-                        if _REPLACE_THROUGH_DIRECTORY_DESCRIPTORS:
-                            _replace_bridge_artifact(secure_root, relative, opened, safe)
-                        else:
-                            # Windows pins the opened parent chain against renames. The
-                            # read was checked against this path metadata, so the writer
-                            # leaves a file that changed since the read in place.
-                            write_output_file_atomically(path, safe, expected=metadata)
-                except (OSError, ValueError):
-                    unmasked.append(relative.as_posix())
-            directories[:] = descend
+        folders = (
+            _bridge_folders_through_descriptors(secure_root, unmasked)
+            if _USE_DIRECTORY_DESCRIPTORS
+            else _bridge_folders_by_path(logs_dir, unmasked)
+        )
+        with closing(folders):
+            for folder, names, lstat_entry, descend in folders:
+                for name in names:
+                    relative = folder / name
+                    seen += 1
+                    if seen > _BRIDGE_ARTIFACT_MAX_PATHS:
+                        unmasked.append(relative.as_posix())
+                        return unmasked
+                    try:
+                        metadata = lstat_entry(name)
+                    except FileNotFoundError:
+                        continue
+                    if stat_is_link_or_reparse(metadata):
+                        continue
+                    if stat.S_ISDIR(metadata.st_mode):
+                        descend.append(name)
+                        continue
+                    if not stat.S_ISREG(metadata.st_mode):
+                        continue
+                    try:
+                        raw, opened = secure_root.read_bytes(
+                            relative, _BRIDGE_ARTIFACT_MAX_BYTES, expected=metadata, allow_hardlinks=True
+                        )
+                        safe = raw
+                        for value in values:
+                            # Equal-length masking also preserves offsets in opaque artifacts.
+                            safe = safe.replace(value, b"*" * len(value))
+                        if safe != raw:
+                            if _USE_DIRECTORY_DESCRIPTORS:
+                                _replace_bridge_artifact(secure_root, relative, opened, safe)
+                            else:
+                                # Windows pins the opened parent chain against renames. The
+                                # read was checked against this path metadata, so the writer
+                                # leaves a file that changed since the read in place.
+                                write_output_file_atomically(logs_dir / relative, safe, expected=metadata)
+                    except (OSError, ValueError):
+                        unmasked.append(relative.as_posix())
     return unmasked
 
 

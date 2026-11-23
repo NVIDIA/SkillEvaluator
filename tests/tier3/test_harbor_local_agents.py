@@ -268,9 +268,72 @@ def test_bridge_artifact_listing_errors_use_relative_entries(
         onerror(error)
         return iter(())
 
+    # POSIX lists folders through descriptors; this pins the os.walk path that Windows uses.
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", False)
     monkeypatch.setattr(local_agents.os, "walk", fail_walk)
 
     assert local_agents._redact_bridge_artifacts(logs, {"synthetic-capability"}) == [expected]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_folders_that_cannot_be_opened_use_relative_entries(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+
+    if os.geteuid() == 0:
+        pytest.skip("root can open folders without read permission")
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    sessions = logs / "sessions"
+    sessions.mkdir(parents=True)
+    (logs / "claude-code.txt").write_text("ordinary output " + token, encoding="utf-8")
+    sessions.chmod(0)
+    try:
+        assert _redact_bridge_artifacts(logs, {token}) == ["sessions"]
+    finally:
+        sessions.chmod(0o700)
+    assert token not in (logs / "claude-code.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_redaction_never_lists_a_folder_swapped_for_a_link_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    token = "synthetic-local-capability-" + "x" * 24
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    (outside / "id_ed25519").write_bytes(b"host key\n")
+    (outside / "nested" / "notes.txt").write_bytes(b"host notes\n")
+    host = {path: path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+    logs = tmp_path / "agent"
+    (logs / "a").mkdir(parents=True)
+    (logs / "z").mkdir()
+    (logs / "a" / "session.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("platform cannot create this link")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_swap(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if Path(relative_path).as_posix() == "a/session.jsonl" and not (logs / "z").is_symlink():
+            # A process still writing the log folder replaces a later sibling, already
+            # listed as a folder, with a link to a host folder.
+            (logs / "z").rmdir()
+            (tmp_path / "link").rename(logs / "z")
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_swap)
+
+    # The swapped folder is reported under its own name; nothing behind the link is listed.
+    assert _redact_bridge_artifacts(logs, {token}) == ["z"]
+    assert (logs / "z").is_symlink()
+    assert token not in (logs / "a" / "session.jsonl").read_text(encoding="utf-8")
+    assert {path: path.read_bytes() for path in outside.rglob("*") if path.is_file()} == host
 
 
 @pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])
@@ -284,7 +347,7 @@ def test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported(
     if branch == "directory_descriptors" and os.name != "posix":
         pytest.skip("descriptor-anchored replacement is POSIX-only")
     # Windows uses the atomic writer; forcing it here runs that path on every platform.
-    monkeypatch.setattr(local_agents, "_REPLACE_THROUGH_DIRECTORY_DESCRIPTORS", branch == "directory_descriptors")
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", branch == "directory_descriptors")
     token = "synthetic-local-capability-" + "x" * 24
     logs = tmp_path / "agent"
     logs.mkdir()

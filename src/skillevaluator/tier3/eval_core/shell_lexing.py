@@ -9,6 +9,7 @@ import shlex
 from typing import Any
 
 _ATTACHED_DESCRIPTOR_RE = re.compile(r"(\d+)(>>|>\||>&|<&|<>|>|<)(?![<])")
+_BRACED_IDENTIFIER_RE = re.compile(r"\{(?:\\\n)*[A-Za-z_](?:(?:\\\n)*[A-Za-z0-9_])*(?:\\\n)*\}")
 
 
 # Words the walk reads as shell syntax when they stand unquoted. Quoted or
@@ -190,8 +191,86 @@ def _keep_attached_descriptors(text: str) -> str:
     return "".join(out)
 
 
-def _shell_tokens(cmd: Any) -> list[str]:
-    normalized = str(cmd).replace("\r\n", "\n").replace("\r", "\n").replace("\n", " ; ")
+def _without_shell_comment_text(text: str, *, shell: str | None = None) -> str | None:
+    """Strip comment text only when its quote context can be modelled.
+
+    A misparsed expansion can only move a comment boundary that comes after it,
+    so a comment ahead of every such expansion is stripped; a comment after one
+    leaves the command unmodelled.
+    """
+    out = []
+    quote = None
+    word_start = True
+    unmodelled_expansion = False
+    index = 0
+    while index < len(text):
+        char = text[index]
+        if char == "\\" and quote != "'" and index + 1 < len(text):
+            pair = text[index : index + 2]
+            out.append(pair)
+            if quote is None and pair != "\\\n":
+                word_start = False
+            index += 2
+            continue
+        if quote not in {"'", "ansi-c"}:
+            if char == "`":
+                unmodelled_expansion = True
+            if char == "$":
+                following = index + 1
+                if shell != "zsh":
+                    # Bash removes continuations before recognizing an opener;
+                    # Zsh does not join these into a substitution.
+                    while text.startswith("\\\n", following):
+                        following += 2
+                if text.startswith("(", following) or (
+                    text.startswith("{", following) and not _BRACED_IDENTIFIER_RE.match(text, following)
+                ):
+                    # A plain identifier cannot nest quotes. Other expansions
+                    # can: do not guess comment boundaries inside their words.
+                    unmodelled_expansion = True
+        if quote is not None:
+            out.append(char)
+            if char == ("'" if quote == "ansi-c" else quote):
+                quote = None
+            index += 1
+            continue
+        if char == "#" and word_start:
+            if unmodelled_expansion:
+                return None
+            out.append(char)
+            end = text.find("\n", index)
+            if end < 0:
+                break
+            index = end
+            continue
+        if char == "$" and text.startswith("'", index + 1):
+            quote = "ansi-c"
+            word_start = False
+            out.append(text[index : index + 2])
+            index += 2
+            continue
+        if char in "'\"`":
+            quote = char
+            word_start = False
+        else:
+            word_start = char in " \t\n" or char in _SHELL_METACHARS
+        out.append(char)
+        index += 1
+    # With no comment removed, keep the original spelling and the existing
+    # status attribution, including expansions next to a quoted literal hash.
+    return "".join(out)
+
+
+def _shell_tokens(cmd: Any, *, strip_comment_text: bool = False, _shell: str | None = None) -> list[str]:
+    source = str(cmd)
+    normalized = source.replace("\r\n", "\n").replace("\r", "\n")
+    if strip_comment_text and "#" in normalized:
+        # Comments end at physical newlines, before those become separators.
+        normalized = _without_shell_comment_text(normalized, shell=_shell)
+        if normalized is None:
+            return []
+        source = normalized
+    normalized = normalized.replace("\n", " ; ")
     normalized = _keep_attached_descriptors(_mark_quoted_syntax(normalized))
     lexer = shlex.shlex(normalized, posix=True, punctuation_chars=True)
     lexer.whitespace_split = True
@@ -200,6 +279,6 @@ def _shell_tokens(cmd: Any) -> list[str]:
         return list(lexer)
     except ValueError:
         try:
-            return shlex.split(str(cmd), posix=True)
+            return shlex.split(source, posix=True)
         except ValueError:
             return []

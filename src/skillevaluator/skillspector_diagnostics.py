@@ -113,20 +113,29 @@ def sanitize_completeness(value: object) -> dict:
     }
 
 
-def merge_completeness(left: object, right: object, *, prefix: str | None = None) -> dict:
-    """Keep both scan stages and skill identities when result objects are merged."""
-    a, b = sanitize_completeness(left), sanitize_completeness(right)
+class _MergedCompleteness(dict):
+    """In-memory aggregate whose existing records have already been projected."""
+
+    __slots__ = ()
+
+
+def merge_completeness(
+    left: object, right: object, *, prefix: str | None = None, reuse_projected_left: bool = False
+) -> dict:
+    """Merge scan stages, retaining left records only for an owned folder aggregate."""
+    a = left if reuse_projected_left and isinstance(left, _MergedCompleteness) else sanitize_completeness(left)
+    b = sanitize_completeness(right)
     if not a and not b:
         return {}
     incoming = b.get("records", [])
     if prefix is not None and incoming:
         skill = _text(prefix)
         incoming = [{**record, "skill": skill} for record in incoming]
-    records = a.get("records", []) + incoming
-    omitted = _count(a.get("omitted_records", 0) + b.get("omitted_records", 0))
-    # Both sets of records are already projected. Cap the combined list
-    # without redacting all of its rows again.
-    return {
-        "records": records[:_MAX_RECORDS],
-        "omitted_records": omitted + max(0, len(records) - _MAX_RECORDS),
+    existing = a.get("records", [])
+    remaining = max(0, _MAX_RECORDS - len(existing))
+    omitted = _count(_count(a.get("omitted_records", 0)) + b.get("omitted_records", 0))
+    combined = {
+        "records": existing[:_MAX_RECORDS] + incoming[:remaining],
+        "omitted_records": omitted + max(0, len(existing) + len(incoming) - _MAX_RECORDS),
     }
+    return _MergedCompleteness(combined) if reuse_projected_left else combined

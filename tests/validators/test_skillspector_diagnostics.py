@@ -297,3 +297,36 @@ def test_gate_message_names_gap_ledger_rows_and_cap(monkeypatch):
         "The completeness ledger for these gaps has 5 rows, with 3 beyond the per-record limit" in error
         for error in result.errors
     )
+
+
+def test_folder_merge_projects_each_incoming_record_once(monkeypatch):
+    import skillevaluator.skillspector_diagnostics as diagnostics
+
+    projected = 0
+    original = diagnostics.completeness_record
+
+    def record(payload, stage):
+        nonlocal projected
+        projected += 1
+        return original(payload, stage)
+
+    monkeypatch.setattr(diagnostics, "completeness_record", record)
+    combined = ValidationResult(validator_name="Security Scan")
+    for index in range(20):
+        member = ValidationResult(validator_name="Security Scan")
+        member.metadata["skillspector_completeness"] = {
+            "records": [{"stage": "skillspector", "ledger_exceptions": [{"path": "guide.md"}]}]
+        }
+        combined.merge_with_prefix(member, f"skill-{index}")
+        member.metadata["skillspector_completeness"]["records"][0]["ledger_exceptions"][0]["path"] = "modified.md"
+
+    assert projected == 20
+    saved = diagnostics.sanitize_completeness(combined.metadata["skillspector_completeness"])
+    assert projected == 40
+    assert [record["skill"] for record in saved["records"]] == [f"skill-{index}" for index in range(20)]
+    assert all(item["ledger_exceptions"][0]["path"] == "guide.md" for item in saved["records"])
+
+    aggregate = combined.metadata["skillspector_completeness"]
+    standalone = merge_completeness(aggregate, None)
+    standalone["records"][0]["ledger_exceptions"][0]["path"] = "modified.md"
+    assert aggregate["records"][0]["ledger_exceptions"][0]["path"] == "guide.md"

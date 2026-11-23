@@ -15,7 +15,7 @@ from typing import Any
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.tier3.dataset_utils import find_eval_file
 from skillevaluator.tier3.eval_core import log_converters
-from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text
+from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import atif_content_text, recorded_mcp_identity
 from skillevaluator.tier3.evals_spec import _validate_dataset_contents, validate_tier3_source
 from skillevaluator.tier3.generate_dataset import _parse_skill
 from skillevaluator.utils.redaction import redact_sensitive_data, redact_sensitive_text
@@ -44,6 +44,7 @@ _FIELDS = {
 _SCIENTIFIC_LITERAL_PATTERN = re.compile(r"(?<![\w.])[-+]?(?:\d+(?:\.\d*)?|\.\d+)[eE][-+]?\d+")
 _SIGNED_DECIMAL_PATTERN = re.compile(r"(?<![\w.])[+-]\d+\.\d+(?![\w.])")
 _HHMM_OFFSET_PATTERN = re.compile(r"\b\d{2}:\d{2}(?::\d{2}(?:\.\d+)?)?(?P<offset>[+-]\d{4})\b")
+_MAX_TOOL_SUMMARY_CHARS = 250
 
 
 @lru_cache(maxsize=1)
@@ -351,7 +352,13 @@ def build_candidates(
                 call, call_counts = redact(call, structured=True)
                 for category in structured_counts:
                     structured_counts[category] += call_counts[category]
-                summary = f"{call.get('function_name', 'unknown')}: {json.dumps(call.get('arguments', {}), ensure_ascii=False)}"
+                name = str(call.get("function_name", "unknown"))
+                if len(name) > _MAX_TOOL_SUMMARY_CHARS and (identity := recorded_mcp_identity(name, call.get("extra"))):
+                    # Keep the tool visible when the server would fill the summary.
+                    server, tool = identity
+                    server_chars = max(0, _MAX_TOOL_SUMMARY_CHARS - len(f"mcp__...__{tool}"))
+                    name = f"mcp__{server[:server_chars]}...__{tool}"
+                summary = f"{name}: {json.dumps(call.get('arguments', {}), ensure_ascii=False)}"
                 tools.append(summary)
                 if "SKILL.md" in summary or "scripts/" in summary:
                     suggestions.append(f"Review whether the replay should use: {summary}")
@@ -394,7 +401,7 @@ def build_candidates(
             ref = f"fixtures/{cid}/{safe_relative(path).as_posix()}"
             fixtures[ref] = content
             candidate["files"].append(ref)
-        candidate["observed"]["tool_calls"] = [s[:250] for s in candidate["observed"]["tool_calls"]]
+        candidate["observed"]["tool_calls"] = [s[:_MAX_TOOL_SUMMARY_CHARS] for s in candidate["observed"]["tool_calls"]]
         candidates.append(candidate)
     document = {
         "format": "skillevaluator.trace-candidates",

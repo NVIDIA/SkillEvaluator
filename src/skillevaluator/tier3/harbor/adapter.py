@@ -4583,6 +4583,15 @@ def _prepare_native_environment(
     """Stage SkillEvaluator runtime additions into a copied native Harbor task."""
     env_dir = task_dir / "environment"
     env_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        (env_dir / "repo-context.json").lstat()
+    except FileNotFoundError:
+        pass
+    else:
+        raise ValueError(
+            f"native Harbor task '{task_dir.name}' environment must not contain repo-context.json; "
+            "that path is reserved for generated repository-context metadata"
+        )
     if not has_skill and not baseline_aliases_prevalidated:
         _check_baseline_skill_candidates_do_not_alias_target(
             skill_path,

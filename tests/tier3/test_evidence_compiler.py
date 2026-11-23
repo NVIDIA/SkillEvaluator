@@ -606,3 +606,321 @@ def test_behavior_bundle_reason_names_each_setting_that_cut_evidence(
         # reports non-required losses too, so the budget-only case names the
         # tool history while the required evidence is still complete.
         assert bundle["omitted"]["incomplete_sections"] == incomplete
+
+
+def _suite_run_trajectory() -> tuple[dict, str]:
+    """A fix, one ``pytest -v`` run of 60 tests, and a final claim. Returns (trajectory, outcome line)."""
+    outcome = "========================= 1 failed, 59 passed in 2.31s ========================="
+    log = "\n".join([
+        "collected 60 items",
+        *(f"tests/test_suite.py::test_case_{case:02d} PASSED" for case in range(60)),
+        outcome,
+    ])
+    assert len(log) > atif_helpers._BUNDLE_ITEM_CHARS
+    traj = {
+        "steps": [
+            {"source": "user", "message": "Fix the bug and run the suite."},
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {"tool_call_id": "run-1", "function_name": "bash", "arguments": {"command": "pytest -v"}}
+                ],
+                "observation": {"results": [{"source_call_id": "run-1", "content": log}]},
+            },
+            {"source": "agent", "message": "Fixed it, all 60 tests pass."},
+        ]
+    }
+    return traj, outcome
+
+
+@pytest.mark.parametrize("metric", ["accuracy", "goal_accuracy"])
+def test_long_tool_result_keeps_its_last_lines(metric: str) -> None:
+    # A test run prints its outcome on the last line. This log is longer than
+    # the per-result allowance, and keeping only its beginning showed the judge
+    # a run of PASSED lines for an attempt whose suite had failed.
+    traj, outcome = _suite_run_trajectory()
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        evidence = module.build_metric_evidence_bundles(traj, "Fix the bug and run the suite.")[metric][
+            "prompt_evidence"
+        ]
+        assert "collected 60 items" in evidence
+        assert outcome in evidence
+
+
+def _tool_result_steps(results: list[str]) -> dict:
+    steps: list[dict] = [{"source": "user", "message": "Run the checks and report."}]
+    for idx, content in enumerate(results):
+        steps.append({
+            "source": "agent",
+            "tool_calls": [{
+                "tool_call_id": f"check-{idx}",
+                "function_name": "bash",
+                "arguments": {"command": f"./check.sh {idx}"},
+            }],
+            "observation": {"results": [{"source_call_id": f"check-{idx}", "content": content}]},
+        })
+    steps.append({"source": "agent", "message": "Done."})
+    return {"steps": steps}
+
+
+@pytest.mark.parametrize("budget", [None, "100000"], ids=["default-budgets", "raised-budgets"])
+def test_accuracy_and_goal_bundles_report_a_tool_result_cut_to_its_allowance(
+    monkeypatch: pytest.MonkeyPatch, budget: str | None
+) -> None:
+    # The per-result allowance is not a budget. The middle of a long tool
+    # result is cut whatever the budget is, the bundle is not "truncated", and
+    # the record used to say nothing at all about it.
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.delenv(name, raising=False)
+        if budget:
+            monkeypatch.setenv(name, budget)
+    traj, _outcome = _suite_run_trajectory()
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Fix the bug and run the suite.")
+        for metric in ("accuracy", "goal_accuracy"):
+            bundle = bundles[metric]
+            assert "test_case_30 PASSED" not in bundle["prompt_evidence"]
+            assert bundle["omitted"]["truncated"] is False
+            assert bundle["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+def test_accuracy_bundle_reports_tool_results_past_its_count_cap() -> None:
+    # Accuracy reads the six newest tool results and goal accuracy the twelve
+    # newest, so the oldest of seven is missing from one bundle only. It gets
+    # its own name, because most real runs have more results than a judge
+    # reads and that must not look like a result that was cut.
+    traj = _tool_result_steps([f"RESULT_{idx}: ok" for idx in range(7)])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        assert "RESULT_0: ok" not in bundles["accuracy"]["prompt_evidence"]
+        assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["older tool results"]
+        assert "RESULT_0: ok" in bundles["goal_accuracy"]["prompt_evidence"]
+        assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == []
+
+
+def test_a_cut_result_past_the_count_cap_is_not_reported_as_a_cut_result() -> None:
+    # The long log is the oldest of seven results, so accuracy never reads it
+    # and goal accuracy reads it cut.
+    traj, _outcome = _suite_run_trajectory()
+    long_log = traj["steps"][1]["observation"]["results"][0]["content"]
+    traj = _tool_result_steps([long_log, *(f"RESULT_{idx}: ok" for idx in range(6))])
+
+    bundles = atif_helpers.build_metric_evidence_bundles(traj, "Run the checks and report.")
+    assert bundles["accuracy"]["omitted"]["incomplete_sections"] == ["older tool results"]
+    assert bundles["goal_accuracy"]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+@pytest.mark.parametrize(("calls", "older"), [(6, []), (13, ["older tool results"])], ids=["six-calls", "thirteen-calls"])
+def test_tool_calls_that_print_the_same_text_are_counted_one_by_one(calls: int, older: list[str]) -> None:
+    # Thirteen calls print the same line. The copies a bundle keeps must not
+    # stand in for the calls it dropped.
+    traj = _tool_result_steps(["check passed."] * calls)
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric, kept in (("accuracy", 6), ("goal_accuracy", 12)):
+            assert bundles[metric]["prompt_evidence"].count("check passed.") == min(calls, kept)
+            assert bundles[metric]["omitted"]["incomplete_sections"] == older
+
+
+def test_tool_result_repeated_in_the_final_response_does_not_hide_a_dropped_section(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The budget has room for the final response only. The answer repeats the
+    # text of the tool result, which is still not the tool result reaching the judge.
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.setenv(name, "40")
+    traj = _tool_result_steps(["check passed."])
+    traj["steps"][-1]["message"] = "check passed."
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert bundles[metric]["prompt_evidence"].count("check passed.") == 1
+            assert bundles[metric]["omitted"]["truncated"] is True
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+@pytest.mark.parametrize("length", [3000, 60_000], ids=["over-the-allowance", "far-over-the-allowance"])
+def test_long_tool_result_is_masked_before_it_is_cut(length: int) -> None:
+    # A value that a cut would go through is masked while it is still whole,
+    # one where the kept beginning ends and one where the kept end starts.
+    # The masking gets the whole result however long it is, because a first
+    # cut can drop the line that marks what follows it as a credential, and
+    # the outcome line at the end of a very long log still reaches the judge.
+    # A result that fits its allowance is left as it is, because it reaches
+    # the saved evidence whole and is masked there.
+    first, second = "S3CRET-" + "v" * 40, "T0KEN-" + "w" * 40
+    outcome = "1 failed, 59 passed in 2.31s"
+    limit = atif_helpers._BUNDLE_ITEM_CHARS
+    head = (limit - len("\n...[truncated]...\n")) * 2 // 3
+    tail = limit - len("\n...[truncated]...\n") - head
+    beginning = "a" * (head - 20) + first
+    ending = second + "c" * (tail - len(second) + 20 - len(outcome) - 1) + "\n" + outcome
+    across_the_cuts = beginning + "b" * (length - len(beginning) - len(ending)) + ending
+    assert len(across_the_cuts) == length
+    assert across_the_cuts[head - 20 :].startswith(first) and across_the_cuts[-tail - 20 :].startswith(second)
+    traj = _tool_result_steps([across_the_cuts, f"short result with {first}"])
+    masked: list[str] = []
+
+    def redact(text: str) -> str:
+        masked.append(text)
+        return text.replace(first, "<masked>").replace(second, "<masked>")
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        masked.clear()
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.", redact=redact)
+        assert masked == [across_the_cuts]
+        for metric in ("accuracy", "goal_accuracy"):
+            evidence = bundles[metric]["prompt_evidence"]
+            assert evidence.count("<masked>") == 2
+            assert evidence.count("S3CRET-") == 1  # only the short result still shows it
+            assert "w" * 8 not in evidence
+            assert outcome in evidence
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+def test_long_tool_result_that_fits_once_masked_is_not_reported_cut() -> None:
+    # The result is over its allowance as the agent got it and under it once
+    # the value in it is masked, so the judge reads all of what is left.
+    secret = "S3CRET-" + "v" * 400
+    result = f"first line\n{secret}\n" + "log line\n" * 130 + "exit status 0."
+    assert len(result) > atif_helpers._BUNDLE_ITEM_CHARS > len(result) - len(secret)
+    traj = _tool_result_steps([result])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(
+            traj, "Run the checks and report.", redact=lambda text: text.replace(secret, "<masked>")
+        )
+        for metric in ("accuracy", "goal_accuracy"):
+            assert result.replace(secret, "<masked>") in bundles[metric]["prompt_evidence"]
+            assert "...[truncated]..." not in bundles[metric]["prompt_evidence"]
+            assert bundles[metric]["omitted"]["incomplete_sections"] == []
+
+
+def test_tool_result_too_long_to_mask_whole_keeps_its_beginning_only(monkeypatch: pytest.MonkeyPatch) -> None:
+    # The end of a result is only safe to show when everything before it was
+    # read by the masking, and a result this long is not read to its end.
+    monkeypatch.setattr(atif_helpers, "_BUNDLE_ITEM_MASK_CHARS", 4000)
+    result = "first line\n" + "log line\n" * 600 + "exit status 0."
+    traj = _tool_result_steps([result])
+    masked: list[str] = []
+
+    def redact(text: str) -> str:
+        masked.append(text)
+        return text.replace("first line", "<masked>")
+
+    bundles = atif_helpers.build_metric_evidence_bundles(traj, "Run the checks and report.", redact=redact)
+
+    assert masked == [result[:4000]]
+    for metric in ("accuracy", "goal_accuracy"):
+        evidence = bundles[metric]["prompt_evidence"]
+        assert "<masked>" in evidence
+        assert "exit status 0." not in evidence
+        assert evidence.endswith("…[clipped]")
+        assert bundles[metric]["omitted"]["incomplete_sections"] == ["tool results"]
+
+
+def test_accuracy_and_goal_bundles_report_a_write_body_cut_to_its_allowance() -> None:
+    content = "HEAD_MARK " + "a" * 2000 + " MIDDLE_MARK " + "b" * 2000 + " TAIL_MARK"
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "write-1",
+                        "function_name": "Write",
+                        "arguments": {"file_path": "/workspace/output/x.txt", "content": content},
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "write-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, wrote the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Write x")
+        for metric in ("accuracy", "goal_accuracy"):
+            bundle = bundles[metric]
+            assert "MIDDLE_MARK" not in bundle["prompt_evidence"]
+            assert bundle["omitted"]["truncated"] is False
+            assert bundle["omitted"]["incomplete_sections"] == ["file changes"]
+
+
+@pytest.mark.parametrize(
+    ("replacements", "reported"),
+    [
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5"], False),
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5", "NEW_EDIT_6"], True),
+        (["NEW_EDIT_1", "NEW_EDIT_2", "NEW_EDIT_3", "NEW_EDIT_4", "NEW_EDIT_5", ""], True),
+    ],
+    ids=["five-edits", "six-edits", "five-edits-and-a-deletion"],
+)
+def test_bundles_report_edits_past_the_five_a_multi_edit_shows(replacements: list[str], reported: bool) -> None:
+    # A multi-edit shows its first five edits. The sixth is short and nothing
+    # else is cut, so only the count can say that it did not reach the judge.
+    # A sixth edit that deletes text has nothing to show and counts the same.
+    traj = {
+        "steps": [
+            {
+                "source": "agent",
+                "tool_calls": [
+                    {
+                        "tool_call_id": "edit-1",
+                        "function_name": "MultiEdit",
+                        "arguments": {
+                            "file_path": "/workspace/output/x.py",
+                            "edits": [
+                                {"old_string": f"old_{idx}", "new_string": new_string}
+                                for idx, new_string in enumerate(replacements, start=1)
+                            ],
+                        },
+                    }
+                ],
+                "observation": {"results": [{"source_call_id": "edit-1", "content": "ok"}]},
+            },
+            {"source": "agent", "message": "Done, edited the file."},
+        ]
+    }
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Edit x")
+        for metric in METRICS:
+            bundle = bundles[metric]
+            assert "NEW_EDIT_5" in bundle["prompt_evidence"]
+            assert "NEW_EDIT_6" not in bundle["prompt_evidence"]
+            assert ("file changes" in bundle["omitted"]["incomplete_sections"]) is reported
+
+
+def test_accuracy_and_goal_bundles_report_a_final_response_the_budget_clipped(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    for name in ("SKILL_EVAL_ACCURACY_BUDGET", "SKILL_EVAL_GOAL_ACCURACY_BUDGET"):
+        monkeypatch.setenv(name, "400")
+    traj = {"steps": [{"source": "agent", "message": _distinct_text(2000)}]}
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Explain the migration.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert bundles[metric]["omitted"]["truncated"] is True
+            assert bundles[metric]["omitted"]["incomplete_sections"] == ["final response"]
+
+
+def test_accuracy_and_goal_bundles_with_complete_evidence_report_nothing_incomplete() -> None:
+    traj = _tool_result_steps(["3 passed in 0.10s"])
+
+    for module in (atif_helpers, _load_harbor_template_module()):
+        bundles = module.build_metric_evidence_bundles(traj, "Run the checks and report.")
+        for metric in ("accuracy", "goal_accuracy"):
+            assert "3 passed in 0.10s" in bundles[metric]["prompt_evidence"]
+            assert bundles[metric]["omitted"] == {
+                "count": 0,
+                "truncated": False,
+                "reason": "",
+                "incomplete_sections": [],
+            }

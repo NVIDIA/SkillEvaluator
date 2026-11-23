@@ -340,6 +340,10 @@ def format_result(data: dict) -> str:
             lines.append("\nCompleted:")
             for t in data["completed"]:
                 lines.append(f"  - [{t['id']}] {t['content']}")
+        if data.get("cancelled"):
+            lines.append("\nCancelled:")
+            for t in data["cancelled"]:
+                lines.append(f"  - [{t['id']}] {t['content']}")
         return "\n".join(lines)
 
     if op == "next":

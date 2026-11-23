@@ -2086,9 +2086,12 @@ def test_reward_txt_is_scored_like_harbor(tmp_path: Path) -> None:
     assert trial["verifier_result"]["rewards"] == {"entry_id": "case-1", "reward": 1.0}
 
 
+_SYNTHETIC_POLICY_KEY = "gw-policy-0a1b2c3d4e5f6789"
+
+
 def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
-    secret = "gw-policy-0a1b2c3d4e5f6789"
+    secret = _SYNTHETIC_POLICY_KEY
     monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
     monkeypatch.setenv("FAKE_GYM_FAILURE", f"AuthenticationError: 401 invalid key {secret}")
     result = _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1)
@@ -2096,6 +2099,52 @@ def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.M
     assert "AuthenticationError" in json.dumps(result)
     assert secret not in json.dumps(result)
     assert all(secret not in path.read_text() for path in run_dir.rglob("*.json"))
+
+
+def test_published_turn_diagnostics_mask_configured_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    config = "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n"
+    skill, _ = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    _native_task(skill)
+    subprocess.run(["git", "init", "--quiet", str(skill)], check=True)
+    secret = _SYNTHETIC_POLICY_KEY
+    monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
+
+    def replay(command, *, cwd, **kwargs):
+        task = next(path for path in Path(command[3]).iterdir() if (path / "task.toml").is_file())
+        logs = cwd / "verifier"
+        logs.mkdir()
+        diagnostic = f"missing verifier reward: {secret}"
+        (logs / "test-stdout.txt").write_text(f"start\n{diagnostic}\nend\n", encoding="utf-8")
+        row = {
+            "task_id": task.name,
+            "turn_reward_strategy": "final",
+            "failure_reason": diagnostic,
+            "turns": [{"name": "verify", "verifier_logs_dir": str(logs), "failure": {"message": diagnostic}}],
+        }
+        Path(command[command.index("--output") + 1]).write_text(json.dumps(row) + "\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(runner, "_run_gym", replay)
+    result = _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1, n_attempts=1)
+    arm = Path(result["run_dir"]) / "codex" / "with-skill"
+    (trial,) = (arm / "trials").iterdir()
+    stdout = (trial / "steps" / "verify" / "test-stdout.txt").read_text(encoding="utf-8")
+    diagnostics = {
+        "returned result": json.dumps(result),
+        "arm summary": (arm / "summary.json").read_text(encoding="utf-8"),
+        "trial result": (trial / "result.json").read_text(encoding="utf-8"),
+        "trial failure": (trial / "failure.json").read_text(encoding="utf-8"),
+        "verifier stdout": stdout,
+    }
+    assert not [name for name, text in diagnostics.items() if secret in text]
+    assert all("missing verifier reward" in text for text in diagnostics.values())
+    assert stdout.splitlines()[::2] == ["start", "end"]
 
 
 def test_malformed_mcp_servers_toml_is_handled_as_on_harbor(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:

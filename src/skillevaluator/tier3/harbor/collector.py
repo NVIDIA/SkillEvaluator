@@ -1302,6 +1302,7 @@ def _write_redacted_text_copy(
     dest: Path,
     *,
     source_root: Path | None = None,
+    secret_values: set[str] | None = None,
 ) -> tuple[bool, dict[str, Any] | None]:
     """Copy a Harbor text artifact while masking common credential shapes."""
     max_bytes = _diagnostic_artifact_max_bytes()
@@ -1349,6 +1350,10 @@ def _write_redacted_text_copy(
     except UnicodeDecodeError as e:
         logger.debug("Failed to read Harbor artifact %s: %s", src, e)
         return False, {"name": src.name, "reason": "read_failed", "size_bytes": size_bytes}
+    if secret_values:
+        from skillevaluator.tier3.harbor.stream_redaction import StreamingSecretRedactor
+
+        text = StreamingSecretRedactor(secret_values).feed(text, final=True)
     redacted = _redacted_artifact_text(src, text)
     if redacted is None:
         return False, {"name": src.name, "reason": "invalid_json", "size_bytes": size_bytes}

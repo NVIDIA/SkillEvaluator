@@ -743,21 +743,6 @@ def _run_gym(
             reader.join(timeout=_GYM_LOG_DRAIN_SECONDS)
 
 
-def _redacted_row(row: dict[str, Any], secrets: set[str]) -> dict[str, Any]:
-    """Redact the failure text a rollout row carries before it reaches trial and result files."""
-    redacted = dict(row)
-    for name in ("failure", "failure_reason", "failure_kind"):
-        value = redacted.get(name)
-        if isinstance(value, dict):
-            redacted[name] = {
-                key: redact_progress_detail(item, secret_values=secrets) if isinstance(item, str) else item
-                for key, item in value.items()
-            }
-        elif isinstance(value, str):
-            redacted[name] = redact_progress_detail(value, secret_values=secrets)
-    return redacted
-
-
 def gym_launch_environment(credentials: dict[str, str]) -> dict[str, str]:
     """Return Gym's process environment: the host variables a Harbor backend may receive, plus its credentials.
 
@@ -1291,7 +1276,7 @@ def run_nemo_gym_eval(
                                     arm_errors.append(f"gym eval run timed out after {arm_timeout:.0f}s")
                                 elif returncode != 0:
                                     arm_errors.append(f"gym eval run exited {returncode}; see {log_path}")
-                rows = [_redacted_row(row, secrets) for row in read_rollouts(rollouts_path, arm_errors)]
+                rows = read_rollouts(rollouts_path, arm_errors)
                 failures = {
                     task: [redact_progress_detail(reason, secret_values=secrets) for reason in reasons]
                     for task, reasons in read_rollout_failures(rollouts_path, arm_errors).items()
@@ -1303,6 +1288,7 @@ def run_nemo_gym_eval(
                     task_case_ids=task_case_ids,
                     n_attempts=attempts,
                     failures=failures,
+                    secret_values=secrets,
                 )
                 launch_errors += [
                     f"{agent} {arm}-skill: {redact_progress_detail(error, secret_values=secrets)}"

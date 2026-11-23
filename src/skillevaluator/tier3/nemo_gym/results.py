@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.tier3.attempt_verdict import attempt_verdict
+from skillevaluator.tier3.harbor.progress import redact_progress_detail
 
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
 _REWARD_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json")
@@ -256,7 +257,7 @@ def _episode_rewards(
 
 
 def _multi_step_outcome(
-    row: dict[str, Any], trial_dir: Path, case_id: str, *, verdict_only: bool = False
+    row: dict[str, Any], trial_dir: Path, case_id: str, *, verdict_only: bool, secret_values: set[str] | None
 ) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
     """Write a multi-step episode's steps and return its rewards, why it is unscored, and its result fields.
 
@@ -275,9 +276,14 @@ def _multi_step_outcome(
         step_dir = trial_dir / "steps" / name
         logs_dir = turn.get("verifier_logs_dir")
         if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-            _copy_verifier_logs(Path(logs_dir), step_dir, verdict_only=verdict_only, step=True)
+            _copy_verifier_logs(
+                Path(logs_dir), step_dir, verdict_only=verdict_only, step=True, secret_values=secret_values
+            )
         step_failure = _failure_text(turn)
-        steps.append(_verified_rewards(step_dir / "verifier", case_id) if not step_failure else (None, step_failure))
+        rewards, failure = (None, step_failure) if step_failure else _verified_rewards(step_dir / "verifier", case_id)
+        if failure and secret_values is not None:
+            failure = redact_progress_detail(failure, secret_values=secret_values)
+        steps.append((rewards, failure))
     fields["step_results"] = [
         {
             "step_name": name,
@@ -292,20 +298,27 @@ def _multi_step_outcome(
     return ({**rewards, "entry_id": case_id} if rewards is not None else None), failure, fields
 
 
-def _copy_verifier_logs(logs_dir: Path, trial_dir: Path, *, verdict_only: bool = False, step: bool = False) -> None:
+def _copy_verifier_logs(
+    logs_dir: Path, trial_dir: Path, *, verdict_only: bool, secret_values: set[str] | None, step: bool = False
+) -> None:
     """Copy a Gym verifier's files and trajectory into a trial or into one of its step folders.
 
     With ``verdict_only``, copy only what the attempt verdict reads: the reward files, and a trial's own
     trajectory when it is small enough for the collector to read and check for an agent that never started.
     """
-    from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES
+    from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES, _write_redacted_text_copy
 
     verifier_dir = trial_dir / "verifier"
     verifier_dir.mkdir(parents=True, exist_ok=True)
     for name in _REWARD_FILES if verdict_only else _VERIFIER_FILES:
         source = logs_dir / name
         if source.is_file() and not source.is_symlink():
-            shutil.copyfile(source, verifier_dir / name)
+            if name == "test-stdout.txt" and secret_values:
+                _write_redacted_text_copy(
+                    source, verifier_dir / name, source_root=logs_dir, secret_values=secret_values
+                )
+            else:
+                shutil.copyfile(source, verifier_dir / name)
     trajectory = logs_dir / "trajectory.json"
     if not trajectory.is_file() or trajectory.is_symlink():
         return
@@ -324,6 +337,7 @@ def write_job_from_rollouts(
     n_attempts: int,
     failures: dict[str, list[str]] | None = None,
     verdict_only: bool = False,
+    secret_values: set[str] | None = None,
 ) -> list[str]:
     """Write one collector job directory from Gym rollouts and return the run errors.
 
@@ -366,15 +380,21 @@ def write_job_from_rollouts(
             rewards: dict[str, Any] | None = None
             step_fields: dict[str, Any] = {}
             if row.get("turns") is not None:
-                rewards, failure, step_fields = _multi_step_outcome(row, trial_dir, case_id, verdict_only=verdict_only)
+                rewards, failure, step_fields = _multi_step_outcome(
+                    row, trial_dir, case_id, verdict_only=verdict_only, secret_values=secret_values
+                )
             else:
                 logs_dir = row.get("verifier_logs_dir")
                 if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-                    _copy_verifier_logs(Path(logs_dir), trial_dir, verdict_only=verdict_only)
+                    _copy_verifier_logs(
+                        Path(logs_dir), trial_dir, verdict_only=verdict_only, secret_values=secret_values
+                    )
                 failure = _failure_text(row)
                 if not failure:
                     rewards, failure = _verified_rewards(trial_dir / "verifier", case_id)
             if rewards is None:
+                if secret_values is not None:
+                    failure = redact_progress_detail(failure, secret_values=secret_values)
                 n_errors += 1
                 if not row.get(_MISSING_ROLLOUT):
                     errors.append(f"case {case_id} attempt {attempt}: {failure}")

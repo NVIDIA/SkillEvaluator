@@ -136,17 +136,54 @@ def test_partial_and_missing_scanners_in_the_same_check_keep_separate_recoveries
     assert "Bandit 1.9.4, scan incomplete · Semgrep didn't run" in text
     assert "code incomplete:" in text
     assert "Bandit scan error: syntax error while parsing" in text
-    assert "semgrep not installed" in text
+    assert "code incomplete: semgrep not installed" in text
     assert "bandit, semgrep not installed" not in text
     assert "code didn't run" not in text
     assert "uv tool install semgrep" in text
     assert "Code Risk Analysis was incomplete in Tier 1" in _headline(tmp_path, [result])
 
 
+def test_setup_item_names_each_check_with_its_own_state():
+    security = _missing_skillspector()
+    code = ValidationResult(validator_name="Code Risk Analysis")
+    code.record_scanner("semgrep", "1.150.0")
+    code.mark_scan_incomplete("bandit")
+    code.add_warning("bandit not installed. Install with: pipx install bandit")
+
+    _passed, rows = summarize_tier1([security, code], lineup=["security", "code-integrity"])
+    text = _text(rows)
+
+    assert "security didn't run, code incomplete: skillspector, bandit not installed" in text
+    assert "or skip it: --skip security,code-integrity" in text
+    assert "code incomplete: Bandit" not in text
+
+
+def test_missing_dependency_auditor_after_a_file_label_reads_as_setup(tmp_path, monkeypatch):
+    from skillevaluator.utils.tool_runner import Tools
+    from skillevaluator.validators.dependencies import DependencySecurityValidator
+
+    monkeypatch.setattr(type(Tools.pip_audit), "is_available", property(lambda _self: False))
+    (tmp_path / "pyproject.toml").write_text('[project]\nname = "demo"\ndependencies = ["idna==3.10"]\n')
+    result = DependencySecurityValidator(use_safety=False).validate(tmp_path)
+    result.validator_name = "Dependency Vulnerability Audit"
+    result.metadata["gating"] = {"tier": 1, "blocking": True}
+    assert any(str(w).startswith("pyproject.toml: pip-audit not installed") for w in result.independent_warnings())
+
+    _passed, rows = summarize_tier1([result], lineup=["dependency"])
+    text = _text(rows)
+
+    assert "dependency vulnerability audit didn't run: pip-audit not installed" in text
+    assert "or skip it: --skip dependency" in text
+    assert "incomplete: pyproject.toml" not in text
+    assert "Dependency Vulnerability Audit didn't run in Tier 1" in _headline(tmp_path, [result])
+
+
 @pytest.mark.parametrize(
     ("last_label", "diagnostic", "scanner_row"),
     [
         ("", "semgrep not installed.", "Semgrep didn't run"),
+        ("", "pyproject.toml: semgrep not installed.", "Semgrep didn't run"),
+        ("", "Semgrep scan: semgrep not installed.", "Semgrep incomplete"),
         ("", "Semgrep scan error: dependency not installed.", "Semgrep incomplete"),
         ("[invalid\nlabel] ", "semgrep not installed.", "Semgrep incomplete"),
     ],

@@ -1395,6 +1395,8 @@ _SETUP_SCANNER = re.compile(
     r"|couldn't (?:download|set up) (?P<download>[\w-]+)\b",
     re.IGNORECASE,
 )
+# A file label such as ``pyproject.toml: ``; ``[^\s:]`` keeps the match linear.
+_FILE_LABEL = re.compile(r"[^\s:]+: ")
 
 
 def _scanner_setup_diagnostics(result: ValidationResult) -> dict[str, list[str]]:
@@ -1412,6 +1414,8 @@ def _scanner_setup_diagnostics(result: ValidationResult) -> dict[str, list[str]]
             if end < 0 or text.find("\n", start, end) >= 0:
                 break
             start = end + 2
+        if (label := _FILE_LABEL.match(text, start)) and "." in label.group(0):
+            start = label.end()
         if match := _SETUP_SCANNER.match(text, start):
             scanner = (match["missing"] or match["download"]).lower()
             scan = scanner if scanner in scans else f"{scanner}-llm"
@@ -1462,7 +1466,7 @@ def _incomplete_fix(results: list[ValidationResult]) -> FixItem:
 
 
 def _setup_fix(results: list[ValidationResult]) -> FixItem:
-    """One item for checks that could not run because a scanner is missing or failed to download."""
+    """One item for checks with a scanner that is missing or failed to download."""
     setup = [(result, _scanner_setup_diagnostics(result)) for result in results]
     scanners = list(dict.fromkeys(scan for _, diagnostics in setup for scan in diagnostics))
     hints: list[str] = []
@@ -1474,21 +1478,21 @@ def _setup_fix(results: list[ValidationResult]) -> FixItem:
             match = _INSTALL_HINT.search(text)
             if match and match.group(1) not in hints:
                 hints.append(match.group(1))
-    checks = ", ".join(
-        dict.fromkeys(
-            _short_name(r.validator_name) if _scanner_setup_issue(r) else ", ".join(diagnostics)
-            for r, diagnostics in setup
-        )
-    )
+    # The subject names checks; a check whose other scanners ran is incomplete, not unrun.
+    states: dict[str, list[str]] = {"didn't run": [], "incomplete": []}
+    for result, _ in setup:
+        state = "didn't run" if _scanner_setup_issue(result) else "incomplete"
+        states[state].append(_short_name(result.validator_name))
+    checks = ", ".join(f"{', '.join(dict.fromkeys(names))} {state}" for state, names in states.items() if names)
     skip = ",".join(dict.fromkeys(_skip_name(r.validator_name) for r in results))
     if failed_downloads:
         hosts = "github.com and pypi.org" if any("set up" in d for d in failed_downloads) else "github.com"
         actions = [f"check network access to {hosts}, then rerun"]
         actions += [f"or install it yourself: {hint}" for hint in hints]
-        problem = f"{checks} didn't run: {'; '.join(failed_downloads)}"
+        problem = f"{checks}: {'; '.join(failed_downloads)}"
     else:
         actions = list(hints)
-        problem = f"{checks} didn't run: {', '.join(scanners) or 'a required scanner'} not installed"
+        problem = f"{checks}: {', '.join(scanners) or 'a required scanner'} not installed"
     return FixItem("setup", problem, [*actions, f"or skip it: --skip {skip}"])
 
 

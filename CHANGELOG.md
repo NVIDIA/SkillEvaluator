@@ -39,8 +39,10 @@ All notable changes to SkillEvaluator are documented in this file.
   that the run budget left incomplete, read `was incomplete` or `N incomplete`
   instead of `didn't run`; with a fail verdict, such a Tier 3 run reads
   `failed`. Under `--block-on-agent-eval`, an `inconclusive` agent evaluation
-  reads `was incomplete` instead of `failed`. A single check whose scanner is
-  not installed still reads `didn't run`.
+  reads `was incomplete` instead of `failed`. A single check reads
+  `didn't run` only when none of its scanners ran; when another scanner in the
+  same check completed, it reads `was incomplete` and the setup item names the
+  missing scanner.
 - The Tier 1 panel lists a check whose only evidence is not applicable (no code
   files, no `scripts/` or `tools/` directory, no dependency files, or no
   semantic version label) on its `n/a` row, with the first such check's reason,
@@ -295,8 +297,9 @@ All notable changes to SkillEvaluator are documented in this file.
 - Partial scanner results retain their actual diagnostics and recorded versions
   instead of being described as missing installations. Their console fix item
   quotes the first three diagnostics, each shortened to one bounded line, and
-  counts the rest. If a check has mixed scanner outcomes, installation advice
-  names the missing scanner and analysis diagnostics appear separately.
+  counts the rest. If a check has mixed scanner outcomes, its setup item reads
+  `<check> incomplete: <scanner> not installed`, beside any check that
+  `didn't run`, and analysis diagnostics appear in a separate item.
 
 ## 1.0.1 - 2026-11-17
 

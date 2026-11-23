@@ -6,7 +6,6 @@
 from __future__ import annotations
 
 import base64
-import contextlib
 import hmac
 import os
 import secrets
@@ -454,6 +453,24 @@ def _read_key_after_concurrent_publish(path: Path) -> bytes:
     raise ValueError(f"Cannot safely read concurrently published output provenance key: {path}")
 
 
+def _unlink_temporary_key(path: Path) -> None:
+    """Remove the candidate, retrying transient Windows delete denials."""
+    attempts = 50
+    for attempt in range(1, attempts + 1):
+        try:
+            path.unlink()
+        except FileNotFoundError:
+            # A concurrent reader can recover the published key by unlinking this name first.
+            return
+        except OSError as exc:
+            # Windows can temporarily deny deletion while another handle is live.
+            if getattr(exc, "winerror", None) not in {5, 32, 33} or attempt == attempts:
+                raise
+            time.sleep(0.002)
+        else:
+            return
+
+
 def _load_or_create_key() -> bytes:
     path = _default_key_path()
     path.parent.mkdir(parents=True, mode=0o700, exist_ok=True)
@@ -475,8 +492,9 @@ def _load_or_create_key() -> bytes:
     stored_key = _protect_key_for_storage(key)
     temporary = path.parent / f"{_KEY_TEMP_PREFIX}{os.getpid()}-{secrets.token_hex(8)}"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(temporary, flags, 0o600)
+    published = True
     try:
-        descriptor = os.open(temporary, flags, 0o600)
         with os.fdopen(descriptor, "wb", closefd=True) as handle:
             handle.write(stored_key)
             handle.flush()
@@ -484,21 +502,25 @@ def _load_or_create_key() -> bytes:
         try:
             os.link(temporary, path)
         except FileExistsError:
-            return _read_key_after_concurrent_publish(path)
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+            published = False
+    except BaseException as exc:
         try:
-            directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
-        except OSError:
-            directory_descriptor = None
-        if directory_descriptor is not None:
-            try:
-                os.fsync(directory_descriptor)
-            finally:
-                os.close(directory_descriptor)
-    finally:
-        with contextlib.suppress(FileNotFoundError):
-            temporary.unlink()
+            _unlink_temporary_key(temporary)
+        except OSError as cleanup_error:
+            exc.add_note(f"Cannot remove temporary output provenance key: {temporary}: {cleanup_error}")
+        raise
+    _unlink_temporary_key(temporary)
+    if not published:
+        return _read_key_after_concurrent_publish(path)
+    try:
+        directory_descriptor = os.open(path.parent, os.O_RDONLY | getattr(os, "O_DIRECTORY", 0))
+    except OSError:
+        directory_descriptor = None
+    if directory_descriptor is not None:
+        try:
+            os.fsync(directory_descriptor)
+        finally:
+            os.close(directory_descriptor)
     return _read_key(path)
 
 

@@ -75,11 +75,15 @@ def test_partial_analysis_keeps_its_diagnostic_and_version(diagnostic, gate, run
     assert diagnostic in text
     assert "SkillSpector 2.11.2, scan incomplete" in text
     assert "0/1 checks passed  ·  1 incomplete" in text
-    assert "security incomplete:" in text
-    assert "rerun" in text
     assert "not installed" not in text
     assert "didn't run" not in text
-    assert "--skip" not in text
+    if gate:
+        assert "security incomplete:" in text
+        assert "rerun" in text
+        assert "--skip" not in text
+    else:
+        assert "or skip it: --skip security" in text
+        assert "security incomplete:" not in text
 
 
 @pytest.mark.parametrize("diagnostic", [None, "skillspector timed out after 300 seconds; partial results only"])

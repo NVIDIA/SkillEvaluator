@@ -554,6 +554,22 @@ def test_scanners_row_keeps_the_version_when_only_the_llm_stage_failed():
     assert "SkillSpector didn't run" in _text(_scanners_row([security]))
 
 
+def test_excluded_binary_is_named_in_what_to_fix():
+    from skillevaluator.models.result import ValidationResult
+    from skillevaluator.reporting.console_ui import summarize_tier1
+
+    security = ValidationResult(validator_name="Security Scan", passed=False)
+    security.mark_scan_incomplete("skillspector")
+    security.metadata["scanners"] = {"skillspector": "2.13.6"}
+    security.add_error('SkillSpector reported a binary exclusion for "data.dat"; security scan did not complete')
+
+    _, rows = summarize_tier1([security])
+    text = _text(rows)
+    assert 'binary exclusion for "data.dat"' in text
+    assert "or skip it: --skip security" in text
+    assert "not installed" not in text
+
+
 def test_unresolved_reference_is_explained_in_what_to_fix():
     from skillevaluator.models.result import ValidationResult
     from skillevaluator.reporting.console_ui import summarize_tier1

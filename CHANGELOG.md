@@ -45,6 +45,40 @@ All notable changes to SkillEvaluator are documented in this file.
 - The all-tier CI bootstrap rejects an unsupported `SKILL_EVAL_ENV_MODE`
   without first loading the Tier 3 runtime (Harbor), so the rejection is
   faster; its message and exit code are unchanged.
+- The Tier 1 summary line counts every check without complete evidence,
+  including one whose scanner is not installed, as `N incomplete` instead of
+  `N didn't run`. The quiet verdict headline uses the same statuses as the
+  summary row and verdict box: several such checks read `Tier 1: 2 incomplete`
+  instead of `Tier 1: 2 didn't run`, and a check with a blocking finding beside
+  an incomplete scan reads `failed`. Incomplete Tier 2 checks, and Tier 3 runs
+  that the run budget left incomplete, read `was incomplete` or `N incomplete`
+  instead of `didn't run`; with a fail verdict, such a Tier 3 run reads
+  `failed`. Under `--block-on-agent-eval`, an `inconclusive` agent evaluation
+  reads `was incomplete` instead of `failed`. A single check reads
+  `didn't run` only when none of its scanners ran; when another scanner in the
+  same check completed, it reads `was incomplete` and the setup item names the
+  missing scanner.
+- The Tier 1 panel lists a check whose only evidence is not applicable (no code
+  files, no `scripts/` or `tools/` directory, no dependency files, or no
+  semantic version label) on its `n/a` row, with the first such check's reason,
+  and the check ticker no longer shows a ✓ for it. When another member of the
+  same check ran, the row uses the validator's short name instead, so Code Risk
+  Analysis reads `code` beside a `✓ code-integrity` ticker entry. A skill with no code
+  and no `scripts/` or `tools/` directory now shows `n/a code, lint`.
+- Harness Compatibility records a `harness_profile_evaluation` success detail
+  when it evaluates at least one skill. The Tier 1 summary counts one more
+  sub-check (a count of one reads `1 sub-check`), JSON `checks_performed` goes
+  from 0 to 1 with a matching `legacy.messages` line, the `-r cli` table reads
+  `1 checks passed` instead of `OK`, and the HTML and Markdown reports show the
+  detail instead of `All checks passed`. JUnit gains a passing
+  `harness_profile_evaluation` testcase, which replaces the
+  `Harness Compatibility` placeholder testcase when the check has no findings.
+- When Harness Compatibility has no findings, that success detail counts as
+  Tier 1 execution evidence: `publication.reasons`, the HTML eligibility
+  reasons and `BENCHMARK.md` no longer list
+  `Tier 1 lacks trustworthy execution evidence.`, and `BENCHMARK.md`'s Tier 1
+  row no longer blames Harness Compatibility. Publication still needs every
+  other required check and the Tier 2 and Tier 3 evidence.
 
 ### Documentation
 
@@ -293,6 +327,12 @@ All notable changes to SkillEvaluator are documented in this file.
   or `.git`, such as `webapp-testing` or `.github/skills/`, left no file to
   scan and the check passed. Only real test and artifact folders and test
   files inside the skill are skipped now, and the Tier 1 reference says which.
+- Partial scanner results retain their actual diagnostics and recorded versions
+  instead of being described as missing installations. The general console fix
+  item quotes the first three diagnostics, each shortened to one bounded line,
+  and counts the rest. If a check has mixed scanner outcomes, its setup item
+  reads `<check> incomplete: <scanner> not installed`, beside any check that
+  `didn't run`, and analysis diagnostics appear in a separate item.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.

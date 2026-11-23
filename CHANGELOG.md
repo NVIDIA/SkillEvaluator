@@ -42,6 +42,9 @@ All notable changes to SkillEvaluator are documented in this file.
   keys. These settings are reserved for prepared runtime packages. Harbor skill
   runs warn when they ignore these settings. `--backend nemo-gym` rejects a
   config that sets `trial_retries` above 0, `load` or `lift_mode`.
+- The all-tier CI bootstrap rejects an unsupported `SKILL_EVAL_ENV_MODE`
+  without first loading the Tier 3 runtime (Harbor), so the rejection is
+  faster; its message and exit code are unchanged.
 
 ### Documentation
 

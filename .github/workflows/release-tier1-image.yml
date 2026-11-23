@@ -34,7 +34,8 @@ jobs:
       github.repository == 'NVIDIA/SkillEvaluator' &&
       github.ref == 'refs/heads/main' &&
       github.event_name == 'workflow_dispatch' &&
-      github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main'
+      (github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main' ||
+       github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release-recovery.yml@refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 45
     environment: release-image

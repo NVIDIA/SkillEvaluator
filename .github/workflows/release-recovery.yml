@@ -1,0 +1,105 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Recover missing release assets
+run-name: "${{ inputs.phase }} · SkillEvaluator ${{ inputs.version }} recovery"
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Existing Python package version (X.Y.Z)
+        required: true
+        type: string
+      source_sha:
+        description: Exact commit of the existing immutable product tag
+        required: true
+        type: string
+      phase:
+        type: choice
+        default: Build recovery CI bundle
+        options:
+          - Build recovery CI bundle
+          - Publish recovery packages
+      manifest_sha256:
+        description: Reviewed manifest SHA-256 (required for publishing)
+        type: string
+
+permissions: {}
+concurrency:
+  group: skillevaluator-release
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  preflight:
+    if: >-
+      github.event_name == 'workflow_dispatch' &&
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Verify the existing product release and frozen source
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          PHASE: ${{ inputs.phase }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+        run: |
+          if [[ "$PHASE" == 'Publish recovery packages' && ! "$MANIFEST_SHA256" =~ ^[0-9a-f]{64}$ ]]; then
+            echo 'Enter the reviewed recovery manifest SHA-256 before publication.' >&2
+            exit 1
+          fi
+          python3 ci/github_release.py preflight --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --main-sha "$GITHUB_SHA" --phase 'Build recovery CI bundle'
+
+  image:
+    needs: preflight
+    if: inputs.phase == 'Build recovery CI bundle'
+    uses: ./.github/workflows/release-tier1-image.yml
+    permissions:
+      contents: read
+      packages: write
+    with:
+      version: ${{ inputs.version }}
+      source_sha: ${{ inputs.source_sha }}
+
+  kitmaker:
+    needs: preflight
+    if: inputs.phase == 'Publish recovery packages'
+    uses: ./.github/workflows/release-kitmaker.yml
+    permissions:
+      contents: read
+      id-token: write
+    with:
+      version: ${{ inputs.version }}
+      source_sha: ${{ inputs.source_sha }}
+      manifest_sha256: ${{ inputs.manifest_sha256 }}
+      asset_tag: v${{ inputs.version }}-assets
+
+  verify-indexes:
+    needs: kitmaker
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+      - name: Verify exact downloads from both public package indexes
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+          VERSION: ${{ inputs.version }}
+          SOURCE_SHA: ${{ inputs.source_sha }}
+          MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+        run: |
+          python3 -m ci.kitmaker_release verify --version "$VERSION" --source-sha "$SOURCE_SHA" \
+            --manifest-sha256 "$MANIFEST_SHA256" --asset-tag "v$VERSION-assets"

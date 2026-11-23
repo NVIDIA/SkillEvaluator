@@ -134,6 +134,21 @@ def preflight(version: str, source_sha: str, main_sha: str, phase: str) -> None:
     if tomllib.loads(contents)["project"]["version"] != version:
         raise ValueError("Selected commit's package version does not match the workflow input.")
     tag = f"v{version}"
+    if phase == "Build recovery CI bundle":
+        if check_tag(tag, source_sha) is None:
+            raise ValueError("Recovery requires the existing product tag at the reviewed source.")
+        release = get_release(tag)
+        if (
+            not release
+            or release.get("immutable") is not True
+            or release.get("draft") is not False
+            or release.get("prerelease") is not False
+            or not release.get("published_at")
+            or release.get("assets") != []
+        ):
+            raise ValueError("Recovery requires a published immutable product release with no uploaded assets.")
+        check_tag(f"{tag}-assets", source_sha)
+        return
     if phase == "Build CI image and bundle" and check_tag(tag, source_sha) is not None:
         raise ValueError(f"{tag} already exists. Use the reviewed product SHA to validate or resume publication.")
     if phase == "Full release":

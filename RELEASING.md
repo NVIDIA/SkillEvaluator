@@ -91,6 +91,60 @@ manual qualification and recovery.
 
 ## Prepare the CI release
 
+### Recover an immutable release published without assets
+
+Use this exception only when the product release is already immutable and has
+no uploaded assets. Keep the package version and the original tag unchanged.
+Do not rebuild distributions from current `main` or insert new CI descriptors
+into packages built from the original tag.
+
+1. Create a **draft** companion release named `vVERSION-assets`, targeted at
+   the exact original `vVERSION` commit. Keep it out of GitHub Latest. A new
+   download tag does not change the Python package version.
+2. Dispatch **Recover missing release assets**, choose **Build recovery CI
+   bundle**, and supply the original version and full source SHA. The protected
+   `release-image` job builds and anonymously verifies that exact revision.
+   This phase cannot publish GitHub releases or Python packages. The recovery
+   and normal release workflows share a concurrency group; reconcile any
+   obsolete waiting release run before starting recovery.
+3. Download the generated `ci-bundle-VERSION` artifact and retain its workflow
+   run and artifact identity. Qualify the generated GitHub and GitLab consumer
+   configurations using the scenarios in the regular CI release procedure.
+   Verify the wheel and sdist against the original source and test fresh
+   installs. The recovery bundle is a separate manual configuration: the
+   original package's built-in `ci init` pins remain unchanged. Do not claim
+   that it automatically selects the new bundle or promote a stable channel.
+4. Assemble the same five assets as a regular release. The manifest keeps
+   `version`, `source_commit`, the two Python `artifacts`, and the separate
+   `ci_bundle` size/hash record. Also set `asset_tag` to `vVERSION-assets` and
+   record the original packaged pins separately from the new bundle pins.
+   `SHA256SUMS.txt` must cover the manifest, wheel, sdist and CI ZIP. Use
+   `product_release.checked_manifest` to verify all five local files. The
+   regular `assemble`/`verify-assets` commands intentionally require bundle
+   files committed in the original source and do not apply to this exception.
+5. Attach all five files to the draft and download them again to check every
+   size and checksum. Review the notes, source identity, consumer evidence and
+   exact asset list **before publishing**. Never publish a partial companion
+   release: immutable releases cannot receive the missing files later.
+6. After approval, publish the companion with `make_latest=false`. Dispatch
+   **Publish recovery packages** with the original version/SHA and the reviewed
+   manifest SHA-256. This uses the existing protected Kitmaker environments.
+   The publisher verifies both immutable tags at the same source, all five
+   uploaded assets, and their checksums. Only the wheel and sdist go to Kitmaker.
+   Recovery receipts bind the companion tag and cannot reuse approvals from
+   the original download location. An unpublished draft is rejected.
+7. Verify both public indexes and fresh public-index installs before changing
+   pending links in the original notes. Link to the companion downloads and
+   state the CLI pin limitation. The workflow does not edit release notes,
+   promote `stable`, or move the original tag.
+
+The same read-only public verification can be run with
+`python3 -m ci.kitmaker_release verify --version VERSION --source-sha SHA
+--manifest-sha256 DIGEST --asset-tag vVERSION-assets`. It requires the GitHub
+read token and configured DevZone index, but does not access Kitmaker or Vault.
+
+### Normal CI release preparation
+
 1. In a release-preparation PR, update the package version, its import fallback,
    the editable lock entry, the citation and its documentation example, and any
    version-specific starter expectations. Move the complete Unreleased changelog

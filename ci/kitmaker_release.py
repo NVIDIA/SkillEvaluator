@@ -134,21 +134,33 @@ class Release:
     source_sha: str
     manifest_sha256: str
     artifacts: dict[str, Artifact]
+    asset_tag: str = ""
 
     @property
     def asset_base(self) -> str:
-        return f"https://github.com/{REPOSITORY}/releases/download/v{self.version}/"
+        tag = checked_asset_tag(self.version, self.asset_tag)
+        return f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
 
     def urls(self, names) -> tuple[str, ...]:
         return tuple(self.asset_base + name for name in self.artifacts if name in names)
 
 
-def parse_manifest(version: str, source_sha: str, manifest_sha256: str, raw: bytes) -> Release:
+def checked_asset_tag(version: str, asset_tag: str = "") -> str:
+    tag = asset_tag or f"v{version}"
+    if not VERSION.fullmatch(version) or tag not in (f"v{version}", f"v{version}-assets"):
+        raise ReleaseError("Asset tag must be vVERSION or vVERSION-assets for the same package version.")
+    return tag
+
+
+def parse_manifest(version: str, source_sha: str, manifest_sha256: str, raw: bytes, asset_tag: str = "") -> Release:
+    tag = checked_asset_tag(version, asset_tag)
     if hashlib.sha256(raw).hexdigest() != manifest_sha256:
         raise ReleaseError("GitHub release manifest digest did not match the approved digest.")
     manifest = as_object(strict_json(raw, ReleaseError), "release manifest")
     if manifest.get("version") != version or manifest.get("source_commit") != source_sha:
         raise ReleaseError("GitHub release manifest did not match the approved version and source.")
+    if tag != f"v{version}" and manifest.get("asset_tag") != tag:
+        raise ReleaseError("The recovery manifest must bind the approved asset tag.")
     expected = (f"{PROJECT}-{version}-py3-none-any.whl", f"{PROJECT}-{version}.tar.gz")
     items = manifest.get("artifacts")
     if not isinstance(items, list) or len(items) != len(expected):
@@ -167,7 +179,7 @@ def parse_manifest(version: str, source_sha: str, manifest_sha256: str, raw: byt
         ):
             raise ReleaseError("The release manifest contains invalid or duplicate distribution metadata.")
         artifacts[filename] = Artifact(digest, size)
-    return Release(version, source_sha, manifest_sha256, {name: artifacts[name] for name in expected})
+    return Release(version, source_sha, manifest_sha256, {name: artifacts[name] for name in expected}, asset_tag)
 
 
 def verify_download(url: str, artifact: Artifact):
@@ -193,7 +205,46 @@ def verify_download(url: str, artifact: Artifact):
         raise ReleaseError("A GitHub release asset does not match its approved size and digest.")
 
 
-def verify_github_release(version: str, source_sha: str, manifest_sha256: str) -> Release:
+def verify_recovery_assets(published: dict, release: Release, raw: bytes) -> None:
+    """Bind all five recovery assets to the reviewed manifest, without changing package pins."""
+    manifest = as_object(strict_json(raw, ReleaseError), "release manifest")
+    bundle = as_object(manifest.get("ci_bundle"), "CI bundle")
+    name, digest, size = bundle.get("filename"), bundle.get("sha256"), bundle.get("size")
+    if (
+        name != f"{PROJECT}-ci-{release.version}.zip"
+        or not isinstance(digest, str)
+        or not SHA256.fullmatch(digest)
+        or type(size) is not int
+        or not 0 < size <= MAX_ASSET
+    ):
+        raise ReleaseError("The recovery manifest must identify the exact CI bundle.")
+    files = {**release.artifacts, name: Artifact(digest, size)}
+    expected = {*files, product_release.MANIFEST, product_release.CHECKSUMS}
+    assets = published.get("assets")
+    if (
+        not isinstance(assets, list)
+        or len(assets) != len(expected)
+        or any(not isinstance(asset, dict) or asset.get("state") != "uploaded" for asset in assets)
+        or {asset.get("name") for asset in assets} != expected
+    ):
+        raise ReleaseError("Recovery publication requires all five uploaded release assets.")
+    verify_download(release.asset_base + name, files[name])
+    sums = request_bytes(
+        release.asset_base + product_release.CHECKSUMS,
+        label="GitHub recovery checksums",
+        redirects=("release-assets.githubusercontent.com", "objects.githubusercontent.com"),
+    )
+    try:
+        product_release.verify_checksum_file(
+            sums,
+            {product_release.MANIFEST: release.manifest_sha256, **{name: item.sha256 for name, item in files.items()}},
+            "Recovery checksums",
+        )
+    except ValueError as exc:
+        raise ReleaseError(str(exc)) from None
+
+
+def verify_github_release(version: str, source_sha: str, manifest_sha256: str, asset_tag: str = "") -> Release:
     if not (VERSION.fullmatch(version) and SHA1.fullmatch(source_sha) and SHA256.fullmatch(manifest_sha256)):
         raise ReleaseError("Expected a bare stable version, full source SHA and bare manifest SHA256.")
     base_api = f"https://api.github.com/repos/{REPOSITORY}"
@@ -205,29 +256,31 @@ def verify_github_release(version: str, source_sha: str, manifest_sha256: str) -
     def github(path):
         return request_json(base_api + path, label="GitHub release identity", headers=github_headers)
 
-    tag = f"v{version}"
-    published = github(f"/releases/tags/{tag}")
-    if (
-        published.get("tag_name") != tag
-        or published.get("immutable") is not True
-        or published.get("draft") is not False
-        or published.get("prerelease") is not False
-        or not published.get("published_at")
-    ):
-        raise ReleaseError("Kitmaker requires the published, immutable GitHub release for the approved tag.")
-    reference = github(f"/git/ref/tags/{tag}")
-    if reference.get("ref") != f"refs/tags/{tag}":
-        raise ReleaseError("GitHub did not resolve the approved release tag.")
-    tagged = as_object(reference.get("object"), "Git tag object")
-    for _ in range(5):
-        if tagged.get("type") != "tag":
-            break
-        annotated_sha = tagged.get("sha")
-        if not isinstance(annotated_sha, str) or not SHA1.fullmatch(annotated_sha):
-            raise ReleaseError("GitHub returned an invalid annotated tag.")
-        tagged = as_object(github(f"/git/tags/{annotated_sha}").get("object"), "annotated Git tag object")
-    if tagged.get("type") != "commit" or tagged.get("sha") != source_sha:
-        raise ReleaseError("The release tag does not refer to the approved source commit.")
+    tag = checked_asset_tag(version, asset_tag)
+    # A companion download release must identify the same source as the locked product release.
+    for identity_tag in dict.fromkeys((f"v{version}", tag)):
+        published = github(f"/releases/tags/{identity_tag}")
+        if (
+            published.get("tag_name") != identity_tag
+            or published.get("immutable") is not True
+            or published.get("draft") is not False
+            or published.get("prerelease") is not False
+            or not published.get("published_at")
+        ):
+            raise ReleaseError("Kitmaker requires the published, immutable GitHub release for the approved tag.")
+        reference = github(f"/git/ref/tags/{identity_tag}")
+        if reference.get("ref") != f"refs/tags/{identity_tag}":
+            raise ReleaseError("GitHub did not resolve the approved release tag.")
+        tagged = as_object(reference.get("object"), "Git tag object")
+        for _ in range(5):
+            if tagged.get("type") != "tag":
+                break
+            annotated_sha = tagged.get("sha")
+            if not isinstance(annotated_sha, str) or not SHA1.fullmatch(annotated_sha):
+                raise ReleaseError("GitHub returned an invalid annotated tag.")
+            tagged = as_object(github(f"/git/tags/{annotated_sha}").get("object"), "annotated Git tag object")
+        if tagged.get("type") != "commit" or tagged.get("sha") != source_sha:
+            raise ReleaseError("The release tag does not refer to the approved source commit.")
 
     asset_base = f"https://github.com/{REPOSITORY}/releases/download/{tag}/"
     raw = request_bytes(
@@ -235,7 +288,9 @@ def verify_github_release(version: str, source_sha: str, manifest_sha256: str) -
         label="GitHub release manifest",
         redirects=("release-assets.githubusercontent.com", "objects.githubusercontent.com"),
     )
-    release = parse_manifest(version, source_sha, manifest_sha256, raw)
+    release = parse_manifest(version, source_sha, manifest_sha256, raw, asset_tag)
+    if tag != f"v{version}":
+        verify_recovery_assets(published, release, raw)
     for name, artifact in release.artifacts.items():
         verify_download(asset_base + name, artifact)
     return release
@@ -482,6 +537,8 @@ def release_to_kitmaker(mode, release, portal, receipts, inventory):
         "manifest_sha256": release.manifest_sha256,
         "project_id": portal.project_id,
     }
+    if checked_asset_tag(release.version, release.asset_tag) != f"v{release.version}":
+        binding["asset_tag"] = release.asset_tag
     state, revision = receipts.read()
     if state is None:
         state = {"binding": binding, "dry_runs": [], "publications": []}
@@ -537,13 +594,19 @@ def release_to_kitmaker(mode, release, portal, receipts, inventory):
 
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("mode", choices=("dry-run", "publish"))
+    parser.add_argument("mode", choices=("dry-run", "publish", "verify"))
     parser.add_argument("--version", required=True)
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--manifest-sha256", required=True)
+    parser.add_argument("--asset-tag", default="", help="Optional vVERSION-assets recovery download tag.")
     args = parser.parse_args()
     try:
-        checkout = verify_github_release(args.version, args.source_sha, args.manifest_sha256)
+        checkout = verify_github_release(args.version, args.source_sha, args.manifest_sha256, args.asset_tag)
+        if args.mode == "verify":
+            if check_indexes(checkout) != set(checkout.artifacts):
+                raise ReleaseError("Both public indexes must serve the exact wheel and source archive.")
+            sys.stdout.write("Verified the exact Python distributions on PyPI and NVIDIA DevZone.\n")
+            return 0
         config_path = vault_path("KITMAKER_VAULT_CONFIG_PATH")
         receipt_prefix = vault_path("KITMAKER_VAULT_RECEIPT_PATH")
         receipt_path = f"{receipt_prefix}/{args.version}"

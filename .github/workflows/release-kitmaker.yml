@@ -14,6 +14,10 @@ on:
       manifest_sha256:
         type: string
         required: true
+      asset_tag:
+        description: Optional vVERSION-assets recovery download tag
+        type: string
+        default: ''
 
 permissions: {}
 
@@ -24,7 +28,8 @@ jobs:
       github.repository == 'NVIDIA/SkillEvaluator' &&
       github.event_name == 'workflow_dispatch' &&
       github.ref == 'refs/heads/main' &&
-      github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main'
+      (github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main' ||
+       github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release-recovery.yml@refs/heads/main')
     runs-on: ubuntu-24.04
     timeout-minutes: 55
     environment: release-kitmaker-dry-run
@@ -57,6 +62,7 @@ jobs:
           RELEASE_VERSION: ${{ inputs.version }}
           RELEASE_SOURCE: ${{ inputs.source_sha }}
           RELEASE_MANIFEST_SHA256: ${{ inputs.manifest_sha256 }}
+          RELEASE_ASSET_TAG: ${{ inputs.asset_tag }}
           RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
           KITMAKER_VAULT_URL: ${{ vars.KITMAKER_VAULT_URL }}
           KITMAKER_VAULT_AUTH_MOUNT: ${{ vars.KITMAKER_VAULT_AUTH_MOUNT }}
@@ -70,6 +76,7 @@ jobs:
           python3 -m ci.kitmaker_release dry-run
           --version "$RELEASE_VERSION" --source-sha "$RELEASE_SOURCE"
           --manifest-sha256 "$RELEASE_MANIFEST_SHA256"
+          --asset-tag "$RELEASE_ASSET_TAG"
 
   upload:
     name: Publish the dry-run distributions through Kitmaker
@@ -91,3 +98,4 @@ jobs:
           python3 -m ci.kitmaker_release publish
           --version "$RELEASE_VERSION" --source-sha "$RELEASE_SOURCE"
           --manifest-sha256 "$RELEASE_MANIFEST_SHA256"
+          --asset-tag "$RELEASE_ASSET_TAG"

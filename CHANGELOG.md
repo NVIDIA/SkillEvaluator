@@ -19,13 +19,13 @@ All notable changes to SkillEvaluator are documented in this file.
   `Ignoring unknown top-level key(s)` warning; now a malformed block stops
   `validate --policy` with an error, and a valid one changes the policy digest
   recorded in result metadata and adds entry counts, never the hosts or URLs,
-  to the policy summary. No check reads these settings yet.
+  to the policy summary. A hook URL prefix requires an exact host. Use a bare
+  wildcard host pattern to allow all paths on its matching subdomains.
 - `evals/config.yml` accepts `harbor.trial_retries` (0 to 5) and an optional
-  top-level block with `load` and `lift_mode`, which were rejected as unknown
-  keys. They are validated now and reserved for a Tier 3 workflow for prepared
-  runtime packages. No command reads them yet, so skill runs ignore them, and
-  `--backend nemo-gym` rejects a config that sets `trial_retries` above 0,
-  `load` or `lift_mode`.
+  `plugin` block with `load` and `lift_mode`, which were rejected as unknown
+  keys. These settings are reserved for prepared runtime packages. Harbor skill
+  runs warn when they ignore these settings. `--backend nemo-gym` rejects a
+  config that sets `trial_retries` above 0, `load` or `lift_mode`.
 
 ### Documentation
 

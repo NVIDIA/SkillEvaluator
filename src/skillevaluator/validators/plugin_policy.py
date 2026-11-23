@@ -41,6 +41,8 @@ def normalize_plugin_allowlist(value: object, key: str, max_chars: int) -> tuple
             host = parsed.hostname
             if host:
                 _check_host_pattern(host, key)
+                if "*" in host:
+                    raise ValueError(f"{key} URL prefix host must be exact. Use a bare wildcard host pattern instead.")
         else:
             # The host matcher percent-decodes an entry, so '%' could spell any rejected character.
             if any(char.isspace() for char in entry) or any(char in entry for char in "%@?#\\"):
@@ -72,8 +74,13 @@ def _check_host_pattern(host: str, key: str) -> None:
         raise ValueError(f"{key} contains an invalid host pattern")
     if any(name.startswith(".") for name in hosts.names):
         raise ValueError(f"{key} contains a host that starts with '.'; use the '*.suffix' form to allow subdomains")
-    if any(".." in name for name in (*hosts.names, *hosts.suffixes)):
+    names = (*hosts.names, *hosts.suffixes)
+    if any(".." in name for name in names):
         raise ValueError(f"{key} contains a host with an empty label")
+    if not hosts.networks and any(
+        label.startswith("-") or label.endswith("-") for name in names for label in name.split(".")
+    ):
+        raise ValueError(f"{key} contains an invalid host label. Hyphens must be inside a label.")
 
 
 def plugin_policy_block(data: dict, name: str, known: set[str]) -> dict:

@@ -96,6 +96,7 @@ def test_allowlist_entries_are_stripped_and_deduplicated():
         ([".corp.example"], r"starts with '\.'.*\*\.suffix"),
         (["\uff0ecorp.example"], r"starts with '\.'"),
         (["example..com"], "empty label"),
+        (["-"], "invalid host label"),
         (["*..corp.example"], "empty label"),
     ],
 )
@@ -118,6 +119,7 @@ def test_invalid_mcp_host_entries_fail_closed(value, match):
         (["https://hooks.example.test/\u202e"], "control or invisible"),
         (["http://*/"], "invalid host wildcard"),
         (["http://*.*/"], "invalid host wildcard"),
+        (["https://*.hooks.example.test/events"], "URL prefix host must be exact"),
         (["https://.hooks.example.test/"], r"starts with '\.'"),
         (["https://hooks..example.test/"], "empty label"),
     ],
@@ -127,8 +129,8 @@ def test_invalid_hook_url_prefixes_fail_closed(value, match):
         ValidationPolicy(hook_allowed_urls=value)
 
 
-def test_hook_url_prefixes_keep_the_host_wildcard_form():
-    entries = ("https://*.hooks.example.test/events", "hooks.example.test")
+def test_hook_allowlist_accepts_exact_url_prefixes_and_wildcard_host_patterns():
+    entries = ("https://hooks.example.test/events", "*.hooks.example.test")
     assert ValidationPolicy(hook_allowed_urls=entries).hook_allowed_urls == entries
 
 

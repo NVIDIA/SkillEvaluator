@@ -5571,6 +5571,15 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
 
     harbor_config = config.get("harbor", {})
+    if _private_runtime_hooks() is None:
+        plugin_controls = [f"plugin.{name}" for name in sorted(config.get("plugin", {}))]
+        if harbor_config.get("trial_retries"):
+            plugin_controls.append("harbor.trial_retries")
+        if plugin_controls:
+            logger.warning(
+                "Only prepared plugin runs use these settings. The skill run ignores %s.",
+                ", ".join(plugin_controls),
+            )
     workspace_config = config.get("skill_workspace", {})
     grading_config = config.get("grading", {})
     n_attempts = n_attempts if n_attempts is not None else harbor_config.get("n_attempts", 1)

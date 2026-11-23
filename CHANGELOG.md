@@ -33,6 +33,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Documentation
 
+- Clarify what Tier 1 Discoverability scores and where to find evidence of
+  skill activation in Tier 3.
 - Add a README badge linking to the reusable GitHub and GitLab CI templates,
   and explain how to add automated quality and security gates to a skills
   repository without maintaining evaluation code.
@@ -49,6 +51,10 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- `doctor`, `health-check`, and `tier3 doctor` accept `--json` to print the
+  same readiness rows as one JSON object on stdout, so CI can read scanner
+  and credential failures without scraping the table. Guided installation is
+  not part of this change.
 - Tier 1 accepts an explicit `--hook-waivers FILE` approval for eligible
   command hooks in an exact, reviewed plugin package. Applied waivers are
   reported and clear only the matching unmodeled-hook gate.
@@ -68,6 +74,55 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Full-body embeddings stop windowing a long section once a window reaches its end,
+  avoiding extra embedding inputs and pooled weight for already-covered tails.
+  Rebuild saved full-body catalogs to use the corrected pooling.
+- Trajectories rebuilt from native Codex logs preserve recorded MCP server and
+  tool names, including server names containing `__`, for scoring and plugin
+  reports. Full identities are checked before display-label truncation, and
+  oversized names and names containing control characters are not trusted for
+  identity matching.
+  In rebuilt logs, MCP tools count as MCP work rather than neutral planning even
+  when their bare name is one of the neutral planning or bookkeeping names (for
+  example `task`, `update_plan`, `spawn_agent`, `wait`, `agent`, or `todowrite`);
+  an MCP tool named `skill` no longer produces a false Skill-tool activation.
+  Codex `tier3 import-traces` candidates also use `mcp__server__tool` labels,
+  retaining the tool name when a long server label must be shortened.
+  Harbor-provided Codex trajectories and their existing MCP classification are
+  unchanged.
+- Dataset coverage includes cases with valid declarative checks in behavior coverage,
+  so checks-only cases no longer incorrectly claim that `behavior_check` is unavailable.
+- Agent JSONL log reconstruction preserves Unicode line separators inside command,
+  observation and response strings instead of treating them as record boundaries.
+  Previously, a Claude Code log whose skill-read record held such a separator lost
+  that record and could score `skill_execution` 0 instead of 1.
+  A CR-only `agent_log` string in an `import-traces` export is no longer split into
+  records and is reported as an unsupported agent log format; agent log files read
+  from a trial directory are unaffected because they are read with newline
+  normalization.
+- Claude Code and Cline log reconstruction skips non-object JSON events and
+  Cline tool payloads instead of discarding valid surrounding evidence with an exception.
+- Declarative command-success checks retain recorded exit status for a single
+  script command whose quoted path contains spaces. Pipeline tails (`|` and `|&`)
+  and negated commands (`!` and `time [-p] [--] !`) remain unattributed instead
+  of using another process's status or the inverse of the script's status.
+  A trailing shell comment containing `|&` does not hide the script's recorded
+  status; quoted or escaped hashes still leave real pipelines unattributed.
+  A shell comment that follows a command substitution, a backtick expansion or
+  a non-identifier parameter expansion leaves status unattributed, because
+  quoting nested inside the expansion can hide where the comment starts,
+  including Bash expansion openers split by line continuations. A comment ahead
+  of such an expansion does not affect status. Plain braced identifier
+  arguments retain their recorded status, and Zsh keeps its distinct
+  continuation behavior. Commentless expansions also retain status when quoted
+  output filenames contain literal hashes; real pipelines remain unattributed.
+- Baseline task identities include authored `repo-context.json` files outside
+  the generated metadata location, so changed task inputs invalidate reuse.
+  Native Harbor tasks reject authored `environment/repo-context.json` because
+  that exact path is reserved for generated repository-context metadata.
+- Tier 3 rejects non-object entries in legacy list and `cases` datasets instead
+  of silently evaluating a subset of the authored cases.
+- Similarity scores stay correct for extremely small embedding vectors.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank
@@ -108,9 +163,13 @@ All notable changes to SkillEvaluator are documented in this file.
   whose embedded instructions must not be followed and count against a
   false-positive verdict. Previously a crafted skill file could steer a
   high-confidence `false_positive` verdict and downgrade a HIGH finding to INFO.
+- NeMo Gym trial directories preserve trailing hyphens in valid task IDs, so cases
+  such as `case` and `case-` retain separate rewards, trajectories and attempt records.
 - Tier 3 trajectory recovery continues past invalid UTF-8 trajectory files and
   unreadable candidate logs, preserving source priority and reporting skipped
   artifacts while recovering available evidence from later agent logs.
+- Tier 1 names a file of an unsupported type when documented binary exclusions
+  account for the difference between the SkillSpector inventory and coverage counts.
 - Tier 2 paragraph chunking counts source-line offsets in one forward pass, avoiding
   repeated scans of the whole prefix for Markdown sections with many paragraphs.
 - Tier 3 treats overflowing native trajectory timing totals as unavailable and retains
@@ -188,6 +247,20 @@ All notable changes to SkillEvaluator are documented in this file.
   similarity scores and clusters are unchanged.
 - Naming checks reject a trailing newline in skill, workflow, and rule path components,
   instead of treating the name before that newline as a complete kebab-case match.
+- The `accuracy` and `goal_accuracy` judges now see the end of a tool result
+  longer than 1,500 characters as well as its beginning. Only the beginning was
+  kept, so the last lines of a long command output, such as the summary line of
+  a test run, never reached the judge that decides the attempt. A long result
+  is masked for credentials before it is cut, so the saved judge evidence does
+  not keep the end of a value the cut went through. A result over 1,000,000
+  characters still keeps only its beginning.
+- The `omitted` record of the `accuracy` and `goal_accuracy` judges now carries
+  `incomplete_sections`, as `behavior_check` already does. It names the final
+  response, file changes or tool results that did not reach the judge whole,
+  including a tool result or write body cut to its own allowance, which the
+  record did not mention before. A run with more tool results than a judge
+  reads lists `older tool results`. On all three judges the record now also
+  counts edits past the five that a multi-edit shows.
 - LLM retries retain the innermost valid `Retry-After` header through exception
   wrappers. Delay seconds must be finite and non-negative; HTTP dates remain
   supported. Malformed inner values do not discard a valid outer delay, and
@@ -199,6 +272,12 @@ All notable changes to SkillEvaluator are documented in this file.
   attempt, and the run then failed with `Excess scored attempts`. With
   `--max-attempts-total`, an arm asking for an attempt on its own can still
   use a slot left over after a both-arm request did not fit.
+- The Tier 1 code check scans a skill's Python files whatever the skill or a
+  folder above it is called. Bandit reads each exclude entry as a substring of
+  the whole path, so a name containing `test`, `evals`, `results`, `versions`
+  or `.git`, such as `webapp-testing` or `.github/skills/`, left no file to
+  scan and the check passed. Only real test and artifact folders and test
+  files inside the skill are skipped now, and the Tier 1 reference says which.
 - Git repository-root lookups preserve trailing whitespace in directory names
   instead of resolving a different path, keeping report links, repository context,
   and generated-results ignore entries tied to the actual checkout.

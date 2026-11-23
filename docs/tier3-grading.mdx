@@ -89,6 +89,12 @@ trial's agent log directory, trying `claude-code.txt`, `cursor-cli.txt`,
   commands keep their `status=failed` and `exit_code=` evidence, so
   error-recovery checks still see them.
 
+When a trajectory keeps Hermes's native tool names, a successful `skill_view`
+of the target manifest counts as a skill read. A `terminal` call with a recorded
+shell result is graded like `bash`, including writes in the judge's file-change
+evidence. For OpenCode, the verifier reads `filePath` from file calls and
+`newString` from edits, so judges see the path and replacement text.
+
 Each trial's reward records the artifact it graded in `trajectory_source`. If
 neither `trajectory.json` nor a supported log yields any steps, the reward
 records `No trajectory or reconstructible agent log`. Custom graders read

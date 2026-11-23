@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from skillevaluator.tier3.eval_core import atif_helpers
+from skillevaluator.tier3.eval_core import atif_helpers, checks
 from skillevaluator.tier3.eval_core.atif_helpers import (
     build_behavior_evidence,
     build_conversation_summary,
@@ -1455,6 +1455,43 @@ def _codex_patch_trajectory(patch: str) -> dict:
 
 def _file_changes_section(evidence: str) -> str:
     return evidence.split("FINAL RESPONSE", 1)[0].split("COMPACT TOOL HISTORY", 1)[0]
+
+
+def _opencode_call(name: str, **arguments: str) -> dict:
+    return {"steps": [{"source": "agent", "tool_calls": [{"function_name": name, "arguments": arguments}]}]}
+
+
+def test_opencode_read_path_proves_activation() -> None:
+    path = "/workspace/skills/calculator/SKILL.md"
+    traj = _opencode_call("read", filePath=path)
+
+    activation = checks.check_activation(atif_helpers.extract_tool_calls_as_dicts(traj), "calculator")
+    assert activation["score"] == 1.0
+    assert activation["details"]["path"] == path
+    assert atif_helpers.get_read_calls(traj) == [path]
+
+
+def test_opencode_write_path_is_a_verified_fact() -> None:
+    path = "/workspace/output/result.txt"
+    traj = _opencode_call("write", filePath=path, content="done")
+
+    facts = atif_helpers.build_verified_facts(traj, [f"Save the result to {path}"], "")
+    assert facts == [{"claim": path, "observed": True, "step_id": 0, "evidence": path}]
+
+
+@pytest.mark.parametrize(
+    ("tool", "body"),
+    [("write", {"content": "updated"}), ("edit", {"oldString": "original", "newString": "updated"})],
+)
+def test_opencode_file_changes_include_path_and_new_content(tool: str, body: dict[str, str]) -> None:
+    path = "/workspace/output/result.txt"
+    traj = _opencode_call(tool, filePath=path, **body)
+
+    changes = _evidence_section(build_behavior_evidence(traj, "Update the result."), "FILE CHANGES")
+    assert f"Agent called: {tool}" in changes
+    assert f"Path: {path}" in changes.splitlines()
+    assert "updated" in changes.splitlines()
+    assert "original" not in changes
 
 
 @pytest.mark.parametrize(

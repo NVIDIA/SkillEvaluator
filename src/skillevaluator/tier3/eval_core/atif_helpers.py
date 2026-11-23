@@ -101,7 +101,8 @@ def get_read_calls(traj: dict[str, Any]) -> list[str]:
     for tc in get_all_tool_calls(traj):
         fn = tc["fn"].lower()
         if fn in ("read", "read_file"):
-            path = tc["args"].get("path", tc["args"].get("file_path", ""))
+            args = tc["args"]
+            path = args.get("path", args.get("file_path")) or args.get("filePath")
             if path:
                 paths.append(str(path))
         elif fn in ("bash", "execute", "exec_command", "run", "run_code", "shell", "command"):
@@ -395,7 +396,7 @@ def _patch_header_paths(patch: str) -> list[str]:
 
 
 def _tool_file_path(args: dict[str, Any]) -> str:
-    for key in ("file_path", "path", "filename", "target_file"):
+    for key in ("file_path", "path", "filename", "target_file", "filePath"):
         value = args.get(key)
         if value:
             return str(value)
@@ -412,7 +413,7 @@ def _tool_file_path(args: dict[str, Any]) -> str:
 def _tool_write_body(args: dict[str, Any], *, full: bool = False) -> str:
     """Render what a write call wrote. Only the first five edits of a multi-edit are shown unless *full*."""
     snippets: list[str] = []
-    for key in ("content", "new_string", "patch", "code"):
+    for key in ("content", "new_string", "newString", "patch", "code"):
         value = args.get(key)
         if value:
             snippets.append(f"{key}:\n{value}")

@@ -33,6 +33,8 @@ def test_current_git_baseline_loads_its_own_shared_modules(monkeypatch):
         "shell_lexing",
         "optional_reference",
         "secret_redaction",
+        "hermes_tool_call_normalizer",
+        "skillevaluator.tier3.eval_core.hermes_tool_call_normalizer",
         "skillevaluator.tier3.eval_core.script_invocation",
         "skillevaluator.tier3.eval_core.shell_lexing",
         "skillevaluator.tier3.eval_core.optional_reference",

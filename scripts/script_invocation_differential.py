@@ -1170,6 +1170,7 @@ def _load_baseline(ref: str):
                 "script_invocation",
                 "optional_reference",
                 "secret_redaction",
+                "hermes_tool_call_normalizer",
                 "codex_tool_call_normalizer",
                 "log_converters",
             )

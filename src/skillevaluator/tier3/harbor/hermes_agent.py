@@ -15,6 +15,8 @@ from harbor.agents.agent_auth_resolution import require_credential_env
 from harbor.agents.installed.base import with_prompt_template
 from harbor.agents.installed.hermes import Hermes
 
+from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_HOME as _HOME
+from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
 from skillevaluator.tier3.harbor import HERMES_VERSION
 
 if TYPE_CHECKING:
@@ -24,7 +26,6 @@ if TYPE_CHECKING:
     from harbor.models.trajectories import Trajectory
 
 HERMES_COMMIT = "f97608f178d1ffeca59860195ab7da295f7c8e5f"
-_HOME = "/tmp/hermes"
 
 
 class SkillEvaluatorHermes(Hermes):
@@ -157,37 +158,16 @@ class SkillEvaluatorHermes(Hermes):
         for step in trajectory.steps:
             results = {result.source_call_id: result for result in step.observation.results} if step.observation else {}
             for call in step.tool_calls or []:
-                if call.function_name not in {"terminal", "skill_view", "read_file"}:
+                if call.function_name not in HERMES_TOOLS:
                     continue
                 result = results.get(call.tool_call_id)
-                try:
-                    payload = json.loads(result.content) if result and isinstance(result.content, str) else {}
-                except (ValueError, TypeError):
-                    payload = {}
-                if not isinstance(payload, dict):
-                    payload = {}
-                if call.function_name == "terminal":
-                    call.function_name = "bash"
-                    exit_code = payload.get("exit_code")
-                    if result and (type(exit_code) is int or payload.get("error")):
-                        result.extra = {
-                            **(result.extra or {}),
-                            "tool_result_is_error": bool(payload.get("error")) or exit_code != 0,
-                        }
-                elif call.function_name == "skill_view":
-                    # Only an observed successful manifest read is activation evidence.
-                    if payload.get("success") is True and payload.get("content") and not payload.get("error"):
-                        name = str(call.arguments.get("name", ""))
-                        file_path = str(call.arguments.get("file_path") or "SKILL.md")
-                        call.function_name = "read"
-                        call.arguments = {"path": f"{_HOME}/skills/{name}/{file_path}"}
-                    elif result:
-                        result.extra = {**(result.extra or {}), "tool_result_is_error": True}
-                elif result:
-                    result.extra = {
-                        **(result.extra or {}),
-                        "tool_result_is_error": bool(payload.get("error")) or payload.get("success") is False,
-                    }
+                content = result.content if result and isinstance(result.content, str) else ""
+                call.function_name, call.arguments, error = normalize_hermes_call(
+                    call.function_name, call.arguments, content, native_session=True
+                )
+                if result and error is not None:
+                    extra = result.extra or {}
+                    result.extra = {**extra, "tool_result_is_error": error or extra.get("tool_result_is_error") is True}
         return trajectory
 
     def populate_context_post_run(self, context: AgentContext) -> None:

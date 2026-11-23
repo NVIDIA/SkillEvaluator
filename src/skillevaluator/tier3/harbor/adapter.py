@@ -84,6 +84,7 @@ _VERIFIER_FILES = (
     _EVAL_CORE_DIR / "checks.py",
     _EVAL_CORE_DIR / "secret_redaction.py",
     _EVAL_CORE_DIR / "codex_tool_call_normalizer.py",
+    _EVAL_CORE_DIR / "hermes_tool_call_normalizer.py",
     _EVAL_CORE_DIR / "character_facts.py",
     _EVAL_CORE_DIR.parent.parent / "evidence.py",
 )

@@ -8,6 +8,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
+- Tier 3 grading now credits successful Hermes skill reads and shell commands in
+  trajectories from other runners. OpenCode file reads, writes, and edits keep
+  their paths and replacement text in grading evidence.
 
 ## 1.2.0 - 2026-11-23
 

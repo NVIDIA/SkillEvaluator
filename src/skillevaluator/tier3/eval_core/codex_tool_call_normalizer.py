@@ -10,6 +10,11 @@ import math
 import re
 from typing import Any
 
+if __package__:
+    from .hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
+else:
+    from hermes_tool_call_normalizer import HERMES_TOOLS, normalize_hermes_call
+
 UNSUPPORTED_NATIVE_CODEX_EXEC = "unsupported_native_codex_exec_wrapper"
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = "ambiguous_outer_exec_result"
 MAPPED_OUTER_EXEC_OBSERVATION = "mapped_outer_exec_result"
@@ -1485,10 +1490,19 @@ def _resolve_exec_records(
 
 
 def _iter_normalized_tool_calls_with_records(traj: dict[str, Any]):
-    """Yield each trajectory tool call after safe native-Codex normalization."""
+    """Yield grading calls without changing the recorded trajectory."""
     for step in traj.get("steps", []):
         for raw_index, tool_call in enumerate(step.get("tool_calls") or []):
             normalized = normalize_tool_call(tool_call)
+            if tool_call.get("function_name") in HERMES_TOOLS and isinstance(tool_call.get("arguments"), dict):
+                call = normalized[0]
+                extra = call.get("extra")
+                if not (isinstance(extra, dict) and extra.get("junie_agent_event_kind") == "TerminalBlockUpdatedEvent"):
+                    content = _outer_tool_call_observation(step, call, include_unscoped=False)
+                    name, args, error = normalize_hermes_call(call["function_name"], call["arguments"], content)
+                    call.update(function_name=name, arguments=args)
+                    if error is not None:
+                        call["_atif_hermes_is_error"] = error
             if normalized and _RECORD_FORMAT in normalized[0]:
                 normalized = _resolve_exec_records(step, tool_call, raw_index, normalized)
             for call in normalized:
@@ -1506,7 +1520,10 @@ def _normalized_tool_call_error_flag_with_records(step: dict[str, Any], tool_cal
     """Report a call's own record outcome, which may be unknown, before the upstream flag."""
     if tool_call.get("_atif_observation_status") == MAPPED_OUTER_EXEC_OBSERVATION and _RECORD_IS_ERROR in tool_call:
         return tool_call[_RECORD_IS_ERROR]
-    return _upstream_normalized_tool_call_error_flag(step, tool_call)
+    flag = _upstream_normalized_tool_call_error_flag(step, tool_call)
+    if "_atif_hermes_is_error" in tool_call:
+        return flag is True or tool_call["_atif_hermes_is_error"]
+    return flag
 
 
 normalize_tool_call = _normalize_tool_call_with_records

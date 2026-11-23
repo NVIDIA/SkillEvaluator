@@ -932,7 +932,7 @@ ACCEPTABLE_ALTERNATE_SCORE = 0.75
 # Tool argument field names used across agents for file paths.
 # Claude Code uses ``file_path`` for Read/Write, ``path`` for Glob.
 # Other agents use ``path`` or ``raw``. ATIF synthetic trajectories use ``raw``.
-_PATH_ARG_KEYS = ("file_path", "path", "filename", "target_file", "raw")
+_PATH_ARG_KEYS = ("file_path", "path", "filename", "target_file", "filePath", "raw")
 
 
 def _extract_path(tool_call: dict[str, Any]) -> str:
@@ -14338,7 +14338,8 @@ def check_script_execution(
         # A file-read tool returning the script's own source is not evidence
         # that it ran.
         for tc in tool_calls:
-            if _is_file_read_action(str(tc["action"])):
+            action = str(tc["action"])
+            if _is_file_read_action(action) or action == "skill_view" or (action == "terminal" and tc.get("is_error")):
                 continue
             obs = str(tc.get("observation", "")).lower()
             if expected_script.lower() in obs:
@@ -15473,6 +15474,8 @@ def _tool_call_productivity(tc: dict[str, Any], expected_skill: Any, expected_sc
     if name in _NEUTRAL_TOOL_NAMES:
         return "neutral"
     args = _tool_efficiency_args(tc)
+    if name == "skill_view" and args.get("file_path") and tc.get("is_error") is False:
+        return "productive"
     target = _tool_efficiency_target(name, args)
     runs_command = _is_execution_action(name)
     search_action = name

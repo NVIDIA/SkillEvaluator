@@ -37,8 +37,8 @@ from harbor.trial.trial import Trial
 
 from skillevaluator.provider_config import ProviderConfig
 from skillevaluator.tier3.commands import validate_agents
-from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
-from skillevaluator.tier3.eval_core.checks import check_activation
+from skillevaluator.tier3.eval_core.atif_helpers import _collect_file_change_evidence, extract_tool_calls_as_dicts
+from skillevaluator.tier3.eval_core.checks import check_activation, check_script_execution, check_tool_efficiency
 from skillevaluator.tier3.harbor import DOCKER_AGENT_IMPORT_PATHS, HARBOR_AGENTS_EXPERIMENTAL
 from skillevaluator.tier3.harbor.adapter import generate_harbor_tasks
 from skillevaluator.tier3.harbor.collector import AGENT_LOG_ARTIFACTS, _agent_log_runtime_failure_reason
@@ -278,6 +278,25 @@ def test_atif_skill_activation_requires_successful_target_manifest(tmp_path, too
     assert calls[0]["observation"]
 
 
+def test_verifier_scores_raw_hermes_calls_like_the_harbor_export(tmp_path):
+    agent = _agent(tmp_path)
+    for tool, arguments, payload in [
+        ("skill_view", {"name": "lookup-code"}, {"success": True, "content": "# Instructions"}),
+        ("read_file", {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"}, {"success": False}),
+        ("terminal", {"command": "echo cobalt > answer.txt"}, {"output": "", "exit_code": 0, "error": None}),
+        ("terminal", {"command": "cat /skills/lookup-code/SKILL.md"}, {"output": "", "exit_code": 1}),
+    ]:
+        session = _session(tool=tool, arguments=arguments, observation=payload)
+        raw = super(type(agent), agent)._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        raw["agent"]["name"] = "external-runner"
+        exported = agent._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        calls = extract_tool_calls_as_dicts(raw)
+        assert calls == extract_tool_calls_as_dicts(exported)
+        assert check_activation(calls, "lookup-code")["passed"] is (tool == "skill_view")
+        if "echo" in arguments.get("command", ""):
+            assert _collect_file_change_evidence(raw) == _collect_file_change_evidence(exported) != []
+
+
 def test_terminal_conversion_and_token_context(tmp_path):
     agent = _agent(tmp_path)
     text = _session(tool="terminal", arguments={"command": "python lookup.py cobalt"})
@@ -290,6 +309,92 @@ def test_terminal_conversion_and_token_context(tmp_path):
     calls = extract_tool_calls_as_dicts(trajectory)
     assert calls[0]["action"] == "bash"
     assert calls[0]["action_input"]["command"] == "python lookup.py cobalt"
+
+
+@pytest.mark.parametrize(
+    ("name", "arguments", "result", "extra", "action", "is_error"),
+    [
+        ("skill_view", {"name": "lookup-code"}, "just text", {"tool_result_is_error": False}, "skill_view", False),
+        (
+            "skill_view",
+            {"name": "lookup-code", "file_path": "references/SKILL.md.template"},
+            '{"success": true, "content": "Run scripts/lookup.py"}',
+            {},
+            "skill_view",
+            False,
+        ),
+        ("terminal", {"command": "python lookup.py"}, '{"error": "lookup.py disabled"}', {}, "terminal", True),
+        ("terminal", {"command": "cat status.json"}, '{"exit_code": 1}', {}, "terminal", None),
+        (
+            "skill_view",
+            {"name": "lookup-code"},
+            '{"success": true, "name": "decoy", "content": "decoy"}',
+            {},
+            "skill_view",
+            None,
+        ),
+        (
+            "read_file",
+            {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"},
+            '{"error": "File not found: /tmp/hermes/skills/lookup-code/SKILL.md"}',
+            {},
+            "read_file",
+            True,
+        ),
+        (
+            "read_file",
+            {"path": "/tmp/hermes/skills/lookup-code/SKILL.md"},
+            '{"success": false, "error": "File not found"}',
+            {},
+            "read_file",
+            True,
+        ),
+        ("read_file", {"path": "/workspace/config.json"}, '{"success": false}', {}, "read_file", None),
+    ],
+)
+def test_unrecognized_or_failed_hermes_calls_do_not_prove_activation(name, arguments, result, extra, action, is_error):
+    step = {
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": "call", "function_name": name, "arguments": arguments}],
+        "observation": {"results": [{"source_call_id": "call", "content": result, "extra": extra}]},
+    }
+    calls = extract_tool_calls_as_dicts({"steps": [step]})
+    assert calls[0]["action"] == action
+    assert calls[0].get("is_error") is is_error
+    assert not check_activation(calls, "lookup-code")["passed"]
+    assert not check_script_execution(calls, "lookup.py")["passed"]
+
+
+def test_successful_auxiliary_skill_view_counts_as_productive_but_not_as_execution(tmp_path):
+    session = _session(
+        arguments={"name": "lookup-code", "file_path": "references/usage.md"},
+        observation={"success": True, "content": "Run lookup.py"},
+    )
+    agent = _agent(tmp_path)
+    for exporter in (super(SkillEvaluatorHermes, agent), agent):
+        trajectory = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        calls = extract_tool_calls_as_dicts(trajectory)
+        assert check_tool_efficiency(calls, "lookup-code", "lookup.py")["score"] == 1.0
+        assert not check_activation(calls, "lookup-code")["passed"]
+        assert not check_script_execution(calls, "lookup.py")["passed"]
+
+
+def test_junie_terminal_stdout_is_not_a_hermes_status_record():
+    call = {
+        "tool_call_id": "call",
+        "function_name": "terminal",
+        "arguments": {"command": "cat status.json"},
+        "extra": {"junie_agent_event_kind": "TerminalBlockUpdatedEvent"},
+    }
+    stdout = '{"exit_code": 1, "output": ""}'
+    step = {
+        "source": "agent",
+        "tool_calls": [call],
+        "observation": {"results": [{"source_call_id": "call", "content": stdout}]},
+    }
+    assert extract_tool_calls_as_dicts({"steps": [step]}) == [
+        {"action": "terminal", "action_input": call["arguments"], "observation": stdout}
+    ]
 
 
 @pytest.mark.parametrize("result", [{"exit_code": 1}, {"error": "timed out"}, {"exit_code": 0}])

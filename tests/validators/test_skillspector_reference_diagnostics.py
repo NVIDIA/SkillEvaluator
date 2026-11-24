@@ -34,6 +34,7 @@ from skillevaluator.skillspector_references import (
     AE1_PATTERN,
     index_legacy_reference_reasons,
     issue_diagnostics,
+    reference_suggestion,
     reference_summary_message,
     report_path,
 )
@@ -46,6 +47,7 @@ _LEGACY_REPORT = "skillspector-2.11.2-perl-help-text-ae1-no-llm.json"
 _HOST_LANGUAGE_REPORT = "skillspector-2.12.0-host-language-parse-limits-ae1-no-llm.json"
 _PARSE_LIMIT_REPORT = "skillspector-2.13.3-perl-parse-limit-ae1-no-llm.json"
 _IMAGE_PATH_REPORT = "skillspector-2.12.0-image-path-reference-no-llm.json"
+_MJS_PARSE_LIMIT_REPORT = "skillspector-2.13.4-mjs-runtime-parse-limit-no-llm.json"
 _CHECK_NAME = f"{AE1_PATTERN} (AE1)"
 _INCOMPLETE = "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial')"
 _OBFUSCATION_ANALYZERS = [
@@ -342,6 +344,168 @@ class TestEvidenceProjection:
             {"file": "SKILL.md", "start_line": 6},
             {"file": "SKILL.md"},
         ]
+
+    @staticmethod
+    def _runtime_parse_limit_issue(target: str = "scripts/admission.mjs", **reason: object) -> dict:
+        """An AE1 issue for *target* in the shape SkillSpector 2.13.x emits.
+
+        Its ``evidence.reasons`` carry ``reason_code``, ``message``, ``phase``,
+        ``analyzers`` and the event's own lines, never ``parser_diagnostic``.
+        """
+        issue = _report(_PARSE_LIMIT_REPORT)["issues"][0]
+        issue["finding"] = f"{target} (partial)"
+        issue["evidence"] = {
+            "target_path": target,
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "message": "A security-relevant expression could not be fully resolved by the bounded static parser.",
+                    "phase": "static",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    **reason,
+                }
+            ],
+        }
+        return issue
+
+    def test_captured_ledger_span_reaches_a_scanner_shaped_finding(self) -> None:
+        """The 2.13.4 capture's ledger row gives its AE1 finding lines 74-170."""
+        report = _report(_MJS_PARSE_LIMIT_REPORT)
+        report["issues"].append(self._runtime_parse_limit_issue())
+        without_ledger = copy.deepcopy(report["issues"][-1])
+
+        result = _process(report)
+
+        [finding] = _ae1(result)
+        assert "static_parse_limit (static_patterns_tool_misuse) at target lines 74-170:" in finding.suggestion
+        reason = finding.metadata["skillspector_evidence"]["reasons"][0]
+        assert (reason["start_line"], reason["end_line"]) == (74, 170)
+        assert reason["line_source"] == "parser_diagnostic"
+        assert not any(key.startswith("_") for key in reason)
+        assert "source_start_offset" not in json.dumps(finding.metadata)
+        # The suggestion is new, so the finding_id changes once from a finding without the span.
+        baseline, _ = SecurityValidator._convert_skillspector_issue(without_ledger)
+        assert "at target line" not in baseline.suggestion
+        assert finding.finding_id != baseline.finding_id
+
+    def test_parser_span_suggestion_does_not_depend_on_call_order(self) -> None:
+        """``issue_diagnostics`` alone has no private keys, and ``reference_suggestion`` is repeatable."""
+        completeness = _report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"]
+        metadata = issue_diagnostics(
+            self._runtime_parse_limit_issue(), normalize_path=report_path, completeness=completeness
+        )
+        evidence = metadata["skillspector_evidence"]
+        assert not any(key.startswith("_") for reason in evidence["reasons"] for key in reason)
+        before = copy.deepcopy(evidence)
+
+        first = reference_suggestion(evidence, None)
+        second = reference_suggestion(evidence, None)
+
+        assert "at target lines 74-170" in first
+        assert second == first
+        assert evidence == before
+
+    def test_ledger_span_is_read_only_from_the_one_matching_row(self) -> None:
+        completeness = copy.deepcopy(_report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"])
+        rows = completeness["ledger_exceptions"]
+
+        other_target, _ = SecurityValidator._convert_skillspector_issue(
+            self._runtime_parse_limit_issue("scripts/helper.mjs"), completeness=completeness
+        )
+        other_reason = self._runtime_parse_limit_issue()
+        other_reason["evidence"]["reasons"][0]["reason_code"] = "obfuscated_instruction_text"
+        other_code, _ = SecurityValidator._convert_skillspector_issue(other_reason, completeness=completeness)
+        rows.append({**rows[1], "parser_diagnostic": {**rows[1]["parser_diagnostic"], "start_line": 200}})
+        ambiguous, _ = SecurityValidator._convert_skillspector_issue(
+            self._runtime_parse_limit_issue(), completeness=completeness
+        )
+
+        for finding in (other_target, other_code, ambiguous):
+            assert "at target line" not in finding.suggestion
+            assert "start_line" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+
+    def test_reason_line_is_kept_over_the_ledger_span(self) -> None:
+        completeness = _report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"]
+        issue = self._runtime_parse_limit_issue(start_line=3)
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue, completeness=completeness)
+
+        assert "at target line 3" in finding.suggestion
+        assert "74-170" not in finding.suggestion
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["start_line"] == 3
+        assert "end_line" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+
+    def test_static_parse_limit_does_not_invent_a_parser_span(self) -> None:
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(self._runtime_parse_limit_issue())
+
+        assert "at target line" not in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+
+    def test_single_line_ledger_span_uses_target_line(self) -> None:
+        completeness = copy.deepcopy(_report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"])
+        completeness["ledger_exceptions"][1]["parser_diagnostic"].update(start_line=11, end_line=11)
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(
+            self._runtime_parse_limit_issue(), completeness=completeness
+        )
+
+        assert "at target line 11" in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+
+    def test_legacy_ledger_row_parser_span_is_quoted(self) -> None:
+        """Without structured reasons, the ledger row itself carries the span."""
+        issue = self._runtime_parse_limit_issue()
+        issue["evidence"]["reasons"] = []
+        completeness = _report(_MJS_PARSE_LIMIT_REPORT)["analysis_completeness"]
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue, completeness=completeness)
+
+        assert "at target lines 74-170" in finding.suggestion
+
+    def test_row_end_line_without_parser_diagnostic_keeps_upstream_suggestion_and_id(self) -> None:
+        """A row that already has lines 3-7 must keep the upstream suggestion and finding ID."""
+        issue = _report()["issues"][0]
+        issue["evidence"] = {
+            "target_path": "scripts/helper.pl",
+            "target_disposition": "partial",
+            "reasons": [
+                {
+                    "reason_code": "static_parse_limit",
+                    "analyzers": ["static_patterns_tool_misuse"],
+                    "start_line": 3,
+                    "end_line": 7,
+                }
+            ],
+        }
+        baseline_issue = copy.deepcopy(issue)
+        del baseline_issue["evidence"]["reasons"][0]["end_line"]
+
+        finding, _is_error = SecurityValidator._convert_skillspector_issue(issue)
+        baseline, _ = SecurityValidator._convert_skillspector_issue(baseline_issue)
+
+        assert finding.suggestion == baseline.suggestion
+        assert finding.finding_id == baseline.finding_id
+        assert "at target line 3" in finding.suggestion
+        assert "3-7" not in finding.suggestion
+        assert "at target lines" not in finding.suggestion
+        assert finding.metadata["skillspector_evidence"]["reasons"][0]["end_line"] == 7
+        assert "line_source" not in finding.metadata["skillspector_evidence"]["reasons"][0]
+
+        issue["evidence"]["reasons"] = [
+            {"reason_code": "read_error", "start_line": 4, "end_line": 5},
+            {"reason_code": "read_error", "start_line": 4, "end_line": 12},
+        ]
+        baseline_issue = copy.deepcopy(issue)
+        for reason in baseline_issue["evidence"]["reasons"]:
+            del reason["end_line"]
+        grouped, _ = SecurityValidator._convert_skillspector_issue(issue)
+        grouped_baseline, _ = SecurityValidator._convert_skillspector_issue(baseline_issue)
+        assert grouped.suggestion == grouped_baseline.suggestion
+        assert grouped.finding_id == grouped_baseline.finding_id
+        assert grouped.suggestion.count("read_error") == 1
+        assert "at target line 4" in grouped.suggestion
+        assert "at target lines" not in grouped.suggestion
 
     @pytest.mark.parametrize("field", ["observed_characters", "observed_seconds"])
     @pytest.mark.parametrize(

@@ -856,11 +856,12 @@ def test_allowlist_revocation_never_sends_credentials_to_proxy(monkeypatch, revo
             thread.start()
         try:
             config = _provider("openai-compatible", base_url=f"http://gateway.test:{catalog.server_port}/v1")
+            # Use the normal bounded catalog timeout for the live loopback request.
             if revoke_before_policy_check:
                 with pytest.raises(ModelCatalogError, match="plain HTTP is no longer authorized"):
-                    fetch_model_records(config, timeout_seconds=1.0)
+                    fetch_model_records(config)
             else:
-                assert fetch_model_records(config, timeout_seconds=1.0) == (ModelRecord("model-a"),)
+                assert fetch_model_records(config) == (ModelRecord("model-a"),)
         finally:
             catalog.shutdown()
             proxy.shutdown()

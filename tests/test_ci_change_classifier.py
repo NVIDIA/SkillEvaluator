@@ -86,9 +86,20 @@ def test_is_docs_only(paths: list[bytes], expected: bool) -> None:
         [b"src/skillevaluator/tier3_environments.py"],
         [b"src/skillevaluator/tier3_new_module.py"],
         [b"src/skillevaluator/utils/secure_fs.py"],
+        # These implementations serve native-only filesystem tests in the jobs.
+        [b"src/skillevaluator/embedding/registry.py"],
+        [b"src/skillevaluator/validators/rubric_eval.py"],
+        # Other imports/resources cannot be ruled out by their package path.
+        [b"src/skillevaluator/reporting/html.py"],
+        [b"src/skillevaluator/cli.py"],
+        [b"src/skillevaluator/validators/security.py"],
+        [b"src/skillevaluator/deduplication/utils/chunker.py"],
+        [b"src/skillevaluator/tier2/collector.py"],
+        [b"src/skillevaluator/reporting/templates/report.html"],
         # A directory replaced by a file or a link shows up under its bare name.
         [b"src/skillevaluator/tier3"],
         [b"src/skillevaluator/utils"],
+        [b"src/skillevaluator/embedding"],
         # What the two jobs run, and what those tests load.
         [b"tests/test_harbor_local_mode.py"],
         [b"tests/validators/test_rubric_eval.py"],
@@ -111,6 +122,7 @@ def test_is_docs_only(paths: list[bytes], expected: bool) -> None:
         # One related path is enough.
         [b"src/skillevaluator/reporting/html.py", b"src/skillevaluator/tier3/runner.py"],
         [b"CHANGELOG.md", b"docs/index.mdx", b"uv.lock"],
+        [b"CHANGELOG.md", b"src/skillevaluator/reporting/html.py", b"tests/reporting/test_html.py"],
         # Nothing to go on.
         [],
     ],
@@ -122,13 +134,6 @@ def test_tier3_platform_jobs_run_for_related_and_unknown_paths(paths: list[bytes
 @pytest.mark.parametrize(
     "paths",
     [
-        [b"src/skillevaluator/reporting/html.py"],
-        [b"src/skillevaluator/cli.py"],
-        [b"src/skillevaluator/validators/security.py"],
-        # ``utils`` further down the tree is not the shared utilities package.
-        [b"src/skillevaluator/deduplication/utils/chunker.py"],
-        [b"src/skillevaluator/tier2/collector.py"],
-        [b"src/skillevaluator/reporting/templates/report.html"],
         # Tests the two jobs do not run, and their data.
         [b"tests/test_cli.py"],
         [b"tests/tier3/test_budget_reservation.py"],
@@ -136,10 +141,9 @@ def test_tier3_platform_jobs_run_for_related_and_unknown_paths(paths: list[bytes
         # Documentation never counts.
         [b"docs/index.mdx"],
         [b"CHANGELOG.md", b"README.md", b"fern/docs.yml"],
-        [b"CHANGELOG.md", b"src/skillevaluator/reporting/html.py", b"tests/reporting/test_html.py"],
     ],
 )
-def test_tier3_platform_jobs_are_skipped_for_unrelated_source_and_tests(paths: list[bytes]) -> None:
+def test_tier3_platform_jobs_are_skipped_for_unrelated_tests_and_docs(paths: list[bytes]) -> None:
     assert is_tier3_platform_related(paths) is False
 
 
@@ -232,8 +236,11 @@ def test_main_classifies_a_real_mixed_diff_as_full_ci(
 @pytest.mark.parametrize(
     ("changed", "expected"),
     [
-        ("src/skillevaluator/reporting/html.py", "docs_only=false\ntier3_platform=false\n"),
+        ("src/skillevaluator/reporting/html.py", "docs_only=false\ntier3_platform=true\n"),
         ("src/skillevaluator/tier3/runner.py", "docs_only=false\ntier3_platform=true\n"),
+        ("src/skillevaluator/embedding/registry.py", "docs_only=false\ntier3_platform=true\n"),
+        ("src/skillevaluator/validators/rubric_eval.py", "docs_only=false\ntier3_platform=true\n"),
+        ("tests/test_unrelated.py", "docs_only=false\ntier3_platform=false\n"),
     ],
 )
 def test_main_classifies_a_real_source_diff_for_the_tier3_platform_jobs(

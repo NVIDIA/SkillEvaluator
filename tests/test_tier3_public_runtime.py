@@ -2801,14 +2801,16 @@ def test_generate_harbor_tasks_dual_arm_suffix(tmp_path: Path) -> None:
         )
 
 
-def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
-    """Verify that _write_task_toml stages LLM retry variables into [verifier.env]."""
+def test_write_task_toml_forwards_retry_and_pattern_limits_env(tmp_path: Path) -> None:
+    """Stage evaluator retry and pattern limits through the verifier environment."""
     case_dir = tmp_path / "case"
     case_dir.mkdir()
     runtime_env = {
         "SKILL_EVAL_LLM_MAX_RETRIES": "5",
         "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "2.0",
         "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "40.0",
+        "SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC": "3.0",
+        "SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC": "8.0",
         "UNRELATED_CUSTOM_VAR": "secret",
     }
     _write_task_toml(
@@ -2822,6 +2824,8 @@ def test_write_task_toml_forwards_retry_env(tmp_path: Path) -> None:
     assert verifier_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "${SKILL_EVAL_LLM_MAX_RETRIES}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "${SKILL_EVAL_LLM_RETRY_BASE_DELAY}"
     assert verifier_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "${SKILL_EVAL_LLM_RETRY_MAX_DELAY}"
+    assert verifier_env["SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC"] == "${SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC}"
+    assert verifier_env["SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC"] == "${SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC}"
     assert "UNRELATED_CUSTOM_VAR" not in verifier_env
 
 

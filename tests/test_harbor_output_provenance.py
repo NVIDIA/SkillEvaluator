@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import shutil
@@ -97,6 +98,22 @@ def test_atomic_output_accepts_windows_crt_descriptor_identity(
 
     assert destination.read_bytes() == b"complete"
     assert not list(tmp_path.glob(".result.json.*.tmp"))
+
+
+def test_atomic_output_leaves_a_destination_that_changed_since_expected_in_place(tmp_path: Path) -> None:
+    destination = tmp_path / "result.json"
+    destination.write_bytes(b"old")
+    expected = destination.lstat()
+    with destination.open("ab") as handle:
+        handle.write(b" appended")
+
+    with pytest.raises(ValueError, match="changed before writing"):
+        output_provenance.write_output_file_atomically(destination, b"complete", expected=expected)
+
+    assert destination.read_bytes() == b"old appended"
+    assert not list(tmp_path.glob(".result.json.*.tmp"))
+    output_provenance.write_output_file_atomically(destination, b"complete", expected=destination.lstat())
+    assert destination.read_bytes() == b"complete"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX descriptor-relative rename support")
@@ -332,6 +349,70 @@ def test_concurrent_first_key_creation_publishes_one_complete_key(
         assert key_path.stat().st_size == 32
     assert key_path.stat().st_nlink == 1
     assert not list(key_path.parent.glob(".output-provenance.key.tmp-*"))
+
+
+@pytest.mark.parametrize("winerror", [5, 32, 33])
+def test_key_publication_retries_transient_windows_unlink_errors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, winerror: int
+) -> None:
+    key_path = Path(os.environ["SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE"])
+    original_unlink = Path.unlink
+    remaining_failures = 2
+
+    def unlink(path: Path, **kwargs: object) -> None:
+        nonlocal remaining_failures
+        if path.name.startswith(".output-provenance.key.tmp-") and remaining_failures:
+            remaining_failures -= 1
+            error = PermissionError(errno.EACCES, "simulated Windows delete denial")
+            error.winerror = winerror  # type: ignore[attr-defined]
+            raise error
+        original_unlink(path, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", unlink)
+    destination = tmp_path / "generated"
+
+    payload = output_provenance.generated_output_marker_payload(destination)
+
+    assert payload == output_provenance.generated_output_marker_payload(destination)
+    assert key_path.stat().st_nlink == 1
+    assert list(key_path.parent.iterdir()) == [key_path]
+
+
+@pytest.mark.parametrize("publication_fails", [False, True])
+def test_key_publication_fails_when_windows_unlink_stays_blocked(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, publication_fails: bool
+) -> None:
+    key_path = Path(os.environ["SKILLEVALUATOR_OUTPUT_PROVENANCE_KEY_FILE"])
+    original_unlink = Path.unlink
+    attempts = 0
+    cleanup_error = PermissionError(errno.EACCES, "simulated persistent Windows delete denial")
+    cleanup_error.winerror = 5  # type: ignore[attr-defined]
+    publication_error = OSError(errno.EIO, "simulated key publication failure")
+
+    def unlink(path: Path, **kwargs: object) -> None:
+        nonlocal attempts
+        if path.name.startswith(".output-provenance.key.tmp-"):
+            attempts += 1
+            assert attempts <= 100, "temporary key cleanup retries must be bounded"
+            raise cleanup_error
+        original_unlink(path, **kwargs)
+
+    def fail_to_link(_source: Path, _destination: Path) -> None:
+        raise publication_error
+
+    with monkeypatch.context() as patch:
+        patch.setattr(Path, "unlink", unlink)
+        patch.setattr(output_provenance.time, "sleep", lambda _seconds: None)
+        if publication_fails:
+            patch.setattr(output_provenance.os, "link", fail_to_link)
+        with pytest.raises(OSError) as raised:
+            output_provenance.generated_output_marker_payload(tmp_path / "generated")
+
+    assert attempts > 1
+    assert raised.value is (publication_error if publication_fails else cleanup_error)
+    assert key_path.exists() is not publication_fails
+    for temporary in key_path.parent.glob(".output-provenance.key.tmp-*"):
+        temporary.unlink()
 
 
 def test_interrupted_hardlink_publish_is_recovered(tmp_path: Path) -> None:

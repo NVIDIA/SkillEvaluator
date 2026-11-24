@@ -415,7 +415,7 @@ class TestExternalTool:
 
         assert (
             tool.get_install_hint() == "Install with: uv tool install "
-            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.4/skillspector-2.13.4-py3-none-any.whl"
+            "https://github.com/NVIDIA/SkillSpector/releases/download/v2.13.6/skillspector-2.13.6-py3-none-any.whl"
         )
         assert "[security]" not in tool.get_install_hint()
 
@@ -496,13 +496,14 @@ class TestAutomaticSkillSpectorVersion:
         ("version_output", "version_exit"),
         [
             ("SkillSpector v2.11.2", 0),
+            ("SkillSpector v2.13.4", 0),
             ("SkillSpector v2.14.0", 0),
             ("version unavailable", 0),
-            ("SkillSpector v2.13.4", 2),
-            ("SkillSpector v2.13.4rc1", 0),
-            ("SkillSpector v2.13.4_rc1", 0),
-            ("Dependency foo 2.13.4 initialized; scanner version unavailable", 0),
-            ("SkillSpector v2.13.4\nSkillSpector v2.11.2", 0),
+            ("SkillSpector v2.13.6", 2),
+            ("SkillSpector v2.13.6rc1", 0),
+            ("SkillSpector v2.13.6_rc1", 0),
+            ("Dependency foo 2.13.6 initialized; scanner version unavailable", 0),
+            ("SkillSpector v2.13.6\nSkillSpector v2.11.2", 0),
         ],
     )
     def test_mismatched_or_unverified_version_runs_pinned_wheel(
@@ -521,19 +522,19 @@ class TestAutomaticSkillSpectorVersion:
             "run",
             "--quiet",
             "--from",
-            str(scanner_bin.parent / "runtime/skillspector/2.13.4/skillspector-2.13.4-py3-none-any.whl"),
+            str(scanner_bin.parent / "runtime/skillspector/2.13.6/skillspector-2.13.6-py3-none-any.whl"),
             "skillspector",
             "scan",
             "target",
         ]
         assert tool.path == str(scanner_bin / "uv")
-        assert tool.version == "2.13.4"
+        assert tool.version == "2.13.6"
         assert tool.resolution_source == "uv tool run"
         assert str(scanner) in caplog.text
-        assert "2.13.4" in caplog.text
+        assert "2.13.6" in caplog.text
 
     def test_constructor_refresh_and_path_lookup_do_not_launch_scanner(self, scanner_bin):
-        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.6")
         marker = scanner_bin / "launched"
         scanner.write_text(scanner.read_text().replace("#!/bin/sh\n", f"#!/bin/sh\n: > '{marker}'\n"))
 
@@ -547,12 +548,12 @@ class TestAutomaticSkillSpectorVersion:
         assert marker.exists()
 
     def test_fresh_module_import_does_not_launch_scanner(self, scanner_bin, monkeypatch):
-        self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        self._scanner(scanner_bin, "SkillSpector v2.13.6")
         calls = []
 
         def run(argv, **kwargs):
             calls.append(argv)
-            return CompletedProcess(argv, 0, "SkillSpector v2.13.4", "")
+            return CompletedProcess(argv, 0, "SkillSpector v2.13.6", "")
 
         monkeypatch.setattr(tool_runner.subprocess, "run", run)
         name = "skillevaluator.utils._tool_runner_import_test"
@@ -566,7 +567,7 @@ class TestAutomaticSkillSpectorVersion:
         assert calls == []
 
     def test_lazy_probe_uses_sanitized_environment_and_caller_timeout(self, scanner_bin, monkeypatch):
-        self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        self._scanner(scanner_bin, "SkillSpector v2.13.6")
         monkeypatch.setenv("NVIDIA_API_KEY", "ambient-secret")
         real_run = tool_runner.subprocess.run
         calls = []
@@ -592,13 +593,13 @@ class TestAutomaticSkillSpectorVersion:
         assert calls[-1][1]["env"]["NVIDIA_API_KEY"] == "requested-scan-secret"
 
     def test_matching_pinned_version_uses_installed_scanner(self, scanner_bin):
-        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.4")
+        scanner = self._scanner(scanner_bin, "SkillSpector v2.13.6")
 
         tool = ExternalTool("SkillSpector", "skillspector", managed=True)
 
         assert tool.run(["scan", "target"], log_command=False).stdout == "direct scanner\n"
         assert tool.path == str(scanner)
-        assert tool.version == "2.13.4"
+        assert tool.version == "2.13.6"
         assert tool.resolution_source == "automatic"
 
     def test_stale_scanner_falls_back_to_packaged_uv(self, scanner_bin, monkeypatch):
@@ -613,7 +614,7 @@ class TestAutomaticSkillSpectorVersion:
         assert result.success
         assert result.exit_code == 0
         assert result.stdout.splitlines()[:4] == ["tool", "run", "--quiet", "--from"]
-        assert result.stdout.splitlines()[4].endswith("/2.13.4/skillspector-2.13.4-py3-none-any.whl")
+        assert result.stdout.splitlines()[4].endswith("/2.13.6/skillspector-2.13.6-py3-none-any.whl")
         assert tool.path == str(packaged_uv)
         assert tool.resolution_source == "uv tool run"
 
@@ -653,7 +654,7 @@ class TestAutomaticSkillSpectorVersion:
         assert result.error_message == tool.configuration_error
         assert str(scanner) in tool.configuration_error
         assert "2.11.2" in tool.configuration_error
-        assert "2.13.4" in tool.configuration_error
+        assert "2.13.6" in tool.configuration_error
         assert "uv" in tool.get_install_hint()
         assert "SKILLEVALUATOR_SKILLSPECTOR_PATH" in tool.get_install_hint()
 
@@ -792,3 +793,25 @@ def test_version_parses_tool_output(tmp_path, monkeypatch):
     tool.chmod(0o755)
     monkeypatch.setenv("PATH", str(tmp_path))
     assert ExternalTool("Bandit", "bandit").version == "1.9.4"
+
+
+@pytest.mark.parametrize(
+    ("platform", "gitleaks", "semgrep"),
+    [
+        ("win32", "winget install Gitleaks.Gitleaks", "uv tool install semgrep"),
+        ("darwin", "brew install gitleaks", "brew install semgrep"),
+        ("linux", "go install github.com/zricethezav/gitleaks/v8@latest", "uv tool install semgrep"),
+    ],
+)
+def test_scanner_install_hints_match_the_host_platform(monkeypatch, platform, gitleaks, semgrep):
+    gitleaks_tool = ExternalTool("Gitleaks", "gitleaks")
+    semgrep_tool = ExternalTool("Semgrep", "semgrep")
+    monkeypatch.setattr(tool_runner.sys, "platform", platform)
+
+    gitleaks_hint = gitleaks_tool.get_install_hint()
+    semgrep_hint = semgrep_tool.get_install_hint()
+
+    assert gitleaks in gitleaks_hint
+    assert semgrep in semgrep_hint
+    if platform != "darwin":
+        assert "brew" not in gitleaks_hint + semgrep_hint

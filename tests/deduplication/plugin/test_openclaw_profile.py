@@ -203,7 +203,9 @@ def test_malformed_native_identity_is_an_incomplete_comparison_not_a_security_fa
     assert len(results) == 4
     assert not any(result.metadata.get("security_failure") for result in results)
     assert results[1].errors
-    assert all(result.metadata.get("optional_skip") for result in results[2:])
+    assert all(
+        result.metadata.get("skipped") and result.metadata.get("optional_skip") is False for result in results[2:]
+    )
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="symlinks unavailable")
@@ -242,7 +244,9 @@ def test_malformed_skill_root_declarations_never_reach_comparisons(tmp_path: Pat
     results = commands.run_plugin_dedup_scan(plugin)
     assert not any(result.metadata.get("security_failure") for result in results)
     assert results[1].errors
-    assert all(result.metadata.get("optional_skip") for result in results[2:])
+    assert all(
+        result.metadata.get("skipped") and result.metadata.get("optional_skip") is False for result in results[2:]
+    )
 
 
 def test_unnamed_root_skill_is_labelled_like_its_inventory_row(tmp_path: Path) -> None:

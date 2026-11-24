@@ -197,7 +197,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mcp-version: ["1.28.1", "2.3.0"]
+        mcp-version: ["1.30.0", "2.3.0"]
     env:
       MCP_SDK_VERSION: ${{ matrix.mcp-version }}
     steps:
@@ -404,6 +404,7 @@ jobs:
           tests/test_tier3_progress.py
           tests/test_tier3_result_display.py
           tests/test_harbor_runtime_preflight.py
+          tests/test_harbor_local_environment.py::test_contained_download_keeps_authored_dot_underscore_files_without_generated_metadata
           tests/embedding/test_catalog.py::TestCatalogPersistence::test_catalog_io_supports_root_owned_tmp_alias
 
   # Tier 2 is platform-independent Python, and Linux and Windows run the same
@@ -479,6 +480,10 @@ jobs:
           tests/test_results_location_legacy_compatibility.py
           tests/test_tier3_compare.py
           tests/test_tier3_progress.py
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_redaction_never_follows_links_or_changes_outside_files
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_listing_errors_use_relative_entries
+          tests/tier3/test_harbor_local_agents.py::test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported
+          tests/tier3/test_harbor_local_agents.py::test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call
           tests/utils/test_secure_fs_selected_reads.py
           tests/utils/test_secure_fs_platform.py
           tests/utils/test_secure_fs_bounded.py
@@ -525,6 +530,34 @@ jobs:
           $basePython = Join-Path $baseEnvironment "Scripts\python.exe"
           uv pip install --python $basePython $wheels[0].FullName
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Install security and all extras using pip on Windows
+        shell: pwsh
+        run: |
+          $wheel = Get-ChildItem dist -Filter "skillevaluator-*.whl" | Select-Object -First 1
+          $checkFloors = @'
+          from importlib.metadata import version
+          from packaging.version import Version
+
+          assert Version(version("pip")) >= Version("26.2.2")
+          assert Version(version("certifi")) >= Version("2026.10.19")
+          '@
+          foreach ($extra in @("security", "all")) {
+            $environment = Join-Path $env:RUNNER_TEMP "skillevaluator-pip-$extra-windows"
+            # Use the patched Python TLS denylist while exercising the older pip.
+            uv venv --managed-python --python 3.12.16 $environment
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $extraPython = Join-Path $environment "Scripts\python.exe"
+            uv pip install --python $extraPython "pip==26.2.1" "certifi==2025.8.3"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip install "$($wheel.FullName)[$extra]"
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            $checkFloors | & $extraPython -
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip check
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+            & $extraPython -m pip_audit --version
+            if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          }
       - name: Smoke-test the installed Windows CLI with a CRLF checkout
         shell: pwsh
         run: |

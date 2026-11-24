@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
 import os
@@ -33,6 +34,7 @@ from skillevaluator.tier3.harbor.report_data import _harbor_task_directory, _rec
 from skillevaluator.utils.redaction import redact_sensitive_text
 from skillevaluator.utils.secret_redaction import Redactor
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
+from skillevaluator.utils.structured_data import StructuredDataError, load_bounded_yaml
 
 if TYPE_CHECKING:
     from rich.console import Console
@@ -1357,10 +1359,9 @@ def _skill_description(skill_path: Path | None) -> str:
         return ""
     match = re.match(r"---\s*\n(.*?)\n---", skill_md.read_text(encoding="utf-8", errors="replace"), re.DOTALL)
     try:
-        import yaml
-
-        meta = yaml.safe_load(match.group(1)) if match else None
-    except Exception:  # malformed frontmatter: Tier 1 reports it
+        # Bounded: ``str()`` below would expand nested aliases without limit.
+        meta = load_bounded_yaml(match.group(1), last_key_wins=True) if match else None
+    except StructuredDataError:  # malformed or over-limit frontmatter: Tier 1 reports it
         return ""
     return str(meta.get("description") or "") if isinstance(meta, Mapping) else ""
 
@@ -1590,6 +1591,9 @@ def load_case_marks(run_dir: Path) -> dict[str, dict[str, dict[str, list[str]]]]
 
 
 _LIVE_VARIANTS = {"with": "with_skill", "without": "without_skill"}
+# Gym run folder -> mark of each rollout its last poll read, the least recently polled run first.
+_GYM_LIVE_MARKS: dict[str, dict[str, str]] = {}
+_MAX_GYM_LIVE_MARKS = 65536
 
 
 def _harbor_job_owner(job_name: str, agents: list[str]) -> tuple[str, str] | None:
@@ -1617,45 +1621,75 @@ def _live_mark(trial: Path, run_dir: Path, pass_threshold: float) -> str | None:
     return ERROR
 
 
+def _gym_live_mark(
+    row: dict[str, Any],
+    task: str,
+    case_id: str,
+    pass_threshold: float,
+    judged: Mapping[str, str],
+    seen: dict[str, str],
+) -> str:
+    from skillevaluator.tier3.nemo_gym.results import rollout_verdict
+
+    # Gym appends a rollout only once its verifier logs are written, so each line is judged once.
+    key = hashlib.sha256(json.dumps([row, task, case_id, pass_threshold], sort_keys=True).encode()).hexdigest()
+    mark = seen.get(key) or judged.get(key)
+    if mark is None:
+        passed = rollout_verdict(row, task, case_id, pass_threshold)
+        mark = ERROR if passed is None else PASS if passed else FAIL
+    seen[key] = mark
+    return mark
+
+
+def _keep_gym_live_marks(run: str, seen: dict[str, str]) -> None:
+    """Keep the verdicts of the rollouts a Gym run holds now for its next poll.
+
+    Past ``_MAX_GYM_LIVE_MARKS`` verdicts, the runs polled longest ago are dropped; the run just polled
+    keeps all of its verdicts, so a poll judges only the rollouts appended since the last one.
+    """
+    _GYM_LIVE_MARKS.pop(run, None)
+    _GYM_LIVE_MARKS[run] = seen
+    kept = sum(len(marks) for marks in list(_GYM_LIVE_MARKS.values()))
+    for other in [other for other in list(_GYM_LIVE_MARKS) if other != run]:
+        if kept <= _MAX_GYM_LIVE_MARKS:
+            break
+        kept -= len(_GYM_LIVE_MARKS.pop(other, {}))
+
+
 def _add_gym_live_marks(
     run_dir: Path, agents: list[str], marks: dict[str, dict[str, dict[str, list[str]]]], pass_threshold: float
 ) -> bool:
     """Add the attempts a running NeMo Gym arm has appended to its ``rollouts.jsonl``; False for a non-Gym run.
 
-    Each attempt is scored from its verifier logs with the same rules the Gym result normalizer uses.
+    Each attempt is judged as the finished run judges it, for the case the runner staged its task as.
+    A task the runner recorded no case for is its own case.
     """
-    from skillevaluator.tier3.nemo_gym.results import (
-        read_rollouts,
-        read_verifier_rewards,
-        rollout_failure_text,
-        rollout_task_name,
-    )
+    from skillevaluator.tier3.nemo_gym.results import TASK_CASE_IDS_FILE, read_rollouts, rollout_task_name
 
     gym_root = run_dir / "_nemo-gym"
     if not gym_root.is_dir() or gym_root.is_symlink():
         return False
+    judged = _GYM_LIVE_MARKS.get(str(gym_root), {})
+    seen: dict[str, str] = {}
     for agent in agents:
         for variant, key in _LIVE_VARIANTS.items():
             arm = gym_root / f"{agent}-{variant}"
             rollouts = arm / "rollouts.jsonl"
             if arm.is_symlink() or rollouts.is_symlink() or not rollouts.is_file():
                 continue
+            case_ids = _load_json(arm / TASK_CASE_IDS_FILE, root=run_dir)
+            if not isinstance(case_ids, dict):
+                case_ids = {}
             for row in read_rollouts(rollouts):
-                case_id = rollout_task_name(row)
-                if case_id is None or not _SAFE_TRIAL.match(case_id):
+                task = rollout_task_name(row)
+                if task is None or not _SAFE_TRIAL.match(task):
                     continue
-                logs_dir = row.get("verifier_logs_dir")
-                rewards = (
-                    read_verifier_rewards(Path(logs_dir))
-                    if not rollout_failure_text(row) and isinstance(logs_dir, str) and logs_dir
-                    else None
-                )
-                score = rewards.get("overall", rewards.get("reward")) if rewards else None
-                if not isinstance(score, int | float) or isinstance(score, bool):
-                    mark = ERROR
-                else:
-                    mark = PASS if score >= pass_threshold else FAIL
-                marks.setdefault(agent, {}).setdefault(key, {}).setdefault(case_id, []).append(mark)
+                case_id = case_ids.get(task)
+                if not isinstance(case_id, str) or not case_id:
+                    case_id = task
+                mark = _gym_live_mark(row, task, case_id, pass_threshold, judged, seen)
+                marks.setdefault(agent, {}).setdefault(key, {}).setdefault(task, []).append(mark)
+    _keep_gym_live_marks(str(gym_root), seen)
     return True
 
 

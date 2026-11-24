@@ -47,6 +47,7 @@ from skillevaluator.tier3.harbor.metrics import (
 from skillevaluator.tier3.runtime_arms import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
+INTERACTION_UNCERTAINTY_METHOD = "paired_case_interaction_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
 
 PRECISION_ADEQUATE = "adequate"
@@ -565,6 +566,13 @@ def expanded_tail(n_cases: int, confidence: float) -> float:
     return _normal_cdf(-math.sqrt(n_cases / (n_cases - 1)) * t_value)
 
 
+def _constant_resample_mean(values: Sequence[float]) -> float | None:
+    """Return the exact resample mean when every case has the same value."""
+    if values and all(value == values[0] for value in values):
+        return math.fsum(values) / len(values)
+    return None
+
+
 def _resample_means(deltas: Sequence[float], *, resamples: int, seed: int) -> list[float]:
     """The mean of each case resample, in draw order, from a ``random.Random(seed)`` stream.
 
@@ -573,6 +581,9 @@ def _resample_means(deltas: Sequence[float], *, resamples: int, seed: int) -> li
     at the same case indices. That is why the lift ladder's steps add up in
     every resample, not only on their means.
     """
+    constant = _constant_resample_mean(deltas)
+    if constant is not None:
+        return [constant] * resamples
     n_cases = len(deltas)
     rng = random.Random(seed)
     return [math.fsum(rng.choices(deltas, k=n_cases)) / n_cases for _ in range(resamples)]
@@ -600,10 +611,6 @@ def paired_case_bootstrap(
     with the seed. With fewer cases the bounds are the extreme resampled means,
     which the minimum already reaches.
     """
-    if type(resamples) is not int or not 1 <= resamples <= MAX_BOOTSTRAP_RESAMPLES:
-        raise ValueError("resamples must be positive")
-    if not 0.0 < confidence < 1.0:
-        raise ValueError("confidence must be between 0 and 1")
     paired = sorted(
         case
         for case in set(treatment) & set(control)
@@ -634,7 +641,7 @@ def case_mean_bootstrap(
         raise ValueError("resamples must be positive")
     if not 0.0 < confidence < 1.0:
         raise ValueError("confidence must be between 0 and 1")
-    if any(isinstance(value, bool) or finite_number(value) is None for value in values):
+    if any(finite_number(value) is None for value in values):
         raise ValueError("case values must be finite numbers")
     deltas = [float(value) for value in values]
     n_cases = len(deltas)
@@ -1032,10 +1039,17 @@ def _ladder_rungs(
     resamples = _effective_resamples(len(case_ids))
     means: dict[str, list[float]] = {name: [] for name in definitions}
     if len(case_ids) >= 2:
+        varying = {}
+        for name, values in deltas.items():
+            constant = _constant_resample_mean(values)
+            if constant is None:
+                varying[name] = values
+            else:
+                means[name] = [constant] * resamples
         rng = random.Random(LIFT_BOOTSTRAP_SEED)
-        for _ in range(resamples):
+        for _ in range(resamples if varying else 0):
             indices = rng.choices(range(len(case_ids)), k=len(case_ids))
-            for name, values in deltas.items():
+            for name, values in varying.items():
                 means[name].append(math.fsum(values[index] for index in indices) / len(indices))
     results = {
         name: paired_case_bootstrap(

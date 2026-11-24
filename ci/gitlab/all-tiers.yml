@@ -15,6 +15,7 @@ variables:
   SKILL_EVAL_TIER1_LLM: 'false'
   SKILL_EVAL_TIER1_PROVIDER: ''
   SKILL_EVAL_TIER1_MODEL: ''
+  SKILL_EVAL_TIER2_IMAGE: ''
   SKILL_EVAL_TIER3_PROVIDER: ''
   SKILL_EVAL_TIER3_MODEL: ''
   SKILL_EVAL_TIER3_BASE_URL: ''
@@ -136,7 +137,7 @@ skill-evaluation:
     - when: on_success
 
 .skill-evaluation-tools:
-  image: python:3.12.12-slim
+  image: python:3.12.16-slim@sha256:5e2bdb1b0d542d5039cffb8181c65930093949194a65c365dfb1b0fe13a4fa5b
   before_script:
     - |
       if ! command -v git >/dev/null 2>&1; then
@@ -160,6 +161,7 @@ skill-evaluation:
       git -C "$tools_dir" remote add origin "https://github.com/$SKILL_EVAL_TOOLS_REPOSITORY.git"
       git -C "$tools_dir" fetch -q --depth 1 origin "$SKILL_EVAL_TOOLS_REF"
       git -C "$tools_dir" checkout -q --detach FETCH_HEAD
+    - &native_report_context |
       export REPORT_COMMIT="$CI_COMMIT_SHA"
       export REPORT_REPOSITORY="$CI_PROJECT_PATH"
       export REPORT_RUN_URL="$CI_PIPELINE_URL"
@@ -202,6 +204,14 @@ skill-evaluation-native:
         *",$SKILL_EVAL_TIER,"*) ;;
         *) echo "Tier $SKILL_EVAL_TIER is not selected"; exit 0 ;;
       esac
+      image_runtime=false
+      if [ "$SKILL_EVAL_TIER" = 2 ] && [ -n "${SKILL_EVAL_TIER2_IMAGE:-}" ]; then
+        if [ "$SKILL_EVAL_TOOLS_DIR" != /opt/skillevaluator ]; then
+          echo 'SKILL_EVAL_TIER2_IMAGE requires an immutable Tier 2 GHCR digest.' >&2
+          exit 1
+        fi
+        image_runtime=true
+      fi
       # A merge request that changes no skill skips this paid tier; the
       # aggregate recomputes the same decision and records it as skipped.
       if [ "$(python -I "$SKILL_EVAL_TOOLS_DIR/ci/select_changed_skills.py" --skills-changed --workspace "$CI_PROJECT_DIR")" = false ]; then
@@ -223,16 +233,18 @@ skill-evaluation-native:
           apt-get update -qq && apt-get install -y --no-install-recommends nodejs npm
         fi
       fi
-      python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
-      env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --extra "tier$SKILL_EVAL_TIER" --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
-      export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      if [ "$image_runtime" = false ]; then
+        python -I -m pip --isolated install --index-url https://pypi.org/simple uv==0.13.8
+        env -i PATH="$PATH" python -I -m uv --no-config --cache-dir "$SKILL_EVAL_TOOLS_DIR/.uv-cache" sync --locked --no-dev --extra "tier$SKILL_EVAL_TIER" --project "$SKILL_EVAL_TOOLS_DIR" --python 3.12 --default-index https://pypi.org/simple
+        export PATH="$SKILL_EVAL_TOOLS_DIR/.venv/bin:$PATH"
+      fi
       if [ "$SKILL_EVAL_TIER" = 3 ]; then
         python -I "$SKILL_EVAL_TOOLS_DIR/ci/bootstrap_tiers.py" || true
       fi
       reports_dir="$(mktemp -d /tmp/skillevaluator-reports.XXXXXX)"
       trap 'rm -rf "$reports_dir"' EXIT
       set +e
-      python -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" evaluate --tier "$SKILL_EVAL_TIER" --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
+      "$SKILL_EVAL_TOOLS_DIR/.venv/bin/python" -I "$SKILL_EVAL_TOOLS_DIR/ci/run_tiers.py" evaluate --tier "$SKILL_EVAL_TIER" --workspace "$CI_PROJECT_DIR" --reports "$reports_dir"
       result=$?
       set -e
       artifact_dir="$CI_PROJECT_DIR/skill-evaluator-native"
@@ -248,13 +260,18 @@ skill-evaluation-native:
     paths: [skill-evaluator-native/]
     expire_in: 14 days
   rules:
-    - if: '$SKILL_EVAL_FEEDBACK == "true"'
+    - &native_skip_feedback
+      if: '$SKILL_EVAL_FEEDBACK == "true"'
       when: never
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
+    - &native_skip_fork
+      if: '$CI_PIPELINE_SOURCE == "merge_request_event" && $CI_MERGE_REQUEST_SOURCE_PROJECT_ID != $CI_PROJECT_ID'
       when: never
-    - if: '$CI_PIPELINE_SOURCE == "merge_request_event"'
-    - if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
-    - if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'
+    # Rules omit the job so GitLab does not start its Docker service for tiers 1,2.
+    - if: '$SKILL_EVAL_TIERS !~ /(^|,)3(,|$)/'
+      when: never
+    - &native_merge_request {if: '$CI_PIPELINE_SOURCE == "merge_request_event"'}
+    - &native_default_branch {if: '$CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'}
+    - &native_web_default_branch {if: '$CI_PIPELINE_SOURCE == "web" && $CI_COMMIT_BRANCH == $CI_DEFAULT_BRANCH'}
 
 skill-evaluation-native-tier2:
   # Inherit caller timeout/tags and the shared execution policy, without
@@ -269,6 +286,48 @@ skill-evaluation-native-tier2:
     DOCKER_TLS_CERTDIR: ''
     DOCKER_TLS_VERIFY: ''
     DOCKER_CERT_PATH: ''
+  rules:
+    - *native_skip_feedback
+    - *native_skip_fork
+    - &skip_unselected_tier2
+      if: '$SKILL_EVAL_TIERS !~ /(^|,)2(,|$)/'
+      when: never
+    - if: '$SKILL_EVAL_TIER2_IMAGE =~ /^ghcr\.io\/nvidia\/skillevaluator-tier2@sha256:[a-f0-9]{64}$/'
+      when: never
+    - *native_merge_request
+    - *native_default_branch
+    - *native_web_default_branch
+
+skill-evaluation-image-tier2:
+  extends: skill-evaluation-native-tier2
+  image:
+    name: "$SKILL_EVAL_TIER2_IMAGE"
+    entrypoint: [""]
+  before_script:
+    - |
+      set -eu
+      if [ "${CI_JOB_IMAGE:-}" != "$SKILL_EVAL_TIER2_IMAGE" ]; then
+        echo 'The GitLab job image does not match the configured Tier 2 image.' >&2
+        exit 1
+      fi
+      if [ "$SKILL_EVAL_TOOLS_REPOSITORY" != NVIDIA/SkillEvaluator ] ||
+         [ -z "${SKILL_EVAL_TOOLS_REF:-}" ] ||
+         [ "$(cat /opt/skillevaluator/revision 2>/dev/null)" != "$SKILL_EVAL_TOOLS_REF" ]; then
+        echo 'The Tier 2 image revision must match the official SKILL_EVAL_TOOLS_REF.' >&2
+        exit 1
+      fi
+      export SKILL_EVAL_TOOLS_DIR=/opt/skillevaluator
+    - *native_report_context
+  rules:
+    - *native_skip_feedback
+    - *native_skip_fork
+    - *skip_unselected_tier2
+    # GitLab pulls the job image before scripts run. Reject other names here.
+    - if: '$SKILL_EVAL_TIER2_IMAGE !~ /^ghcr\.io\/nvidia\/skillevaluator-tier2@sha256:[a-f0-9]{64}$/'
+      when: never
+    - *native_merge_request
+    - *native_default_branch
+    - *native_web_default_branch
 
 skill-evaluation-tier1-llm:
   # Static Tier 1 remains available on every MR. Only this protected job sees
@@ -345,6 +404,9 @@ skill-evaluation-aggregate:
       artifacts: true
       optional: true
     - job: skill-evaluation-native-tier2
+      artifacts: true
+      optional: true
+    - job: skill-evaluation-image-tier2
       artifacts: true
       optional: true
     - job: skill-evaluation-tier1-llm

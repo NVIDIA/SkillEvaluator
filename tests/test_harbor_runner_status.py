@@ -21,6 +21,11 @@ import pytest
 
 from skillevaluator.tier3.harbor import collector, runner
 
+# On Windows the venv launcher waits for a separate Python process. Killing
+# that process can make the launcher exit before taskkill reaches it. These
+# standard-library fixtures can make the interpreter the actual process root.
+_HARBOR_FIXTURE_PYTHON = sys._base_executable if os.name == "nt" else sys.executable
+
 
 def test_published_execution_errors_are_redacted_bounded_and_counted() -> None:
     github_token = "ghp_" + ("A" * 36)
@@ -171,7 +176,7 @@ def test_bounded_harbor_process_drops_partial_secret_at_output_limit() -> None:
     script = f"import os,time; os.write(2, {(prefix + secret + '|overflow').encode()!r}); time.sleep(30)"
 
     result = runner._run_bounded_harbor_process(
-        [sys.executable, "-c", script],
+        [_HARBOR_FIXTURE_PYTHON, "-c", script],
         env=dict(os.environ),
         cwd=Path.cwd(),
         stdin_text=None,
@@ -191,7 +196,7 @@ def test_bounded_harbor_process_timeout_includes_blocked_stdin_delivery() -> Non
 
     with pytest.raises(RuntimeError, match="timed out"):
         runner._run_bounded_harbor_process(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [_HARBOR_FIXTURE_PYTHON, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
             cwd=Path.cwd(),
             stdin_text="x" * (1024 * 1024),
@@ -209,7 +214,7 @@ def test_bounded_harbor_process_contains_tree_after_stdin_delivery_error() -> No
 
     with pytest.raises(RuntimeError, match="stdin delivery failed"):
         runner._run_bounded_harbor_process(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [_HARBOR_FIXTURE_PYTHON, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
             cwd=Path.cwd(),
             stdin_text="\udcff",
@@ -259,7 +264,7 @@ def test_bounded_harbor_process_timeout_preserves_redacted_diagnostic_tail(
 
     with pytest.raises(RuntimeError, match="timed out") as raised:
         runner._run_bounded_harbor_process(
-            [sys.executable, "-c", script],
+            [_HARBOR_FIXTURE_PYTHON, "-c", script],
             env=dict(os.environ),
             cwd=Path.cwd(),
             stdin_text=None,
@@ -280,7 +285,7 @@ def test_bounded_harbor_process_redacts_secret_created_by_timeout_message() -> N
 
     with pytest.raises(runner._HarborRunTimeoutError) as raised:
         runner._run_bounded_harbor_process(
-            [sys.executable, "-c", "import time; time.sleep(30)"],
+            [_HARBOR_FIXTURE_PYTHON, "-c", "import time; time.sleep(30)"],
             env=dict(os.environ),
             cwd=Path.cwd(),
             stdin_text=None,
@@ -648,6 +653,7 @@ def test_run_harbor_checks_cancellation_before_refreshing_credentials(
 def test_bounded_harbor_process_failure_reaps_windows_descendants(
     tmp_path: Path,
     failure_mode: str,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import ctypes
     from ctypes import wintypes
@@ -655,62 +661,91 @@ def test_bounded_harbor_process_failure_reaps_windows_descendants(
     kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel32.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
     kernel32.OpenProcess.restype = wintypes.HANDLE
+    kernel32.WaitForSingleObject.argtypes = [wintypes.HANDLE, wintypes.DWORD]
+    kernel32.WaitForSingleObject.restype = wintypes.DWORD
+    kernel32.TerminateProcess.argtypes = [wintypes.HANDLE, wintypes.UINT]
+    kernel32.TerminateProcess.restype = wintypes.BOOL
     kernel32.CloseHandle.argtypes = [wintypes.HANDLE]
     kernel32.CloseHandle.restype = wintypes.BOOL
 
-    child_pid_path = tmp_path / f"{failure_mode}-windows-child-pid"
-    child_marker = tmp_path / f"{failure_mode}-windows-child-survived"
-    child_script = f"import pathlib,time;time.sleep(1);pathlib.Path({str(child_marker)!r}).write_text('survived')"
+    ready_path = tmp_path / "process-ids"
+    child_script = "import time; time.sleep(120)"
     parent_script = (
-        "import os,pathlib,subprocess,sys,time;"
-        f"child=subprocess.Popen([{sys.executable!r},'-c',{child_script!r}]);"
-        f"pathlib.Path({str(child_pid_path)!r}).write_text(str(child.pid));"
+        "import os,pathlib,subprocess,time;"
+        f"child=subprocess.Popen([{_HARBOR_FIXTURE_PYTHON!r},'-c',{child_script!r}]);"
+        f"ready=pathlib.Path({str(ready_path)!r});pending=ready.with_suffix('.pending');"
+        "pending.write_text(f'{os.getpid()} {child.pid}',encoding='ascii');pending.replace(ready);"
         + ("os.write(1,b'a'*3000);os.write(2,b'b'*3000);" if failure_mode == "output" else "")
-        + "time.sleep(30)"
+        + "time.sleep(120)"
     )
+    fixture_command = [_HARBOR_FIXTURE_PYTHON, "-c", parent_script]
+    real_popen = runner.subprocess.Popen
+    child_handle = None
+    synchronize_and_terminate = 0x00100001
 
-    if failure_mode == "timeout":
-        with pytest.raises(RuntimeError, match="timed out"):
-            runner._run_bounded_harbor_process(
-                [sys.executable, "-c", parent_script],
+    def launch_when_ready(command: list[str], **kwargs: object) -> subprocess.Popen[bytes]:
+        nonlocal child_handle
+        process = real_popen(command, **kwargs)
+        if command != fixture_command:
+            return process
+        # Start the measured timeout after the child exists. Keep its handle so
+        # the assertion checks the original process even if its PID is reused.
+        deadline = time.monotonic() + 10
+        try:
+            while True:
+                try:
+                    process_ids = ready_path.read_text(encoding="ascii")
+                except (FileNotFoundError, PermissionError) as exc:
+                    # The renamed file can be visible before Windows lets us open it.
+                    if process.poll() is not None or time.monotonic() >= deadline:
+                        raise RuntimeError("Windows process-tree fixture did not become ready") from exc
+                    time.sleep(0.01)
+                else:
+                    break
+            parent_pid, child_pid = map(int, process_ids.split())
+            child_handle = kernel32.OpenProcess(synchronize_and_terminate, False, child_pid)
+            if not child_handle:
+                raise ctypes.WinError(ctypes.get_last_error())
+            assert parent_pid == process.pid, "The fixture must launch Python directly"
+        except BaseException:
+            with contextlib.suppress(OSError, RuntimeError):
+                runner._terminate_harbor_process_tree(process)
+            if process.stdout is not None:
+                with contextlib.suppress(OSError):
+                    process.stdout.close()
+            raise
+        return process
+
+    monkeypatch.setattr(runner.subprocess, "Popen", launch_when_ready)
+    expected = (
+        pytest.raises(runner._HarborRunTimeoutError, match="timed out")
+        if failure_mode == "timeout"
+        else contextlib.nullcontext()
+    )
+    wait_object_0 = 0
+    try:
+        with expected:
+            result = runner._run_bounded_harbor_process(
+                fixture_command,
                 env=dict(os.environ),
                 cwd=Path.cwd(),
                 stdin_text=None,
-                timeout_seconds=1,
+                timeout_seconds=1 if failure_mode == "timeout" else 5,
                 max_output_bytes=4096,
                 diagnostic_tail_chars=128,
                 secret_values=set(),
             )
-    else:
-        result = runner._run_bounded_harbor_process(
-            [sys.executable, "-c", parent_script],
-            env=dict(os.environ),
-            cwd=Path.cwd(),
-            stdin_text=None,
-            timeout_seconds=5,
-            max_output_bytes=4096,
-            diagnostic_tail_chars=128,
-            secret_values=set(),
+            assert result.output_exceeded is True
+        assert child_handle is not None
+        assert kernel32.WaitForSingleObject(child_handle, 5000) == wait_object_0, (
+            "Harbor descendant survived Windows process-tree containment"
         )
-        assert result.output_exceeded is True
-
-    child_pid = int(child_pid_path.read_text(encoding="ascii"))
-    process_query_limited_information = 0x1000
-    deadline = time.monotonic() + 1
-    while time.monotonic() < deadline:
-        handle = kernel32.OpenProcess(
-            process_query_limited_information,
-            False,
-            child_pid,
-        )
-        if not handle:
-            break
-        kernel32.CloseHandle(handle)
-        time.sleep(0.01)
-    else:
-        pytest.fail("Harbor descendant survived Windows process-tree containment")
-    time.sleep(1.05)
-    assert not child_marker.exists()
+    finally:
+        if child_handle:
+            if kernel32.WaitForSingleObject(child_handle, 0) != wait_object_0:
+                kernel32.TerminateProcess(child_handle, 1)
+                kernel32.WaitForSingleObject(child_handle, 5000)
+            kernel32.CloseHandle(child_handle)
 
 
 def test_windows_tree_cleanup_uses_verified_system32_taskkill_despite_path_and_cwd(
@@ -1616,6 +1651,44 @@ def test_merge_attempt_jobs_preserves_regular_trial_artifacts(tmp_path: Path) ->
     assert parsed_result.trial_results[0] == parsed_trial
     assert parsed_config is not None
     assert parsed_config.job_name == aggregate_dir.name
+
+
+def test_merge_attempt_jobs_is_discoverable_by_installed_harbor_analyzer(tmp_path: Path) -> None:
+    from harbor.analyze.analyzer import _resolve_trial_dirs
+    from harbor.viewer.scanner import JobScanner
+
+    attempts = [tmp_path / "attempt-001", tmp_path / "attempt-002"]
+    for index, job_dir in enumerate(attempts, start=1):
+        _write_current_harbor_attempt(
+            job_dir,
+            trial_name=f"case-{index:03d}__trial",
+            root_completed=1,
+            result_id=index * 10,
+        )
+        (job_dir / f"case-{index:03d}__trial" / "trial.log").write_text("Retained source trial log\n", encoding="utf-8")
+    aggregate_dir = tmp_path / "aggregate"
+
+    runner._merge_attempt_jobs(attempts, aggregate_dir)
+
+    scanner = JobScanner(tmp_path)
+    expected_trials = [aggregate_dir / name for name in scanner.list_trials(aggregate_dir.name)]
+    assert len(expected_trials) == 2
+    assert _resolve_trial_dirs(aggregate_dir, filter_passing=None, n_trials=None) == expected_trials
+    aggregate_result = scanner.get_job_result(aggregate_dir.name)
+    assert aggregate_result is not None
+    provenance = json.loads((aggregate_dir / "job.log").read_text(encoding="utf-8"))
+    assert provenance["kind"] == "skillevaluator_retained_aggregate"
+    assert provenance["job_name"] == aggregate_dir.name
+    assert provenance["job_id"] == str(aggregate_result.id)
+    assert provenance["execution"] == "Trials retained from source jobs; no independent Harbor execution."
+    assert provenance["n_total_trials"] == aggregate_result.n_total_trials
+    assert provenance["source_jobs"] == [
+        {
+            "name": job_dir.name,
+            "id": json.loads((job_dir / "result.json").read_text(encoding="utf-8"))["id"],
+        }
+        for job_dir in attempts
+    ]
 
 
 def test_merge_attempt_jobs_normalizes_mixed_naive_and_aware_timestamps(tmp_path: Path) -> None:

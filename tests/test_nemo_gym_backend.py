@@ -14,6 +14,7 @@ import click
 import pytest
 
 from skillevaluator.evaluation.options import EvaluationOptions
+from skillevaluator.tier3.case_summary import ERROR, PASS, live_case_marks
 from skillevaluator.tier3.harbor.collector import collect_harbor_results
 from skillevaluator.tier3.nemo_gym.backend import (
     DEFAULT_EXECUTION_BACKEND,
@@ -615,8 +616,11 @@ with output.open("w") as rows:
             if os.environ.get("FAKE_GYM_REWARD_TXT"):
                 (logs / "reward.txt").write_text("1\\n")
             else:
-                (logs / "reward.json").write_text(json.dumps({{"overall": 0.75}}))
-                (logs / "skill_evaluator_reward.json").write_text(json.dumps({{"overall": 0.75}}))
+                rewards = {{"overall": 0.75}}
+                if os.environ.get("FAKE_GYM_ENTRY_ID"):
+                    rewards["entry_id"] = os.environ["FAKE_GYM_ENTRY_ID"]
+                (logs / "reward.json").write_text(json.dumps(rewards))
+                (logs / "skill_evaluator_reward.json").write_text(json.dumps(rewards))
             row = {{"_ng_task_id": {{"taskset": tasks.name, "task_id": task.name}}, "verifier_return_code": 0,
                     "verifier_logs_dir": str(logs), "episode_id": {{"rollout_id": f"r{{attempt}}", "attempt": 0}}}}
             if os.environ.get("FAKE_GYM_FAILURE"):
@@ -672,7 +676,13 @@ def _fake_gym_skill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, config: str
         gym_runner,
         "_GYM_HOST_ENV_VARS",
         gym_runner._GYM_HOST_ENV_VARS
-        | {"FAKE_GYM_ENV_LOG", "FAKE_GYM_REWARD_TXT", "FAKE_GYM_FAILURE", "FAKE_GYM_EXTRA_ROLLOUT"},
+        | {
+            "FAKE_GYM_ENV_LOG",
+            "FAKE_GYM_REWARD_TXT",
+            "FAKE_GYM_FAILURE",
+            "FAKE_GYM_EXTRA_ROLLOUT",
+            "FAKE_GYM_ENTRY_ID",
+        },
     )
     monkeypatch.setenv("GITHUB_TOKEN", "host-only-token")
     monkeypatch.setenv("ANTHROPIC_API_KEY", "host-only-key")
@@ -1379,6 +1389,40 @@ def test_config_errors_let_cli_overrides_win(tmp_path: Path) -> None:
     )
 
 
+@pytest.mark.parametrize(
+    ("setting", "error"),
+    [
+        pytest.param(
+            "harbor:\n  trial_retries: 2\n",
+            "harbor.trial_retries is not supported with --backend nemo-gym yet",
+            id="trial-retries",
+        ),
+        pytest.param("plugin:\n  load: wrapper\n", "plugin.load is not supported with --backend nemo-gym", id="load"),
+        pytest.param(
+            "plugin:\n  lift_mode: effectiveness\n",
+            "plugin.lift_mode is not supported with --backend nemo-gym",
+            id="lift-mode",
+        ),
+    ],
+)
+def test_config_errors_reject_settings_gym_does_not_read(tmp_path: Path, setting: str, error: str) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(f"schema_version: 1\n{setting}", encoding="utf-8")
+    assert nemo_gym_config_errors(tmp_path) == [error]
+
+
+def test_config_errors_accept_zero_trial_retries_and_an_empty_block(tmp_path: Path) -> None:
+    from skillevaluator.tier3.nemo_gym.backend import nemo_gym_config_errors
+
+    (tmp_path / "evals").mkdir()
+    (tmp_path / "evals" / "config.yml").write_text(
+        "schema_version: 1\nplugin: {}\nharbor:\n  trial_retries: 0\n", encoding="utf-8"
+    )
+    assert nemo_gym_config_errors(tmp_path) == []
+
+
 def test_workflow_preflight_rejects_environment_kwarg(tmp_path: Path) -> None:
     import click
 
@@ -1556,21 +1600,36 @@ def test_gym_timeout_kills_the_whole_process_group(tmp_path: Path) -> None:
 
 
 @pytest.mark.parametrize("interrupt", [False, True])
-def test_successful_gym_teardown_completes_cleanup_progress(tmp_path: Path, interrupt: bool) -> None:
+def test_successful_gym_teardown_completes_cleanup_progress(
+    tmp_path: Path, interrupt: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import signal
+    import subprocess
     import sys
 
     from skillevaluator.tier3.nemo_gym.runner import _run_gym
 
-    script = "import os, signal, time; time.sleep(0.5); "
+    command = [sys.executable, "-c", "import time; time.sleep(60)"]
     if interrupt:
-        script += "os.kill(os.getppid(), signal.SIGINT); "
-    script += "time.sleep(60)"
+        real_wait = subprocess.Popen.wait
+        sent = False
+
+        def interrupt_first_wait(process, timeout=None):
+            nonlocal sent
+            if not sent and process.args == command:
+                sent = True
+                # Send SIGINT only once the group exists and the runner is waiting.
+                signal.raise_signal(signal.SIGINT)
+            return real_wait(process, timeout=timeout)
+
+        monkeypatch.setattr(subprocess.Popen, "wait", interrupt_first_wait)
+
     reporter = _RecordingReporter()
     with (tmp_path / "gym.log").open("w") as log:
 
         def run():
             return _run_gym(
-                [sys.executable, "-c", script],
+                command,
                 cwd=tmp_path,
                 env=dict(os.environ),
                 log=log,
@@ -2027,9 +2086,12 @@ def test_reward_txt_is_scored_like_harbor(tmp_path: Path) -> None:
     assert trial["verifier_result"]["rewards"] == {"entry_id": "case-1", "reward": 1.0}
 
 
+_SYNTHETIC_POLICY_KEY = "gw-policy-0a1b2c3d4e5f6789"
+
+
 def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch)
-    secret = "gw-policy-0a1b2c3d4e5f6789"
+    secret = _SYNTHETIC_POLICY_KEY
     monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
     monkeypatch.setenv("FAKE_GYM_FAILURE", f"AuthenticationError: 401 invalid key {secret}")
     result = _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1)
@@ -2037,6 +2099,59 @@ def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.M
     assert "AuthenticationError" in json.dumps(result)
     assert secret not in json.dumps(result)
     assert all(secret not in path.read_text() for path in run_dir.rglob("*.json"))
+
+
+@pytest.mark.parametrize("multiline", [False, True])
+def test_published_turn_diagnostics_mask_configured_credentials(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiline: bool
+) -> None:
+    import subprocess
+
+    from skillevaluator.tier3.nemo_gym import runner
+
+    config = (
+        "schema_version: 1\nharbor:\n  task_source: native_harbor\n"
+        "  runtime_env:\n    SERVICE_SETTING: ${SERVICE_SETTING}\ngrading:\n  mode: custom_only\n"
+    )
+    skill, _ = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    _native_task(skill)
+    subprocess.run(["git", "init", "--quiet", str(skill)], check=True)
+    secret = "opaque first\nsecond line" if multiline else _SYNTHETIC_POLICY_KEY
+    monkeypatch.setenv("SERVICE_SETTING", secret if multiline else "on")
+    if not multiline:
+        monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
+
+    def replay(command, *, cwd, **kwargs):
+        task = next(path for path in Path(command[3]).iterdir() if (path / "task.toml").is_file())
+        logs = cwd / "verifier"
+        logs.mkdir()
+        diagnostic = f"missing verifier reward: {secret}"
+        (logs / "test-stdout.txt").write_text(f"start\n{diagnostic}\nend\n", encoding="utf-8")
+        row = {
+            "task_id": task.name,
+            "turn_reward_strategy": "final",
+            "failure_reason": diagnostic,
+            "turns": [{"name": "verify", "verifier_logs_dir": str(logs), "failure": {"message": diagnostic}}],
+        }
+        Path(command[command.index("--output") + 1]).write_text(json.dumps(row) + "\n", encoding="utf-8")
+        return 0
+
+    monkeypatch.setattr(runner, "_run_gym", replay)
+    result = _run_fake_gym(skill, tmp_path, skip_baseline=True, max_cases=1, n_attempts=1)
+    arm = Path(result["run_dir"]) / "codex" / "with-skill"
+    (trial,) = (arm / "trials").iterdir()
+    stdout = (trial / "steps" / "verify" / "test-stdout.txt").read_text(encoding="utf-8")
+    diagnostics = {
+        "returned result": json.dumps(result),
+        "arm summary": (arm / "summary.json").read_text(encoding="utf-8"),
+        "trial result": (trial / "result.json").read_text(encoding="utf-8"),
+        "trial failure": (trial / "failure.json").read_text(encoding="utf-8"),
+        "verifier stdout": stdout,
+    }
+    forms = (secret, json.dumps(secret)[1:-1], " ".join(secret.split()))
+    assert not [name for name, text in diagnostics.items() if any(form in text for form in forms)]
+    assert all("missing verifier reward" in text for text in diagnostics.values())
+    assert stdout.splitlines()[::2] == ["start", "end"]
 
 
 def test_malformed_mcp_servers_toml_is_handled_as_on_harbor(tmp_path: Path, caplog: pytest.LogCaptureFixture) -> None:
@@ -2238,6 +2353,27 @@ def test_gym_run_starts_the_reporter_with_its_run_dir(tmp_path: Path, monkeypatc
     assert len(reporter.plans) == 1
     plan = reporter.plans[0]
     assert plan.output_dir == result["run_dir"] and plan.case_count == 2 and plan.matrix_trials == 4
+
+
+@pytest.mark.parametrize(("verified_case", "expected", "scored"), [("auth-login", PASS, 1), ("other-case", ERROR, 0)])
+def test_live_marks_keep_the_runners_case_map_after_it_removes_the_staged_tasks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, verified_case: str, expected: str, scored: int
+) -> None:
+    config = "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n"
+    skill, _env_log = _fake_gym_skill(tmp_path, monkeypatch, config=config)
+    task_toml = _native_task(skill) / "task.toml"
+    task_toml.write_text(task_toml.read_text().replace('entry_id = "case-001"', 'entry_id = "auth-login"'))
+    monkeypatch.setenv("FAKE_GYM_ENTRY_ID", verified_case)
+
+    result = _run_fake_gym(skill, tmp_path, skip_baseline=True)
+
+    run_dir = Path(result["run_dir"])
+    assert not (run_dir / "_harbor-tasks").exists()
+    arm = run_dir / "_nemo-gym" / "codex-with"
+    assert json.loads((arm / "task_case_ids.json").read_text()) == {"case-001": "auth-login"}
+    marks, _running = live_case_marks(run_dir, ["codex"], pass_threshold=0.5)
+    assert marks == {"codex": {"with_skill": {"case-001": [expected]}}}
+    assert result["agents"]["codex"]["num_trials_with"] == scored
 
 
 def test_live_marks_score_reward_logs_and_skip_normalized_gym_jobs(tmp_path: Path) -> None:

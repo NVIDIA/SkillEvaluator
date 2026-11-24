@@ -7,10 +7,10 @@ records the exact resolved dependency set used for this release.
 | Dependency group | Packages and licenses |
 | --- | --- |
 | Base | Bandit (Apache-2.0), Click (BSD-3-Clause), IDNA (BSD-3-Clause), Jinja2 (BSD-3-Clause), Markdown-It-Py (MIT), Packaging (Apache-2.0 or BSD-2-Clause), Pydantic (MIT), PyYAML (MIT), regex (Apache-2.0 AND CNRI-Python), Rich (MIT), uv (Apache-2.0 or MIT) |
-| LLM | Anthropic (MIT), Boto3 (Apache-2.0), LiteLLM (MIT), OpenAI (Apache-2.0) |
+| LLM | aiohttp (Apache-2.0 AND MIT), Anthropic (MIT), Boto3 (Apache-2.0), filelock (MIT), fsspec (BSD-3-Clause), LiteLLM (MIT), multidict (Apache-2.0), OpenAI (Apache-2.0), urllib3 (MIT) |
 | Tier 3 | Harbor (Apache-2.0), MCP (MIT), OAuthLib (BSD-3-Clause), PyJWT (MIT), python-dotenv (BSD-3-Clause) |
-| Security | pip-audit (Apache-2.0) |
-| Dashboard | Streamlit (Apache-2.0) |
+| Security | certifi (MPL-2.0), filelock (MIT), msgpack (Apache-2.0), pip (MIT), pip-audit (Apache-2.0), urllib3 (MIT) |
+| Dashboard | Streamlit (Apache-2.0), urllib3 (MIT) |
 
 ## Embedded report charts
 
@@ -57,7 +57,7 @@ license is retained at `/usr/local/share/licenses/gitleaks/LICENSE`.
 | Tool | Pinned source | License |
 | --- | --- | --- |
 | Semgrep | [v1.182.0](https://github.com/semgrep/semgrep/tree/v1.182.0) | LGPL-2.1 |
-| SkillSpector | [5482446](https://github.com/NVIDIA/SkillSpector/tree/54824463814a0be01360792523ec7245a69190fc) | Apache-2.0 |
+| SkillSpector | [e2674da](https://github.com/NVIDIA/SkillSpector/tree/e2674da339b0bddc6e565d059c0577c6d9cd25da) | Apache-2.0 |
 | Gitleaks | [v8.30.0](https://github.com/gitleaks/gitleaks/tree/v8.30.0) | MIT |
 
 ## Unicode security data

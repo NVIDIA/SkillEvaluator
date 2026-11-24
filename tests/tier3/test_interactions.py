@@ -755,7 +755,9 @@ def test_cli_requires_two_skills_and_never_generates_a_source(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("contrast", [-0.2, 0.0, 0.1])
-def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contrast):
+def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contrast, capsys):
+    from skillevaluator.tier3.interaction_commands import _print_report
+
     matrix = []
     for index, scores in enumerate(
         [
@@ -777,6 +779,36 @@ def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contr
     assert uncertainty["ci_low"] == pytest.approx(contrast)
     assert uncertainty["ci_high"] == pytest.approx(contrast)
     assert compare_configurations(matrix, metric="goal_accuracy", n_attempts=1) == report
+    report.update(metric="goal_accuracy", skills=[{"name": "a"}, {"name": "b"}], run_dir=str(tmp_path))
+    _print_report(report)
+    text = capsys.readouterr().out
+    nonzero = 0 if contrast == 0 else 3
+    assert (
+        f"95% case-bootstrap interval: [{contrast:+.4f}, {contrast:+.4f}]; "
+        f"3 cases, {nonzero} non-zero; precision: insufficient"
+    ) in text
+
+
+def test_terminal_reports_ordered_signed_bounds_for_varying_interactions(tmp_path, capsys):
+    from skillevaluator.tier3.interaction_commands import _print_report
+
+    matrix = []
+    for index, scores in enumerate(
+        [[0.1, 0.2, 0.3], [0.2, 0.3, 0.4], [0.2, 0.4, 0.5], [0.1, 0.5, 0.9]]
+    ):
+        condition = "without-skill" if index == 0 else "with-skill"
+        values = {f"case-{case}": [value] for case, value in enumerate(scores)}
+        result = _evidence(tmp_path / str(index), values, condition=condition)
+        matrix.append({"id": str(index), "condition": condition, "result": result})
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    uncertainty = report["agents"]["codex"]["uncertainty"]
+    assert uncertainty["ci_low"] == -0.2
+    assert uncertainty["ci_high"] == 0.3
+    report.update(metric="goal_accuracy", skills=[{"name": "a"}, {"name": "b"}], run_dir=str(tmp_path))
+    _print_report(report)
+    assert (
+        "95% case-bootstrap interval: [-0.2000, +0.3000]; 3 cases, 2 non-zero; precision: insufficient"
+    ) in capsys.readouterr().out
 
 
 def test_single_case_interaction_has_counts_but_no_interval(tmp_path):

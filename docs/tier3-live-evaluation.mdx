@@ -31,7 +31,7 @@ then connect a model, prepare your dataset, and run the comparison.
 <Note>
   **NeMo Gym is also available** as an experimental backend for Docker on
   Linux/macOS. The adapter is included in SkillEvaluator 1.0.1 and requires a
-  separate pinned Gym installation; see [Installation](/skills/skillevaluator/installation#install) for package availability. [Setup and supported agents](/skills/skillevaluator/tier3-runtime#execution-backends).
+  separate pinned Gym installation; see [Installation](/skills/skillevaluator/installation#install) for package availability. [NeMo Gym setup and first run](/skills/skillevaluator/nemo-gym).
   The walkthrough below uses **Harbor**, the default backend.
 </Note>
 
@@ -101,11 +101,9 @@ and any input files. Then validate:
 skillevaluator tier3 validate ./my-skill --strict
 ```
 
-Confirm the file exists first: an absent `evals/` directory can be reported as
-missing without a failing exit code. Resolve errors and warnings before
-continuing. Passing validation checks the
-dataset's structure and flagged wording; you still need to review whether its
-tasks represent how people will use the skill.
+Resolve missing datasets, errors, and warnings before continuing. Validation
+checks the dataset's structure and flagged wording. You still need to review
+whether the tasks represent how people will use the skill.
 
 ### Check readiness
 
@@ -319,6 +317,12 @@ The run prints its output directory. By default, reports are saved under
 <div id="repeatable-activation-validation">
 
 <Accordion title="Activation and skill interactions">
+  The HTML report does not render the per-trial `activation_validation`
+  record. Open `report.html` and select **Download JSON** to inspect it in the
+  canonical export. Standalone `tier3 evaluate` does not accept `-r`, and its
+  bounded `result.json` does not include this record. You can also use the
+  [retained-run export recipe](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation).
+
   - [Skill interaction experiments](/skills/skillevaluator/tier3-experiments#skill-interaction-experiments)
   - [Repeatable activation validation](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation)
 </Accordion>

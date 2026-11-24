@@ -21,7 +21,7 @@ import pytest
 
 from skillevaluator.tier3.case_summary import ERROR, FAIL, PASS, case_marks, live_case_marks
 from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES, collect_harbor_results
-from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS
+from skillevaluator.tier3.harbor.metrics import DEFAULT_METRICS, mark_not_applicable
 from skillevaluator.tier3.nemo_gym.results import write_job_from_rollouts, write_task_case_ids
 
 CASES = {"case-1": "case-1"}
@@ -442,6 +442,45 @@ def test_named_step_evidence_survives_collection_and_job_cleanup(tmp_path: Path,
         assert not (steps / "second").exists()
 
 
+@pytest.mark.parametrize("partial", [False, True], ids=["scored", "partial"])
+def test_retained_trajectories_mask_arm_values(tmp_path: Path, partial: bool) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+    first = _turn(tmp_path, "first", 1.0)
+    second = _second_turn_failure(tmp_path, "setup-failed")[0] if partial else _turn(tmp_path, "second", 1.0)
+    secret = 'opaque "sample"\nvalue'
+    trajectory = _trajectory("first")
+    trajectory["steps"][0].update(
+        message=f"before {secret} after", timestamp="2026-11-24T12:34:56.808012Z", extra={"nested": [secret, 7]}
+    )
+    (Path(first["verifier_logs_dir"]) / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+    errors = write_job_from_rollouts(
+        [_episode([first, second], task="login-task")],
+        jobs / "demo-codex-with",
+        eval_name="codex__m",
+        task_case_ids={"login-task": "auth-login"},
+        n_attempts=1,
+        secret_values={secret, "name", "agent", "8080"},
+    )
+    assert bool(errors) == partial
+    collect_harbor_results("demo", ["codex"], out, jobs, skip_baseline=True, expected_case_ids=["auth-login"])
+    trial = out / "codex/with-skill/trials/login-task__gym001"
+    paths = [trial / "steps/first/trajectory.json"]
+    if not partial:
+        paths.append(trial / "trajectory.json")
+    exposed = []
+    for path in paths:
+        document = json.loads(path.read_text(encoding="utf-8"))
+        assert document["agent"]["name"] == "codex"
+        step = document["steps"][0]
+        assert step["message"].startswith("before ") and step["message"].endswith(" after")
+        assert step["extra"]["nested"][1] == 7
+        if secret in step["message"] or secret in step["extra"]["nested"][0]:
+            exposed.append(path.relative_to(trial))
+    assert not exposed
+    assert "timestamp" not in json.loads(paths[0].read_text(encoding="utf-8"))["steps"][0]
+
+
 def test_step_evidence_publication_refuses_linked_files(tmp_path: Path) -> None:
     out, jobs = tmp_path / "out", tmp_path / "jobs"
     _stage_native_task(out, "with")
@@ -580,6 +619,33 @@ def test_live_marks_apply_the_final_verdict_and_staged_case_to_episodes(tmp_path
 
     assert live == [PASS, FAIL, ERROR, PASS, ERROR]
     assert sorted(live) == sorted(final)
+
+
+@pytest.mark.parametrize("failed_prepare", [False, True], ids=["healthy", "failed-prepare"])
+def test_final_turn_determines_metric_applicability(tmp_path: Path, failed_prepare: bool) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+    prepare = _graded_turn(tmp_path, "prepare", 1.0, overall=1.0)
+    if failed_prepare:
+        _judge_failed(Path(prepare["verifier_logs_dir"]))
+    final = _graded_turn(tmp_path, "verify", 1.0, overall=1.0)
+    logs = Path(final["verifier_logs_dir"])
+    numeric = json.loads((logs / "reward.json").read_text())
+    del numeric["behavior_check"]
+    (logs / "reward.json").write_text(json.dumps(numeric))
+    sidecar = numeric.copy()
+    mark_not_applicable(sidecar, "behavior_check", "No behavior assertions")
+    (logs / "skill_evaluator_reward.json").write_text(json.dumps(sidecar))
+    row = _episode([prepare, final], task="login-task", turn_reward_strategy="final")
+
+    live, finished = _live_and_final_marks(out, jobs, [row])
+
+    expected = [ERROR] if failed_prepare else [PASS]
+    assert (live, finished) == (expected, expected)
+    if not failed_prepare:
+        reward = json.loads((out / "codex/with-skill/trials/login-task__gym001/reward.json").read_text())
+        assert reward["overall"] == 1.0
+        assert reward["details"]["behavior_check"]["reason"] == "No behavior assertions"
 
 
 def test_live_marks_keep_the_staged_case_after_the_staged_tasks_are_removed(tmp_path: Path) -> None:
@@ -744,7 +810,7 @@ def test_live_marks_still_read_the_trajectory_of_an_agent_that_never_started(tmp
     row = _graded_rollout(tmp_path / "never-started")
     # A tokenless trajectory that names an auth failure is an agent that never started, which stays unscored.
     tokenless = _trajectory("never-started") | {"final_metrics": {}}
-    tokenless["steps"][0]["message"] = "API Error: 401 Unauthorized"
+    tokenless["steps"][0]["message"] = "AuthenticationError: provider refused request"
     Path(row["verifier_logs_dir"], "trajectory.json").write_text(json.dumps(tokenless), encoding="utf-8")
     _live_arm(out, [row])
 
@@ -752,7 +818,12 @@ def test_live_marks_still_read_the_trajectory_of_an_agent_that_never_started(tmp
 
     assert marks == {"codex": {"with_skill": {"login-task": [ERROR]}}}
     write_job_from_rollouts(
-        [row], jobs / "demo-codex-with", eval_name="codex__m", task_case_ids={"login-task": "auth-login"}, n_attempts=1
+        [row],
+        jobs / "demo-codex-with",
+        eval_name="codex__m",
+        task_case_ids={"login-task": "auth-login"},
+        n_attempts=1,
+        secret_values={"Error"},
     )
     results = collect_harbor_results(
         "demo", ["codex"], out, jobs, skip_baseline=True, expected_cases=1, expected_case_ids=["auth-login"]

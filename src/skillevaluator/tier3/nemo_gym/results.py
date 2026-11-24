@@ -306,7 +306,13 @@ def _copy_verifier_logs(
     With ``verdict_only``, copy only what the attempt verdict reads: the reward files, and a trial's own
     trajectory when it is small enough for the collector to read and check for an agent that never started.
     """
-    from skillevaluator.tier3.harbor.collector import DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES, _write_redacted_text_copy
+    from skillevaluator.tier3.harbor.collector import (
+        DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES,
+        _read_json,
+        _TrajectoryMergeError,
+        _validated_trajectory_dict,
+        _write_redacted_text_copy,
+    )
 
     verifier_dir = trial_dir / "verifier"
     verifier_dir.mkdir(parents=True, exist_ok=True)
@@ -325,7 +331,16 @@ def _copy_verifier_logs(
     if verdict_only and (step or trajectory.stat().st_size > DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES):
         return
     (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
-    shutil.copyfile(trajectory, trial_dir / "agent" / "trajectory.json")
+    destination = trial_dir / "agent" / "trajectory.json"
+    if not step or not secret_values:
+        shutil.copyfile(trajectory, destination)
+        return
+    try:
+        masked = _validated_trajectory_dict(_read_json(trajectory), secret_values=secret_values)
+        encoded = json.dumps(masked, separators=(",", ":"), allow_nan=False)
+    except _TrajectoryMergeError:
+        encoded = "null"
+    destination.write_text(encoded, encoding="utf-8")
 
 
 def write_job_from_rollouts(

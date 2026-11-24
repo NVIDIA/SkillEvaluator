@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
+  `final` strategy. The live case grid and finished report use the same verdict.
+  A failed or ungraded step leaves the attempt unscored. With `final`, the last
+  step determines which metrics apply, even if an earlier step scored one.
+  Each step keeps its own verifier output and trajectory after job cleanup,
+  including steps completed before a failure. Gym masks configured credential
+  values in trajectory text, verifier output, and step failure messages.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 
@@ -199,20 +206,6 @@ notes below describe the new policy and backend configuration behavior.
 
 ### Fixed
 
-- NeMo Gym runs of native multi-step tasks are scored instead of failing with
-  "SkillEvaluator verifier did not run in the NeMo Gym sandbox". Each step's
-  rewards, verifier files and trajectory are kept in order, and the attempt is
-  scored once by the task's `mean` or `final` strategy. An attempt with a masked,
-  failed or ungraded step stays unscored and names that step. The live case
-  status judges every Gym attempt as the finished run does, so a goal missed
-  under standard grading shows as failed, and a required judge that failed or a
-  verifier that names another case shows as an error, also after the staged
-  tasks are removed. A
-  `final` attempt credits only the last step's judges. Published multi-step
-  trials, from Gym or Harbor, keep each step's redacted trajectory and verifier
-  output under `steps/<name>/`, so the evidence survives job cleanup and a
-  partial attempt keeps the steps that ran. Gym masks configured credentials in
-  step failure messages and published verifier output.
 - Bound declarative output-pattern checks with isolated Python regex workers and a shared
   matching budget, preserving Python regex semantics and later checks. Interpreter
   startup and JSON transfer have a separate startup allowance and do not consume

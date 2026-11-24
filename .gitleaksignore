@@ -1,5 +1,3 @@
 08b38a1d499d894b009a761a5db04b818ef1af70:tests/reporting/test_tier3_failure_reasons.py:curl-auth-user:581
 # Synthetic escaped-quote curl fixture from the preserved author commit.
 ccd7363b0ea3377781bc391f788a4f614deebc9b:tests/tier3/test_security_finding_evidence.py:curl-auth-user:1274
-# Synthetic policy key in the original Gym turn-diagnostics regression test.
-8ba95ad23ca2f00fa6fae270bbb7d4589dbd1b11:tests/test_nemo_gym_backend.py:generic-api-key:2063

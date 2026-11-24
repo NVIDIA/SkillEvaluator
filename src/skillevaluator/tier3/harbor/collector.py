@@ -2027,7 +2027,30 @@ def _merged_atif_schema_version(*trajectories: Mapping[str, Any]) -> str:
     return f"ATIF-v{newest[0]}.{newest[1]}"
 
 
-def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
+def _mask_atif_fields(value: Any, mask: Callable[[str], str]) -> Any:
+    """Mask free text and free-form metadata while preserving ATIF's field names and literal tags."""
+    from typing import Literal, get_origin
+
+    from pydantic import BaseModel
+
+    if isinstance(value, BaseModel):
+        fields = {}
+        for name, field in type(value).model_fields.items():
+            item = getattr(value, name)
+            if item is None:
+                continue
+            masked = item if get_origin(field.annotation) is Literal else _mask_atif_fields(item, mask)
+            if name != "timestamp" or masked == item:
+                fields[name] = masked
+        return fields
+    if isinstance(value, dict):
+        return {key: _mask_atif_fields(item, mask) for key, item in value.items() if mask(key) == key}
+    if isinstance(value, list):
+        return [_mask_atif_fields(item, mask) for item in value]
+    return mask(value) if isinstance(value, str) else value
+
+
+def _validated_trajectory_dict(data: Any, *, secret_values: set[str] | None = None) -> dict[str, Any]:
     try:
         # Bound traversal before deepcopy so hostile ATIF cannot amplify work
         # before validation begins.
@@ -2127,7 +2150,20 @@ def _validated_trajectory_dict(data: Any) -> dict[str, Any]:
         )
         from harbor.models.trajectories import Trajectory
 
-        validated = Trajectory.model_validate(candidate).to_json_dict()
+        trajectory = Trajectory.model_validate(candidate)
+        if secret_values:
+            from skillevaluator.tier3.harbor.stream_redaction import collision_safe_redaction_marker
+
+            secrets = sorted(secret_values - {""}, key=len, reverse=True)
+            marker = collision_safe_redaction_marker(secrets)
+
+            def mask(text: str) -> str:
+                for secret in secrets:
+                    text = text.replace(secret, marker)
+                return text
+
+            trajectory = Trajectory.model_validate(_mask_atif_fields(trajectory, mask))
+        validated = trajectory.to_json_dict()
         _validate_generated_json_value(
             validated,
             max_depth=ATIF_JSON_MAX_DEPTH,
@@ -3519,7 +3555,7 @@ def _constituent_custom_metric_failure(result: dict[str, Any]) -> str:
 def _restore_constituent_not_applicable(
     data: dict[str, Any], result: dict[str, Any], trial_root: Path
 ) -> dict[str, Any]:
-    """Restore absent N/A metrics only when every declared step has bounded sidecar evidence.
+    """Restore absent N/A metrics from the scoring steps, after checking every sidecar.
 
     The returned validation view preserves Harbor's authoritative numeric values.
     Missing or unsafe sidecars cannot turn absent metrics into applicable scores.
@@ -3542,10 +3578,11 @@ def _restore_constituent_not_applicable(
     original = root_verifier.get("rewards") if isinstance(root_verifier, dict) else None
     if not isinstance(original, dict):
         return result
+    scoring_steps = names[-1:] if _harbor_multi_step_reward_strategy(result) == "final" else names
     restored = [
         metric
         for metric in _standard_reward_metrics(original)
-        if metric not in original and all(metric_is_not_applicable(by_name[name], metric) for name in names)
+        if metric not in original and all(metric_is_not_applicable(by_name[name], metric) for name in scoring_steps)
     ]
     if not restored:
         return result
@@ -3558,6 +3595,8 @@ def _restore_constituent_not_applicable(
             return result
         rewards = dict(rewards)
         for metric in restored:
+            if not metric_is_not_applicable(by_name[name], metric):
+                continue
             # A conflicting numeric value remains authoritative and prevents restoration.
             if metric in rewards and not metric_is_not_applicable(rewards, metric):
                 return result
@@ -3565,7 +3604,7 @@ def _restore_constituent_not_applicable(
             mark_not_applicable(rewards, metric, recorded_not_applicable_reason(by_name[name], metric))
         steps.append({**step, "verifier_result": {**verifier, "rewards": rewards}})
     for metric in restored:
-        reason = shared_not_applicable_reason([by_name[name] for name in names], metric)
+        reason = shared_not_applicable_reason([by_name[name] for name in scoring_steps], metric)
         mark_not_applicable(root_rewards, metric, reason)
         if metric not in data:
             mark_not_applicable(data, metric, reason)

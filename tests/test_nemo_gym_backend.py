@@ -2101,19 +2101,25 @@ def test_rollout_row_failures_are_redacted(tmp_path: Path, monkeypatch: pytest.M
     assert all(secret not in path.read_text() for path in run_dir.rglob("*.json"))
 
 
+@pytest.mark.parametrize("multiline", [False, True])
 def test_published_turn_diagnostics_mask_configured_credentials(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, multiline: bool
 ) -> None:
     import subprocess
 
     from skillevaluator.tier3.nemo_gym import runner
 
-    config = "schema_version: 1\nharbor:\n  task_source: native_harbor\ngrading:\n  mode: custom_only\n"
+    config = (
+        "schema_version: 1\nharbor:\n  task_source: native_harbor\n"
+        "  runtime_env:\n    SERVICE_SETTING: ${SERVICE_SETTING}\ngrading:\n  mode: custom_only\n"
+    )
     skill, _ = _fake_gym_skill(tmp_path, monkeypatch, config=config)
     _native_task(skill)
     subprocess.run(["git", "init", "--quiet", str(skill)], check=True)
-    secret = _SYNTHETIC_POLICY_KEY
-    monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
+    secret = "opaque first\nsecond line" if multiline else _SYNTHETIC_POLICY_KEY
+    monkeypatch.setenv("SERVICE_SETTING", secret if multiline else "on")
+    if not multiline:
+        monkeypatch.setenv(MODEL_API_KEY_ENV, secret)
 
     def replay(command, *, cwd, **kwargs):
         task = next(path for path in Path(command[3]).iterdir() if (path / "task.toml").is_file())
@@ -2142,7 +2148,8 @@ def test_published_turn_diagnostics_mask_configured_credentials(
         "trial failure": (trial / "failure.json").read_text(encoding="utf-8"),
         "verifier stdout": stdout,
     }
-    assert not [name for name, text in diagnostics.items() if secret in text]
+    forms = (secret, json.dumps(secret)[1:-1], " ".join(secret.split()))
+    assert not [name for name, text in diagnostics.items() if any(form in text for form in forms)]
     assert all("missing verifier reward" in text for text in diagnostics.values())
     assert stdout.splitlines()[::2] == ["start", "end"]
 

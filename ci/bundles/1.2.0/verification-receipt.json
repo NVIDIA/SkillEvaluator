@@ -1,0 +1,87 @@
+{
+  "all_verified": true,
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:39c381bc9559be4fe30ede2b937d1a8577fcfedc66230a8e52b6fe5e79c23c94",
+  "source_revision": "75949f7d1bb1222850edf1ea9621a89ae3fb9bb7",
+  "platform": {
+    "os": "linux",
+    "architecture": "amd64"
+  },
+  "public_manifest_matches_smoke_tested_image": true,
+  "anonymous_pull_verified": true,
+  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/45273565735",
+  "public_manifest_digest": "sha256:39c381bc9559be4fe30ede2b937d1a8577fcfedc66230a8e52b6fe5e79c23c94",
+  "smoke_runtime_id": "sha256:ac302b46d95c3ebfef0b0caa85c5bd4e7d21b5a88fe69ce58a3060a7b9ebc6ea",
+  "image_smoke_cases": [
+    {
+      "case": "all-pass",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 2,
+      "passed": 2,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "33356bf972c47a4a04400d5919aa67cf28c8a473b1d87939123c409029fe43d5",
+      "base_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d",
+      "head_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d"
+    },
+    {
+      "case": "invalid-name",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "failed",
+      "total": 2,
+      "passed": 1,
+      "failed": 1,
+      "incomplete": 0,
+      "summary_bytes": 718,
+      "summary_json_sha256": "6b56c674c0c1fab1d57fbcc38c6a9e811856ca1a2b34817e949a2b8df1d3d63d",
+      "base_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d",
+      "head_sha": "7f42d327d1d950c6ae998a445375d8d2e5678b21"
+    },
+    {
+      "case": "changed-one",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "passed",
+      "total": 1,
+      "passed": 1,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 405,
+      "summary_json_sha256": "98854f5287a5210dc9db3d157985bf531299cb7c759f039debc70ee5b9785dd2",
+      "base_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d",
+      "head_sha": "dabe4dcde62475650762e3a31c14e607e7b0abae"
+    },
+    {
+      "case": "no-change",
+      "verified": true,
+      "exit_code": 0,
+      "overall_status": "skipped",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 365,
+      "summary_json_sha256": "a50a045fa7cc448cd4522c946bc1ef5e106b4c7f2ae0b5e9f04f60e6c812b442",
+      "base_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d",
+      "head_sha": "d295e6e3c0f61a0a4f48a99094c4f3790f1b953b"
+    },
+    {
+      "case": "missing-llm-key",
+      "verified": true,
+      "exit_code": 1,
+      "overall_status": "error",
+      "total": 0,
+      "passed": 0,
+      "failed": 0,
+      "incomplete": 0,
+      "summary_bytes": 464,
+      "summary_json_sha256": "0c83cb229852198201d6fd1e5b2fba4dea60c765c6536a408582f8498726e8e9",
+      "base_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d",
+      "head_sha": "04a82e61a81ea9a5cd00b45a4086116be842661d"
+    }
+  ],
+  "runtime_observation_sha256": "2d8cd12ab9539630d7259cd59e7879aa23be88ee441e0cab2b03fd065e387441"
+}

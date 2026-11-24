@@ -37,7 +37,7 @@ def _augment(reporter: ReporterBase, document: str, payload: dict) -> str:
         data = json.loads(document)
         data["runs"][0].setdefault("properties", {})["pluginRuntime"] = payload
         return json.dumps(data, indent=reporter.indent, ensure_ascii=True, allow_nan=False)
-    if reporter.name == "junit":
+    if reporter.name in {"junit", "github"}:
         return document
     if reporter.name == "html":
         raise ValueError("HTML runtime evidence must be supplied to render_all before rendering")

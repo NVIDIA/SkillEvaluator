@@ -1322,6 +1322,51 @@ class TestRubricEvalValidator:
         assert result.metadata["rubric_eval"]["overall_score"] is None
         assert result.metadata["rubric_eval"]["overall_pass"] is False
 
+    def test_folder_validation_records_member_outcomes(self, tmp_path):
+        folder = tmp_path / "skills"
+        folder.mkdir()
+        for name in ("skill-a", "skill-b", "skill-c"):
+            _write_skill(folder, name)
+
+        passing_report = {
+            "overall_pass": True,
+            "score": 90,
+            "summary": "passed",
+            "checks": _complete_checks(scores={criterion["id"]: 9 for criterion in RUBRIC_CRITERIA}),
+        }
+        failing_report = {
+            "overall_pass": False,
+            "score": 50,
+            "summary": "failed",
+            "checks": _complete_checks(scores={criterion["id"]: 5 for criterion in RUBRIC_CRITERIA}),
+        }
+        validator = RubricEvalValidator(min_score=70)
+        original_single = validator._validate_single_skill
+
+        def validate_single(skill_path: Path):
+            if skill_path.name == "skill-c":
+                incomplete = rubric_eval.ValidationResult(
+                    validator_name="RUBRIC_EVAL",
+                    validator_description=validator.description,
+                )
+                incomplete.mark_scan_incomplete("rubric_judge")
+                return incomplete
+            return original_single(skill_path)
+
+        with (
+            patch.object(RubricJudge, "process", side_effect=[passing_report, failing_report, passing_report]),
+            patch.object(validator, "_validate_single_skill", side_effect=validate_single),
+        ):
+            folder_result = validator.validate(folder)
+            single_result = original_single(folder / "skill-a")
+
+        assert folder_result.metadata["rubric_eval_members"] == [
+            {"skill": "skill-a", "status": "passed"},
+            {"skill": "skill-b", "status": "failed"},
+            {"skill": "skill-c", "status": "incomplete"},
+        ]
+        assert "rubric_eval_members" not in single_result.metadata
+
     @pytest.mark.parametrize(
         ("answered_by", "with_fallback_block"),
         [("claude-opus-5-5", False), ("claude-opus-4-8", True), ("claude-opus-4-8", False)],
@@ -1864,7 +1909,11 @@ class TestInvalidReplyRetry:
         assert successes == {"[skill-a] rubric_eval": 2, "[skill-b] rubric_eval": 1}
         (finding,) = _llm_findings(result)
         assert finding.file_path.startswith("[skill-c] ")
-        assert finding.metadata == {"judge_attempts": 2}
+        assert finding.metadata == {
+            "judge_attempts": 2,
+            "artifact_path": str(tmp_path / "skill-c" / "SKILL.md"),
+            "member_label": "skill-c",
+        }
 
     def test_report_names_the_model_that_answered_the_retry(self, tmp_path, monkeypatch: pytest.MonkeyPatch):
         pytest.importorskip("anthropic")

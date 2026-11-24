@@ -670,6 +670,18 @@ def _collect_supplementary_content(
     return result
 
 
+def _member_status(result: ValidationResult) -> str:
+    """Classify one skill's rubric result with the status a single-skill run gets."""
+    from skillevaluator.reporting.run_status import Status, resolve_run_status
+
+    headline = resolve_run_status([result]).headline
+    if headline == Status.FAILED:
+        return "failed"
+    if headline == Status.INCOMPLETE:
+        return "incomplete"
+    return "passed"
+
+
 class RubricEvalValidator(ValidatorBase):
     """LLM-as-Judge rubric evaluation for skill quality.
 
@@ -722,6 +734,9 @@ class RubricEvalValidator(ValidatorBase):
                 "summary": "No skills found in target directory",
                 "checks": [],
             }
+            # An empty member list marks a folder run that evaluated no skill,
+            # unlike a single-skill run, which has no member list.
+            result.metadata["rubric_eval_members"] = []
             return result
 
         result = ValidationResult(
@@ -729,9 +744,11 @@ class RubricEvalValidator(ValidatorBase):
             validator_description=self.description,
         )
         all_rubric: list[dict] = []
+        members: list[dict[str, str]] = []
         for skill_dir in skill_dirs:
             sub = self._validate_single_skill(skill_dir)
             result.merge_with_prefix(sub, skill_dir.name)
+            members.append({"skill": skill_dir.name, "status": _member_status(sub)})
             if sub.metadata.get("rubric_eval", {}).get("execution_status") == "succeeded":
                 all_rubric.append(sub.metadata["rubric_eval"])
 
@@ -760,6 +777,7 @@ class RubricEvalValidator(ValidatorBase):
                 "checks": [],
             }
         result.metadata["rubric_eval_all"] = all_rubric
+        result.metadata["rubric_eval_members"] = members
 
         return result
 

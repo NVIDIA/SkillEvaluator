@@ -833,7 +833,9 @@ completed run directly:
   per-trial artifacts: the trial's `reward.json`, Harbor's `trajectory.json`
   when available, and redacted, size-capped diagnostic copies such as
   `trial.log`, `exception.txt`, and agent logs (`codex.txt`, `opencode.txt`).
-  With standard grading, `reward.json` records `trajectory_source` (the
+  A multi-step trial also keeps each named step's redacted `trajectory.json`
+  and `test-stdout.txt` under `steps/<step>/`, so an attempt that stopped
+  partway still shows the steps that ran. With standard grading, `reward.json` records `trajectory_source` (the
   trajectory or agent log that was graded) and, under each LLM judge's
   `details`, an `omitted` record showing whether its evidence was truncated to
   fit the [evidence budget](/skills/skillevaluator/tier3-grading#evidence-budgets) or, for

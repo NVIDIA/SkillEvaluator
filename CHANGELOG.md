@@ -12,6 +12,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- NeMo Gym now scores native multi-step tasks once using the task's `mean` or
+  `final` strategy. The live case grid and finished report use the same verdict.
+  A failed or ungraded step leaves the attempt unscored. With `final`, the last
+  step determines which metrics apply, even if an earlier step scored one.
+  Each step keeps its own verifier output and trajectory after job cleanup,
+  including steps completed before a failure. Gym masks configured credential
+  values in trajectory text, verifier output, and step failure messages.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 - The api-caller reference skill keeps a `Content-Type` passed with `--headers`

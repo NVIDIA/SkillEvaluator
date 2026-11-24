@@ -104,31 +104,60 @@ def test_stale_replay_cannot_restore_a_deleted_id_or_replace_a_newer_version():
     from scripts.benchmark_registry_overlap import validate_stale_replay
 
     class Backend:
-        def __init__(self, ignores_order):
+        def __init__(self, *, ignores_order=False, index_ignores_order=False):
             self.entries = {}
+            self.vectors = {0: np.eye(16, dtype=np.float32)[0]}
             self.ignores_order = ignores_order
+            self.index_ignores_order = index_ignores_order
 
-        def _set(self, entry_id, sequence, live):
-            if self.ignores_order or sequence > self.entries.get(entry_id, (0, False))[0]:
-                self.entries[entry_id] = sequence, live
+        def _set(self, entry_id, sequence, vector):
+            advances = self.ignores_order or sequence > self.entries.get(entry_id, (0, False))[0]
+            if advances:
+                self.entries[entry_id] = sequence, vector is not None
+            if advances or self.index_ignores_order:
+                if vector is None:
+                    self.vectors.pop(entry_id, None)
+                else:
+                    self.vectors[entry_id] = vector
 
-        def upsert(self, entry_id, sequence, _vector):
-            self._set(entry_id, sequence, True)
+        def upsert(self, entry_id, sequence, vector):
+            self._set(entry_id, sequence, vector)
 
         def remove(self, entry_id, sequence):
-            self._set(entry_id, sequence, False)
+            self._set(entry_id, sequence, None)
 
         def visible(self, entry_id, sequence):
             return self.entries.get(entry_id) == (sequence, True)
 
-    vector = np.array([0, 1], dtype=np.float32)
-    assert all(validate_stale_replay(Backend(False), 100, vector).values())
-    assert validate_stale_replay(Backend(True), 100, vector) == {
+        def search(self, vector, k):
+            return sorted(self.vectors, key=lambda entry_id: (-self.vectors[entry_id] @ vector, entry_id))[:k]
+
+    assert all(validate_stale_replay(Backend(), 100, dimension=16, seed=41).values())
+    assert validate_stale_replay(Backend(ignores_order=True), 100, dimension=16, seed=41) == {
         "stale_upsert_after_delete": False,
         "stale_upsert_after_replacement": False,
         "stale_delete_after_replacement": False,
         "duplicate_delete": True,
     }
+    assert validate_stale_replay(Backend(index_ignores_order=True), 100, dimension=16, seed=41) == {
+        "stale_upsert_after_delete": False,
+        "stale_upsert_after_replacement": False,
+        "stale_delete_after_replacement": False,
+        "duplicate_delete": True,
+    }
+
+    class MissingResultsBackend(Backend):
+        def search(self, vector, k):
+            return super().search(vector, k) if len(self.vectors) > 1 else []
+
+    report = validate_stale_replay(MissingResultsBackend(), 100, dimension=16, seed=41)
+    assert report["stale_upsert_after_delete"] is False
+
+
+def test_one_dimensional_corpus_cannot_qualify_stale_replay():
+    from scripts.benchmark_registry_overlap import validate_stale_replay
+
+    assert validate_stale_replay(object(), 100, dimension=1, seed=41) == {"distinguishable_probe_vectors": False}
 
 
 def test_qualification_requires_ann_evidence_and_a_complete_operating_envelope():
@@ -241,6 +270,32 @@ def test_pgvector_runner_refuses_unsupported_parameters(flag, value):
     assert exc.value.code == 2
 
 
+@pytest.mark.parametrize("phase", ["--duration", "--burst-duration"])
+def test_one_dimensional_corpus_requires_recall_only_or_preparation(phase, capsys):
+    from scripts.benchmark_registry_overlap import _parse_args
+
+    args = [
+        "--backend",
+        "pgvector",
+        "--postgres-dsn",
+        "test",
+        "--dimension",
+        "1",
+        "--duration",
+        "0",
+        "--burst-duration",
+        "0",
+    ]
+    assert _parse_args(args).dimension == 1
+    assert _parse_args([*args, phase, "1", "--prepare-only"]).dimension == 1
+
+    with pytest.raises(SystemExit) as exc:
+        _parse_args([*args, phase, "1"])
+
+    assert exc.value.code == 2
+    assert "at least two dimensions" in capsys.readouterr().err
+
+
 @pytest.mark.parametrize("alias", ["same-path", "symlink", "hardlink"])
 def test_runner_cannot_overwrite_vector_input(tmp_path, alias):
     np = pytest.importorskip("numpy")
@@ -276,6 +331,75 @@ def test_runner_cannot_overwrite_vector_input(tmp_path, alias):
 
     assert exc.value.code == 2
     assert vectors.read_bytes() == original
+
+
+@pytest.mark.parametrize(
+    ("first_flag", "first_name", "second_name"),
+    [
+        ("--write-workload", "workload.json", "WORKLOAD.json"),
+        ("--write-workload", "caf\u00e9.json", "cafe\u0301.json"),
+        ("--write-vectors", "caf\u00e9.npy", "CAFE\u0301.NPY"),
+    ],
+)
+def test_fresh_artifact_names_follow_destination_filesystem(tmp_path, capsys, first_flag, first_name, second_name):
+    pytest.importorskip("numpy")
+    from scripts.benchmark_registry_overlap import main
+
+    calibration = tmp_path / "calibration"
+    calibration.mkdir()
+    (calibration / first_name).touch()
+    first, second = tmp_path / first_name, tmp_path / second_name
+    args = ["--prepare-only", "--size", "4", "--dimension", "2", "--queries", "2", "--k", "1"]
+    args.extend([first_flag, str(first), "--output", str(second)])
+
+    if (calibration / second_name).exists():
+        with pytest.raises(SystemExit) as exc:
+            main(args)
+        assert exc.value.code == 2
+        assert "separate files" in capsys.readouterr().err
+        assert list(tmp_path.iterdir()) == [calibration]
+    else:
+        assert main(args) == 0
+        assert first.is_file() and second.is_file() and not first.samefile(second)
+
+
+@pytest.mark.parametrize("first_output", ["vectors", "workload"])
+def test_output_alias_that_appears_during_preparation_preserves_first_artifact(
+    tmp_path, monkeypatch, capsys, first_output
+):
+    numpy = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    report = tmp_path / "report.json"
+    args = ["--size", "4", "--dimension", "2", "--queries", "2", "--k", "1", "--prepare-only", "--output", str(report)]
+    if first_output == "vectors":
+        artifact = tmp_path / "vectors.npy"
+        write_vectors = numpy.save
+
+        def save_then_alias(path, corpus, **kwargs):
+            write_vectors(path, corpus, **kwargs)
+            report.hardlink_to(path)
+
+        monkeypatch.setattr(numpy, "save", save_then_alias)
+        args.extend(["--write-vectors", str(artifact)])
+    else:
+        artifact = tmp_path / "workload.json"
+        write_json = benchmark._write_json
+
+        def write_then_alias(path, data):
+            write_json(path, data)
+            if path == artifact:
+                report.hardlink_to(path)
+
+        monkeypatch.setattr(benchmark, "_write_json", write_then_alias)
+        args.extend(["--write-workload", str(artifact)])
+
+    assert benchmark.main(args) == 2
+    assert "separate files" in capsys.readouterr().err
+    if first_output == "vectors":
+        assert numpy.load(artifact).shape == (4, 2)
+    else:
+        assert json.loads(artifact.read_text(encoding="utf-8"))["query_ids"]
 
 
 @pytest.mark.parametrize("found", [[], [2], [2, 7], [True, 2], [-1, 2]])
@@ -321,3 +445,59 @@ def test_mutation_probe_requires_ann_suppression_after_keyed_removal(monkeypatch
 
     with pytest.raises(benchmark.VisibilityTimeout):
         mutate(2)
+
+
+def test_dropped_mutations_do_not_shift_later_writes(monkeypatch):
+    from types import SimpleNamespace
+
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    class Backend:
+        def __init__(self):
+            self.writes = []
+            self.live = None
+
+        def upsert(self, entry_id, sequence, vector):
+            self.writes.append((entry_id, sequence, vector.tobytes()))
+            self.live = entry_id, sequence
+
+        def remove(self, entry_id, sequence):
+            self.writes.append((entry_id, sequence, None))
+            self.live = None
+
+        def visible(self, entry_id, sequence):
+            return self.live == (entry_id, sequence)
+
+        def search(self, _vector, _k):
+            return [self.live[0] if self.live else 0]
+
+    corpus = np.eye(4, dtype=np.float32)
+
+    def run(indices):
+        backend = Backend()
+        mutate = benchmark.MutationLoad(backend, corpus, seed=41)
+        for index in indices:
+            mutate(index)
+        return backend.writes
+
+    full = run([0, 1, 2, 3])
+    assert run([0, 2, 3]) == [full[0], full[2], full[3]]
+
+    # The steady phase schedules three mutations and drops index 1. The burst starts at index 3.
+    def run_stream(operation, *, rate, **_):
+        for index in {5: [0, 2], 25: [0]}.get(rate, []):
+            operation(index)
+        return {}
+
+    monkeypatch.setattr(benchmark, "run_stream", run_stream)
+    backend = Backend()
+    workload = benchmark.exact_workload(corpus, [0], k=1)
+    benchmark._measure_load(backend, corpus, workload, SimpleNamespace(seed=41, duration=0.6, burst_duration=0.04))
+    assert backend.writes == [full[0], full[2], full[3]]
+
+    # A scheduled delete still sends its tombstone when both preceding writes were dropped.
+    backend = Backend()
+    with pytest.raises(benchmark.VisibilityTimeout, match="before deletion"):
+        benchmark.MutationLoad(backend, corpus, seed=41)(2)
+    assert backend.writes == [full[2]]

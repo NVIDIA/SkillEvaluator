@@ -527,19 +527,22 @@ batches from one source and embeds the skill name and description. Results
 provide scores, revision identity, and provenance for review. Use the
 [local JSON catalog](#use-a-local-catalog) for checkout and CI workflows.
 
-Use PostgreSQL with pgvector 0.8.2 and provision the `vector` extension before
-initialization. Install the `[registry]` extra separately from `[all]`. Run
-`uv sync --extra registry` from the checkout to install the Tier 2 embedding
-dependencies and PostgreSQL driver. Export
+Use a UTF-8 PostgreSQL database with pgvector 0.8.2 or later and provision the
+`vector` extension before initialization. An administrator can precreate the
+dedicated `skillevaluator_overlap` schema for the operator. The operator needs
+`USAGE` and `CREATE` on that schema and `USAGE` on the extension schema.
+Install the `[registry]` extra separately from `[all]`. Run
+`uv sync --locked --extra registry` from the checkout to install the Tier 2
+embedding dependencies and PostgreSQL driver. Export
 `SKILL_EVAL_REGISTRY_DSN` through your environment's secret configuration and
 set up the [Tier 2 embedding provider](/skills/skillevaluator/configuration).
 Run these commands from a checkout that includes the pilot.
 
 ```bash
-python -m skillevaluator.registry_overlap init --source example-registry
-python -m skillevaluator.registry_overlap sync --batch ./batch-1.json --sha256 "$BATCH_SHA256"
-python -m skillevaluator.registry_overlap status
-python -m skillevaluator.registry_overlap search ./candidate/SKILL.md --top-k 10
+uv run --no-sync python -m skillevaluator.registry_overlap init --source example-registry
+uv run --no-sync python -m skillevaluator.registry_overlap sync --batch ./batch-1.json --sha256 "$BATCH_SHA256"
+uv run --no-sync python -m skillevaluator.registry_overlap status
+uv run --no-sync python -m skillevaluator.registry_overlap search ./candidate/SKILL.md --top-k 10
 ```
 
 Obtain `BATCH_SHA256` through a separate trusted channel from the batch
@@ -599,7 +602,8 @@ revision when you change the embedding pipeline for the same model.
 
 1. Configure the new profile and run `reindex`. It creates a generation from
    the current source snapshot. The active generation continues to serve
-   queries.
+   queries. A rebuild with the same profile reuses available vectors whose
+   embedding input is unchanged.
 2. Run `sync --generation N` with the new profile as needed. Use `status` to
    inspect the accepted cursor, event checkpoints, oldest pending events,
    and index readiness.
@@ -648,9 +652,20 @@ policy.
 ### Reproduce the registry-scale measurements
 
 The checkout benchmark accepts a little-endian, row-major float32 `.npy`
-matrix. Use a representative corpus with pinned provenance and one embedding
-profile. Provide the `--size` corresponding to the prefix you intend to
-measure. Prepare a reusable exhaustive cosine reference for the same vectors
+matrix. To generate a proxy corpus, download `0000.parquet` through
+`0005.parquet` into `./parquet` from `default/latest` in the [pinned ClawHub Parquet conversion](https://huggingface.co/datasets/OpenClaw/clawhub-security-signals-live/tree/23a1a8aa3e3cf7359ce81c74d6280b02a3910672/default/latest).
+Download `onnx/model_int8.onnx` and `tokenizer.json` from the [pinned MiniLM model](https://huggingface.co/Xenova/all-MiniLM-L6-v2/tree/751bff37182d3f1213fa05d7196b954e230abad9)
+and put both files in `./minilm`. The generator verifies input hashes and
+writes the vector matrix and its provenance sidecar.
+
+```bash
+uv run --locked --with numpy --with pyarrow --with onnxruntime --with tokenizers \
+  python -m scripts.registry_overlap_benchmark_corpus \
+  --parquet-dir ./parquet --model-dir ./minilm --output ./corpus.npy
+```
+
+Provide the `--size` corresponding to the matrix prefix you intend to measure.
+Prepare a reusable exhaustive cosine reference for the same vectors
 and then compare the two indexes in sequence. Pass `--query-ids FILE` during
 preparation to supply specific zero-based corpus row IDs. Point the environment
 variables at disposable benchmark databases. The benchmark creates its own
@@ -675,13 +690,44 @@ with an exposed Qdrant gRPC port, set
 fingerprint with the corpus source, embedding profile, machine, service
 versions, and settings.
 
+The historical pilot used a local projection of the pinned Parquet conversion.
+The sample specification in `tests/fixtures/registry-overlap-clawhub-minilm-source-sample.json`
+records the row groups and library versions. To reconstruct the projection,
+run this from the checkout with the pinned source shards in `./parquet`.
+
+```bash
+uv run --locked --with pyarrow python - <<'PY'
+import json
+from pathlib import Path
+
+import pyarrow.parquet as pq
+
+spec = json.loads(Path("tests/fixtures/registry-overlap-clawhub-minilm-source-sample.json").read_text())
+destination = Path("sample-parquet")
+destination.mkdir()
+for name, groups in spec["shards"].items():
+    source = pq.ParquetFile(Path("parquet") / name)
+    selected = range(source.num_row_groups) if groups == "all" else groups
+    pq.write_table(source.read_row_groups(selected, columns=spec["source_columns"]), destination / name)
+PY
+```
+
+Run the corpus generator with `--parquet-dir ./sample-parquet` and
+`--allow-source-sample`. Of the 35,377 source rows, 32,209 supplied
+descriptions. Seeded cluster padding produces the 250,000-row matrix. The
+query IDs and overlap labels under `tests/fixtures/` refer to rows in that matrix.
+Pass `registry-overlap-clawhub-minilm-query-ids.json` to `--query-ids` in preparation
+and `registry-overlap-clawhub-minilm-reviewed-labels.json` to `--labels` in the comparison.
+
 The benchmark accepts `SKILLEVALUATOR_BENCHMARK_POSTGRES_EF_SEARCH` and
 `SKILLEVALUATOR_BENCHMARK_QDRANT_EF_SEARCH` (40–1,000, default 200) to tune
 HNSW search effort independently. The report records each adapter's setting.
 
 The steady phase schedules 20 searches and 5 mutations per second for
 30 minutes. The one-minute burst keeps 20 searches per second and raises
-mutations to 25 per second. Read recall@10 against the exhaustive reference,
+mutations to 25 per second. Each mutation's scheduled slot fixes its operation,
+revision, and probe vector, including when an earlier slot is dropped. Read
+recall@10 against the exhaustive reference,
 provider-excluded search p95 and p99 from the scheduled start, and separate
 write acknowledgement and visibility timings. Visibility is measured by
 checking the keyed live revision and issuing a top-k query with a seeded probe

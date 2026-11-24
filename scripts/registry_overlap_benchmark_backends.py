@@ -6,6 +6,7 @@
 from __future__ import annotations
 
 import os
+import re
 from itertools import repeat
 from time import monotonic, sleep
 from typing import TYPE_CHECKING
@@ -19,6 +20,10 @@ _MAX_TOP_K = 50
 _SEARCH_BUDGET = 200
 _INITIAL_SEQUENCE = 0
 _QDRANT_FULL_SCAN_KB = 10
+
+
+class PgVectorSetupError(ValueError):
+    """A failed pgvector prerequisite with a credential-free diagnostic."""
 
 
 def _check_matrix(vectors: np.ndarray, dimension: int) -> None:
@@ -77,6 +82,26 @@ def _benchmark_ef_search(variable: str) -> int:
     return value
 
 
+def _setup_pgvector(connection) -> tuple[str, str]:
+    from psycopg import sql
+
+    if connection.info.parameter_status("server_encoding") != "UTF8":
+        raise PgVectorSetupError("The PostgreSQL benchmark requires a UTF-8 database")
+    extension = connection.execute("""
+        SELECT pg_catalog.current_setting('server_version'), e.extversion, n.nspname
+        FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+        WHERE e.extname = 'vector'
+    """).fetchone()
+    if extension is None:
+        raise PgVectorSetupError("Install pgvector 0.8.2 or later in the benchmark database before the trial")
+    server_version, vector_version, namespace = extension
+    release = re.fullmatch(r"([0-9]+)\.([0-9]+)\.([0-9]+)", vector_version)
+    if release is None or tuple(map(int, release.groups())) < (0, 8, 2):
+        raise PgVectorSetupError("The PostgreSQL benchmark requires pgvector 0.8.2 or later")
+    connection.execute(sql.SQL("SET search_path TO pg_catalog, {}").format(sql.Identifier(namespace)))
+    return server_version, vector_version
+
+
 class PgVectorBackend:
     """Search a dedicated half-precision HNSW index and rerank float32 vectors."""
 
@@ -129,7 +154,7 @@ class PgVectorBackend:
         ).format(self._table)
         self._pool = ConnectionPool(
             dsn,
-            kwargs={"autocommit": True, "connect_timeout": 5},
+            kwargs={"autocommit": True, "connect_timeout": 5, "client_encoding": "UTF8"},
             open=False,
             min_size=2,
             max_size=4,
@@ -138,6 +163,7 @@ class PgVectorBackend:
         )
 
     def _configure(self, connection) -> None:
+        _setup_pgvector(connection)
         with connection.cursor() as cursor:
             cursor.execute("SET statement_timeout = '5s'")
             cursor.execute("SET lock_timeout = '5s'")
@@ -154,14 +180,8 @@ class PgVectorBackend:
         if not 0 <= workers <= 4:
             raise ValueError("PostgreSQL benchmark build workers must be between 0 and 4")
 
-        with connect(self._dsn, connect_timeout=5) as connection, connection.cursor() as cursor:
-            cursor.execute(
-                "SELECT current_setting('server_version'), extversion FROM pg_extension WHERE extname='vector'"
-            )
-            versions = cursor.fetchone()
-            if versions is None:
-                raise RuntimeError("Install the pgvector extension in the benchmark database before the trial")
-
+        with connect(self._dsn, connect_timeout=5, client_encoding="UTF8") as connection, connection.cursor() as cursor:
+            server_version, vector_version = _setup_pgvector(connection)
             cursor.execute(sql.SQL("CREATE SCHEMA {}").format(self._schema))
             cursor.execute(
                 sql.SQL(
@@ -199,8 +219,8 @@ class PgVectorBackend:
 
         return {
             "resource_name": self.resource_name,
-            "engine_version": versions[0],
-            "extension_version": versions[1],
+            "engine_version": server_version,
+            "extension_version": vector_version,
             "dimension": self.dimension,
             "ann_indexed_count": len(vectors),
             "planner_uses_ann": planner_uses_ann,

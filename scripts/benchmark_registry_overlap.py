@@ -18,6 +18,13 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from dataclasses import asdict, dataclass
 from typing import TYPE_CHECKING
 
+try:
+    from scripts.registry_overlap_benchmark_backends import PgVectorBackend, PgVectorSetupError, QdrantBackend
+except ModuleNotFoundError as exc:
+    if exc.name != "scripts":
+        raise
+    from registry_overlap_benchmark_backends import PgVectorBackend, PgVectorSetupError, QdrantBackend
+
 if TYPE_CHECKING:
     from collections.abc import Callable
     from pathlib import Path
@@ -401,12 +408,9 @@ class MutationLoad:
     """Exercise insert, replace and delete on a bounded set of dedicated IDs."""
 
     def __init__(self, backend, corpus: VectorCorpus, *, seed: int):
-        import numpy as np
-
         self.backend = backend
         self.corpus_size, self.dimension = corpus.shape
-        self.rng = np.random.default_rng(seed)
-        self.sequence = 1
+        self.seed = seed
         self.id_limit = self.corpus_size
         self.live: dict[int, tuple[int, VectorCorpus]] = {}
 
@@ -419,30 +423,33 @@ class MutationLoad:
         _validate_results(found, 1, None, id_limit=self.id_limit, require_full=True)
         return (found[0] == entry_id) == live
 
-    def __call__(self, _index: int) -> MutationTiming:
-        # Cycle through insert, replacement and delete while rotating dedicated IDs.
-        cycle, step = divmod(self.sequence - 1, 3)
+    def __call__(self, index: int) -> MutationTiming:
+        import numpy as np
+
+        # Derive the write from its scheduled slot, including when other slots were dropped.
+        cycle, step = divmod(index, 3)
         slot = cycle % MUTATION_SLOTS
         entry_id = self.corpus_size + slot
         self.id_limit = max(self.id_limit, entry_id + 1)
-        self.sequence += 1
-        sequence = self.sequence
+        sequence = index + 2
         if step == 2:
             previous = self.live.get(entry_id)
             probe_deadline = time.monotonic() + DELETE_DEADLINE
-            if previous is None or not self._observed(entry_id, *previous, probe_deadline, live=True):
-                raise VisibilityTimeout("Mutation entry was not searchable before deletion")
-            prior_sequence, vector = previous
+            was_visible = previous is not None and self._observed(entry_id, *previous, probe_deadline, live=True)
             began = time.monotonic()
             expires = began + DELETE_DEADLINE
             self.backend.remove(entry_id, sequence)
+            self.live.pop(entry_id, None)
             ack = 1000 * (time.monotonic() - began)
+            if previous is None or not was_visible:
+                raise VisibilityTimeout("Mutation entry was not searchable before deletion")
+            prior_sequence, vector = previous
             elapsed = _wait_for_visibility(
                 lambda: self._observed(entry_id, prior_sequence, vector, expires, live=False), began, DELETE_DEADLINE
             )
-            del self.live[entry_id]
             return MutationTiming("delete", ack, elapsed)
-        vector = _normalize(self.rng.standard_normal((1, self.dimension), dtype="float32"))[0]
+        rng = np.random.default_rng([self.seed, index])
+        vector = _normalize(rng.standard_normal((1, self.dimension), dtype="float32"))[0]
         began = time.monotonic()
         expires = began + UPSERT_DEADLINE
         self.backend.upsert(entry_id, sequence, vector)
@@ -454,29 +461,66 @@ class MutationLoad:
         return MutationTiming("upsert", ack, elapsed)
 
 
-def validate_stale_replay(backend, first_id: int, vector: VectorCorpus) -> dict[str, bool]:
-    """Probe stale upserts and deletes against independently established live rows."""
-    backend.upsert(first_id, 10, vector)
+def validate_stale_replay(backend, first_id: int, *, dimension: int, seed: int) -> dict[str, bool]:
+    """Verify keyed revisions and ANN results before and after stale writes."""
+    import numpy as np
+
+    if dimension == 1:
+        return {"distinguishable_probe_vectors": False}
+    # Keep stale replay controls independent of the mixed-load vectors.
+    rng = np.random.default_rng(np.random.SeedSequence(seed, spawn_key=(1,)))
+    deleted_vector, current_vector, stale_delete_vector, duplicate_vector = _normalize(
+        rng.standard_normal((4, dimension), dtype="float32")
+    )
+    prior_vector = -current_vector
+
+    def search_matches(entry_id: int, probe: VectorCorpus, *, expected: bool) -> bool:
+        found = backend.search(probe, 1)
+        try:
+            _validate_results(found, 1, None, id_limit=first_id + 4, require_full=True)
+        except ValueError:
+            return False
+        return (found[0] == entry_id) == expected
+
+    def live(entry_id: int, sequence: int, probe: VectorCorpus) -> bool:
+        return backend.visible(entry_id, sequence) and search_matches(entry_id, probe, expected=True)
+
+    def absent(entry_id: int, sequence: int, probe: VectorCorpus) -> bool:
+        return not backend.visible(entry_id, sequence) and search_matches(entry_id, probe, expected=False)
+
+    backend.upsert(first_id, 10, deleted_vector)
+    first_was_live = live(first_id, 10, deleted_vector)
     backend.remove(first_id, 11)
-    backend.upsert(first_id, 10, vector)
-    stale_upsert_after_delete = not backend.visible(first_id, 10)
+    first_was_deleted = absent(first_id, 10, deleted_vector)
+    backend.upsert(first_id, 10, deleted_vector)
+    stale_upsert_after_delete = first_was_live and first_was_deleted and absent(first_id, 10, deleted_vector)
 
     replacement = first_id + 1
-    backend.upsert(replacement, 10, vector)
-    backend.upsert(replacement, 12, vector)
-    backend.upsert(replacement, 11, vector)
-    stale_upsert_after_replacement = backend.visible(replacement, 12)
+    backend.upsert(replacement, 10, prior_vector)
+    original_was_live = live(replacement, 10, prior_vector)
+    backend.upsert(replacement, 12, current_vector)
+    replacement_was_live = live(replacement, 12, current_vector) and absent(replacement, 10, prior_vector)
+    backend.upsert(replacement, 11, prior_vector)
+    stale_upsert_after_replacement = (
+        original_was_live
+        and replacement_was_live
+        and live(replacement, 12, current_vector)
+        and absent(replacement, 11, prior_vector)
+    )
 
     stale_delete = first_id + 2
-    backend.upsert(stale_delete, 12, vector)
+    backend.upsert(stale_delete, 12, stale_delete_vector)
+    third_was_live = live(stale_delete, 12, stale_delete_vector)
     backend.remove(stale_delete, 11)
-    stale_delete_after_replacement = backend.visible(stale_delete, 12)
+    stale_delete_after_replacement = third_was_live and live(stale_delete, 12, stale_delete_vector)
 
     duplicate = first_id + 3
-    backend.upsert(duplicate, 10, vector)
+    backend.upsert(duplicate, 10, duplicate_vector)
+    duplicate_was_live = live(duplicate, 10, duplicate_vector)
     backend.remove(duplicate, 11)
+    duplicate_was_deleted = absent(duplicate, 10, duplicate_vector)
     backend.remove(duplicate, 11)
-    duplicate_delete = not backend.visible(duplicate, 10)
+    duplicate_delete = duplicate_was_live and duplicate_was_deleted and absent(duplicate, 10, duplicate_vector)
     return {
         "stale_upsert_after_delete": stale_upsert_after_delete,
         "stale_upsert_after_replacement": stale_upsert_after_replacement,
@@ -519,11 +563,15 @@ def _measure_recall(
 
 def _measure_load(backend, corpus: VectorCorpus, workload: Workload, args: argparse.Namespace):
     mutate = MutationLoad(backend, corpus, seed=args.seed)
+    mutation_offset = 0
 
     def search(index: int) -> None:
         own_id = workload.query_ids[index % len(workload.query_ids)]
         found = backend.search(corpus[own_id], workload.k, exclude=own_id)
         _validate_results(found, workload.k, own_id, id_limit=mutate.id_limit, require_full=True)
+
+    def apply_mutation(index: int) -> MutationTiming:
+        return mutate(mutation_offset + index)
 
     phases = {}
     for phase, duration, mutation_rate in (("steady", args.duration, 5), ("burst", args.burst_duration, 25)):
@@ -534,24 +582,18 @@ def _measure_load(backend, corpus: VectorCorpus, workload: Workload, args: argpa
         with ThreadPoolExecutor(max_workers=2) as harness:
             searches = harness.submit(run_stream, search, start=started, rate=20, duration=duration, workers=4)
             mutations = harness.submit(
-                run_stream, mutate, start=started, rate=mutation_rate, duration=duration, workers=1
+                run_stream, apply_mutation, start=started, rate=mutation_rate, duration=duration, workers=1
             )
             while wait((searches, mutations), timeout=60).not_done:
                 _progress(f"{phase.capitalize()} load elapsed {time.monotonic() - started:.0f}/{duration:g} seconds")
             phases[phase] = {"search": searches.result(), "mutations": mutations.result()}
+        mutation_offset += math.ceil(mutation_rate * duration)
     return phases
 
 
 def _run_backend(
     name: str, corpus: VectorCorpus, workload: Workload, labels: dict[int, set[int]], args: argparse.Namespace
 ) -> dict[str, object]:
-    try:
-        from scripts.registry_overlap_benchmark_backends import PgVectorBackend, QdrantBackend
-    except ModuleNotFoundError as exc:
-        if exc.name != "scripts":
-            raise
-        from registry_overlap_benchmark_backends import PgVectorBackend, QdrantBackend
-
     if name == "pgvector":
         backend = PgVectorBackend(args.postgres_dsn, args.dimension)
     else:
@@ -565,7 +607,7 @@ def _run_backend(
         recall = _measure_recall(backend, corpus, workload, labels)
         load = _measure_load(backend, corpus, workload, args)
         _progress(f"{name}: verifying stale mutation replay")
-        stale = validate_stale_replay(backend, len(corpus) + MUTATION_SLOTS, corpus[0])
+        stale = validate_stale_replay(backend, len(corpus) + MUTATION_SLOTS, dimension=args.dimension, seed=args.seed)
     finally:
         backend.close()
     result = {
@@ -645,14 +687,37 @@ def qualify_backend(result: dict[str, object], args: argparse.Namespace) -> dict
     }
 
 
-def _validate_artifact_paths(args: argparse.Namespace) -> None:
+def _fresh_artifact_names_alias(first: Path, second: Path) -> bool:
+    from pathlib import Path
+    from tempfile import TemporaryDirectory
+    from unicodedata import normalize
+
+    def caseless_name(name: str) -> str:
+        return normalize("NFD", normalize("NFD", name).casefold())
+
+    if caseless_name(first.name) != caseless_name(second.name) or first.exists() or second.exists():
+        return False
+    if not first.parent.is_dir() or not second.parent.is_dir() or not first.parent.samefile(second.parent):
+        return False
+    # Probe the destination filesystem without creating either requested artifact.
+    with TemporaryDirectory(prefix=".registry-overlap-path-check-", dir=first.parent) as directory:
+        probe = Path(directory)
+        (probe / first.name).touch(exist_ok=False)
+        return (probe / second.name).exists()
+
+
+def _validate_artifact_paths(args: argparse.Namespace, *, probe_fresh: bool = False) -> None:
     reserved = [path for path in (args.vectors, args.query_ids, args.workload, args.labels) if path is not None]
     for output in (args.write_vectors, args.write_workload, args.output):
         if output is None:
             continue
         resolved = output.resolve()
         for previous in reserved:
-            if resolved == previous.resolve() or (output.exists() and previous.exists() and output.samefile(previous)):
+            if (
+                resolved == previous.resolve()
+                or (output.exists() and previous.exists() and output.samefile(previous))
+                or (probe_fresh and _fresh_artifact_names_alias(output, previous))
+            ):
                 raise ValueError("Benchmark output paths must refer to separate files from inputs and other outputs")
         reserved.append(output)
 
@@ -690,12 +755,14 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
         parser.error("queries must fit the corpus and be <= 10000; k must be below size and <= 50")
     if not 0 <= args.seed < 2**32 or not 0 <= args.duration <= 3600 or not 0 <= args.burst_duration <= 600:
         parser.error("seed must fit uint32; steady and burst periods must be within [0, 3600] and [0, 600]")
+    if not args.prepare_only and args.dimension == 1 and (args.duration or args.burst_duration):
+        parser.error("mutation visibility probes require at least two dimensions; use zero durations for recall only")
     if args.workload and args.query_ids:
         parser.error("--workload already specifies query IDs")
     if args.write_vectors and args.write_vectors.suffix != ".npy":
         parser.error("--write-vectors must name a .npy file")
     try:
-        _validate_artifact_paths(args)
+        _validate_artifact_paths(args, probe_fresh=True)
     except (OSError, RuntimeError, ValueError) as exc:
         parser.error(str(exc))
     if not args.prepare_only:
@@ -723,6 +790,7 @@ def main(argv: list[str] | None = None) -> int:
         )
         digest = corpus_sha256(corpus)
         if args.write_vectors:
+            _validate_artifact_paths(args)
             np.save(args.write_vectors, corpus, allow_pickle=False)
         if args.workload:
             _progress("Reading recorded query IDs and exact ranking cutoffs")
@@ -738,8 +806,10 @@ def main(argv: list[str] | None = None) -> int:
         labels = _read_labels(args.labels, workload) if args.labels else {}
         workload_document = {"version": FORMAT_VERSION, "tie_tolerance": TIE_TOLERANCE, **asdict(workload)}
         if args.write_workload:
+            _validate_artifact_paths(args)
             _write_json(args.write_workload, workload_document)
-    except (OSError, ValueError, TypeError, OverflowError) as exc:
+        _validate_artifact_paths(args)
+    except (OSError, RuntimeError, ValueError, TypeError, OverflowError) as exc:
         _progress(f"Invalid benchmark input or artifact: {exc}")
         return 2
 
@@ -768,6 +838,7 @@ def main(argv: list[str] | None = None) -> int:
             "search_rate_per_second": 20,
             "steady_mutation_rate_per_second": 5,
             "burst_mutation_rate_per_second": 25,
+            "mutation_trace": "scheduled-index-v1",
             "tie_tolerance": TIE_TOLERANCE,
             "provider_time_included": False,
             "mutation_visibility_probe": "keyed live revision and direct ANN query using a seeded probe vector",
@@ -789,19 +860,24 @@ def main(argv: list[str] | None = None) -> int:
         for name in selected:
             try:
                 document["results"][name] = _run_backend(name, corpus, workload, labels, args)
+            except PgVectorSetupError as exc:
+                _progress(f"{name}: {exc}")
+                document["results"][name] = {"error": type(exc).__name__, "detail": str(exc)}
             except Exception as exc:
                 # Driver errors may embed DSNs or other connection credentials.
                 _progress(f"{name}: benchmark failed ({type(exc).__name__})")
                 document["results"][name] = {"error": type(exc).__name__}
             if args.output:
                 try:
+                    _validate_artifact_paths(args)
                     _write_json(args.output, document)
-                except OSError as exc:
+                except (OSError, RuntimeError, ValueError) as exc:
                     _progress(f"Could not write report: {exc}")
                     return 2
     try:
+        _validate_artifact_paths(args)
         _write_json(args.output, document)
-    except OSError as exc:
+    except (OSError, RuntimeError, ValueError) as exc:
         _progress(f"Could not write report: {exc}")
         return 2
     return int(any("error" in result for result in document["results"].values()))

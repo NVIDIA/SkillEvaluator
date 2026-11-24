@@ -5,8 +5,10 @@
 
 from __future__ import annotations
 
+import json
 import os
 from concurrent.futures import ThreadPoolExecutor
+from unittest.mock import Mock
 
 import pytest
 
@@ -16,6 +18,67 @@ def test_pgvector_rejects_dimensions_outside_half_precision_hnsw_limit() -> None
 
     with pytest.raises(ValueError, match="dimension"):
         PgVectorBackend("", 4001)
+
+
+@pytest.mark.parametrize(
+    ("encoding", "extension", "error"),
+    [
+        ("SQL_ASCII", ("16.0", b"0.8.2", b"public"), "UTF-8 database"),
+        ("UTF8", None, "Install pgvector"),
+        ("UTF8", ("16.0", "0.7.4", "public"), "requires pgvector 0.8.2"),
+    ],
+)
+def test_pgvector_benchmark_preflight_rejects_unsupported_installation(encoding, extension, error) -> None:
+    pytest.importorskip("psycopg")
+    from scripts.registry_overlap_benchmark_backends import _setup_pgvector
+
+    connection = Mock()
+    connection.info.parameter_status.return_value = encoding
+    connection.execute.return_value.fetchone.return_value = extension
+
+    with pytest.raises(ValueError, match=error):
+        _setup_pgvector(connection)
+
+    assert connection.execute.call_count == (0 if encoding == "SQL_ASCII" else 1)
+
+
+def test_benchmark_reports_pgvector_setup_rejection(tmp_path, monkeypatch, capsys) -> None:
+    pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as runner
+
+    message = "The PostgreSQL benchmark requires a UTF-8 database"
+    monkeypatch.setattr(runner, "_run_backend", Mock(side_effect=runner.PgVectorSetupError(message)))
+    output = tmp_path / "report.json"
+
+    code = runner.main(
+        [
+            "--backend",
+            "pgvector",
+            "--postgres-dsn",
+            "unused",
+            "--size",
+            "4",
+            "--dimension",
+            "2",
+            "--queries",
+            "2",
+            "--k",
+            "1",
+            "--duration",
+            "0",
+            "--burst-duration",
+            "0",
+            "--output",
+            str(output),
+        ]
+    )
+
+    assert code == 1
+    assert message in capsys.readouterr().err
+    assert json.loads(output.read_text())["results"]["pgvector"] == {
+        "error": "PgVectorSetupError",
+        "detail": message,
+    }
 
 
 @pytest.fixture(params=["postgres", "qdrant"])

@@ -61,12 +61,26 @@ class RegistryStore:
         self.schema = schema
         self.connection = connect(dsn, autocommit=True, row_factory=dict_row, connect_timeout=5)
         try:
-            self.connection.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema)))
+            if self.connection.info.parameter_status("server_encoding") != "UTF8":
+                raise ValueError("Registry overlap requires a PostgreSQL database with UTF8 server encoding.")
+            self.connection.execute("SET client_encoding TO 'UTF8'")
             self.connection.execute("SET statement_timeout TO '30s'")
             self.connection.execute("SET lock_timeout TO '5s'")
-            extension = self._row("SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'vector'")
+            extension = self._row("""
+                SELECT e.extversion, n.nspname,
+                    pg_catalog.has_schema_privilege(n.oid, 'USAGE') AS schema_usable
+                FROM pg_catalog.pg_extension e JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace
+                WHERE e.extname = 'vector'
+            """)
             if extension is None or Version(extension["extversion"]) < Version("0.8.2"):
                 raise ValueError("Registry overlap requires pgvector 0.8.2 or later in the connected database.")
+            if not extension["schema_usable"]:
+                raise ValueError("The registry database role needs USAGE on the pgvector extension schema.")
+            self.connection.execute(
+                sql.SQL("SET search_path TO {}, {}").format(
+                    sql.Identifier(schema), sql.Identifier(extension["nspname"])
+                )
+            )
         except BaseException:
             self.connection.close()
             raise
@@ -96,7 +110,10 @@ class RegistryStore:
         """Create one source registry and its first empty active generation."""
         identifier(source, "source")
         with self.connection.transaction():
-            self.connection.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
+            # Generation IDs start at one. Key zero serializes concurrent bootstraps.
+            self.connection.execute("SELECT pg_advisory_xact_lock(hashtext(%s), 0)", (self.schema,))
+            if self._row("SELECT 1 FROM pg_catalog.pg_namespace WHERE nspname = %s", (self.schema,)) is None:
+                self.connection.execute(sql.SQL("CREATE SCHEMA {}").format(sql.Identifier(self.schema)))
             self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS generations (
                     id bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
@@ -139,9 +156,8 @@ class RegistryStore:
             self.connection.execute("UPDATE registry_state SET active_generation = %s", (generation,))
             return generation
 
-    @staticmethod
-    def _table(generation: int) -> sql.Identifier:
-        return sql.Identifier(f"g_{generation}")
+    def _table(self, generation: int) -> sql.Identifier:
+        return sql.Identifier(self.schema, f"g_{generation}")
 
     def _create_generation(self, profile: EmbeddingProfile, checkpoint: int) -> int:
         generation = self._row(
@@ -289,20 +305,43 @@ class RegistryStore:
         ).fetchall(), False
 
     def _embeddings(self, pending, generation, profile, embed):
-        vectors, needed = {}, {}
-        table = self._table(generation)
-        for event in pending:
-            key = event["input_sha256"]
-            if not event["current"] or key is None or key in vectors or key in needed:
-                continue
-            reuse = self._row(
-                sql.SQL("SELECT embedding::text AS vector FROM {} WHERE input_sha256 = %s LIMIT 1").format(table),
-                (key,),
-            )
-            if reuse is None:
-                needed[key] = event["text"]
-            else:
-                vectors[key] = reuse["vector"]
+        needed = {
+            event["input_sha256"]: event["text"]
+            for event in pending
+            if event["current"] and event["input_sha256"] is not None
+        }
+        if not needed:
+            return {}
+        vectors = {}
+        # Keep matching generation tables available while copying cached vectors.
+        # Release the row locks before making any provider request.
+        with self.connection.transaction():
+            caches = self.connection.execute(
+                """
+                SELECT id FROM generations WHERE profile = %s
+                    AND (id = %s OR pg_catalog.to_regclass(%s || '.g_' || id) IS NOT NULL)
+                ORDER BY id <> %s, id FOR KEY SHARE
+            """,
+                (Jsonb(asdict(profile)), generation, self.schema, generation),
+            ).fetchall()
+            for cache in caches:
+                cached = self.connection.execute(
+                    sql.SQL("""
+                        SELECT requested.input_sha256, found.vector
+                        FROM unnest(%s::text[]) AS requested(input_sha256)
+                        CROSS JOIN LATERAL (
+                            SELECT embedding::text AS vector FROM {}
+                            WHERE input_sha256 = requested.input_sha256 LIMIT 1
+                        ) AS found
+                    """).format(self._table(cache["id"])),
+                    (list(needed),),
+                )
+                for row in cached:
+                    key = row["input_sha256"]
+                    vectors[key] = row["vector"]
+                    del needed[key]
+                if not needed:
+                    break
         if needed:
             try:
                 result = embed(list(needed.values()))
@@ -435,7 +474,7 @@ class RegistryStore:
             row = self._row("DELETE FROM generations WHERE id = %s RETURNING id", (generation,))
             if row is None:
                 raise ValueError("Registry generation is unavailable")
-            self.connection.execute(sql.SQL("DROP TABLE {}").format(self._table(generation)))
+            self.connection.execute(sql.SQL("DROP TABLE IF EXISTS {}").format(self._table(generation)))
 
     def status(self):
         with self.connection.transaction():

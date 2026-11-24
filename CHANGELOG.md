@@ -9,7 +9,8 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a Tier 2 registry overlap pilot that replays verified skill revisions
   into PostgreSQL with pgvector and returns bounded nearest-neighbor candidates
   with provenance. The pilot includes generation rebuild and activation
-  commands and a reproducible index benchmark.
+  commands, same-profile embedding reuse, and an index benchmark with pinned
+  proxy-corpus inputs.
 
 ### Fixed
 

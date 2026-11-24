@@ -7,6 +7,8 @@ import os
 import threading
 import uuid
 from concurrent.futures import ThreadPoolExecutor
+from contextlib import contextmanager
+from time import monotonic, sleep
 
 import pytest
 
@@ -46,18 +48,46 @@ def _batch(cursor, *events):
 
 
 @pytest.fixture
-def database():
-    from psycopg import connect, sql
-
+def database_dsn():
     dsn = os.environ.get("SKILL_EVAL_TEST_REGISTRY_DSN")
     if not dsn:
         pytest.skip("SKILL_EVAL_TEST_REGISTRY_DSN absent")
+    return dsn
+
+
+@pytest.fixture
+def database(database_dsn):
+    from psycopg import connect, sql
+
     schema = f"overlap_test_{uuid.uuid4().hex}"
-    with RegistryStore(dsn, schema=schema) as store:
+    with RegistryStore(database_dsn, schema=schema) as store:
         store.initialize("registry", PROFILE)
-        yield store, dsn, schema
-    with connect(dsn, autocommit=True) as connection:
+        yield store, database_dsn, schema
+    with connect(database_dsn, autocommit=True) as connection:
         connection.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
+@contextmanager
+def _disposable_database(dsn, encoding="UTF8"):
+    from psycopg import connect, sql
+    from psycopg.conninfo import make_conninfo
+    from psycopg.errors import InsufficientPrivilege
+
+    name = f"overlap_test_{uuid.uuid4().hex}"
+    database = sql.Identifier(name)
+    with connect(dsn, autocommit=True) as connection:
+        try:
+            connection.execute(
+                sql.SQL("CREATE DATABASE {} TEMPLATE template0 ENCODING {} LC_COLLATE 'C' LC_CTYPE 'C'").format(
+                    database, sql.Literal(encoding)
+                )
+            )
+        except InsufficientPrivilege:
+            pytest.skip("Registry extension deployment tests require a database creation role")
+        try:
+            yield make_conninfo(dsn, dbname=name)
+        finally:
+            connection.execute(sql.SQL("DROP DATABASE {}").format(database))
 
 
 def _hits(store, profile=PROFILE, exclude=None):
@@ -80,6 +110,101 @@ def test_reopened_registry_rejects_unsupported_pgvector(database, monkeypatch, e
         restored.status()
 
 
+def test_registry_uses_relocated_vector_and_utf8_client_encoding(database_dsn):
+    from psycopg import connect
+    from psycopg.conninfo import make_conninfo
+
+    with _disposable_database(database_dsn) as dsn:
+        with connect(dsn, autocommit=True) as connection:
+            connection.execute('CREATE SCHEMA "Vector Extensions"')
+            connection.execute('CREATE EXTENSION vector SCHEMA "Vector Extensions"')
+        with RegistryStore(make_conninfo(dsn, client_encoding="SQL_ASCII")) as store:
+            store.initialize("registry", PROFILE)
+            store.accept(_batch(1, _event("a", 1, "東京")))
+            embedder = Embedder()
+            assert store.drain(PROFILE, embedder) == 1
+            assert embedder.inputs == ["skill: 東京"]
+            assert store.status()["index_ready"]
+            assert _hits(store) == [("a", "1")]
+
+
+def test_registry_rejects_non_utf8_database_explicitly(database_dsn):
+    from psycopg import connect
+
+    with _disposable_database(database_dsn, encoding="SQL_ASCII") as dsn:
+        with connect(dsn, autocommit=True) as connection:
+            connection.execute("CREATE EXTENSION vector")
+        with pytest.raises(ValueError, match="UTF8"), RegistryStore(dsn):
+            pytest.fail("Registry admitted a SQL_ASCII database")
+
+
+def test_initialize_in_a_preprovisioned_schema_as_delegated_operator(database_dsn):
+    from psycopg import connect, sql
+    from psycopg.conninfo import make_conninfo
+    from psycopg.errors import InsufficientPrivilege
+
+    schema_name = f"overlap_test_{uuid.uuid4().hex}"
+    role_name = f"overlap_operator_{uuid.uuid4().hex}"
+    schema = sql.Identifier(schema_name)
+    role = sql.Identifier(role_name)
+    with connect(database_dsn, autocommit=True) as connection:
+        try:
+            connection.execute(sql.SQL("CREATE ROLE {}").format(role))
+        except InsufficientPrivilege:
+            pytest.skip("Delegated registry initialization test requires a role administrator")
+        try:
+            extension_schema = sql.Identifier(
+                connection.execute("""
+                    SELECT n.nspname FROM pg_catalog.pg_extension e
+                    JOIN pg_catalog.pg_namespace n ON n.oid = e.extnamespace WHERE e.extname = 'vector'
+                """).fetchone()[0]
+            )
+            connection.execute(sql.SQL("CREATE SCHEMA {}").format(schema))
+            connection.execute(sql.SQL("GRANT USAGE, CREATE ON SCHEMA {} TO {}").format(schema, role))
+            connection.execute(sql.SQL("GRANT USAGE ON SCHEMA {} TO {}").format(extension_schema, role))
+            dsn = make_conninfo(database_dsn, options=f"-c role={role_name}")
+            with RegistryStore(dsn, schema=schema_name) as store:
+                assert not store._row("SELECT has_database_privilege(current_database(), 'CREATE') AS can_create")[
+                    "can_create"
+                ]
+                assert store.initialize("registry", PROFILE) == store.initialize("registry", PROFILE)
+                assert store.status()["index_ready"]
+        finally:
+            connection.execute(sql.SQL("DROP SCHEMA IF EXISTS {} CASCADE").format(schema))
+            connection.execute(sql.SQL("DROP OWNED BY {}").format(role))
+            connection.execute(sql.SQL("DROP ROLE {}").format(role))
+
+
+def test_concurrent_first_initializations_are_idempotent(database_dsn):
+    from psycopg import connect, sql
+
+    schema = f"overlap_test_{uuid.uuid4().hex}"
+    with (
+        connect(database_dsn, autocommit=True) as observer,
+        RegistryStore(database_dsn, schema=schema) as first,
+        RegistryStore(database_dsn, schema=schema) as second,
+        ThreadPoolExecutor() as executor,
+    ):
+        try:
+            with first.connection.transaction():
+                original = first.initialize("registry", PROFILE)
+                operation = executor.submit(second.initialize, "registry", PROFILE)
+                deadline = monotonic() + 4
+                while monotonic() < deadline:
+                    wait_event = observer.execute(
+                        "SELECT wait_event_type FROM pg_stat_activity WHERE pid = %s",
+                        (second.connection.info.backend_pid,),
+                    ).fetchone()
+                    if wait_event == ("Lock",):
+                        break
+                    sleep(0.01)
+                else:
+                    pytest.fail("Second initializer did not wait for the first transaction")
+            assert operation.result(timeout=5) == original
+        finally:
+            observer.execute(sql.SQL("DROP SCHEMA {} CASCADE").format(sql.Identifier(schema)))
+
+
 def test_resume_reuse_revision_and_exclude_only_self(database):
     store, dsn, schema = database
     embedder = Embedder()
@@ -97,6 +222,38 @@ def test_resume_reuse_revision_and_exclude_only_self(database):
     store.drain(PROFILE, embedder)
     assert _hits(store) == [("a", "1"), ("b", "2")]
     assert embedder.inputs == ["skill: Work"]
+
+
+def test_same_profile_reindex_reuses_existing_vectors(database):
+    store, _, _ = database
+    store.accept(_batch(1, _event("a", 1)))
+    store.drain(PROFILE, Embedder())
+    replacement = store.reindex(PROFILE)
+
+    def reject_provider(_texts):
+        pytest.fail("Same-profile reindex requested an existing provider vector")
+
+    assert store.drain(PROFILE, reject_provider, generation=replacement) == 1
+    store.activate(replacement)
+    assert _hits(store) == [("a", "1")]
+
+
+def test_same_profile_reindex_can_rebuild_missing_source_table(database):
+    from psycopg import sql
+
+    store, _, _ = database
+    store.accept(_batch(1, _event("a", 1)))
+    old = store.status()["active_generation"]
+    store.drain(PROFILE, Embedder())
+    store.connection.execute(sql.SQL("DROP TABLE {}").format(sql.Identifier(f"g_{old}")))
+    replacement = store.reindex(PROFILE)
+    embedder = Embedder()
+    assert store.drain(PROFILE, embedder, generation=replacement) == 1
+    assert embedder.inputs == ["skill: Work"]
+    store.activate(replacement)
+    assert _hits(store) == [("a", "1")]
+    store.retire(old)
+    assert [generation["id"] for generation in store.status()["generations"]] == [replacement]
 
 
 def test_conflict_rolls_back_batch_and_stale_event_cannot_revive_delete(database):

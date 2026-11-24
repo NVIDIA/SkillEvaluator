@@ -839,10 +839,13 @@ directory, `catalog_root` is stored relative to that parent (`.` in the example
 above). Identical clones and relocated collections can reuse the same manifest;
 evaluation checks the sources in the current checkout. An unrelated external
 collection retains an absolute root and must be available at that location.
-The runtime hashes cover everything staging copies from a selected skill,
-including files that git ignores or does not track (such as `.DS_Store` or
-`.pytest_cache/`) and empty folders, so generate a manifest you plan to commit
-from a fresh clone. Of the permission bits, only whether a file is executable
+The runtime projection and decoy hashes omit regular `.DS_Store` and `Thumbs.db`
+files and `.pytest_cache`, `.mypy_cache`, and `.ruff_cache` directories at any
+depth. Unsafe links, hard links, and special nodes with those names are still
+rejected. Other ignored or untracked runtime files and empty folders still
+count, so generate a manifest you plan to commit from a fresh clone. The
+`skill-evaluator-decoy-runtime/3` recipe requires regenerating older manifests;
+publication source hashes keep their existing exclusions. Of the permission bits, only whether a file is executable
 by its owner counts, so clones made under different umasks agree. Windows
 checkouts can differ: Git may convert line endings there, and Python reports
 `.exe`, `.bat`, `.cmd` and `.com` files as executable and other files as not

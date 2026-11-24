@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Omit incidental OS metadata and Python tool caches from runtime skill copies
+  and decoy identities. Decoy manifests use the version-3 runtime digest and
+  older selections must be regenerated; publication source hashes are unchanged.
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or
   `final` strategy. The live case grid and finished report use the same verdict.
   A failed or ungraded step leaves the attempt unscored. With `final`, the last

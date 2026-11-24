@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any
 
 # Bump this recipe if the runtime projection or reused canonical encoding changes.
-DECOY_SOURCE_DIGEST_ALGORITHM = "skill-evaluator-decoy-runtime/2"
+DECOY_SOURCE_DIGEST_ALGORITHM = "skill-evaluator-decoy-runtime/3"
 
 
 def _portable_mode(entry: Any) -> Any:

@@ -59,6 +59,7 @@ from skillevaluator.tier3.output_provenance import (
     validate_provenance_key_outside,
     write_generated_output_marker,
 )
+from skillevaluator.tier3.runtime_projection import runtime_cache_entry_is_excluded
 from skillevaluator.tier3.toml_utils import extract_toml_metadata_entry_id, toml_quote
 from skillevaluator.utils.path_security import (
     find_git_repo_root,
@@ -908,6 +909,7 @@ def _runtime_skill_copy_ignore(skill_root: Path, excluded_roots: Sequence[Path] 
             candidate = current / name
             if (
                 publication_source_entry_is_excluded(skill_root, candidate)
+                or runtime_cache_entry_is_excluded(skill_root, candidate)
                 or publication_source_link_is_generated(skill_root, candidate)
                 or _is_skill_evals_path(candidate, skill_root)
                 or _path_is_excluded(candidate, excluded_roots)

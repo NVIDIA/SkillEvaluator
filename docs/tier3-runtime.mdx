@@ -386,6 +386,22 @@ See [retained CI evidence](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci
     model through `--agent-model claude-code=MODEL`. See
     [Agents & Sandboxes](/skills/skillevaluator/agents-and-sandboxes#supported-agents).
   </Accordion>
+  <Accordion title="Every trial times out with no tokens">
+    When at least 80 percent of a run's trials end in `AgentTimeoutError` with
+    zero input and zero output tokens, the agents most likely never got a
+    response from the model endpoint: a proxy, firewall or DNS rule between the
+    environment and the endpoint, a wrong base URL, or a credential the endpoint
+    does not answer. SkillEvaluator prints a warning that names the provider
+    host and the number of trials, and `result.json` records `model_endpoint_diagnostic`
+    with the matching and total trial counts and the agents; scores,
+    `execution_status` and exit codes do not change. Check the base URL and
+    credential, and access to that host from the environment you ran in (the
+    host for local mode, a container for Docker), then rerun, optionally with
+    `--agent-runtime-preflight` to try one agent execution before the full
+    matrix. An agent that times out without reporting token usage can trigger
+    the warning too; rerun that case with a longer `--timeout-multiplier` to
+    tell the two apart.
+  </Accordion>
   <Accordion title="Results look wrong or a case is hard to diagnose">
     Re-run with `--harbor-keep-jobs` — Harbor artifacts are transient and
     deleted by default whether the run succeeds or fails. With retention on,

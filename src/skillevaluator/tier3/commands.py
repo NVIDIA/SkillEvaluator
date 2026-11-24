@@ -1003,6 +1003,7 @@ def readiness_rows(
             environment_kwargs=resolved_env_kwargs,
             subprocess_env=prerequisite_subprocess_env,
             verify_live_cluster=verify_models,
+            agent_models={agent: [model] for agent, (model, _source) in model_resolution.items()},
         )
     if prereq_errors:
         for error in prereq_errors:

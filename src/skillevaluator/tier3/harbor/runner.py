@@ -122,6 +122,12 @@ from skillevaluator.tier3.harbor.collector import (
     harbor_timeout_job_recovered,
     validate_harbor_job_result,
 )
+from skillevaluator.tier3.harbor.endpoint_failure import (
+    detect_model_endpoint_failure,
+    endpoint_failure_warning,
+    provider_hosts,
+    selected_agent_job_dirs,
+)
 from skillevaluator.tier3.harbor.gke_environment import (
     GKE_ALLOW_WORKLOAD_IDENTITY_ENV,
     GKE_BOUND_SERVICE_ACCOUNT_ERROR_TEMPLATE,
@@ -2620,8 +2626,13 @@ def _check_prerequisites(
     environment_kwargs: Mapping[str, Any] | None = None,
     verify_live_cluster: bool = False,
     subprocess_env: Mapping[str, str] | None = None,
+    agent_models: Mapping[str, Sequence[str]] | None = None,
 ) -> list[str]:
-    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode)."""
+    """Check Harbor and the selected environment (built-in, backend, GKE, or local mode).
+
+    ``agent_models`` maps an agent to the models it will run; local mode checks
+    the installed agent CLIs against them before any trial starts.
+    """
     if not is_env_mode(env_mode):
         return [
             f"Unsupported Harbor environment '{env_mode}'. Choose one of: {', '.join(sorted(_supported_env_modes()))}"
@@ -2752,7 +2763,9 @@ def _check_prerequisites(
             return [f"Local mode supports only claude-code, codex, opencode. Unsupported: {', '.join(unsupported)}."]
         try:
             strict_reads = local_sandbox.coerce_flag(None, env_var=local_sandbox.STRICT_READS_ENV)
-            return ensure_local_runtimes(selected_agents, sandbox=sandbox, strict_reads=strict_reads)
+            return ensure_local_runtimes(
+                selected_agents, sandbox=sandbox, strict_reads=strict_reads, agent_models=agent_models
+            )
         except ValueError as exc:
             return [f"Invalid local runtime configuration: {exc}"]
 
@@ -5803,6 +5816,7 @@ def _run_harbor_eval_impl(
         agents=agents,
         environment_kwargs=effective_environment_kwargs,
         subprocess_env=prerequisite_subprocess_env,
+        agent_models={agent: [model_resolution[agent]["model"]] for agent in agents},
     )
     if prereq_errors:
         reporter.emit(ProgressEvent(stage="environment-preflight", state="failed", detail="; ".join(prereq_errors)))
@@ -6882,6 +6896,23 @@ def _run_harbor_eval_impl(
             "partial": bool(budget.not_run),
         }
     )
+    if endpoint_diagnostic := detect_model_endpoint_failure(
+        selected_agent_job_dirs(
+            jobs_dir,
+            skill_path.name,
+            agents,
+            skip_baseline=skip_baseline,
+            skip_with_skill=skip_with_skill,
+        )
+    ):
+        results["model_endpoint_diagnostic"] = endpoint_diagnostic
+        results.setdefault("warnings", []).append(
+            endpoint_failure_warning(
+                endpoint_diagnostic,
+                env_mode=env_mode,
+                hosts=provider_hosts(runtime_plans[agent].provider.base_url for agent in agents),
+            )
+        )
     from skillevaluator.evaluation.tier3_report import (
         _agent_score_policy,
         _build_agent,

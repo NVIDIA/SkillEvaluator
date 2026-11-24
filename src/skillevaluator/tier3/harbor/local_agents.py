@@ -20,7 +20,7 @@ from collections.abc import Awaitable, Callable, Iterator, Mapping
 from contextlib import closing, suppress
 from functools import partial
 from pathlib import Path, PurePosixPath
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 from urllib.parse import urlsplit
 
 from harbor.agents.agent_auth_resolution import ResolvedModelConnection, without_inferred_endpoint
@@ -32,6 +32,8 @@ from skillevaluator.provider_config import is_claude_5_5_or_later, is_gpt6_model
 from skillevaluator.tier3.harbor import LOCAL_CODEX_HOME_DIRNAME, LOCAL_CODEX_SECRETS_DIRNAME
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorClaudeCode as _InstalledClaudeCode
 from skillevaluator.tier3.harbor.installed_agents import SkillEvaluatorCodex, SkillEvaluatorOpenCode
+from skillevaluator.tier3.harbor.local_runtime import CLI_VERSION_RE as _CLI_VERSION_RE
+from skillevaluator.tier3.harbor.local_runtime import MODEL_MIN_RUNTIME_VERSIONS
 from skillevaluator.tier3.harbor.nvidia_build_bridge import (
     MAX_REQUESTS_PER_BRIDGE,
     RunningBridge,
@@ -62,10 +64,10 @@ _BRIDGE_ARTIFACT_MAX_PATHS = 10_000
 # descriptors; elsewhere os.walk and the atomic output writer are used.
 _USE_DIRECTORY_DESCRIPTORS = os.name == "posix"
 # Local mode runs the CLI installed on the host, not the release Harbor installs
-# in other environments. These are the oldest releases that run each model family.
-_CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = (2, 1, 280)
-_CODEX_MIN_VERSION_FOR_GPT_6 = (0, 159, 1)
-_CLI_VERSION_RE = re.compile(r"(\d+)\.(\d+)\.(\d+)")
+# in other environments. These are the oldest releases that run each model
+# family; the run preflight and ``doctor`` check the same registry.
+_CLAUDE_CODE_MIN_VERSION_FOR_CLAUDE_5_5 = MODEL_MIN_RUNTIME_VERSIONS["claude-code"]
+_CODEX_MIN_VERSION_FOR_GPT_6 = MODEL_MIN_RUNTIME_VERSIONS["codex"]
 
 logger = logging.getLogger(__name__)
 
@@ -772,6 +774,14 @@ class SkillEvaluatorLocalOpenCode(SkillEvaluatorOpenCode):
     """OpenCode wrapper that skips nvm/npm bootstrap in local mode."""
 
     _REMOTE_WORKSPACE = PurePosixPath("/workspace")
+    # Local mode removes ``--dangerously-skip-permissions`` from the OpenCode
+    # command, so ``opencode run`` rejects every permission request, and by
+    # default a rejected request ends the agent's turn. Let the agent carry on
+    # after a denied tool call. A job's ``opencode_config`` can still override it.
+    _DEFAULT_CONFIG: ClassVar[dict[str, Any]] = SkillEvaluatorOpenCode._deep_merge(
+        copy.deepcopy(SkillEvaluatorOpenCode._DEFAULT_CONFIG),
+        {"experimental": {"continue_loop_on_deny": True}},
+    )
 
     async def install(self, environment: BaseEnvironment) -> None:
         await self.exec_as_agent(environment, command="opencode --version")

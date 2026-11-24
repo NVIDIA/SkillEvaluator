@@ -9,6 +9,19 @@ All notable changes to SkillEvaluator are documented in this file.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.
+- The local-mode run preflight and `doctor --env-mode local` check the
+  installed Claude Code and Codex CLI against the selected models and stop
+  before any trial when one is too old. Use `--agent-model AGENT=MODEL` to
+  choose an older model.
+- Tier 3 results flag a run in which at least 80 percent of trials timed out
+  with no model tokens. The console shows a warning, and `result.json` records
+  `model_endpoint_diagnostic`.
+
+### Changed
+
+- Local OpenCode trials carry on after a denied permission request instead of
+  ending the agent's turn: local mode runs OpenCode without
+  `--dangerously-skip-permissions`, so such requests are always rejected.
 
 ### Fixed
 

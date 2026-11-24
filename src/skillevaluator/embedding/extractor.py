@@ -409,7 +409,6 @@ def _extract_from_text(
     except StructuredDataSyntaxError:
         if budget is not None:
             budget.exclude(file_path, "invalid_yaml")
-        logger.debug("Invalid YAML frontmatter in %s", file_path)
         return None
     except StructuredDataLimitError as exc:
         raise ValueError(f"Manifest structured-data complexity limit exceeded: {label}") from exc

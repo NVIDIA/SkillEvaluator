@@ -199,6 +199,7 @@ class PgVectorBackend:
             "planner_uses_ann": planner_uses_ann,
             "hnsw_ef_search": _SEARCH_BUDGET,
             "hnsw_max_scan_tuples": 20000,
+            "search_statement_timeout_ms": 250,
             "table_and_index_bytes": storage_bytes,
             "maintenance_workers": workers,
             "precision": "halfvec HNSW with stored float32 reranking",
@@ -213,7 +214,8 @@ class PgVectorBackend:
 
     def search(self, vector: np.ndarray, k: int, exclude: int | None = None) -> list[int]:
         _check_top_k(k)
-        with self._pool.connection() as connection:
+        with self._pool.connection(timeout=0.25) as connection, connection.transaction():
+            connection.execute("SET LOCAL statement_timeout TO '250ms'")
             rows = connection.execute(
                 self._search[exclude is not None], self._search_params(vector, k, exclude)
             ).fetchall()

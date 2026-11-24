@@ -1,6 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -22,7 +24,8 @@ def test_projects_only_bounded_yaml_name_and_description() -> None:
     assert corpus.project_row({**identity, "skill_md_content": good.replace("name:", "missing:")}) is None
 
 
-def test_partial_projection_requires_explicit_sampling(tmp_path: Path) -> None:
+@pytest.fixture
+def source_shards(tmp_path: Path) -> dict[str, str]:
     arrow = pytest.importorskip("pyarrow")
     parquet = pytest.importorskip("pyarrow.parquet")
     good = "---\nname: A skill\ndescription: A description.\n---\nBody"
@@ -31,11 +34,83 @@ def test_partial_projection_requires_explicit_sampling(tmp_path: Path) -> None:
     )
     for shard in corpus.PARQUET_SHARDS:
         parquet.write_table(table, tmp_path / shard)
-    with pytest.raises(ValueError, match="pinned source rows"):
+    return {shard: hashlib.sha256((tmp_path / shard).read_bytes()).hexdigest() for shard in corpus.PARQUET_SHARDS}
+
+
+def test_partial_projection_requires_explicit_sampling(tmp_path: Path, source_shards: dict[str, str]) -> None:
+    with pytest.raises(ValueError, match="checksum"):
         corpus._load_rows(tmp_path, allow_source_sample=False)
-    rows, counts = corpus._load_rows(tmp_path, allow_source_sample=True)
+    rows, counts, files = corpus._load_rows(tmp_path, allow_source_sample=True)
     assert len(rows) == 1
     assert counts == {"source": 6, "retained": 1, "malformed": 0, "duplicate_slug": 5}
+    assert files == source_shards
+
+
+def test_full_source_validates_names_hashes_and_row_count(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_shards: dict[str, str]
+) -> None:
+    monkeypatch.setattr(corpus, "PARQUET_ROWS", len(source_shards))
+    monkeypatch.setattr(corpus, "PARQUET_SHA256", source_shards)
+    _, counts, files = corpus._load_rows(tmp_path, allow_source_sample=False)
+    assert counts["source"] == len(source_shards)
+    assert files == source_shards
+
+    first_shard = corpus.PARQUET_SHARDS[0]
+    original = tmp_path / first_shard
+    unexpected = tmp_path / "unexpected.parquet"
+    original.rename(unexpected)
+    with pytest.raises(ValueError, match="shard names"):
+        corpus._load_rows(tmp_path, allow_source_sample=False)
+
+    unexpected.rename(original)
+    unexpected.write_bytes(original.read_bytes())
+    with pytest.raises(ValueError, match="shard names"):
+        corpus._load_rows(tmp_path, allow_source_sample=False)
+
+    unexpected.unlink()
+    monkeypatch.setattr(corpus, "PARQUET_ROWS", len(source_shards) + 1)
+    with pytest.raises(ValueError, match="pinned source rows"):
+        corpus._load_rows(tmp_path, allow_source_sample=False)
+
+
+def test_full_row_count_in_sample_mode_does_not_claim_verified_provenance(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, source_shards: dict[str, str]
+) -> None:
+    source_dir = tmp_path / "source"
+    source_dir.mkdir()
+    for name in source_shards:
+        (tmp_path / name).rename(source_dir / name)
+    monkeypatch.setattr(corpus, "PARQUET_ROWS", len(source_shards))
+    first_shard = corpus.PARQUET_SHARDS[0]
+    monkeypatch.setattr(corpus, "PARQUET_SHA256", {**source_shards, first_shard: "0" * 64})
+    for name, constant in [(corpus.MODEL_FILE, "MODEL_SHA256"), ("tokenizer.json", "TOKENIZER_SHA256")]:
+        (tmp_path / name).write_bytes(b"model fixture")
+        monkeypatch.setattr(corpus, constant, hashlib.sha256(b"model fixture").hexdigest())
+    monkeypatch.setattr(corpus, "_embed", lambda *_args, **_kwargs: np.ones((1, corpus.MODEL_DIMENSION)))
+    path = tmp_path / "matrix.npy"
+    corpus.main(
+        [
+            "--parquet-dir",
+            str(source_dir),
+            "--model-dir",
+            str(tmp_path),
+            "--output",
+            str(path),
+            "--allow-source-sample",
+            "--size",
+            str(len(source_shards)),
+            "--dimension",
+            str(corpus.MODEL_DIMENSION),
+        ]
+    )
+    metadata = json.loads(path.with_suffix(".json").read_text())
+    assert metadata["dataset_revision"] == corpus.DATASET_REVISION
+    assert metadata["parquet_conversion_revision"] == corpus.PARQUET_REVISION
+    assert metadata["source_selection"] == "local sample or projection"
+    assert metadata["source_shards"] == [
+        {"name": name, "sha256": digest, "verified_upstream": name != first_shard}
+        for name, digest in source_shards.items()
+    ]
 
 
 def test_projection_preserves_geometry_and_padding_preserves_prefix(tmp_path: Path) -> None:

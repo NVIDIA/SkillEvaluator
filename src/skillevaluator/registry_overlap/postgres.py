@@ -9,6 +9,7 @@ import re
 from collections.abc import Callable
 from dataclasses import asdict, dataclass
 
+from packaging.version import Version
 from psycopg import connect, sql
 from psycopg.errors import QueryCanceled, UndefinedTable
 from psycopg.rows import dict_row
@@ -92,6 +93,9 @@ class RegistryStore:
         """Create one source registry and its first empty active generation."""
         identifier(source, "source")
         with self.connection.transaction():
+            extension = self._row("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
+            if extension is None or Version(extension["extversion"]) < Version("0.8.2"):
+                raise ValueError("Registry overlap requires pgvector 0.8.2 or later")
             self.connection.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
             self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS generations (
@@ -203,6 +207,14 @@ class RegistryStore:
                     (event.skill_id,),
                 )
                 if head is not None and head["sequence"] > event.sequence:
+                    # Remember the digest so a conflicting replay cannot advance the cursor.
+                    tail = self._row(
+                        """
+                        INSERT INTO events(skill_id, sequence, revision, digest) VALUES (%s, %s, %s, %s)
+                        RETURNING number
+                        """,
+                        (event.skill_id, event.sequence, event.revision, event.digest),
+                    )["number"]
                     continue
                 tail = self._row(
                     """
@@ -430,8 +442,11 @@ class RegistryStore:
             generations = self.connection.execute("""
                 SELECT g.id, g.profile, g.checkpoint,
                     EXISTS (SELECT 1 FROM seeds s WHERE s.generation = g.id) AS pending_snapshot,
-                    (SELECT observed_at FROM events
-                        WHERE number > g.checkpoint ORDER BY number LIMIT 1) AS oldest_pending
+                    least(
+                        (SELECT e.observed_at FROM seeds s JOIN events e USING (number)
+                            WHERE s.generation = g.id ORDER BY s.number LIMIT 1),
+                        (SELECT observed_at FROM events WHERE number > g.checkpoint ORDER BY number LIMIT 1)
+                    ) AS oldest_pending
                 FROM generations g ORDER BY g.id
             """).fetchall()
             return {**state, "generations": generations, "index_ready": self._index_ready(state["active_generation"])}
@@ -482,6 +497,8 @@ class RegistryStore:
                     raise ValueError("Registry search index is unavailable")
                 self.connection.execute("SET LOCAL enable_seqscan TO off")
                 self.connection.execute("SET LOCAL hnsw.ef_search TO 200")
+                self.connection.execute("SET LOCAL hnsw.iterative_scan TO strict_order")
+                self.connection.execute("SET LOCAL hnsw.max_scan_tuples TO 20000")
                 candidates = self.connection.execute(
                     self._candidate_sql(generation, profile.dimension),
                     (

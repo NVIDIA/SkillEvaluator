@@ -29,7 +29,16 @@ from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
 DATASET = "OpenClaw/clawhub-security-signals-live"
 DATASET_REVISION = "e59ffc97c03080af95f38e992be79dab652c8d93"
 PARQUET_REVISION = "23a1a8aa3e3cf7359ce81c74d6280b02a3910672"
-PARQUET_SHARDS = tuple(f"{index:04}.parquet" for index in range(6))
+# LFS SHA-256 values of default/latest at the pinned conversion revision.
+PARQUET_SHA256 = {
+    "0000.parquet": "1097bfd4c3d951f2e520536b45e1a4e23fd0850c0cee4e802185bf3893e5ae76",
+    "0001.parquet": "f53dfb8459fb55634146344d41c365354db28c30a92c8c759d9f73bbac4150bb",
+    "0002.parquet": "4ff41571e6ee98056ffec1c1cce154fb1fd2c9634c0fe0823f192133347c63a0",
+    "0003.parquet": "8a1b777a8e8d49752048d430c637114dd03f48088efdecc329702a4c2a4f3836",
+    "0004.parquet": "6d244fae9341a40c86db95b6da7c8aa7db180c96ad77109e1f83abedcc6360e8",
+    "0005.parquet": "8037e71585a9a4fadce41488e0a45231b0f828242ee979570d820ffce595a441",
+}
+PARQUET_SHARDS = tuple(PARQUET_SHA256)
 PARQUET_ROWS = 86_441
 MODEL = "Xenova/all-MiniLM-L6-v2"
 MODEL_REVISION = "751bff37182d3f1213fa05d7196b954e230abad9"
@@ -81,34 +90,46 @@ def project_row(value: Mapping[str, object]) -> CorpusRow | None:
     return CorpusRow(source_id, slug, version, f"{name}: {description}")
 
 
-def _load_rows(path: Path, *, allow_source_sample: bool) -> tuple[list[CorpusRow], dict[str, int]]:
+def _load_rows(path: Path, *, allow_source_sample: bool) -> tuple[list[CorpusRow], dict[str, int], dict[str, str]]:
     import pyarrow.parquet as pq
 
+    if not allow_source_sample:
+        names = {file.name for file in path.iterdir() if file.suffix.lower() == ".parquet"}
+        if names != set(PARQUET_SHARDS):
+            raise ValueError("Parquet shard names must match the pinned source files")
     rows = []
     slugs = set()
+    source_hashes = {}
     seen = malformed = duplicate = 0
     for shard in PARQUET_SHARDS:
         source = path / shard
         if allow_source_sample and not source.is_file():
             continue
-        parquet = pq.ParquetFile(source)
-        for batch in parquet.iter_batches(batch_size=256, columns=list(SOURCE_COLUMNS)):
-            for value in batch.to_pylist():
-                seen += 1
-                row = project_row(value)
-                if row is None:
-                    malformed += 1
-                    continue
-                slug = row.slug.casefold()
-                if slug in slugs:
-                    duplicate += 1
-                    continue
-                slugs.add(slug)
-                rows.append(row)
+        with source.open("rb") as stream:
+            digest = hashlib.file_digest(stream, "sha256").hexdigest()
+            if not allow_source_sample and digest != PARQUET_SHA256[shard]:
+                raise ValueError(f"Parquet shard {shard} does not match the pinned SHA-256 checksum")
+            source_hashes[shard] = digest
+            stream.seek(0)
+            parquet = pq.ParquetFile(stream)
+            for batch in parquet.iter_batches(batch_size=256, columns=list(SOURCE_COLUMNS)):
+                for value in batch.to_pylist():
+                    seen += 1
+                    row = project_row(value)
+                    if row is None:
+                        malformed += 1
+                        continue
+                    slug = row.slug.casefold()
+                    if slug in slugs:
+                        duplicate += 1
+                        continue
+                    slugs.add(slug)
+                    rows.append(row)
         print(f"Projected {shard}: {len(rows):,} cumulative retained records", flush=True)
     if seen != PARQUET_ROWS and (not allow_source_sample or not 0 < seen < PARQUET_ROWS):
         raise ValueError(f"Expected {PARQUET_ROWS} pinned source rows, got {seen}")
-    return rows, {"source": seen, "malformed": malformed, "duplicate_slug": duplicate, "retained": len(rows)}
+    counts = {"source": seen, "malformed": malformed, "duplicate_slug": duplicate, "retained": len(rows)}
+    return rows, counts, source_hashes
 
 
 def _embed(rows: list[CorpusRow], model_dir: Path, *, threads: int, batch_size: int) -> np.ndarray:
@@ -199,9 +220,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--threads", type=int, default=4)
     parser.add_argument("--batch-size", type=int, default=128)
     parser.add_argument(
-        "--allow-source-sample", action="store_true", help="Accept and label a partial source projection"
+        "--allow-source-sample", action="store_true", help="Accept and label local samples or projections"
     )
     args = parser.parse_args(argv)
+    if args.output.suffix != ".npy":
+        parser.error("--output must use the .npy extension")
+    sidecar = args.output.with_suffix(".json")
+    if sidecar.resolve() == args.output.resolve() or (
+        sidecar.exists() and args.output.exists() and sidecar.samefile(args.output)
+    ):
+        parser.error("The matrix and its JSON sidecar must be different files")
     if not (PARQUET_ROWS <= args.size <= 250_000 and MODEL_DIMENSION <= args.dimension <= 4096):
         parser.error("size must fit the pinned corpus and be at most 250000; dimension must be in [384, 4096]")
     if not (1 <= args.threads <= 8 and 1 <= args.batch_size <= 256 and args.seed >= 0):
@@ -210,7 +238,7 @@ def main(argv: list[str] | None = None) -> None:
         raise ValueError("ONNX model does not match the pinned file")
     if _sha256(args.model_dir / "tokenizer.json") != TOKENIZER_SHA256:
         raise ValueError("Tokenizer does not match the pinned file")
-    rows, counts = _load_rows(args.parquet_dir, allow_source_sample=args.allow_source_sample)
+    rows, counts, source_hashes = _load_rows(args.parquet_dir, allow_source_sample=args.allow_source_sample)
     if not rows:
         raise ValueError("Pinned corpus contains no usable descriptions")
     vectors = _embed(rows, args.model_dir, threads=args.threads, batch_size=args.batch_size)
@@ -220,7 +248,13 @@ def main(argv: list[str] | None = None) -> None:
         "dataset": DATASET,
         "dataset_revision": DATASET_REVISION,
         "parquet_conversion_revision": PARQUET_REVISION,
-        "source_selection": "all rows" if counts["source"] == PARQUET_ROWS else "sampled rows",
+        "source_selection": "all verified upstream rows"
+        if source_hashes == PARQUET_SHA256
+        else "local sample or projection",
+        "source_shards": [
+            {"name": name, "sha256": digest, "verified_upstream": digest == PARQUET_SHA256[name]}
+            for name, digest in source_hashes.items()
+        ],
         "model": MODEL,
         "model_revision": MODEL_REVISION,
         "model_sha256": MODEL_SHA256,
@@ -237,7 +271,7 @@ def main(argv: list[str] | None = None) -> None:
         "matrix_sha256": _sha256(args.output),
         "human_labeled_overlap_queries": 0,
     }
-    args.output.with_suffix(".json").write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    sidecar.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
     print(json.dumps(metadata), flush=True)
 
 

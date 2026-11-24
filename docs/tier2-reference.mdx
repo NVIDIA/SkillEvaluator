@@ -647,13 +647,20 @@ The steady phase schedules 20 searches and 5 mutations per second for
 mutations to 25 per second. Read recall@10 against the exhaustive reference,
 provider-excluded search p95 and p99 from the scheduled start, and separate
 write acknowledgement and visibility timings. Visibility is measured by
-reading the keyed live revision. The technical gate requires confirmed ANN
-use, recall@10 of at least 0.95, search p95 of at most 100 ms and p99 of at
-most 250 ms, fewer than 0.5% failed or dropped search requests, deletes visible
-within 5 seconds, and upserts visible within 60 seconds at p95. The report also
-checks mutation failures, dropped requests, and stale replay. Full qualification
-requires at least 100,000 2,048-dimensional vectors and 1,000 queries across
-the stated workload phases.
+checking the keyed live revision and issuing a top-k query with a seeded probe
+vector. The prior revision must appear in both probes before a removal and be
+absent afterward. Mutation visibility gates use adapter invocation through the
+successful probe. The report gives acknowledgement-to-visibility times
+separately. A driver request already in flight may finish after the probe's
+deadline, in which case the sample counts as a failure.
+
+The technical adapter gate requires confirmed ANN use, recall@10 of at least
+0.95, search p95 of at most 100 ms and p99 of at most 250 ms, fewer than 0.5%
+failed or dropped search requests, deletes visible within 5 seconds, and upserts
+visible within 60 seconds at p95. The report also checks mutation failures,
+dropped requests, and stale replay. Full adapter qualification requires at
+least 100,000 2,048-dimensional vectors and 1,000 queries across the stated
+workload phases. Use a separate end-to-end run to qualify the pilot service.
 
 For labeled overlap evidence, pass `--labels ./labels.json` to the benchmark.
 Each key is a selected query's zero-based corpus row ID as a string, and each

@@ -34,6 +34,7 @@ MAX_RELATED_IDS = 100
 MIN_LABELED_QUERIES = 100
 CORPUS_BLOCK_ROWS = 1024
 ORACLE_BATCH = 16
+MUTATION_SLOTS = 128
 UPSERT_DEADLINE = 60.0
 DELETE_DEADLINE = 5.0
 VISIBILITY_INTERVAL = 0.02
@@ -175,9 +176,7 @@ def recall_for_results(corpus: VectorCorpus, workload: Workload, query: int, fou
     import numpy as np
 
     own_id = workload.query_ids[query]
-    _validate_results(found, workload.k, own_id)
-    if any(type(entry_id) is not int or not 0 <= entry_id < workload.size for entry_id in found):
-        raise ValueError("Backend returned an ID outside the prepared corpus")
+    _validate_results(found, workload.k, own_id, id_limit=workload.size)
     scores = corpus[found] @ corpus[own_id]
     threshold = workload.cutoffs[query]
     strict_hits = int(np.count_nonzero(scores > threshold + TIE_TOLERANCE))
@@ -186,9 +185,15 @@ def recall_for_results(corpus: VectorCorpus, workload: Workload, query: int, fou
     return (min(strict_hits, strict_count) + min(tie_hits, workload.k - strict_count)) / workload.k
 
 
-def _validate_results(found: list[int], k: int, own_id: int) -> None:
+def _validate_results(
+    found: list[int], k: int, own_id: int | None, *, id_limit: int, require_full: bool = False
+) -> None:
     if len(found) > k:
         raise ValueError("Backend returned more than k candidates")
+    if require_full and len(found) < k:
+        raise ValueError("Backend returned fewer than k candidates")
+    if any(type(entry_id) is not int or not 0 <= entry_id < id_limit for entry_id in found):
+        raise ValueError("Backend returned an ID outside the assigned corpus and mutation IDs")
     if len(set(found)) != len(found):
         raise ValueError("Backend returned a duplicate candidate")
     if own_id in found:
@@ -366,48 +371,86 @@ def run_stream(
             kind: _distribution([timing.visibility_ms for timing in mutations if timing.kind == kind])
             for kind in ("upsert", "delete")
         },
+        "mutation_visibility_after_ack_ms": {
+            kind: _distribution([timing.visibility_ms - timing.ack_ms for timing in mutations if timing.kind == kind])
+            for kind in ("upsert", "delete")
+        },
     }
 
 
+def _remaining_time(expires: float) -> float:
+    remaining = expires - time.monotonic()
+    if remaining <= 0:
+        raise VisibilityTimeout
+    return remaining
+
+
 def _wait_for_visibility(check: Callable[[], bool], began: float, deadline: float) -> float:
-    while time.monotonic() - began <= deadline:
-        if check():
-            elapsed = time.monotonic() - began
-            if elapsed <= deadline:
-                return 1000 * elapsed
-            break
-        time.sleep(VISIBILITY_INTERVAL)
-    raise VisibilityTimeout
+    expires = began + deadline
+    _remaining_time(expires)
+    while True:
+        visible = check()
+        remaining = _remaining_time(expires)
+        if visible:
+            return 1000 * (deadline - remaining)
+        time.sleep(min(VISIBILITY_INTERVAL, remaining))
+        _remaining_time(expires)
 
 
 class MutationLoad:
     """Exercise insert, replace and delete on a bounded set of dedicated IDs."""
 
-    def __init__(self, backend, corpus: VectorCorpus):
+    def __init__(self, backend, corpus: VectorCorpus, *, seed: int):
+        import numpy as np
+
         self.backend = backend
-        self.corpus = corpus
+        self.corpus_size, self.dimension = corpus.shape
+        self.rng = np.random.default_rng(seed)
         self.sequence = 1
-        self.live: dict[int, int] = {}
+        self.id_limit = self.corpus_size
+        self.live: dict[int, tuple[int, VectorCorpus]] = {}
+
+    def _observed(self, entry_id: int, sequence: int, vector: VectorCorpus, expires: float, *, live: bool) -> bool:
+        _remaining_time(expires)
+        if self.backend.visible(entry_id, sequence) != live:
+            return False
+        _remaining_time(expires)
+        found = self.backend.search(vector, 1)
+        _validate_results(found, 1, None, id_limit=self.id_limit, require_full=True)
+        return (found[0] == entry_id) == live
 
     def __call__(self, _index: int) -> MutationTiming:
         # Cycle through insert, replacement and delete while rotating dedicated IDs.
         cycle, step = divmod(self.sequence - 1, 3)
-        slot = cycle % 128
-        entry_id = len(self.corpus) + slot
+        slot = cycle % MUTATION_SLOTS
+        entry_id = self.corpus_size + slot
+        self.id_limit = max(self.id_limit, entry_id + 1)
         self.sequence += 1
         sequence = self.sequence
-        began = time.monotonic()
-        if step == 2 and entry_id in self.live:
-            prior = self.live[entry_id]
+        if step == 2:
+            previous = self.live.get(entry_id)
+            probe_deadline = time.monotonic() + DELETE_DEADLINE
+            if previous is None or not self._observed(entry_id, *previous, probe_deadline, live=True):
+                raise VisibilityTimeout("Mutation entry was not searchable before deletion")
+            prior_sequence, vector = previous
+            began = time.monotonic()
+            expires = began + DELETE_DEADLINE
             self.backend.remove(entry_id, sequence)
             ack = 1000 * (time.monotonic() - began)
-            elapsed = _wait_for_visibility(lambda: not self.backend.visible(entry_id, prior), began, DELETE_DEADLINE)
+            elapsed = _wait_for_visibility(
+                lambda: self._observed(entry_id, prior_sequence, vector, expires, live=False), began, DELETE_DEADLINE
+            )
             del self.live[entry_id]
             return MutationTiming("delete", ack, elapsed)
-        self.backend.upsert(entry_id, sequence, self.corpus[(slot + step) % len(self.corpus)])
+        vector = _normalize(self.rng.standard_normal((1, self.dimension), dtype="float32"))[0]
+        began = time.monotonic()
+        expires = began + UPSERT_DEADLINE
+        self.backend.upsert(entry_id, sequence, vector)
         ack = 1000 * (time.monotonic() - began)
-        elapsed = _wait_for_visibility(lambda: self.backend.visible(entry_id, sequence), began, UPSERT_DEADLINE)
-        self.live[entry_id] = sequence
+        elapsed = _wait_for_visibility(
+            lambda: self._observed(entry_id, sequence, vector, expires, live=True), began, UPSERT_DEADLINE
+        )
+        self.live[entry_id] = sequence, vector
         return MutationTiming("upsert", ack, elapsed)
 
 
@@ -475,11 +518,13 @@ def _measure_recall(
 
 
 def _measure_load(backend, corpus: VectorCorpus, workload: Workload, args: argparse.Namespace):
+    mutate = MutationLoad(backend, corpus, seed=args.seed)
+
     def search(index: int) -> None:
         own_id = workload.query_ids[index % len(workload.query_ids)]
-        _validate_results(backend.search(corpus[own_id], workload.k, exclude=own_id), workload.k, own_id)
+        found = backend.search(corpus[own_id], workload.k, exclude=own_id)
+        _validate_results(found, workload.k, own_id, id_limit=mutate.id_limit, require_full=True)
 
-    mutate = MutationLoad(backend, corpus)
     phases = {}
     for phase, duration, mutation_rate in (("steady", args.duration, 5), ("burst", args.burst_duration, 25)):
         if duration <= 0:
@@ -520,7 +565,7 @@ def _run_backend(
         recall = _measure_recall(backend, corpus, workload, labels)
         load = _measure_load(backend, corpus, workload, args)
         _progress(f"{name}: verifying stale mutation replay")
-        stale = validate_stale_replay(backend, len(corpus) + 128, corpus[0])
+        stale = validate_stale_replay(backend, len(corpus) + MUTATION_SLOTS, corpus[0])
     finally:
         backend.close()
     result = {
@@ -593,10 +638,23 @@ def qualify_backend(result: dict[str, object], args: argparse.Namespace) -> dict
             }
         )
     return {
+        "scope": "benchmark_adapter",
         "passes_technical_gate": all(checks.values()),
         "checks": checks,
         "search_failure_fraction": search_failure_fraction,
     }
+
+
+def _validate_artifact_paths(args: argparse.Namespace) -> None:
+    reserved = [path for path in (args.vectors, args.query_ids, args.workload, args.labels) if path is not None]
+    for output in (args.write_vectors, args.write_workload, args.output):
+        if output is None:
+            continue
+        resolved = output.resolve()
+        for previous in reserved:
+            if resolved == previous.resolve() or (output.exists() and previous.exists() and output.samefile(previous)):
+                raise ValueError("Benchmark output paths must refer to separate files from inputs and other outputs")
+        reserved.append(output)
 
 
 def _parse_args(argv: list[str] | None) -> argparse.Namespace:
@@ -624,16 +682,22 @@ def _parse_args(argv: list[str] | None) -> argparse.Namespace:
     args = parser.parse_args(argv)
     if not 2 <= args.size <= 500_000 or not 1 <= args.dimension <= 4096:
         parser.error("size must be within [2, 500000], dimension within [1, 4096]")
+    if args.backend in ("pgvector", "both") and args.dimension > 4000:
+        parser.error("pgvector halfvec indexing supports at most 4000 dimensions")
     if args.size * args.dimension * 4 > 4 * 1024**3:
         parser.error("normalized corpus exceeds 4 GiB")
-    if not 1 <= args.queries <= min(args.size, 10_000) or not 1 <= args.k <= min(100, args.size - 1):
-        parser.error("queries must fit the corpus and be <= 10000; k must be below size and <= 100")
+    if not 1 <= args.queries <= min(args.size, 10_000) or not 1 <= args.k <= min(50, args.size - 1):
+        parser.error("queries must fit the corpus and be <= 10000; k must be below size and <= 50")
     if not 0 <= args.seed < 2**32 or not 0 <= args.duration <= 3600 or not 0 <= args.burst_duration <= 600:
         parser.error("seed must fit uint32; steady and burst periods must be within [0, 3600] and [0, 600]")
     if args.workload and args.query_ids:
         parser.error("--workload already specifies query IDs")
     if args.write_vectors and args.write_vectors.suffix != ".npy":
         parser.error("--write-vectors must name a .npy file")
+    try:
+        _validate_artifact_paths(args)
+    except (OSError, RuntimeError, ValueError) as exc:
+        parser.error(str(exc))
     if not args.prepare_only:
         if args.backend in ("pgvector", "both") and not args.postgres_dsn:
             parser.error("supply --postgres-dsn or SKILLEVALUATOR_BENCHMARK_POSTGRES_DSN")
@@ -706,10 +770,12 @@ def main(argv: list[str] | None = None) -> int:
             "burst_mutation_rate_per_second": 25,
             "tie_tolerance": TIE_TOLERANCE,
             "provider_time_included": False,
-            "mutation_visibility_probe": "separate keyed live-revision read",
+            "mutation_visibility_probe": "keyed live revision and direct ANN query using a seeded probe vector",
+            "mutation_visibility_clock": "adapter invocation through successful probe",
         },
         "environment": {"python": platform.python_version(), "platform": platform.platform(), "numpy": np.__version__},
         "qualification": {
+            "pilot_service": {"status": "unmeasured", "requires": "end-to-end production service measurement"},
             "embedding_cost": {"status": "unmeasured", "requires": "measured provider workload and pricing"},
             "embedding_profile": {
                 "status": "unverified",

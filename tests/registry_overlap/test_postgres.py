@@ -198,11 +198,17 @@ def test_invalid_limits_vectors_and_missing_index(database):
 
 def test_outdated_vectors_cannot_displace_current_candidates(database):
     store, _, _ = database
-    outdated = [_event(f"old-{number}", 1, "Nearest") for number in range(45)]
+    outdated = [_event(f"old-{number}", 1, f"Nearest {number}") for number in range(240)]
     eligible = [_event(f"live-{number}", 1, "Still available") for number in range(10)]
     store.accept(_batch(1, *outdated, *eligible))
-    store.drain(PROFILE, lambda texts: [VECTOR if "Nearest" in text else [0.8, 0.6, 0.0, 0.0] for text in texts])
-    store.accept(_batch(2, *[_event(f"old-{number}", 2, "Pending replacement") for number in range(45)]))
+    store.drain(
+        PROFILE,
+        lambda texts: [
+            [1.0, int(text.rsplit(" ", 1)[1]) / 2000, 0.0, 0.0] if "Nearest" in text else [0.8, 0.6, 0.0, 0.0]
+            for text in texts
+        ],
+    )
+    store.accept(_batch(2, *[_event(f"old-{number}", 2, "Pending replacement") for number in range(240)]))
     results = store.search(PROFILE, lambda: VECTOR)
     assert results["status"] == "degraded"
     assert [hit["skill_id"] for hit in results["candidates"]] == [f"live-{number}" for number in range(10)]
@@ -242,3 +248,27 @@ def test_acceptance_lock_is_bounded_and_retriable(database):
     assert _hits(store) == [("a", "1")]
     store.accept(removing)
     assert _hits(store) == []
+
+
+def test_conflicting_stale_observation_rejects_entire_batch(database):
+    store, _, _ = database
+    store.accept(_batch(1, _event("a", 5, None)))
+    store.accept(_batch(2, _event("a", 4, "Old")))
+    with pytest.raises(ValueError, match="sequence conflict"):
+        store.accept(_batch(3, _event("a", 4, "Conflicting"), _event("b", 1)))
+    assert store.status()["accepted_cursor"] == 2
+    store.accept(_batch(3, _event("a", 4, "Old")))
+    store.drain(PROFILE, Embedder())
+    assert _hits(store) == []
+
+
+def test_status_reports_oldest_pending_reindex_seed(database):
+    store, _, _ = database
+    store.accept(_batch(1, _event("a", 1)))
+    oldest = store.status()["generations"][0]["oldest_pending"]
+    store.drain(PROFILE, Embedder())
+    assert store.status()["generations"][0]["oldest_pending"] is None
+    generation = store.reindex(PROFILE_NEXT)
+    row = next(row for row in store.status()["generations"] if row["id"] == generation)
+    assert row["pending_snapshot"]
+    assert row["oldest_pending"] == oldest

@@ -93,3 +93,10 @@ condition = "AND"
 targetRules = ["curl-auth-user"]
 regexes = ['''^admin:hunter2hunter2$''']
 paths = ['''^tests/reporting/test_tier3_failure_reasons\.py$''']
+
+[[allowlists]]
+description = "SHA-256 of the public MiniLM tokenizer pinned by the registry benchmark"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^da0e79933b9ed51798a3ae27893d3c5fa4a201126cef75586296df9b4d2c62a0$''']
+paths = ['''^scripts/registry_overlap_benchmark_corpus\.py$''']

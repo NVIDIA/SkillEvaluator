@@ -229,3 +229,95 @@ def test_labeled_gate_requires_evidence_for_supplied_vectors(queries, hit_rate, 
     report = qualify_labeled_overlap({"queries": queries, "hit_rate": hit_rate}, k=k, synthetic=synthetic)
 
     assert report["passes_labeled_overlap_gate"] is passes
+
+
+@pytest.mark.parametrize(("flag", "value"), [("--k", "51"), ("--dimension", "4001")])
+def test_pgvector_runner_refuses_unsupported_parameters(flag, value):
+    from scripts.benchmark_registry_overlap import _parse_args
+
+    with pytest.raises(SystemExit) as exc:
+        _parse_args(["--prepare-only", flag, value])
+
+    assert exc.value.code == 2
+
+
+@pytest.mark.parametrize("alias", ["same-path", "symlink", "hardlink"])
+def test_runner_cannot_overwrite_vector_input(tmp_path, alias):
+    np = pytest.importorskip("numpy")
+    from scripts.benchmark_registry_overlap import main
+
+    vectors = tmp_path / "vectors.npy"
+    np.save(vectors, np.eye(2, dtype=np.float32))
+    original = vectors.read_bytes()
+    output = vectors if alias == "same-path" else tmp_path / "report.json"
+    if alias == "symlink":
+        output.symlink_to(vectors)
+    if alias == "hardlink":
+        output.hardlink_to(vectors)
+
+    with pytest.raises(SystemExit) as exc:
+        main(
+            [
+                "--prepare-only",
+                "--vectors",
+                str(vectors),
+                "--output",
+                str(output),
+                "--size",
+                "2",
+                "--dimension",
+                "2",
+                "--queries",
+                "1",
+                "--k",
+                "1",
+            ]
+        )
+
+    assert exc.value.code == 2
+    assert vectors.read_bytes() == original
+
+
+@pytest.mark.parametrize("found", [[], [2], [2, 7], [True, 2], [-1, 2]])
+def test_load_requires_full_in_range_candidate_lists(found):
+    from scripts.benchmark_registry_overlap import _validate_results
+
+    with pytest.raises(ValueError):
+        _validate_results(found, k=2, own_id=0, id_limit=7, require_full=True)
+
+    _validate_results([1, 6], k=2, own_id=0, id_limit=7, require_full=True)
+
+
+def test_mutation_probe_requires_ann_suppression_after_keyed_removal(monkeypatch):
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    class Backend:
+        def __init__(self):
+            self.indexed = None
+            self.live = None
+
+        def upsert(self, entry_id, sequence, vector):
+            self.indexed = entry_id, vector.copy()
+            self.live = entry_id, sequence
+
+        def remove(self, _entry_id, _sequence):
+            self.live = None
+
+        def visible(self, entry_id, sequence):
+            return self.live == (entry_id, sequence)
+
+        def search(self, vector, _k):
+            return [self.indexed[0]] if np.array_equal(vector, self.indexed[1]) else [0]
+
+    backend = Backend()
+    mutate = benchmark.MutationLoad(backend, np.eye(4, dtype=np.float32), seed=7)
+
+    assert mutate(0).kind == "upsert"
+    inserted = backend.indexed[1].copy()
+    assert mutate(1).kind == "upsert"
+    assert not np.array_equal(inserted, backend.indexed[1])
+    monkeypatch.setattr(benchmark, "DELETE_DEADLINE", 0.02)
+
+    with pytest.raises(benchmark.VisibilityTimeout):
+        mutate(2)

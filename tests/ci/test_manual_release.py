@@ -107,7 +107,10 @@ def test_testpypi_upload_is_opt_in_and_uses_only_validated_distributions():
     jobs = workflow["jobs"]
     publish = jobs["testpypi"]
     assert publish["needs"] == ["release-source", "prepare"]
-    assert publish["if"] == "inputs.publish_testpypi && inputs.phase == 'Validate release'"
+    assert " ".join(publish["if"].split()) == (
+        "!cancelled() && needs.release-source.result == 'success' && needs.prepare.result == 'success' && "
+        "inputs.publish_testpypi && inputs.phase == 'Validate release'"
+    )
     assert publish["environment"] == "pypi-test"
     assert publish["permissions"] == {"id-token": "write"}
     assert not any("checkout@" in step.get("uses", "") for step in publish["steps"])
@@ -124,6 +127,10 @@ def test_testpypi_upload_is_opt_in_and_uses_only_validated_distributions():
 
     verify = jobs["verify-testpypi"]
     assert verify["needs"] == ["release-source", "prepare", "testpypi"]
+    assert " ".join(verify["if"].split()) == (
+        "!cancelled() && needs.release-source.result == 'success' && needs.prepare.result == 'success' && "
+        "needs.testpypi.result == 'success'"
+    )
     assert verify["permissions"] == {"contents": "read"}
     commands = "\n".join(step.get("run", "") for step in verify["steps"])
     assert "ci/product_release.py verify-testpypi" in commands

@@ -359,7 +359,11 @@ jobs:
   testpypi:
     name: Publish validated distributions to TestPyPI
     needs: [release-source, prepare]
-    if: inputs.publish_testpypi && inputs.phase == 'Validate release'
+    # Validation intentionally skips the image and bundle jobs.
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      needs.prepare.result == 'success' && inputs.publish_testpypi &&
+      inputs.phase == 'Validate release'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     environment: pypi-test
@@ -387,6 +391,9 @@ jobs:
   verify-testpypi:
     name: Verify and install the TestPyPI distributions
     needs: [release-source, prepare, testpypi]
+    if: >-
+      !cancelled() && needs.release-source.result == 'success' &&
+      needs.prepare.result == 'success' && needs.testpypi.result == 'success'
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     permissions:

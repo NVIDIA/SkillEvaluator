@@ -6,14 +6,20 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
+  supply-chain scans when work counters disagree with the ledger.
+
 - Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
   repeated whole-dataset scans for truncated Harbor names and per-case totals
   while preserving ambiguous-name handling and stop-on-pass precedence.
 
-## 1.1.0 - 2026-11-22
+## 1.2.0 - 2026-11-23
 
 ### Highlights
 
+- **GitHub Actions annotations.** Export findings with `-r github` to show
+  workflow errors, warnings and notices alongside CI results.
+  [GitHub Actions guide](https://docs.nvidia.com/skills/skillevaluator/github-actions)
 - **Stable CI channels.** Opt into promoted Tier 1 releases for GitHub Actions or
   GitLab CI after the first promotion. Use `skillevaluator ci init --channel stable`
   for GitHub or the stable include for GitLab. [GitHub guide](https://docs.nvidia.com/skills/skillevaluator/github-actions#follow-the-latest-stable-release) · [GitLab guide](https://docs.nvidia.com/skills/skillevaluator/gitlab-ci#follow-the-latest-stable-release)
@@ -160,6 +166,8 @@ notes below describe the new policy and backend configuration behavior.
 
 ### Added
 
+- Ship the verified 1.2.0 CI bundle with matching packaged workflow and image
+  pins, and link the current templates from the README and CI guides.
 - `doctor`, `health-check`, and `tier3 doctor` accept `--json` to print the
   same readiness rows as one JSON object on stdout, so CI can read scanner
   and credential failures without scraping the table. Guided installation is
@@ -180,8 +188,29 @@ notes below describe the new policy and backend configuration behavior.
   placeholder becomes one random UUID per client. Harbor verifier judges,
   embeddings, in-container agents, and reusable CI commands use separate
   configuration.
+- Add GitHub Actions annotation reports with `-r github`. The format prints
+  `::error`, `::warning`, and `::notice` workflow commands on stdout so a job
+  that runs the CLI can annotate the pull request without uploading SARIF.
+  Incomplete scanners are warnings, gate failures stay errors, and the run
+  ends with a summary notice that records how many findings were not annotated
+  under GitHub's per-step cap and how to see the omitted findings.
+  Catalog report-write failures appear as errors even when a scanner is incomplete.
+  Pathless skill findings anchor on the skill's `SKILL.md` when inside the
+  workspace, or include the skill's catalog-relative path.
+  Merged plugin and collection member findings resolve their unprefixed file
+  path, or fall back to the manifest anchor and member label when outside the
+  workspace.
 
 ### Fixed
+
+- Bound declarative output-pattern checks with isolated Python regex workers and a shared
+  matching budget, preserving Python regex semantics and later checks. Interpreter
+  startup and JSON transfer have a separate startup allowance and do not consume
+  the matching budget; invalid patterns remain unscored across output encodings.
+  Pattern timeouts and exhausted matching budgets count as failed checks, so
+  slow failing patterns cannot increase the behavior score. Operators can
+  configure the per-pattern deadline and shared budget through the existing
+  verifier environment.
 
 - Full-body embeddings stop windowing a long section once a window reaches its end,
   avoiding extra embedding inputs and pooled weight for already-covered tails.

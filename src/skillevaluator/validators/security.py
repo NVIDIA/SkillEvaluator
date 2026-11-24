@@ -1732,8 +1732,8 @@ def _skillspector_passive_raster_note(
         scanned_root is None
         or not ledger_exceptions
         or not isinstance(components, list)
-        or not isinstance(scope_exclusions, list)
-        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+        or not _skillspector_scope_paths_are_safe(scope_exclusions)
+        or any(row.get("fatal") is not False for row in scope_exclusions)
     ):
         return None
     named: Counter[str] = Counter()
@@ -1959,6 +1959,80 @@ def _skillspector_report_path_key(path: object) -> str | None:
     ):
         return None
     return path
+
+
+def _skillspector_scope_paths_are_safe(exclusions: object) -> bool:
+    """Check report-relative scope paths, allowing the scanner's directory marker."""
+    if not isinstance(exclusions, list):
+        return False
+    for row in exclusions:
+        path = row.get("path") if isinstance(row, dict) else None
+        if (
+            not isinstance(path, str)
+            or path[1:2] == ":"
+            or _skillspector_report_path_key(path.removesuffix("/")) is None
+        ):
+            return False
+    return True
+
+
+_SKILLSPECTOR_SUPPLY_CHAIN = "static_patterns_supply_chain"
+_SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN = frozenset(
+    f"{_SKILLSPECTOR_SUPPLY_CHAIN}_{name}"
+    for name in ("dependencies", "triggers", "bytecode", "concealed_executable", "dependency_source")
+)
+
+
+def _skillspector_supply_chain_accounting_note(ledger: list[dict], statuses: list[dict]) -> str | None:
+    """Describe a supplemental work mismatch without changing an incomplete scan's verdict."""
+    child_prefixes = tuple(f"{child}_" for child in _SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN)
+    supplemental_sources: set[tuple[str, str]] = set()
+    work_by_source: dict[tuple[str, str], set[tuple[str, str, int | None, int | None]]] = {}
+    for row in ledger:
+        analyzers = row.get("analyzers")
+        if row.get("outcome") != "partial" or row.get("phase") != "static" or not isinstance(analyzers, list):
+            continue
+        source = _skillspector_scoring_source_scope(row)
+        path = _skillspector_report_path_key(row.get("path"))
+        reason = row.get("reason_code")
+        for analyzer in analyzers:
+            if not isinstance(analyzer, str):
+                continue
+            start, end = row.get("start_line"), row.get("end_line")
+            if analyzer.startswith(child_prefixes):
+                supplemental_sources.add(source)
+                if (
+                    not isinstance(reason, str)
+                    or not reason
+                    or analyzer.removesuffix(f"_{reason}") not in _SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN
+                ):
+                    continue
+                # The scanner counts each supplemental path, child and reason once.
+                start = end = None
+            elif analyzer != _SKILLSPECTOR_SUPPLY_CHAIN:
+                continue
+            if (
+                path is not None
+                and path[1:2] != ":"
+                and row.get("fatal") is False
+                and all(line is None or type(line) is int for line in (start, end))
+            ):
+                work_by_source.setdefault(source, set()).add((path, analyzer, start, end))
+
+    if not supplemental_sources:
+        return None
+    reported: Counter[tuple[str, str]] = Counter()
+    for status in statuses:
+        if status["analyzer_id"] == _SKILLSPECTOR_SUPPLY_CHAIN:
+            reported[_skillspector_scoring_source_scope(status)] += status["partial"]
+    for source in sorted(supplemental_sources):
+        accounted = len(work_by_source.get(source, ()))
+        if accounted != reported[source]:
+            return (
+                "SkillSpector supply-chain analyzer has inconsistent partial work accounting "
+                f"({reported[source]} reported, {accounted} explained by the ledger)."
+            )
+    return None
 
 
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
@@ -3158,6 +3232,8 @@ def _skillspector_gaps_without_rows(
         gaps.append("unreadable scope exclusions")
     elif fatal := sum(not (isinstance(row, dict) and row.get("fatal") is False) for row in scope_exclusions):
         gaps.append(f"{fatal} fatal scope exclusion(s)")
+    elif not _skillspector_scope_paths_are_safe(scope_exclusions):
+        gaps.append("unsafe scope exclusion path")
     if counts["findings_before_filtering"] != counts["findings_after_filtering"]:
         gaps.append(
             f"{counts['findings_before_filtering']} finding(s) before filtering and "
@@ -4697,6 +4773,9 @@ class SecurityValidator(ValidatorBase):
                         if not gap_rows and not other_gaps and diagnostic["limitations"]:
                             # No incomplete file to name: the limitation is the only stated reason.
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        if accounting_note := _skillspector_supply_chain_accounting_note(gap_rows, gap_statuses):
+                            separator = " " if message.endswith(".") else ". "
+                            message = f"{message}{separator}{accounting_note}"
                         result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 
@@ -4978,6 +5057,12 @@ class SecurityValidator(ValidatorBase):
                         "security scan did not complete"
                     )
                     return False
+            if not _skillspector_scope_paths_are_safe(analysis_completeness.get("scope_exclusions", [])):
+                result.add_error(
+                    "skillspector JSON analysis completeness has an unsafe scope exclusion path; "
+                    "security scan did not complete"
+                )
+                return False
             if covered_count or excluded_pngs:
                 for analyzer_id in universal_analyzer_ids:
                     # The PNG exclusion applies only to the text patterns.

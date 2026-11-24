@@ -322,6 +322,8 @@ def test_provider_environment_forwards_each_host_judge_model_override(
         "SKILL_EVAL_LLM_MAX_RETRIES",
         "SKILL_EVAL_LLM_RETRY_BASE_DELAY",
         "SKILL_EVAL_LLM_RETRY_MAX_DELAY",
+        "SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC",
+        "SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC",
     ],
 )
 @pytest.mark.parametrize("provider_name", ["openai", "openai-compatible", "anthropic", "bedrock", "nv_build"])
@@ -334,14 +336,14 @@ def test_provider_environment_forwards_each_host_judge_model_override(
         ("   ", None),
     ],
 )
-def test_provider_environment_forwards_each_host_retry_override(
+def test_provider_environment_forwards_each_host_retry_or_pattern_limit_override(
     monkeypatch: pytest.MonkeyPatch,
     name: str,
     provider_name: str,
     configured: str,
     expected: str | None,
 ) -> None:
-    """Verify _provider_environment forwards stripped host retry settings and omits blank values."""
+    """Forward stripped host retry and pattern limits, omitting blank values."""
     monkeypatch.setattr(runner.os, "environ", {name: configured})
 
     environment = runner._provider_environment(_provider(provider_name))
@@ -361,6 +363,8 @@ def test_resolve_agent_runtime_plan_retains_retry_settings_in_subprocess_env(
             "SKILL_EVAL_LLM_MAX_RETRIES": "0",
             "SKILL_EVAL_LLM_RETRY_BASE_DELAY": "0.1",
             "SKILL_EVAL_LLM_RETRY_MAX_DELAY": "0.5",
+            "SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC": "3.0",
+            "SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC": "8.0",
         },
     )
 
@@ -376,7 +380,11 @@ def test_resolve_agent_runtime_plan_retains_retry_settings_in_subprocess_env(
     assert subprocess_env["SKILL_EVAL_LLM_MAX_RETRIES"] == "0"
     assert subprocess_env["SKILL_EVAL_LLM_RETRY_BASE_DELAY"] == "0.1"
     assert subprocess_env["SKILL_EVAL_LLM_RETRY_MAX_DELAY"] == "0.5"
+    assert subprocess_env["SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC"] == "3.0"
+    assert subprocess_env["SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC"] == "8.0"
     assert "SKILL_EVAL_LLM_MAX_RETRIES" not in plans["codex"].staged_env
+    assert "SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC" not in plans["codex"].staged_env
+    assert "SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC" not in plans["codex"].staged_env
 
 
 @pytest.mark.parametrize("source_name", ["LLM_JUDGE_MODEL", "SKILL_EVAL_JUDGE_MODEL"])

@@ -501,3 +501,23 @@ def test_dropped_mutations_do_not_shift_later_writes(monkeypatch):
     with pytest.raises(benchmark.VisibilityTimeout, match="before deletion"):
         benchmark.MutationLoad(backend, corpus, seed=41)(2)
     assert backend.writes == [full[2]]
+
+
+def test_predelete_probe_error_does_not_skip_the_scheduled_delete():
+    from unittest.mock import Mock
+
+    np = pytest.importorskip("numpy")
+    from scripts import benchmark_registry_overlap as benchmark
+
+    backend = Mock()
+    backend.visible.return_value = True
+    backend.search.return_value = [4]
+    mutate = benchmark.MutationLoad(backend, np.eye(4, dtype=np.float32), seed=41)
+    assert mutate(0).kind == "upsert"
+    backend.search.side_effect = TimeoutError("pre-delete probe timed out")
+
+    with pytest.raises(TimeoutError, match="pre-delete probe timed out"):
+        mutate(2)
+
+    backend.remove.assert_called_once_with(4, 4)
+    assert 4 not in mutate.live

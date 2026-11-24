@@ -434,13 +434,22 @@ class MutationLoad:
         sequence = index + 2
         if step == 2:
             previous = self.live.get(entry_id)
-            probe_deadline = time.monotonic() + DELETE_DEADLINE
-            was_visible = previous is not None and self._observed(entry_id, *previous, probe_deadline, live=True)
+            was_visible = False
+            probe_error = None
+            if previous is not None:
+                try:
+                    probe_deadline = time.monotonic() + DELETE_DEADLINE
+                    was_visible = self._observed(entry_id, *previous, probe_deadline, live=True)
+                except Exception as exc:
+                    # Preserve the scheduled write and report the failed observation separately.
+                    probe_error = exc
             began = time.monotonic()
             expires = began + DELETE_DEADLINE
             self.backend.remove(entry_id, sequence)
             self.live.pop(entry_id, None)
             ack = 1000 * (time.monotonic() - began)
+            if probe_error is not None:
+                raise probe_error
             if previous is None or not was_visible:
                 raise VisibilityTimeout("Mutation entry was not searchable before deletion")
             prior_sequence, vector = previous

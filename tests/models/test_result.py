@@ -287,3 +287,41 @@ class TestMerge:
         assert parent.passed is False
         assert all("[my-skill]" in err for err in parent.errors)
         assert parent.findings[0].file_path.startswith("[my-skill] ")
+
+    def test_merge_with_prefix_preserves_unprefixed_artifact_path_across_nesting(self):
+        inner = ValidationResult()
+        original = Finding(
+            category="SCHEMA",
+            severity=Severity.HIGH,
+            check_name="frontmatter",
+            message="Missing description",
+            file_path="/repo/plugin/skills/demo/SKILL.md",
+            line_number=4,
+        )
+        inner.add_finding(original)
+        inner.add_finding(
+            Finding(
+                category="LICENSE",
+                severity=Severity.MEDIUM,
+                check_name="missing_license",
+                message="No license",
+                file_path="",
+            )
+        )
+
+        plugin = ValidationResult()
+        plugin.merge_with_prefix(inner, "demo")
+        assert original.metadata == {}
+        assert plugin.findings[0].file_path == "[demo] /repo/plugin/skills/demo/SKILL.md"
+        assert plugin.findings[0].metadata["artifact_path"] == "/repo/plugin/skills/demo/SKILL.md"
+        assert plugin.findings[0].metadata["member_label"] == "demo"
+        assert "artifact_path" not in plugin.findings[1].metadata
+        assert plugin.findings[1].metadata["member_label"] == "demo"
+
+        bundle = ValidationResult()
+        bundle.merge_with_prefix(plugin, "bundle")
+        assert bundle.findings[0].file_path == "[bundle] [demo] /repo/plugin/skills/demo/SKILL.md"
+        assert bundle.findings[0].metadata["artifact_path"] == "/repo/plugin/skills/demo/SKILL.md"
+        assert bundle.findings[0].metadata["member_label"] == "bundle/demo"
+        assert "artifact_path" not in bundle.findings[1].metadata
+        assert bundle.findings[1].metadata["member_label"] == "bundle/demo"

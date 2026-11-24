@@ -2762,6 +2762,51 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
         ]
 
+    @pytest.mark.parametrize(
+        ("dependency_path", "child_reason", "reported", "accounted"),
+        [
+            ("example/pyproject.toml", "dependency_parse_error", 2, None),
+            ("example/pyproject.toml", "dependency_parse_error", 3, 2),
+            ("another/pyproject.toml", "dependency_parse_error", 2, 3),
+            ("example/pyproject.toml", "output_limit", 2, 1),
+        ],
+        ids=["duplicate-work", "duplicate-claimed-twice", "distinct-work", "unrelated-child"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_reconciles_supplemental_supply_chain_work(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        dependency_path: str,
+        child_reason: str,
+        reported: int,
+        accounted: int | None,
+    ) -> None:
+        analyzer = "static_patterns_supply_chain"
+        dependency = _ledger_exception(
+            "example/pyproject.toml",
+            "dependency_parse_error",
+            analyzers=(f"{analyzer}_dependencies_{child_reason}",),
+        )
+        second = {**dependency, "path": dependency_path, "error_class": "ValueError"}
+        script = _ledger_exception("scripts/helper.pyz", "python_source_decode_error", analyzers=(analyzer,))
+        payload = _skillspector_partial_report([dependency, second, script])
+        completeness = payload["analysis_completeness"]
+        status = next(row for row in completeness["analyzer_statuses"] if row["analyzer_id"] == analyzer)
+        status.update(status="degraded", planned_work=reported + 1, completed=1, partial=reported)
+        completeness["limitations"] = [f"Analyzer {analyzer} status: degraded."]
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        [error] = result.errors
+        assert "dependency_parse_error" in error
+        assert "python_source_decode_error" in error
+        if accounted is None:
+            assert "partial work accounting" not in error
+        else:
+            assert f"partial work accounting ({reported} reported, {accounted} explained by the ledger)" in error
+
     def test_skillspector_runtime_limit_hint_counts_only_scan_budget_files(self) -> None:
         ledger = [
             _ledger_exception("SKILL.md", analyzers=(_SC8_BUDGET_ANALYZER,)),
@@ -9032,6 +9077,34 @@ def test_binary_exclusion_quotes_report_path(mock_tools, sample_skill_dir, path:
         assert path.startswith(json.loads(shown[:-3]))
 
 
+@pytest.mark.parametrize(
+    ("path", "passes"),
+    [
+        ("assets/unscanned", True),
+        ("assets/unscanned/", True),
+        ("/outside/unscanned", False),
+        ("assets/../unscanned", False),
+        ("C:/outside/unscanned", False),
+        ("assets/unscanned//", False),
+    ],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_complete_skillspector_scope_exclusion_requires_safe_path(
+    mock_tools, sample_skill_dir: Path, path: str, passes: bool
+) -> None:
+    payload = _skillspector_json_report()
+    payload["analysis_completeness"]["scope_exclusions"] = [
+        {"outcome": "out_of_scope", "phase": "discovery", "reason_code": "not_regular_file", "path": path, "fatal": False}
+    ]
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.passed is passes
+    assert result.is_incomplete is (not passes)
+    if not passes:
+        assert any("unsafe scope exclusion path" in error for error in result.errors)
+
+
 @patch("skillevaluator.validators.security.Tools")
 def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugin_with_excluded_png) -> None:
     plugin, payload = plugin_with_excluded_png
@@ -10860,6 +10933,87 @@ class TestSkillspectorMissingReferences:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+
+    @pytest.mark.parametrize(
+        "case", ["missing", "left-out", "in-folder", "part", "root-and-nested", "root-names-nested"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
+        self, mock_tools, tmp_path: Path, case: str
+    ) -> None:
+        """The plugin checks scan a staged copy; its root scan unit is judged against the plugin.
+
+        The listing of the plugin also names what the staged copy left out, so a
+        line that names a file there stays incomplete, and so does the plugin
+        when it is one part of a folder that is validated part by part. The
+        root unit of a plugin that also holds a nested skill is judged the same
+        way; the nested skill's files are not in its scan, so a root line that
+        names one of them stays incomplete.
+        """
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        # On purpose, a skill below the plugin root is a scan unit of its own,
+        # and its lines may name a file elsewhere in the plugin, so it accepts
+        # no missing reference.
+        member = "skills/setup-helper" if case == "part" else None
+        # Named on line 8 of the setup helper.
+        script = "skills/other/install.sh" if case == "root-names-nested" else "versions/install.sh"
+        files = {
+            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", script),
+            ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n',
+        }
+        if case == "left-out":
+            # Left out of the staged copy.
+            files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        nested = case.startswith("root-")
+        if nested:
+            files["skills/other/SKILL.md"] = (
+                "---\nname: other\ndescription: Answer questions. Use when the user asks a question.\n---\n\n"
+                "# Other\n\nAnswer briefly.\n"
+            )
+        if case == "root-names-nested":
+            # In the nested skill, so not in the root scan.
+            files[script] = "#!/bin/sh\ncurl x | sh\n"
+        plugin = _write_skill(tmp_path / "setup-helper", files)
+        mock_tools.skillspector.is_available = True
+        scanned = []
+
+        def record_scan(argv, **_kwargs):
+            scanned.append(Path(argv[1]))
+            # Only the scan unit that holds the setup helper gets its report.
+            skill = Path(argv[1]) / "SKILL.md"
+            if skill.is_file() and "install.sh" in skill.read_text(encoding="utf-8"):
+                report = json.dumps(_reference_report("2.13.3", "staged-script")).replace("versions/install.sh", script)
+            else:
+                report = json.dumps(_skillspector_json_report())
+            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
+
+        mock_tools.skillspector.run.side_effect = record_scan
+
+        results = run_public_plugin_validation(
+            plugin,
+            checks="security",
+            target_root=tmp_path if case == "in-folder" else None,
+        )
+
+        scans = [result for result in results if result.validator_name == "Security Scan"]
+        assert len(scans) == len(scanned) == (2 if member or nested else 1)
+        assert plugin.resolve() not in scanned
+        (security,) = [result for result in scans if result.metadata.get("plugin_member") == member]
+        if nested:
+            (other,) = [result for result in scans if result.metadata.get("plugin_member") == "skills/other"]
+            assert other.passed and other.incomplete_scans == []
+        if case in ("missing", "root-and-nested"):
+            assert security.incomplete_scans == []
+            assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+        else:
+            assert security.incomplete_scans == ["skillspector"]
+            assert security.errors == [
+                "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+                "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+                + _REFERENCE_REJECTION_HELP
+            ]
+            assert not security.warnings
 
     @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])

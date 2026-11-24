@@ -354,26 +354,35 @@ def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = 
     member each finding came from. *extra_metadata* is merged on top, for a
     caller that can also name the member in a machine-readable field.
     """
-    metadata = finding.metadata
+    metadata = dict(finding.metadata) if isinstance(finding.metadata, dict) else {}
+    if (
+        isinstance(finding.file_path, str)
+        and finding.file_path.strip()
+        and "artifact_path" not in metadata
+        and "member_label" not in metadata
+    ):
+        metadata["artifact_path"] = finding.file_path
+    if isinstance(prefix, str) and prefix.strip():
+        existing_label = metadata.get("member_label")
+        metadata["member_label"] = (
+            f"{prefix}/{existing_label}" if isinstance(existing_label, str) and existing_label.strip() else prefix
+        )
     for key in ("occurrences", "skillspector_occurrences"):
-        listed = metadata.get(key) if isinstance(metadata, dict) else None
+        listed = metadata.get(key)
         if not isinstance(listed, list):
             continue
         # A check that folds repeats (the PII scan) lists each location
         # in metadata, and a SkillSpector AE1 finding lists the lines
         # that name its file; prefix those like file_path so the
         # finding's own location still matches its first listed one.
-        metadata = {
-            **metadata,
-            key: [
-                {**item, "file": f"[{prefix}] {item['file']}"}
-                if isinstance(item, dict) and isinstance(item.get("file"), str)
-                else item
-                for item in listed
-            ],
-        }
+        metadata[key] = [
+            {**item, "file": f"[{prefix}] {item['file']}"}
+            if isinstance(item, dict) and isinstance(item.get("file"), str)
+            else item
+            for item in listed
+        ]
     if extra_metadata:
-        metadata = {**metadata, **extra_metadata} if isinstance(metadata, dict) else dict(extra_metadata)
+        metadata.update(extra_metadata)
     return Finding(
         category=finding.category,
         severity=finding.severity,
@@ -648,7 +657,7 @@ class ValidationResult:
         for finding in self.findings:
             # merge_with_prefix puts skill labels before legacy messages but inside
             # structured finding paths. Recognize both forms, including nested merges.
-            location = finding.location
+            location = finding.location or ""
             prefix = ""
             while location.startswith("[") and "] " in location:
                 label, _, location = location.partition("] ")

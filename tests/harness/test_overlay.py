@@ -1287,8 +1287,10 @@ def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
     assert rows["pi"]["status"] == "not_loaded"
     assert "PI-CASING" in _ids(rows, "pi")
 
-    # Loose at .agents/skills: mode "agents" loads any .md name at the root too
-    # (verified against the pinned loader: skill.md and alpha.md both load).
+    # Loose at .agents/skills (collectSkillEntries mode "agents", dir === root): a loose
+    # .md file directly in the root is not discovered (verified against the pinned
+    # DefaultResourceLoader); nested one folder down any .md name loads, and the
+    # census harness-check counts follows the same rule.
     # Sibling control: a working named child skill next to the loose manifest
     # keeps loading.
     agents_root = tmp_path / "proj3" / ".agents" / "skills"
@@ -1298,12 +1300,21 @@ def test_pi_casing_follows_the_root_family_and_depth(tmp_path: Path):
     (sky / "SKILL.md").write_text(
         "---\nname: sky\ndescription: Use when testing siblings.\n---\nBody\n", encoding="utf-8"
     )
+    nested = agents_root / "nested"
+    nested.mkdir()
+    (nested / "alpha.md").write_text(
+        "---\nname: alpha\ndescription: Use when testing nesting.\n---\nBody\n", encoding="utf-8"
+    )
     rows = _rows(loose)
-    assert rows["pi"]["status"] == "loads"
-    assert "PI-CASING" not in _ids(rows, "pi")
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-CASING" in _ids(rows, "pi")
     rows = _rows(sky)
     assert rows["pi"]["status"] == "loads"
     assert "PI-CASING" not in _ids(rows, "pi")
+    assert sorted(p.relative_to(agents_root).as_posix() for p in overlay._pi_manifests(agents_root)) == [
+        "nested/alpha.md",
+        "sky/SKILL.md",
+    ]
 
     # Loose at a .pi root: mode "pi" accepts any .md name directly in the root.
     rows = _rows(_loose_skill(tmp_path / "proj4" / ".pi" / "skills"))

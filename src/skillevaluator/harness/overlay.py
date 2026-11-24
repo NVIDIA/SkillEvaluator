@@ -190,15 +190,18 @@ _PI_ROOT_FAMILIES = {
 def _pi_manifest_ignored(skill_path: Path) -> bool:
     """Whether pi skips a non-SKILL.md manifest at this depth under its roots.
 
-    Verified against the pinned loader: a loose ``.md`` file loads directly in any
-    skills root (both root families) and nested only under ``.agents/skills``.
+    Verified against the pinned loader's default-root discovery (``collectSkillEntries``
+    in dist/core/package-manager.js): a loose ``.md`` file loads directly in a ``.pi``
+    root only, and nested under ``.agents/skills`` only. A directory pi is given
+    explicitly instead (``loadSkillsFromDirInternal`` in dist/core/skills.js) loads loose
+    files at its own root.
     """
     parts = _link_location_parts(skill_path)
     for root, family in _PI_ROOT_FAMILIES.items():
         size = len(root.split("/"))
-        for index in range(len(parts) - size, -1, -1):  # dir == root allowed: loose manifest
+        for index in range(len(parts) - size, -1, -1):
             if "/".join(parts[index : index + size]) == root:
-                return False if index + size == len(parts) else family == "pi"
+                return (family == "pi") != (index + size == len(parts))  # the skill dir is the root: loose
     return False
 
 
@@ -1040,13 +1043,16 @@ def _pi_loadable(manifest: Path) -> bool:
 
 
 def _pi_manifests(base: Path) -> list[Path]:
-    """Manifest files pi 1.6.0 accepts under a skills root (dist/core/skills.js).
+    """Manifest files pi 1.6.0 accepts under a skills root.
 
-    A folder short-circuits on the exact ``SKILL.md`` spelling — a differently
-    cased sibling is invisible to it — and without one, loose ``.md`` files load
-    at the scanned root (any name, both root families) and nested only under
-    ``.agents/skills``, while subfolders recurse. Entries matched by the root's ignore files are
-    skipped, and only files whose frontmatter parses with a description load.
+    Default roots follow ``collectSkillEntries`` (dist/core/package-manager.js): a loose
+    ``.md`` file (any name) loads directly in a ``.pi`` root (mode "pi") and nested under
+    ``.agents/skills`` (mode "agents"). A directory pi is given explicitly keeps loose files
+    at its own root instead (``loadSkillsFromDirInternal``, dist/core/skills.js), which is
+    also how a non-default root is modelled here. A folder short-circuits on the exact
+    ``SKILL.md`` spelling — a differently cased sibling is invisible to it — while subfolders
+    recurse. Entries matched by the root's ignore files are skipped, and only files whose
+    frontmatter parses with a description load.
     """
     mode = _pi_skills_mode(base) or "pi"
 
@@ -1088,7 +1094,7 @@ def _pi_manifests(base: Path) -> list[Path]:
             elif (
                 child.is_file()
                 and child.name.endswith(".md")
-                and (root_level or mode == "agents")
+                and (mode == "agents") != root_level
                 and _pi_loadable(child)
             ):
                 found.append(child)

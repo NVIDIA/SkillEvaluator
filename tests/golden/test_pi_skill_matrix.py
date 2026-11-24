@@ -36,10 +36,16 @@ CASES = {c["id"]: c for c in json.loads((GOLDEN_DIR / "pi_skill_matrix_cases.jso
 
 
 def build_case(tmp_path: Path, case_id: str) -> Path:
-    """Rebuild the fixture tree under a .pi/skills root: the probe's load target becomes the scanned root."""
+    """Rebuild the fixture tree under the case's own target, which becomes the scanned root.
+
+    A named target (``m/.agents/skills``, ``m/.pi/skills``, ``check``...) keeps its root family, so
+    the scan applies the discovery rule pi used when the golden was recorded. A ``.`` target has
+    no family of its own and lands under a ``.pi/skills`` root, which models the explicit
+    directory the probe passed (loose ``.md`` at the target root loads, nested ones do not).
+    """
     case = CASES[case_id]
     target = case["targets"][0]
-    root = tmp_path / ".pi" / "skills"
+    root = tmp_path / target if target != "." else tmp_path / ".pi" / "skills"
     for rel, content in case["files"].items():
         if rel.startswith(target + "/"):
             rel = rel[len(target) + 1 :]

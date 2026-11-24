@@ -4773,6 +4773,11 @@ class SecurityValidator(ValidatorBase):
                         if not gap_rows and not other_gaps and diagnostic["limitations"]:
                             # No incomplete file to name: the limitation is the only stated reason.
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        if diagnostic["omitted_exceptions"]:
+                            message = (
+                                f"{message}. The completeness ledger for these gaps has {diagnostic['ledger_rows_total']} rows, "
+                                f"with {diagnostic['omitted_exceptions']} beyond the per-record limit"
+                            )
                         if accounting_note := _skillspector_supply_chain_accounting_note(gap_rows, gap_statuses):
                             separator = " " if message.endswith(".") else ". "
                             message = f"{message}{separator}{accounting_note}"

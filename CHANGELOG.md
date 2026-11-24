@@ -276,6 +276,15 @@ notes below describe the new policy and backend configuration behavior.
   The fence length exceeds any backtick run in the rendered content. File and
   skill labels are escaped and length-limited. The judge is instructed to
   treat the fenced content and labels as skill data and follow the rubric.
+- The `skillspector_completeness` ledger in JSON reports keeps up to 500
+  exception rows per skill and scan stage (was 20), with a 128 KiB budget
+  for serialized rows. Reports keep up to 512 records (was 64), and each
+  record now states `ledger_rows_retained` and
+  `ledger_rows_total`. A 227-skill library whose scanner reported 521
+  incomplete rows previously showed 268, so fixing the visible rows did not
+  clear the gate; the omitted count was recorded but not surfaced. When the
+  cap applies, the security gate message counts the ledger rows for the
+  reported gaps, including how many exceed the per-record limit.
 - Tier 1 file walkers skip symlinks and Windows directory junctions whose
   target resolves outside the skill directory (or is missing), so the PII,
   secrets, Unicode, license and link checks no longer read or quote files from

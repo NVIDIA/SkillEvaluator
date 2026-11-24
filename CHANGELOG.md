@@ -19,6 +19,15 @@ All notable changes to SkillEvaluator are documented in this file.
   Each step keeps its own verifier output and trajectory after job cleanup,
   including steps completed before a failure. Gym masks configured credential
   values in trajectory text, verifier output, and step failure messages.
+- Tier 2 deduplication verdict requests carry the documented output ceiling,
+  16,384 tokens or 32,768 for GPT-5 and GPT-6 reasoning models. Only Anthropic
+  requests sent it. NVIDIA Build, OpenAI, OpenAI-compatible and Bedrock requests
+  sent none, so the provider default set the limit. `doctor --tier 2
+  --verify-models` sends the same ceiling.
+- Bedrock `apac.` and `us-gov.` inference-profile IDs are recognized as the
+  model they name. Claude 4.7 and later on those profiles no longer receive a
+  `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
+  keeps the request's geography prefix.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 - The api-caller reference skill keeps a `Content-Type` passed with `--headers`

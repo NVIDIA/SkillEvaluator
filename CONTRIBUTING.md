@@ -15,6 +15,25 @@ For environment setup, focused tests, documentation checks and the review
 workflow, read the [contributor guide](docs/developer-guide.mdx). For a runnable
 public skill and task, start with the [terminal starter](examples/starter/README.md).
 
+## TestPyPI release validation
+
+The `pypi-test` GitHub environment uses the release reviewers and permits
+deployments from `main`. Register a TestPyPI GitHub Actions Trusted Publisher
+for `skillevaluator` with owner `NVIDIA`, repository `SkillEvaluator`, workflow
+`release.yml`, and environment `pypi-test`.
+[Set up a pending publisher](https://test.pypi.org/manage/account/publishing/).
+
+Run **SkillEvaluator Release** from `main` with phase **Validate release**
+and `publish_testpypi` selected. After approving the TestPyPI deployment,
+the workflow verifies the hosted wheel and source distribution against the
+retained release artifacts and smoke-tests both installs with dependencies
+from production PyPI. If TestPyPI staging fails, rerun all jobs or start a
+new validation run so the successful attempt retains its own artifacts.
+
+For production, use the successful validation run's inputs in the
+**Publish release** phase. The `release-kitmaker` environment approves
+production publication through Kitmaker.
+
 ## Documentation And Example Contributions
 
 - Run every command you change against the documented release or checkout and

@@ -242,9 +242,15 @@ Use the `openai-compatible` provider for a gateway that supports OpenAI Chat Com
   </Tab>
 </Tabs>
 
-The Tier 2 probe requires `skillevaluator[tier2]` or `skillevaluator[all]`. See [Installation options](/skills/skillevaluator/installation-options). Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
+The Tier 2 probe requires the OpenAI SDK, which is included in `skillevaluator[tier2]` and `skillevaluator[all]`. See [Installation options](/skills/skillevaluator/installation-options). Run `skillevaluator doctor --tier 2 --verify-models` to test the configured chat and embedding models.
 
-For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. To use the same gateway with Claude Code, clear inherited overrides with `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` before running Tier 3. For a separate Claude endpoint, set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` together using that endpoint's own key. See the OpenAI-compatible tab above for agent endpoints and the `--agent-model` option.
+For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. See the OpenAI-compatible tab above for the APIs each agent uses.
+
+To use Claude Code through the gateway or an Anthropic Messages endpoint, clear inherited cloud routing with `unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK`, then choose the Claude route:
+
+- **Shared gateway** — Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key.
+- **Native Anthropic** — Export your Anthropic key as `ANTHROPIC_API_KEY` and run `unset ANTHROPIC_BASE_URL`. Claude Code then uses Anthropic's endpoint and the native model default.
+- **Separate custom endpoint** — Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` with that endpoint's own URL and key. Pass `--agent-model claude-code=MODEL` with a model ID served by that endpoint.
 
 ## Fully local setup
 

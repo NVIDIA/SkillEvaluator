@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
+  supply-chain scans when work counters disagree with the ledger.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

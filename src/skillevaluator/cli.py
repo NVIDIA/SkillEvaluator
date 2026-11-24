@@ -54,6 +54,11 @@ from skillevaluator.reporting.console_ui import (
     summarize_tier2,
     summarize_tier3,
 )
+from skillevaluator.reporting.github_reporter import (
+    catalog_annotation,
+    collect_annotations,
+    print_collected_annotations,
+)
 from skillevaluator.reporting.naming import report_basename
 
 # Tier 1 (static validation) is the base install surface and is safe to import
@@ -525,7 +530,7 @@ def _report_options(func):
         "report_formats",
         cls=_MultiValueOption,
         multiple=True,
-        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit"]),
+        type=click.Choice(["cli", "json", "html", "markdown", "sarif", "junit", "github"]),
         default=("cli",),
         show_default=True,
         help="Report format(s). Accepts comma- or space-separated values "
@@ -647,7 +652,7 @@ def _resolve_report_output_location(target_path: Path, output_dir: Path) -> Path
 
 
 def _report_roots(target_path: Path) -> dict[str, Path]:
-    """Return the scan and repository roots SARIF and JUnit paths are made relative to.
+    """Return the scan and repository roots SARIF, JUnit, and GitHub paths are made relative to.
 
     The repository root is the Git root containing *target_path*, so a finding
     reads the same repository-relative ``file`` from every command; outside Git
@@ -1573,8 +1578,16 @@ def _catalog_child_argv_from_ctx(
     return argv
 
 
-def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str | None]:
-    """Run one catalog skill validation in a child process."""
+class _ValidationGateFailure(click.ClickException):
+    """Validation completed and reported its results, but the required checks did not pass."""
+
+
+def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, str | None, bool, str | None, list[dict]]:
+    """Run one catalog skill validation in a child process.
+
+    The child's output is captured, so its GitHub annotations are collected and
+    returned for the parent to print as one stream for the whole catalog.
+    """
     import os
 
     from click.testing import CliRunner
@@ -1584,18 +1597,22 @@ def _run_catalog_skill_worker(job: dict[str, Any]) -> tuple[str, bool, str, str 
         os.chdir(workdir)
 
     skill_name = str(job["skill_name"])
-    result = CliRunner().invoke(cli, job["argv"])
+    raw_workspace_root = job.get("workspace_root")
+    workspace_root = Path(raw_workspace_root) if isinstance(raw_workspace_root, str) and raw_workspace_root else None
+    with collect_annotations(workspace_root=workspace_root) as annotations:
+        result = CliRunner().invoke(cli, job["argv"], standalone_mode=False)
     json_report_name = _consume_validate_json_report()
     if result.exit_code == 0:
-        return skill_name, True, "", json_report_name
+        return skill_name, None, False, json_report_name, annotations
     exc = result.exception
-    if isinstance(exc, SystemExit):
-        return skill_name, False, "validation failed", json_report_name
-    if exc is not None:
-        if isinstance(exc, click.ClickException):
-            return skill_name, False, str(getattr(exc, "message", exc)), json_report_name
-        return skill_name, False, f"unexpected error: {exc}", json_report_name
-    return skill_name, False, "validation failed", json_report_name
+    if isinstance(exc, click.ClickException):
+        reason = exc.format_message()
+    elif exc is None or isinstance(exc, SystemExit):
+        reason = "validation failed"
+    else:
+        reason = f"unexpected error: {exc}"
+    execution_failed = not isinstance(exc, _ValidationGateFailure)
+    return skill_name, reason, execution_failed, json_report_name, annotations
 
 
 def _catalog_skill_entry(
@@ -1803,6 +1820,128 @@ def _record_metadata_id_failures(
     return [*failures, *((name, reason) for name, reason in id_failures if name not in failed)]
 
 
+def _print_catalog_github_annotations(
+    ctx: click.Context,
+    *,
+    catalog_root: Path,
+    workspace_root: Path | None = None,
+    skill_dirs: list[Path],
+    skill_annotations: dict[str, list[dict]],
+    failures: list[tuple[str, str]],
+    execution_failures: set[str],
+    id_conflicts: list[dict[str, object]],
+    id_failures: list[tuple[str, str]],
+    discovery_problems: dict[Path, str],
+) -> None:
+    """Print the catalog's one GitHub annotation stream from its final outcomes.
+
+    Skills render before the catalog checks ``metadata.id`` uniqueness, so the
+    per-skill counts would miss those failures. The summary is counted from the
+    catalog's failures instead, and catalog-level findings join the same capped
+    stream with a file on the affected skill's manifest. A discovery failure
+    points at the directory itself, without probing it: a linked directory is
+    tracked as the link, and Git has no files beneath it.
+    """
+    report_formats = ctx.params.get("report_formats") or ()
+    if "github" not in report_formats:
+        return
+    from skillevaluator.constants import SKILL_MANIFEST_VARIANTS
+
+    resolved_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
+    names = {skill_dir.relative_to(catalog_root).as_posix(): skill_dir for skill_dir in skill_dirs}
+
+    def manifest(name: str) -> Path | None:
+        skill_dir = names.get(name)
+        if skill_dir is None:
+            return None
+        for variant in SKILL_MANIFEST_VARIANTS:
+            if (skill_dir / variant).is_file():
+                return skill_dir / variant
+        return skill_dir
+
+    def annotation(
+        name: str,
+        *,
+        check: str,
+        message: str,
+        severity: str,
+        blocking: bool,
+        file_path: Path | None = None,
+        follow_links: bool = True,
+    ) -> dict:
+        return catalog_annotation(
+            check=check,
+            message=message,
+            severity=severity,
+            blocking=blocking,
+            file_path=file_path or manifest(name),
+            workspace_root=resolved_workspace_root,
+            scan_root=catalog_root,
+            follow_links=follow_links,
+        )
+
+    extra: list[dict] = []
+    for skill_dir, reason in discovery_problems.items():
+        name = skill_dir.relative_to(catalog_root).as_posix()
+        # The link itself, never its target, even when the target is inside the repository.
+        extra.append(
+            annotation(
+                name,
+                check="discovery",
+                message=f"{name}: {reason}",
+                severity="high",
+                blocking=True,
+                file_path=Path(name),
+                follow_links=False,
+            )
+        )
+    for conflict in id_conflicts:
+        members = conflict.get("skills")
+        if not isinstance(members, list):
+            continue
+        for member in map(str, members):
+            others = ", ".join(str(other) for other in members if str(other) != member)
+            extra.append(
+                annotation(
+                    member,
+                    check="metadata_id_duplicate",
+                    message=f"{member}: metadata.id '{conflict.get('metadata_id')}' is also declared by {others}",
+                    severity=str(conflict.get("severity") or ""),
+                    blocking=bool(conflict.get("blocking")),
+                )
+            )
+    catalog_level = {name for name, _reason in id_failures} | {
+        path.relative_to(catalog_root).as_posix() for path in discovery_problems
+    }
+    for name, reason in failures:
+        if name not in execution_failures:
+            if name in catalog_level:
+                continue
+            entries = skill_annotations.get(name, [])
+            if any(item["level"] == "error" for entry in entries for item in entry["annotations"]):
+                continue
+            # A member that only had incomplete checks keeps its warnings.
+            failed_count = sum(entry["counts"][2] for entry in entries)
+            if not failed_count and sum(entry["counts"][3] for entry in entries):
+                continue
+        extra.append(
+            annotation(
+                name,
+                check="catalog_failure",
+                message=f"{name}: {reason or 'validation failed'}",
+                severity="high",
+                blocking=True,
+            )
+        )
+    print_collected_annotations(
+        {name: skill_annotations.get(name, []) for name in names},
+        failed={name for name, _reason in failures},
+        catalog_failed=catalog_level | execution_failures,
+        catalog_annotations=extra,
+        report_formats=report_formats,
+    )
+
+
 def _validate_catalog(
     ctx: click.Context,
     *,
@@ -1827,11 +1966,13 @@ def _validate_catalog(
         )
 
     discovery_problems = discovery_problems or {}
+    catalog_workspace_root = _report_roots(resolved_target)["repository_root"]
     if workers > 1:
         _validate_catalog_parallel(
             ctx,
             skill_dirs=skill_dirs,
             catalog_root=resolved_target,
+            workspace_root=catalog_workspace_root,
             output_dir=output_dir,
             workers=workers,
             discovery_problems=discovery_problems,
@@ -1840,10 +1981,12 @@ def _validate_catalog(
         return
 
     failures = [(path.relative_to(resolved_target).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     meta_key = "skillevaluator_catalog_report_root"
     previous_catalog_root = ctx.meta.get(meta_key)
     ctx.meta[meta_key] = output_dir
     skill_reports: dict[str, str | None] = {}
+    github_annotations: dict[str, list[dict]] = {}
     try:
         for index, skill_dir in enumerate(skill_dirs, start=1):
             skill_name = skill_dir.relative_to(resolved_target).as_posix()
@@ -1859,15 +2002,19 @@ def _validate_catalog(
                 "results_dir": _catalog_results_dir(ctx, skill_dir, resolved_target),
                 "catalog_root": resolved_target,
             }
-            reason = ""
             try:
-                ctx.invoke(validate, **overrides)
+                with collect_annotations(workspace_root=catalog_workspace_root) as skill_annotations:
+                    try:
+                        ctx.invoke(validate, **overrides)
+                    finally:
+                        github_annotations[skill_name] = skill_annotations
             except click.ClickException as exc:
-                reason = str(getattr(exc, "message", exc))
-                failures.append((skill_name, reason))
+                failures.append((skill_name, exc.format_message()))
+                if not isinstance(exc, _ValidationGateFailure):
+                    execution_failures.add(skill_name)
             except Exception as exc:  # unexpected: keep the catalog running, report it on the scoreboard
-                reason = f"unexpected error: {exc}"
-                failures.append((skill_name, reason))
+                failures.append((skill_name, f"unexpected error: {exc}"))
+                execution_failures.add(skill_name)
             skill_reports[skill_name] = _consume_validate_json_report()
     finally:
         if previous_catalog_root is None:
@@ -1894,6 +2041,18 @@ def _validate_catalog(
         for skill_name in (skill_dir.relative_to(resolved_target).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=resolved_target,
+        workspace_root=catalog_workspace_root,
+        skill_dirs=skill_dirs,
+        skill_annotations=github_annotations,
+        failures=failures,
+        execution_failures=execution_failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -1908,6 +2067,7 @@ def _validate_catalog_parallel(
     *,
     skill_dirs: list[Path],
     catalog_root: Path,
+    workspace_root: Path | None = None,
     output_dir: Path,
     workers: int,
     discovery_problems: dict[Path, str] | None = None,
@@ -1922,6 +2082,7 @@ def _validate_catalog_parallel(
         _print_catalog_summary(0, [], output_dir)
         return
 
+    catalog_workspace_root = workspace_root or _report_roots(catalog_root)["repository_root"]
     workdir = str(Path.cwd())
     make_view_console().print(
         f"[dim]Validating {len(skill_dirs)} skills with {workers} worker"
@@ -1934,20 +2095,26 @@ def _validate_catalog_parallel(
             "argv": _catalog_child_argv_from_ctx(ctx, skill_dir, output_dir / skill_name, catalog_root=catalog_root),
             "cwd": workdir,
             "output_dir": str(output_dir / skill_name),
+            "workspace_root": str(catalog_workspace_root),
         }
         for skill_dir in skill_dirs
         if skill_dir not in discovery_problems
         for skill_name in [skill_dir.relative_to(catalog_root).as_posix()]
     ]
     failures = [(path.relative_to(catalog_root).as_posix(), reason) for path, reason in discovery_problems.items()]
+    execution_failures: set[str] = set()
     worker_reports: dict[str, str | None] = {}
+    worker_annotations: dict[str, list[dict]] = {}
     with ProcessPoolExecutor(max_workers=workers) as executor:
         futures = [executor.submit(_run_catalog_skill_worker, job) for job in jobs]
         for future in as_completed(futures):
-            skill_name, passed, reason, json_report_name = future.result()
+            skill_name, reason, execution_failed, json_report_name, annotations = future.result()
             worker_reports[skill_name] = json_report_name
-            if not passed:
+            worker_annotations[skill_name] = annotations
+            if reason is not None:
                 failures.append((skill_name, reason))
+            if execution_failed:
+                execution_failures.add(skill_name)
 
     id_conflicts, id_failures = _catalog_metadata_id_conflicts(
         policy,
@@ -1970,6 +2137,18 @@ def _validate_catalog_parallel(
         for skill_name in (skill_dir.relative_to(catalog_root).as_posix() for skill_dir in skill_dirs)
     ]
     _write_catalog_summary(output_dir, skill_entries, metadata_id_conflicts=id_conflicts)
+    _print_catalog_github_annotations(
+        ctx,
+        catalog_root=catalog_root,
+        workspace_root=catalog_workspace_root,
+        skill_dirs=skill_dirs,
+        skill_annotations=worker_annotations,
+        failures=failures,
+        execution_failures=execution_failures,
+        id_conflicts=id_conflicts,
+        id_failures=id_failures,
+        discovery_problems=discovery_problems,
+    )
     _print_catalog_summary(len(skill_dirs), failures, output_dir)
     _print_metadata_id_conflicts(id_conflicts)
     if failures:
@@ -3165,7 +3344,7 @@ def validate(
     if harness_rows and not quiet:
         console.print(harness_panel(harness_rows, verbose=True))
     if gate_failed:
-        raise click.ClickException("validation failed")
+        raise _ValidationGateFailure("validation failed")
 
 
 # Intro text shown under the grouped Tier 3 options in ``validate --help``.

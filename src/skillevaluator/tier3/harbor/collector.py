@@ -146,6 +146,7 @@ GENERATED_AGENT_ARTIFACTS = (
     "security_attribution.json",
     "findings.json",
     "baseline_timeout_tolerance.json",
+    "statistics.json",
 )
 GENERATED_CONDITION_DIRS = ("with-skill", "without-skill")
 GENERATED_ROOT_ARTIFACTS = ("attempt_policy.json", "comparison.json")
@@ -8676,6 +8677,28 @@ def collect_harbor_results(
         coverage = agent_declarative_checks(with_collected_rewards, without_collected_rewards)
         if coverage:
             all_results["agents"][agent]["declarative_checks"] = coverage
+        # Report-only statistics read the arms scored above. They never change a score, lift, pass@k or status.
+        from skillevaluator.tier3.harbor import run_statistics
+
+        statistics_arms: dict[str, run_statistics.ArmInput] = {}
+        if not skip_with_skill and not with_budget_denied:
+            statistics_arms["with_skill"] = run_statistics.ArmInput(
+                with_logical_rewards, with_execution["execution_status"], with_pass
+            )
+        if not skip_baseline and not without_budget_denied:
+            statistics_arms["without_skill"] = run_statistics.ArmInput(
+                without_logical_rewards, without_execution["execution_status"], without_pass
+            )
+        run_statistics.attach(
+            all_results,
+            agent,
+            agent_dir=agent_dir,
+            output_dir=output_dir,
+            arms=statistics_arms,
+            expected_case_ids=agent_expected_case_ids,
+            stop_on_pass=stop_on_pass,
+            lift_eligible=lift_eligible,
+        )
         if (
             tolerance_on
             and without_job_dir is not None

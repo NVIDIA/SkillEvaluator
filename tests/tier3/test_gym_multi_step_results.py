@@ -481,6 +481,36 @@ def test_retained_trajectories_mask_arm_values(tmp_path: Path, partial: bool) ->
     assert "timestamp" not in json.loads(paths[0].read_text(encoding="utf-8"))["steps"][0]
 
 
+@pytest.mark.parametrize("failed", [False, True], ids=["scored", "failed"])
+def test_single_step_published_trajectory_masks_arm_value(tmp_path: Path, failed: bool) -> None:
+    out, jobs = tmp_path / "out", tmp_path / "jobs"
+    _stage_native_task(out, "with")
+    logs = tmp_path / "single"
+    row = _graded_rollout(logs)
+    if failed:
+        row.update(failure="verifier failed", verifier_return_code=1)
+    secret = 'opaque "example"\nvalue'
+    trajectory = _trajectory("single") | {"final_metrics": {}}
+    trajectory["steps"][0]["message"] = f"before {secret}401 after"
+    (logs / "trajectory.json").write_text(json.dumps(trajectory), encoding="utf-8")
+
+    errors = write_job_from_rollouts(
+        [row],
+        jobs / "demo-codex-with",
+        eval_name="codex__m",
+        task_case_ids={"login-task": "auth-login"},
+        n_attempts=1,
+        secret_values={secret},
+    )
+    assert bool(errors) == failed
+    results = collect_harbor_results("demo", ["codex"], out, jobs, skip_baseline=True, expected_case_ids=["auth-login"])
+    assert results["agents"]["codex"]["scored_attempts"] == (0 if failed else 1)
+    published = out / "codex/with-skill/trials/login-task__gym001/trajectory.json"
+    message = json.loads(published.read_text(encoding="utf-8"))["steps"][0]["message"]
+    assert message.startswith("before ") and message.endswith(" after")
+    assert secret not in message
+
+
 def test_step_evidence_publication_refuses_linked_files(tmp_path: Path) -> None:
     out, jobs = tmp_path / "out", tmp_path / "jobs"
     _stage_native_task(out, "with")

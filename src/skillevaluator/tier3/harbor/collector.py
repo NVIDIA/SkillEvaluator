@@ -890,13 +890,17 @@ def _agent_log_runtime_failure_reason(
     trial_dir: Path,
     *,
     include_text_logs: bool = True,
+    trajectory_startup_failed: bool | None = None,
 ) -> str:
     """Return the most specific agent log/runtime startup failure, if present."""
-    for trajectory_path in (trial_dir / "agent" / "trajectory.json", trial_dir / "trajectory.json"):
-        if trajectory_path.exists():
-            reason = _trajectory_agent_runtime_failure_reason(_read_json(trajectory_path))
-            if reason:
-                return reason
+    if trajectory_startup_failed is not False:
+        for trajectory_path in (trial_dir / "agent" / "trajectory.json", trial_dir / "trajectory.json"):
+            if trajectory_path.exists():
+                reason = _trajectory_agent_runtime_failure_reason(_read_json(trajectory_path))
+                if reason:
+                    return reason
+        if trajectory_startup_failed:
+            return "NeMo Gym agent failed to start"
 
     for path in (
         trial_dir / "agent" / "claude-code.txt",
@@ -928,12 +932,17 @@ def _agent_log_runtime_failure_reason(
 
 def _agent_runtime_failure_reason(trial_dir: Path) -> str:
     """Return why a trial cannot produce a valid score."""
+    result = _read_json(trial_dir / "result.json")
+    result = result if isinstance(result, dict) else {}
+    gym = result.get("nemo_gym") if result.get("execution_backend") == "nemo-gym" else None
+    startup_failed = gym.get("trajectory_startup_failed") if isinstance(gym, dict) else None
     exception_details = [
-        _trial_exception_details(trial_dir),
+        _exception_details(result.get("exception_info")),
         *_trial_step_exception_details(trial_dir),
     ]
     agent_reason = _agent_log_runtime_failure_reason(
         trial_dir,
+        trajectory_startup_failed=startup_failed if isinstance(startup_failed, bool) else None,
         include_text_logs=any(
             exception_type in _AGENT_RUNTIME_EXCEPTION_TYPES
             or exception_type in _UNCONDITIONAL_AGENT_RUNTIME_EXCEPTION_TYPES

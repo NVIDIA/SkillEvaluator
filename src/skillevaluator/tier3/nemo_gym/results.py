@@ -300,15 +300,17 @@ def _multi_step_outcome(
 
 def _copy_verifier_logs(
     logs_dir: Path, trial_dir: Path, *, verdict_only: bool, secret_values: set[str] | None, step: bool = False
-) -> None:
+) -> bool | None:
     """Copy a Gym verifier's files and trajectory into a trial or into one of its step folders.
 
     With ``verdict_only``, copy only what the attempt verdict reads: the reward files, and a trial's own
     trajectory when it is small enough for the collector to read and check for an agent that never started.
+    When masking a trial's trajectory, return its startup verdict from the original text.
     """
     from skillevaluator.tier3.harbor.collector import (
         DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES,
         _read_json,
+        _trajectory_agent_runtime_failure_reason,
         _TrajectoryMergeError,
         _validated_trajectory_dict,
         _write_redacted_text_copy,
@@ -327,20 +329,23 @@ def _copy_verifier_logs(
                 shutil.copyfile(source, verifier_dir / name)
     trajectory = logs_dir / "trajectory.json"
     if not trajectory.is_file() or trajectory.is_symlink():
-        return
+        return None
     if verdict_only and (step or trajectory.stat().st_size > DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES):
-        return
+        return None
     (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
     destination = trial_dir / "agent" / "trajectory.json"
-    if not step or not secret_values:
+    if verdict_only or not secret_values:
         shutil.copyfile(trajectory, destination)
-        return
+        return None
+    original = _read_json(trajectory)
+    startup_failed = None if step else bool(_trajectory_agent_runtime_failure_reason(original))
     try:
-        masked = _validated_trajectory_dict(_read_json(trajectory), secret_values=secret_values)
+        masked = _validated_trajectory_dict(original, secret_values=secret_values)
         encoded = json.dumps(masked, separators=(",", ":"), allow_nan=False)
     except _TrajectoryMergeError:
         encoded = "null"
     destination.write_text(encoded, encoding="utf-8")
+    return startup_failed
 
 
 def write_job_from_rollouts(
@@ -393,17 +398,19 @@ def write_job_from_rollouts(
             trial_dir = job_dir / trial_name
             trial_dir.mkdir(parents=True, exist_ok=True)
             rewards: dict[str, Any] | None = None
-            step_fields: dict[str, Any] = {}
+            trial_fields: dict[str, Any] = {}
             if row.get("turns") is not None:
-                rewards, failure, step_fields = _multi_step_outcome(
+                rewards, failure, trial_fields = _multi_step_outcome(
                     row, trial_dir, case_id, verdict_only=verdict_only, secret_values=secret_values
                 )
             else:
                 logs_dir = row.get("verifier_logs_dir")
                 if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-                    _copy_verifier_logs(
+                    startup_failed = _copy_verifier_logs(
                         Path(logs_dir), trial_dir, verdict_only=verdict_only, secret_values=secret_values
                     )
+                    if startup_failed is not None:
+                        trial_fields["nemo_gym"] = {"trajectory_startup_failed": startup_failed}
                 failure = _failure_text(row)
                 if not failure:
                     rewards, failure = _verified_rewards(trial_dir / "verifier", case_id)
@@ -428,7 +435,7 @@ def write_job_from_rollouts(
                         "exception_info": None
                         if rewards
                         else {"exception_type": "NeMoGymEpisodeFailure", "exception_message": failure},
-                        **step_fields,
+                        **trial_fields,
                     },
                     indent=2,
                 ),

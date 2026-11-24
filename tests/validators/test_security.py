@@ -2762,6 +2762,51 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
         ]
 
+    @pytest.mark.parametrize(
+        ("dependency_path", "child_reason", "reported", "accounted"),
+        [
+            ("example/pyproject.toml", "dependency_parse_error", 2, None),
+            ("example/pyproject.toml", "dependency_parse_error", 3, 2),
+            ("another/pyproject.toml", "dependency_parse_error", 2, 3),
+            ("example/pyproject.toml", "output_limit", 2, 1),
+        ],
+        ids=["duplicate-work", "duplicate-claimed-twice", "distinct-work", "unrelated-child"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_reconciles_supplemental_supply_chain_work(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        dependency_path: str,
+        child_reason: str,
+        reported: int,
+        accounted: int | None,
+    ) -> None:
+        analyzer = "static_patterns_supply_chain"
+        dependency = _ledger_exception(
+            "example/pyproject.toml",
+            "dependency_parse_error",
+            analyzers=(f"{analyzer}_dependencies_{child_reason}",),
+        )
+        second = {**dependency, "path": dependency_path, "error_class": "ValueError"}
+        script = _ledger_exception("scripts/helper.pyz", "python_source_decode_error", analyzers=(analyzer,))
+        payload = _skillspector_partial_report([dependency, second, script])
+        completeness = payload["analysis_completeness"]
+        status = next(row for row in completeness["analyzer_statuses"] if row["analyzer_id"] == analyzer)
+        status.update(status="degraded", planned_work=reported + 1, completed=1, partial=reported)
+        completeness["limitations"] = [f"Analyzer {analyzer} status: degraded."]
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        [error] = result.errors
+        assert "dependency_parse_error" in error
+        assert "python_source_decode_error" in error
+        if accounted is None:
+            assert "partial work accounting" not in error
+        else:
+            assert f"partial work accounting ({reported} reported, {accounted} explained by the ledger)" in error
+
     def test_skillspector_runtime_limit_hint_counts_only_scan_budget_files(self) -> None:
         ledger = [
             _ledger_exception("SKILL.md", analyzers=(_SC8_BUDGET_ANALYZER,)),
@@ -9030,6 +9075,34 @@ def test_binary_exclusion_quotes_report_path(mock_tools, sample_skill_dir, path:
         assert len(shown) <= 200
         assert shown.endswith("...")
         assert path.startswith(json.loads(shown[:-3]))
+
+
+@pytest.mark.parametrize(
+    ("path", "passes"),
+    [
+        ("assets/unscanned", True),
+        ("assets/unscanned/", True),
+        ("/outside/unscanned", False),
+        ("assets/../unscanned", False),
+        ("C:/outside/unscanned", False),
+        ("assets/unscanned//", False),
+    ],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_complete_skillspector_scope_exclusion_requires_safe_path(
+    mock_tools, sample_skill_dir: Path, path: str, passes: bool
+) -> None:
+    payload = _skillspector_json_report()
+    payload["analysis_completeness"]["scope_exclusions"] = [
+        {"outcome": "out_of_scope", "phase": "discovery", "reason_code": "not_regular_file", "path": path, "fatal": False}
+    ]
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.passed is passes
+    assert result.is_incomplete is (not passes)
+    if not passes:
+        assert any("unsafe scope exclusion path" in error for error in result.errors)
 
 
 @patch("skillevaluator.validators.security.Tools")

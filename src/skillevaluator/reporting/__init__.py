@@ -12,6 +12,7 @@ in various formats for different use cases:
 - MarkdownReporter: Markdown for PR comments and documentation
 - SARIFReporter: SARIF 2.1.0 for GitHub Code Scanning
 - JUnitReporter: JUnit XML for CI test-report consumers
+- GitHubReporter: GitHub Actions workflow commands for inline annotations
 
 All reporters consume the same ValidationResult data structure from
 skillevaluator.models, ensuring consistent information across all output formats.
@@ -35,6 +36,7 @@ Example usage:
 from skillevaluator.reporting.base import ReporterBase
 from skillevaluator.reporting.benchmark import BenchmarkReporter
 from skillevaluator.reporting.cli import CLIReporter
+from skillevaluator.reporting.github_reporter import GitHubReporter
 from skillevaluator.reporting.html import HTMLReporter
 from skillevaluator.reporting.json_reporter import JSONReporter
 from skillevaluator.reporting.junit_reporter import JUnitReporter
@@ -44,6 +46,7 @@ from skillevaluator.reporting.sarif_reporter import SARIFReporter
 __all__ = [
     "BenchmarkReporter",
     "CLIReporter",
+    "GitHubReporter",
     "HTMLReporter",
     "JSONReporter",
     "JUnitReporter",

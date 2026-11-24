@@ -78,6 +78,7 @@ def check_staged(directory: Path) -> None:
         )[0]
         assert check["passed"] is (exit_code == 0), check
         assert verifier["check_error_recovery"](calls, "scripts/calc.py")["passed"] is recovered
+    check_hermes_retry(verifier)
     # Exercise the recent root-search and cleanup rules on the task interpreter,
     # including both sides of each classification boundary.
     for command, score in [("find / -name calc.py", 0.0), ("find /workspace -name calc.py", 1.0)]:
@@ -107,6 +108,31 @@ def check_staged(directory: Path) -> None:
             }
         )
     )
+
+
+def check_hermes_retry(verifier):
+    command = "python scripts/calc.py"
+    steps = []
+    for index, payload in enumerate(
+        (
+            {"exit_code": 7, "output": "Input declined"},
+            {
+                "status": "yielded_to_background",
+                "exit_code": None,
+                "session_id": "proc_1",
+                "output": "checking permission denied cases",
+            },
+            {"exit_code": 0, "output": "done"},
+        )
+    ):
+        call_id = str(index)
+        tool = {"tool_call_id": call_id, "function_name": "terminal", "arguments": {"command": command}}
+        result = {"source_call_id": call_id, "content": json.dumps(payload)}
+        steps.append({"source": "agent", "tool_calls": [tool], "observation": {"results": [result]}})
+        calls = verifier["extract_tool_calls_as_dicts"]({"steps": steps})
+        recovery = verifier["check_error_recovery"](calls, "scripts/calc.py")
+        assert recovery["score"] == (0.9 if index == 2 else 0.0), recovery
+        assert [row["steps_to_fix"] for row in recovery["corrections"]] == ([2] if index == 2 else []), recovery
 
 
 def run_verifier_main(directory: Path) -> dict[str, float]:

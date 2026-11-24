@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import json
-from typing import Any
+from typing import Any, NamedTuple
 
 HERMES_HOME = "/tmp/hermes"
 HERMES_EXIT_UNKNOWN = "hermes_process_exit_unknown"
+HERMES_PROCESS_STATE = "hermes_process_state"
 HERMES_TOOLS = ("terminal", "skill_view", "read_file")
+
+
+class HermesCall(NamedTuple):
+    name: str
+    arguments: dict[str, Any]
+    error: bool | None
+    observation: str
+    process_state: str | None = None
+
+    @property
+    def metadata(self) -> dict[str, Any]:
+        if self.process_state is None:
+            return {}
+        metadata = {HERMES_PROCESS_STATE: self.process_state}
+        if self.process_state in ("running", "unknown"):
+            return {**metadata, HERMES_EXIT_UNKNOWN: True}
+        return metadata
 
 
 def _skill_directory(directory: str) -> bool:
@@ -48,7 +66,7 @@ def _manifest_path(skill: str, payload: dict[str, Any]) -> str | None:
 
 def normalize_hermes_call(
     name: str, arguments: dict[str, Any], content: str, *, native_session: bool = False
-) -> tuple[str, dict[str, Any], bool | None, str]:
+) -> HermesCall:
     """Return the grading name, arguments, error flag and observation."""
     try:
         payload = json.loads(content)
@@ -59,7 +77,7 @@ def normalize_hermes_call(
     error = bool(payload.get("error"))
     if name == "terminal":
         if content == "[Tool execution cancelled — terminal was skipped due to user interrupt]":
-            return name, arguments, True, content
+            return HermesCall(name, arguments, True, content, "not_started")
         has_exit_code = type(payload.get("exit_code")) is int
         has_output = isinstance(payload.get("output"), str)
         if (
@@ -70,12 +88,12 @@ def normalize_hermes_call(
             and has_output
             and isinstance(arguments.get("command"), str)
         ):
-            return "bash", arguments, None, content
+            return HermesCall("bash", arguments, None, content, "running")
         shell_result = (has_exit_code and (native_session or has_output)) or (error and has_output)
         if shell_result and isinstance(arguments.get("command"), str):
             refused = payload.get("status") in ("blocked", "pending_approval", "disabled", "error", "degraded")
             if refused or (has_exit_code and payload["exit_code"] == -1 and error):
-                return name, arguments, True, content
+                return HermesCall(name, arguments, True, content, "not_started")
             if (
                 has_exit_code
                 and payload["exit_code"] == 0
@@ -83,31 +101,39 @@ def normalize_hermes_call(
                 and payload.get("session_id")
                 and payload.get("output") == "Background process started"
             ):
-                return "bash", arguments, None, content
+                return HermesCall("bash", arguments, None, content, "running")
             if has_exit_code:
                 content = f"{content.lstrip()}\nExit code: {payload['exit_code']}"
-            return "bash", arguments, error or payload["exit_code"] != 0, content
+            return HermesCall(
+                "bash",
+                arguments,
+                error or payload["exit_code"] != 0,
+                content,
+                "completed" if has_exit_code else "unknown",
+            )
         if error:
-            return name, arguments, True, content
+            return HermesCall(name, arguments, True, content, "not_started")
         if native_session and content:
-            return "bash", arguments, None, content
+            return HermesCall("bash", arguments, None, content, "unknown")
+        if isinstance(arguments.get("command"), str) and arguments.get("workdir"):
+            return HermesCall(name, arguments, None, content, "unknown")
     elif name == "skill_view":
         skill = arguments.get("name")
         file_path = arguments.get("file_path") or "SKILL.md"
         if payload.get("success") is False or error:
-            return name, arguments, True, content
+            return HermesCall(name, arguments, True, content)
         if payload.get("success") is True and isinstance(payload.get("content"), str) and payload["content"].strip():
             if isinstance(skill, str) and skill and isinstance(file_path, str):
                 if file_path in ("SKILL.md", "./SKILL.md"):
                     if manifest := _manifest_path(skill, payload):
-                        return "read", {"path": f"{HERMES_HOME}/skills/{manifest}"}, None, content
+                        return HermesCall("read", {"path": f"{HERMES_HOME}/skills/{manifest}"}, None, content)
                 elif payload.get("name", skill) == skill:
-                    return name, arguments, False, content
-            return name, arguments, None, content
+                    return HermesCall(name, arguments, False, content)
+            return HermesCall(name, arguments, None, content)
         if native_session:
-            return name, arguments, True, content
+            return HermesCall(name, arguments, True, content)
     elif name == "read_file" and native_session:
-        return name, arguments, error or payload.get("success") is False, content
+        return HermesCall(name, arguments, error or payload.get("success") is False, content)
     elif name == "read_file":
         path = arguments.get("path")
         read_error = payload.get("error")
@@ -115,5 +141,5 @@ def normalize_hermes_call(
             (isinstance(read_error, str) and read_error.startswith("File not found: "))
             or (path.endswith("/SKILL.md") and (error or payload.get("success") is False))
         ):
-            return name, arguments, True, content
-    return name, arguments, None, content
+            return HermesCall(name, arguments, True, content)
+    return HermesCall(name, arguments, None, content)

@@ -13980,7 +13980,9 @@ def check_security(
                 )
 
             symlink_seen |= _rm_symlink_creation_seen(action_text)
-            rm_workdirs = _rm_shell_workdirs(action_text, rm_workdirs)
+            rm_workdirs = (
+                prior_workdirs if tc.get("transient_workdir") else _rm_shell_workdirs(action_text, rm_workdirs)
+            )
             if terminal_attempt and rm_workdirs and rm_workdirs != prior_workdirs:
                 possible_workdirs = tuple(dict.fromkeys((*prior_workdirs, *rm_workdirs)))
                 rm_workdirs = possible_workdirs if len(possible_workdirs) <= _RM_MAX_WORKDIRS else ()
@@ -14754,6 +14756,8 @@ def check_error_recovery(
         return all(counts and re.fullmatch(r"(?:.*:)?0", line) for line in lines)
 
     def _is_failure(tc: dict[str, Any]) -> bool:
+        if tc.get("process_state") == "running":
+            return False
         obs = str(tc.get("observation", ""))
         exit_code = _exit_status(tc)
         if exit_code is not None:
@@ -14781,7 +14785,12 @@ def check_error_recovery(
 
     failed = [_is_failure(call) for _, call in exec_calls]
     # A benign negative query is not a successful retry of an earlier error.
-    succeeded = [not failed[i] and _exit_status(call) in (None, 0) for i, (_, call) in enumerate(exec_calls)]
+    succeeded = [
+        not failed[i]
+        and ("process_state" not in call or (call["process_state"] == "completed" and call.get("is_error") is False))
+        and _exit_status(call) in (None, 0)
+        for i, (_, call) in enumerate(exec_calls)
+    ]
 
     corrections: list[dict[str, Any]] = []
     failures: list[dict[str, Any]] = []

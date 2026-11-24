@@ -11,9 +11,17 @@ import re
 from typing import Any
 
 if __package__:
-    from .hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_TOOLS, normalize_hermes_call
+    from .hermes_tool_call_normalizer import (
+        HERMES_EXIT_UNKNOWN,
+        HERMES_TOOLS,
+        normalize_hermes_call,
+    )
 else:
-    from hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_TOOLS, normalize_hermes_call
+    from hermes_tool_call_normalizer import (
+        HERMES_EXIT_UNKNOWN,
+        HERMES_TOOLS,
+        normalize_hermes_call,
+    )
 
 UNSUPPORTED_NATIVE_CODEX_EXEC = "unsupported_native_codex_exec_wrapper"
 AMBIGUOUS_OUTER_EXEC_OBSERVATION = "ambiguous_outer_exec_result"
@@ -1499,14 +1507,14 @@ def _iter_normalized_tool_calls_with_records(traj: dict[str, Any]):
                 extra = call.get("extra")
                 if not (isinstance(extra, dict) and extra.get("junie_agent_event_kind") == "TerminalBlockUpdatedEvent"):
                     content = _outer_tool_call_observation(step, call, include_unscoped=False)
-                    name, args, error, observation = normalize_hermes_call(
-                        call["function_name"], call["arguments"], content
-                    )
-                    call.update(function_name=name, arguments=args)
-                    if observation != content:
-                        call["_atif_hermes_observation"] = observation
-                    if error is not None or name == "bash":
-                        call["_atif_hermes_is_error"] = error
+                    graded = normalize_hermes_call(call["function_name"], call["arguments"], content)
+                    call.update(function_name=graded.name, arguments=graded.arguments)
+                    if metadata := graded.metadata:
+                        call["extra"] = {**(extra if isinstance(extra, dict) else {}), **metadata}
+                    if graded.observation != content:
+                        call["_atif_hermes_observation"] = graded.observation
+                    if graded.error is not None or graded.name == "bash":
+                        call["_atif_hermes_is_error"] = graded.error
             if normalized and _RECORD_FORMAT in normalized[0]:
                 normalized = _resolve_exec_records(step, tool_call, raw_index, normalized)
             for call in normalized:

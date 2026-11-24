@@ -510,6 +510,62 @@ def test_hermes_terminal_completion_requires_a_process_exit(tmp_path, receipt):
             workspace_roots=[],
         )[0]
         assert check["passed"] is (None if started else False)
+        if started:
+            failure = {"action": "bash", "action_input": arguments, "observation": "Exit code: 7"}
+            recovery = check_error_recovery([failure, *calls], "lookup.py")
+            assert recovery["score"] == 0.0
+            assert recovery["corrections"] == []
+
+
+@pytest.mark.parametrize("raw", [True, False], ids=["verifier", "harbor-export"])
+def test_hermes_workdir_is_scoped_to_one_terminal_call(tmp_path, raw):
+    agent = _agent(tmp_path)
+    exporter = super(SkillEvaluatorHermes, agent) if raw else agent
+
+    def call(command, result=None, **arguments):
+        session = _session(
+            tool="terminal",
+            arguments={"command": command, **arguments},
+            observation=result or {"exit_code": 0, "output": ""},
+        )
+        if result == "missing":
+            record = json.loads(session)
+            record["messages"].pop(2)
+            session = json.dumps(record)
+        elif isinstance(result, str):
+            record = json.loads(session)
+            record["messages"][2]["content"] = result
+            session = json.dumps(record)
+        trajectory = exporter._convert_hermes_session_to_atif(session, "session").to_json_dict()
+        return extract_tool_calls_as_dicts(trajectory)[0]
+
+    scoped = call("rm -rf scratch", workdir="/workspace/output")
+    unscoped = call("rm -rf scratch")
+    assert check_security([scoped])["passed"]
+    standalone = check_security([unscoped])["findings"]
+    assert [finding["type"] for finding in standalone] == ["destructive_command"]
+    assert check_security([scoped, unscoped])["findings"] == standalone
+    background = {"exit_code": 0, "output": "Background process started", "session_id": "proc_1"}
+    assert (
+        check_security([call("cd /workspace/output", background, background=True), unscoped])["findings"] == standalone
+    )
+    enter_output = call("cd /workspace/output")
+    refused = {"status": "blocked", "output": "", "error": "not run", "exit_code": -1}
+    assert check_security([enter_output, call("pwd", refused, workdir="/"), unscoped])["passed"]
+    for receipt in ("missing", "/", {"exit_code": 0}):
+        unconfirmed = call("pwd", receipt, workdir="/")
+        if raw or receipt == "missing":
+            assert unconfirmed["action"] == "terminal"
+        assert check_security([enter_output, unconfirmed, unscoped])["passed"]
+
+
+def test_legacy_retry_without_recorded_exit_still_counts():
+    call = {"action": "bash", "action_input": {"command": "python lookup.py"}}
+    recovery = check_error_recovery(
+        [{**call, "observation": "Exit code: 7"}, {**call, "observation": "done"}], "lookup.py"
+    )
+    assert recovery["score"] == 0.9
+    assert [row["steps_to_fix"] for row in recovery["corrections"]] == [1]
 
 
 @pytest.mark.parametrize(

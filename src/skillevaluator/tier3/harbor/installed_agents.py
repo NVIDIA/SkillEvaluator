@@ -186,16 +186,20 @@ class SkillEvaluatorOpenCode(OpenCode):
 
     def _convert_events_to_trajectory(self, events: list[dict[str, Any]]) -> Trajectory | None:
         normalized = []
-        failed_reads: list[set[str]] = []
+        failed_file_calls: list[set[str]] = []
         turn_failures: set[str] | None = None
         for event in events:
             part = event.get("part")
             if event.get("type") == "step_start":
                 turn_failures = set()
             elif event.get("type") == "step_finish" and turn_failures is not None:
-                failed_reads.append(turn_failures)
+                failed_file_calls.append(turn_failures)
                 turn_failures = None
-            elif event.get("type") == "tool_use" and isinstance(part, dict) and part.get("tool") == "read":
+            elif (
+                event.get("type") == "tool_use"
+                and isinstance(part, dict)
+                and part.get("tool") in ("read", "edit", "write")
+            ):
                 state = part.get("state")
                 call_id = part.get("callID", part.get("id"))
                 if turn_failures is not None and call_id and isinstance(state, dict) and state.get("status") == "error":
@@ -215,9 +219,9 @@ class SkillEvaluatorOpenCode(OpenCode):
                         event = {**event, "part": {**part, "state": {**state, "output": output}}}
             normalized.append(event)
         trajectory = super()._convert_events_to_trajectory(normalized)
-        if trajectory and any(failed_reads):
+        if trajectory and any(failed_file_calls):
             agent_steps = (step for step in trajectory.steps if step.source == "agent")
-            for step, failures in zip(agent_steps, failed_reads, strict=True):
+            for step, failures in zip(agent_steps, failed_file_calls, strict=True):
                 for result in step.observation.results if step.observation else ():
                     if result.source_call_id in failures:
                         result.extra = {**(result.extra or {}), "tool_result_is_error": True}

@@ -36,6 +36,7 @@ if __package__:
     from skillevaluator.tier3.eval_core.codex_tool_call_normalizer import (
         normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
     )
+    from skillevaluator.tier3.eval_core.hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_PROCESS_STATE
     from skillevaluator.tier3.eval_core.secret_redaction import redact_secrets_in_log_line
 else:  # Standalone helper staged beside the verifier.
     from codex_tool_call_normalizer import (
@@ -55,6 +56,7 @@ else:  # Standalone helper staged beside the verifier.
         normalized_tool_call_wrapper_observation as _tool_call_wrapper_observation,
     )
     from evidence import evidence_ref_identity
+    from hermes_tool_call_normalizer import HERMES_EXIT_UNKNOWN, HERMES_PROCESS_STATE
     from secret_redaction import redact_secrets_in_log_line
 
 logger = logging.getLogger(__name__)
@@ -1111,6 +1113,9 @@ def build_verified_facts(
                 continue
             # Check tool call arguments: command/cmd/code and file-path args
             for _, tc in iter_tool_calls({"steps": [step]}):
+                name = str(tc.get("function_name", "")).lower()
+                if name in ("write", "edit") and normalized_tool_call_is_error(step, tc):
+                    continue
                 args = tc.get("arguments") or {}
                 if not isinstance(args, dict):
                     continue
@@ -1550,6 +1555,17 @@ def extract_tool_calls_as_dicts(traj: dict[str, Any]) -> list[dict[str, Any]]:
             # exited 0 carry no exit status line.
             if (is_error := normalized_tool_call_error_flag(step, tc)) is not None:
                 call["is_error"] = is_error
+            extra = tc.get("extra")
+            if call["action"] in ("bash", "terminal") and isinstance(extra, dict):
+                state = extra.get(HERMES_PROCESS_STATE)
+                if state is None and extra.get(HERMES_EXIT_UNKNOWN) is True:
+                    state = "unknown"
+                if state in ("completed", "running", "not_started", "unknown"):
+                    call["process_state"] = state
+                    if state in ("running", "not_started") or (
+                        isinstance(call["action_input"], dict) and call["action_input"].get("workdir")
+                    ):
+                        call["transient_workdir"] = True
             if status := tc.get("_atif_normalization_status"):
                 call["normalization_status"] = status
             if status := tc.get("_atif_observation_status"):

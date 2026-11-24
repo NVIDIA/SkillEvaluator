@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""Native OpenCode bash events preserve exit evidence through Harbor's converter."""
+"""Native OpenCode tool outcomes preserve grading evidence through Harbor's converter."""
 
 from __future__ import annotations
 
@@ -12,7 +12,12 @@ from pathlib import Path
 import pytest
 from harbor.models.agent.context import AgentContext
 
-from skillevaluator.tier3.eval_core.atif_helpers import extract_tool_calls_as_dicts
+from skillevaluator.tier3.eval_core.atif_helpers import (
+    behavior_evidence_gap,
+    build_metric_evidence_bundles,
+    build_verified_facts,
+    extract_tool_calls_as_dicts,
+)
 from skillevaluator.tier3.eval_core.checks import check_activation, check_script_execution, check_tool_efficiency
 from skillevaluator.tier3.eval_core.declarative_checks import evaluate_declarative_checks
 from skillevaluator.tier3.eval_core.log_converters import load_trajectory_with_fallback
@@ -82,6 +87,69 @@ def test_only_finished_bash_calls_gain_exit_evidence(tool, status, native_events
 def test_empty_events_remain_empty(tmp_path):
     agent = SkillEvaluatorOpenCode(logs_dir=tmp_path, model_name="openai/test-model")
     assert agent._convert_events_to_trajectory([]) is None
+
+
+def test_failed_command_attempt_is_still_observed():
+    step = {
+        "source": "agent",
+        "tool_calls": [{"function_name": "bash", "tool_call_id": "c", "arguments": {"command": "run-check"}}],
+        "observation": {
+            "results": [{"source_call_id": "c", "content": "failed", "extra": {"tool_result_is_error": True}}]
+        },
+    }
+    (fact,) = build_verified_facts({"steps": [step]}, ["Attempt `run-check`"], "")
+    assert fact["observed"] is True
+
+
+@pytest.mark.parametrize("tool", ["edit", "write"])
+@pytest.mark.parametrize("status", ["error", "completed"])
+@pytest.mark.parametrize("source", ["native", "opencode.txt"])
+def test_native_file_change_controls_missing_evidence_gap(tool, status, source, tmp_path, monkeypatch):
+    monkeypatch.setenv("SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT", "500")
+    events = [{"type": "step_start"}]
+    error = "No matching text" if tool == "edit" else "Permission denied"
+    for outcome in ("error", "completed"):
+        path = f"/workspace/output/{outcome}.txt"
+        body = f"value-{outcome}"
+        args = {"oldString": "original", "newString": body} if tool == "edit" else {"content": body}
+        state = {"status": outcome, "input": {"filePath": path, **args}}
+        state.update({"error": error} if outcome == "error" else {"output": "OK"})
+        events.append({"type": "tool_use", "part": {"type": "tool", "tool": tool, "callID": outcome, "state": state}})
+    final = "A" * 3000 + "MISSING_MIDDLE" + "B" * 3000
+    events.extend(
+        [
+            {"type": "step_finish"},
+            {"type": "step_start"},
+            {"type": "text", "part": {"type": "text", "text": final}},
+            {"type": "step_finish"},
+        ]
+    )
+    if source == "native":
+        agent = SkillEvaluatorOpenCode(logs_dir=tmp_path, model_name="openai/test-model")
+        trajectory = agent._convert_events_to_trajectory(events)
+        assert trajectory is not None
+        data = trajectory.to_json_dict()
+    else:
+        (tmp_path / "opencode.txt").write_text("\n".join(json.dumps(event) for event in events), encoding="utf-8")
+        data, metadata = load_trajectory_with_fallback(tmp_path / "trajectory.json")
+        assert metadata["source"] == "opencode.txt"
+        assert data is not None
+    path, body = f"/workspace/output/{status}.txt", f"value-{status}"
+    bundles = build_metric_evidence_bundles(data, "Update the files.", expected_behavior=[f"Save `{body}` to {path}"])
+    bundle = bundles["behavior_check"]
+    omitted = bundle["omitted"]
+    assert "MISSING_MIDDLE" not in bundle["prompt_evidence"]
+    assert omitted["required_missing"] == ["final response"]
+    succeeded = status == "completed"
+    assert {
+        "facts": {fact["claim"]: fact["observed"] for fact in bundle["verified"]},
+        "verified": omitted["expected_behaviors_verified"],
+        "gap": "final response did not reach the judge" in behavior_evidence_gap(omitted),
+    } == {"facts": {path: succeeded, body: succeeded}, "verified": succeeded, "gap": not succeeded}
+    if not succeeded:
+        calls = extract_tool_calls_as_dicts(data)
+        assert error in calls[0]["observation"].splitlines()
+        assert calls[0]["is_error"] is True
 
 
 def test_native_read_activation_uses_its_own_result(native_events, tmp_path):

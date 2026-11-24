@@ -19,6 +19,8 @@ All notable changes to SkillEvaluator are documented in this file.
   Each step keeps its own verifier output and trajectory after job cleanup,
   including steps completed before a failure. Gym masks configured credential
   values in trajectory text, verifier output, and step failure messages.
+- `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
+  lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
 - The api-caller reference skill keeps a `Content-Type` passed with `--headers`
@@ -26,6 +28,15 @@ All notable changes to SkillEvaluator are documented in this file.
   `application/merge-patch+json` or a JSON:API request
   `application/vnd.api+json`. It was always replaced with `application/json`,
   whatever the header name's case.
+
+### Documentation
+
+- Added a guide to MCP servers and Docker Compose sidecars that explains where `localhost`,
+  service names and commands resolve in Docker and local runs, and a cookbook for evaluating
+  a CLI skill that needs a short-lived login. The stdio example in the dataset reference now
+  passes the script as an argument instead of as part of the command.
+- The CLI reference now covers `ci init`, `ci status`, `ci demo` and `--hook-waivers`. A test
+  fails when a visible command or long option is missing from the page.
 
 ## 1.2.0 - 2026-11-23
 

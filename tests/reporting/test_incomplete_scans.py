@@ -11,6 +11,7 @@ from skillevaluator.models import ValidationResult
 from skillevaluator.reporting import (
     BenchmarkReporter,
     CLIReporter,
+    GitHubReporter,
     HTMLReporter,
     JSONReporter,
     JUnitReporter,
@@ -123,6 +124,14 @@ class TestIncompleteScanReporting:
         output = _plain(CLIReporter().render_all([result]))
         assert "did not complete" not in output
         assert "INCOMPLETE" not in output
+
+    def test_github_marks_incomplete_as_warning_not_clean(self):
+        output = GitHubReporter().render_all([_incomplete_result()])
+        warnings = [line for line in output.splitlines() if line.startswith("::warning")]
+        assert warnings
+        assert "did not complete" in warnings[0] or "timed out" in warnings[0]
+        assert "1 incomplete" in output
+        assert not any(line.startswith("::error") for line in output.splitlines())
 
     def test_junit_marks_incomplete_as_error_not_passed(self):
         root = ET.fromstring(JUnitReporter().render_all([_incomplete_result()]))

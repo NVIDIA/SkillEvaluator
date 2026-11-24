@@ -41,6 +41,7 @@ from skillevaluator.publication_identity import (
 )
 from skillevaluator.reporting import (
     CLIReporter,
+    GitHubReporter,
     HTMLReporter,
     JSONReporter,
     JUnitReporter,
@@ -162,6 +163,7 @@ REPORTERS = {
     "markdown": MarkdownReporter,
     "sarif": SARIFReporter,
     "junit": JUnitReporter,
+    "github": GitHubReporter,
 }
 
 
@@ -685,8 +687,8 @@ def emit_reports(
     names it even when no finding path or quality score does.
 
     *scan_root* is the evaluated target and *repository_root* the base that
-    SARIF and JUnit file paths are made relative to (the Git root when the
-    target is inside a repository); both formats get the same pair.
+    SARIF, JUnit, and GitHub annotation file paths are made relative to (the Git
+    root when the target is inside a repository); those formats get the same pair.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -699,10 +701,22 @@ def emit_reports(
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
         CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
+    if "github" in report_formats:
+        github_reporter = GitHubReporter(
+            workspace_root=repository_root,
+            scan_root=scan_root,
+            catalog_root=catalog_root,
+            report_formats=report_formats,
+        )
+        if console.is_terminal:
+            # A stopped Rich status leaves its cursor-restore escapes without a newline;
+            # workflow commands are only parsed at the start of a line.
+            console.line()
+        github_reporter.print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:
-        if fmt == "cli":
+        if fmt in {"cli", "github"}:
             continue
         reporter_cls = REPORTERS[fmt]
         if fmt == "html":

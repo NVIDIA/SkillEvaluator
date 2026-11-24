@@ -1156,6 +1156,24 @@ def _skillspector_scoring_match_identity(
     return ("finding", finding) if finding else ("row", index)
 
 
+def _skillspector_quoted_path(path: str) -> str:
+    """Quote a report path on one line, preserving spaces and whole escape sequences."""
+    limit = _SKILLSPECTOR_REPORT_TEXT_MAX_CHARS
+    quoted = json.dumps(path[:limit], ensure_ascii=True)
+    if len(quoted) <= limit:
+        return quoted
+
+    remaining = limit - len('""...')
+    parts = []
+    for character in path:
+        escaped = json.dumps(character, ensure_ascii=True)[1:-1]
+        if len(escaped) > remaining:
+            break
+        parts.append(escaped)
+        remaining -= len(escaped)
+    return '"' + "".join(parts) + '"...'
+
+
 def _skillspector_report_text(value: object) -> str | None:
     """Return untrusted report text as one bounded line, or ``None`` when it is not text."""
     if not isinstance(value, str):
@@ -1580,31 +1598,30 @@ def _read_skillspector_passive_raster(root: SecureRoot, path: str, budget: int) 
     return len(data), metadata
 
 
-def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_root: Path | None) -> list[str]:
-    """Return the verified PNGs that account for the full inventory surplus."""
+def _skillspector_binary_exclusion_components(completeness: dict, components: object) -> dict[str, dict]:
+    """Match reported binary exclusions to the entire inventory surplus, without accepting them."""
     if not isinstance(components, list) or any(
         not isinstance(component, dict) or not isinstance(component.get("path"), str) for component in components
     ):
-        return []
+        return {}
     surplus = len(components) - completeness["total_components"]
     exclusions = completeness.get("scope_exclusions")
     references = completeness.get("references")
     if (
-        scanned_root is None
-        or not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
+        not 0 < surplus <= _PASSIVE_RASTER_MAX_FILES
         or not isinstance(exclusions, list)
         or len(exclusions) != surplus
         or not isinstance(references, list)
         or any(not isinstance(reference, dict) for reference in references)
         or _skillspector_reference_evidence_unmatched(completeness)
     ):
-        return []
+        return {}
 
     required_patterns = _SKILLSPECTOR_COMMON_UNIVERSAL_ANALYZERS - {"static_yara"}
     paths: set[str] = set()
     for row in exclusions:
         if not isinstance(row, dict):
-            return []
+            return {}
         path = row.get("path")
         analyzers = row.get("analyzers")
         if (
@@ -1615,15 +1632,13 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
             or row.get("start_line") is not None
             or row.get("end_line") is not None
             or not isinstance(path, str)
-            or not path.lower().endswith(".png")
             or path in paths
-            or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
             or not isinstance(analyzers, list)
             or len(analyzers) != len(required_patterns)
             or not all(isinstance(analyzer, str) for analyzer in analyzers)
             or set(analyzers) != required_patterns
         ):
-            return []
+            return {}
         paths.add(path)
     if any(
         reference.get("status") == "resolved"
@@ -1631,18 +1646,32 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
         and target in paths
         for reference in references
     ):
-        return []
+        return {}
 
     by_path: dict[str, dict] = {}
     for component in components:
         path = component["path"]
         if path in paths:
             if path in by_path or _skillspector_scoring_source_scope(component) != ("", ""):
-                return []
+                return {}
             by_path[path] = component
     if by_path.keys() != paths:
-        return []
+        return {}
 
+    return by_path
+
+
+def _skillspector_excluded_pngs(by_path: dict[str, dict], scanned_root: Path | None) -> list[str]:
+    """Return only the excluded components verified as passive PNGs on disk."""
+    if (
+        scanned_root is None
+        or not by_path
+        or any(
+            not path.lower().endswith(".png") or skillspector_file_role(path) in AGENT_CONTROL_PATH_ROLES
+            for path in by_path
+        )
+    ):
+        return []
     budget = _PASSIVE_RASTER_MAX_BYTES
     identities: set[tuple[int, int]] = set()
     try:
@@ -1662,7 +1691,7 @@ def _skillspector_excluded_pngs(completeness: dict, components: object, scanned_
                 budget -= size
     except (OSError, SecurePathError):
         return []
-    return sorted(paths)
+    return sorted(by_path)
 
 
 def _skillspector_passive_raster_note(
@@ -1703,8 +1732,8 @@ def _skillspector_passive_raster_note(
         scanned_root is None
         or not ledger_exceptions
         or not isinstance(components, list)
-        or not isinstance(scope_exclusions, list)
-        or any(not isinstance(row, dict) or row.get("fatal") is not False for row in scope_exclusions)
+        or not _skillspector_scope_paths_are_safe(scope_exclusions)
+        or any(row.get("fatal") is not False for row in scope_exclusions)
     ):
         return None
     named: Counter[str] = Counter()
@@ -1930,6 +1959,80 @@ def _skillspector_report_path_key(path: object) -> str | None:
     ):
         return None
     return path
+
+
+def _skillspector_scope_paths_are_safe(exclusions: object) -> bool:
+    """Check report-relative scope paths, allowing the scanner's directory marker."""
+    if not isinstance(exclusions, list):
+        return False
+    for row in exclusions:
+        path = row.get("path") if isinstance(row, dict) else None
+        if (
+            not isinstance(path, str)
+            or path[1:2] == ":"
+            or _skillspector_report_path_key(path.removesuffix("/")) is None
+        ):
+            return False
+    return True
+
+
+_SKILLSPECTOR_SUPPLY_CHAIN = "static_patterns_supply_chain"
+_SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN = frozenset(
+    f"{_SKILLSPECTOR_SUPPLY_CHAIN}_{name}"
+    for name in ("dependencies", "triggers", "bytecode", "concealed_executable", "dependency_source")
+)
+
+
+def _skillspector_supply_chain_accounting_note(ledger: list[dict], statuses: list[dict]) -> str | None:
+    """Describe a supplemental work mismatch without changing an incomplete scan's verdict."""
+    child_prefixes = tuple(f"{child}_" for child in _SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN)
+    supplemental_sources: set[tuple[str, str]] = set()
+    work_by_source: dict[tuple[str, str], set[tuple[str, str, int | None, int | None]]] = {}
+    for row in ledger:
+        analyzers = row.get("analyzers")
+        if row.get("outcome") != "partial" or row.get("phase") != "static" or not isinstance(analyzers, list):
+            continue
+        source = _skillspector_scoring_source_scope(row)
+        path = _skillspector_report_path_key(row.get("path"))
+        reason = row.get("reason_code")
+        for analyzer in analyzers:
+            if not isinstance(analyzer, str):
+                continue
+            start, end = row.get("start_line"), row.get("end_line")
+            if analyzer.startswith(child_prefixes):
+                supplemental_sources.add(source)
+                if (
+                    not isinstance(reason, str)
+                    or not reason
+                    or analyzer.removesuffix(f"_{reason}") not in _SKILLSPECTOR_SUPPLY_CHAIN_CHILDREN
+                ):
+                    continue
+                # The scanner counts each supplemental path, child and reason once.
+                start = end = None
+            elif analyzer != _SKILLSPECTOR_SUPPLY_CHAIN:
+                continue
+            if (
+                path is not None
+                and path[1:2] != ":"
+                and row.get("fatal") is False
+                and all(line is None or type(line) is int for line in (start, end))
+            ):
+                work_by_source.setdefault(source, set()).add((path, analyzer, start, end))
+
+    if not supplemental_sources:
+        return None
+    reported: Counter[tuple[str, str]] = Counter()
+    for status in statuses:
+        if status["analyzer_id"] == _SKILLSPECTOR_SUPPLY_CHAIN:
+            reported[_skillspector_scoring_source_scope(status)] += status["partial"]
+    for source in sorted(supplemental_sources):
+        accounted = len(work_by_source.get(source, ()))
+        if accounted != reported[source]:
+            return (
+                "SkillSpector supply-chain analyzer has inconsistent partial work accounting "
+                f"({reported[source]} reported, {accounted} explained by the ledger)."
+            )
+    return None
 
 
 def _skillspector_bundled_file_bytes(path: object, components: object, scanned_root: Path | None) -> bytes | None:
@@ -3129,6 +3232,8 @@ def _skillspector_gaps_without_rows(
         gaps.append("unreadable scope exclusions")
     elif fatal := sum(not (isinstance(row, dict) and row.get("fatal") is False) for row in scope_exclusions):
         gaps.append(f"{fatal} fatal scope exclusion(s)")
+    elif not _skillspector_scope_paths_are_safe(scope_exclusions):
+        gaps.append("unsafe scope exclusion path")
     if counts["findings_before_filtering"] != counts["findings_after_filtering"]:
         gaps.append(
             f"{counts['findings_before_filtering']} finding(s) before filtering and "
@@ -4632,7 +4737,8 @@ class SecurityValidator(ValidatorBase):
                     other_gaps: list[str] = []
                     if gap_notes is None and without_hooks is not None and not gap_rows:
                         excluded_pngs = _skillspector_excluded_pngs(
-                            analysis_completeness, data.get("components"), scanned_root
+                            _skillspector_binary_exclusion_components(analysis_completeness, data.get("components")),
+                            scanned_root,
                         )
                         other_gaps = _skillspector_gaps_without_rows(
                             gap_statuses,
@@ -4667,6 +4773,9 @@ class SecurityValidator(ValidatorBase):
                         if not gap_rows and not other_gaps and diagnostic["limitations"]:
                             # No incomplete file to name: the limitation is the only stated reason.
                             message = f"{message}. Limitation: {diagnostic['limitations'][0]}"
+                        if accounting_note := _skillspector_supply_chain_accounting_note(gap_rows, gap_statuses):
+                            separator = " " if message.endswith(".") else ". "
+                            message = f"{message}{separator}{accounting_note}"
                         result.fail_gate(message)
                         result.mark_scan_incomplete(stage_name)
 
@@ -4928,15 +5037,32 @@ class SecurityValidator(ValidatorBase):
             covered_count = analysis_completeness["total_components"]
             if inventory_count != covered_count and not excluded_pngs:
                 if completeness_status == "complete":
-                    excluded_pngs = _skillspector_excluded_pngs(
-                        analysis_completeness, normalized_components, scanned_root
+                    binary_components = _skillspector_binary_exclusion_components(
+                        analysis_completeness, normalized_components
                     )
+                    unsupported = next(
+                        (path for path in sorted(binary_components) if not path.lower().endswith(".png")), None
+                    )
+                    if unsupported is not None:
+                        result.add_error(
+                            f"SkillSpector reported a binary exclusion for {_skillspector_quoted_path(unsupported)}. "
+                            "SkillEvaluator only accepts verified passive PNGs for this exclusion; "
+                            "security scan did not complete"
+                        )
+                        return False
+                    excluded_pngs = _skillspector_excluded_pngs(binary_components, scanned_root)
                 if not excluded_pngs:
                     result.add_error(
                         "skillspector JSON component inventory contradicts analysis completeness; "
                         "security scan did not complete"
                     )
                     return False
+            if not _skillspector_scope_paths_are_safe(analysis_completeness.get("scope_exclusions", [])):
+                result.add_error(
+                    "skillspector JSON analysis completeness has an unsafe scope exclusion path; "
+                    "security scan did not complete"
+                )
+                return False
             if covered_count or excluded_pngs:
                 for analyzer_id in universal_analyzer_ids:
                     # The PNG exclusion applies only to the text patterns.

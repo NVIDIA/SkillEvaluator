@@ -121,9 +121,10 @@ class ScriptLintValidator(ValidatorBase):
         if not skill_dirs:
             result.add_success(check_name="lint", message="No skills found to lint")
             return result
+        labels = self._member_labels(skill_dirs, root)
         for sd in skill_dirs:
             sub = self._lint_skill(sd)
-            result.merge_with_prefix(sub, sd.name)
+            result.merge_with_prefix(sub, labels[sd])
         return result
 
     def _lint_skill(self, skill_path: Path) -> ValidationResult:

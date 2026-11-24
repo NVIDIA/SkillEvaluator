@@ -354,26 +354,35 @@ def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = 
     member each finding came from. *extra_metadata* is merged on top, for a
     caller that can also name the member in a machine-readable field.
     """
-    metadata = finding.metadata
+    metadata = dict(finding.metadata) if isinstance(finding.metadata, dict) else {}
+    if (
+        isinstance(finding.file_path, str)
+        and finding.file_path.strip()
+        and "artifact_path" not in metadata
+        and "member_label" not in metadata
+    ):
+        metadata["artifact_path"] = finding.file_path
+    if isinstance(prefix, str) and prefix.strip():
+        existing_label = metadata.get("member_label")
+        metadata["member_label"] = (
+            f"{prefix}/{existing_label}" if isinstance(existing_label, str) and existing_label.strip() else prefix
+        )
     for key in ("occurrences", "skillspector_occurrences"):
-        listed = metadata.get(key) if isinstance(metadata, dict) else None
+        listed = metadata.get(key)
         if not isinstance(listed, list):
             continue
         # A check that folds repeats (the PII scan) lists each location
         # in metadata, and a SkillSpector AE1 finding lists the lines
         # that name its file; prefix those like file_path so the
         # finding's own location still matches its first listed one.
-        metadata = {
-            **metadata,
-            key: [
-                {**item, "file": f"[{prefix}] {item['file']}"}
-                if isinstance(item, dict) and isinstance(item.get("file"), str)
-                else item
-                for item in listed
-            ],
-        }
+        metadata[key] = [
+            {**item, "file": f"[{prefix}] {item['file']}"}
+            if isinstance(item, dict) and isinstance(item.get("file"), str)
+            else item
+            for item in listed
+        ]
     if extra_metadata:
-        metadata = {**metadata, **extra_metadata} if isinstance(metadata, dict) else dict(extra_metadata)
+        metadata.update(extra_metadata)
     return Finding(
         category=finding.category,
         severity=finding.severity,
@@ -385,6 +394,24 @@ def prefix_finding(finding: Finding, prefix: str, extra_metadata: dict | None = 
         suggestion=finding.suggestion,
         metadata=metadata,
     )
+
+
+def _labelled_member_metadata(metadata: object, prefix: str) -> dict:
+    """Return *metadata* with the member that produced it recorded under ``member_label``.
+
+    ``merge_with_prefix`` composes ``[member] check`` names, but a member name
+    may itself contain ``]`` and two members of one folder may share a
+    basename, so the composed string cannot be split back into the member a
+    report needs. Storing the label keeps each member distinguishable however
+    its name is written, and composes on a nested merge the way
+    :func:`prefix_finding` records it on a finding.
+    """
+    labelled = dict(metadata) if isinstance(metadata, dict) else {}
+    if not prefix.strip():
+        return labelled
+    existing = labelled.get("member_label")
+    labelled["member_label"] = f"{prefix}/{existing}" if isinstance(existing, str) and existing.strip() else prefix
+    return labelled
 
 
 @dataclass
@@ -648,7 +675,7 @@ class ValidationResult:
         for finding in self.findings:
             # merge_with_prefix puts skill labels before legacy messages but inside
             # structured finding paths. Recognize both forms, including nested merges.
-            location = finding.location
+            location = finding.location or ""
             prefix = ""
             while location.startswith("[") and "] " in location:
                 label, _, location = location.partition("] ")
@@ -780,12 +807,15 @@ class ValidationResult:
         for finding in other.findings:
             self.findings.append(prefix_finding(finding, prefix))
 
-        # Carry over success_details (prefixed) so contributor info is preserved
+        # Carry over success_details (prefixed) so contributor info is preserved.
+        # The label also goes in metadata: a member name may itself contain "]",
+        # so a composed ``[member] check`` name cannot be split back into the
+        # member the findings were keyed by.
         for detail in other.success_details:
             prefixed_detail = SuccessDetail(
                 check_name=f"[{prefix}] {detail.check_name}",
                 message=detail.message,
-                metadata=detail.metadata,
+                metadata=_labelled_member_metadata(detail.metadata, prefix),
             )
             self.success_details.append(prefixed_detail)
 
@@ -795,6 +825,15 @@ class ValidationResult:
         gate_failures = [*self.gate_failures, *(f"[{prefix}] {message}" for message in other.gate_failures)]
         if gate_failures:
             self.metadata["gate_failures"] = gate_failures
+        # The messages above are composed into ``[member] reason`` strings, which
+        # a name containing "]" makes ambiguous. Keep each member's own failures
+        # beside them so a report can still tell which member failed the gate.
+        if other.gate_failures:
+            carried = self.metadata.get("member_gate_failures")
+            self.metadata["member_gate_failures"] = [
+                *(carried if isinstance(carried, list) else []),
+                {"label": prefix, "failures": list(other.gate_failures)},
+            ]
         # A member's confirmed failure outranks an incomplete scan in the
         # merged result's reported status, as it does in the member's own.
         if other.metadata.get("confirmed_failure") is True:

@@ -210,6 +210,16 @@ Unknown check types and invalid fields are dataset-validation errors. On a
 without-skill baseline, checks for scripts inside the evaluated skill are not
 checked because that skill is not installed.
 
+In the unreleased checkout, runtime `output_matches` checks use isolated Python
+workers with a default 1-second limit per pattern and a shared 5-second matching
+budget per case. A timeout or an exhausted matching budget counts as a failed
+check and stays in the `behavior_check` denominator. Invalid-pattern errors
+reported by a worker and worker startup failures remain not checked. Later
+literal checks still run. Set
+`SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC` and `SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC`
+in the host environment to allow slower legitimate patterns; both accept
+positive finite seconds. See [Output-pattern check limits](/skills/skillevaluator/environment-variables#output-pattern-check-limits).
+
 For an exact final-response format, use an anchored `output_matches` check
 and keep semantic requirements in `expected_behavior` (or `assertions`). For
 example, this legacy entry checks numeric-only output without judging it:
@@ -705,11 +715,11 @@ required fields, duplicate case IDs, and invalid config in seconds.
 
 The informational **Dataset coverage** block also shows case count, positive
 (should-trigger), negative/non-trigger and unlabeled-trigger counts, plus cases
-with an expected output and assertions/expected behaviors. These use the same
+with an expected output and assertions/expected behaviors/declarative checks. These use the same
 field normalization and trigger resolution as evaluation. Gaps name missing
 negative or positive examples and missing judge references: without an expected
-output, accuracy and goal_accuracy are N/A; without assertions or expected
-behaviors, behavior_check is N/A.
+output, accuracy and goal_accuracy are N/A; without assertions, expected
+behaviors or valid nonempty declarative checks, behavior_check is N/A.
 
 A single-case dataset is labelled **a starting point, not a representative
 evaluation**. Larger datasets show their counts and concrete gaps without any

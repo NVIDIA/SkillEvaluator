@@ -375,9 +375,10 @@ class QualityScoreValidator(ValidatorBase):
 
         result = ValidationResult(validator_name="QUALITY", validator_description=self.description)
         all_quality: list[dict] = []
+        labels = self._member_labels(skill_dirs, root)
         for skill_dir in skill_dirs:
             sub = self._validate_single_skill(skill_dir)
-            result.merge_with_prefix(sub, skill_dir.name)
+            result.merge_with_prefix(sub, labels[skill_dir])
             if sub.metadata.get("quality_scores"):
                 all_quality.append(sub.metadata["quality_scores"])
 

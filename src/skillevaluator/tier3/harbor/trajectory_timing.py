@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import math
 import re
+from collections.abc import Iterable
 from datetime import datetime
 from typing import Any, NamedTuple
 
@@ -91,6 +92,14 @@ def _seconds(milliseconds: float | None) -> float | None:
     if milliseconds is None or not math.isfinite(milliseconds) or milliseconds < 0:
         return None
     return round(milliseconds / 1000.0, 3)
+
+
+def _sum_ms(values: Iterable[float]) -> float | None:
+    """Leave an overflowing timing component unmeasured without losing the other one."""
+    try:
+        return math.fsum(values)
+    except OverflowError:
+        return None
 
 
 def _tool_calls(step: dict[str, Any]) -> list[Any] | None:
@@ -170,7 +179,7 @@ def _native_timing_ms(steps: list[dict[str, Any]]) -> tuple[float | None, float 
         for step in agent_steps
     ]
     llm_ms = (
-        math.fsum(value for value in llm_values if value is not None)
+        _sum_ms(value for value in llm_values if value is not None)
         if agent_steps and all(value is not None for value in llm_values)
         else None
     )
@@ -183,7 +192,8 @@ def _native_timing_ms(steps: list[dict[str, Any]]) -> tuple[float | None, float 
         calls.extend(step_calls)
     intervals: list[tuple[float, float]] = []
     durations: list[float] = []
-    tool_ms: float | None = 0.0 if llm_ms is not None else None
+    # No tool calls establishes zero independently of the availability of LLM timing.
+    tool_ms: float | None = 0.0
     for call in calls:
         extra = call.get("extra") if isinstance(call, dict) else None
         interval = _interval_ms(extra)
@@ -197,7 +207,8 @@ def _native_timing_ms(steps: list[dict[str, Any]]) -> tuple[float | None, float 
         durations.append(duration)
     else:
         if calls:
-            tool_ms = _union_ms(intervals) + math.fsum(durations)
+            duration_ms = _sum_ms(durations)
+            tool_ms = _union_ms(intervals) + duration_ms if duration_ms is not None else None
     if llm_ms is None and tool_ms is None:
         return None
     return llm_ms, tool_ms

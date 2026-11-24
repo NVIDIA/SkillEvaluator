@@ -56,6 +56,14 @@ def legacy_results_root(skill_path: Path) -> Path:
     return skill_path.expanduser().resolve() / "evals" / "results"
 
 
+def plugin_results_directory(plugin_root: Path, requested: Path | None = None) -> Path:
+    """Select a public plugin results base without creating an authored evals tree."""
+    if requested is not None:
+        return requested
+    configured = os.environ.get(ENV_RESULTS_DIR)
+    return Path(configured).expanduser() if configured else plugin_root / "results"
+
+
 def skill_results_name(skill_path: Path) -> str:
     """Return the directory name used under an external results root."""
     return skill_path.expanduser().resolve().name
@@ -1146,7 +1154,7 @@ def git_root_for(path: Path) -> Path | None:
     if result.returncode != 0:
         return None
     # Raw file-name bytes: decode them the way Python encodes paths, not with the locale code page.
-    root = os.fsdecode(result.stdout).strip()
+    root = os.fsdecode(result.stdout).removesuffix("\n")
     return Path(root).resolve() if root else None
 
 

@@ -71,6 +71,16 @@
             },
             {
               "choices": [
+                "stable"
+              ],
+              "name": "channel",
+              "opts": [
+                "--channel"
+              ],
+              "param_type": "option"
+            },
+            {
+              "choices": [
                 "docker",
                 "local"
               ],
@@ -509,7 +519,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -706,7 +717,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -845,6 +857,16 @@
           "name": "verify_models",
           "opts": [
             "--verify-models"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
           ],
           "param_type": "option",
           "type": "boolean"
@@ -1468,6 +1490,16 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -1613,7 +1645,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1695,7 +1728,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1795,7 +1829,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1845,7 +1880,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1911,13 +1947,22 @@
           "type": "file"
         },
         {
+          "name": "hook_waivers",
+          "opts": [
+            "--hook-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "choices": [
             "cli",
             "json",
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2049,7 +2094,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2092,7 +2138,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2151,7 +2198,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2209,7 +2257,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2259,7 +2308,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2325,13 +2375,22 @@
               "type": "file"
             },
             {
+              "name": "hook_waivers",
+              "opts": [
+                "--hook-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2451,13 +2510,22 @@
               "type": "file"
             },
             {
+              "name": "hook_waivers",
+              "opts": [
+                "--hook-waivers"
+              ],
+              "param_type": "option",
+              "type": "file"
+            },
+            {
               "choices": [
                 "cli",
                 "json",
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli', 'json', 'html')",
               "multiple": true,
@@ -2579,13 +2647,22 @@
             "type": "file"
           },
           {
+            "name": "hook_waivers",
+            "opts": [
+              "--hook-waivers"
+            ],
+            "param_type": "option",
+            "type": "file"
+          },
+          {
             "choices": [
               "cli",
               "json",
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -2654,7 +2731,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2720,7 +2798,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2852,7 +2931,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2931,7 +3011,8 @@
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -3255,6 +3336,16 @@
               "name": "verify_models",
               "opts": [
                 "--verify-models"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
               ],
               "param_type": "option",
               "type": "boolean"
@@ -4958,6 +5049,14 @@
           "type": "file"
         },
         {
+          "name": "hook_waivers",
+          "opts": [
+            "--hook-waivers"
+          ],
+          "param_type": "option",
+          "type": "file"
+        },
+        {
           "default": "70",
           "name": "min_score",
           "opts": [
@@ -5377,7 +5476,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,

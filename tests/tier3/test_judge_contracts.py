@@ -1871,6 +1871,316 @@ def test_long_judge_evidence_is_bounded_and_redacted_before_it_is_cut(tmp_path: 
     assert credential[-8:] not in saved_text
 
 
+def _tool_result_with(text: str, *, at: int, length: int = 3000) -> str:
+    """A log of *length* characters in short lines, with *text* lying across character *at*."""
+    start = at - len(text) // 2
+    before = ("log line before the value\n" * (start // 26 + 1))[: start - 1] + "\n"
+    after = "\n" + "log line after the value\n" * (length // 25)
+    return (before + text + after)[: length - 14] + "exit status 0."
+
+
+def test_credential_across_the_cut_of_a_long_tool_result_is_not_saved(tmp_path: Path, monkeypatch) -> None:
+    # The accuracy and goal judges get the beginning and the end of a long
+    # tool result. A credential that the cut goes through must be masked while
+    # it is whole. After the cut its end stands alone in the kept tail, away
+    # from the name or the first lines that the masking reads.
+    verifier = _stage_verifier(tmp_path)
+    configured = "configured-" + "Kq7" * 10
+    monkeypatch.setenv("ANTHROPIC_API_KEY", configured)
+    password, flag_value = "pass-" + "Zx9" * 12, "flag-" + "Jv4" * 12
+    rng = random.Random(816)
+    key_lines = ["".join(rng.choices(string.ascii_letters + string.digits, k=64)) for _ in range(26)]
+    private_key = "PRIVATE " + "KEY"
+    key_block = "\n".join([f"-----BEGIN {private_key}-----", *key_lines, f"-----END {private_key}-----"])
+    # A key block of 13,000 characters that ends just before the end of a
+    # result of 40,000. Its first line is far from the kept end, so no window
+    # around that end would have it.
+    key_lines += ["".join(rng.choices(string.ascii_letters + string.digits, k=64)) for _ in range(200)]
+    pgp_key = f"PGP {private_key} BLOCK"
+    long_block = "\n".join([f"-----BEGIN {pgp_key}-----", *key_lines[26:], f"-----END {pgp_key}-----"])
+    head_end = _cut_point(atif_helpers._BUNDLE_ITEM_CHARS)
+    tail_start = 3000 - (atif_helpers._BUNDLE_ITEM_CHARS - len("\n...[truncated]...\n") - head_end)
+    results = [
+        _tool_result_with(f"export DB_PASSWORD={password}", at=head_end),
+        _tool_result_with(f"mysql --password {flag_value} --host db", at=tail_start),
+        _tool_result_with(configured, at=tail_start),
+        _tool_result_with(key_block, at=tail_start - 400),
+        _tool_result_with(long_block, at=40_000 - 300 - len(long_block) // 2, length=40_000),
+    ]
+    assert [len(result) for result in results] == [3000, 3000, 3000, 3000, 40_000]
+    steps: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        call = {"tool_call_id": f"run-{index}", "function_name": "bash", "arguments": {"command": f"./step-{index}.sh"}}
+        observation = {"results": [{"source_call_id": f"run-{index}", "content": result}]}
+        steps.append({"source": "agent", "tool_calls": [call], "observation": observation})
+    steps.append({"source": "agent", "message": "I completed the task."})
+    verifier.ATIF_PATH.write_text(json.dumps({"steps": steps}), encoding="utf-8")
+    prompts: list[str] = []
+    route = _routed(prompts, accuracy=_ACCURACY_RESPONSE, goal=_GOAL_RESPONSE, behavior=_BEHAVIOR_RESPONSE)
+    verifier.call_public_llm = route
+    verifier._call_public_llm_with_provenance = lambda prompt, **kwargs: (*route(prompt, **kwargs), {})
+
+    verifier.main()
+
+    saved_text = (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+    for value in (password, flag_value, configured):
+        assert value[:8] not in saved_text
+        assert value[-8:] not in saved_text
+    assert not any(line in saved_text for line in key_lines)
+    # The end of each result still reaches the two judges that read tool results.
+    goal_prompt = next(prompt for prompt in prompts if "EXPECTED BEHAVIORS" not in prompt and "FORMAT_FOLLOWED" not in prompt)
+    assert goal_prompt.count("exit status 0.") == len(results)
+
+
+def _judge_prompts_for_tool_results(verifier: Any, results: list[str]) -> tuple[str, str, str]:
+    """Run the verifier on one tool call per result. Return the accuracy prompt, the goal prompt and the saved file."""
+    steps: list[dict[str, Any]] = []
+    for index, result in enumerate(results):
+        call = {"tool_call_id": f"run-{index}", "function_name": "bash", "arguments": {"command": f"./step-{index}.sh"}}
+        observation = {"results": [{"source_call_id": f"run-{index}", "content": result}]}
+        steps.append({"source": "agent", "tool_calls": [call], "observation": observation})
+    steps.append({"source": "agent", "message": "I completed the task."})
+    verifier.ATIF_PATH.write_text(json.dumps({"steps": steps}), encoding="utf-8")
+    prompts: list[str] = []
+    route = _routed(prompts, accuracy=_ACCURACY_RESPONSE, goal=_GOAL_RESPONSE, behavior=_BEHAVIOR_RESPONSE)
+    verifier.call_public_llm = route
+    verifier._call_public_llm_with_provenance = lambda prompt, **kwargs: (*route(prompt, **kwargs), {})
+
+    verifier.main()
+
+    accuracy_prompt = next(prompt for prompt in prompts if "FORMAT_FOLLOWED" in prompt)
+    goal_prompt = next(prompt for prompt in prompts if "EXPECTED BEHAVIORS" not in prompt and "FORMAT_FOLLOWED" not in prompt)
+    return accuracy_prompt, goal_prompt, (verifier.VERIFIER_DIR / "judge_attempts.json").read_text(encoding="utf-8")
+
+
+def test_key_header_with_no_end_line_does_not_hide_the_end_of_a_tool_result(tmp_path: Path) -> None:
+    # The masking of saved evidence reads a key header that has no END line as
+    # a key that runs to the end of the text. A long tool result is masked
+    # before it is cut, so a header that a grep only mentions would take the
+    # rest of the result with it, the last lines included. A key that was cut
+    # off is still masked, to the last line that holds its data.
+    verifier = _stage_verifier(tmp_path)
+    private_key = "PRIVATE " + "KEY"
+    header = f"-----BEGIN RSA {private_key}-----"
+    rng = random.Random(816)
+    key_lines = ["".join(rng.choices(string.ascii_letters + string.digits + "+/", k=64)) for _ in range(25)]
+    key_lines.append("Ab3x9Q==")
+    context = [f"./src/app/module_{index:02d}.py:{index + 3}: a line of grep context" for index in range(60)]
+    log = [f"log line {index}" for index in range(200)]
+    results = [
+        "\n".join([
+            f"./docs/setup.md:14:{header}",
+            f'./keys.py:7:HEADER = "{header}"',
+            *context,
+            "Found 2 matches in 3 files.",
+        ]),
+        "\n".join([*log, f"./docs/setup.md:14:{header}", "Found 1 match."]),
+        "\n".join([*log, f'no "{header}" in the repo, check passed.']),
+        "\n".join(["cat id_rsa", header, *key_lines, *log, "exit status 0."]),
+        "\n".join([*(f"{number:6d}\t{line}" for number, line in enumerate([header, *key_lines], 1)), *log, "Done."]),
+    ]
+    assert all(len(result) > atif_helpers._BUNDLE_ITEM_CHARS for result in results)
+
+    accuracy_prompt, goal_prompt, saved_text = _judge_prompts_for_tool_results(verifier, results)
+
+    for prompt in (accuracy_prompt, goal_prompt):
+        for last_line in (
+            "Found 2 matches in 3 files.",
+            "Found 1 match.",
+            " in the repo, check passed.",
+            "exit status 0.",
+            "Done.",
+        ):
+            assert last_line in prompt
+    for text in (accuracy_prompt, goal_prompt, saved_text):
+        assert not any(line in text for line in key_lines)
+        assert verifier._PRIVATE_KEY_CLOSING_LINE not in text
+
+
+def test_cut_off_key_in_short_lines_does_not_reach_the_judges(tmp_path: Path) -> None:
+    # Key data is not always wrapped at 64 characters. A key that is wrapped
+    # again at 24 still parses, so the lines of nothing but key characters
+    # that follow a header are key data whatever their length. A tool can put
+    # a file name, a line number or a time in front of every line it prints.
+    verifier = _stage_verifier(tmp_path)
+    private_key = "PRIVATE " + "KEY"
+    header = f"-----BEGIN {private_key}-----"
+    rng = random.Random(8165)
+    key_lines = ["".join(rng.choices(string.ascii_letters + string.digits + "+/", k=length)) for length in (24, 24, 16)]
+    log = [f"log line {index}" for index in range(200)]
+    results = [
+        "\n".join(["cat id_ed25519", header, *key_lines, *log, "Read the key."]),
+        "\n".join([*(f"id_ed25519:{number}:{line}" for number, line in enumerate([header, *key_lines], 1)), *log, "Searched the key."]),
+        "\n".join(
+            f"2026-11-20T17:03:{index % 60:02d}.{index:07d}Z {line}"
+            for index, line in enumerate(["Run cat deploy_key", header, *key_lines, *log, "Process completed with exit code 0."])
+        ),
+    ]
+    assert all(len(result) > atif_helpers._BUNDLE_ITEM_CHARS for result in results)
+
+    accuracy_prompt, goal_prompt, saved_text = _judge_prompts_for_tool_results(verifier, results)
+
+    for prompt in (accuracy_prompt, goal_prompt):
+        for last_line in ("Read the key.", "Searched the key.", "Process completed with exit code 0."):
+            assert last_line in prompt
+    for text in (accuracy_prompt, goal_prompt, saved_text):
+        assert not any(line in text for line in key_lines)
+        assert verifier._PRIVATE_KEY_CLOSING_LINE not in text
+
+
+@pytest.mark.parametrize(
+    ("result", "masked"),
+    [
+        ("grep hit {begin}\nFound 1 match.", "grep hit <key>\nFound 1 match."),
+        ('no "{begin}" here, check passed.', 'no "<key>" here, check passed.'),
+        ("{begin}\n{data}\n{data}\nAb3x9Q==\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\nVersion: 2\n\n{data}\n{data}\n=Zk3a\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\\n{data}\\n{data}\nexit status 0.", "<key>\nexit status 0."),
+        ("id_rsa:1:{begin}\nid_rsa:2:{data}\nid_rsa:3:Ab3x9Q==\nexit status 0.", "id_rsa:1:<key>\nexit status 0."),
+        ("{begin}\n{data}\ngrep hit {begin}\nFound 1 match.", "<key>\ngrep hit <key>\nFound 1 match."),
+        ("{begin}\n{data}\n{end}\ngrep hit {begin}\nFound 1 match.", "<key>\ngrep hit <key>\nFound 1 match."),
+        ("grep hit {begin}\n{begin}\n{data}\n{end}\nexit status 0.", "grep hit <key>\nexit status 0."),
+        ("{begin}\n{data}", "<key>"),
+        ("{begin}\n{short}\n{short}\nZm9v\nexit status 0.", "<key>\nexit status 0."),
+        ("id_rsa:1:{begin}\nid_rsa:2:{short}\nid_rsa:3:{short}\nexit status 0.", "id_rsa:1:<key>\nexit status 0."),
+        (
+            "17:03:01.004Z {begin}\n17:03:01.015Z {short}\n17:03:02.100Z Zm9v\n17:03:02.101Z exit status 0.",
+            "17:03:01.004Z <key>\n17:03:02.101Z exit status 0.",
+        ),
+        ("{begin}\n{short}\n{data}\n{short}\nexit status 0.", "<key>\nexit status 0."),
+        ("id_rsa:1:{begin}\nid_rsa-2-{short}\nid_rsa-3-{short}\nexit status 0.", "id_rsa:1:<key>\nexit status 0."),
+        ("{begin}\r\n{short}\r\n{short}\r\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\n{short}\nAb3x9Q==\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\n{short}\n{short}\nAb\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\n{short}\n{short}\nexit status 0.\r\nDone.", "<key>\nexit status 0.\r\nDone."),
+        ("key: {begin}\n  {short}\n  {short}\nexit status 0.", "key: <key>\nexit status 0."),
+        ("app.py:12: UserWarning: key {begin}\n{short}\n{short}\nexit status 0.", "app.py:12: UserWarning: key <key>\nexit status 0."),
+        (
+            "17:03:01.004Z DEPLOY_KEY={begin}\n17:03:01.015Z {short}\n17:03:01.016Z {short}\n17:03:02.101Z exit status 0.",
+            "17:03:01.004Z DEPLOY_KEY=<key>\n17:03:02.101Z exit status 0.",
+        ),
+        (
+            "cat -n notes\n     7\tkey = {begin}\n     8\t{short}\n     9\t{short}\nexit status 0.",
+            "cat -n notes\n     7\tkey = <key>\nexit status 0.",
+        ),
+        (
+            "Nov  9 17:03:01 host {begin}\nNov 10 17:03:02 host {short}\nNov 10 17:03:03 host exit status 0.",
+            "Nov  9 17:03:01 host <key>\nNov 10 17:03:03 host exit status 0.",
+        ),
+        ('id_rsa:1:key = "{begin}\nid_rsa:2:{short}\nid_rsa:3:{short}\nexit status 0.', 'id_rsa:1:key = "<key>\nexit status 0.'),
+        ("{begin}\n\n{short}\n{short}\n=Zk3a\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\nVersion: 2\nComment: none\n\n{short}\n{short}\nexit status 0.", "<key>\nexit status 0."),
+        (
+            "cat -n key.asc\n     1\t{begin}\n     2\tVersion: 2\n     3\t\n     4\t{short}\n     5\t{short}\nexit status 0.",
+            "cat -n key.asc\n     1\t<key>\nexit status 0.",
+        ),
+        (
+            "17:03:01.004Z {begin}\n17:03:01.005Z\n17:03:01.006Z {short}\n17:03:01.007Z {short}\n17:03:01.008Z exit status 0.",
+            "17:03:01.004Z <key>\n17:03:01.008Z exit status 0.",
+        ),
+        (
+            "id_rsa:1:{begin}\nid_rsa:2:Proc-Type: 4,ENCRYPTED\nid_rsa:3:DEK-Info: AES-128-CBC,0123456789ABCDEF\n"
+            "id_rsa:4:\nid_rsa:5:{short}\nid_rsa:6:{short}\nexit status 0.",
+            "id_rsa:1:<key>\nexit status 0.",
+        ),
+        ("{begin}\n{data}\n{begin}\n{data}\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\n{data}\nnote {begin} {data}\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\nsome text\n{data}\nAb3x9Q==\n=Zk3a\nexit status 0.", "<key>\nexit status 0."),
+        ("{begin}\n{data}\n{short}\n{short}\n{short}\nexit status 0.", "<key>\nexit status 0."),
+        (
+            "grep hit {begin}\nlog line 1\nlog line 2\nid_rsa:1:{begin}\nid_rsa:2:{short}\nFound 2 matches.",
+            "grep hit <key>\nlog line 1\nlog line 2\nid_rsa:1:<key>\nFound 2 matches.",
+        ),
+        ("grep hit {begin}\nOK\nFound 1 match.", "grep hit <key>\nOK\nFound 1 match."),
+        ("grep hit {begin}\n3fc7cdd\n33b5734\n0d745fe", "grep hit <key>\n3fc7cdd\n33b5734\n0d745fe"),
+        ("grep hit {begin}\nDone.\nFound 1 match.", "grep hit <key>\nDone.\nFound 1 match."),
+        (
+            "{begin}\nabc12\nlog line\ngrep hit {begin}\nOK\nFound 1 match.",
+            "<key>\nabc12\nlog line\ngrep hit <key>\nOK\nFound 1 match.",
+        ),
+        ("id_rsa:1:{begin}\nid_rsa:2:\tAbcDef\nexit status 0.", "id_rsa:1:<key>\nid_rsa:2:\tAbcDef\nexit status 0."),
+        ("notes.md:3:{begin}\n0 errors\nFound 1 match.", "notes.md:3:<key>\n0 errors\nFound 1 match."),
+        ("grep hit {begin}\nDEBUG=true\nFound 1 match.", "grep hit <key>\nDEBUG=true\nFound 1 match."),
+        ("grep hit {begin}\nVersion: 2\n\nFound 1 match.", "grep hit <key>\nVersion: 2\n\nFound 1 match."),
+        ("grep hit {begin}\nsee Version: 2\n{short}\nexit status 0.", "grep hit <key>\nsee Version: 2\n{short}\nexit status 0."),
+        ("{begin}\n{data}\n\nexit status 0.", "<key>\n\nexit status 0."),
+        ("{begin}\n{short}\n{short}\n\nOK\nexit status 0.", "<key>\n\nOK\nexit status 0."),
+        (
+            "cat -n notes.md\n     1\t{begin} {data}\n     2\tsome text\n     3\tmore text\n     4\tDone.",
+            "cat -n notes.md\n     1\t<key>\n     2\tsome text\n     3\tmore text\n     4\tDone.",
+        ),
+        ("grep hit {begin} in {data}\nmysql -p\\\npppppppppppp db", "grep hit <key>\nmysql -p<redacted> db"),
+        ("grep hit {begin}\nFound 1 match.\n{short}\n{short}\n{short}\nexit status 0.", "grep hit <key>\nFound 1 match.\n{short}\n{short}\n{short}\nexit status 0."),
+    ],
+    ids=[
+        "mention",
+        "mention-inside-a-line",
+        "cut-off-key",
+        "cut-off-pgp-block",
+        "cut-off-key-with-escaped-line-breaks",
+        "cut-off-key-with-line-numbers",
+        "cut-off-key-then-mention",
+        "whole-key-then-mention",
+        "mention-then-whole-key",
+        "cut-off-key-at-the-end",
+        "cut-off-key-in-short-lines",
+        "cut-off-key-in-short-lines-with-line-numbers",
+        "cut-off-key-in-short-lines-behind-a-time",
+        "cut-off-key-in-lines-of-mixed-length",
+        "cut-off-key-in-short-lines-around-a-grep-hit",
+        "cut-off-key-in-short-lines-with-carriage-returns",
+        "cut-off-key-in-short-lines-with-padding",
+        "cut-off-key-in-short-lines-with-a-last-line-of-two",
+        "cut-off-key-in-short-lines-then-carriage-returns",
+        "cut-off-key-in-indented-short-lines",
+        "cut-off-key-in-short-lines-after-a-warning",
+        "cut-off-key-in-short-lines-behind-a-time-and-a-name",
+        "cut-off-key-in-short-lines-with-numbers-and-text-on-the-header-line",
+        "cut-off-key-in-short-lines-behind-a-padded-date",
+        "cut-off-key-in-short-lines-after-text-on-the-header-line",
+        "cut-off-pgp-block-in-short-lines",
+        "cut-off-pgp-block-in-short-lines-with-header-lines",
+        "cut-off-pgp-block-in-short-lines-with-line-numbers",
+        "cut-off-pgp-block-in-short-lines-behind-a-time",
+        "cut-off-encrypted-key-in-short-lines-with-line-numbers",
+        "cut-off-key-then-cut-off-key",
+        "cut-off-key-then-a-header-on-the-last-key-line",
+        "cut-off-key-with-a-line-of-text-inside",
+        "cut-off-key-with-short-lines-after-a-long-one",
+        "mention-then-cut-off-key-in-short-lines",
+        "mention-then-a-status-word",
+        "mention-then-short-hashes",
+        "mention-then-a-word-and-a-full-stop",
+        "one-case-lines-after-two-headers",
+        "line-start-with-a-tab-the-header-line-lacks",
+        "mention-then-a-count",
+        "mention-then-a-setting",
+        "mention-then-a-version-line",
+        "short-lines-after-text-that-names-a-version",
+        "empty-line-after-the-last-key-line",
+        "empty-line-after-short-lines-ends-the-key",
+        "numbered-lines-after-the-last-key-line",
+        "password-option-after-the-last-key-line",
+        "short-lines-that-follow-no-header",
+    ],
+)
+def test_tool_result_masking_ends_an_open_key_block_where_its_data_ends(result: str, masked: str) -> None:
+    private_key = "PRIVATE " + "KEY"
+    forms = {
+        "begin": f"-----BEGIN RSA {private_key}-----",
+        "end": f"-----END RSA {private_key}-----",
+        "data": "Zm9v" * 16,
+        "short": "Zm9v" * 6,
+    }
+    result = result.format(**forms)
+    masked = masked.format(**forms)
+
+    assert eval_template._redact_tool_result(result) == masked.replace("<key>", "<redacted private key>")
+    # Saved evidence keeps reading an open block to the end of the text.
+    if forms["end"] not in result:
+        assert eval_template._redact_judge_evidence(result).endswith("<redacted private key>")
+
+
 def test_judge_evidence_write_failure_never_changes_the_score(tmp_path: Path, monkeypatch) -> None:
     verifier = _stage_verifier(tmp_path)
     calls: list[str] = []

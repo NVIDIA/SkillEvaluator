@@ -4,83 +4,286 @@ Publish one product release containing the Python packages and verified CI
 configuration. Users normally install the package and run `skillevaluator ci
 init`; image builds and template generation are maintainer work.
 
-## Prepare and validate
+## Configure release access
 
-1. Select the reviewed source revision and update the package version, import
-   fallback, editable lock entry, citation and documentation citation example.
-   Move the complete Unreleased changelog into the dated release section.
-2. Run the locked full test suite, lint, package build, strict distribution
-   metadata checks, OSS source/archive checks, benchmark provenance checks and
-   documentation validation. Install the built wheel and source distribution
-   in clean supported Python environments and exercise actual CLI/report output.
-3. Review edge cases, option interactions, output correctness and regressions.
-   Resolve required current-head CI failures and review threads before merging.
+Use **Actions → SkillEvaluator Release → Run workflow** and select `main`.
+The workflow accepts a bare `X.Y.Z` version, a full source commit SHA, and a
+phase. `Validate release` is the default. PRs, pushes, and tags never trigger
+the product release workflow.
 
-## Build the CI release before publishing Python packages
+Before merging the release workflows, create the `release-image`,
+`release-github`, `release-kitmaker-dry-run`, and `release-kitmaker`
+GitHub Actions environments. For each environment, require approval from
+the repository's release maintainers, leave **Prevent self-review** disabled,
+disable administrator bypass, and allow deployments only from the `main` branch.
+A listed maintainer may approve a release they started; each environment still
+pauses for an explicit approval. Review the final release notes and all five
+validated assets before approving GitHub publication.
 
-For a release that changes the installed evaluator, runtime dependencies or
-scanners, build and verify a fresh official CI image. Workflow/publisher-only
-or documentation-only releases can reuse a compatible verified image; record
-the reuse and its source identity explicitly. Review the current template
-catalog and packaged CLI descriptors for every product release.
+Before the first release, enable immutable releases and set
+`RELEASE_DEVZONE_INDEX_URL` to the approved public HTTPS NVIDIA DevZone
+listing for `/skillevaluator/`.
 
-1. Merge the validated release source to `main`. The publishing workflow accepts
-   only upstream `main`; ordinary PR and main-push builds verify without publishing.
-2. Run **Build and publish Tier 1 image** with `publish=true`:
+- Grant this repository's Actions token write access to the official public
+  GHCR package. The workflow creates the version tag and writes the GitHub
+  release using its scoped job token.
+- Set the approved `KITMAKER_TELEPORT_VERSION`, `KITMAKER_FERRY_PROXY`, and
+  `KITMAKER_FERRY_JOIN_TOKEN` variables in both Kitmaker environments. Enroll
+  the upstream release workflow in Charon Ferry. The submission endpoint
+  validates the wheel and source distribution during a dry run and publishes
+  them during an approved upload. The status endpoint reports each result.
+- Configure `KITMAKER_VAULT_URL`, `KITMAKER_VAULT_AUTH_MOUNT`,
+  `KITMAKER_VAULT_ROLE`, and `KITMAKER_VAULT_AUDIENCE` on each Kitmaker
+  environment. Bind each Vault JWT role to the approved repository and
+  environment, `refs/heads/main`, caller workflow `release.yml`, and reusable
+  workflow `release-kitmaker.yml`. Confirm the approved Vault URL is reachable
+  from the GitHub-hosted runner. Set `KITMAKER_VAULT_NAMESPACE` and
+  `KITMAKER_VAULT_CA_PEM` where required by the Vault deployment.
+- Both roles read the KV v2 data API path in `KITMAKER_VAULT_CONFIG_PATH`.
+  The record holds `project_id`, `owner_email`, and the authorized Kitmaker
+  service `token`. Grant both roles read and compare-and-set write access
+  below the separate KV v2 data API prefix in `KITMAKER_VAULT_RECEIPT_PATH`.
+  Each version has one receipt key. Confirm the project ID and owner in
+  Kitmaker and run the protected dry-run job successfully before approving
+  the first upload. The checked-in dry-run job sends `upload: false`.
+  Apply that restriction in Ferry policy as well if the tenant supports it.
+- For **Full release**, install a dedicated bundle PR GitHub App on SkillEvaluator
+  with repository Contents, Pull requests, and Workflows write access. Keep the
+  App subject to the normal `main` rules. In a `release-bundle-pr` Actions
+  environment restricted to `main`, add the
+  `RELEASE_BUNDLE_APP_CLIENT_ID` variable and `RELEASE_BUNDLE_APP_PRIVATE_KEY`
+  secret. The workflow checks both are present before it builds an image.
+  The App writes generated files to a release branch and opens the PR.
 
-   ```bash
-   gh workflow run publish-tier1-image.yml \
-     --repo NVIDIA/SkillEvaluator --ref main -f publish=true
-   ```
+## Start a release from GitHub Actions
 
-   Record the run's exact source SHA. Wait for image verification, publication
-   and the onboarding job's anonymous pull of the resulting immutable digest.
-3. Download `github-actions-onboarding` and the image verification evidence.
-   The onboarding job renders the templates with the reviewed workflow SHA and
-   published image digest. For separate workflow/publisher revisions, use:
+1. Merge the version-preparation PR described below. Open **SkillEvaluator
+   Release → Run workflow** on `main`, choose **Full release**, and enter the
+   version and the version-preparation merge SHA.
+2. Approve the image job. The workflow builds or reuses the immutable image,
+   verifies the public digest, generates the bundle and pins, and opens or
+   reuses the bundle PR. Its link appears in the run summary.
+3. Review the PR and qualify the generated GitHub and GitLab configurations.
+   Update the bundle catalog and current onboarding links in the PR if needed.
+   Merge the PR after the required checks pass. The run waits up to two hours
+   for that merge and verifies the exact squash-merge commit on `main`. If the
+   wait expires, merge the PR and use **Re-run failed jobs** on the original run.
+   Before the version tag exists, a fresh dispatch can reuse an open or
+   merged bundle PR for the same candidate. If intervening changes require a
+   new image candidate, close the old bundle PR if it is still open and
+   dispatch **Full release** with the new reviewed SHA. The workflow generates
+   a separate branch and PR for that candidate.
+4. Review the validated bundle merge SHA, artifact ID, and manifest checksum
+   in the run summary. Follow the GitHub release and Kitmaker approvals from
+   the same run. Publication uses the exact validated artifacts, verifies PyPI
+   and DevZone, runs fresh install smoke tests, and finalizes the release.
 
-   ```bash
-   python3 ci/render_templates.py --workflow-ref REVIEWED_FULL_SHA \
-     --publisher-ref REVIEWED_PUBLISHER_FULL_SHA \
-     --image ghcr.io/nvidia/skillevaluator-tier1@sha256:VERIFIED_DIGEST \
-     --output /tmp/skillevaluator-onboarding
-   ```
+If the bundle PR is already merged, choose **Validate and publish** with the
+version and the bundle merge SHA. This starts at package validation and skips
+image building and bundle PR creation.
 
-   Use a new output directory. The renderer writes configurations, README and
-   `release.json`; prepare the versioned ZIP, checksums, scanner inventory and
-   verification receipt separately.
-4. Commit the verified files under `ci/bundles/VERSION/` through a follow-up PR.
-   Update `ci/bundles/README.md`, current onboarding links and the packaged
-   `src/skillevaluator/ci-release.json` to the same verified image/workflow pins.
-   Preserve historical version folders. If releasing all-tier onboarding, review
-   its separate schema-version 2 descriptor, workflow/tools refs, capabilities,
-   evaluator version and runtime-lock hash together.
-5. Test the exact generated files in clean consumers, including pass/failure,
-   changed/all/no-change selection, missing prerequisites and retained reports.
-   Test optional trusted publishing and provider-backed tiers separately; record
-   unavailable integration checks explicitly.
-6. Merge those pin/bundle changes, freeze the final source revision, then rebuild
-   and validate the Python packages so `ci init` contains the final descriptors.
-   Keep the image's source SHA distinct from the later bundle/metadata commit.
+Select **promote_stable** with **Full release**, **Validate and publish**, or
+**Publish release**. After both package indexes pass verification, the workflow
+promotes the exact version if it is GitHub Latest and the stable writer App is
+configured. Use the standalone promotion workflow for retries and the first
+`v1.0.1` bootstrap. Docs publish through **Publish Docs** on pushes to `main`,
+including the bundle PR merge.
+
+The individual image, validation and publication phases are also available for
+manual qualification and recovery.
+
+## Prepare the CI release
+
+1. In a release-preparation PR, update the package version, its import fallback,
+   the editable lock entry, the citation and its documentation example, and any
+   version-specific starter expectations. Move the complete Unreleased changelog
+   into a dated version section. Review the changes and pass required CI before
+   merging.
+2. In the release workflow UI, choose **Build CI image and bundle** and enter
+   the version-preparation merge SHA. Approve the `release-image` job. The
+   workflow verifies the official Linux amd64 runtime and anonymously pulls and
+   retests the exact published digest. It retains the scanner inventory and
+   verification receipt.
+3. Download the `ci-bundle-VERSION` artifact. Commit its versioned files under
+   `ci/bundles/VERSION/`, both descriptors under `src/skillevaluator/`, and the
+   generated workflow wrappers under `.github/workflows/` and GitLab stable
+   include under `ci/gitlab/` through a follow-up PR. Update the bundle catalog
+   and current onboarding links. Test the exact
+   generated files in clean GitHub and GitLab consumers for pass/fail,
+   all/changed/no-change selection, missing prerequisites, and retained reports.
+   Qualify optional trusted publishing and provider-backed tiers when affected.
+4. Merge the pin PR and freeze its merge SHA as the product release source.
+   If candidate runtime, scanner, dependency, or reusable-workflow inputs
+   changed after the image build, qualify a new image source and refresh the
+   bundle first.
 
 See [CI maintainer instructions](ci/README.md#maintainer-release-procedure) for
-image publication, scanner verification and consumer qualification details.
+image and consumer qualification details.
 
 ## Publish the product release
 
-1. Create the version tag at the final reviewed source revision. Stage one draft
-   GitHub release with the reviewed notes, wheel, source distribution, CI ZIP,
-   artifact manifest and checksums. Download and verify every asset before
-   publishing; immutable release assets cannot be replaced afterward.
-2. Publish the completed GitHub release. Verify anonymous artifact downloads and
-   the exact image link/digest. Include direct versioned YAML links and the
-   versioned PyPI package URL in the notes, marking PyPI pending until verified.
-3. Use the approved Kitmaker project to dry-run both exact Python artifact URLs.
-   After both checks complete, submit those same URLs for managed publication.
-   Retain submission receipts; inspect status before retrying an ambiguous request.
-4. Verify index-hosted hashes and fresh pip/uv installations, dependencies, CLI
-   version and real reports. Then update the editable release notes from pending
-   to published and verified, with any validation limits stated.
+1. Open the workflow in the GitHub UI again, choose **Validate release**, and
+   enter the version and product release SHA from the bundle PR. Review the
+   source, wheel, sdist, and CI bundle checks. Validation checks the selected
+   commit for a dated changelog entry and matches the live public GHCR digest
+   against the bundle. On the successful run's **Summary** page, copy both
+   values from **Publish release inputs**. `validation_run` includes the run ID
+   and attempt (such as `123-1`), and `validation_manifest_sha256` is the
+   manifest hash.
+2. Choose **Publish release** with the same version and product SHA, enter the
+   two values from the summary, and approve the `release-github` job. The
+   publish run verifies the selected validation attempt and uses its exact
+   wheel, sdist, CI ZIP, manifest, and checksums. If the retained validation
+   artifact has expired or is missing before the first draft is staged, run
+   **Validate release** again and use both values from the new summary.
+   Before creating `vVERSION` at the reviewed product SHA, the workflow
+   rechecks the release notes and official GHCR digest and checks both package
+   indexes for version conflicts. It verifies the staged bytes before
+   publishing and verifies anonymous downloads afterward. The notes show that
+   package publication is pending. Release runs execute one at a time across
+   versions and phases. GitHub retains up to 100 pending dispatches. A
+   backfilled version stays off **Latest** when a newer release already holds
+   it.
+3. Approve `release-kitmaker-dry-run` to validate both anonymous Python asset
+   URLs. Review the results and approve `release-kitmaker` after both pass. The job submits those URLs
+   for both public PyPI and NVIDIA DevZone and records its request UUID in the
+   private Vault receipt. The workflow verifies the exact index-hosted files,
+   fresh pip and uv installations, a Tier 1 report, and the installed CI pins
+   before recording verification in the GitHub release notes.
+
+On interruption, use **Re-run failed jobs** on the original run first. To
+start a fresh run, enter the same version and reviewed bundle merge SHA.
+
+- If the tag exists and the GitHub draft was never created, use **Validate and
+  publish**. The standalone **Publish release** phase can also continue with
+  the receipt from a successful standalone **Validate release** run.
+- For an existing draft, choose **Publish release** with blank validation
+  inputs. The approved job restores the exact bytes retained by the original
+  publishing run. Preserve that artifact until completion.
+- For an immutable GitHub release, choose **Publish release** with blank
+  validation inputs. The workflow uses the published bytes and resumes any
+  recorded Kitmaker submission.
+
+If GitHub rejects the workflow token when creating the version tag, an
+authorized maintainer can create that tag at the exact reviewed product SHA
+and resume the same run. The workflow checks the tag target on every attempt.
+
+For a Kitmaker timeout or partial publication, inspect the private receipt,
+Kitmaker status and both public indexes. The workflow polls a saved submission
+and records the terminal result for each artifact. A recorded success is
+excluded from retries while the indexes converge.
+
+For a receipt stuck at `submitting`, reconcile the exact project, URLs, and
+upload mode against Portal history. With authorized compare-and-set access,
+retain the existing `urls` and `upload` values, add the matched Portal `uuid`,
+and set `status` to `submitted`. Leave `post_response_uuid` absent so the
+workflow validates the mode and URLs echoed by Portal. If Portal confirms
+there was no accepted request and the indexes agree, use `status: failed`
+with an empty `job_statuses` map and no UUID.
+
+Retry a failed artifact only when both indexes lack it and Kitmaker has
+reported no prior success for it. Escalate a hash conflict or a file present
+on only one index after the submission finishes. The GitHub release stays
+pending while verification is incomplete.
+
+## Promote the stable channel
+
+Generate the GitHub entry points and GitLab stable include from the verified
+Tier 1 bundle as part of the release-bundle PR.
+
+```bash
+python3 ci/stable_channel.py ci/bundles/VERSION
+python3 ci/stable_channel.py ci/bundles/VERSION --check
+python scripts/check_oss_boundary.py --root . --allowlist config/oss_boundary_allowlist.json
+```
+
+The source-boundary check scans tracked text files across the repository,
+including the generated workflows, promotion scripts and documentation. CI runs
+it for both code and docs-only changes.
+
+Qualify the exact generated references in a disposable GitHub repository.
+Check a credentials-free scan, a failing same-repository PR scan with signed
+evidence and a successful private Pages deployment that updates **Open full
+report**. Test a publisher from the candidate release against retained evidence
+from the previous stable scanner. The scan and its feedback can resolve the
+channel at different times. Include queued scans, reruns and the full artifact
+retention period when reviewing a publisher compatibility change.
+
+Publishing a stable release signals **Promote stable GitHub workflows**. The
+promotion runs from `main`, verifies the latest immutable release and checks
+its CI archive and runtime identities against the published artifact manifest.
+It verifies the GitHub and GitLab stable configurations against the templates
+at the release commit. Before moving the `stable` tag, it verifies that public
+PyPI and NVIDIA DevZone serve the unyanked wheel and source distribution with
+the exact filenames, SHA-256 digests, and sizes in that same manifest.
+
+Before the first promotion, a repository administrator must configure promotion
+access.
+
+- Set the repository Actions variable `RELEASE_DEVZONE_INDEX_URL` to the approved
+  public HTTPS NVIDIA DevZone listing for `/skillevaluator/`.
+- Install a dedicated GitHub App on this repository with Contents write access.
+  Allow it to bypass only the tag ruleset for `stable`. Reserve the name `stable`
+  for the tag and protect the version tags separately.
+- Create the `stable-channel` Actions environment and restrict deployments to
+  `main`. Add the `STABLE_CHANNEL_APP_CLIENT_ID` variable and the
+  `STABLE_CHANNEL_APP_PRIVATE_KEY` secret to that environment.
+
+If the DevZone URL is unset or invalid, package verification stops promotion
+before the `stable` tag can move.
+
+For a standalone promotion after the product release finishes verification,
+open **Promote stable GitHub workflows** in Actions and select **Run workflow** on `main`. Set
+`expected-release` to the reviewed `vX.Y.Z` tag shown in the release workflow
+summary. Manual promotion stops if GitHub Latest differs from that tag. The
+product workflow's GitHub Actions token does not trigger the release relay.
+If a promotion ran before both indexes served the verified files, rerun it
+after package verification finishes. A retry verifies the published release
+even if `main` already has the next version's wrappers. Qualify this case with
+the release App on GitHub.
+If GitHub refuses to update `stable` to the older workflow tree, keep the exact
+release commit at the tip of a protected release branch and retry.
+
+The immutable `v1.0.1` release predates the stable entry points. If it is still the
+latest release at first activation, merge its generated configurations into
+`main` and dispatch promotion with `expected-release` set to `v1.0.1` and
+`bootstrap-sha` set to the full reviewed commit SHA. The selected commit must
+contain the GitLab stable include and the exact published CI bundle. Later
+retries of `v1.0.1` verify the existing `stable` target. Subsequent releases
+include the generated configurations in their version tags. The workflow
+rejects downgrades.
+
+## Qualify the GitLab Tier 1 stable include
+
+The release generator writes `ci/gitlab/stable-tier1.yml` from the immutable
+evaluator commit and scanner image digest in the same Tier 1 bundle used for
+GitHub. Include that file and its source template in the release commit. The
+consumer's root `.gitlab-ci.yml` retains the merge-request rules.
+[GitLab CI setup](docs/gitlab-ci.mdx#follow-the-latest-stable-release)
+
+Qualify the release commit before publishing, since publication triggers
+promotion. For the first `v1.0.1` promotion, qualify the bootstrap commit before
+dispatching the workflow. In a test GitLab project, use the consumer root
+configuration from the GitLab CI guide and replace `refs/tags/stable` in its
+include URL with the full commit SHA you are qualifying.
+
+Run GitLab CI Lint and verify changed-skill selection in a detached merge
+request, HTML and `skill-evaluator-ci.json` artifact retention after an
+intentional scan failure, and a full scan on the default branch. Check that the
+metadata records the release, evaluator commit, image digest, consumer commit,
+pipeline ID, and job ID. Run a new pipeline after switching the test include to
+a different qualified release. A retry of the original job should keep its
+original release and configuration.
+[GitLab include behavior](https://docs.gitlab.com/ci/yaml/#include)
+
+If `stable` already serves a GitHub-only release, leave that release's target in
+place. GitLab starts with the next qualifying release. Once published through
+the channel, later stable promotions must retain the GitLab include. Consumers
+can pin a previous verified bundle while a corrected release is prepared.
+
+Upgrade all-tier setups with trusted merge-request feedback through reviewed
+changes to the immutable configuration, tools, and image pins.
+[All-tier GitLab setup](ci/templates/all-tiers/README.md#gitlab-checks-and-feedback)
 
 ## User-facing instructions
 

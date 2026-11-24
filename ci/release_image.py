@@ -68,11 +68,9 @@ def resolve_digest(image: str, revision: str, *, token: str = "", actor: str = "
             raise ReleaseImageError("Registry manifest digest did not match its content")
         return f"{image}@{digest}"
     except urllib.error.HTTPError as error:
-        raise ReleaseImageError(
-            f"Registry request failed with HTTP {error.code}; refusing to overwrite a tag"
-        ) from error
+        raise ReleaseImageError(f"Registry lookup failed with HTTP {error.code}.") from error
     except (urllib.error.URLError, TimeoutError, ValueError) as error:
-        raise ReleaseImageError("Registry identity could not be verified; refusing to overwrite a tag") from error
+        raise ReleaseImageError("Registry lookup could not verify the image revision.") from error
 
 
 def main() -> int:

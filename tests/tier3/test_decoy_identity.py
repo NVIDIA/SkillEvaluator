@@ -224,7 +224,9 @@ def test_cache_names_do_not_hide_unsafe_nodes(tmp_path, relative, kind):
     if kind == "symlink":
         extra.symlink_to(source / "SKILL.md")
     elif kind == "hardlink":
-        extra.hardlink_to(source / "SKILL.md")
+        outside = tmp_path / "outside.bin"
+        outside.write_text("outside", encoding="utf-8")
+        extra.hardlink_to(outside)
     else:
         if not hasattr(os, "mkfifo"):
             pytest.skip("FIFOs are unavailable")

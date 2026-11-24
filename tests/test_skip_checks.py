@@ -119,7 +119,7 @@ def test_tier1_summary_names_scanners_and_versions():
     _ok, rows = summarize_tier1([security, code_risk, secrets])
     row = next(row for row in rows if row.label == "scanners")
     assert "".join(seg for seg, _style in row.segments) == (
-        "SkillSpector 2.13.3 · Bandit 1.9.4 · Semgrep unknown · Gitleaks didn't run"
+        "SkillSpector 2.13.3 · Bandit 1.9.4 · Semgrep unknown · Gitleaks incomplete"
     )
     assert code_risk.to_dict()["scanners"] == {"bandit": "1.9.4", "semgrep": "unknown"}
 

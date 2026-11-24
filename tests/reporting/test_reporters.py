@@ -3152,8 +3152,10 @@ def test_cli_harbor_job_labels_remain_neutral_and_literal(colored):
 
 
 @pytest.mark.skipif(os.name == "nt", reason="only POSIX file names carry undecodable bytes as surrogate escapes")
-@pytest.mark.parametrize("report_format", ["json", "markdown", "html", "sarif", "junit"])
-def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, report_format: str) -> None:
+@pytest.mark.parametrize("report_format", ["json", "markdown", "html", "sarif", "junit", "github"])
+def test_reports_are_written_for_a_file_name_that_is_not_utf8(
+    tmp_path: Path, report_format: str, capsys: pytest.CaptureFixture[str]
+) -> None:
     # On Linux, os.listdir returns the name b"caf\xe9.md" as "caf\udce9.md".
     skill = tmp_path / "skill"
     skill.mkdir()
@@ -3180,6 +3182,14 @@ def test_reports_are_written_for_a_file_name_that_is_not_utf8(tmp_path: Path, re
         scan_root=skill,
         repository_root=tmp_path,
     )
+
+    if report_format == "github":
+        captured = capsys.readouterr()
+        assert "Unexpected" in captured.out
+        assert "file=" not in captured.out
+        assert r"skill/caf\xe9.md: Unexpected" in captured.out
+        assert not output_dir.exists() or list(output_dir.iterdir()) == []
+        return
 
     (report,) = [path for path in output_dir.iterdir() if path.name != "BENCHMARK.md"]
     text = report.read_text(encoding="utf-8")

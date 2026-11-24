@@ -45,7 +45,8 @@ def make_request(
         body = None
         if data is not _UNSET:
             body = json.dumps(data).encode("utf-8")
-            req_headers["Content-Type"] = "application/json"
+            if not any(name.lower() == "content-type" for name in req_headers):
+                req_headers["Content-Type"] = "application/json"
 
         # Create request
         req = Request(url, data=body, headers=req_headers, method=method)

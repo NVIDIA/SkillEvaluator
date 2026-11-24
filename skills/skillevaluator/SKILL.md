@@ -87,6 +87,7 @@ Never print, echo, or commit API keys; keep them in the host environment.
 | Everything, with one exit code | `skillevaluator validate <skill-dir>` | all of the above |
 | CI-safe keyless gate | `skillevaluator validate <skills-dir> --profile default --tiers 1 -r json,markdown,sarif -o reports` | scanners |
 | CI test report (JUnit XML) | add `junit` to `-r`, for example `-r json,sarif,junit` | same as the gate |
+| GitHub Actions annotations | add `github` to `-r`, for example `-r cli,github` | same as the gate |
 | Set up repo CI | `skillevaluator ci init` | GitHub checkout |
 
 Full flag tables: [Tier 1](references/commands-tier1.md),

@@ -8,6 +8,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - Reject unsafe paths in SkillSpector scope exclusions and clarify incomplete
   supply-chain scans when work counters disagree with the ledger.
+- The api-caller reference skill keeps a `Content-Type` passed with `--headers`
+  when it sends a `--data` body, so a PATCH can use
+  `application/merge-patch+json` or a JSON:API request
+  `application/vnd.api+json`. It was always replaced with `application/json`,
+  whatever the header name's case.
 
 ## 1.2.0 - 2026-11-23
 

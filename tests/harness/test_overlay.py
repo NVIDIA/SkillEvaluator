@@ -1945,3 +1945,117 @@ def test_over_limit_frontmatter_is_not_reported_as_tab_indentation():
     frontmatter = "name: demo\n" + "\n".join(alias_graph_lines(5)) + "\ntext: |\n  one\n  \ttwo\n"
 
     assert overlay._tab_indent_breaks_yaml(frontmatter) is False
+
+
+def test_pi_name_collision_needs_both_skills_to_load(tmp_path: Path):
+    """Only skills pi loads can collide (verified against the pinned loader): with `sky/` in the
+    root's .gitignore, same-named sky/ and other/ load just other/, with no collision diagnostic."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    root.mkdir(parents=True)
+    (root / ".gitignore").write_text("sky/\n", encoding="utf-8")
+    for folder in ("sky", "other"):
+        _install(root, folder, name="sky")
+
+    rows = _rows(root / "sky")
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-IGNORED" in _ids(rows, "pi")
+    assert "PI-NAME-COLLISION" not in _ids(rows, "pi")
+    assert "PI-NAME-COLLISION" not in _ids(_rows(root / "other"), "pi")
+
+    (root / ".gitignore").unlink()
+    assert "PI-NAME-COLLISION" in _ids(_rows(root / "sky"), "pi")
+    assert "PI-NAME-COLLISION" in _ids(_rows(root / "other"), "pi")
+
+
+@pytest.mark.parametrize(
+    "frontmatter",
+    ["name: x\n", "name: x\ndescription: a\ndescription: b\n", "name: x\n\tdescription: b\n"],
+    ids=["no-description", "duplicate-keys", "tab-indent"],
+)
+def test_pi_dropped_manifest_is_no_name_collision(tmp_path: Path, frontmatter: str):
+    """A same-named skill pi drops is no collision for either side (verified against the pinned
+    loader): the dropped row names its own cause and the loaded one is not degraded."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    _install(root, "a", name="x")
+    dropped = root / "b"
+    dropped.mkdir(parents=True)
+    (dropped / "SKILL.md").write_text(f"---\n{frontmatter}---\nBody\n", encoding="utf-8")
+
+    rows = _rows(dropped)
+    assert rows["pi"]["status"] == "not_loaded"
+    assert "PI-NAME-COLLISION" not in _ids(rows, "pi")
+    assert _rows(root / "a")["pi"]["status"] == "loads"
+    assert "PI-NAME-COLLISION" not in _ids(_rows(root / "a"), "pi")
+
+
+@pytest.mark.parametrize(
+    ("ignore_file", "rule", "manifest"),
+    [
+        (".gitignore", "sky/\n", "SKILL.md"),
+        (".gitignore", "sky/SKILL.md\n", "SKILL.md"),
+        ("sky/.ignore", "SKILL.md\n", "SKILL.md"),
+        ("sky/.fdignore", "/SKILL.md\n", "SKILL.md"),
+        (".gitignore", "sky/\n", "skill.md"),
+    ],
+    ids=["gitignore-folder", "gitignore-file", "nested-ignore", "nested-fdignore", "gitignore-non-canonical"],
+)
+def test_pi_ignored_manifest_names_the_ignore_file_and_rule(tmp_path: Path, ignore_file: str, rule: str, manifest: str):
+    """An ignore-rule exclusion is its own finding naming the file and the line: pi skips such
+    entries silently (verified against the pinned loader), so the manifest-name advice is wrong here."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    skill = root / "sky"
+    skill.mkdir(parents=True)
+    (skill / manifest).write_text("---\nname: sky\ndescription: Use when testing ignores.\n---\nBody\n")
+    (root / ignore_file).parent.mkdir(parents=True, exist_ok=True)
+    (root / ignore_file).write_text(rule, encoding="utf-8")
+
+    row = _rows(skill)["pi"]
+    ids = {f["id"] for f in row["findings"]}
+    assert row["status"] == "not_loaded"
+    assert "PI-IGNORED" in ids and not ids & {"PI-CASING", "PI-HIDDEN"}
+    message = next(f["message"] for f in row["findings"] if f["id"] == "PI-IGNORED")
+    assert f".pi/skills/{ignore_file}" in message and rule.strip() in message
+
+
+@pytest.mark.parametrize(("rule", "ignored"), [("sky/\n!sky/SKILL.md\n", True), ("sky/\n!sky/\n", False)])
+def test_pi_ignored_folder_is_not_re_entered_by_a_negated_rule(tmp_path: Path, rule: str, ignored: bool):
+    """pi tests a folder before its contents and never re-enters an excluded one (verified against
+    the pinned loader): `!sky/SKILL.md` under `sky/` does not bring the file back, `!sky/` does."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    skill = _install(root, "sky")
+    (root / ".gitignore").write_text(rule, encoding="utf-8")
+
+    row = _rows(skill)["pi"]
+    assert row["status"] == ("not_loaded" if ignored else "loads")
+    assert ("PI-IGNORED" in {f["id"] for f in row["findings"]}) is ignored
+
+
+@pytest.mark.parametrize(
+    ("manifest", "cause"),
+    [
+        ("---\nname: tabbed\n\tdescription: x\n---\nBody\n", "PI-FRONTMATTER-TABS"),
+        ("---\ndescription: x\ndescription: y\n---\nBody\n", "PI-FRONTMATTER-DUPKEYS"),
+        ("Body without frontmatter.\n", "PI-UNPARSEABLE"),
+    ],
+    ids=["tab-indent", "duplicate-keys", "no-frontmatter"],
+)
+def test_pi_dropped_manifest_reports_only_its_cause(tmp_path: Path, manifest: str, cause: str):
+    """The row of a file pi never loads names its real cause: loads-under-the-folder-name is false for it."""
+    skill = _skill(tmp_path)
+    (skill / "SKILL.md").write_text(manifest, encoding="utf-8")
+
+    ids = _ids(_rows(skill), "pi")
+    assert cause in ids and "PI-NAME-FALLBACK" not in ids
+
+
+@pytest.mark.parametrize(("description", "chars"), [("yes", 3), ("on", 2), ('"yes"', 3), ('"on"', 2)])
+def test_pi_census_counts_descriptions_as_pi_resolves_them(tmp_path: Path, description: str, chars: int):
+    """pi's YAML 1.2 core parser lists plain yes and on as strings (verified against the pinned
+    loader), so its census counts them; the canonical catalog keeps the YAML 1.1 reading."""
+    skill = _skill(tmp_path / "proj" / ".pi" / "skills", desc=description)
+
+    facts = facts_for([skill], load_profiles("pi"))[skill]
+    row = _rows(skill)["pi"]
+    assert facts["census_desc_chars"] == row["catalog"]["desc_chars"] == chars
+    assert row["listed"] == {"mode": "full", "text": description.strip('"')}
+    assert facts["catalog_desc_chars"] == (chars if description.startswith('"') else 0)

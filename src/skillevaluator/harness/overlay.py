@@ -205,13 +205,18 @@ def _pi_manifest_ignored(skill_path: Path) -> bool:
     return False
 
 
-def _pi_ignored_by_rules(skill_path: Path) -> bool:
-    """Whether pi's ignore files (matched case-insensitively) exclude this path under a pi root."""
+def _pi_ignored_by_rules(skill_path: Path) -> tuple[str, str] | None:
+    """The ``(ignore file, line)`` excluding this path from pi's scan under a pi root, both as written.
+
+    Ignore files (matched case-insensitively) are read per folder from the root down, each folder's
+    ``.gitignore``, ``.ignore`` and ``.fdignore`` in turn. pi checks a folder before its contents and never
+    re-enters an excluded one, so every folder on the way down is tested before the file itself.
+    """
     try:
         posix = skill_path.absolute().as_posix()
         roots = [root for root in _PI_ROOT_FAMILIES if "/" + root + "/" in posix + "/" or posix.endswith("/" + root)]
         if not roots:
-            return False
+            return None
         root = max(roots, key=len)
         base = Path(posix[: posix.rindex(root) + len(root)])
         folders = []
@@ -221,7 +226,7 @@ def _pi_ignored_by_rules(skill_path: Path) -> bool:
             if folder in (base, folder.parent):
                 break
             folder = folder.parent
-        patterns: list[str] = []
+        rules: list[tuple[str, str, bool, pathspec.GitIgnoreSpec]] = []  # ignore file, line, negated, matcher
         for folder in reversed(folders):
             prefix = "" if folder == base else folder.relative_to(base).as_posix() + "/"
             for name in PI_IGNORE_FILES:
@@ -232,13 +237,31 @@ def _pi_ignored_by_rules(skill_path: Path) -> bool:
                     except OSError:
                         continue
                     for line in lines:
-                        _pi_add_ignore_line(patterns, line, prefix)
-        if not patterns:
-            return False
-        spec = pathspec.GitIgnoreSpec.from_lines(patterns)
-        return bool(spec.match_file(skill_path.absolute().relative_to(base).as_posix().lower()))
+                        added: list[str] = []
+                        _pi_add_ignore_line(added, line, prefix)
+                        if added:
+                            # A negated line is matched by its positive form: a lone "!" pattern never
+                            # answers True from match_file().
+                            negated = added[0].startswith("!")
+                            rules.append(
+                                (prefix + name, line, negated, pathspec.GitIgnoreSpec.from_lines([added[0][negated:]]))
+                            )
+        if not rules:
+            return None
+        absolute = skill_path.absolute()
+        folders_on_the_way = absolute.relative_to(base).as_posix().lower().split("/")[:-1]
+        candidates = ["/".join(folders_on_the_way[:i]) + "/" for i in range(1, len(folders_on_the_way) + 1)]
+        candidates.append(absolute.relative_to(base).as_posix().lower() + ("/" if skill_path.is_dir() else ""))
+        for candidate in candidates:
+            reason = None  # gitignore: the last line that matches decides
+            for ignore_file, line, negated, matcher in rules:
+                if matcher.match_file(candidate):
+                    reason = None if negated else (ignore_file, line)
+            if reason:
+                return reason
+        return None
     except (ValueError, OSError):
-        return False  # outside any recognizable pi root
+        return None  # outside any recognizable pi root
 
 
 # OpenClaw 2026.10.9 cjk-chars.ts: CJK code points cost 4-16 chars, every other UTF-16 unit 1.
@@ -659,8 +682,12 @@ def skill_facts(
     pi_hidden = _pi_top_level_bool(fm_yaml, "disable-model-invocation")
     # A file pi never discovers cannot hide the skill or need a value fix.
     # The ignore rules match the file pi reads, not the folder an explicit check selects.
-    pi_not_discovered = _pi_ignored_by_rules(manifest if manifest is not None else skill_path) or (
-        actual_manifest_name != "SKILL.md"
+    pi_ignore = _pi_ignored_by_rules(manifest if manifest is not None else skill_path)
+    pi_rule_ignored = pi_ignore is not None
+    # pi skips an ignored entry before it ever compares the manifest name.
+    pi_manifest_ignored = (
+        not pi_rule_ignored
+        and actual_manifest_name != "SKILL.md"
         and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path))
     )
     duplicates = catalog.duplicates(manifest, name) if catalog else []
@@ -680,7 +707,10 @@ def skill_facts(
         "workspace_skills": root is None and skill_path.absolute().parent.name == "skills",
         "grouping_depth": depth,
         "manifest_name_exact": "SKILL.md" in names,
-        "pi_manifest_ignored": pi_not_discovered,
+        "pi_manifest_ignored": pi_manifest_ignored,
+        "pi_ignored_by_rules": pi_rule_ignored,
+        "pi_ignore_file": pi_ignore[0] if pi_ignore else "",
+        "pi_ignore_rule": pi_ignore[1] if pi_ignore else "",
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -709,10 +739,14 @@ def skill_facts(
         if tools is None
         else {str: "string", list: "list", dict: "map"}.get(type(tools), "other"),
         "disable_model_invocation": _is_true(data.get("disable-model-invocation")),
-        "pi_disable_model_invocation": pi_hidden is True and not pi_dropped and not pi_not_discovered,
+        "pi_disable_model_invocation": pi_hidden is True
+        and not pi_dropped
+        and not pi_rule_ignored
+        and not pi_manifest_ignored,
         "pi_hidden_value_invalid": pi_hidden is False
         and not pi_dropped
-        and not pi_not_discovered
+        and not pi_rule_ignored
+        and not pi_manifest_ignored
         and _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
@@ -748,7 +782,7 @@ def skill_facts(
         "pi_duplicate_paths": ", ".join(duplicates[:3]),
         "pi_description_text": pi_description or "",
         "pi_description_invalid": pi_description is None and not pi_dropped,
-        "pi_not_loaded": pi_dropped or pi_not_discovered or pi_description is None,
+        "pi_not_loaded": pi_dropped or pi_rule_ignored or pi_manifest_ignored or pi_description is None,
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
 
@@ -827,7 +861,14 @@ class Catalog:
     descriptions: dict[Path, str] | None = None
 
     @classmethod
-    def of(cls, skills: list[Path], base: Path | None = None, manifests: dict[Path, Path] | None = None) -> Catalog:
+    def of(
+        cls,
+        skills: list[Path],
+        base: Path | None = None,
+        manifests: dict[Path, Path] | None = None,
+        pi_resolved: bool = False,
+    ) -> Catalog:
+        """Count the skills in one folder; ``pi_resolved`` measures descriptions as pi's parser resolves them."""
         names, descriptions, chars = {}, {}, 0
         for skill in skills:
             # Loose manifest files (pi's root .md skills) stand for their folder;
@@ -835,11 +876,15 @@ class Catalog:
             folder = skill.parent if skill.is_file() else skill
             # A file entry is its own explicit manifest; a folder entry only uses
             # the manifest an explicit check selected for it.
-            manifest, _, _, _, data = _read_manifest(
+            manifest, _, text, _, data = _read_manifest(
                 folder, skill if skill.is_file() else (manifests or {}).get(folder.resolve())
             )
             names[manifest.resolve()] = _skill_name(folder, data)
             description = data.get("description")
+            if pi_resolved:
+                # pi lists what its YAML 1.2 core parser resolves: plain yes and on stay strings.
+                frontmatter = FRONTMATTER_PATTERN.match(text)
+                description = _pi_description(frontmatter.group(1)) if frontmatter else None
             chars += len(description) if isinstance(description, str) else 0
             descriptions[manifest.resolve()] = description if isinstance(description, str) else ""
         return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
@@ -1109,7 +1154,7 @@ def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) ->
         if _pi_skills_mode(base) is not None:
             # pi's own discovery: every loose .md file it loads is its own skill;
             # an empty census stands, ignore rules may exclude everything.
-            return Catalog.of(_pi_manifests(base), base, manifests)
+            return Catalog.of(_pi_manifests(base), base, manifests, pi_resolved=True)
         return Catalog.of(_find_skills(base) or group, base, manifests)
     return Catalog.of(
         group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests

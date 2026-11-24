@@ -11,6 +11,13 @@ regexes = ['''^sk-AbCdEf1234567890$''']
 paths = ['''^tests/test_tier3_(progress|result_display)\.py$''']
 
 [[allowlists]]
+description = "Synthetic loopback provider token used by the offline Tier 2 image smoke"
+condition = "AND"
+targetRules = ["generic-api-key"]
+regexes = ['''^sk-06276fca39b945cd9800dc7b19323fde$''']
+paths = ['''^ci/smoke_tier2_image\.py$''']
+
+[[allowlists]]
 description = "Synthetic policy key used by NeMo Gym rollout redaction tests"
 condition = "AND"
 targetRules = ["generic-api-key"]

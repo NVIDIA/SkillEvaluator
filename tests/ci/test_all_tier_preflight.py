@@ -151,11 +151,9 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
 
     import yaml
 
-    package = tmp_path / "skillevaluator"
-    package.mkdir()
     marker = tmp_path / "consumer-imported"
-    (package / "__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\nraise SystemExit(91)\n"
+    (tmp_path / "sitecustomize.py").write_text(
+        f"import os\nfrom pathlib import Path\nPath({str(marker)!r}).write_text('imported')\nos._exit(91)\n"
     )
     environment = {
         "PATH": os.environ.get("PATH", ""),
@@ -167,7 +165,7 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
     argv = shlex.split(step["run"])
     argv[0] = sys.executable
     argv[-1] = str(ROOT / argv[-1].removeprefix("evaluator/"))
-    # Establish that this consumer package exploits the old unisolated command.
+    # The unisolated interpreter runs this startup hook from the consumer's PYTHONPATH.
     vulnerable = [arg for arg in argv if arg != "-I"]
     before = subprocess.run(vulnerable, cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=30)
     assert before.returncode == 91

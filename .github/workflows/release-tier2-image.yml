@@ -1,0 +1,117 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Release Tier 2 image
+
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Reviewed source commit on main (also the consumer tools ref)
+        type: string
+        required: true
+
+permissions: {}
+
+jobs:
+  publish:
+    if: >-
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.ref == 'refs/heads/main' &&
+      github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release-tier2-image.yml@refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 35
+    environment: release-image
+    permissions:
+      contents: read
+      packages: write
+    concurrency:
+      group: tier2-image-${{ inputs.source_sha }}
+      cancel-in-progress: false
+    outputs:
+      image_digest: ${{ steps.release.outputs.image_digest }}
+    env:
+      IMAGE: ghcr.io/nvidia/skillevaluator-tier2
+      SOURCE_SHA: ${{ inputs.source_sha }}
+      # A unique tag also permits the first push to a new GHCR package.
+      PUSH_TAG: sha-${{ inputs.source_sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Check out a reviewed main revision
+        run: |
+          [[ "$SOURCE_SHA" =~ ^[0-9a-f]{40}$ ]]
+          git rev-list --first-parent HEAD | grep -Fx "$SOURCE_SHA" >/dev/null
+          git checkout --detach "$SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$SOURCE_SHA"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the reviewed Tier 2 runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ci/Dockerfile.tier2
+          build-args: SOURCE_SHA=${{ inputs.source_sha }}
+          platforms: linux/amd64
+          labels: |
+            org.opencontainers.image.source=https://github.com/NVIDIA/SkillEvaluator
+            org.opencontainers.image.description=SkillEvaluator Tier 2 CI runtime
+          tags: ${{ env.IMAGE }}:${{ env.PUSH_TAG }}
+          no-cache: true
+          load: true
+          provenance: false
+      - name: Verify the exact image being published
+        run: python3 ci/smoke_tier2_image.py --image "$IMAGE:$PUSH_TAG" --output "$RUNNER_TEMP/release-verification"
+      - name: Publish the verified build and resolve its digest
+        id: release
+        env:
+          GHCR_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/publish-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          trap 'docker logout ghcr.io >/dev/null 2>&1 || true' EXIT
+          printf '%s' "$GHCR_TOKEN" | docker login ghcr.io -u "$GITHUB_ACTOR" --password-stdin
+          docker push "$IMAGE:$PUSH_TAG" | tee "$RUNNER_TEMP/tier2-push.log"
+          digest="$(awk -v tag="$PUSH_TAG:" '$1 == tag && $2 == "digest:" {print $3}' "$RUNNER_TEMP/tier2-push.log")"
+          [[ "$digest" =~ ^sha256:[0-9a-f]{64}$ ]]
+          printf 'image_digest=%s@%s\n' "$IMAGE" "$digest" >> "$GITHUB_OUTPUT"
+      - name: Retain build verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier2-release-build-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/release-verification/
+          if-no-files-found: warn
+          retention-days: 30
+
+  qualify:
+    needs: publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      IMAGE_DIGEST: ${{ needs.publish.outputs.image_digest }}
+      SOURCE_SHA: ${{ inputs.source_sha }}
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          ref: ${{ inputs.source_sha }}
+          persist-credentials: false
+      - name: Verify and report the public digest
+        run: |
+          export DOCKER_CONFIG="$RUNNER_TEMP/anonymous-docker-config"
+          mkdir -p "$DOCKER_CONFIG"
+          printf '{"auths":{"ghcr.io":{}}}\n' > "$DOCKER_CONFIG/config.json"
+          docker pull "$IMAGE_DIGEST"
+          test "$(docker inspect --format='{{index .Config.Labels "org.opencontainers.image.revision"}}' "$IMAGE_DIGEST")" = "$SOURCE_SHA"
+          python3 ci/smoke_tier2_image.py --image "$IMAGE_DIGEST" --output "$RUNNER_TEMP/public-verification"
+          printf 'Verified Tier 2 image `%s` for tools ref `%s`.\n' "$IMAGE_DIGEST" "$SOURCE_SHA" >> "$GITHUB_STEP_SUMMARY"
+      - name: Retain public image verification evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier2-release-public-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/public-verification/
+          if-no-files-found: warn
+          retention-days: 30

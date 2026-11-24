@@ -246,11 +246,19 @@ The Tier 2 probe requires the OpenAI SDK, which is included in `skillevaluator[t
 
 For Tier 3, verify that the gateway serves the API and tool-call behavior your agent needs. See the OpenAI-compatible tab above for the APIs each agent uses.
 
-To use Claude Code through the gateway or an Anthropic Messages endpoint, clear inherited cloud routing with `unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK`, then choose the Claude route:
+To use Claude Code through the gateway or an Anthropic Messages endpoint, run `unset CLAUDE_CODE_USE_VERTEX CLAUDE_CODE_USE_BEDROCK` to clear inherited cloud routing. Then choose the Claude route.
 
-- **Shared gateway** — Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key.
-- **Native Anthropic** — Export your Anthropic key as `ANTHROPIC_API_KEY` and run `unset ANTHROPIC_BASE_URL`. Claude Code then uses Anthropic's endpoint and the native model default.
-- **Separate custom endpoint** — Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` with that endpoint's own URL and key. Pass `--agent-model claude-code=MODEL` with a model ID served by that endpoint.
+<Tabs>
+  <Tab title="Shared gateway" language="shared-claude-gateway">
+    Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key.
+  </Tab>
+  <Tab title="Native Anthropic" language="native-claude-anthropic">
+    Export your Anthropic key as `ANTHROPIC_API_KEY` and run `unset ANTHROPIC_BASE_URL`. Claude Code then uses Anthropic's endpoint and the native model default.
+  </Tab>
+  <Tab title="Separate custom endpoint" language="custom-claude-endpoint">
+    Set `ANTHROPIC_BASE_URL` and `ANTHROPIC_API_KEY` with that endpoint's own URL and key. Pass `--agent-model claude-code=MODEL` with a model ID served by that endpoint.
+  </Tab>
+</Tabs>
 
 ## Fully local setup
 

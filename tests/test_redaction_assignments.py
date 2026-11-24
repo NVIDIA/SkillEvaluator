@@ -156,6 +156,8 @@ _ADVERSARIAL_INPUTS = {
     "pem-repeated-private-key-pairs": _BEGIN + "PRIVATE KEY " * 5_000,
     "pem-headers-before-final-end": f"{_BEGIN}PRIVATE KEY-----\n" * 7_000 + f"{_END}x",
     "pem-label-word-ending-in-dash": f"{_BEGIN}PRIVATE KEY X-" * 2_622,
+    "registry-prefix-near-misses": ("hf_" + "a" * 33 + " " + "npm_" + "b" * 35 + " " + "pypi-" + "c" * 84 + " ")
+    * 2_000,
 }
 # Every other adversarial input must come back unchanged.
 _ADVERSARIAL_OUTPUTS = {
@@ -186,6 +188,53 @@ def test_redact_sensitive_text_redacts_value_after_long_key_run() -> None:
     assert redacted == f"{prefix}token=<redacted>\n{prefix}secret:<redacted>"
 
 
+# Built at runtime so secret scanners never see a literal credential.
+_HF_TOKEN = "hf_" + "Ab" * 17
+_HF_OAUTH_TOKEN = "hf_oauth_" + "Cd1" * 8
+_HF_JWT_TOKEN = "hf_jwt_" + "Ef2." * 6
+_NPM_TOKEN = "npm_" + "Gh3" * 12
+_PYPI_TOKEN = "pypi-" + "Ij4_-" * 17
+
+
+@pytest.mark.parametrize(
+    ("token", "marker"),
+    [
+        pytest.param(_HF_TOKEN, "huggingface-token-<redacted>", id="hf"),
+        pytest.param(_HF_OAUTH_TOKEN, "huggingface-token-<redacted>", id="hf-oauth"),
+        pytest.param(_HF_JWT_TOKEN, "huggingface-token-<redacted>", id="hf-jwt"),
+        pytest.param(_NPM_TOKEN, "npm-token-<redacted>", id="npm"),
+        pytest.param(_PYPI_TOKEN, "pypi-token-<redacted>", id="pypi"),
+        pytest.param(_HF_TOKEN + "Zz9" * 10, "huggingface-token-<redacted>", id="hf-longer-than-minimum"),
+        pytest.param(_NPM_TOKEN + "Zz9" * 10, "npm-token-<redacted>", id="npm-longer-than-minimum"),
+        pytest.param(_PYPI_TOKEN + "Zz9" * 10, "pypi-token-<redacted>", id="pypi-longer-than-minimum"),
+    ],
+)
+def test_bare_registry_tokens_are_masked(token: str, marker: str) -> None:
+    for text in (token, f"pull failed with {token} in the log", f'{{"detail": "{token}"}}', f"({token})"):
+        redacted = redact_sensitive_text(text)
+        assert token not in redacted, text
+        assert marker in redacted, text
+    assert redact_sensitive_text(f"a {token} b") == f"a {marker} b"
+
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("hf_hub_download(repo_id='x')", id="hf-function-name"),
+        pytest.param("npm_config_registry=https://registry.example/", id="npm-config-variable"),
+        pytest.param("pip install pypi-simple", id="pypi-word"),
+        pytest.param("hf_" + "a" * 33, id="hf-body-one-short"),
+        pytest.param("npm_" + "b" * 35, id="npm-body-one-short"),
+        pytest.param("pypi-" + "c" * 84, id="pypi-body-one-short"),
+        pytest.param("x_" + _HF_TOKEN, id="hf-after-underscore"),
+        pytest.param("my" + _NPM_TOKEN, id="npm-after-word"),
+        pytest.param("a-" + _PYPI_TOKEN, id="pypi-after-dash"),
+    ],
+)
+def test_registry_token_lookalikes_are_kept(text: str) -> None:
+    assert redact_sensitive_text(text) == text
+
+
 @pytest.mark.parametrize(
     ("source", "end", "expected"),
     [
@@ -210,6 +259,8 @@ def test_credential_safe_cut_points(source: str, end: int, expected: int) -> Non
         pytest.param("ghs_" + "b" * 20 + "." + "c" * 20, "ghs_", id="github-stateless"),
         pytest.param("AKIA" + "IOSFODNN7EXAMPLE", "AKIA", id="aws"),
         pytest.param("sk-" + "d" * 24, "sk-", id="sk"),
+        pytest.param("hf_oauth_" + "Cd" * 12 + ".~-", "hf_oauth_", id="huggingface-oauth"),
+        pytest.param("pypi-" + "Gh_-" * 22, "pypi-", id="pypi"),
         pytest.param("eyJ" + "e" * 12 + ".eyJ" + "f" * 12 + "." + "g" * 12, "eyJ", id="jwt"),
         pytest.param("Bearer " + "h/+=" * 6, "h/+=", id="bearer"),
         pytest.param("https://alice:p,ss;w@host.example/x", "alice", id="url-user-info"),

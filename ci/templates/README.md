@@ -20,9 +20,9 @@ a separate demo repository.
 ## Get a version you can run
 
 **These source templates contain placeholders.** Copy the
-[ready-to-use configurations](../bundles/1.0.1/README.md) instead; their reviewed
+[ready-to-use configurations](../bundles/1.2.0/README.md) instead; their reviewed
 workflow commits and container image digest are already filled in.
-The 1.0.1 bundle includes the comments-only workflow; the archived 0.9.0 bundle
+The 1.2.0 bundle includes the comments-only workflow; the archived 0.9.0 bundle
 does not. Default CLI feedback still configures the hosted publisher. For
 comments only, copy the versioned workflow and follow the
 [comment setup](../README.md#pr-comments-without-hosted-reports).

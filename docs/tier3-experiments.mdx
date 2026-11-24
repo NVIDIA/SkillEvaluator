@@ -74,6 +74,9 @@ calculated, then whole cases are resampled together with a recorded seed and
 resample count. No interval is reported for a single case. The interval
 measures variation across the reviewed cases, not all provider or trial noise;
 a zero-width interval on identical case interactions is not proof of certainty.
+Precision uses the lift thresholds: fewer than five cases is `insufficient`;
+fewer than ten cases or an interval wider than 0.20 is `low`. Interactions can
+span a wider range than lifts, so their precision can be `low` more often.
 A sign alone is not a significance test. On ten cases at `--n-attempts 1`,
 one binary outcome flipping in an individual or combined configuration moves
 the interaction by 0.10. Configurations

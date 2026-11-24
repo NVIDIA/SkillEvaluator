@@ -37,7 +37,7 @@ This guide gets you from a fresh clone to a mergeable pull request. You need Pyt
   If you prefer pip, `make install` runs the equivalent editable install:
 
   ```bash title="pip alternative"
-  pip install -e '.[all,dev]'
+  python -m pip install -e '.[all,dev]'
   ```
 
   ### Run the contribution gate
@@ -53,7 +53,7 @@ The Makefile wraps the standard tools, so you can run the underlying commands di
 
 | Target | Runs | Purpose |
 | --- | --- | --- |
-| `make install` | `pip install -e '.[all,dev]'` | Editable install with every extra plus dev tooling |
+| `make install` | `python -m pip install -e '.[all,dev]'` | Editable install with every extra plus dev tooling |
 | `make test` | `pytest` | Default (fast) test suite |
 | `make lint` | `ruff check src tests` | Lint the source and tests |
 | `make build` | `python -m build` | Build the wheel and sdist |
@@ -219,7 +219,7 @@ SkillEvaluator version you used for reproducibility:
 cff-version: 1.2.0
 title: "SkillEvaluator"
 type: software
-version: "1.0.1"
+version: "1.2.0"
 preferred-citation:
   type: article
   title: "Evaluating Skills, Not Just Agents: Agentic Continuous Evaluation of Skills"

@@ -233,7 +233,7 @@ def compare_configurations(
 
 def _summarize_case_interactions(per_case: Mapping[str, Any], evidence: Mapping[str, Any]) -> dict[str, Any]:
     """Use the same equally weighted case summary for either execution order."""
-    from skillevaluator.tier3.harbor.stats import case_mean_bootstrap
+    from skillevaluator.tier3.harbor.stats import INTERACTION_UNCERTAINTY_METHOD, case_mean_bootstrap
 
     cases = list(per_case.values())
     baseline = math.fsum(case["baseline"] for case in cases) / len(cases)
@@ -244,7 +244,7 @@ def _summarize_case_interactions(per_case: Mapping[str, Any], evidence: Mapping[
     ]
     case_interactions = [case["interaction"] for case in cases]
     uncertainty = case_mean_bootstrap(case_interactions)
-    uncertainty["method"] = "paired_case_interaction_bootstrap"
+    uncertainty["method"] = INTERACTION_UNCERTAINTY_METHOD
     uncertainty["nonzero_cases"] = sum(value != 0.0 for value in case_interactions)
     return {
         "status": "complete",

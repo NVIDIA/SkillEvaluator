@@ -22,6 +22,7 @@ commands referenced below.
 | [tier2 PATH](#direct-tier-workflows) | Run intra-skill dedup; include inter-skill comparison with `--catalog` | Chat and embeddings provider |
 | [tier3 PATH](#direct-tier-workflows) | Prepare a missing starter dataset and run live evaluation | Provider, supported agent, and sandbox |
 | [validate](#validate) | Run all three tiers for skills, including Tier 3 autopilot, with explicit scope and gating controls | Provider access, scanners, supported agent, and sandbox; `--tiers 1` selects static checks |
+| [ci init](/skills/skillevaluator/cli-onboarding) | Set up GitHub Tier 1 checks with optional hosted reports. Use `--channel stable` to opt a new setup into stable releases. | GitHub checkout and authenticated GitHub CLI for a setup PR |
 | [quality-check](#quality-check) | Score skill quality across four weighted categories | Nothing |
 | [rubric-eval](#rubric-eval) | LLM-as-judge rubric evaluation | LLM provider key |
 | [security-scan](#security-scan) | Scan for security vulnerabilities | Nothing (key only with `--llm`/`--llm-verify`) |
@@ -72,10 +73,10 @@ Direct `tier1 PATH`, `tier1 validate PATH`, and `tier2 PATH` default to
 
 | Flag | Default | Effect |
 | --- | --- | --- |
-| `-r, --report [cli\|json\|html\|markdown\|sarif\|junit]` | `cli,json,html` for direct workflows; `cli` for focused commands | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). |
+| `-r, --report [cli\|json\|html\|markdown\|sarif\|junit\|github]` | `cli,json,html` for direct workflows; `cli` for focused commands | Report format(s). Accepts comma- or space-separated values (`-r cli,json,html` or `-r cli json html`) and may be repeated. The compact default view writes html+json unless `-r` is passed explicitly, which is honored exactly (including `cli`). `github` prints workflow commands to stdout and does not write a file. |
 | `-o, --output-dir DIRECTORY` | `reports` | Directory for generated reports. |
 
-In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files. The focused expert commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown`, `.sarif.json` with `-r sarif`, or `.junit.xml` with `-r junit`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Direct workflows write `skillevaluator-tier1` or `skillevaluator-tier2` reports in the selected formats and also overwrite previous files with that basename. Filename conventions and report anatomy live in [Reports & Results](/skills/skillevaluator/reports).
+In practice: a default `validate` run (no `-r`) shows the compact pipeline view **and** writes `json` + `html` report files; passing `-r` takes over completely — `-r cli` really means terminal output only, no files, and `-r github` prints GitHub Actions annotations to stdout without a report file. The focused expert commands take the `cli` default literally: they print the full terminal report and write files only for the formats you request with `-r`. A `validate` run writes `skillevaluator-output-<timestamp>.json` / `.html` (plus `.md` with `-r markdown`, `.sarif.json` with `-r sarif`, or `.junit.xml` with `-r junit`); standalone commands write a fixed `skillevaluator-<kind>` basename (for example `skillevaluator-quality.json`), so a re-run overwrites the previous report. Direct workflows write `skillevaluator-tier1` or `skillevaluator-tier2` reports in the selected formats and also overwrite previous files with that basename. Filename conventions and report anatomy live in [Reports & Results](/skills/skillevaluator/reports).
 
 **Exit codes.** Commands communicate through a small exit-code contract — this is what your CI gates on (see [Gate Your CI](/skills/skillevaluator/ci-integration)):
 
@@ -979,6 +980,7 @@ skillevaluator doctor --env-mode docker
 skillevaluator doctor --tier 1 --checks security,code-integrity,dependency
 skillevaluator doctor --tier 2 --verify-models
 skillevaluator doctor --tier all
+skillevaluator doctor --tier 1 --json
 ```
 
 - **Tier 1** reports each external scanner the selected checks run: SkillSpector for `security`, Bandit, Semgrep and Gitleaks for `code-integrity`, and pip-audit for `dependency`. Each row shows the resolved executable, the override variable when one selected it, and the version from a bounded version probe. The probe never starts a shell. A scanner fails when it is missing, its override is malformed, or the probe exits nonzero or times out. It also fails when it is older than the release the validators parse: Bandit 1.9.4 or Gitleaks 8. An unreported version is a warning.
@@ -998,8 +1000,32 @@ An option for a tier that is not selected exits with a usage error before any ch
 | `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs, and Kata accepts only `kata_runtime` and `kata_dns`; policy-owned fields are rejected for every eligible backend. |
 | `--agent-model TEXT` | unset | Per-agent model override, `AGENT=MODEL` (repeatable) — check readiness with the model each agent will actually run. |
 | `--verify-models` | off | Tier 3: live per-agent catalog probe. Prints pass for verified access, warn for an inconclusive or non-authoritative result (success or failure), and fail only for a definitive credential, model, or configuration rejection. Tier 2: one embedding and one chat request. |
+| `--json` | off | Write one JSON object to stdout instead of the table. Nothing else is written to stdout, including when a check fails. Click usage errors still exit `2` and print to stderr, not JSON. |
 
-`-a`, `--env-mode`, `--backend`, `--environment-kwarg` and `--agent-model` apply to Tier 3 only. `skillevaluator tier3 doctor` checks only Tier 3. It takes the Tier 3 flags, including `--agent-model` and `--verify-models`, and has no `--tier`, `--checks` or `--timeout`.
+`--json` uses this shape. `status` on each tier is the worst row (`fail` over `warn` over `pass`). The top-level `status` is the worst tier. `check` and `detail` have terminal escape sequences and control characters removed (tab and newline are kept), as in the table.
+
+```json
+{
+  "schema_version": 1,
+  "command": "doctor",
+  "tiers": [
+    {
+      "tier": "1",
+      "status": "fail",
+      "checks": [
+        {"check": "CLI package", "status": "pass", "detail": "skillevaluator 1.0.1"},
+        {"check": "SkillSpector", "status": "pass", "detail": "2.13.4 at /usr/bin/skillspector"},
+        {"check": "Semgrep", "status": "fail", "detail": "not installed. Optional; install separately with: uv tool install semgrep"}
+      ]
+    }
+  ],
+  "status": "fail"
+}
+```
+
+A missing Tier 3 extra is a tier `3` entry with status `fail` and that detail, not a stderr line. Exit codes are unchanged: `0` when no row fails, `1` when any row fails (`warn` does not fail).
+
+`-a`, `--env-mode`, `--backend`, `--environment-kwarg` and `--agent-model` apply to Tier 3 only. `skillevaluator tier3 doctor` checks only Tier 3. It takes the Tier 3 flags, including `--agent-model`, `--verify-models`, and `--json`, and has no `--tier`, `--checks` or `--timeout`.
 
 ## health-check
 
@@ -1008,6 +1034,7 @@ Quick readiness check for the CLI and the selected live-eval backend. Use it as 
 ```bash title="Quick readiness check"
 skillevaluator health-check
 skillevaluator health-check --tier 1    # CI preflight for the Tier 1 scanners
+skillevaluator health-check --tier 1 --json
 ```
 
 | Flag | Default | Effect |
@@ -1018,6 +1045,7 @@ skillevaluator health-check --tier 1    # CI preflight for the Tier 1 scanners
 | `-a, --agents TEXT` | provider-native | Comma-separated agents to check. Defaults: NVIDIA Build=`opencode`, OpenAI=`codex`, Anthropic=`claude-code`. |
 | `--env-mode` | `docker` | Backend to check (same 27 modes as [tier3 evaluate](#tier3-evaluate)). |
 | `--environment-kwarg`, `--ek` | none | `KEY=VALUE` non-secret constructor option for a Harbor-native non-Docker backend (repeatable). Pass the same values intended for evaluation. Docker and local reject all kwargs, and Kata accepts only `kata_runtime` and `kata_dns`; policy-owned fields are rejected for every eligible backend. |
+| `--json` | off | Write one JSON object to stdout instead of the table, in the same shape as [doctor --json](#doctor). |
 
 ## models
 

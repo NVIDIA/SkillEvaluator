@@ -179,7 +179,7 @@ def test_quality_config_rejects_non_utf8_file(tmp_path: Path) -> None:
             'expected_headers:\n  - heading: "## Limitations"\n    points: 5\n    points: 10\n',
             r"invalid YAML: line 4, column 5: duplicate key 'points'",
         ),
-        ("expected_headers: " + "[" * 10000 + "]" * 10000 + "\n", "invalid YAML: nesting is too deep"),
+        ("expected_headers: " + "[" * 10000 + "]" * 10000 + "\n", r"invalid YAML: .*nesting depth exceeds 100"),
         (
             'expected_headers:\n  - heading: "## Limitations"\n    points: ' + "9" * 400 + "\n",
             r"expected_headers\[0\]\.points must be a non-negative number",
@@ -468,7 +468,8 @@ def test_digest_does_not_declare_packaged_headings_when_the_key_is_omitted(tmp_p
     assert _digest(bare) != _digest(None)
 
 
-# Longer than Python's 4300-digit int-to-str limit once written in decimal; YAML still loads it.
+# Longer than Python's 4300-digit int-to-str limit once written in decimal, and past the structure limit
+# on integers, so the loader refuses it before the settings are validated.
 _HUGE_HEX = "0x" + "f" * 4000
 
 
@@ -536,7 +537,7 @@ def test_custom_file_without_efficiency_keeps_the_packaged_token_budget(tmp_path
             "efficiency:\n  token_budget:\n    max_tokens: 1000000001\n",
             r"\.max_tokens must be a positive integer no greater than 1000000000",
         ),
-        (f"efficiency:\n  token_budget:\n    max_tokens: {_HUGE_HEX}\n", r"\.max_tokens must be a positive integer no"),
+        (f"efficiency:\n  token_budget:\n    max_tokens: {_HUGE_HEX}\n", r"invalid YAML: .*integer size exceeds 14000 bits"),
         ("efficiency:\n  token_budget:\n    points: -1\n", r"efficiency\.token_budget\.points must be a non-negative"),
         ('efficiency:\n  token_budget:\n    message: ""\n', r"efficiency\.token_budget\.message must be a non-empty"),
     ],
@@ -661,7 +662,7 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
         ("discoverability:\n  description_too_long:\n    max_chars: true\n", r"\.max_chars must be a positive integer"),
         (
             f"discoverability:\n  description_too_long:\n    max_chars: {_HUGE_HEX}\n",
-            r"\.max_chars must be a positive integer no greater than 1000000000",
+            r"invalid YAML: .*integer size exceeds 14000 bits",
         ),
         ("discoverability:\n  description_too_long:\n    points: -5\n", r"\.points must be a non-negative"),
         ("discoverability:\n  description_too_short: 20\n", r"discoverability\.description_too_short must be a mapping"),
@@ -675,7 +676,7 @@ def test_custom_file_with_only_a_description_minimum_keeps_every_other_packaged_
         ("discoverability:\n  description_too_short:\n    min_chars: true\n", r"\.min_chars must be a positive integer"),
         (
             f"discoverability:\n  description_too_short:\n    min_chars: {_HUGE_HEX}\n",
-            r"\.min_chars must be a positive integer no greater than 1000000000",
+            r"invalid YAML: .*integer size exceeds 14000 bits",
         ),
         ("discoverability:\n  description_too_short:\n    points: -5\n", r"\.points must be a non-negative"),
     ],

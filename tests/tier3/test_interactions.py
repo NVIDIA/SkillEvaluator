@@ -755,7 +755,9 @@ def test_cli_requires_two_skills_and_never_generates_a_source(monkeypatch, tmp_p
 
 
 @pytest.mark.parametrize("contrast", [-0.2, 0.0, 0.1])
-def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contrast):
+def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contrast, capsys):
+    from skillevaluator.tier3.interaction_commands import _print_report
+
     matrix = []
     for index, scores in enumerate(
         [
@@ -777,6 +779,36 @@ def test_interaction_interval_keeps_arms_paired_within_each_case(tmp_path, contr
     assert uncertainty["ci_low"] == pytest.approx(contrast)
     assert uncertainty["ci_high"] == pytest.approx(contrast)
     assert compare_configurations(matrix, metric="goal_accuracy", n_attempts=1) == report
+    report.update(metric="goal_accuracy", skills=[{"name": "a"}, {"name": "b"}], run_dir=str(tmp_path))
+    _print_report(report)
+    text = capsys.readouterr().out
+    nonzero = 0 if contrast == 0 else 3
+    assert (
+        f"95% case-bootstrap interval: [{contrast:+.4f}, {contrast:+.4f}]; "
+        f"3 cases, {nonzero} non-zero; precision: insufficient"
+    ) in text
+
+
+def test_terminal_reports_ordered_signed_bounds_for_varying_interactions(tmp_path, capsys):
+    from skillevaluator.tier3.interaction_commands import _print_report
+
+    matrix = []
+    for index, scores in enumerate(
+        [[0.1, 0.2, 0.3], [0.2, 0.3, 0.4], [0.2, 0.4, 0.5], [0.1, 0.5, 0.9]]
+    ):
+        condition = "without-skill" if index == 0 else "with-skill"
+        values = {f"case-{case}": [value] for case, value in enumerate(scores)}
+        result = _evidence(tmp_path / str(index), values, condition=condition)
+        matrix.append({"id": str(index), "condition": condition, "result": result})
+    report = compare_configurations(matrix, metric="goal_accuracy", n_attempts=1)
+    uncertainty = report["agents"]["codex"]["uncertainty"]
+    assert uncertainty["ci_low"] == -0.2
+    assert uncertainty["ci_high"] == 0.3
+    report.update(metric="goal_accuracy", skills=[{"name": "a"}, {"name": "b"}], run_dir=str(tmp_path))
+    _print_report(report)
+    assert (
+        "95% case-bootstrap interval: [-0.2000, +0.3000]; 3 cases, 2 non-zero; precision: insufficient"
+    ) in capsys.readouterr().out
 
 
 def test_single_case_interaction_has_counts_but_no_interval(tmp_path):
@@ -1124,6 +1156,52 @@ def test_interleaved_keeps_dataset_generation_and_case_review_provenance(monkeyp
         skills, eval_source=source, options=EvaluationOptions(source), execution_order="interleaved"
     )
     assert report["status"] == "complete" and len(calls) == 8
+
+
+@pytest.mark.parametrize("suffix", ["yaml", "yml"])
+@pytest.mark.parametrize("timestamp", ["2026-11-19", "2026-11-19T16:00:00Z", "2026-11-19 16:00:00+02:30"])
+def test_interleaved_keeps_native_yaml_generation_timestamps(monkeypatch, tmp_path, suffix, timestamp):
+    import yaml
+
+    from skillevaluator.tier3.harbor.runner import _dataset_generation_provenance
+
+    source = _two_case_source(tmp_path)
+    original = source / "evals" / "evals.json"
+    document = json.loads(original.read_text())
+    generated_at = yaml.safe_load(f"generated_at: {timestamp}")["generated_at"]
+    document["generation"] = {
+        "mode": "llm", "grounding": "skill", "review_state": "reviewed", "generated_at": generated_at
+    }
+    for entry in document["evals"]:
+        entry["review"] = {"status": "reviewed"}
+    dataset = original.with_suffix("." + suffix)
+    dataset.write_text(yaml.safe_dump(document), encoding="utf-8")
+    original.unlink()
+    before = dataset.read_bytes()
+    skills = [_skill(tmp_path, name) for name in ("a", "b")]
+    calls = _interleaved_engine(monkeypatch)
+    fake = EvaluationService.evaluate
+
+    def evaluate(self, options, **kwargs):
+        staged = json.loads((options.skill_path / "evals" / "evals.json").read_text())
+        assert staged["generation"] == {**document["generation"], "generated_at": generated_at.isoformat()}
+        assert staged["evals"][0]["review"] == {"status": "reviewed"}
+        provenance = _dataset_generation_provenance(options.skill_path)
+        assert provenance["mode"] == "llm" and provenance["grounding"] == "skill"
+        assert provenance["needs_review_count"] == 0
+        return fake(self, options, **kwargs)
+
+    monkeypatch.setattr(EvaluationService, "evaluate", evaluate)
+    result = CliRunner().invoke(
+        cli, ["tier3", "interact", *map(str, skills), "--eval-source", str(source),
+              "--execution-order", "interleaved", "--json"]
+    )
+    assert result.exit_code == 0, result.output
+    report = json.loads(result.stdout)
+    assert report["status"] == "complete" and len(calls) == 8
+    assert all(step["status"] == "complete" for step in report["schedule"])
+    assert dataset.read_bytes() == before
+    assert (Path(report["run_dir"]) / "source" / "evals" / dataset.name).read_bytes() == before
 
 
 def test_interleaved_releases_previous_case_sources_before_preparing_another(monkeypatch, tmp_path):

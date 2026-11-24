@@ -73,13 +73,17 @@ def synthetic_trajectory_from_claude_stream_jsonl(text: str) -> dict[str, Any] |
     """Parse Claude Code ``--output-format stream-json`` lines (tee'd to claude-code.txt)."""
     steps: list[dict[str, Any]] = []
     steps_by_call_id: dict[str, dict[str, Any]] = {}
-    for raw_line in text.splitlines():
+    # JSONL records end at LF; Unicode line separators can appear inside JSON strings.
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
         try:
             evt = json.loads(line)
         except json.JSONDecodeError:
+            continue
+
+        if not isinstance(evt, dict):
             continue
 
         et = evt.get("type")
@@ -283,13 +287,16 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
     steps: list[dict[str, Any]] = []
     n = 0
 
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
         try:
             evt = json.loads(line)
         except json.JSONDecodeError:
+            continue
+
+        if not isinstance(evt, dict):
             continue
 
         say = evt.get("say", "")
@@ -301,6 +308,9 @@ def synthetic_trajectory_from_cline_cli(text: str) -> dict[str, Any] | None:
                 tool_data = json.loads(evt_text)
             except (json.JSONDecodeError, TypeError):
                 tool_data = {}
+
+            if not isinstance(tool_data, dict):
+                continue
 
             tool_name = tool_data.get("tool", "")
             if tool_name == "useSkill":
@@ -500,7 +510,7 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
     steps: list[dict[str, Any]] = []
     saw_content = False
 
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line:
             continue
@@ -587,7 +597,7 @@ def synthetic_trajectory_from_opencode_json(text: str) -> dict[str, Any] | None:
 def _iter_jsonl_dicts(text: str) -> list[dict[str, Any]]:
     """Parse JSONL lines, skipping non-JSON noise (e.g. stderr mixed into tee logs)."""
     events: list[dict[str, Any]] = []
-    for raw_line in text.splitlines():
+    for raw_line in text.split("\n"):
         line = raw_line.strip()
         if not line.startswith("{") or not line.endswith("}"):
             continue
@@ -908,6 +918,12 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
 
         if item_type == "mcp_tool_call":
             tool = str(item.get("tool") or "mcp_tool")
+            server = item.get("server")
+            mcp_extra = {}
+            if isinstance(server, str) and server:
+                bare_tool = tool.removeprefix(f"mcp__{server}__")
+                mcp_extra = {"mcp_server": server, "mcp_tool": bare_tool}
+                tool = f"mcp__{server}__{bare_tool}"
             arguments = item.get("arguments")
             if not isinstance(arguments, dict):
                 arguments = {}
@@ -926,6 +942,8 @@ def synthetic_trajectory_from_codex_json(text: str) -> dict[str, Any] | None:
                 ],
                 "observation": {"results": []},
             }
+            if mcp_extra:
+                step["tool_calls"][0]["extra"] = mcp_extra
             observation = _codex_mcp_observation(item)
             if observation:
                 step["observation"]["results"].append(
@@ -993,7 +1011,7 @@ def synthetic_trajectory_from_codex_txt(text: str) -> dict[str, Any] | None:
     if synth and synth.get("steps"):
         return synth
 
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    lines = [line.strip() for line in text.split("\n") if line.strip()]
     if not lines:
         return None
     if all(line.startswith("{") and line.endswith("}") for line in lines):
@@ -1025,52 +1043,29 @@ def load_trajectory_with_fallback(
                     meta["source"] = "trajectory.json"
                     return data, meta
             meta["warning"] = "trajectory.json has no steps[]"
-        except (json.JSONDecodeError, OSError) as e:
+        except (json.JSONDecodeError, UnicodeDecodeError, OSError) as e:
             meta["warning"] = f"trajectory.json unreadable: {e}"
 
-    claude_path = logs / "claude-code.txt"
-    if claude_path.exists():
-        raw = claude_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_claude_stream_jsonl(raw)
+    candidates = (
+        ("claude-code.txt", synthetic_trajectory_from_claude_stream_jsonl, "Claude Code stream JSONL"),
+        ("cursor-cli.txt", synthetic_trajectory_from_cursor_cli, "Cursor CLI log (heuristic)"),
+        ("cline.txt", synthetic_trajectory_from_cline_cli, "Cline CLI JSONL log"),
+        ("opencode.txt", synthetic_trajectory_from_opencode_json, "OpenCode JSON stream"),
+        ("codex.txt", synthetic_trajectory_from_codex_txt, "Codex structured log"),
+    )
+    for filename, converter, description in candidates:
+        try:
+            raw = (logs / filename).read_text(encoding="utf-8", errors="replace")
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            warning = f"{filename} unreadable: {exc}"
+            meta["warning"] = f"{meta['warning']}; {warning}" if meta["warning"] else warning
+            continue
+        synth = converter(raw)
         if synth and synth.get("steps"):
-            meta["source"] = "claude-code.txt"
-            meta["note"] = "Synthetic ATIF from Claude Code stream JSONL"
-            return synth, meta
-
-    cursor_path = logs / "cursor-cli.txt"
-    if cursor_path.exists():
-        raw = cursor_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_cursor_cli(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "cursor-cli.txt"
-            meta["note"] = "Synthetic ATIF from Cursor CLI log (heuristic)"
-            return synth, meta
-
-    cline_path = logs / "cline.txt"
-    if cline_path.exists():
-        raw = cline_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_cline_cli(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "cline.txt"
-            meta["note"] = "Synthetic ATIF from Cline CLI JSONL log"
-            return synth, meta
-
-    opencode_path = logs / "opencode.txt"
-    if opencode_path.exists():
-        raw = opencode_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_opencode_json(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "opencode.txt"
-            meta["note"] = "Synthetic ATIF from OpenCode JSON stream"
-            return synth, meta
-
-    codex_path = logs / "codex.txt"
-    if codex_path.exists():
-        raw = codex_path.read_text(encoding="utf-8", errors="replace")
-        synth = synthetic_trajectory_from_codex_txt(raw)
-        if synth and synth.get("steps"):
-            meta["source"] = "codex.txt"
-            meta["note"] = "Synthetic ATIF from Codex structured log"
+            meta["source"] = filename
+            meta["note"] = f"Synthetic ATIF from {description}"
             return synth, meta
 
     return None, meta

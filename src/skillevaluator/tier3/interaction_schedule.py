@@ -13,6 +13,7 @@ import tempfile
 from collections.abc import Callable, Mapping, Sequence
 from contextlib import ExitStack
 from dataclasses import replace
+from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -91,6 +92,7 @@ def prepare_case_sources(
                 selected_document = {**document, "cases": [entry]}
             else:
                 selected_document = entry
+        selected_json = json.dumps(selected_document, default=_dataset_json_metadata) + "\n"
         selected = []
         for index, skill in enumerate(frozen):
             destination = root / f"case-{ordinal}" / f"skill-{index}" / skill.name
@@ -100,10 +102,17 @@ def prepare_case_sources(
             copytree_secure(evaluator / "evals", destination / "evals", allowed_root=evaluator)
             # JSON takes precedence over the original supported filename. The
             # original source and fixtures are retained in the experiment root.
-            (destination / "evals" / "evals.json").write_text(json.dumps(selected_document) + "\n", encoding="utf-8")
+            (destination / "evals" / "evals.json").write_text(selected_json, encoding="utf-8")
             selected.append(destination)
         sources[entry["id"]] = selected
     return sources
+
+
+def _dataset_json_metadata(value: Any) -> str:
+    """Keep native YAML dates and timestamps as ISO 8601 metadata in staged JSON."""
+    if isinstance(value, (datetime, date)):
+        return value.isoformat()
+    raise TypeError(f"Object of type {type(value).__name__} is not JSON serializable")
 
 
 def interaction_schedule(

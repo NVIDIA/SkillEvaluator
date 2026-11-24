@@ -22,18 +22,17 @@ DOC_PREFIXES = (b"docs/",)
 DOC_FILES = frozenset({b"fern/docs.yml", b"CHANGELOG.md", b"README.md"})
 KNOWN_STATUSES = frozenset(b"ACDMRTUXB")
 
-# The Tier 3 platform jobs are the macOS sandbox tests and the native Windows
-# local-mode check. They exist for operating-system behaviour, and that code
-# lives under these source paths. The Linux jobs run the same test files, so a
-# change anywhere else can only break those tests in a way Linux already shows.
+# The native jobs import code across the package, including catalog I/O and
+# rubric validation with real macOS filesystem behavior. Package paths alone
+# cannot establish platform independence, so keep these changes in the lane.
 SOURCE_ROOT = b"src/skillevaluator"
 TESTS_ROOT = b"tests"
-TIER3_PLATFORM_SOURCE = (b"src/skillevaluator/tier3", b"src/skillevaluator/utils")
 # The test files the two jobs run. tests/test_ci_workflows.py checks this list
 # against the jobs' commands in ci.yml.
 TIER3_PLATFORM_TESTS = frozenset(
     {
         b"tests/embedding/test_catalog.py",
+        b"tests/test_harbor_local_environment.py",
         b"tests/test_harbor_local_mode.py",
         b"tests/test_harbor_local_sandbox.py",
         b"tests/test_harbor_runtime_preflight.py",
@@ -69,9 +68,8 @@ def _is_test_module(path: bytes) -> bool:
 def _touches_tier3_platform(path: bytes) -> bool:
     if _is_documentation(path):
         return False
-    if path != SOURCE_ROOT and _is_under(path, SOURCE_ROOT):
-        # ``tier3`` also matches top-level modules such as ``tier3_environments.py``.
-        return any(path.startswith(prefix) for prefix in TIER3_PLATFORM_SOURCE)
+    if _is_under(path, SOURCE_ROOT):
+        return True
     if path != TESTS_ROOT and _is_under(path, TESTS_ROOT):
         if _is_under(path, TIER3_PLATFORM_TEST_SUPPORT):
             return True

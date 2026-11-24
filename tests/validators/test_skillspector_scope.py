@@ -1824,6 +1824,19 @@ class TestTier1Plumbing:
         assert kwargs["content_type"] == expected_scope
         assert kwargs["skillspector_reference_root"] == (sample_skill_dir if content_type == "plugin" else None)
 
+    def test_plugin_without_a_manifest_refuses_before_scanner_construction(
+        self, monkeypatch: pytest.MonkeyPatch, sample_skill_dir: Path
+    ) -> None:
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        monkeypatch.setattr(tier1_commands, "SecurityValidator", _RecordingSecurityValidator)
+        _RecordingSecurityValidator.instances = []
+
+        results = run_public_plugin_validation(sample_skill_dir, checks="security")
+
+        assert not _RecordingSecurityValidator.instances
+        assert any(not result.passed for result in results)
+
     def test_standalone_security_scan_stays_unrestricted(
         self, monkeypatch: pytest.MonkeyPatch, sample_skill_dir: Path
     ) -> None:
@@ -1834,3 +1847,33 @@ class TestTier1Plumbing:
 
         (kwargs,) = _RecordingSecurityValidator.instances
         assert "content_type" not in kwargs
+
+
+def test_nested_alias_manifest_fails_closed() -> None:
+    from tests.yaml_alias_fixtures import alias_bomb_frontmatter
+
+    assert scope_module._manifest_reference_text(alias_bomb_frontmatter()) is None
+
+
+class TestManifestReferenceTextIsBounded:
+    """A manifest that is not JSON is read as YAML within the structured-data limits."""
+
+    def test_one_large_string_aliased_many_times_fails_closed_without_joining_it(self):
+        from tests.yaml_alias_fixtures import scalar_alias_fan_yaml
+
+        assert scope_module._manifest_reference_text(scalar_alias_fan_yaml()) is None
+
+    def test_merge_key_bomb_fails_closed(self):
+        from tests.yaml_alias_fixtures import merge_bomb_yaml
+
+        assert scope_module._manifest_reference_text(merge_bomb_yaml()) is None
+
+    def test_yaml_manifest_still_yields_its_runtime_references(self):
+        text = "name: plugin\ndescription: a ./not/a/reference.md\nhooks:\n  - command: ./hooks/stop.sh\n"
+
+        assert scope_module._manifest_reference_text(text) == "./hooks/stop.sh"
+
+    def test_invalid_yaml_syntax_keeps_the_whole_text_as_the_reference(self):
+        text = "name: [unclosed\nhooks: ./hooks/stop.sh\n"
+
+        assert scope_module._manifest_reference_text(text) == text

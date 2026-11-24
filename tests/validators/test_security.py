@@ -10,13 +10,16 @@ import re
 import struct
 import subprocess
 import sys
+import xml.etree.ElementTree as ET
 import zlib
 from concurrent.futures import Future
 from pathlib import Path
 from unittest.mock import patch
 
 import pytest
+from click.testing import CliRunner
 
+from skillevaluator.cli import cli
 from skillevaluator.config import load_pii_patterns
 from skillevaluator.provider_config import CHAT_DEFAULT_MODELS
 from skillevaluator.reporting import CLIReporter, HTMLReporter, JSONReporter, MarkdownReporter
@@ -643,6 +646,59 @@ description: A skill documenting REST API endpoints
 
         home_paths = [f.metadata["matched_value"] for f in result.findings if f.check_name == "home_paths"]
         assert home_paths == ["/home/alice/"]
+
+    def test_pii_scan_does_not_read_symlink_pointing_outside_skill(self, tmp_path: Path):
+        """A symlinked file that leaves the skill is skipped, so host content never reaches a finding."""
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        host_file = tmp_path / "host_file.txt"
+        host_file.write_text("contact alice.host@acme-widgets.net token=HOSTMARKER\n", encoding="utf-8")
+        try:
+            (skill_dir / "references" / "notes.md").symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 1
+        assert not [f for f in result.findings if f.check_name == "emails"]
+        assert "HOSTMARKER" not in " ".join([*result.errors, *result.warnings, *result.messages])
+        assert "alice.host" not in " ".join(str(f.metadata) + (f.line_content or "") for f in result.findings)
+
+    def test_pii_scan_still_reads_symlink_pointing_inside_skill(self, tmp_path: Path):
+        skill_dir = tmp_path / "skill"
+        (skill_dir / "references").mkdir(parents=True)
+        (skill_dir / "SKILL.md").write_text("---\nname: skill\ndescription: test\n---\n# Demo\n", encoding="utf-8")
+        (skill_dir / "references" / "real.md").write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        try:
+            (skill_dir / "alias.md").symlink_to(skill_dir / "references" / "real.md")
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        result = SecurityValidator().validate_pii_only(skill_dir)
+
+        assert result.summary.files_scanned == 3
+        email_findings = [f for f in result.findings if f.check_name == "emails"]
+        assert len(email_findings) == 1
+        occurrences = {o["file"] for o in email_findings[0].metadata["occurrences"]}
+        assert occurrences == {"alias.md", "references/real.md"}
+
+    def test_scan_file_for_pii_refuses_symlink_outside_skill_root(self, tmp_path: Path):
+        """The reader itself enforces the boundary, not only the walker that feeds it."""
+        skill_dir = tmp_path / "skill"
+        skill_dir.mkdir()
+        host_file = tmp_path / "host_file.md"
+        host_file.write_text("Contact: john.doe@personal-email.com\n", encoding="utf-8")
+        link = skill_dir / "notes.md"
+        try:
+            link.symlink_to(host_file)
+        except OSError as exc:
+            pytest.skip(f"symlinks unavailable: {exc}")
+
+        validator = SecurityValidator()
+        assert validator._scan_file_for_pii(link, set(), skill_root=skill_dir) == []
+        assert validator._scan_file_for_pii(host_file, set(), skill_root=tmp_path)
 
     def test_detects_non_placeholder_email(self, tmp_path: Path):
         """Test detection of a non-placeholder email address."""
@@ -2705,6 +2761,51 @@ print(json.dumps([finding.metadata["matched_value"] for finding in result.findin
             "from the whole-scan limit, so reducing bundled content does not change it. Rerun the scan; if the "
             "limit repeats, update SkillSpector or report the completeness exceptions to the SkillSpector project."
         ]
+
+    @pytest.mark.parametrize(
+        ("dependency_path", "child_reason", "reported", "accounted"),
+        [
+            ("example/pyproject.toml", "dependency_parse_error", 2, None),
+            ("example/pyproject.toml", "dependency_parse_error", 3, 2),
+            ("another/pyproject.toml", "dependency_parse_error", 2, 3),
+            ("example/pyproject.toml", "output_limit", 2, 1),
+        ],
+        ids=["duplicate-work", "duplicate-claimed-twice", "distinct-work", "unrelated-child"],
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_skillspector_reconciles_supplemental_supply_chain_work(
+        self,
+        mock_tools,
+        sample_skill_dir: Path,
+        dependency_path: str,
+        child_reason: str,
+        reported: int,
+        accounted: int | None,
+    ) -> None:
+        analyzer = "static_patterns_supply_chain"
+        dependency = _ledger_exception(
+            "example/pyproject.toml",
+            "dependency_parse_error",
+            analyzers=(f"{analyzer}_dependencies_{child_reason}",),
+        )
+        second = {**dependency, "path": dependency_path, "error_class": "ValueError"}
+        script = _ledger_exception("scripts/helper.pyz", "python_source_decode_error", analyzers=(analyzer,))
+        payload = _skillspector_partial_report([dependency, second, script])
+        completeness = payload["analysis_completeness"]
+        status = next(row for row in completeness["analyzer_statuses"] if row["analyzer_id"] == analyzer)
+        status.update(status="degraded", planned_work=reported + 1, completed=1, partial=reported)
+        completeness["limitations"] = [f"Analyzer {analyzer} status: degraded."]
+
+        result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+        assert result.is_incomplete
+        [error] = result.errors
+        assert "dependency_parse_error" in error
+        assert "python_source_decode_error" in error
+        if accounted is None:
+            assert "partial work accounting" not in error
+        else:
+            assert f"partial work accounting ({reported} reported, {accounted} explained by the ledger)" in error
 
     def test_skillspector_runtime_limit_hint_counts_only_scan_budget_files(self) -> None:
         ledger = [
@@ -8903,6 +9004,275 @@ def _referenced_image_report(name: str) -> dict:
     return json.loads((Path(__file__).parents[1] / "fixtures" / name).read_text(encoding="utf-8"))
 
 
+@pytest.fixture
+def plugin_with_excluded_png(tmp_path: Path) -> tuple[Path, dict]:
+    plugin = tmp_path / "plugin"
+    manifest = plugin / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"name":"example","version":"1.0.0","description":"Example plugin."}', encoding="utf-8")
+    (plugin / "README.md").write_text("![Logo](assets/logo.png)\n", encoding="utf-8")
+    logo = plugin / "assets" / "logo.png"
+    logo.parent.mkdir()
+    logo.write_bytes(_png_bytes())
+
+    # Captured with SkillSpector 2.13.4 and --no-llm against the files above.
+    report = Path(__file__).parents[1] / "fixtures" / "skillspector-2.13.4-plugin-png-no-llm.json"
+    return plugin, json.loads(report.read_text(encoding="utf-8"))
+
+
+@pytest.mark.parametrize("exclusion", ["documented", "missing", "wrong-path"])
+@patch("skillevaluator.validators.security.Tools")
+def test_unaccepted_binary_scope_exclusion(mock_tools, tmp_path: Path, exclusion: str) -> None:
+    # Scan fixture captured from these three files with SkillSpector 2.13.6.
+    (tmp_path / "SKILL.md").write_text(
+        "---\nname: demo-skill\ndescription: Demo skill. Use when testing.\n---\n\n# Demo\n", encoding="utf-8"
+    )
+    (tmp_path / "scripts").mkdir()
+    (tmp_path / "scripts/hello.py").write_text('print("hello")\n', encoding="utf-8")
+    (tmp_path / "data.dat").write_bytes(bytes(range(192, 256)))
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    exclusions = payload["analysis_completeness"]["scope_exclusions"]
+    if exclusion == "missing":
+        exclusions.clear()
+    elif exclusion == "wrong-path":
+        exclusions[0]["path"] = "other.dat"
+
+    result = _validate_skillspector_payload(mock_tools, tmp_path, payload)
+
+    assert not result.passed
+    assert result.is_incomplete
+    if exclusion == "documented":
+        assert any('binary exclusion for "data.dat"' in error for error in result.errors)
+        assert not any("inventory contradicts" in error for error in result.errors)
+    else:
+        assert any("inventory contradicts analysis completeness" in error for error in result.errors)
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["   ", " data.dat ", 'a"b.dat', "line\nbreak\x1b.dat", "x" * 192 + "\u202e" * 12],
+    ids=["only-spaces", "edge-spaces", "quote", "control-characters", "bounded-escaping"],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_binary_exclusion_quotes_report_path(mock_tools, sample_skill_dir, path: str) -> None:
+    payload = json.loads(
+        (Path(__file__).parents[1] / "fixtures/skillspector-2.13.6-excluded-binary-no-llm.json").read_text("utf-8")
+    )
+    next(c for c in payload["components"] if c["path"] == "data.dat")["path"] = path
+    payload["analysis_completeness"]["scope_exclusions"][0]["path"] = path
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.is_incomplete
+    [message] = [error for error in result.errors if "binary exclusion for " in error]
+    shown = message.split("binary exclusion for ", 1)[1].split(". SkillEvaluator", 1)[0]
+    assert shown.isascii() and shown.isprintable()
+    if len(json.dumps(path)) <= 200:
+        assert json.loads(shown) == path
+    else:
+        assert len(shown) <= 200
+        assert shown.endswith("...")
+        assert path.startswith(json.loads(shown[:-3]))
+
+
+@pytest.mark.parametrize(
+    ("path", "passes"),
+    [
+        ("assets/unscanned", True),
+        ("assets/unscanned/", True),
+        ("/outside/unscanned", False),
+        ("assets/../unscanned", False),
+        ("C:/outside/unscanned", False),
+        ("assets/unscanned//", False),
+    ],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_complete_skillspector_scope_exclusion_requires_safe_path(
+    mock_tools, sample_skill_dir: Path, path: str, passes: bool
+) -> None:
+    payload = _skillspector_json_report()
+    payload["analysis_completeness"]["scope_exclusions"] = [
+        {"outcome": "out_of_scope", "phase": "discovery", "reason_code": "not_regular_file", "path": path, "fatal": False}
+    ]
+
+    result = _validate_skillspector_payload(mock_tools, sample_skill_dir, payload)
+
+    assert result.passed is passes
+    assert result.is_incomplete is (not passes)
+    if not passes:
+        assert any("unsafe scope exclusion path" in error for error in result.errors)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_accepts_a_verified_png_exclusion(mock_tools, plugin_with_excluded_png) -> None:
+    plugin, payload = plugin_with_excluded_png
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.passed, result.errors
+    assert not result.incomplete_scans
+    assert any("1 passive PNG file (assets/logo.png)" in warning for warning in result.warnings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_reports_png_exclusion_in_every_format(
+    mock_tools, plugin_with_excluded_png, tmp_path: Path
+) -> None:
+    plugin, payload = plugin_with_excluded_png
+    mock_tools.skillspector.is_available = True
+    mock_tools.skillspector.version = "2.13.4"
+    mock_tools.skillspector.run.return_value = ToolResult(
+        success=True, stdout=json.dumps(payload), stderr="", exit_code=0
+    )
+    reports = tmp_path / "reports"
+    runner = CliRunner()
+    args = ["validate", str(plugin), "--type", "plugin", "--tiers", "1", "--checks", "security", "--no-llm"]
+    run = runner.invoke(cli, [*args, "-r", "cli,json,html,markdown,sarif,junit", "-o", str(reports)])
+
+    assert run.exit_code == 0, run.output
+    note = "1 passive PNG file (assets/logo.png)"
+    [json_path] = [path for path in reports.glob("*.json") if not path.name.endswith(".sarif.json")]
+    [security] = json.loads(json_path.read_text(encoding="utf-8"))["results"]
+    assert security["passed"]
+    [finding] = security["findings"]
+    assert finding["severity"] == "info"
+    assert note in finding["message"]
+    assert finding["file_path"] == "assets/logo.png"
+    assert sum(note in warning for warning in security["legacy"]["warnings"]) == 1
+
+    assert " ".join(run.output.split()).count(note) == 1
+    assert note in next(reports.glob("*.html")).read_text(encoding="utf-8")
+    assert note in next(reports.glob("*.md")).read_text(encoding="utf-8")
+    [sarif_run] = json.loads(next(reports.glob("*.sarif.json")).read_text(encoding="utf-8"))["runs"]
+    [sarif_note] = sarif_run["results"]
+    assert sarif_note["level"] == "note"
+    assert note in sarif_note["message"]["text"]
+    junit = ET.parse(next(reports.glob("*.junit.xml"))).getroot()
+    assert not junit.findall(".//failure")
+    assert not junit.findall(".//error")
+    assert any(note in (entry.text or "") for entry in junit.findall(".//testcase/system-out"))
+
+    compact = runner.invoke(cli, [*args, "-o", str(tmp_path / "compact")])
+    assert compact.exit_code == 0, compact.output
+    assert "assets/logo.png" in compact.output
+    assert "YARA and artifact integrity" in " ".join(compact.output.split())
+
+
+@pytest.mark.parametrize("include_status", [False, True], ids=["statusless", "unexpected-status"])
+@patch("skillevaluator.validators.security.Tools")
+def test_legacy_skillspector_reports_cannot_use_png_exclusions(
+    mock_tools, plugin_with_excluded_png, include_status: bool
+) -> None:
+    plugin, modern = plugin_with_excluded_png
+    payload = json.loads(_SKILLSPECTOR_2_9_6_NO_LLM_REPORT.read_text(encoding="utf-8"))
+    payload["components"].append(modern["components"][-1])
+    completeness = payload["analysis_completeness"]
+    completeness.update(references=[], scope_exclusions=modern["analysis_completeness"]["scope_exclusions"])
+    if include_status:
+        completeness["status"] = "complete"
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.is_incomplete
+    expected = "status' must be absent" if include_status else "inventory contradicts analysis completeness"
+    assert any(expected in error for error in result.errors)
+    assert not any("passive PNG" in warning for warning in result.warnings)
+
+
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_retains_yara_findings_on_an_excluded_png(mock_tools, plugin_with_excluded_png) -> None:
+    plugin, payload = plugin_with_excluded_png
+    payload["issues"] = _skillspector_json_report(
+        [
+            {
+                "id": "YR1",
+                "severity": "HIGH",
+                "pattern": "Malware",
+                "finding": "Test finding",
+                "category": "Malware",
+                "location": {"file": "assets/logo.png"},
+            }
+        ]
+    )["issues"]
+    payload["risk_assessment"].update(score=60, severity="HIGH", recommendation="DO_NOT_INSTALL")
+    payload["analysis_completeness"].update(findings_before_filtering=1, findings_after_filtering=1)
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload, exit_code=1)
+
+    assert not result.passed
+    assert not result.is_incomplete
+    assert [(finding.check_name, finding.file_path) for finding in result.findings] == [
+        ("skillspector_passive_png_exclusion", "assets/logo.png"),
+        ("Malware (YR1)", "assets/logo.png"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing-file",
+        "invalid-bytes",
+        "executable-mode",
+        "executable-inventory",
+        "duplicate-exclusion",
+        "extra-component",
+        "incomplete-analyzers",
+        "uninspected-image",
+        "control-path",
+        "output-style-path",
+        "resolved-reference",
+        "missing-reference",
+        "ambiguous-reference",
+    ],
+)
+@patch("skillevaluator.validators.security.Tools")
+def test_plugin_root_security_rejects_unverified_png_exclusions(
+    mock_tools, plugin_with_excluded_png, case: str
+) -> None:
+    plugin, payload = plugin_with_excluded_png
+    completeness = payload["analysis_completeness"]
+    row = completeness["scope_exclusions"][0]
+    logo = plugin / row["path"]
+    if case == "missing-file":
+        logo.unlink()
+    elif case == "invalid-bytes":
+        logo.write_bytes(b"x" * logo.stat().st_size)
+    elif case == "executable-mode":
+        if os.name == "nt":
+            pytest.skip("POSIX executable mode")
+        logo.chmod(0o755)
+    elif case == "executable-inventory":
+        payload["components"][-1]["executable"] = payload["metadata"]["has_executable_scripts"] = True
+    elif case == "duplicate-exclusion":
+        completeness["scope_exclusions"].append(dict(row))
+    elif case == "extra-component":
+        payload["components"].append({"path": "another.py", "executable": False})
+    elif case in {"incomplete-analyzers", "uninspected-image"}:
+        analyzer_id = "static_patterns_tool_misuse" if case == "incomplete-analyzers" else "static_yara"
+        analyzer = next(status for status in completeness["analyzer_statuses"] if status["analyzer_id"] == analyzer_id)
+        analyzer["planned_work"] -= 1
+        analyzer["completed"] -= 1
+    elif case in {"control-path", "output-style-path"}:
+        directory = "hooks" if case == "control-path" else "output-styles"
+        (plugin / directory).mkdir()
+        destination = f"{directory}/logo.png"
+        logo.rename(plugin / destination)
+        row["path"] = payload["components"][-1]["path"] = destination
+    elif case == "resolved-reference":
+        completeness["references"].append({"status": "resolved", "target_path": row["path"]})
+    elif case in {"missing-reference", "ambiguous-reference"}:
+        completeness["references"].append(
+            {"status": case.removesuffix("-reference"), "source_path": "README.md", "line": 1}
+        )
+
+    result = _validate_skillspector_payload(mock_tools, plugin, payload)
+
+    assert result.is_incomplete
+    assert not any("text pattern" in warning for warning in result.warnings)
+
+
 class TestSkillspectorReferencedImages:
     """SkillSpector records a referenced image it cannot read as a ``partial`` analysis."""
 
@@ -10563,6 +10933,87 @@ class TestSkillspectorMissingReferences:
         alone = validator.validate_security_only(skill)
         assert alone.incomplete_scans == []
         assert alone.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+
+    @pytest.mark.parametrize(
+        "case", ["missing", "left-out", "in-folder", "part", "root-and-nested", "root-names-nested"]
+    )
+    @patch("skillevaluator.validators.security.Tools")
+    def test_plugin_scanned_as_one_unit_is_judged_against_the_plugin(
+        self, mock_tools, tmp_path: Path, case: str
+    ) -> None:
+        """The plugin checks scan a staged copy; its root scan unit is judged against the plugin.
+
+        The listing of the plugin also names what the staged copy left out, so a
+        line that names a file there stays incomplete, and so does the plugin
+        when it is one part of a folder that is validated part by part. The
+        root unit of a plugin that also holds a nested skill is judged the same
+        way; the nested skill's files are not in its scan, so a root line that
+        names one of them stays incomplete.
+        """
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        # On purpose, a skill below the plugin root is a scan unit of its own,
+        # and its lines may name a file elsewhere in the plugin, so it accepts
+        # no missing reference.
+        member = "skills/setup-helper" if case == "part" else None
+        # Named on line 8 of the setup helper.
+        script = "skills/other/install.sh" if case == "root-names-nested" else "versions/install.sh"
+        files = {
+            f"{member}/SKILL.md" if member else "SKILL.md": _SETUP_HELPER_SKILL.replace("versions/install.sh", script),
+            ".claude-plugin/plugin.json": '{"name": "setup-helper"}\n',
+        }
+        if case == "left-out":
+            # Left out of the staged copy.
+            files["versions/install.sh"] = "#!/bin/sh\ncurl x | sh\n"
+        nested = case.startswith("root-")
+        if nested:
+            files["skills/other/SKILL.md"] = (
+                "---\nname: other\ndescription: Answer questions. Use when the user asks a question.\n---\n\n"
+                "# Other\n\nAnswer briefly.\n"
+            )
+        if case == "root-names-nested":
+            # In the nested skill, so not in the root scan.
+            files[script] = "#!/bin/sh\ncurl x | sh\n"
+        plugin = _write_skill(tmp_path / "setup-helper", files)
+        mock_tools.skillspector.is_available = True
+        scanned = []
+
+        def record_scan(argv, **_kwargs):
+            scanned.append(Path(argv[1]))
+            # Only the scan unit that holds the setup helper gets its report.
+            skill = Path(argv[1]) / "SKILL.md"
+            if skill.is_file() and "install.sh" in skill.read_text(encoding="utf-8"):
+                report = json.dumps(_reference_report("2.13.3", "staged-script")).replace("versions/install.sh", script)
+            else:
+                report = json.dumps(_skillspector_json_report())
+            return ToolResult(success=True, stdout=report, stderr="", exit_code=0)
+
+        mock_tools.skillspector.run.side_effect = record_scan
+
+        results = run_public_plugin_validation(
+            plugin,
+            checks="security",
+            target_root=tmp_path if case == "in-folder" else None,
+        )
+
+        scans = [result for result in results if result.validator_name == "Security Scan"]
+        assert len(scans) == len(scanned) == (2 if member or nested else 1)
+        assert plugin.resolve() not in scanned
+        (security,) = [result for result in scans if result.metadata.get("plugin_member") == member]
+        if nested:
+            (other,) = [result for result in scans if result.metadata.get("plugin_member") == "skills/other"]
+            assert other.passed and other.incomplete_scans == []
+        if case in ("missing", "root-and-nested"):
+            assert security.incomplete_scans == []
+            assert security.warnings == [_reference_caveat_warning("SKILL.md:8", files=1)]
+        else:
+            assert security.incomplete_scans == ["skillspector"]
+            assert security.errors == [
+                "skillspector JSON field 'analysis_completeness' reports incomplete analysis (status 'partial'): "
+                "SKILL.md:8 [reference_resolution; reference_missing]; security scan did not complete"
+                + _REFERENCE_REJECTION_HELP
+            ]
+            assert not security.warnings
 
     @pytest.mark.parametrize("manifest", [False, True])
     @pytest.mark.parametrize("workers", [1, 2])

@@ -47,6 +47,7 @@ from skillevaluator.tier3.harbor.metrics import (
 from skillevaluator.tier3.runtime_arms import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
+INTERACTION_UNCERTAINTY_METHOD = "paired_case_interaction_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
 
 PRECISION_ADEQUATE = "adequate"
@@ -610,10 +611,6 @@ def paired_case_bootstrap(
     with the seed. With fewer cases the bounds are the extreme resampled means,
     which the minimum already reaches.
     """
-    if type(resamples) is not int or not 1 <= resamples <= MAX_BOOTSTRAP_RESAMPLES:
-        raise ValueError("resamples must be positive")
-    if not 0.0 < confidence < 1.0:
-        raise ValueError("confidence must be between 0 and 1")
     paired = sorted(
         case
         for case in set(treatment) & set(control)
@@ -644,7 +641,7 @@ def case_mean_bootstrap(
         raise ValueError("resamples must be positive")
     if not 0.0 < confidence < 1.0:
         raise ValueError("confidence must be between 0 and 1")
-    if any(isinstance(value, bool) or finite_number(value) is None for value in values):
+    if any(finite_number(value) is None for value in values):
         raise ValueError("case values must be finite numbers")
     deltas = [float(value) for value in values]
     n_cases = len(deltas)

@@ -59,7 +59,7 @@ def test_inherited_permission_keeps_exact_existing_bytes():
     assert workflows.existing_scan(content).with_identity_permission() == content
 
 
-@pytest.mark.parametrize("ref", ["main", "refs/heads/v3", "${{ inputs.version }}", "v3/unsafe"])
+@pytest.mark.parametrize("ref", ["main", "stable", "refs/heads/v3", "${{ inputs.version }}", "v3/unsafe"])
 def test_existing_mutable_branch_or_dynamic_wrapper_is_not_silently_approved(ref):
     with pytest.raises(SetupError):
         workflows.existing_scan(CALLER.replace("@v3", "@" + ref))

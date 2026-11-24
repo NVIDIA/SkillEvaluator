@@ -16,10 +16,10 @@ if not __package__:
     sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 try:
-    from model_config import tier2_credentials
+    from model_config import HTTP_PROXY_ENV, tier2_credentials
     from select_changed_skills import _git, has_control_character
 except ModuleNotFoundError:
-    from ci.model_config import tier2_credentials
+    from ci.model_config import HTTP_PROXY_ENV, tier2_credentials
     from ci.select_changed_skills import _git, has_control_character
 
 IMAGE = re.compile(r"ghcr\.io/nvidia/skillevaluator-tier2@sha256:[0-9a-f]{64}")
@@ -44,6 +44,7 @@ CONTEXT = frozenset(
         "SKILL_EVAL_PROVIDER",
         "SKILL_EVAL_SCAN_MODE",
         "SKILL_EVAL_TIMEOUT_SECONDS",
+        *HTTP_PROXY_ENV,
     }
 )
 

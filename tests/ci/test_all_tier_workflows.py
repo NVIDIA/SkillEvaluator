@@ -29,7 +29,7 @@ def test_required_tier1_reuses_hardened_workflow_and_parallel_paid_tiers():
     assert workflow["jobs"]["tier1"]["uses"] == "./.github/workflows/evaluate-skills.yml"
     paid = workflow["jobs"]["paid-tiers"]
     assert paid["strategy"]["fail-fast"] == "false"
-    assert paid["strategy"]["matrix"]["tier"] == ["2", "3"]
+    assert paid["strategy"]["matrix"]["tier"] == "${{ fromJSON(needs.eligibility.outputs.paid-tiers) }}"
     # Existing consumers retain deployment tracking and custom protection apps.
     assert inputs["environment-deployment"]["type"] == "boolean"
     assert inputs["environment-deployment"]["default"] == "true"
@@ -86,7 +86,7 @@ def test_aggregate_reuses_tier_evidence_from_jobs_not_rerun():
         s["with"]["name"].replace("${{ matrix.tier }}", tier)
         for s in workflow["jobs"]["paid-tiers"]["steps"]
         if s.get("uses", "").startswith("actions/upload-artifact@")
-        for tier in workflow["jobs"]["paid-tiers"]["strategy"]["matrix"]["tier"]
+        for tier in ("2", "3")
     ]
     produced += [s["with"]["name"] for s in steps if s.get("uses", "").startswith("actions/upload-artifact@")]
     for attempt in ("1", "2", "12"):

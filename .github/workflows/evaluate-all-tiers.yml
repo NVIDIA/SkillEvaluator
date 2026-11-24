@@ -149,6 +149,7 @@ jobs:
       allowed: ${{ steps.check.outputs.allowed }}
       scan-mode: ${{ steps.check.outputs.scan-mode }}
       skills-changed: ${{ steps.check.outputs.skills-changed }}
+      paid-tiers: ${{ steps.check.outputs.paid-tiers }}
     steps:
       - name: Check immutable configuration and current same-repository PR head
         id: check
@@ -229,6 +230,7 @@ jobs:
               output.write('allowed=' + str(allowed).lower() + '\n')
               output.write('scan-mode=' + scan_mode + '\n')
               output.write('skills-changed=' + str(skills_changed).lower() + '\n')
+              output.write('paid-tiers=' + json.dumps([tier for tier in (2, 3) if str(tier) in tiers]) + '\n')
           print('Provider jobs eligible' if allowed else 'Provider jobs withheld; Tier 1 remains available')
           if allowed and not skills_changed:
               print('No changed skill: the LLM Tier 1, Tier 2 and Tier 3 jobs are skipped; the keyless Tier 1 scan is the gate')
@@ -236,7 +238,10 @@ jobs:
   paid-tiers:
     needs: eligibility
     # A PR that changes no skill skips the paid tiers; the aggregate records them as skipped.
-    if: ${{ needs.eligibility.outputs.allowed == 'true' && needs.eligibility.outputs.skills-changed == 'true' }}
+    if: >-
+      needs.eligibility.outputs.allowed == 'true' &&
+      needs.eligibility.outputs.skills-changed == 'true' &&
+      needs.eligibility.outputs.paid-tiers != '[]'
     runs-on: ${{ inputs.runner }}
     environment:
       name: ${{ inputs.environment }}
@@ -249,7 +254,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        tier: [2, 3]
+        tier: ${{ fromJSON(needs.eligibility.outputs.paid-tiers) }}
     env:
       SKILLEVALUATOR_TOOLS_REF: ${{ inputs.tools-ref }}
       SKILL_EVAL_PATHS: ${{ inputs.paths }}

@@ -14,6 +14,7 @@ PROVIDER_KEYS = {
     "openai-compatible": "SKILL_EVAL_LLM_API_KEY",
 }
 CREDENTIAL_KEYS = frozenset((*PROVIDER_KEYS.values(), "SKILL_EVAL_EMBEDDING_API_KEY"))
+HTTP_PROXY_ENV = frozenset({"HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"})
 SAFE_ENV = frozenset(
     {
         "PATH",
@@ -24,12 +25,7 @@ SAFE_ENV = frozenset(
         "SSL_CERT_DIR",
         "REQUESTS_CA_BUNDLE",
         "CURL_CA_BUNDLE",
-        "HTTP_PROXY",
-        "HTTPS_PROXY",
-        "NO_PROXY",
-        "http_proxy",
-        "https_proxy",
-        "no_proxy",
+        *HTTP_PROXY_ENV,
         "DOCKER_HOST",
         "DOCKER_CONTEXT",
         "DOCKER_CONFIG",

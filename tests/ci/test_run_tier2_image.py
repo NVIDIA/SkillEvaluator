@@ -133,6 +133,25 @@ def test_compatible_embeddings_can_receive_gateway_fallback_without_gateway_chat
     assert "SKILL_EVAL_LLM_API_KEY" not in child and "OPENAI_API_KEY" not in child
 
 
+def test_inference_proxy_settings_reach_only_the_container_run(launch):
+    runner, args, calls, source, *_ = launch
+    proxy_settings = {
+        "HTTP_PROXY": "http://proxy.example:3128",
+        "HTTPS_PROXY": "http://proxy.example:3128",
+        "NO_PROXY": "127.0.0.1,internal.example",
+        "http_proxy": "http://proxy.example:3128",
+        "https_proxy": "http://proxy.example:3128",
+        "no_proxy": "127.0.0.1,internal.example",
+    }
+    source.update(proxy_settings)
+    assert runner.main(args) == 0
+    pull, inspect, (command, run) = calls
+    for key, value in proxy_settings.items():
+        assert key not in pull[1]["env"] and key not in inspect[1]["env"]
+        assert key in command and value not in command
+        assert run["env"][key] == value
+
+
 def test_unmatched_oci_revision_never_runs_the_image(launch, monkeypatch, capsys):
     runner, args, calls, _, *_ = launch
     execute = runner.subprocess.run
@@ -177,7 +196,6 @@ def test_github_workflow_selects_the_runner_inside_the_protected_tier_path(tier,
     assert "needs.eligibility.outputs.allowed == 'true'" in paid["if"]
     assert "needs.eligibility.outputs.skills-changed == 'true'" in paid["if"]
     assert "contains(format(',{0},', inputs.tiers), ',1,')" in jobs["tier1"]["if"]
-    assert paid["strategy"]["matrix"]["tier"] == ["2", "3"]
     candidate = next(s for s in steps if s.get("with", {}).get("path") == "candidate")
     assert candidate["with"]["fetch-depth"] == "0"
     assert "matrix.tier != 2 || inputs.tier2-image == ''" in candidate["with"]["filter"]

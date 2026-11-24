@@ -2190,8 +2190,8 @@ def _split_member_label(check_name: str) -> tuple[str | None, str]:
     label = check_name[1:end]
     if not label:
         return None, check_name
-    remainder = check_name[end + 1:]
-    return label, remainder[1:] if remainder.startswith(" ") else remainder
+    remainder = check_name[end + 1 :]
+    return label, remainder.removeprefix(" ")
 
 
 def _finding_blocks(finding: Any) -> bool:

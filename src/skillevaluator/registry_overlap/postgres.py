@@ -11,7 +11,7 @@ from dataclasses import asdict, dataclass
 
 from packaging.version import Version
 from psycopg import connect, sql
-from psycopg.errors import QueryCanceled, UndefinedTable
+from psycopg.errors import UndefinedTable
 from psycopg.rows import dict_row
 from psycopg.types.json import Jsonb
 
@@ -46,9 +46,9 @@ class EmbeddingProfile:
 
 def _vector_text(vector: list[float], dimension: int) -> str:
     try:
-        unit = normalize_embedding_vector(vector, dimension, context="Registry embedding")
-    except SimilarityConfigError:
-        raise ValueError("Embedding is invalid for the registry profile") from None
+        unit = normalize_embedding_vector(vector, dimension, context="Embedding returned for the registry profile")
+    except SimilarityConfigError as exc:
+        raise ValueError(str(exc)) from None
     return "[" + ",".join(map(str, unit)) + "]"
 
 
@@ -64,6 +64,9 @@ class RegistryStore:
             self.connection.execute(sql.SQL("SET search_path TO {}, public").format(sql.Identifier(schema)))
             self.connection.execute("SET statement_timeout TO '30s'")
             self.connection.execute("SET lock_timeout TO '5s'")
+            extension = self._row("SELECT extversion FROM pg_catalog.pg_extension WHERE extname = 'vector'")
+            if extension is None or Version(extension["extversion"]) < Version("0.8.2"):
+                raise ValueError("Registry overlap requires pgvector 0.8.2 or later in the connected database.")
         except BaseException:
             self.connection.close()
             raise
@@ -93,9 +96,6 @@ class RegistryStore:
         """Create one source registry and its first empty active generation."""
         identifier(source, "source")
         with self.connection.transaction():
-            extension = self._row("SELECT extversion FROM pg_extension WHERE extname = 'vector'")
-            if extension is None or Version(extension["extversion"]) < Version("0.8.2"):
-                raise ValueError("Registry overlap requires pgvector 0.8.2 or later")
             self.connection.execute(sql.SQL("CREATE SCHEMA IF NOT EXISTS {}").format(sql.Identifier(self.schema)))
             self.connection.execute("""
                 CREATE TABLE IF NOT EXISTS generations (
@@ -306,13 +306,15 @@ class RegistryStore:
         if needed:
             try:
                 result = embed(list(needed.values()))
-                if len(result) != len(needed):
-                    raise ValueError("Unexpected vector count")
-                vectors.update(
-                    (key, _vector_text(vector, profile.dimension)) for key, vector in zip(needed, result, strict=True)
-                )
+            except SimilarityConfigError:
+                raise
             except Exception:
                 raise ValueError("Embedding failed. The pending registry checkpoint can be retried.") from None
+            if not isinstance(result, (list, tuple)) or len(result) != len(needed):
+                raise ValueError("Embedding response has an invalid vector count for the registry batch.")
+            vectors.update(
+                (key, _vector_text(vector, profile.dimension)) for key, vector in zip(needed, result, strict=True)
+            )
         return vectors
 
     def _apply_pending(self, pending, generation, vectors, seeded):
@@ -482,9 +484,12 @@ class RegistryStore:
         if not self._index_ready(generation):
             raise ValueError("Registry search index is unavailable")
         try:
-            vector = _vector_text(embed(), profile.dimension)
+            result = embed()
+        except SimilarityConfigError:
+            raise
         except Exception:
             raise ValueError("Embedding failed for the registry query") from None
+        vector = _vector_text(result, profile.dimension)
         try:
             with self.connection.transaction():
                 self.connection.execute("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ READ ONLY")
@@ -512,8 +517,8 @@ class RegistryStore:
                         top_k,
                     ),
                 ).fetchall()
-        except (QueryCanceled, UndefinedTable):
-            raise ValueError("Registry index is unavailable or search timed out") from None
+        except UndefinedTable:
+            raise ValueError("Registry index is unavailable") from None
         return {
             "status": "degraded" if row["checkpoint"] < state["tail"] else "ok",
             "source": state["source"],

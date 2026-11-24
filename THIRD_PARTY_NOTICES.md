@@ -13,6 +13,17 @@ records the exact resolved dependency set used for this release.
 | Registry overlap | Psycopg (LGPL-3.0-only) |
 | Dashboard | Streamlit (Apache-2.0), urllib3 (MIT) |
 
+## Registry overlap driver wheels
+
+The `registry` extra installs Psycopg and the platform-specific
+`psycopg-binary` wheel. The binary wheel's Python extension is
+LGPL-3.0-only. The bundled PostgreSQL client library, `libpq`, uses the
+PostgreSQL License. The bundled OpenSSL 3 libraries, `libssl` and
+`libcrypto`, use Apache-2.0.
+[Psycopg binary installation](https://www.psycopg.org/psycopg3/docs/basic/install.html#binary-installation) ·
+[PostgreSQL License](https://www.postgresql.org/about/licence/) ·
+[OpenSSL License](https://openssl-library.org/source/license/)
+
 ## Embedded report charts
 
 Tier 3 HTML reports include Chart.js 4.5.1 and its bundled @kurkle/color 0.3.2

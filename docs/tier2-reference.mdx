@@ -528,8 +528,9 @@ provide scores, revision identity, and provenance for review. Use the
 [local JSON catalog](#use-a-local-catalog) for checkout and CI workflows.
 
 Use PostgreSQL with pgvector 0.8.2 and provision the `vector` extension before
-initialization. Run `uv sync --extra registry` from the checkout to install the
-Tier 2 embedding dependencies and PostgreSQL driver. Export
+initialization. Install the `[registry]` extra separately from `[all]`. Run
+`uv sync --extra registry` from the checkout to install the Tier 2 embedding
+dependencies and PostgreSQL driver. Export
 `SKILL_EVAL_REGISTRY_DSN` through your environment's secret configuration and
 set up the [Tier 2 embedding provider](/skills/skillevaluator/configuration).
 Run these commands from a checkout that includes the pilot.
@@ -611,6 +612,38 @@ revision when you change the embedding pipeline for the same model.
 Build or query a local JSON catalog with the existing commands when you need
 a portable checkout or CI workflow. Rebuild the pilot from source batches so
 that stable registry IDs and source revisions accompany its vectors.
+
+### Operate and remove the registry
+
+`search` reranks at most 200 candidates. Each database statement in the
+search transaction runs under a 250 ms timeout after embedding completes.
+The HNSW scan uses strict-order iteration with an approximate limit of
+20,000 tuple visits for the iterative portion. A statement timeout surfaces
+as a search error. Check `status` for index readiness and generation
+checkpoints. When search returns `degraded`, drain pending work with `sync`
+using the generation's matching profile.
+
+Have the database operator monitor dead tuples and index size in the
+generation tables, particularly after frequent upserts and removals. Keep
+autovacuum enabled. If search keeps timing out with a ready index, check
+database load and dead tuple counts to decide whether to schedule a vacuum
+or index maintenance.
+
+Upserts that advance a skill's sequence retain the combined name and
+description, artifact reference, and fingerprints indefinitely, including
+for superseded or removed skills. A revision first observed as stale retains
+only its ID, sequence, revision, digest, and observation time for replay
+checks.
+`retire N` drops an inactive generation's vectors and associated index and
+metadata. The shared replay history remains in the registry schema.
+
+For full database deletion, stop registry clients and have a PostgreSQL
+administrator confirm that the target database contains the dedicated
+`skillevaluator_overlap` schema and review any dependent objects.
+`DROP SCHEMA skillevaluator_overlap CASCADE` permanently deletes the pilot's
+vectors, replay history, and checkpoints along with dependent objects.
+Handle batch files and database backups separately under your retention
+policy.
 
 ### Reproduce the registry-scale measurements
 

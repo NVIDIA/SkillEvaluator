@@ -129,7 +129,7 @@ dashboard = [
     "streamlit>=1.61,<2",
     "urllib3>=2.8.0,<3",
 ]
-# Full public install convenience bundle.
+# Public tiers and dependency auditing. Install [registry] separately for the pilot.
 all = [
     "skillevaluator[tier2,tier3,security]",
 ]

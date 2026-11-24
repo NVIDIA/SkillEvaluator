@@ -22,7 +22,7 @@ MAX_BATCH_BYTES = 8 * 1024 * 1024
 MAX_BATCH_EVENTS = 250
 _MAX_SEQUENCE = 2**63 - 1
 _IDENTIFIER = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:/@+-]{0,255}")
-_DIGEST = re.compile(r"[0-9a-f]{64}")
+_DIGEST = re.compile(r"[0-9a-fA-F]{64}")
 _OPAQUE_REFERENCE = re.compile(r"ref:[A-Za-z0-9][A-Za-z0-9_.+-]{0,255}")
 _EVENT_FIELDS = {"id", "sequence", "revision", "kind"}
 
@@ -127,8 +127,10 @@ def parse_batch(raw: bytes, expected_sha256: str) -> RegistryBatch:
     """Verify bytes and validate every event before returning any work."""
     if len(raw) > MAX_BATCH_BYTES:
         raise ValueError("Registry batch exceeds the byte limit")
+    if not _DIGEST.fullmatch(expected_sha256):
+        raise ValueError("Registry batch checksum must be 64 hexadecimal characters")
     digest = _digest(raw)
-    if not _DIGEST.fullmatch(expected_sha256) or not hmac.compare_digest(digest, expected_sha256):
+    if not hmac.compare_digest(digest, expected_sha256.lower()):
         raise ValueError("Registry batch checksum does not match")
     try:
         text = raw.decode("utf-8")

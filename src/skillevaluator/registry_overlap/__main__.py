@@ -46,7 +46,7 @@ def _database():
         raise click.ClickException("Set SKILL_EVAL_REGISTRY_DSN to the authorized PostgreSQL connection string.")
     try:
         from psycopg import Error
-        from psycopg.errors import LockNotAvailable
+        from psycopg.errors import LockNotAvailable, QueryCanceled
 
         from skillevaluator.registry_overlap.postgres import RegistryStore
     except ImportError:
@@ -58,6 +58,10 @@ def _database():
         raise click.ClickException(str(exc)) from None
     except LockNotAvailable:
         raise click.ClickException("Registry database is busy. Retry the operation.") from None
+    except QueryCanceled:
+        raise click.ClickException(
+            "Registry database statement timed out or was canceled. Retry the operation."
+        ) from None
     except Error:
         raise click.ClickException(
             "Registry database operation failed. Check the database and pgvector setup."

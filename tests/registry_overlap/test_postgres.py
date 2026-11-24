@@ -10,6 +10,7 @@ from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 
+from skillevaluator.embedding.client import SimilarityConfigError
 from skillevaluator.registry_overlap.events import parse_batch
 
 pytest.importorskip("psycopg")
@@ -62,6 +63,21 @@ def database():
 def _hits(store, profile=PROFILE, exclude=None):
     result = store.search(profile, lambda: VECTOR, top_k=10, exclude=exclude)
     return [(hit["skill_id"], hit["revision"]) for hit in result["candidates"]]
+
+
+@pytest.mark.parametrize("extension", [None, {"extversion": "0.8.1"}])
+def test_reopened_registry_rejects_unsupported_pgvector(database, monkeypatch, extension):
+    _, dsn, schema = database
+    read_row = RegistryStore._row
+
+    def restored_catalog(store, query, parameters=()):
+        if isinstance(query, str) and "pg_extension" in query:
+            return extension
+        return read_row(store, query, parameters)
+
+    monkeypatch.setattr(RegistryStore, "_row", restored_catalog)
+    with pytest.raises(ValueError, match=r"pgvector 0\.8\.2 or later"), RegistryStore(dsn, schema=schema) as restored:
+        restored.status()
 
 
 def test_resume_reuse_revision_and_exclude_only_self(database):
@@ -147,6 +163,37 @@ def test_failed_embedding_and_unready_generation_are_explicit(database):
         store.search(PROFILE, lambda: fail([]))
 
 
+def test_embedding_client_diagnostics_reach_the_operator(database):
+    store, _, _ = database
+    store.accept(_batch(1, _event("a", 1)))
+
+    def invalid(*_args):
+        raise SimilarityConfigError("Embedding response at index 0 vector must not be a zero vector.")
+
+    with pytest.raises(SimilarityConfigError, match="zero vector"):
+        store.drain(PROFILE, invalid)
+    with pytest.raises(SimilarityConfigError, match="zero vector"):
+        store.search(PROFILE, invalid)
+
+
+def test_search_preserves_database_cancellation_for_cli(database):
+    from psycopg import sql
+    from psycopg.errors import QueryCanceled
+
+    store, dsn, schema = database
+    active = store.status()["active_generation"]
+    with RegistryStore(dsn, schema=schema) as busy, busy.connection.transaction():
+
+        def lock_indexed_table():
+            busy.connection.execute(
+                sql.SQL("LOCK TABLE {} IN ACCESS EXCLUSIVE MODE").format(sql.Identifier(f"g_{active}"))
+            )
+            return VECTOR
+
+        with pytest.raises(QueryCanceled):
+            store.search(PROFILE, lock_indexed_table)
+
+
 def test_cutover_fences_query_and_rollback_preserves_delete(database):
     store, dsn, schema = database
     store.accept(_batch(1, _event("a", 1), _event("b", 1)))
@@ -177,9 +224,18 @@ def test_invalid_limits_vectors_and_missing_index(database):
     with pytest.raises(ValueError, match="top_k"):
         store.search(PROFILE, lambda: pytest.fail("invalid query embedded"), top_k=51)
     store.accept(_batch(1, _event("a", 1)))
-    for vector in ([0.0] * 4, [float("nan"), 0.0, 0.0, 0.0], [1.0, 0.0]):
-        with pytest.raises(ValueError, match="Embedding"):
+    for vector, diagnostic in (
+        ([0.0] * 4, "zero vector"),
+        ([float("nan"), 0.0, 0.0, 0.0], "finite numbers"),
+        ([1.0, 0.0], "dimension mismatch.*expected 4"),
+    ):
+        with pytest.raises(ValueError, match=diagnostic):
             store.drain(PROFILE, lambda _texts, vector=vector: [vector])
+        with pytest.raises(ValueError, match=diagnostic):
+            store.search(PROFILE, lambda vector=vector: vector)
+    with pytest.raises(ValueError, match="vector count"):
+        store.drain(PROFILE, lambda _texts: [])
+    assert store.status()["generations"][0]["checkpoint"] == 0
     store.drain(PROFILE, Embedder())
     from psycopg import sql
 

@@ -138,10 +138,24 @@ def test_reject_manifest_above_preflight_size_limit():
         parse_batch(*_seal(_source_event(manifest=MANIFEST + "x" * (1024 * 1024))))
 
 
+def test_accepts_uppercase_checksum_and_preserves_lowercase_digest():
+    raw, digest = _seal(_source_event())
+
+    assert parse_batch(raw, digest.upper()).digest == digest
+
+
+@pytest.mark.parametrize("checksum", ["0" * 63, "0" * 65, "g" * 64, " " + "0" * 63])
+def test_rejects_invalid_checksum_format(checksum):
+    raw, _ = _seal(_source_event())
+
+    with pytest.raises(ValueError, match="checksum must be 64 hexadecimal characters"):
+        parse_batch(raw, checksum)
+
+
 def test_reject_checksum_and_duplicate_json():
     raw, digest = _seal(_source_event())
-    with pytest.raises(ValueError, match="checksum"):
-        parse_batch(raw + b" ", digest)
+    with pytest.raises(ValueError, match="checksum does not match"):
+        parse_batch(raw + b" ", digest.upper())
     duplicate = raw.replace(b'"cursor": 1', b'"cursor": 1, "cursor": 2')
     with pytest.raises(ValueError, match="JSON"):
         parse_batch(duplicate, hashlib.sha256(duplicate).hexdigest())

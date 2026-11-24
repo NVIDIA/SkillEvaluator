@@ -2166,6 +2166,35 @@ def _result_display_status(result: ValidationResult) -> str:
     return result_execution_status(result)
 
 
+def _finding_member_label(finding: Any) -> str | None:
+    """Return the member a finding came from when ``prefix_finding`` recorded it."""
+    metadata = getattr(finding, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    label = metadata.get("member_label")
+    if isinstance(label, str) and label.strip():
+        return label
+    return None
+
+
+def _member_label(detail: Any) -> str | None:
+    """Return the member a success detail came from, as ``merge_with_prefix`` recorded it.
+
+    The ``member_label`` metadata is authoritative: a member's own name may
+    contain ``]``, and two members of one folder may share a basename, so the
+    composed ``[member] check`` string cannot be split back into the member
+    that the findings were keyed by. Older results, and the finding path,
+    carry no such record, so fall back to the label in the check name.
+    """
+    metadata = getattr(detail, "metadata", None)
+    if isinstance(metadata, dict):
+        label = metadata.get("member_label")
+        if isinstance(label, str) and label.strip():
+            return label
+    label, _ = _split_member_label(detail.check_name)
+    return label
+
+
 def _split_member_label(check_name: str) -> tuple[str | None, str]:
     """Split the ``[member] check`` label ``merge_with_prefix`` writes.
 
@@ -2218,7 +2247,20 @@ def _gate_failed_member_labels(result: ValidationResult) -> set[str]:
     finding, so it is the only place a folder run still knows which member it
     failed. An unlabelled gate failure applies to no single member and is left
     to the whole run's status.
+
+    The per-member record is preferred, because a name containing ``]`` makes
+    the composed message ambiguous. The prefixed messages are still read for
+    results merged before that record existed.
     """
+    recorded = result.metadata.get("member_gate_failures")
+    if isinstance(recorded, list):
+        labels = {
+            entry["label"]
+            for entry in recorded
+            if isinstance(entry, dict) and isinstance(entry.get("label"), str) and entry["label"].strip()
+        }
+        if labels:
+            return labels
     labels: set[str] = set()
     for failure in result.gate_failures:
         label, _ = _split_member_label(failure)
@@ -2518,12 +2560,12 @@ class HTMLReporter(ReporterBase):
             validator_name = result.validator_name
 
             # Extract skill names from success_details. A member merged with
-            # ``merge_with_prefix`` names its skill in the ``[skill] check``
-            # form, the same way it names it in ``Finding.file_path``, so the
-            # label has to be read here too: taken whole it becomes a second
-            # skill entry for a skill the findings below already keyed.
+            # ``merge_with_prefix`` records its label in the detail metadata, and
+            # older results only name it in the ``[skill] check`` form, so both
+            # are read: taken whole it becomes a second skill entry for a skill
+            # the findings below already keyed.
             for detail in result.success_details:
-                label, _ = _split_member_label(detail.check_name)
+                label = _member_label(detail)
                 # Skip discovery/folder-level checks
                 if detail.check_name in (
                     "skill_discovery",
@@ -2568,8 +2610,16 @@ class HTMLReporter(ReporterBase):
                     if len(parts) > 0:
                         skill_name = parts[0]
 
+                # ``prefix_finding`` also records the member the finding came
+                # from, which survives a member name containing "]"; the file
+                # path above is the fallback for results merged without it.
+                labelled = file_path.startswith("[") and "]" in file_path
+                recorded_label = _finding_member_label(finding)
+                if recorded_label is not None:
+                    skill_name = recorded_label
+                    labelled = True
+
                 if skill_name:
-                    labelled = file_path.startswith("[") and "]" in file_path
                     blocking = _finding_blocks(finding)
                     if skill_name not in skills:
                         skills[skill_name] = {"passed": not blocking, "validators": {}, "issue_count": 0}

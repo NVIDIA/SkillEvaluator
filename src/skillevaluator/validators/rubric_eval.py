@@ -745,10 +745,12 @@ class RubricEvalValidator(ValidatorBase):
         )
         all_rubric: list[dict] = []
         members: list[dict[str, str]] = []
+        labels = self._member_labels(skill_dirs, root)
         for skill_dir in skill_dirs:
             sub = self._validate_single_skill(skill_dir)
-            result.merge_with_prefix(sub, skill_dir.name)
-            members.append({"skill": skill_dir.name, "status": _member_status(sub)})
+            label = labels[skill_dir]
+            result.merge_with_prefix(sub, label)
+            members.append({"skill": label, "status": _member_status(sub)})
             if sub.metadata.get("rubric_eval", {}).get("execution_status") == "succeeded":
                 all_rubric.append(sub.metadata["rubric_eval"])
 

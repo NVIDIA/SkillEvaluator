@@ -32,6 +32,7 @@ from skillevaluator.reporting import (
 from skillevaluator.reporting.sarif_reporter import _file_uri, _normalize_artifact_uri
 from skillevaluator.reporting.summary_copy import SKILL_LIFT_DEFINITION
 from skillevaluator.tier1.commands import emit_reports
+from skillevaluator.validators.quality_score import QualityScoreValidator
 
 _SKILLSPECTOR_2_12_LLM_PROVENANCE = Path(__file__).parents[1] / "fixtures" / "skillspector-2.12.0-llm-provenance.json"
 
@@ -1469,6 +1470,77 @@ def test_folder_merges_keep_one_entry_per_skill_with_that_skills_verdict() -> No
 def json_skill_names(json_data: dict) -> set[str]:
     """Return the skill names a JSON report lists, for identity assertions."""
     return {entry["name"] for entry in json_data["skills"]}
+
+
+def test_a_member_name_containing_a_bracket_keeps_its_own_entry() -> None:
+    """A ``]`` in a directory name must not merge that member into a shorter name.
+
+    The label ``merge_with_prefix`` composes cannot be split reliably when a
+    name contains ``]``, so each member records its label in the detail and
+    finding metadata. Reading only the composed ``[fancy]name] check`` name
+    reported the skill as ``fancy`` and dropped ``fancy]name`` from both the
+    JSON ``skills[]`` list and the HTML skill cards.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for name in ("fancy", "fancy]name", "plain"):
+        member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        member.add_success("quality_score", "Score: 90.0/100", overall_score=90.0)
+        collection.merge_with_prefix(member, name)
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert sorted(skills_by_name) == ["fancy", "fancy]name", "plain"]
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted(entry["name"] for entry in json_data["skills"]) == ["fancy", "fancy]name", "plain"]
+
+
+def test_nested_members_with_the_same_basename_keep_their_own_verdicts() -> None:
+    """Two skills named ``common`` under different folders are two members.
+
+    The label used to be the directory basename always, so ``team-a/common``
+    and ``team-b/common`` were keyed as one ``common`` member and the second
+    score replaced the first. A repeated name now falls back to the path
+    relative to the scanned folder, so each keeps its own gate result.
+    """
+    collection = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+    for label, score in (("team-a/common", 79.5), ("team-b/common", 82.0)):
+        member = ValidationResult(validator_name="QUALITY", validator_description="Quality")
+        member.add_success("quality_score", f"Score: {score}/100", overall_score=score)
+        if score < 81:
+            member.fail_gate(f"Score: {score}/100 is below the minimum of 81")
+        collection.merge_with_prefix(member, label)
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([collection])
+    assert {name: data["passed"] for name, data in skills_by_name.items()} == {
+        "team-a/common": False,
+        "team-b/common": True,
+    }
+
+    json_data = json.loads(JSONReporter(include_timestamp=False).render_all([collection]))
+    assert sorted((entry["name"], entry["passed"]) for entry in json_data["skills"]) == [
+        ("team-a/common", False),
+        ("team-b/common", True),
+    ]
+
+
+def test_folder_label_is_the_directory_name_unless_it_repeats(tmp_path: Path) -> None:
+    """A unique directory name stays the label; only a repeat qualifies its path."""
+    for relative in ("alpha", "team-b/common", "team-a/common"):
+        skill = tmp_path / relative
+        skill.mkdir(parents=True)
+        (skill / "SKILL.md").write_text(
+            "---\nname: common\ndescription: A shared helper skill used by two teams in this folder.\n---\n\n# Common\n",
+            encoding="utf-8",
+        )
+
+    folder = QualityScoreValidator()._validate_folder(tmp_path)
+    details = [detail.check_name for detail in folder.success_details]
+    assert "[alpha] quality_score" in details
+    assert "[team-a/common] quality_score" in details
+    assert "[team-b/common] quality_score" in details
+
+    skills_by_name = HTMLReporter(include_timestamp=False)._reorganize_by_skill([folder])
+    assert sorted(skills_by_name) == ["alpha", "team-a/common", "team-b/common"]
 
 
 def test_gate_failure_creates_the_member_it_names() -> None:

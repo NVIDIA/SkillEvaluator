@@ -269,6 +269,12 @@ notes below describe the new policy and backend configuration behavior.
   advisory findings — still reads as passed in `skills[]` and the skill cards.
   Recording each member's own status in `merge_with_prefix` would close that, and
   is left for a follow-up.
+- Each member of a folder run keeps its own name in that list. A directory name
+  containing `]` no longer truncates to the text before it, which had hidden that
+  skill behind a shorter one, and two skills with the same basename in different
+  folders keep separate verdicts instead of the later one replacing the earlier.
+  The member is carried in the result rather than re-read from the `[skill] check`
+  label, so the JSON `skills[]` entries and the HTML skill cards agree.
 - Bedrock preflight and host inference now sign requests with IAM credentials
   when `AWS_BEARER_TOKEN_BEDROCK` is empty or whitespace-only, for example when
   a CI job exports an unset secret. Previously the Tier 3 preflight sent a blank

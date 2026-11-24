@@ -4,6 +4,12 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Added
+
+- Add a locked Tier 2 CI container with credential-free build verification and
+  opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
+  Tier 2 together from the Repository Integration guide.
+
 ### Fixed
 
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or

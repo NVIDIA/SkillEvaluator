@@ -398,6 +398,13 @@ digest with a clean Docker configuration and reruns all five smoke cases.
 A fresh dispatch also reuses an existing verified candidate tag. Registry
 errors stop publication, and the workflow preserves existing tags.
 
+**Verify Tier 2 image** builds the locked runtime and exercises chat and
+embeddings with an offline fixture. Dispatch **Release Tier 2 image** on `main`
+with the reviewed source SHA to publish it through the `release-image`
+environment. Use the digest and matching tools ref from the qualification job.
+For the first release, make `ghcr.io/nvidia/skillevaluator-tier2` public and
+rerun the qualification job if its anonymous pull failed.
+
 The `ci-bundle-VERSION` artifact contains the rendered CI files and ZIP, scanner
 inventory, verification receipt, both packaged CLI descriptors and the stable
 GitHub workflow files and GitLab include. Before merging the pin PR, test the

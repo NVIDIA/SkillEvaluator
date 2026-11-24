@@ -1,0 +1,58 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Verify Tier 2 image
+
+on:
+  pull_request:
+    paths: &image-paths
+      - ci/**
+      - src/skillevaluator/**
+      - pyproject.toml
+      - uv.lock
+      - .dockerignore
+      - LICENSE
+      - NOTICE
+      - README.md
+      - THIRD_PARTY_NOTICES.md
+      - .github/workflows/verify-tier2-image.yml
+      - .github/workflows/release-tier2-image.yml
+  push:
+    branches: [main]
+    paths: *image-paths
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - name: Build the locked Tier 2 runtime
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          file: ci/Dockerfile.tier2
+          build-args: SOURCE_SHA=${{ github.sha }}
+          platforms: linux/amd64
+          tags: skillevaluator-tier2:verify
+          load: true
+          provenance: false
+          cache-from: type=gha,scope=tier2-image
+          cache-to: >-
+            ${{ github.event_name != 'pull_request' && github.ref == 'refs/heads/main' &&
+            'type=gha,scope=tier2-image,mode=max,ignore-error=true' || '' }}
+      - name: Exercise Tier 2 with deterministic chat and embeddings
+        run: python3 ci/smoke_tier2_image.py --image skillevaluator-tier2:verify --output "$RUNNER_TEMP/tier2-verification"
+      - name: Retain integration evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: tier2-image-verification
+          path: ${{ runner.temp }}/tier2-verification/
+          if-no-files-found: warn
+          retention-days: 14

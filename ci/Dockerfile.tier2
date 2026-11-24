@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: Apache-2.0
+# Provider-backed deduplication runtime for reusable CI jobs.
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3 AS build
+
+ENV PIP_NO_INPUT=1 UV_COMPILE_BYTECODE=1 PYC_INVALIDATION_MODE=UNCHECKED_HASH \
+    UV_NO_CACHE=1 UV_PYTHON_DOWNLOADS=never
+
+WORKDIR /opt/skillevaluator
+COPY ci/requirements/uv.txt ./uv-requirements.txt
+RUN python -m pip install --no-cache-dir --require-hashes -r uv-requirements.txt
+COPY pyproject.toml uv.lock ./
+RUN uv sync --frozen --no-dev --no-editable --no-install-project --extra tier2
+COPY README.md LICENSE NOTICE THIRD_PARTY_NOTICES.md ./
+COPY src ./src
+RUN uv sync --locked --no-dev --no-editable --extra tier2
+
+FROM python:3.12-slim-bookworm@sha256:62ed8e07e544e8555c5d93748d5275015136b7f5c52b5e8679b4de339c3779d3
+
+ENV PATH="/opt/skillevaluator/.venv/bin:${PATH}" PIP_NO_INPUT=1 \
+    PYTHONDONTWRITEBYTECODE=1 PYTHONUNBUFFERED=1 PYTHON_DOTENV_DISABLED=1 \
+    HOME=/tmp
+
+RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates git \
+    && rm -rf /var/lib/apt/lists/* \
+    && useradd --uid 10001 --no-create-home --shell /usr/sbin/nologin evaluator \
+    && mkdir -p /workspace /reports \
+    && chown evaluator:evaluator /reports
+
+COPY --from=build /opt/skillevaluator/.venv /opt/skillevaluator/.venv
+COPY LICENSE NOTICE THIRD_PARTY_NOTICES.md /opt/skillevaluator/
+COPY ci/diagnostics.py ci/eligible_gitlab.py ci/github_api.py ci/model_config.py ci/native_reports.py \
+    ci/publish_reports.py ci/report_views.py ci/run_tier1.py ci/run_tiers.py \
+    ci/secret_redaction.py ci/security_baselines.py ci/select_changed_skills.py \
+    ci/tier_manifest.py /opt/skillevaluator/ci/
+RUN python -m compileall -q --invalidation-mode unchecked-hash /opt/skillevaluator/ci \
+    && python -I /opt/skillevaluator/ci/run_tiers.py evaluate --help >/dev/null
+
+ARG SOURCE_SHA
+RUN test "${#SOURCE_SHA}" -eq 40 \
+    && case "$SOURCE_SHA" in *[!0123456789abcdef]*) exit 1 ;; esac \
+    && printf '%s\n' "$SOURCE_SHA" > /opt/skillevaluator/revision \
+    && chmod 0444 /opt/skillevaluator/revision
+LABEL org.opencontainers.image.revision=$SOURCE_SHA
+
+USER evaluator
+WORKDIR /workspace
+ENTRYPOINT ["python", "-I", "/opt/skillevaluator/ci/run_tiers.py", "evaluate", "--tier", "2"]

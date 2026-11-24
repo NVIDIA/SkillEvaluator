@@ -54,3 +54,23 @@ Reports retain native evidence and an aggregate artifact for 14 days. Feedback
 links to the authenticated artifact for that run; download and extract it,
 then open `index.html`. Hosted HTML is a separate option. Local setup, status
 and demo commands do not prove provider-backed evaluation succeeded.
+
+## Prebuilt Tier 2 image
+
+The 1.2.0 pins use the locked on-runner Tier 2 install. Newer workflow revisions
+that support the prebuilt runtime can run Tier 2 on a Linux x86-64 Docker runner
+with the same provider credentials and advisory policy.
+
+- **GitHub:** update `jobs.skills.uses` to a supporting workflow revision and
+  set `tier2-image` under `jobs.skills.with`. If you use trusted feedback,
+  update its tools and producer workflow pins and refresh the approved caller
+  blob.
+- **GitLab:** set `SKILL_EVAL_TIER2_IMAGE` in the root CI variables so the job
+  rules can select the image. Keep provider credentials scoped to the execution
+  environment and update the pinned remote include to a supporting revision.
+
+Set the image to `ghcr.io/nvidia/skillevaluator-tier2@sha256:<digest>` and the
+tools ref to the corresponding source commit. Use the digest and source commit
+reported by [Release Tier 2 image](https://github.com/NVIDIA/SkillEvaluator/actions/workflows/release-tier2-image.yml)
+after the public image verification step succeeds. Leave the image input empty
+to install from the locked tools revision during the job.

@@ -14,8 +14,11 @@ the product release workflow.
 Before merging the release workflows, create the `release-image`,
 `release-github`, `release-kitmaker-dry-run`, and `release-kitmaker`
 GitHub Actions environments. For each environment, require approval from
-the repository's release maintainers, enable **Prevent self-review**, disable
-administrator bypass, and allow deployments only from the `main` branch.
+the repository's release maintainers, leave **Prevent self-review** disabled,
+disable administrator bypass, and allow deployments only from the `main` branch.
+A listed maintainer may approve a release they started; each environment still
+pauses for an explicit approval. Review the final release notes and all five
+validated assets before approving GitHub publication.
 
 Before the first release, enable immutable releases and set
 `RELEASE_DEVZONE_INDEX_URL` to the approved public HTTPS NVIDIA DevZone

@@ -274,7 +274,8 @@ def test_ledger_row_byte_limit_matches_escaped_json_and_preserves_totals(monkeyp
 
     monkeypatch.setattr(diagnostics, "_MAX_LEDGER_ROW_BYTES", 1_024)
     short = {"path": "scripts/one.py", "phase": "static", "reason_code": "static_parse_limit"}
-    wide = {**short, "path": f"scripts/{'é' * 180}.py"}
+    wide = {**short, "path": f"scripts/{'é' * 130}.py"}
+    assert completeness_record({"ledger_exceptions": [wide]}, "skillspector")["ledger_exceptions"] == [wide]
 
     record = completeness_record({"ledger_exceptions": [short, wide, short]}, "skillspector")
 

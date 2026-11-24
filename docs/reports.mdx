@@ -1408,8 +1408,10 @@ or gate.
 
 - Tokens are prompt plus completion (`total_tokens`). Prompt counts include
   cached tokens, so cached tokens are never added again;
-  `uncached_prompt_tokens` is prompt minus cached. A missing cache counter
-  counts as 0.
+  `uncached_prompt_tokens` is prompt minus cached, and `efficiency_tokens` is
+  uncached prompt plus completion. A missing cache counter counts as 0.
+- `source` names where the counters come from: `atif_final_metrics`, the
+  `final_metrics` that each attempt's trajectory records.
 - Attempts that failed before scoring, such as an attempt that hit the agent
   timeout, still used tokens and are counted. So are the scored attempts of an
   arm that failed. `coverage.unscored_attempts` counts the attempts without a
@@ -1436,8 +1438,10 @@ or gate.
   `invalid_token_counters`, and `missing_attempts`. A case expects the
   attempts its pass@k record planned: attempts skipped after a pass and
   attempts a run budget did not admit are not expected.
-- `delta.total_tokens` is with skill minus baseline, and
-  `delta.total_tokens_change_percent` divides it by the baseline. A change needs
+- `delta` is with skill minus baseline for every total (`prompt_tokens`,
+  `cached_tokens`, `uncached_prompt_tokens`, `completion_tokens`, `total_tokens`
+  and `efficiency_tokens`), and `delta.total_tokens_change_percent` divides the
+  `total_tokens` change by the baseline. A change needs
   complete counts in both arms for the same cases and attempts, and both arms
   must have succeeded, because the report withholds the scores of any other arm.
   Otherwise `delta.status` is `unavailable` and `delta.reason_codes` and

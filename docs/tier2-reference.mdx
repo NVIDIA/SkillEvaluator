@@ -519,6 +519,157 @@ Catalogs stay local unless you explicitly share them. Because they contain
 embeddings and other data derived from skill content, review them before
 sharing like any other generated project artifact.
 
+## Run the registry overlap pilot
+
+Use the pilot to replay a registry's skill revisions into PostgreSQL and
+retrieve a bounded list of nearby skills. It accepts operator-supplied JSON
+batches from one source and embeds the skill name and description. Results
+provide scores, revision identity, and provenance for review. Use the
+[local JSON catalog](#use-a-local-catalog) for checkout and CI workflows.
+
+Use PostgreSQL with pgvector 0.8.2 and provision the `vector` extension before
+initialization. Run `uv sync --extra registry` from the checkout to install the
+Tier 2 embedding dependencies and PostgreSQL driver. Export
+`SKILL_EVAL_REGISTRY_DSN` through your environment's secret configuration and
+set up the [Tier 2 embedding provider](/skills/skillevaluator/configuration).
+Run these commands from a checkout that includes the pilot.
+
+```bash
+python -m skillevaluator.registry_overlap init --source example-registry
+python -m skillevaluator.registry_overlap sync --batch ./batch-1.json --sha256 "$BATCH_SHA256"
+python -m skillevaluator.registry_overlap status
+python -m skillevaluator.registry_overlap search ./candidate/SKILL.md --top-k 10
+```
+
+Obtain `BATCH_SHA256` through a separate trusted channel from the batch
+producer. Checksum validation compares the exact file bytes before parsing.
+Use `--exclude ID` when rechecking a skill that is already indexed. Other
+skills remain eligible even if their content fingerprint matches. Search
+accepts `--top-k` values from 1 through 50 and returns available candidates
+within that bound. Treat an empty result as retrieval evidence only.
+
+### Prepare and replay a batch
+
+Each batch contains 1 to 250 events and can be at most 8 MiB. The envelope
+contains `schema_version` set to `1`, the initialized `source`, a contiguous
+integer `cursor` starting at `1`, and the `events` array. Each event carries
+an `id` stable within the source, a positive integer `sequence` that increases
+for that ID, a `revision`, and a `kind` of `upsert` or `remove`. Upserts also
+carry the raw UTF-8 skill manifest in `manifest` and an `artifact` reference.
+Use an immutable HTTPS URL without credentials, a query, or a fragment, or
+use `ref:` followed by an opaque identifier. A removal needs the four common
+fields. The pilot replays only the supplied local batches and retains artifacts
+as references.
+
+```json
+{
+  "schema_version": 1,
+  "source": "example-registry",
+  "cursor": 1,
+  "events": [
+    {
+      "id": "release-summary",
+      "sequence": 1,
+      "revision": "v1",
+      "kind": "upsert",
+      "manifest": "---\nname: release-summary\ndescription: Write a changelog from merged changes.\n---\n",
+      "artifact": "https://example.com/registry/release-summary/v1"
+    }
+  ]
+}
+```
+
+Use `sync --batch FILE --sha256 SHA256 --accept-only` to validate and commit a
+batch without running embeddings. Run `sync` separately to apply up to 250
+pending event records per invocation. A byte-identical batch replay has no
+effect on accepted events. A skipped cursor, changed batch at an accepted
+cursor, or conflicting event at the same sequence rejects the entire batch
+and leaves the accepted cursor unchanged. An older sequence cannot supersede
+a newer revision or removal. Upon a provider failure, rerun `sync` to resume
+from the saved checkpoint.
+
+### Change the embedding profile
+
+Each generation pins the provider, model, endpoint fingerprint, description
+mode, vector dimension, and profile revision. The global options `--dimension`
+(default `2048`) and `--profile-revision` (default `1`) go before the
+subcommand. Set the dimension to match your provider. Increase the profile
+revision when you change the embedding pipeline for the same model.
+
+1. Configure the new profile and run `reindex`. It creates a generation from
+   the current source snapshot. The active generation continues to serve
+   queries.
+2. Run `sync --generation N` with the new profile as needed. Use `status` to
+   inspect the accepted cursor, event checkpoints, oldest pending events,
+   and index readiness.
+3. Run `activate N` when the generation has caught up. The same readiness
+   check applies when switching back to a previous generation. Keep that
+   generation caught up with its matching profile if you need rollback.
+4. Run `retire N` only after the rollback window closes. It explicitly
+   removes an inactive generation's index.
+
+Build or query a local JSON catalog with the existing commands when you need
+a portable checkout or CI workflow. Rebuild the pilot from source batches so
+that stable registry IDs and source revisions accompany its vectors.
+
+### Reproduce the registry-scale measurements
+
+The checkout benchmark accepts a little-endian, row-major float32 `.npy`
+matrix. Use a representative corpus with pinned provenance and one embedding
+profile. Provide the `--size` corresponding to the prefix you intend to
+measure. Prepare a reusable exhaustive cosine reference for the same vectors
+and then compare the two indexes in sequence. Pass `--query-ids FILE` during
+preparation to supply specific zero-based corpus row IDs. Point the environment
+variables at disposable benchmark databases. The benchmark creates its own
+tables and collections and reports their names.
+
+```bash
+uv run --no-project --with numpy python scripts/benchmark_registry_overlap.py \
+  --prepare-only --vectors ./corpus.npy --size 100000 --dimension 2048 \
+  --queries 1000 --k 10 --write-workload ./workload.json --output ./prepared.json
+
+uv run --no-project --with numpy --with 'psycopg[binary,pool]' \
+  --with qdrant-client --with httpx python scripts/benchmark_registry_overlap.py \
+  --backend both --vectors ./corpus.npy --workload ./workload.json \
+  --size 100000 --dimension 2048 --queries 1000 --k 10 \
+  --duration 1800 --burst-duration 60 --output ./registry-benchmark.json
+```
+
+Set `SKILLEVALUATOR_BENCHMARK_POSTGRES_DSN` and
+`SKILLEVALUATOR_BENCHMARK_QDRANT_URL` for the second command. For a service
+with an exposed Qdrant gRPC port, set
+`SKILLEVALUATOR_BENCHMARK_QDRANT_GRPC_PORT`. Keep the output JSON and workload
+fingerprint with the corpus source, embedding profile, machine, service
+versions, and settings.
+
+The steady phase schedules 20 searches and 5 mutations per second for
+30 minutes. The one-minute burst keeps 20 searches per second and raises
+mutations to 25 per second. Read recall@10 against the exhaustive reference,
+provider-excluded search p95 and p99 from the scheduled start, and separate
+write acknowledgement and visibility timings. Visibility is measured by
+reading the keyed live revision. The technical gate requires confirmed ANN
+use, recall@10 of at least 0.95, search p95 of at most 100 ms and p99 of at
+most 250 ms, fewer than 0.5% failed or dropped search requests, deletes visible
+within 5 seconds, and upserts visible within 60 seconds at p95. The report also
+checks mutation failures, dropped requests, and stale replay. Full qualification
+requires at least 100,000 2,048-dimensional vectors and 1,000 queries across
+the stated workload phases.
+
+For labeled overlap evidence, pass `--labels ./labels.json` to the benchmark.
+Each key is a selected query's zero-based corpus row ID as a string, and each
+value is a list of distinct related row IDs, excluding the query itself.
+For example, `{"12":[19,42]}` labels either row 19 or row 42 as a hit for
+query row 12. Select those query rows when preparing the workload. The report
+records labeled Hit@10 separately from exact cosine recall. The labeled gate
+requires Hit@10 of at least 90% across 100 or more labeled queries with
+supplied vectors.
+
+Use short durations and a small corpus for smoke tests. With no `--vectors`
+input the benchmark generates clustered synthetic vectors for technical
+testing. Release evidence requires labels from a representative skill
+workload embedded with the intended provider. Verify provider provenance
+and measure embedding cost separately.
+
 ## Inside validate
 
 `validate` runs the intra-skill deduplication pass by default as part of a full

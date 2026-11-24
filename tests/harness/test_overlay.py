@@ -2059,3 +2059,103 @@ def test_pi_census_counts_descriptions_as_pi_resolves_them(tmp_path: Path, descr
     assert facts["census_desc_chars"] == row["catalog"]["desc_chars"] == chars
     assert row["listed"] == {"mode": "full", "text": description.strip('"')}
     assert facts["catalog_desc_chars"] == (chars if description.startswith('"') else 0)
+
+
+@pytest.mark.parametrize(
+    ("root", "install_root", "ancestor"),
+    [
+        ("proj/.pi/skills", ".pi/skills", "SKILL.md"),
+        ("proj/.agents/skills", ".agents/skills", "SKILL.md"),
+        ("proj/.pi/skills/a", ".pi/skills", "a/SKILL.md"),
+        ("home/.pi/agent/skills", "~/.pi/agent/skills", "SKILL.md"),
+    ],
+    ids=["pi-root", "agents-root", "deeper", "user-root"],
+)
+def test_pi_ancestor_manifest_hides_the_nested_skill(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, root: str, install_root: str, ancestor: str
+):
+    """pi's default scan of a root stops at a folder's SKILL.md and never enters the folders below it
+    (verified against the pinned loader): the catalog saw that, the selected skill still loaded."""
+    monkeypatch.setattr(Path, "home", lambda: tmp_path / "home")
+    base = tmp_path / root
+    skill = _install(base, "sky")
+    _ancestor_manifest(base)
+
+    row = _rows(skill)["pi"]
+    ids = {f["id"] for f in row["findings"]}
+    assert row["status"] == "not_loaded" and row["listed"] == {"mode": "dropped", "text": ""}
+    assert "PI-ANCESTOR-MANIFEST" in ids and not ids & {"PI-HIDDEN", "PI-NAME-COLLISION", "PI-CASING"}
+    assert f"{install_root} holds {ancestor}" in next(
+        f["message"] for f in row["findings"] if f["id"] == "PI-ANCESTOR-MANIFEST"
+    )
+    assert _rows(base)["pi"]["status"] == "loads"  # the ancestor itself loads
+
+    (base / "SKILL.md").unlink()
+    assert _rows(skill)["pi"]["status"] == "loads"
+
+
+def _ancestor_manifest(base: Path) -> None:
+    """A skill at the base itself, the manifest pi's scan of the base stops at."""
+    base.mkdir(parents=True, exist_ok=True)
+    (base / "SKILL.md").write_text(
+        f"---\nname: root\ndescription: Use when testing catalogs.\n---\n{BODY}", encoding="utf-8"
+    )
+
+
+def test_pi_ignored_ancestor_manifest_is_no_cutoff(tmp_path: Path):
+    """An ancestor SKILL.md that the ignore rules exclude stops nothing (verified against the pinned loader)."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    skill = _install(root, "sky")
+    _ancestor_manifest(root)
+    (root / ".gitignore").write_text("SKILL.md\n!sky/SKILL.md\n", encoding="utf-8")
+
+    row = _rows(skill)["pi"]
+    assert row["status"] == "loads" and "PI-ANCESTOR-MANIFEST" not in {f["id"] for f in row["findings"]}
+
+
+@pytest.mark.parametrize(
+    ("manifest", "extra", "advice"),
+    [
+        ("SKILL.md", "\ndisable-model-invocation: true\n", "PI-HIDDEN"),
+        ("SKILL.md", '\ndisable-model-invocation: "true"\n', "PI-HIDDEN-INVALID"),
+        ("skill.md", "\n", "PI-CASING"),
+    ],
+    ids=["hidden-flag", "quoted-hidden-flag", "non-canonical-name"],
+)
+def test_pi_hidden_by_ancestor_reports_only_that_cause(tmp_path: Path, manifest: str, extra: str, advice: str):
+    """A skill pi never discovers gets neither advice about loading it nor about its manifest's spelling."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    _ancestor_manifest(root)
+    skill = root / "sky"
+    skill.mkdir()
+    (skill / manifest).write_text(
+        f"---\nname: sky\ndescription: Use when testing ancestors.{extra}---\nBody\n", encoding="utf-8"
+    )
+
+    ids = _ids(_rows(skill), "pi")
+    assert "PI-ANCESTOR-MANIFEST" in ids and advice not in ids
+
+
+def test_pi_ancestor_manifest_checked_as_a_file(tmp_path: Path):
+    """A check of the manifest file itself selects the skill pi does load; the file below it stays hidden."""
+    root = tmp_path / "proj" / ".pi" / "skills"
+    _ancestor_manifest(root)
+    _install(root, "a")
+    sky = _install(root / "a", "sky")
+
+    assert "PI-ANCESTOR-MANIFEST" not in _ids(_rows(root / "SKILL.md"), "pi")
+    for hidden in (root / "a" / "SKILL.md", sky):
+        row = _rows(hidden)["pi"]
+        assert ".pi/skills holds SKILL.md" in next(
+            f["message"] for f in row["findings"] if f["id"] == "PI-ANCESTOR-MANIFEST"
+        )
+
+
+def test_pi_ancestor_finding_stays_inside_the_default_roots(tmp_path: Path):
+    """Outside pi's roots the verdict stays: pi reaches such a skill only through a settings path this check cannot see."""
+    root = tmp_path / "proj" / "myskills"
+    skill = _install(root, "sky")
+    _ancestor_manifest(root)
+
+    row = _rows(skill)["pi"]
+    assert row["status"] == "loads" and "PI-ANCESTOR-MANIFEST" not in {f["id"] for f in row["findings"]}

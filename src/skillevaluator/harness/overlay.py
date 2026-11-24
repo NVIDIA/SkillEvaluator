@@ -684,9 +684,16 @@ def skill_facts(
     # The ignore rules match the file pi reads, not the folder an explicit check selects.
     pi_ignore = _pi_ignored_by_rules(manifest if manifest is not None else skill_path)
     pi_rule_ignored = pi_ignore is not None
-    # pi skips an ignored entry before it ever compares the manifest name.
+    # pi's scan of the root stops at the first SKILL.md above this skill, so it never sees the file
+    # (a check of that manifest file itself selects the skill pi does load).
+    selected = skill_path.absolute()
+    pi_cutoff = (
+        next((c for c in catalog.cutoffs if c != selected and c.parent in selected.parents), None) if catalog else None
+    )
+    # pi skips an ignored entry, or stops above it, before it ever compares the manifest name.
     pi_manifest_ignored = (
         not pi_rule_ignored
+        and pi_cutoff is None
         and actual_manifest_name != "SKILL.md"
         and ("SKILL.md" in names or not actual_manifest_name.endswith(".md") or _pi_manifest_ignored(skill_path))
     )
@@ -711,6 +718,8 @@ def skill_facts(
         "pi_ignored_by_rules": pi_rule_ignored,
         "pi_ignore_file": pi_ignore[0] if pi_ignore else "",
         "pi_ignore_rule": pi_ignore[1] if pi_ignore else "",
+        "pi_ancestor_manifest": pi_cutoff.relative_to(catalog.base).as_posix() if pi_cutoff else "",
+        "pi_hidden_by_ancestor": pi_cutoff is not None,
         "nested_skill_md": bool(nested),
         "nested_skill_md_exact": any(p.name == "SKILL.md" and not p.is_symlink() for p in nested),
         "skill_md_symlink": manifest.is_symlink(),
@@ -747,6 +756,7 @@ def skill_facts(
         and not pi_dropped
         and not pi_rule_ignored
         and not pi_manifest_ignored
+        and pi_cutoff is None
         and _is_true(data.get("disable-model-invocation")),
         "codex_implicit_disabled": _codex_implicit_disabled(skill_path),
         "claude_only_fields": ", ".join(f for f in _CLAUDE_ONLY_FIELDS if f in data),
@@ -782,7 +792,9 @@ def skill_facts(
         "pi_duplicate_paths": ", ".join(duplicates[:3]),
         "pi_description_text": pi_description or "",
         "pi_description_invalid": pi_description is None and not pi_dropped,
-        "pi_not_loaded": pi_dropped or pi_rule_ignored or pi_manifest_ignored or pi_description is None,
+        "pi_not_loaded": (
+            pi_dropped or pi_rule_ignored or pi_manifest_ignored or pi_cutoff is not None or pi_description is None
+        ),
         "lookalike_names": ", ".join(lookalikes[:3]),
     }
 
@@ -859,6 +871,8 @@ class Catalog:
     desc_chars: int
     base: Path | None = None
     descriptions: dict[Path, str] | None = None
+    # pi's scan of the folder stopped at these manifests: nothing below them is discovered.
+    cutoffs: tuple[Path, ...] = ()
 
     @classmethod
     def of(
@@ -867,6 +881,7 @@ class Catalog:
         base: Path | None = None,
         manifests: dict[Path, Path] | None = None,
         pi_resolved: bool = False,
+        cutoffs: list[Path] | None = None,
     ) -> Catalog:
         """Count the skills in one folder; ``pi_resolved`` measures descriptions as pi's parser resolves them."""
         names, descriptions, chars = {}, {}, 0
@@ -887,7 +902,14 @@ class Catalog:
                 description = _pi_description(frontmatter.group(1)) if frontmatter else None
             chars += len(description) if isinstance(description, str) else 0
             descriptions[manifest.resolve()] = description if isinstance(description, str) else ""
-        return cls(names=names, size=len(skills), desc_chars=chars, base=base, descriptions=descriptions)
+        return cls(
+            names=names,
+            size=len(skills),
+            desc_chars=chars,
+            base=base,
+            descriptions=descriptions,
+            cutoffs=tuple(cutoffs or ()),
+        )
 
     def lookalikes(self, manifest: Path) -> list[str]:
         """Other skills here whose description has nearly the same words as this one's."""
@@ -1087,8 +1109,10 @@ def _pi_loadable(manifest: Path) -> bool:
     return _pi_description(match.group(1)) is not None
 
 
-def _pi_manifests(base: Path) -> list[Path]:
+def _pi_manifests(base: Path, cutoffs: list[Path] | None = None) -> list[Path]:
     """Manifest files pi 1.6.0 accepts under a skills root.
+
+    ``cutoffs`` collects the exact ``SKILL.md`` files that stopped the scan; pi never looks below them.
 
     Default roots follow ``collectSkillEntries`` (dist/core/package-manager.js): a loose
     ``.md`` file (any name) loads directly in a ``.pi`` root (mode "pi") and nested under
@@ -1126,6 +1150,8 @@ def _pi_manifests(base: Path) -> list[Path]:
         # skill.md is not the canonical spelling here.
         canonical = next((c for c in children if c.name == "SKILL.md"), None)
         if canonical is not None and canonical.is_file() and not ignored(canonical, False):
+            if cutoffs is not None:
+                cutoffs.append(canonical)
             return [canonical] if _pi_loadable(canonical) else []
         found: list[Path] = []
         for child in children:
@@ -1148,13 +1174,15 @@ def _pi_manifests(base: Path) -> list[Path]:
     return scan(base, True, [])
 
 
-def _catalog_of(group: list[Path], manifests: dict[Path, Path] | None = None) -> Catalog:
+def _catalog_of(
+    group: list[Path], manifests: dict[Path, Path] | None = None, cutoffs: list[Path] | None = None
+) -> Catalog:
     base = _catalog_base(group[0])
     if base is not None:
         if _pi_skills_mode(base) is not None:
             # pi's own discovery: every loose .md file it loads is its own skill;
             # an empty census stands, ignore rules may exclude everything.
-            return Catalog.of(_pi_manifests(base), base, manifests, pi_resolved=True)
+            return Catalog.of(_pi_manifests(base, cutoffs), base, manifests, pi_resolved=True, cutoffs=cutoffs)
         return Catalog.of(_find_skills(base) or group, base, manifests)
     return Catalog.of(
         group, Path(os.path.commonpath([s.resolve() for s in group])) if len(group) > 1 else None, manifests
@@ -1183,7 +1211,8 @@ def facts_for(
         groups.setdefault(base.resolve() if base else None, []).append(skill)
     catalogs: dict[Path, Catalog] = {}
     for group in groups.values():
-        catalogs.update(dict.fromkeys(group, _catalog_of(group, explicit)))
+        cutoffs: list[Path] = []
+        catalogs.update(dict.fromkeys(group, _catalog_of(group, explicit, cutoffs)))
     user_roots = None if profiles is None else {r for p in profiles for r in p.get("roots", {}).get("user", [])}
     user_skills: dict[Path, dict[Path, str]] = {}
     # Canonical-catalog name clashes for non-pi harnesses sharing a pi-mode folder.

@@ -4612,8 +4612,10 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
         merged_trial_results: list[TrialResult] = []
         source_started_at: list[datetime] = []
         source_updated_at: list[datetime] = []
+        source_job_provenance: list[dict[str, str]] = []
         used_trial_names: set[str] = set()
         for source_index, (job_name, job_dir) in enumerate(snapshots):
+            source_identity = {"name": job_name}
             try:
                 source_job_result = json.loads((job_dir / "result.json").read_text(encoding="utf-8"))
             except (json.JSONDecodeError, OSError):
@@ -4624,12 +4626,14 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
                 except Exception:
                     source_job_model = None
                 if source_job_model is not None:
+                    source_identity["id"] = str(source_job_model.id)
                     source_started_at.append(_utc_aware_datetime(source_job_model.started_at))
                     source_updated_at.append(
                         _utc_aware_datetime(
                             source_job_model.updated_at or source_job_model.finished_at or source_job_model.started_at
                         )
                     )
+            source_job_provenance.append(source_identity)
             root_trial_results: dict[str, dict[str, Any]] = {}
             if isinstance(source_job_result, dict) and isinstance(source_job_result.get("trial_results"), list):
                 for candidate in source_job_result["trial_results"]:
@@ -4799,6 +4803,23 @@ def _merge_attempt_jobs(job_dirs: list[Path], aggregate_dir: Path) -> None:
             aggregate_result.model_dump_json(indent=2),
             encoding="utf-8",
         )
+        # Harbor's analyzer identifies job directories by job.log. Record the
+        # real aggregation provenance without implying another agent execution.
+        (staged_aggregate / "job.log").write_text(
+            json.dumps(
+                {
+                    "kind": "skillevaluator_retained_aggregate",
+                    "job_name": aggregate_path.name,
+                    "job_id": str(aggregate_job_id),
+                    "execution": "Trials retained from source jobs; no independent Harbor execution.",
+                    "n_total_trials": aggregate_total_trials,
+                    "source_jobs": source_job_provenance,
+                },
+                indent=2,
+            )
+            + "\n",
+            encoding="utf-8",
+        )
         copytree_secure(
             staged_aggregate,
             aggregate_path,
@@ -4899,22 +4920,31 @@ def _run_budgeted_variants(
     attempt_job_dirs: dict[str, dict[tuple[int, int], Path]] = {variant: {} for variant, _, _ in jobs}
     result_lock = threading.Lock()
 
-    def run_unit(task_index: int, task_name: str, attempt: int) -> bool:
+    def run_unit(
+        task_index: int, task_name: str, attempt: int, unit_jobs: list[tuple[str, Path, str | None]]
+    ) -> set[str]:
+        """Admit one attempt of each arm in ``unit_jobs`` as one unit; return the arms that passed."""
         if cancellation is not None:
             cancellation.raise_if_requested()
         admissions = [
-            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in jobs
+            {"agent": agent, "arm": variant, "case_id": task_name, "attempt": attempt} for variant, _, _ in unit_jobs
         ]
         with ExitStack() as reservations:
             if not budget.admit_many(admissions):
-                return False
+                return set()
             for admission in admissions:
                 reservations.callback(budget.release, admission)
-            return run_admitted(task_index, task_name, attempt, admissions)
+            return run_admitted(task_index, task_name, attempt, admissions, unit_jobs)
 
-    def run_admitted(task_index: int, task_name: str, attempt: int, admissions: list[dict[str, Any]]) -> bool:
-        passed = True
-        for admission, (variant, dataset, job_import_path) in zip(admissions, jobs, strict=True):
+    def run_admitted(
+        task_index: int,
+        task_name: str,
+        attempt: int,
+        admissions: list[dict[str, Any]],
+        unit_jobs: list[tuple[str, Path, str | None]],
+    ) -> set[str]:
+        passed: set[str] = set()
+        for admission, (variant, dataset, job_import_path) in zip(admissions, unit_jobs, strict=True):
             if cancellation is not None:
                 cancellation.raise_if_requested()
             job_name = f"{skill_name}-{agent}-{variant}-{task_name}-attempt{attempt:03d}"
@@ -4957,12 +4987,19 @@ def _run_budgeted_variants(
                     errors[variant][(task_index, attempt)] = (
                         f"{agent} {variant}-skill Harbor run failed: {task_name} attempt {attempt}: {detail}"
                     )
-            passed = passed and ok and _job_passed(job_dir, pass_threshold)
+            if ok and _job_passed(job_dir, pass_threshold):
+                passed.add(variant)
         return passed
 
     def run_case(task_index: int, task_name: str) -> None:
+        # Each arm stops after its own first pass, as it does without a budget,
+        # because the collector expects no attempt of an arm after that. The
+        # arms that still need an attempt are admitted together.
+        pending = jobs
         for attempt in range(1, n_attempts + 1):
-            if run_unit(task_index, task_name, attempt) and stop_on_pass:
+            passed = run_unit(task_index, task_name, attempt, pending)
+            pending = [job for job in pending if job[0] not in passed]
+            if not pending:
                 break
 
     worker_count = max(1, min(n_concurrent, len(task_names) or 1))
@@ -4975,7 +5012,7 @@ def _run_budgeted_variants(
                 futures = [executor.submit(run_case, index, task_name) for index, task_name in enumerate(task_names)]
             else:
                 futures = [
-                    executor.submit(run_unit, index, task_name, attempt)
+                    executor.submit(run_unit, index, task_name, attempt, jobs)
                     for index, task_name in enumerate(task_names)
                     for attempt in range(1, n_attempts + 1)
                 ]
@@ -5576,13 +5613,21 @@ def _run_harbor_eval_impl(
             reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
             return {"error": [str(exc)]}
 
+    from skillevaluator.tier3.plugin_execution import runtime_source_path
+
+    publication_source = runtime_source_path(skill_path)
+    publication_name = (
+        _snapshot_publication_target.get("skill_name", publication_source.name)
+        if _snapshot_publication_target and publication_source != skill_path
+        else publication_source.name
+    )
     if _evaluator_skill_path is None:
         assert forwarded is not None
         forwarded.pop("skill_path")
         forwarded.pop("agents")
         with ExitStack() as snapshot_stack:
             try:
-                snapshot_publication_target = publication_target_from_path(skill_path)
+                snapshot_publication_target = publication_target_from_path(publication_source)
                 evaluator_skill_path = snapshot_stack.enter_context(private_evaluator_skill_snapshot(skill_path))
                 snapshot_config, _ = load_evals_config(evaluator_skill_path)
                 snapshot_workspace = snapshot_config.get("skill_workspace", {})
@@ -5613,7 +5658,7 @@ def _run_harbor_eval_impl(
                     forwarded["_decoy_workspace_paths"] = [*manual, *frozen]
                     forwarded["_decoy_workspace_source_paths"] = source_paths
                     forwarded["_decoy_manifest"] = manifest
-                if publication_target_from_path(skill_path) != snapshot_publication_target:
+                if publication_target_from_path(publication_source) != snapshot_publication_target:
                     raise ValueError("Publication source changed while its private evaluator snapshot was created")
             except (OSError, ValueError) as exc:
                 reporter.emit(ProgressEvent(stage="configuration", state="failed", detail=str(exc)))
@@ -5633,6 +5678,15 @@ def _run_harbor_eval_impl(
         return {"error": [str(exc)]}
 
     harbor_config = config.get("harbor", {})
+    if _private_runtime_hooks() is None:
+        plugin_controls = [f"plugin.{name}" for name in sorted(config.get("plugin", {}))]
+        if harbor_config.get("trial_retries"):
+            plugin_controls.append("harbor.trial_retries")
+        if plugin_controls:
+            logger.warning(
+                "Only prepared plugin runs use these settings. The skill run ignores %s.",
+                ", ".join(plugin_controls),
+            )
     workspace_config = config.get("skill_workspace", {})
     grading_config = config.get("grading", {})
     n_attempts = n_attempts if n_attempts is not None else harbor_config.get("n_attempts", 1)
@@ -6163,7 +6217,7 @@ def _run_harbor_eval_impl(
             if isinstance(reason_code, str):
                 conflict["reason_code"] = reason_code
             return {"publication_target": None, "publication_target_conflict": conflict}
-        run_end_target = publication_target_from_path(skill_path)
+        run_end_target = publication_target_from_path(publication_source)
         if run_end_target == publication_target:
             return {
                 "publication_target": dict(publication_target) if publication_target is not None else None,
@@ -6197,7 +6251,7 @@ def _run_harbor_eval_impl(
         """Retain redacted probe provenance for failures after run reservation."""
         published_errors, error_total = _published_execution_errors(errors)
         failed_result: dict[str, Any] = {
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "execution_status": "failed",
             "execution_errors": published_errors,
             "execution_error_details_total": error_total,
@@ -6473,7 +6527,7 @@ def _run_harbor_eval_impl(
         )
 
     if not _runtime_context_is_bound_to_publication_target(
-        skill_path,
+        publication_source,
         staged_task_paths,
         reference_skills_dir=reference_skills_dir,
         workspace_skill_paths=_decoy_workspace_source_paths or workspace_skills,
@@ -6868,7 +6922,7 @@ def _run_harbor_eval_impl(
             "baseline": baseline,
             "comparison_identity": identity,
             "expected_case_ids": case_ids,
-            "skill_name": skill_path.name,
+            "skill_name": publication_name,
             "run_id": run_id,
             **_run_owned_publication_fields(),
             "run_dir": str(run_dir),

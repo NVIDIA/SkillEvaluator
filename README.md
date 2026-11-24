@@ -165,7 +165,7 @@ Eligible NVIDIA Developer Program members can use NVIDIA-hosted endpoints for
 3. Complete [scanner setup](docs/installation-options.mdx#system-tools), start Docker, and [prepare a reviewed dataset](docs/prepare-dataset.mdx). Install every tier, set the provider and key, then validate:
 
 ```bash
-pip install "skillevaluator[all]"
+python -m pip install "skillevaluator[all]"
 export SKILL_EVAL_LLM_PROVIDER=nv_build
 export NVIDIA_API_KEY='nvapi-...'
 skillevaluator validate ./my-skill
@@ -209,10 +209,10 @@ Choose checks and optional hosted feedback, then review the setup PR.
 
 | Your repository | Ready-to-use template | Copy destination |
 | --- | --- | --- |
-| GitHub | [Skill checks](ci/bundles/1.0.1/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
-| GitLab | [Skill checks](ci/bundles/1.0.1/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
-| GitHub PR comments without hosting | [Optional comments](ci/bundles/1.0.1/comment-skill-checks.yml) | Second workflow; complete [comment setup](ci/bundles/1.0.1/README.md#pr-comment-setup) |
-| GitHub hosted reports and PR comments | [Optional publisher](ci/bundles/1.0.1/publish-skill-reports.yml) | Second workflow; complete [publisher setup](ci/bundles/1.0.1/README.md#one-time-publisher-setup) |
+| GitHub | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/skill-checks.yml) | `.github/workflows/skill-checks.yml` |
+| GitLab | [Skill checks](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/gitlab-skill-checks.yml) | `.gitlab-ci.yml`, or merge into your existing pipeline |
+| GitHub PR comments without hosting | [Optional comments](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/comment-skill-checks.yml) | Second workflow; complete [comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/README.md#pr-comment-setup) |
+| GitHub hosted reports and PR comments | [Optional publisher](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/publish-skill-reports.yml) | Second workflow; complete [publisher setup](https://github.com/NVIDIA/SkillEvaluator/blob/main/ci/bundles/1.2.0/README.md#one-time-publisher-setup) |
 
 Pick one optional feedback workflow. These run Tier 1 checks without a model
 key; [all-tier CI setup](https://docs.nvidia.com/skills/skillevaluator/advanced-ci)

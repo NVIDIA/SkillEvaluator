@@ -3,6 +3,9 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage the installed verifier, then exercise it with a separate task Python.
 
+The staged verifier includes the custom grader runner, which test.sh runs with
+the same task Python when a task has a custom grader.
+
 The host needs the tier3 extra. The task interpreter needs only idna and must
 not have skillevaluator installed. Use an actual Python 3.9 interpreter in CI:
 newer Python parsers do not reproduce every older-interpreter syntax failure.
@@ -15,6 +18,7 @@ import importlib.util
 import json
 import os
 import runpy
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -72,8 +76,17 @@ def check_staged(directory: Path) -> None:
     assert verifier["_parse_retry_after"]("Thu, 01 Jan 1970 00:00:00 GMT", 7.0) == 0.0
     assert verifier["_parse_retry_after"]("Fri, 31 Dec 9999 23:59:59 GMT", 7.0) > 7.0
     reward = run_verifier_main(directory)
+    custom_rewards = run_custom_grader_runner(directory)
     print(
-        json.dumps({"python": sys.version.split()[0], "verifier": str(directory), "results": results, "reward": reward})
+        json.dumps(
+            {
+                "python": sys.version.split()[0],
+                "verifier": str(directory),
+                "results": results,
+                "reward": reward,
+                "custom_rewards": custom_rewards,
+            }
+        )
     )
 
 
@@ -134,6 +147,60 @@ def run_verifier_main(directory: Path) -> dict[str, float]:
     return reward
 
 
+# A stub custom grader. The boolean metric must be dropped, not scored.
+STUB_CUSTOM_GRADER = """\
+import json
+import os
+from pathlib import Path
+
+reward = {"overall": 0.75, "custom_metrics": {"style": 0.5, "passed": True}}
+path = Path(os.environ["HARBOR_LOGS_DIR"]) / "verifier" / "reward.json"
+path.write_text(json.dumps(reward), encoding="utf-8")
+"""
+
+
+def run_custom_grader_runner(directory: Path) -> dict[str, dict[str, float]]:
+    """Run custom_grader_runner.py in both custom grading modes the way test.sh does."""
+    expected = {
+        "custom_only": {"overall": 0.75, "style": 0.5},
+        # The default score that eval.py wrote stays the overall score.
+        "default_plus_custom": {"security": 1.0, "overall": 0.8, "style": 0.5},
+    }
+    rewards: dict[str, dict[str, float]] = {}
+    for mode, expected_reward in expected.items():
+        with tempfile.TemporaryDirectory(prefix="harbor-custom-grader-") as temporary:
+            root = Path(temporary)
+            logs, tests, verifier = root / "logs", root / "tests", root / "logs" / "verifier"
+            verifier.mkdir(parents=True)
+            tests.mkdir()
+            (tests / "grader.py").write_text(STUB_CUSTOM_GRADER, encoding="utf-8")
+            if mode == "default_plus_custom":
+                default_reward = {"security": 1.0, "overall": 0.8}
+                (verifier / "skill_evaluator_reward.json").write_text(json.dumps(default_reward), encoding="utf-8")
+                (verifier / "reward.txt").write_text("0.8", encoding="utf-8")
+            environment = {
+                "PATH": os.environ.get("PATH", os.defpath),
+                "HARBOR_LOGS_DIR": str(logs),
+                "HARBOR_TESTS_DIR": str(tests),
+            }
+            completed = subprocess.run(
+                [sys.executable, "-I", str(directory / "custom_grader_runner.py"), "--mode", mode],
+                cwd=root,
+                env=environment,
+                capture_output=True,
+                text=True,
+                encoding="utf-8",
+                check=False,
+            )
+            assert completed.returncode == 0, mode + "\n" + completed.stdout[-4000:] + completed.stderr[-4000:]
+            reward = json.loads((verifier / "reward.json").read_text(encoding="utf-8"))
+            overall = float((verifier / "reward.txt").read_text(encoding="utf-8"))
+        assert reward == expected_reward, (mode, reward)
+        assert overall == expected_reward["overall"], (mode, overall)
+        rewards[mode] = reward
+    return rewards
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     mode = parser.add_mutually_exclusive_group(required=True)
@@ -144,18 +211,21 @@ def main() -> None:
         check_staged(arguments.check_staged)
         return
 
-    from skillevaluator.tier3.harbor.adapter import _copy_verifier
+    from skillevaluator.tier3.harbor.adapter import TEMPLATES_DIR, _copy_verifier, _evaluator_tests_dir
 
     with tempfile.TemporaryDirectory(prefix="harbor-verifier-smoke-") as temporary:
         task = Path(temporary)
         _copy_verifier(task)
+        # Staged next to the verifier, as for a task with a custom grader.
+        staged = _evaluator_tests_dir(task)
+        shutil.copy2(TEMPLATES_DIR / "custom_grader_runner.py", staged / "custom_grader_runner.py")
         subprocess.run(
             [
                 str(arguments.python.absolute()),
                 "-I",
                 str(Path(__file__).resolve()),
                 "--check-staged",
-                str(task / "tests" / "skill_evaluator"),
+                str(staged),
             ],
             cwd=task,
             check=True,

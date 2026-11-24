@@ -86,6 +86,7 @@ no-color, redirected, and string-rendered output retains readable paths.
 | `markdown` | Markdown for PR comments | You want the result posted on a pull request |
 | `sarif` | SARIF 2.1.0 JSON | GitHub Code Scanning or other SARIF consumers need inline annotations |
 | `junit` | JUnit XML | CI systems that show native test reports need a JUnit artifact |
+| `github` | GitHub Actions workflow commands | A workflow that runs the CLI itself needs inline annotations without uploading SARIF |
 
 HTML reports use a shared NVIDIA presentation across all three tiers, with
 numbered Insights cards, expandable findings, and tables alongside charts.
@@ -171,8 +172,9 @@ full rows remain in each trial's `reward.json`.
 
 The HTML Tier 2 view separates **Intra-Skill** (redundant content among
 its files) from **Inter-Skill** (catalog or collection comparisons). Each
-scope shows Checks completed, Duplicate findings, Affected files or skills,
-and Catalog entries compared. Completion uses recorded comparison
+scope shows Checks completed, Duplicate findings (Similarity matches in the
+Inter-Skill scope), Affected files or entries, and Catalog entries compared.
+Completion uses recorded comparison
 evidence; a completed check can still fail its gate because it found duplicates.
 Refused LLM classifications and file safety errors remain visible findings,
 but do not count as confirmed duplicates within a skill.
@@ -181,9 +183,14 @@ A completed comparison with no matches shows zero. A skipped catalog comparison,
 missing metadata, or an incomplete scan shows the recorded reason and unavailable
 counts. Target against catalog comparisons exclude the target's recorded self
 entry. Within-skill checks and recorded pairwise scans mark Catalog entries compared
-as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file or skill paths,
-so equal display names do not merge distinct skills. Token or context savings
+as not applicable. Pairwise scans identify the collection size separately. Affected counts use recorded file, skill or
+catalog entry paths, so equal display names do not merge distinct skills. Token or context savings
 are not estimated from duplicate counts.
+
+Tier 2 results that belong to neither scope, such as dependency-reference
+checks, appear in a separate **Other checks** tab under "Other recorded checks".
+That tab has no summary counts. It lists each result with its own errors and
+findings, and names each clean result with its check name and recorded details.
 
 HTML, terminal, and Markdown reports link every recorded Harbor job to its
 **Results** and available **Analysis**. HTML uses concise labels from the
@@ -333,8 +340,8 @@ Report filenames follow two patterns, both under the output directory:
 | `context-optimization-check` | `skillevaluator-context` | Yes |
 | `dedup-scan` | `skillevaluator-dedup` | Yes |
 
-The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` format
-prints to the terminal and never writes a file. A full `validate` run's
+The extension matches the format (`.json`, `.html`, `.md`, `.sarif.json`, `.junit.xml`); the `cli` and `github` formats
+print to the terminal and never write a file. `github` has no file extension and no catalog-collision check, because it does not create a report path. A full `validate` run's
 timestamp is `YYYYMMDDHHMMSS`, so
 `-r json` produces something like `skillevaluator-output-20260709141530.json`
 and never clobbers the previous run.
@@ -376,6 +383,74 @@ the Tier 3 verdict, or the skip reason. An advisory group (Tier 3 without
 `failure` or `error`; its findings, errors, and execution errors are kept in
 `system-out` with an `Advisory, does not gate:` prefix, and its incomplete
 scanners are `skipped`.
+
+## GitHub annotations
+
+`-r github` prints GitHub Actions workflow commands on stdout so a job that
+runs `skillevaluator validate` or `tier1` itself can put findings on the pull
+request diff and the run summary. It does not write a file, does not upload
+SARIF, and does not need a token or extra permission. Combine it with other
+formats, for example `-r cli,github,sarif`.
+
+Use this when the reusable SkillEvaluator workflow is not in the job and
+GitHub Code Scanning is unavailable (private repositories without code
+scanning, or a plain `run:` step). Prefer SARIF when you can upload to code
+scanning: it is not capped at ten errors, ten warnings, and ten notices per
+step. Prefer
+JUnit when a CI system ingests test reports rather than workflow commands.
+
+| Finding | Workflow command |
+| --- | --- |
+| CRITICAL or HIGH | `::error` |
+| MEDIUM or LOW | `::warning` |
+| INFO | `::notice` |
+| Gate failure (for example a quality score below `--min-score`) | `::error`, even when other findings on that group are warnings |
+| Scanner that did not complete | `::warning` with a "did not complete" message; every other non-gate error on that group (such as each entry in Bandit's `errors` list) is also a `::warning` |
+
+Advisory (non-blocking) results emit `::warning` in place of `::error`, while
+blocking results keep `::error`; the required gate itself is unchanged.
+
+`file=` is the path relative to the Git repository root, or to the scanned
+folder when the target is outside a Git repository. GitHub resolves it against
+the checkout. On POSIX, GitHub preserves a backslash in an existing file name.
+For a tracked `alpha/design\notes.md`, GitHub emits
+`file=alpha/design\notes.md` and SARIF and JUnit use `alpha/design/notes.md`.
+`line=` (and `endLine=` when recorded) is included when the finding has a location.
+`file` is omitted when the path is outside the repository. In a catalog run,
+member skill annotations resolve paths against the catalog's repository root
+(including across nested Git repositories), or omit `file` and prefix the
+message with the catalog-relative skill path when outside that workspace. `title=` is the
+check group and check name, and always comes last, so a path that ends in a
+space keeps it when the runner parses the command. An incomplete scan is never a clean log: each
+unfinished scanner is a warning, and the run ends with one `::notice`
+summary (skills checked, passed, failed, incomplete). The summary follows the
+required validation gate, like the JSON `overall_status` and the exit code, so
+a failed advisory group (such as Tier 2 dedup with `--no-block-on-dedup`) does
+not count the skill as failed.
+
+GitHub shows at most 10 error, 10 warning, and 10 notice annotations per
+step (50 per job). This format emits the most severe first, in a
+deterministic order (severity, path, line, check). INFO findings stop at nine
+notices so the summary notice is always shown. The summary notice says how
+many more were not annotated and names the file report formats requested with `-r`.
+If the run writes no requested report files, it suggests rerunning with `-r github,json`.
+A catalog run (a folder of skills, with any `--workers` value) prints one
+capped stream and one summary for the whole catalog, after every skill has
+finished, rather than one per skill. The checked and passed counts match
+`catalog-summary.json`, and catalog-level findings such as a duplicate
+`metadata.id` are annotated on each affected skill's `SKILL.md` within the same
+caps. `catalog-summary.json` counts a skill whose only problem is an incomplete
+scan as `failed` for gating (and the exit code is non-zero), while the
+annotation summary shows those skills in a separate `incomplete` count rather
+than under `failed`.
+Finding text is escaped per GitHub's workflow-command rules and stripped of
+control characters; credential-shaped values are masked like the other
+reporters. A planted newline or `::add-mask` / `::stop-commands` payload
+stays on one escaped line.
+
+```bash title="CLI job with inline annotations"
+skillevaluator validate ./skills --tiers 1 -r cli,github
+```
 
 ## HTML report
 
@@ -766,7 +841,9 @@ completed run directly:
   (`SKILL_EVAL_BEHAVIOR_FINAL_RESPONSE_LIMIT`). For `behavior_check`, the
   record's `reason` names each setting that applied, and
   `incomplete_sections`, `required_complete` and `required_missing` say which
-  evidence did not reach the judge whole. A `behavior_check` whose required
+  evidence did not reach the judge whole. For `accuracy` and `goal_accuracy`,
+  `incomplete_sections` names the sections that did not reach the judge
+  whole. A `behavior_check` whose required
   evidence is incomplete is reported as an evaluation error with no score,
   which also leaves the trial's `overall_score` null; see
   [evidence budgets](/skills/skillevaluator/tier3-grading#evidence-budgets).
@@ -959,9 +1036,12 @@ tool names, these calls are productive: reading, searching, listing, writing,
 editing or patching files (`Write`, `Edit`, `MultiEdit`, `apply_patch`, `LS`,
 OpenCode `list`, Codex `list_dir` and `grep_files`, and similar), running
 commands and activating a skill. MCP tools named `mcp__server__tool`, as Claude
-Code records them, are productive too. Codex records an MCP call under the bare
-tool name and OpenCode as `server_tool`, so these calls are classified by their
-name like any other tool, and most such names count as wasted. A Codex name
+Code records them, are productive too. When a missing or empty Harbor trajectory
+is rebuilt from `codex.txt`, the recorded `server` and `tool` fields produce the
+same MCP name and remain separate, so `__` inside a server name does not change
+its identity. Codex MCP calls in Harbor's existing graded trajectory are not yet
+recognized as MCP; their bare names and OpenCode names such as `server_tool` are
+classified like any other tool, and most such names count as wasted. A Codex name
 with a namespace, such as `functions.apply_patch`, is classified by the part
 after the last dot. Help, version and install commands are wasted, whether
 written as text or recorded as an argument list, as is any tool outside these
@@ -979,6 +1059,14 @@ neutral, as is a `Monitor` watch with no command. A command typed with
 reason names how many calls were not counted. A trial whose only calls are
 neutral did no work: it scores tool efficiency 0.0, so its `skill_efficiency`
 is 0.0, the same as a trial with no tool calls.
+
+In rebuilt Codex logs, MCP tools count as MCP work instead of neutral planning
+even when their bare name is a neutral planning or bookkeeping name, such as
+`task`, `update_plan`, `spawn_agent`, `wait`, `agent` or `todowrite`. An MCP
+tool named `skill` also remains an MCP call; it does not count as a Skill-tool
+activation. These rules do not change Harbor-provided Codex trajectories.
+Candidates created by `tier3 import-traces` from Codex exports likewise retain
+the recorded MCP identity in `mcp__server__tool` labels.
 
 Tool-efficiency checks classify explicit searches rooted at `/` as wasted work,
 whether or not the command names the expected skill or script. This includes

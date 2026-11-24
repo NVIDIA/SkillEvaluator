@@ -1824,6 +1824,19 @@ class TestTier1Plumbing:
         assert kwargs["content_type"] == expected_scope
         assert kwargs["skillspector_reference_root"] == (sample_skill_dir if content_type == "plugin" else None)
 
+    def test_plugin_without_a_manifest_refuses_before_scanner_construction(
+        self, monkeypatch: pytest.MonkeyPatch, sample_skill_dir: Path
+    ) -> None:
+        from skillevaluator.tier1.plugin_public import run_public_plugin_validation
+
+        monkeypatch.setattr(tier1_commands, "SecurityValidator", _RecordingSecurityValidator)
+        _RecordingSecurityValidator.instances = []
+
+        results = run_public_plugin_validation(sample_skill_dir, checks="security")
+
+        assert not _RecordingSecurityValidator.instances
+        assert any(not result.passed for result in results)
+
     def test_standalone_security_scan_stays_unrestricted(
         self, monkeypatch: pytest.MonkeyPatch, sample_skill_dir: Path
     ) -> None:

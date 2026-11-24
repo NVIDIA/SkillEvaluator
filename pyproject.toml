@@ -7,18 +7,31 @@ requires = ["setuptools >= 77", "wheel"]
 
 [project]
 name = "skillevaluator"
-version = "1.0.1"
-description = "Multi-tier framework for evaluating AI agent skills with quality gates, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation."
+version = "1.2.0"
+description = "Multi-tier framework for evaluating AI agent skills and plugins with quality gates, security scanning, harness compatibility checks, semantic overlap detection, synthetic evaluation dataset generation, and live agent evaluation that measures how skills affect agent behavior. Includes reusable GitHub Actions and GitLab CI templates, with all-tier evaluation available as an opt-in."
 authors = [{ name = "NVIDIA Corporation" }]
 readme = "README.md"
 keywords = [
-    "skills-evaluation",
-    "skills",
-    "skill-uplift",
+    "agent-evaluation",
+    "agent-plugins",
+    "agent-security",
+    "agent-skills",
+    "agentic-ai",
     "ai-agents",
-    "security",
-    "vulnerability-scanner",
+    "benchmark",
+    "ci-templates",
     "claude-code",
+    "codex",
+    "evaluate",
+    "evaluation",
+    "harness",
+    "plugin",
+    "plugin-evaluation",
+    "security-scanner",
+    "skill-eval",
+    "skill-evaluation",
+    "skill-evaluator",
+    "skills",
 ]
 classifiers = [
     "Environment :: Console",
@@ -64,8 +77,11 @@ llm = [
     "anthropic>=0.83.0",
     # Botocore 1.44 introduced HTTPS enforcement for bearer authentication.
     "boto3>=1.44.0",
+    # The LLM stack and Harbor use filelock; aiohttp uses multidict.
+    "filelock>=4.2.1,<5",
     "fsspec>=2026.6.0",
     "litellm>=1.110.2,<1.111.0.dev0",
+    "multidict>=6.9.1,<7",
     "openai>=2.21.0",
     "urllib3>=2.8.0,<3",
 ]
@@ -88,8 +104,14 @@ tier3 = [
 ]
 # Scanner for the opt-in Dependency Vulnerability Audit (`--check dependency`).
 security = [
+    # pip-audit uses the installed CA bundle for the eMudhra trust fix.
+    "certifi>=2026.10.19",
+    # Security floor for CacheControl's file-backed cache.
+    "filelock>=4.2.1,<5",
     # CVE-2026-114613 fixed floor for pip-audit's CacheControl dependency.
     "msgpack>=1.2.3",
+    # pip needs the same eMudhra fix in its vendored CA bundle.
+    "pip>=26.2.2",
     "pip-audit>=2.10.0",
     "urllib3>=2.8.0,<3",
 ]

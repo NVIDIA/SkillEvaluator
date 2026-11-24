@@ -519,7 +519,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -716,7 +717,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -855,6 +857,16 @@
           "name": "verify_models",
           "opts": [
             "--verify-models"
+          ],
+          "param_type": "option",
+          "type": "boolean"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
           ],
           "param_type": "option",
           "type": "boolean"
@@ -1478,6 +1490,16 @@
           ],
           "param_type": "option",
           "type": "text"
+        },
+        {
+          "default": "False",
+          "is_flag": true,
+          "name": "as_json",
+          "opts": [
+            "--json"
+          ],
+          "param_type": "option",
+          "type": "boolean"
         }
       ]
     },
@@ -1623,7 +1645,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1705,7 +1728,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1805,7 +1829,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1855,7 +1880,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -1935,7 +1961,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2067,7 +2094,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,
@@ -2110,7 +2138,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2169,7 +2198,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2227,7 +2257,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2277,7 +2308,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2357,7 +2389,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2491,7 +2524,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli', 'json', 'html')",
               "multiple": true,
@@ -2627,7 +2661,8 @@
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -2696,7 +2731,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2762,7 +2798,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2894,7 +2931,8 @@
                 "html",
                 "markdown",
                 "sarif",
-                "junit"
+                "junit",
+                "github"
               ],
               "default": "('cli',)",
               "multiple": true,
@@ -2973,7 +3011,8 @@
               "html",
               "markdown",
               "sarif",
-              "junit"
+              "junit",
+              "github"
             ],
             "default": "('cli', 'json', 'html')",
             "multiple": true,
@@ -3297,6 +3336,16 @@
               "name": "verify_models",
               "opts": [
                 "--verify-models"
+              ],
+              "param_type": "option",
+              "type": "boolean"
+            },
+            {
+              "default": "False",
+              "is_flag": true,
+              "name": "as_json",
+              "opts": [
+                "--json"
               ],
               "param_type": "option",
               "type": "boolean"
@@ -5427,7 +5476,8 @@
             "html",
             "markdown",
             "sarif",
-            "junit"
+            "junit",
+            "github"
           ],
           "default": "('cli',)",
           "multiple": true,

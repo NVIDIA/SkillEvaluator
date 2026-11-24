@@ -74,3 +74,16 @@ def test_backend_rejects_late_write_after_removal_and_allows_newer_restore(prepa
     backend.upsert(skill_id, 4, vectors[3])
     assert not backend.visible(skill_id, 4)
     assert skill_id not in backend.search(vectors[3], 10)
+
+
+def test_search_effort_has_a_bounded_credential_free_setting(monkeypatch):
+    from scripts.registry_overlap_benchmark_backends import _benchmark_ef_search
+
+    variable = "SKILLEVALUATOR_BENCHMARK_POSTGRES_EF_SEARCH"
+    monkeypatch.delenv(variable, raising=False)
+    assert _benchmark_ef_search(variable) == 200
+    monkeypatch.setenv(variable, "80")
+    assert _benchmark_ef_search(variable) == 80
+    monkeypatch.setenv(variable, "1001")
+    with pytest.raises(ValueError, match=r"40\.\.1000"):
+        _benchmark_ef_search(variable)

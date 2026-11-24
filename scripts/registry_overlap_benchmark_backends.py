@@ -70,6 +70,13 @@ def _copy_vectors(copy, vectors: np.ndarray) -> None:
     copy.write(b"\xff\xff")
 
 
+def _benchmark_ef_search(variable: str) -> int:
+    value = int(os.environ.get(variable, str(_SEARCH_BUDGET)))
+    if not 40 <= value <= 1000:
+        raise ValueError(f"{variable} must be in 40..1000")
+    return value
+
+
 class PgVectorBackend:
     """Search a dedicated half-precision HNSW index and rerank float32 vectors."""
 
@@ -83,6 +90,7 @@ class PgVectorBackend:
         self.dimension = dimension
         self.resource_name = f"registry_overlap_bench_{uuid4().hex}"
         self._dsn = dsn
+        self._ef_search = _benchmark_ef_search("SKILLEVALUATOR_BENCHMARK_POSTGRES_EF_SEARCH")
         self._schema = sql.Identifier(self.resource_name)
         self._table = sql.Identifier(self.resource_name, "skills")
         self._halfvec = sql.SQL(f"halfvec({dimension})")
@@ -129,13 +137,12 @@ class PgVectorBackend:
             configure=self._configure,
         )
 
-    @staticmethod
-    def _configure(connection) -> None:
+    def _configure(self, connection) -> None:
         with connection.cursor() as cursor:
             cursor.execute("SET statement_timeout = '5s'")
             cursor.execute("SET lock_timeout = '5s'")
             cursor.execute("SET enable_seqscan = off")
-            cursor.execute(f"SET hnsw.ef_search = {_SEARCH_BUDGET}")
+            cursor.execute("SELECT set_config('hnsw.ef_search', %s, false)", (str(self._ef_search),))
             cursor.execute("SET hnsw.iterative_scan = 'strict_order'")
             cursor.execute("SET hnsw.max_scan_tuples = 20000")
 
@@ -197,7 +204,7 @@ class PgVectorBackend:
             "dimension": self.dimension,
             "ann_indexed_count": len(vectors),
             "planner_uses_ann": planner_uses_ann,
-            "hnsw_ef_search": _SEARCH_BUDGET,
+            "hnsw_ef_search": self._ef_search,
             "hnsw_max_scan_tuples": 20000,
             "search_statement_timeout_ms": 250,
             "table_and_index_bytes": storage_bytes,
@@ -250,6 +257,7 @@ class QdrantBackend:
         self.dimension = dimension
         self.resource_name = f"registry_overlap_bench_{uuid4().hex}"
         self._url = url
+        self._ef_search = _benchmark_ef_search("SKILLEVALUATOR_BENCHMARK_QDRANT_EF_SEARCH")
         self._transport = "gRPC" if grpc_port else "HTTP"
         self._client = QdrantClient(
             url=url,
@@ -314,7 +322,7 @@ class QdrantBackend:
             "ann_indexed_count": indexed_count,
             "planner_uses_ann": planner_uses_ann,
             "search_probe_counts": probes,
-            "hnsw_ef_search": _SEARCH_BUDGET,
+            "hnsw_ef_search": self._ef_search,
             "indexing_threshold_kb": threshold_kb,
             "full_scan_threshold_kb": _QDRANT_FULL_SCAN_KB,
             "transport": self._transport,
@@ -347,7 +355,7 @@ class QdrantBackend:
             using="embedding",
             query=vector,
             query_filter=query_filter,
-            search_params=models.SearchParams(hnsw_ef=_SEARCH_BUDGET, exact=False),
+            search_params=models.SearchParams(hnsw_ef=self._ef_search, exact=False),
             timeout=5,
             limit=k,
             with_vectors=False,

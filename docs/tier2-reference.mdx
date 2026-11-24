@@ -642,6 +642,10 @@ with an exposed Qdrant gRPC port, set
 fingerprint with the corpus source, embedding profile, machine, service
 versions, and settings.
 
+The benchmark accepts `SKILLEVALUATOR_BENCHMARK_POSTGRES_EF_SEARCH` and
+`SKILLEVALUATOR_BENCHMARK_QDRANT_EF_SEARCH` (40–1,000, default 200) to tune
+HNSW search effort independently. The report records each adapter's setting.
+
 The steady phase schedules 20 searches and 5 mutations per second for
 30 minutes. The one-minute burst keeps 20 searches per second and raises
 mutations to 25 per second. Read recall@10 against the exhaustive reference,

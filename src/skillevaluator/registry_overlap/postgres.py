@@ -496,14 +496,17 @@ class RegistryStore:
                 if not self._index_ready(generation):
                     raise ValueError("Registry search index is unavailable")
                 self.connection.execute("SET LOCAL enable_seqscan TO off")
-                self.connection.execute("SET LOCAL hnsw.ef_search TO 200")
+                shortlist_size = min(200, max(40, 4 * top_k))
+                self.connection.execute(
+                    "SELECT set_config('hnsw.ef_search', %s, true)", (str(max(80, shortlist_size)),)
+                )
                 self.connection.execute("SET LOCAL hnsw.iterative_scan TO strict_order")
                 self.connection.execute("SET LOCAL hnsw.max_scan_tuples TO 20000")
                 candidates = self.connection.execute(
                     self._candidate_sql(generation, profile.dimension),
                     (
                         vector,
-                        min(200, max(40, 4 * top_k)),
+                        shortlist_size,
                         vector,
                         exclude or "",
                         top_k,

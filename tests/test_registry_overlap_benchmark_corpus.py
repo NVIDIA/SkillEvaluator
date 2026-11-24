@@ -136,3 +136,13 @@ def test_rejects_malformed_vectors_without_publishing_matrix(tmp_path: Path, inv
     with pytest.raises(ValueError, match="finite nonzero"):
         corpus.write_matrix(np.array(invalid), path, size=3, dimension=8, seed=1)
     assert not path.exists()
+
+
+@pytest.mark.parametrize("suffix", [".json", ".out"])
+def test_output_extension_cannot_collide_with_provenance_sidecar(tmp_path, capsys, suffix):
+    with pytest.raises(SystemExit) as exc:
+        corpus.main(
+            ["--parquet-dir", str(tmp_path), "--model-dir", str(tmp_path), "--output", str(tmp_path / f"data{suffix}")]
+        )
+    assert exc.value.code == 2
+    assert "--output must use the .npy extension" in capsys.readouterr().err

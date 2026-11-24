@@ -12,6 +12,9 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
+- Retain destructive-command findings when a recursive `rm` receives its first
+  deletion target through a backtick substitution, while preserving force-only
+  cleanup and unrelated command arguments.
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or
   `final` strategy. The live case grid and finished report use the same verdict.
   A failed or ungraded step leaves the attempt unscored. With `final`, the last

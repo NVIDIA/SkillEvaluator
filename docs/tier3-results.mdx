@@ -666,10 +666,18 @@ reports a call over 256 KiB as incomplete (`0.5`) instead of reading it, so
 it never reaches the cap of 65,536 fragments, but a smaller call can reach
 the 64 KiB and 4,096-token limits.
 
+Recursive `rm` commands with a parsed backtick-substitution target also reach
+the target checker, including a first target such as ``rm -rf `pwd` ``.
+Substitution output remains unresolved and receives no temporary-cleanup
+exemption. This additional gate reads at most 65,536 characters and 4,096 shell words per
+text, three nested script levels and the first sixteen distinct script words
+or payloads in each text it reads. All nested readings count toward the shared
+trace limit described above; text it cannot parse retains the earlier gates.
+
 These readings do not reach the following forms, which keep the result the
 check's other rules give them; the plugin security scan, which walks every
 call and reads every `rm` word in it, flags some of them, such as the two
-backtick forms of `eval`, the backtick target and the chains of runners:
+backtick forms of `eval` and the chains of runners:
 
 - An `env` option bundled or abbreviated before `-S`, as in
   `env -iu X -S 'rm\_-rf\_/workspace'` or `env --uns X -S '...'`.
@@ -693,11 +701,11 @@ backtick forms of `eval`, the backtick target and the chains of runners:
   `echo /workspace | xargs busybox "rm" -rf`;
   `env busybox "rm" -rf /workspace`, `busybox busybox "rm" -rf /workspace`
   and `find /workspace -exec busybox "rm" -rf {} +` are read.
-- A quoted or escaped `rm` name or option where any target starts with,
-  or defaults through `${X:-...}` to, a backtick substitution, as in
-  ``"rm" -rf "`pwd`" /workspace`` or ``"rm" -rf "${X:-`pwd`}"``, whose
-  other targets are then not read either; the same commands with
-  `"$(pwd)"` are read.
+- A backtick target after `${...}` or `((` anywhere earlier in the command,
+  including ``cd "${WORKDIR}" && rm -rf `pwd` `` and
+  ``"rm" -rf "${X:-`pwd`}"``, which the lexer cannot split. A locale-quoted
+  executable such as ``$"rm" -rf `pwd` /workspace`` also stays unread.
+  The corresponding commands with `"$(pwd)"` are read.
 - A redirection between a quoted or escaped `rm` name and its first
   option, as in `"rm" 2>/dev/null -rf /workspace`, which the pattern does
   not match once quotes are dropped, as it does not match

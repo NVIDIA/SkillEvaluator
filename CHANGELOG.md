@@ -6,6 +6,7 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Report an advisory paired case-bootstrap interval and contributing case counts for Tier 3 skill interactions, without changing their scores or verdicts.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.

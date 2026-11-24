@@ -138,6 +138,8 @@ def compare_configurations(
     Every case has equal weight; attempts are averaged within a case first.
     Configuration order is baseline, singleton skills, combined skills.
     """
+    from skillevaluator.tier3.harbor.stats import INTERACTION_UNCERTAINTY_METHOD, case_mean_bootstrap
+
     if len(configurations) < 4:
         raise ValueError("Expected baseline, at least two individuals, and combined evidence")
     failures = [
@@ -225,9 +227,14 @@ def compare_configurations(
                 / len(per_case)
                 for rows in outcomes
             ]
+            case_interactions = [case["interaction"] for case in per_case.values()]
+            uncertainty = case_mean_bootstrap(case_interactions)
+            uncertainty["method"] = INTERACTION_UNCERTAINTY_METHOD
+            uncertainty["nonzero_cases"] = sum(value != 0.0 for value in case_interactions)
             compared[agent] = {
                 "status": "complete",
                 **interaction_scores(means[0], means[1:-1], means[-1]),
+                "uncertainty": uncertainty,
                 "cases": per_case,
                 "evidence": {config["id"]: rows for config, rows in zip(configurations, outcomes, strict=True)},
             }

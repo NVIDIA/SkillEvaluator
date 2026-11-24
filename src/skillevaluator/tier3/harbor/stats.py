@@ -47,6 +47,7 @@ from skillevaluator.tier3.harbor.metrics import (
 from skillevaluator.tier3.runtime_arms import ARM_LOOSE_PARTS, ARM_SUM_OF_PARTS, ARM_WITH, ARM_WITHOUT
 
 LIFT_UNCERTAINTY_METHOD = "paired_case_bootstrap"
+INTERACTION_UNCERTAINTY_METHOD = "paired_case_interaction_bootstrap"
 CONTEXT_COST_METHOD = "paired_first_turn_prompt_tokens"
 
 PRECISION_ADEQUATE = "adequate"
@@ -610,10 +611,6 @@ def paired_case_bootstrap(
     with the seed. With fewer cases the bounds are the extreme resampled means,
     which the minimum already reaches.
     """
-    if type(resamples) is not int or not 1 <= resamples <= MAX_BOOTSTRAP_RESAMPLES:
-        raise ValueError("resamples must be positive")
-    if not 0.0 < confidence < 1.0:
-        raise ValueError("confidence must be between 0 and 1")
     paired = sorted(
         case
         for case in set(treatment) & set(control)
@@ -622,13 +619,38 @@ def paired_case_bootstrap(
         and _logical_score(control[case]) is not None
     )
     deltas = [float(treatment[case_id]) - float(control[case_id]) for case_id in paired]
+    result = case_mean_bootstrap(deltas, resamples=resamples, seed=seed, confidence=confidence, _means=_means)
+    result["method"] = LIFT_UNCERTAINTY_METHOD
+    return result
+
+
+def case_mean_bootstrap(
+    values: Sequence[float],
+    *,
+    resamples: int = LIFT_BOOTSTRAP_RESAMPLES,
+    seed: int = LIFT_BOOTSTRAP_SEED,
+    confidence: float = LIFT_BOOTSTRAP_CONFIDENCE,
+    _means: Sequence[float] | None = None,
+) -> dict[str, Any]:
+    """Expanded percentile interval for a mean of finite, equally weighted case values.
+
+    Unlike score inputs, a case contrast may fall outside [0, 1]. Each value
+    must already combine all paired arms of one case, before resampling.
+    """
+    if type(resamples) is not int or not 1 <= resamples <= MAX_BOOTSTRAP_RESAMPLES:
+        raise ValueError("resamples must be positive")
+    if not 0.0 < confidence < 1.0:
+        raise ValueError("confidence must be between 0 and 1")
+    if any(finite_number(value) is None for value in values):
+        raise ValueError("case values must be finite numbers")
+    deltas = [float(value) for value in values]
     n_cases = len(deltas)
     result: dict[str, Any] = {
         "estimate": None,
         "ci_low": None,
         "ci_high": None,
         "confidence": confidence,
-        "method": LIFT_UNCERTAINTY_METHOD,
+        "method": "case_mean_bootstrap",
         "interval": LIFT_INTERVAL_METHOD,
         "resamples": resamples,
         "seed": seed,

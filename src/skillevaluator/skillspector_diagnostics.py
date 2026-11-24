@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import unicodedata
 
 # Per-result and per-record caps keep the JSON report bounded against a hostile
@@ -14,6 +15,13 @@ import unicodedata
 # retains out of the total, so any truncation that does occur is visible.
 _MAX_RECORDS = 512
 _MAX_ROWS = 500
+# A per-skill hosted report can include the static and LLM records. With
+# 100 skills, this leaves space in the 64 MiB archive for findings and
+# other report fields, even when Unicode paths expand as JSON escapes.
+_MAX_LEDGER_ROW_BYTES = 128 * 1024
+# Reserve up to eight two-space indentation levels for each pretty-printed
+# ledger row. The hosted per-skill report uses seven.
+_JSON_LEDGER_ROW_INDENT = 16
 _MAX_LIMITATIONS = 8
 
 
@@ -63,7 +71,9 @@ def completeness_record(completeness: dict, stage: str) -> dict:
     limits = completeness.get("limitations")
     limits = limits if isinstance(limits, list) else []
     exceptions = []
-    for row in rows[:_MAX_ROWS]:
+    bytes_left = _MAX_LEDGER_ROW_BYTES
+    omitted_exceptions = max(0, len(rows) - _MAX_ROWS)
+    for index, row in enumerate(rows[:_MAX_ROWS]):
         if not isinstance(row, dict):
             continue
         item = {key: _text(row.get(key)) for key in ("path", "phase", "reason_code")}
@@ -77,8 +87,13 @@ def completeness_record(completeness: dict, stage: str) -> dict:
         diagnostic = parser_diagnostic_record(row.get("parser_diagnostic"))
         if diagnostic is not None:
             item["parser_diagnostic"] = diagnostic
+        document = json.dumps(item, ensure_ascii=True, indent=2)
+        row_bytes = len(document) + _JSON_LEDGER_ROW_INDENT * (document.count("\n") + 1) + 2
+        if row_bytes > bytes_left:
+            omitted_exceptions = len(rows) - index
+            break
+        bytes_left -= row_bytes
         exceptions.append(item)
-    omitted_exceptions = max(0, len(rows) - _MAX_ROWS)
     return {
         "stage": stage if isinstance(stage, str) and stage in {"skillspector", "skillspector-llm"} else "unknown",
         "reported_status": "partial",

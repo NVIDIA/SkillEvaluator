@@ -115,8 +115,8 @@ def test_diagnostic_text_and_lists_are_bounded_redacted_and_idempotent():
         "limitations": ["password=fictional-password " + "x" * 800] * 10,
     }
     record = completeness_record(raw, "skillspector")
-    assert record["omitted_exceptions"] == 5
-    assert record["ledger_rows_retained"] == 500
+    assert 0 < record["ledger_rows_retained"] <= 500
+    assert record["omitted_exceptions"] == 505 - record["ledger_rows_retained"]
     assert record["ledger_rows_total"] == 505
     assert record["omitted_limitations"] == 2
     assert record["ledger_exceptions"][0]["omitted_analyzers"] == 4
@@ -267,6 +267,22 @@ def test_ledger_keeps_every_row_of_a_realistic_library_and_states_the_totals():
     assert again["ledger_rows_retained"] == 47
     assert again["omitted_exceptions"] == 3
     assert again["ledger_rows_total"] == 50
+
+
+def test_ledger_row_byte_limit_matches_escaped_json_and_preserves_totals(monkeypatch):
+    import skillevaluator.skillspector_diagnostics as diagnostics
+
+    monkeypatch.setattr(diagnostics, "_MAX_LEDGER_ROW_BYTES", 1_024)
+    short = {"path": "scripts/one.py", "phase": "static", "reason_code": "static_parse_limit"}
+    wide = {**short, "path": f"scripts/{'é' * 180}.py"}
+
+    record = completeness_record({"ledger_exceptions": [short, wide, short]}, "skillspector")
+
+    assert record["ledger_exceptions"] == [short]
+    assert record["ledger_rows_retained"] == 1
+    assert record["ledger_rows_total"] == 3
+    assert record["omitted_exceptions"] == 2
+    assert sanitize_completeness({"records": [record]})["records"] == [record]
 
 
 def test_gate_message_names_gap_ledger_rows_and_cap(monkeypatch):

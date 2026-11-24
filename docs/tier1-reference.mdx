@@ -997,8 +997,9 @@ Tier 1 checks always gate the exit code inside `validate`. Tier 2 gates when it 
     name for a file, report that detection issue to SkillSpector.
 
     For more detail, each JSON result's `skillspector_completeness.records`
-    retains the scan stage, up to 500 ledger exceptions per skill, analyzer
-    names, and up to eight limitations. Each record states
+    retains the scan stage, analyzer names, and up to eight limitations.
+    Each skill and stage retains up to 500 ledger exceptions within a
+    128 KiB budget for serialized rows. Each record states
     `ledger_rows_retained` and `ledger_rows_total`, and `omitted_exceptions`
     counts rows beyond the cap. The gate message states how many ledger rows
     describe the reported gaps and how many exceeded the limit when the cap applies.

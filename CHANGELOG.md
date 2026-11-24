@@ -6,6 +6,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- Add opt-in case/attempt interleaving for structured skill-interaction suites,
+  with a reproducible rotated configuration schedule, retained step evidence,
+  and cross-block checks of the actual retained outcome scorer. Stage only the
+  current case and retain dataset generation/review provenance, including native
+  YAML dates and timestamps. Native task suites and runs with run-wide budget
+  caps require sequential execution.
+- Report an advisory paired case-bootstrap interval and contributing case counts for Tier 3 skill interactions, without changing their scores or verdicts.
 - Add a locked Tier 2 CI container with credential-free build verification and
   opt-in digest-pinned GitHub and GitLab jobs. Document how to run Tier 1 and
   Tier 2 together from the Repository Integration guide.

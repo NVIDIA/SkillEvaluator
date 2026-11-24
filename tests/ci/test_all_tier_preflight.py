@@ -151,11 +151,9 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
 
     import yaml
 
-    package = tmp_path / "skillevaluator"
-    package.mkdir()
     marker = tmp_path / "consumer-imported"
-    (package / "__init__.py").write_text(
-        f"from pathlib import Path\nPath({str(marker)!r}).write_text('imported')\nraise SystemExit(91)\n"
+    (tmp_path / "sitecustomize.py").write_text(
+        f"import os\nfrom pathlib import Path\nPath({str(marker)!r}).write_text('imported')\nos._exit(91)\n"
     )
     environment = {
         "PATH": os.environ.get("PATH", ""),
@@ -167,7 +165,7 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
     argv = shlex.split(step["run"])
     argv[0] = sys.executable
     argv[-1] = str(ROOT / argv[-1].removeprefix("evaluator/"))
-    # Establish that this consumer package exploits the old unisolated command.
+    # The unisolated interpreter runs this startup hook from the consumer's PYTHONPATH.
     vulnerable = [arg for arg in argv if arg != "-I"]
     before = subprocess.run(vulnerable, cwd=tmp_path, env=environment, capture_output=True, text=True, timeout=30)
     assert before.returncode == 91
@@ -177,6 +175,36 @@ def test_actual_workflow_bootstrap_ignores_consumer_pythonpath(tmp_path):
     assert after.returncode == 2  # Unsupported mode is handled by trusted code.
     assert "supports docker and local" in after.stdout
     assert not marker.exists()
+
+
+def test_unsupported_bootstrap_mode_rejects_before_optional_runtime_imports(tmp_path):
+    import os
+
+    probe = """
+import importlib.abc
+import runpy
+import sys
+
+class RejectRuntime(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname == "skillevaluator.tier3" or fullname.startswith("skillevaluator.tier3."):
+            raise RuntimeError("unsupported mode imported optional runtime: " + fullname)
+
+sys.meta_path.insert(0, RejectRuntime())
+runpy.run_path(sys.argv[1], run_name="__main__")
+"""
+    result = subprocess.run(
+        [sys.executable, "-I", "-c", probe, str(ROOT / "ci/bootstrap_tiers.py")],
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", ""), "SKILL_EVAL_ENV_MODE": "gke"},
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+
+    assert result.returncode == 2, result.stderr
+    assert "supports docker and local" in result.stdout
+    assert result.stderr == ""
 
 
 def test_bootstrap_doctor_receives_the_configured_ci_provider_and_model(monkeypatch):

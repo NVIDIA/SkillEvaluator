@@ -1,0 +1,71 @@
+# SPDX-License-Identifier: Apache-2.0
+name: Promote stable GitHub workflows
+# The release relay lets the privileged run use main's workflow and environment policy.
+on:
+  workflow_run:
+    workflows: [SkillEvaluator release published]
+    types: [completed]
+  workflow_call:
+    inputs:
+      expected-release:
+        type: string
+        required: true
+    secrets:
+      STABLE_CHANNEL_APP_PRIVATE_KEY:
+        required: true
+  workflow_dispatch:
+    inputs:
+      expected-release:
+        description: Reviewed release tag to promote (vX.Y.Z)
+        type: string
+        required: true
+      bootstrap-sha:
+        description: Reviewed main commit SHA for the first promotion of v1.0.1
+        type: string
+        required: false
+
+permissions: {}
+
+jobs:
+  promote:
+    # Reusable workflows use the caller's workflow identity.
+    if: >-
+      github.repository == 'NVIDIA/SkillEvaluator' &&
+      github.ref == 'refs/heads/main' &&
+      ((github.event_name == 'workflow_dispatch' &&
+        (github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' ||
+         github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/release.yml@refs/heads/main')) ||
+       (github.event_name == 'workflow_run' &&
+        github.workflow_ref == 'NVIDIA/SkillEvaluator/.github/workflows/promote-stable.yml@refs/heads/main' &&
+        github.event.workflow_run.event == 'release' &&
+        github.event.workflow_run.conclusion == 'success'))
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    environment: stable-channel
+    concurrency:
+      group: skillevaluator-stable
+      cancel-in-progress: false
+      queue: max
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0
+        with:
+          ref: refs/heads/main
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Create the stable channel writer token
+        id: writer
+        uses: actions/create-github-app-token@f418cff399f7aef4c2f0ad47e25ca7a6abbdd6fc # v3.4.0
+        with:
+          client-id: ${{ vars.STABLE_CHANNEL_APP_CLIENT_ID }}
+          private-key: ${{ secrets.STABLE_CHANNEL_APP_PRIVATE_KEY }}
+          permission-contents: write
+      - name: Verify the published release and promote its workflows
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_DEVZONE_INDEX_URL: ${{ vars.RELEASE_DEVZONE_INDEX_URL }}
+          STABLE_EXPECTED_RELEASE: ${{ inputs.expected-release }}
+          STABLE_PUSH_TOKEN: ${{ steps.writer.outputs.token }}
+          STABLE_BOOTSTRAP_SHA: ${{ inputs.bootstrap-sha }}
+        run: bash ci/promote_stable.sh

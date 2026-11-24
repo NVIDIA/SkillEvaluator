@@ -25,6 +25,7 @@ from skillevaluator.logging_config import get_logger
 from skillevaluator.models.result import Severity
 from skillevaluator.utils.scanner_install import (
     GITLEAKS_VERSION,
+    SKILLSPECTOR_UV_ENV,
     SKILLSPECTOR_VERSION,
     SKILLSPECTOR_WHEEL_URL,
     ensure_gitleaks,
@@ -32,6 +33,7 @@ from skillevaluator.utils.scanner_install import (
     gitleaks_platform,
     managed_gitleaks_path,
     managed_skillspector_wheel,
+    skillspector_uv_run_args,
 )
 
 logger = get_logger(__name__)
@@ -245,7 +247,7 @@ class ExternalTool:
             wheel = managed_skillspector_wheel()
             if uv is not None and wheel is not None:
                 self._path = uv
-                self._uv_run = (uv, ("tool", "run", "--quiet", "--from", str(wheel), "skillspector"))
+                self._uv_run = (uv, skillspector_uv_run_args(wheel))
                 self._ensure = (uv, ensure_skillspector_wheel)
                 self.resolution_source = "uv tool run"
         elif self.command == "gitleaks":
@@ -424,6 +426,8 @@ class ExternalTool:
             return ToolResult(success=False, stdout="", stderr="", exit_code=-1, error_message=error)
 
         cmd = [self._path, *launch_args, *args]
+        if launch_args:
+            child_env = {**(os.environ if child_env is None else child_env), **SKILLSPECTOR_UV_ENV}
 
         if log_command:
             logger.info(f"Running {self.name}: {' '.join(cmd[:5])}...")
@@ -517,6 +521,25 @@ def create_temp_config(content: str, suffix: str = ".toml") -> Path:
     return config_path
 
 
+class _DeferredTool:
+    """Build an ``ExternalTool`` on first access so importing the CLI does not log."""
+
+    def __init__(self, *args, **kwargs) -> None:
+        self._args = args
+        self._kwargs = kwargs
+        self._name = ""
+
+    def __set_name__(self, owner: type, name: str) -> None:
+        self._name = name
+
+    def __get__(self, _obj: object, owner: type | None = None) -> ExternalTool:
+        if owner is None:
+            raise AttributeError(self._name)
+        tool = ExternalTool(*self._args, **self._kwargs)
+        setattr(owner, self._name, tool)
+        return tool
+
+
 class Tools:
     """Registry of external tools.
 
@@ -524,22 +547,22 @@ class Tools:
     tools and evaluation tools used by SkillEvaluator validators.
     """
 
-    gitleaks = ExternalTool("Gitleaks", "gitleaks", managed=True)
-    pip_audit = ExternalTool("pip-audit", "pip-audit", prefer_interpreter_sibling=True)
-    safety = ExternalTool("Safety", "safety")
-    bandit = ExternalTool(
+    gitleaks = _DeferredTool("Gitleaks", "gitleaks", managed=True)
+    pip_audit = _DeferredTool("pip-audit", "pip-audit", prefer_interpreter_sibling=True)
+    safety = _DeferredTool("Safety", "safety")
+    bandit = _DeferredTool(
         "Bandit",
         "bandit",
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_BANDIT_PATH",
     )
-    semgrep = ExternalTool(
+    semgrep = _DeferredTool(
         "Semgrep",
         "semgrep",
         prefer_interpreter_sibling=True,
         override_env="SKILLEVALUATOR_SEMGREP_PATH",
     )
-    skillspector = ExternalTool(
+    skillspector = _DeferredTool(
         "skillspector",
         "skillspector",
         prefer_interpreter_sibling=True,

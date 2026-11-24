@@ -41,6 +41,13 @@ Open `reports/tier1/skillevaluator-tier1.html` in your browser. Use
 | **Failed** | Fix the listed findings, then run the same command again. |
 | **Incomplete** | Restore missing scanner evidence before treating the check as passed. |
 
+Tier 1 Discoverability reads the frontmatter `description`, looks for the
+literal `## Purpose` marker in `SKILL.md`, and checks the skill folder name. This static
+score does not predict whether an agent will route to or activate the skill.
+For evidence from live trials, use Tier 3's
+[`skill_execution`](/skills/skillevaluator/metrics-reference#skill_execution)
+signal and [activation validation](/skills/skillevaluator/tier3-experiments#repeatable-activation-validation).
+
 Exit `0` means the Tier 1 gate passed; `1` means a check failed or required
 evidence is incomplete. Exit `2` indicates a command or configuration error.
 LLM stages are skipped in this walkthrough. The quality threshold defaults to

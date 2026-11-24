@@ -41,6 +41,7 @@ from skillevaluator.publication_identity import (
 )
 from skillevaluator.reporting import (
     CLIReporter,
+    GitHubReporter,
     HTMLReporter,
     JSONReporter,
     JUnitReporter,
@@ -162,6 +163,7 @@ REPORTERS = {
     "markdown": MarkdownReporter,
     "sarif": SARIFReporter,
     "junit": JUnitReporter,
+    "github": GitHubReporter,
 }
 
 
@@ -325,6 +327,7 @@ def run_validation(
     harness: str | None = None,
     harness_profiles: Path | None = None,
     skillspector_baseline: Path | None = None,
+    hook_waivers: Path | None = None,
     skip: str | None = None,
 ) -> list[ValidationResult]:
     """Run selected Tier 1 validators and return structured results.
@@ -359,6 +362,8 @@ def run_validation(
     *pii_waivers* is an optional PII waiver file applied by the ``pii`` check.
     *skillspector_baseline* is an audited SkillSpector suppression baseline
     applied to the ``security`` check; it is never discovered from the target.
+    *hook_waivers* names an explicitly selected file of reviewed command hook
+    waivers for the ``security`` check.
     *target_root* is the folder that *target_path* belongs to when a caller
     validates that folder one skill at a time, as ``validate`` does for a
     folder of skills. The ``security`` check then accepts no SkillSpector
@@ -424,6 +429,7 @@ def run_validation(
             content_type=content_type if content_type in _AGENT_ARTIFACT_CONTENT_TYPES else None,
             skillspector_reference_root=target_path if content_type == CONTENT_TYPE_PLUGIN else None,
             skillspector_baseline=skillspector_baseline,
+            hook_waivers=hook_waivers,
             target_root=target_root,
         )
         return [_run_result("security", "Security Scan", v.description, v.validate_security_only)]
@@ -585,8 +591,14 @@ def run_security_scan(
     use_llm: bool = False,
     llm_verify: bool = False,
     skillspector_baseline: Path | None = None,
+    hook_waivers: Path | None = None,
 ) -> list[ValidationResult]:
-    validator = SecurityValidator(use_llm=use_llm, verify_llm=llm_verify, skillspector_baseline=skillspector_baseline)
+    validator = SecurityValidator(
+        use_llm=use_llm,
+        verify_llm=llm_verify,
+        skillspector_baseline=skillspector_baseline,
+        hook_waivers=hook_waivers,
+    )
     return [
         _as_result(
             "Security Scan",
@@ -675,8 +687,8 @@ def emit_reports(
     names it even when no finding path or quality score does.
 
     *scan_root* is the evaluated target and *repository_root* the base that
-    SARIF and JUnit file paths are made relative to (the Git root when the
-    target is inside a repository); both formats get the same pair.
+    SARIF, JUnit, and GitHub annotation file paths are made relative to (the Git
+    root when the target is inside a repository); those formats get the same pair.
     """
     if policy is not None:
         apply_policy(results, policy)
@@ -689,10 +701,22 @@ def emit_reports(
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
         CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(results)
+    if "github" in report_formats:
+        github_reporter = GitHubReporter(
+            workspace_root=repository_root,
+            scan_root=scan_root,
+            catalog_root=catalog_root,
+            report_formats=report_formats,
+        )
+        if console.is_terminal:
+            # A stopped Rich status leaves its cursor-restore escapes without a newline;
+            # workflow commands are only parsed at the start of a line.
+            console.line()
+        github_reporter.print_all(results)
 
     html_tabs = _derive_html_tabs(results)
     for fmt in report_formats:
-        if fmt == "cli":
+        if fmt in {"cli", "github"}:
             continue
         reporter_cls = REPORTERS[fmt]
         if fmt == "html":

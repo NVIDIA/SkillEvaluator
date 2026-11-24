@@ -3,9 +3,11 @@
 
 import asyncio
 import contextlib
+import errno
 import json
 import os
 import shlex
+import stat
 import tomllib
 from pathlib import Path
 from types import SimpleNamespace
@@ -24,6 +26,7 @@ from skillevaluator.tier3.harbor.local_agents import (
     SkillEvaluatorGatewayCodex,
     SkillEvaluatorLocalClaudeCode,
     SkillEvaluatorLocalCodex,
+    SkillEvaluatorLocalNvidiaBuildClaudeCode,
     SkillEvaluatorLocalNvidiaBuildCodex,
     SkillEvaluatorLocalOpenCode,
     SkillEvaluatorNvidiaBuildClaudeCode,
@@ -55,6 +58,535 @@ class _RecordingEnvironment:
         configs = [content for destination, content in self.uploads if destination == remote_path]
         assert configs, f"no Codex config was uploaded to {remote_path}"
         return tomllib.loads(configs[-1])
+
+
+@pytest.mark.parametrize(
+    "agent_type",
+    [
+        SkillEvaluatorNvidiaBuildClaudeCode,
+        SkillEvaluatorNvidiaBuildCodex,
+        SkillEvaluatorLocalNvidiaBuildClaudeCode,
+        SkillEvaluatorLocalNvidiaBuildCodex,
+    ],
+)
+@pytest.mark.parametrize("outcome", ["success", "failure", "cancelled"])
+def test_bridge_capability_is_redacted_after_cleanup_and_log_download(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agent_type: type, outcome: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    agent = agent_type(logs_dir=logs, model_name="nvidia/synthetic-model")
+    cleaned = False
+
+    async def start(_environment: object) -> None:
+        agent._nvidia_build_bridge_started = True
+        agent._nvidia_build_bridge_origin = "http://127.0.0.1:43123"
+        agent._nvidia_build_bridge_client_token = token
+
+    async def prepare(_environment: object) -> None:
+        return None
+
+    async def cleanup(_environment: object) -> None:
+        nonlocal cleaned
+        cleaned = True
+        agent._nvidia_build_bridge_started = False
+        agent._nvidia_build_bridge_origin = None
+        agent._nvidia_build_bridge_client_token = None
+
+    async def run(_self: object, **_kwargs: object) -> None:
+        if outcome == "failure":
+            raise RuntimeError("synthetic agent failure")
+        if outcome == "cancelled":
+            raise asyncio.CancelledError
+
+    monkeypatch.setattr(agent, "_start_bridge", start)
+    monkeypatch.setattr(agent, "_prepare_bridge_client", prepare)
+    monkeypatch.setattr(agent, "_cleanup_bridge", cleanup)
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "run", run)
+    monkeypatch.setattr(local_agents.SkillEvaluatorCodex, "run", run)
+    if outcome == "success":
+        asyncio.run(agent.run("synthetic task", object(), SimpleNamespace()))
+    else:
+        error = RuntimeError if outcome == "failure" else asyncio.CancelledError
+        with pytest.raises(error):
+            asyncio.run(agent.run("synthetic task", object(), SimpleNamespace()))
+    assert cleaned and agent._nvidia_build_bridge_client_token is None
+
+    # Harbor downloads these files only after run() and bridge cleanup return.
+    session = logs / "sessions" / "synthetic.jsonl"
+    session.parent.mkdir()
+    payload = {"observation": "ordinary output " + token, "usage": {"input_tokens": 13, "output_tokens": 7}}
+    stream = json.dumps(payload) + "\n"
+    (logs / "claude-code.txt").write_text(stream, encoding="utf-8")
+    session.write_text(stream, encoding="utf-8")
+    opaque = logs / "binary.dat"
+    opaque.write_bytes(b"\x00ordinary\xff" + token.encode() + b"\x00")
+
+    def populate(_self: object, context: SimpleNamespace) -> None:
+        for path in (logs / "claude-code.txt", session, opaque):
+            assert token.encode() not in path.read_bytes(), "capability reached native trajectory conversion"
+        parsed = json.loads(session.read_text(encoding="utf-8"))
+        context.n_input_tokens = parsed["usage"]["input_tokens"]
+        context.n_output_tokens = parsed["usage"]["output_tokens"]
+        # A converter can also use state captured before the raw files were scrubbed.
+        (logs / "trajectory.json").write_text(
+            json.dumps({"steps": [parsed], "metadata": {"client": token}}), encoding="utf-8"
+        )
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    monkeypatch.setattr(local_agents.SkillEvaluatorCodex, "populate_context_post_run", populate)
+    context = SimpleNamespace()
+    agent.populate_context_post_run(context)
+
+    assert context.n_input_tokens == 13 and context.n_output_tokens == 7
+    for path in (logs / "claude-code.txt", session, logs / "trajectory.json", opaque):
+        assert token.encode() not in path.read_bytes()
+    assert json.loads(session.read_text(encoding="utf-8"))["usage"] == payload["usage"]
+    assert b"\x00ordinary\xff" in opaque.read_bytes() and opaque.read_bytes().endswith(b"\x00")
+    assert token not in repr(vars(agent))
+
+
+@pytest.mark.parametrize("kind", ["symlink", "directory_symlink", "hardlink"])
+def test_bridge_artifact_redaction_never_follows_links_or_changes_outside_files(tmp_path: Path, kind: str) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+
+    token = "synthetic-local-capability-" + "x" * 24
+    outside_dir = tmp_path / "outside"
+    outside_dir.mkdir()
+    outside = outside_dir / "untouched.txt"
+    original = ("ordinary output " + token).encode()
+    outside.write_bytes(original)
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    # Not the masked copy's 0600 creation mode, so the test sees whether the mode is restored.
+    outside.chmod(0o640)
+    try:
+        if kind == "hardlink":
+            os.link(outside, logs / "linked.txt")
+        elif kind == "directory_symlink":
+            (logs / "linked").symlink_to(outside_dir, target_is_directory=True)
+        else:
+            (logs / "linked.txt").symlink_to(outside)
+    except OSError:
+        pytest.skip("platform cannot create this link")
+
+    unmasked = _redact_bridge_artifacts(logs, {token})
+    assert outside.read_bytes() == original
+    if kind != "hardlink":
+        assert unmasked == []
+        assert (logs / ("linked" if kind == "directory_symlink" else "linked.txt")).is_symlink()
+    elif os.name == "posix":
+        # The retained name gets its own masked copy with the same mode; the outside name keeps its bytes.
+        assert unmasked == []
+        linked = (logs / "linked.txt").stat()
+        assert (logs / "linked.txt").read_bytes() == b"ordinary output " + b"*" * len(token)
+        assert linked.st_nlink == 1 and stat.S_IMODE(linked.st_mode) == 0o640
+    else:
+        # Elsewhere the atomic output writer refuses hard-linked files.
+        assert unmasked == ["linked.txt"]
+    assert sorted(path.name for path in logs.iterdir()) == ["linked" if kind == "directory_symlink" else "linked.txt"]
+
+
+@pytest.mark.parametrize("kind", ["single", "hardlink"])
+def test_bridge_artifact_redaction_never_writes_through_a_parent_swapped_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, kind: str
+) -> None:
+    from skillevaluator.tier3 import output_provenance
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    token = "synthetic-local-capability-" + "x" * 24
+    outside = tmp_path / "outside"
+    (outside / "e").mkdir(parents=True)
+    host_file = outside / "e" / "a.txt"
+    if kind == "single":
+        host_file.write_bytes(b"host data\n")
+    logs = tmp_path / "agent"
+    folder = logs / "d"
+    (folder / "e").mkdir(parents=True)
+    (folder / "e" / "a.txt").write_text("ordinary output " + token, encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+        if kind == "hardlink":
+            # The outside name is a second name for the file that is read, so only
+            # the no-follow parent traversal keeps the masked copy out of it.
+            os.link(folder / "e" / "a.txt", host_file)
+    except OSError:
+        pytest.skip("platform cannot create these links")
+    host_bytes = host_file.read_bytes()
+    host_inode = host_file.stat().st_ino
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_swap(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if Path(relative_path).as_posix() == "d/e/a.txt" and not folder.is_symlink():
+            # A process still writing the log folder replaces the parent with a link.
+            folder.rename(tmp_path / "d.moved")
+            (tmp_path / "link").rename(folder)
+        return result
+
+    real_validate = output_provenance.validate_output_directory_path
+
+    def validate_while_link_is_away(path: Path) -> None:
+        # It can also take the link away while a lexical link check runs.
+        if not folder.is_symlink():
+            return real_validate(path)
+        folder.rename(tmp_path / "link")
+        try:
+            return real_validate(path)
+        finally:
+            (tmp_path / "link").rename(folder)
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_swap)
+    monkeypatch.setattr(output_provenance, "validate_output_directory_path", validate_while_link_is_away)
+
+    assert _redact_bridge_artifacts(logs, {token}) == ["d/e/a.txt"]
+    assert folder.is_symlink()
+    assert host_file.stat().st_ino == host_inode
+    assert host_file.read_bytes() == host_bytes
+    assert sorted(path.name for path in (outside / "e").iterdir()) == ["a.txt"]
+
+
+@pytest.mark.parametrize(
+    ("filename", "expected"),
+    [("agent/sessions", "sessions"), ("agent", "."), (None, "."), ("outside", ".")],
+)
+def test_bridge_artifact_listing_errors_use_relative_entries(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, filename: str | None, expected: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    error = PermissionError(errno.EACCES, "access denied", str(tmp_path / filename) if filename else None)
+
+    def fail_walk(_root: Path, *, onerror):
+        onerror(error)
+        return iter(())
+
+    # POSIX lists folders through descriptors; this pins the os.walk path that Windows uses.
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", False)
+    monkeypatch.setattr(local_agents.os, "walk", fail_walk)
+
+    assert local_agents._redact_bridge_artifacts(logs, {"synthetic-capability"}) == [expected]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_folders_that_cannot_be_opened_use_relative_entries(tmp_path: Path) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+
+    if os.geteuid() == 0:
+        pytest.skip("root can open folders without read permission")
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    sessions = logs / "sessions"
+    sessions.mkdir(parents=True)
+    (logs / "claude-code.txt").write_text("ordinary output " + token, encoding="utf-8")
+    sessions.chmod(0)
+    try:
+        assert _redact_bridge_artifacts(logs, {token}) == ["sessions"]
+    finally:
+        sessions.chmod(0o700)
+    assert token not in (logs / "claude-code.txt").read_text(encoding="utf-8")
+
+
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_redaction_never_lists_a_folder_swapped_for_a_link_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    token = "synthetic-local-capability-" + "x" * 24
+    outside = tmp_path / "outside"
+    (outside / "nested").mkdir(parents=True)
+    (outside / "id_ed25519").write_bytes(b"host key\n")
+    (outside / "nested" / "notes.txt").write_bytes(b"host notes\n")
+    host = {path: path.read_bytes() for path in outside.rglob("*") if path.is_file()}
+    logs = tmp_path / "agent"
+    (logs / "a").mkdir(parents=True)
+    (logs / "z").mkdir()
+    (logs / "a" / "session.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+    try:
+        (tmp_path / "link").symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("platform cannot create this link")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_swap(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if Path(relative_path).as_posix() == "a/session.jsonl" and not (logs / "z").is_symlink():
+            # A process still writing the log folder replaces a later sibling, already
+            # listed as a folder, with a link to a host folder.
+            (logs / "z").rmdir()
+            (tmp_path / "link").rename(logs / "z")
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_swap)
+
+    # The swapped folder is reported under its own name; nothing behind the link is listed.
+    assert _redact_bridge_artifacts(logs, {token}) == ["z"]
+    assert (logs / "z").is_symlink()
+    assert token not in (logs / "a" / "session.jsonl").read_text(encoding="utf-8")
+    assert {path: path.read_bytes() for path in outside.rglob("*") if path.is_file()} == host
+
+
+@pytest.mark.skipif(os.name != "posix", reason="folders are listed through descriptors on POSIX only")
+def test_bridge_artifact_redaction_reports_a_listed_folder_moved_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor.local_agents import _redact_bridge_artifacts
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    (logs / "b").mkdir(parents=True)
+    (logs / "z").mkdir()
+    (logs / "b" / "s.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+    (logs / "z" / "t.jsonl").write_text("ordinary output " + token, encoding="utf-8")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_move(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if Path(relative_path).as_posix() == "b/s.jsonl" and (logs / "z").exists():
+            # A process still writing the log folder moves a later sibling, already
+            # listed, to a name the pass has already visited.
+            (logs / "z").rename(logs / "a")
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_move)
+
+    # The moved folder is reported, so conversion is skipped rather than shipping its token.
+    assert _redact_bridge_artifacts(logs, {token}) == ["z"]
+    assert token in (logs / "a" / "t.jsonl").read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("through_descriptors", [True, False])
+def test_bridge_artifact_redaction_reports_a_listed_file_moved_during_the_pass(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, through_descriptors: bool
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    if through_descriptors and os.name != "posix":
+        pytest.skip("folder descriptors require POSIX")
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", through_descriptors)
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    (logs / "a").mkdir(parents=True)
+    (logs / "z").mkdir()
+    first = logs / "z" / "s.jsonl"
+    source = logs / "z" / "t.jsonl"
+    moved = logs / "a" / "t.jsonl"
+    first.write_text(token, encoding="utf-8")
+    source.write_text(token, encoding="utf-8")
+
+    real_read = SecureRoot.read_bytes
+
+    def read_then_move(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+        result = real_read(self, relative_path, max_bytes, **kwargs)
+        if relative_path == Path("z/s.jsonl"):
+            # The walk has already visited a/ and listed t.jsonl under z/.
+            source.rename(moved)
+        return result
+
+    monkeypatch.setattr(SecureRoot, "read_bytes", read_then_move)
+
+    assert local_agents._redact_bridge_artifacts(logs, {token}) == ["z/t.jsonl"]
+    assert token not in first.read_text(encoding="utf-8")
+    assert token in moved.read_text(encoding="utf-8")
+
+
+@pytest.mark.parametrize("branch", ["directory_descriptors", "atomic_writer"])
+@pytest.mark.parametrize("moment", ["after_read", "while_copying"])
+def test_bridge_artifact_changed_after_the_read_keeps_its_bytes_and_is_reported(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, branch: str, moment: str
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+    from skillevaluator.utils.secure_fs import SecureRoot
+
+    if branch == "directory_descriptors" and os.name != "posix":
+        pytest.skip("descriptor-anchored replacement is POSIX-only")
+    # Windows uses the atomic writer; forcing it here runs that path on every platform.
+    monkeypatch.setattr(local_agents, "_USE_DIRECTORY_DESCRIPTORS", branch == "directory_descriptors")
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    log = logs / "claude-code.txt"
+    original = "ordinary output " + token + "\n"
+    log.write_text(original, encoding="utf-8")
+    appended = False
+
+    def append() -> None:
+        # The container can still be writing the log folder while Harbor collects it.
+        nonlocal appended
+        appended = True
+        with log.open("a", encoding="utf-8") as handle:
+            handle.write("appended line\n")
+
+    if moment == "after_read":
+        real_read = SecureRoot.read_bytes
+
+        def read_then_append(self: SecureRoot, relative_path: Path, max_bytes: int, **kwargs: object) -> object:
+            result = real_read(self, relative_path, max_bytes, **kwargs)
+            append()
+            return result
+
+        monkeypatch.setattr(SecureRoot, "read_bytes", read_then_append)
+    else:
+        real_fsync = os.fsync
+
+        def fsync_then_append(descriptor: int) -> None:
+            # Append once the masked copy is durable but before it is renamed over the entry.
+            real_fsync(descriptor)
+            if not appended and stat.S_ISREG(os.fstat(descriptor).st_mode):
+                append()
+
+        monkeypatch.setattr(os, "fsync", fsync_then_append)
+
+    assert local_agents._redact_bridge_artifacts(logs, {token}) == ["claude-code.txt"]
+    assert appended
+    assert log.read_text(encoding="utf-8") == original + "appended line\n"
+    assert sorted(path.name for path in logs.iterdir()) == ["claude-code.txt"]
+
+
+def test_bridge_artifacts_with_in_folder_links_are_redacted_across_harbor_recovery_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from harbor.models.agent.context import AgentContext
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    if os.name != "posix":
+        pytest.skip("hard-linked log files get their own masked copy only on POSIX")
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    sessions = logs / "sessions"
+    session = sessions / "projects" / "-app" / "s1.jsonl"
+    session.parent.mkdir(parents=True)
+    stream = json.dumps({"observation": "ordinary output " + token, "usage": {"input_tokens": 13, "output_tokens": 7}})
+    (logs / "claude-code.txt").write_text(stream + "\n", encoding="utf-8")
+    session.write_text(stream + "\n", encoding="utf-8")
+    # Claude Code can share file-history backups between session folders through hard links.
+    backup = sessions / "file-history" / "s0" / "abc@v2"
+    backup.parent.mkdir(parents=True)
+    backup.write_text("backup " + token + "\n", encoding="utf-8")
+    (sessions / "file-history" / "s1").mkdir()
+    (sessions / "debug").mkdir()
+    try:
+        os.link(backup, sessions / "file-history" / "s1" / "abc@v2")
+        (sessions / "debug" / "latest").symlink_to("missing.txt")
+    except OSError:
+        pytest.skip("platform cannot create these links")
+    if hasattr(os, "mkfifo"):
+        os.mkfifo(sessions / "ide.fifo")
+    agent = SkillEvaluatorNvidiaBuildClaudeCode(logs_dir=logs, model_name="nvidia/synthetic-model")
+    agent._nvidia_build_artifact_tokens = {token}
+    conversions = 0
+
+    def populate(_self: object, context: AgentContext) -> None:
+        nonlocal conversions
+        conversions += 1
+        parsed = json.loads(session.read_text(encoding="utf-8"))
+        assert token not in json.dumps(parsed), "capability reached native trajectory conversion"
+        context.n_input_tokens = parsed["usage"]["input_tokens"]
+        context.n_output_tokens = parsed["usage"]["output_tokens"]
+        trajectory = json.dumps({"steps": [parsed], "metadata": {"client": token}})
+        (logs / "trajectory.json").write_text(trajectory, encoding="utf-8")
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    context = AgentContext()
+    # Harbor 0.25 calls the hook after the agent phase and again from output
+    # recovery after a later trial error, each time only while the context is empty.
+    for _ in range(2):
+        if context.is_empty():
+            agent.populate_context_post_run(context)
+
+    assert conversions == 1
+    assert (context.n_input_tokens, context.n_output_tokens) == (13, 7)
+    retained = [path for path in logs.rglob("*") if path.is_file() and not path.is_symlink()]
+    assert logs / "trajectory.json" in retained
+    assert all(token.encode() not in path.read_bytes() for path in retained)
+    assert (sessions / "debug" / "latest").is_symlink()
+    assert token not in repr(vars(agent))
+
+
+@pytest.mark.parametrize("limit", ["size", "paths"])
+def test_unmaskable_bridge_artifacts_skip_conversion_on_every_harbor_call(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture, limit: str
+) -> None:
+    from harbor.models.agent.context import AgentContext
+
+    from skillevaluator.tier3.harbor import local_agents
+
+    token = "synthetic-local-capability-" + "x" * 24
+    logs = tmp_path / "agent"
+    logs.mkdir()
+    (logs / "claude-code.txt").write_text("ordinary output " + token, encoding="utf-8")
+    # The warning names this entry, so the token must be masked in the name too.
+    (logs / f"large-{token}.jsonl").write_text("x" * 100 + token, encoding="utf-8")
+    if limit == "size":
+        monkeypatch.setattr(local_agents, "_BRIDGE_ARTIFACT_MAX_BYTES", 100)
+    else:
+        monkeypatch.setattr(local_agents, "_BRIDGE_ARTIFACT_MAX_PATHS", 1)
+    agent = SkillEvaluatorNvidiaBuildClaudeCode(logs_dir=logs, model_name="nvidia/synthetic-model")
+    agent._nvidia_build_artifact_tokens = {token}
+
+    def populate(_self: object, _context: object) -> None:
+        raise AssertionError("logs that may hold the capability reached native trajectory conversion")
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    context = AgentContext()
+    with caplog.at_level("WARNING"):
+        for _ in range(2):
+            if context.is_empty():
+                agent.populate_context_post_run(context)
+
+    assert context.is_empty()
+    assert not (logs / "trajectory.json").exists()
+    assert token not in (logs / "claude-code.txt").read_text(encoding="utf-8")
+    assert agent._nvidia_build_artifact_tokens == {token}
+    warnings = [
+        record.getMessage()
+        for record in caplog.records
+        if record.getMessage().startswith("Could not mask the NVIDIA Build bridge credential")
+        # The agent's Harbor logger reaches trial.log and job.log; the module logger has no handler there.
+        and record.name == agent.logger.name
+    ]
+    assert len(warnings) == 2
+    assert all(message.endswith(f"starting with large-{'*' * len(token)}.jsonl.") for message in warnings)
+    assert token not in caplog.text
+
+
+def test_bridge_artifacts_are_redacted_and_private_state_cleared_when_conversion_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from skillevaluator.tier3.harbor import local_agents
+
+    token = "synthetic-local-capability-" + "x" * 24
+    agent = SkillEvaluatorNvidiaBuildClaudeCode(logs_dir=tmp_path, model_name="nvidia/synthetic-model")
+    agent._nvidia_build_artifact_tokens = {token}
+    (tmp_path / "claude-code.txt").write_text("ordinary output " + token, encoding="utf-8")
+
+    def populate(_self: object, _context: object) -> None:
+        (tmp_path / "trajectory.json").write_text(
+            json.dumps({"metadata": {"client": token}, "usage": 13}), encoding="utf-8"
+        )
+        raise RuntimeError("synthetic converter failure")
+
+    monkeypatch.setattr(local_agents.SkillEvaluatorClaudeCode, "populate_context_post_run", populate)
+    with pytest.raises(RuntimeError, match="synthetic converter failure"):
+        agent.populate_context_post_run(SimpleNamespace())
+    assert token not in (tmp_path / "claude-code.txt").read_text(encoding="utf-8")
+    assert token not in (tmp_path / "trajectory.json").read_text(encoding="utf-8")
+    assert json.loads((tmp_path / "trajectory.json").read_text(encoding="utf-8"))["usage"] == 13
+    assert token not in repr(vars(agent))
 
 
 class _MergingRecordingEnvironment(BaseEnvironment):

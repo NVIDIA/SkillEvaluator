@@ -6,6 +6,11 @@ The shared collector reads one job directory per agent and arm. Each Gym rollout
 becomes one trial holding the verifier files Gym downloaded from ``/logs/verifier``
 and the ATIF trajectory Gym wrote for the verifier, so scoring, lift, pass@k and
 reports stay backend-neutral.
+
+A multi-step episode reports each step on its ordered ``turns`` and leaves the
+top-level verifier fields unset. It becomes Harbor's multi-step trial layout:
+``step_results`` with one ``steps/<name>/`` folder per step, and a root reward
+rolled up from the step reward files by Gym's ``turn_reward_strategy``.
 """
 
 from __future__ import annotations
@@ -15,16 +20,26 @@ import json
 import math
 import re
 import shutil
+import tempfile
+import unicodedata
 from collections import defaultdict
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.tier3.attempt_verdict import attempt_verdict
+from skillevaluator.tier3.harbor.progress import redact_progress_detail
+
 _UNSAFE = re.compile(r"[^A-Za-z0-9._-]+")
-_VERIFIER_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json", "test-stdout.txt")
+_REWARD_FILES = ("reward.json", "reward.txt", "skill_evaluator_reward.json", "custom_reward.json")
+_VERIFIER_FILES = (*_REWARD_FILES, "test-stdout.txt")
+_TURN_REWARD_STRATEGIES = ("mean", "final")
+_TURN_METADATA = ("turn_sessions", "turn_reward_strategy", "stopped_after_turn", "turns_without_verifier_result")
+_NO_REWARDS = "the task verifier wrote no reward.json or numeric reward.txt"
+TASK_CASE_IDS_FILE = "task_case_ids.json"
 
 
 def _safe(value: str) -> str:
-    return _UNSAFE.sub("-", value).strip("-") or "task"
+    return _UNSAFE.sub("-", value) or "task"
 
 
 def read_rollouts(path: Path, errors: list[str] | None = None) -> list[dict[str, Any]]:
@@ -106,12 +121,47 @@ def read_verifier_rewards(verifier_dir: Path) -> dict[str, Any] | None:
     return None
 
 
-def rollout_failure_text(row: dict[str, Any]) -> str:
-    """Return why a Gym rollout failed, or an empty string when its verifier ran."""
-    return _failure_text(row)
+def write_task_case_ids(gym_arm_dir: Path, task_case_ids: dict[str, str]) -> None:
+    """Record an arm's staged task to case map beside its rollouts, which the run keeps after removing its tasks."""
+    gym_arm_dir.mkdir(parents=True, exist_ok=True)
+    (gym_arm_dir / TASK_CASE_IDS_FILE).write_text(json.dumps(task_case_ids, indent=2), encoding="utf-8")
+
+
+def rollout_verdict(row: dict[str, Any], task_name: str, case_id: str, pass_threshold: float) -> bool | None:
+    """Return whether a Gym rollout passes as the finished run judges it, or ``None`` when it is unscored.
+
+    The rollout is written as the runner writes it, with only the files the verdict reads, to a scratch job
+    in the system temporary folder, so the run folder is only read. The job is then read with the
+    collector's reward extraction, scoreability checks and attempt verdict, as ``harbor_job_passed`` is.
+    """
+    from skillevaluator.tier3.harbor.collector import (
+        _extract_rewards,
+        _logical_attempt_rewards,
+        _overall_score,
+        _partition_scoreable_rewards,
+    )
+
+    task_case_ids = {task_name: case_id}
+    with tempfile.TemporaryDirectory(prefix="skillevaluator-gym-live-") as scratch:
+        job_dir = Path(scratch) / "job"
+        write_job_from_rollouts(
+            [row], job_dir, eval_name="live", task_case_ids=task_case_ids, n_attempts=1, verdict_only=True
+        )
+        rewards, _failures = _partition_scoreable_rewards(_extract_rewards(job_dir, task_entry_id_map=task_case_ids))
+    attempts = _logical_attempt_rewards(rewards)
+    if not attempts:
+        return None
+    return attempt_verdict(_overall_score(attempts[0]), pass_threshold, reward=attempts[0]).passed
 
 
 def _failure_text(row: dict[str, Any]) -> str:
+    failure = _reported_failure_text(row)
+    if not failure and row.get("verifier_return_code") is None:
+        return "SkillEvaluator verifier did not run in the NeMo Gym sandbox"
+    return failure
+
+
+def _reported_failure_text(row: dict[str, Any]) -> str:
     failure = row.get("failure") or row.get("failure_reason") or row.get("failure_kind")
     if isinstance(failure, dict):
         return str(failure.get("message") or failure.get("failure_kind") or "NeMo Gym episode failed")
@@ -119,22 +169,183 @@ def _failure_text(row: dict[str, Any]) -> str:
         return str(failure)
     if row.get("mask_sample"):
         return "NeMo Gym masked the sample (Gym-side failure)"
-    if row.get("verifier_return_code") is None:
-        return "SkillEvaluator verifier did not run in the NeMo Gym sandbox"
     return ""
 
 
-def _copy_verifier_logs(logs_dir: Path, trial_dir: Path) -> None:
+def _verified_rewards(verifier_dir: Path, case_id: str) -> tuple[dict[str, Any] | None, str]:
+    """Return the verifier's rewards stamped with ``case_id``, or why they cannot be scored."""
+    loaded = read_verifier_rewards(verifier_dir)
+    if loaded is None:
+        return None, _NO_REWARDS
+    loaded_entry_id = loaded.get("entry_id")
+    if loaded_entry_id is not None and str(loaded_entry_id) != str(case_id):
+        return None, f"the task verifier reported case {str(loaded_entry_id)!r} for staged case {str(case_id)!r}"
+    rewards = {**loaded, "entry_id": case_id}
+    reward_path = verifier_dir / "reward.json"
+    if reward_path.is_file():
+        reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
+    return rewards, ""
+
+
+def _turn_names(turns: Any) -> list[str] | None:
+    """Return the turns' step names when each can be its own ``steps/<name>/`` folder, else ``None``."""
+    from skillevaluator.tier3.harbor.collector import _safe_trial_path_component
+
+    if not isinstance(turns, list) or not turns:
+        return None
+    names: list[str] = []
+    keys: set[str] = set()
+    for turn in turns:
+        name = turn.get("name") if isinstance(turn, dict) else None
+        if not isinstance(name, str) or _safe_trial_path_component(name) != name:
+            return None
+        # Case-insensitive file systems would otherwise merge two steps' evidence into one folder.
+        key = unicodedata.normalize("NFC", name).casefold()
+        if key in keys:
+            return None
+        names.append(name)
+        keys.add(key)
+    return names
+
+
+def _reward_number(value: Any) -> float | None:
+    return float(value) if isinstance(value, int | float) and not isinstance(value, bool) else None
+
+
+def _rolled_up_rewards(step_rewards: list[dict[str, Any]], strategy: str) -> dict[str, Any]:
+    """Roll up the steps that ran as Harbor does: the last step's rewards, or each key's mean, a missing key as 0."""
+    if strategy == "final":
+        return dict(step_rewards[-1])
+    keys = sorted(
+        {key for rewards in step_rewards for key, value in rewards.items() if _reward_number(value) is not None}
+    )
+    return {
+        key: sum(_reward_number(rewards.get(key)) or 0.0 for rewards in step_rewards) / len(step_rewards)
+        for key in keys
+    }
+
+
+def _episode_rewards(
+    row: dict[str, Any], names: list[str], steps: list[tuple[dict[str, Any] | None, str]]
+) -> tuple[dict[str, Any] | None, str]:
+    """Return a multi-step episode's rolled-up rewards from each step's ``(rewards, failure)``, or why it is unscored.
+
+    Every step must have run its verifier and written rewards for the episode to be scored. A masked or
+    failed step, a step without a verifier result, or an episode Gym marked failed leaves the attempt
+    unscored. Gym's ``mean`` counts a step without a verifier result as 0 and Harbor's leaves it out; the
+    adapter applies neither, so an ungraded step never becomes a score. An episode that stopped after a
+    step missed its ``min_reward`` is scored over the steps that ran, as on Harbor.
+    """
+    failure = next(
+        (
+            f"step {name!r}: {step_failure}"
+            for name, (rewards, step_failure) in zip(names, steps, strict=True)
+            if rewards is None
+        ),
+        "",
+    )
+    strategy = row.get("turn_reward_strategy")
+    stopped_after = row.get("stopped_after_turn")
+    failure = failure or _reported_failure_text(row)
+    if not failure and strategy not in _TURN_REWARD_STRATEGIES:
+        failure = f"NeMo Gym reported an unsupported turn_reward_strategy {strategy!r}"
+    if not failure and stopped_after is not None and stopped_after != names[-1]:
+        failure = f"NeMo Gym stopped after turn {stopped_after!r}, which is not its last turn"
+    if failure:
+        return None, failure
+    return _rolled_up_rewards([rewards for rewards, _failure in steps if rewards is not None], strategy), ""
+
+
+def _multi_step_outcome(
+    row: dict[str, Any], trial_dir: Path, case_id: str, *, verdict_only: bool, secret_values: set[str] | None
+) -> tuple[dict[str, Any] | None, str, dict[str, Any]]:
+    """Write a multi-step episode's steps and return its rewards, why it is unscored, and its result fields.
+
+    An unscored episode keeps each step's evidence.
+    """
+    turns = row.get("turns")
+    fields: dict[str, Any] = {"nemo_gym": {key: row.get(key) for key in _TURN_METADATA}}
+    names = _turn_names(turns)
+    if names is None:
+        return None, "NeMo Gym returned malformed multi-step turns", fields
+    # Gym exports each turn's own input and new output under the episode's one session id, even under
+    # turn_sessions "continue", so no turn holds an earlier one's steps for Harbor's resume merge to strip.
+    fields["config"] = {"agent": {"resume_trajectory": False}}
+    steps: list[tuple[dict[str, Any] | None, str]] = []
+    for name, turn in zip(names, turns, strict=True):
+        step_dir = trial_dir / "steps" / name
+        logs_dir = turn.get("verifier_logs_dir")
+        if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
+            _copy_verifier_logs(
+                Path(logs_dir), step_dir, verdict_only=verdict_only, step=True, secret_values=secret_values
+            )
+        step_failure = _failure_text(turn)
+        rewards, failure = (None, step_failure) if step_failure else _verified_rewards(step_dir / "verifier", case_id)
+        if failure and secret_values is not None:
+            failure = redact_progress_detail(failure, secret_values=secret_values)
+        steps.append((rewards, failure))
+    fields["step_results"] = [
+        {
+            "step_name": name,
+            "verifier_result": {"rewards": rewards} if rewards else None,
+            "exception_info": {"exception_type": "NeMoGymStepFailure", "exception_message": step_failure}
+            if step_failure
+            else None,
+        }
+        for name, (rewards, step_failure) in zip(names, steps, strict=True)
+    ]
+    rewards, failure = _episode_rewards(row, names, steps)
+    return ({**rewards, "entry_id": case_id} if rewards is not None else None), failure, fields
+
+
+def _copy_verifier_logs(
+    logs_dir: Path, trial_dir: Path, *, verdict_only: bool, secret_values: set[str] | None, step: bool = False
+) -> bool | None:
+    """Copy a Gym verifier's files and trajectory into a trial or into one of its step folders.
+
+    With ``verdict_only``, copy only what the attempt verdict reads: the reward files, and a trial's own
+    trajectory when it is small enough for the collector to read and check for an agent that never started.
+    When masking a trial's trajectory, return its startup verdict from the original text.
+    """
+    from skillevaluator.tier3.harbor.collector import (
+        DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES,
+        _read_json,
+        _trajectory_agent_runtime_failure_reason,
+        _TrajectoryMergeError,
+        _validated_trajectory_dict,
+        _write_redacted_text_copy,
+    )
+
     verifier_dir = trial_dir / "verifier"
     verifier_dir.mkdir(parents=True, exist_ok=True)
-    for name in _VERIFIER_FILES:
+    for name in _REWARD_FILES if verdict_only else _VERIFIER_FILES:
         source = logs_dir / name
         if source.is_file() and not source.is_symlink():
-            shutil.copyfile(source, verifier_dir / name)
+            if name == "test-stdout.txt" and secret_values:
+                _write_redacted_text_copy(
+                    source, verifier_dir / name, source_root=logs_dir, secret_values=secret_values
+                )
+            else:
+                shutil.copyfile(source, verifier_dir / name)
     trajectory = logs_dir / "trajectory.json"
-    if trajectory.is_file() and not trajectory.is_symlink():
-        (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(trajectory, trial_dir / "agent" / "trajectory.json")
+    if not trajectory.is_file() or trajectory.is_symlink():
+        return None
+    if verdict_only and (step or trajectory.stat().st_size > DEFAULT_DIAGNOSTIC_ARTIFACT_MAX_BYTES):
+        return None
+    (trial_dir / "agent").mkdir(parents=True, exist_ok=True)
+    destination = trial_dir / "agent" / "trajectory.json"
+    if verdict_only or not secret_values:
+        shutil.copyfile(trajectory, destination)
+        return None
+    original = _read_json(trajectory)
+    startup_failed = None if step else bool(_trajectory_agent_runtime_failure_reason(original))
+    try:
+        masked = _validated_trajectory_dict(original, secret_values=secret_values)
+        encoded = json.dumps(masked, separators=(",", ":"), allow_nan=False)
+    except _TrajectoryMergeError:
+        encoded = "null"
+    destination.write_text(encoded, encoding="utf-8")
+    return startup_failed
 
 
 def write_job_from_rollouts(
@@ -145,10 +356,13 @@ def write_job_from_rollouts(
     task_case_ids: dict[str, str],
     n_attempts: int,
     failures: dict[str, list[str]] | None = None,
+    verdict_only: bool = False,
+    secret_values: set[str] | None = None,
 ) -> list[str]:
     """Write one collector job directory from Gym rollouts and return the run errors.
 
-    ``task_case_ids`` maps each staged task folder name to its evals.json case id.
+    ``task_case_ids`` maps each staged task folder name to its evals.json case id. With ``verdict_only``,
+    a trial gets only the verifier files its attempt verdict reads, not the evidence a report publishes.
     """
     job_dir.mkdir(parents=True, exist_ok=True)
     errors: list[str] = []
@@ -183,25 +397,26 @@ def write_job_from_rollouts(
             trial_name = f"{_safe(task_name)}__gym{attempt:03d}"
             trial_dir = job_dir / trial_name
             trial_dir.mkdir(parents=True, exist_ok=True)
-            logs_dir = row.get("verifier_logs_dir")
-            if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
-                _copy_verifier_logs(Path(logs_dir), trial_dir)
-            reward_path = trial_dir / "verifier" / "reward.json"
-            failure = _failure_text(row)
             rewards: dict[str, Any] | None = None
-            loaded = None if failure else read_verifier_rewards(trial_dir / "verifier")
-            if loaded is not None:
-                loaded_entry_id = loaded.get("entry_id")
-                if loaded_entry_id is not None and str(loaded_entry_id) != str(case_id):
-                    failure = (
-                        f"the task verifier reported case {str(loaded_entry_id)!r} for staged case {str(case_id)!r}"
+            trial_fields: dict[str, Any] = {}
+            if row.get("turns") is not None:
+                rewards, failure, trial_fields = _multi_step_outcome(
+                    row, trial_dir, case_id, verdict_only=verdict_only, secret_values=secret_values
+                )
+            else:
+                logs_dir = row.get("verifier_logs_dir")
+                if isinstance(logs_dir, str) and Path(logs_dir).is_dir():
+                    startup_failed = _copy_verifier_logs(
+                        Path(logs_dir), trial_dir, verdict_only=verdict_only, secret_values=secret_values
                     )
-                else:
-                    rewards = {**loaded, "entry_id": case_id}
-                    if reward_path.is_file():
-                        reward_path.write_text(json.dumps(rewards, indent=2), encoding="utf-8")
+                    if startup_failed is not None:
+                        trial_fields["nemo_gym"] = {"trajectory_startup_failed": startup_failed}
+                failure = _failure_text(row)
+                if not failure:
+                    rewards, failure = _verified_rewards(trial_dir / "verifier", case_id)
             if rewards is None:
-                failure = failure or "the task verifier wrote no reward.json or numeric reward.txt"
+                if secret_values is not None:
+                    failure = redact_progress_detail(failure, secret_values=secret_values)
                 n_errors += 1
                 if not row.get(_MISSING_ROLLOUT):
                     errors.append(f"case {case_id} attempt {attempt}: {failure}")
@@ -220,6 +435,7 @@ def write_job_from_rollouts(
                         "exception_info": None
                         if rewards
                         else {"exception_type": "NeMoGymEpisodeFailure", "exception_message": failure},
+                        **trial_fields,
                     },
                     indent=2,
                 ),

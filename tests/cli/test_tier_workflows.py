@@ -422,7 +422,10 @@ def test_tier3_help_keeps_option_descriptions_visible(width):
     import click
 
     command = cli.commands["tier3"]
-    output = render_help(command.workflow, click.Context(command.workflow), width=width)
+    # A parentless context lacks -h, and Click would cache that help option for `tier3 PATH -h`.
+    with cli.make_context("skillevaluator", [], resilient_parsing=True) as parent:
+        ctx = click.Context(command.workflow, info_name="tier3", parent=parent)
+        output = render_help(command.workflow, ctx, width=width)
     normalized = " ".join(output.split())
     assert "Run an extra agent-only execution of" in normalized
     assert "first staged task before the full" in normalized

@@ -490,9 +490,21 @@ recognized regenerable caches, such as `.pytest_cache`, `__pycache__`, or
 access. Mixed targets, dynamic shell expressions, compound commands and
 unsupported forms retain the existing destructive-command classification.
 
+A narrow temporary-file pipeline is exempt: `find /tmp/cache -type f -print0 |
+xargs -0 -r rm -f` keeps NUL-delimited paths under its literal temporary root.
+The producer may use `-P` and `-name`/`-iname` filters with a quoted pattern or
+a plain literal name (letters, digits, `.`, `_`, `-`); unquoted glob patterns
+retain the finding. The consumer must
+use NUL input and force-only removal, without written targets or other options.
+Link evidence, path traversal, link-following modes, whitespace-delimited output,
+custom formatting, additional commands and unknown syntax retain the finding.
+The exemption reads only one pipeline of at most 4,096 characters and 128 words. It uses
+command-text evidence and does not prove containment through pre-existing links.
+
 A destructive-command finding scores the Security dimension `0.0`. Other
 recursive `rm` commands outside `/tmp`, and `xargs rm` with a recursive or
-force option, receive this finding. A force-only `rm -f` or `rm --force`
+force option outside the narrow pipeline exemption above, receive this finding.
+A force-only `rm -f` or `rm --force`
 without `-r` or `--recursive` receives it only when a target resolves under
 `/bin`, `/boot`, `/etc`, `/home`, `/lib*`, `/root`, `/sbin`, `/usr`, `/var`
 (except `/var/tmp`), `~`, or `$HOME`. Brace lists such as `/{etc,usr}/hosts`
@@ -657,7 +669,7 @@ the 64 KiB and 4,096-token limits.
 Recursive `rm` commands with a parsed backtick-substitution target also reach
 the target checker, including a first target such as ``rm -rf `pwd` ``.
 Substitution output remains unresolved and receives no temporary-cleanup
-exemption. This additional gate reads at most 64 KiB and 4,096 shell words per
+exemption. This additional gate reads at most 65,536 characters and 4,096 shell words per
 text, three nested script levels and the first sixteen distinct script words
 or payloads in each text it reads. All nested readings count toward the shared
 trace limit described above; text it cannot parse retains the earlier gates.

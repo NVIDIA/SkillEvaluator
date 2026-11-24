@@ -6,10 +6,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
-from skillevaluator.reporting.base import additional_errors, get_skip_reason, is_cleanly_skipped
+from skillevaluator.reporting.base import (
+    additional_errors,
+    get_skip_reason,
+    is_cleanly_skipped,
+    tier2_catalog_entries_compared,
+    tier2_context_insufficiency,
+)
 
 if TYPE_CHECKING:
     from skillevaluator.models import ValidationResult
+
+
+_CANONICAL_CATEGORIES = {
+    category.casefold(): category for category in ("DUPLICATE", "SIMILARITY", "INTER_SKILL", "INTER_PLUGIN")
+}
 
 
 @dataclass(frozen=True)
@@ -32,14 +43,33 @@ class Tier2ScopeView:
     not_run: bool = False
     skips: tuple[Tier2SkipView, ...] = ()
 
+    @property
+    def comparison_count(self) -> int:
+        return sum(not is_catalog_setup_record(result) for result in self.results)
+
 
 def _count(value: object) -> int | None:
     return value if type(value) is int and 0 <= value <= 2**63 - 1 else None
 
 
+# The bundle catalog setup record (build, load or save) that precedes its comparisons.
+_CATALOG_SETUP_NAME = "plugin catalog similarity"
+
+
+def _normalized_name(result: ValidationResult) -> str:
+    return " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
+
+
+def is_catalog_setup_record(result: ValidationResult) -> bool:
+    """Return whether a result only builds, loads or saves a catalog and compares nothing."""
+    return _normalized_name(result) == _CATALOG_SETUP_NAME
+
+
 def _scope(result: ValidationResult) -> str | None:
-    name = " ".join(result.validator_name.casefold().replace("_", " ").replace("-", " ").split())
-    if "similarity" in name:
+    name = _normalized_name(result)
+    if name == "plugin dependency deduplication":
+        return "other"
+    if name in {"inter skill deduplication", "inter plugin deduplication"} or "similarity" in name:
         return "across"
     if "dedup" in name or "context optimization" in name:
         return "within"
@@ -88,9 +118,40 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
         catalog_known = bool(members) and scope == "across"
         pairwise_only = bool(members) and scope == "across"
         for result in members:
+            # A catalog setup record completes by building or loading the
+            # catalog; its index size is not a pairwise collection scan.
+            setup = scope == "across" and is_catalog_setup_record(result)
+            budget = result.metadata.get("plugin_context_budget")
+            if isinstance(budget, dict):
+                limits, consumed = budget.get("limits"), budget.get("consumed")
+                if (
+                    isinstance(limits, dict)
+                    and isinstance(consumed, dict)
+                    and all(
+                        _count(source.get(key)) is not None
+                        for source, key in (
+                            (limits, "chunks"),
+                            (limits, "scalar_comparisons"),
+                            (consumed, "chunks_collected"),
+                            (consumed, "scalar_comparisons"),
+                        )
+                    )
+                ):
+                    notes.append(
+                        f"Plugin context budget: {consumed['chunks_collected']}/{limits['chunks']} chunks collected; "
+                        f"{consumed['scalar_comparisons']}/{limits['scalar_comparisons']} scalar comparisons consumed."
+                    )
             details = {detail.check_name: detail.metadata for detail in result.success_details}
+            compared_check = next(
+                (
+                    check
+                    for check in ("catalog_compared", "skill_catalog_comparison", "plugin_catalog_comparison")
+                    if check in details
+                ),
+                None,
+            )
             indexed = details.get("index_built")
-            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) else None
+            entries = _count(indexed.get("entry_count")) if isinstance(indexed, dict) and not setup else None
             analysis = result.metadata.get("llm_analysis")
             analysis_complete = (
                 isinstance(analysis, dict)
@@ -100,75 +161,126 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 and _count(analysis.get("clusters_refused")) == 0
             )
             recorded_completion = bool(
-                {"catalog_compared", "index_built", "similarity_check"} & details.keys()
+                {"index_built", "catalog_loaded"} & details.keys()
+                if setup
+                else compared_check or {"index_built", "similarity_check"} & details.keys()
                 if scope == "across"
                 else "context_dedup" in details or analysis_complete
             )
-            insufficient = any(
-                detail.check_name == "context_dedup"
-                and detail.message in {"No text files found in skill directory", "Not enough content to compare"}
-                for detail in result.success_details
+            # Bundle verdicts are optional after the catalog comparison; their
+            # candidate-review status is not mandatory within-skill clustering.
+            optional_catalog_analysis = (
+                compared_check == "plugin_catalog_comparison"
+                and isinstance(analysis, dict)
+                and _count(analysis.get("candidates_total")) is not None
             )
+            insufficient = tier2_context_insufficiency(result)
             if insufficient:
-                notes.append(
-                    "Comparison not applicable: "
-                    + next(detail.message for detail in result.success_details if detail.check_name == "context_dedup")
-                )
+                notes.append(f"Comparison not applicable: {insufficient}")
+            compared = details.get(compared_check, {})
+            excluded = _count(compared.get("self_matches_excluded"))
+            bundled = _count(compared.get("bundled_skills")) if compared_check == "skill_catalog_comparison" else None
+            compared_count = tier2_catalog_entries_compared(compared_check, compared)
+            # The skill catalog check keeps its existing note and completion rule.
+            skill_catalog = compared_check == "catalog_compared"
+            no_eligible_entries = compared_count == 0 and not skill_catalog
+            if no_eligible_entries:
+                notes.append("Comparison not applicable: no eligible catalog entries after self exclusion.")
             # A collection index of fewer than two entries has nothing to compare pairwise.
-            single_entry = (
-                scope == "across" and entries is not None and entries < 2 and "catalog_compared" not in details
-            )
+            single_entry = scope == "across" and entries is not None and entries < 2 and compared_check is None
             if single_entry:
                 notes.append(f"Comparison not applicable: the collection index has {entries} entry; pairs need two.")
-            clean_skip = is_cleanly_skipped(result) or insufficient or single_entry
+            clean_skip = is_cleanly_skipped(result) or insufficient or single_entry or no_eligible_entries
             finished = (
                 recorded_completion
-                and (not isinstance(analysis, dict) or analysis_complete)
+                and (not isinstance(analysis, dict) or analysis_complete or optional_catalog_analysis)
                 and not result.is_incomplete
                 and not additional_errors(result)
                 and not clean_skip
             )
-            completed += bool(finished)
+            completed += bool(finished and not setup)
             all_complete = all_complete and bool(finished)
             if not finished and not clean_skip:
                 known = False
                 unfinished = True
-            compared = details.get("catalog_compared")
-            compared = compared if isinstance(compared, dict) else {}
-            total, excluded = _count(compared.get("catalog_entry_count")), _count(compared.get("self_matches_excluded"))
-            if total is not None and excluded is not None and excluded <= total and finished:
-                catalog_counts.append(total - excluded)
-                notes.append(
-                    f"Compared one target against {total - excluded} catalog entries; {excluded} self entries excluded."
+            if no_eligible_entries:
+                catalog_counts.append(0)
+            elif compared_count is not None and finished:
+                catalog_counts.append(compared_count)
+                target = (
+                    f"{bundled} bundled skill{'s' if bundled != 1 else ''}"
+                    if compared_check == "skill_catalog_comparison" and bundled is not None
+                    else "one target"
                 )
-            else:
+                notes.append(
+                    f"Compared one target against {compared_count} catalog entries; {excluded} self entries excluded."
+                    if skill_catalog
+                    else f"Compared {target} against {compared_count} catalog entries. "
+                    f"Skipped {excluded} self pair{'s' if excluded != 1 else ''}."
+                )
+            elif not (setup and finished):
                 catalog_known = False
-            pairwise_only = pairwise_only and entries is not None and "catalog_compared" not in details
-            if scope == "across" and entries is not None and not single_entry:
+            pairwise_only = pairwise_only and entries is not None and compared_check is None
+            if scope == "across" and entries is not None and not single_entry and compared_check is None:
                 notes.append(f"Pairwise comparison of {entries} collection entries; no catalog used.")
         duplicates = []
-        paths: set[str] = set()
+        paths: set[tuple[str, str]] = set()
         paths_known = True
         for result in members:
             for finding in result.findings:
-                category = finding.category.casefold()
-                if category not in ({"duplicate"} if scope == "within" else {"similarity"}):
+                category = _CANONICAL_CATEGORIES.get(finding.category.casefold())
+                if category not in (
+                    {"DUPLICATE"} if scope == "within" else {"SIMILARITY", "INTER_SKILL", "INTER_PLUGIN"}
+                ):
                     continue
                 duplicates.append(finding)
                 metadata = finding.metadata if isinstance(finding.metadata, dict) else {}
-                recorded = (
-                    metadata.get("source_files")
-                    if scope == "within"
-                    else [metadata.get("path_a"), metadata.get("path_b")]
-                )
+                if scope == "within":
+                    recorded = metadata.get("source_files")
+                elif category in {"INTER_SKILL", "INTER_PLUGIN"}:
+                    recorded = [finding.file_path, metadata.get("catalog_path")]
+                else:
+                    recorded = [metadata.get("path_a"), metadata.get("path_b")]
                 if (
                     not isinstance(recorded, list)
                     or not recorded
                     or any(not isinstance(p, str) or not p for p in recorded)
                 ):
                     paths_known = False
+                elif category in {"INTER_SKILL", "INTER_PLUGIN"}:
+                    check = "skill_catalog_comparison" if category == "INTER_SKILL" else "plugin_catalog_comparison"
+                    comparison = next(
+                        (detail.metadata for detail in result.success_details if detail.check_name == check), None
+                    )
+                    comparison = comparison if isinstance(comparison, dict) else {}
+                    excluded = comparison.get("excluded_catalog_paths")
+                    excluded_count = _count(comparison.get("self_matches_excluded"))
+                    target = result.metadata.get("plugin_catalog_target")
+                    indexed_target = (
+                        finding.file_path
+                        if category == "INTER_SKILL"
+                        else (target.get("path") if isinstance(target, dict) else None)
+                    )
+                    catalog_namespace = f"{category}:catalog"
+                    # Reconcile collection targets only through recorded self
+                    # exclusions; identical relative labels alone prove nothing.
+                    if (
+                        isinstance(indexed_target, str)
+                        and indexed_target
+                        and excluded_count is not None
+                        and excluded_count > 0
+                        and isinstance(excluded, list)
+                        and indexed_target in excluded
+                    ):
+                        target_identity = (catalog_namespace, indexed_target)
+                    elif excluded_count == 0 and excluded == []:
+                        target_identity = (f"{category}:target", finding.file_path)
+                    else:
+                        paths_known = False
+                        continue
+                    paths.update((target_identity, (catalog_namespace, metadata["catalog_path"])))
                 else:
-                    paths.update(recorded)
+                    paths.update((scope, path) for path in recorded)
         duplicate_count = len(duplicates) if duplicates or all_complete else None
         affected = len(paths) if paths_known and duplicate_count is not None else None
         # No member and no recorded stage: this command never runs the scope.
@@ -194,19 +306,24 @@ def tier2_scope_views(results: list[ValidationResult]) -> tuple[Tier2ScopeView, 
                 _skip_views(members),
             )
         )
-    unknown = tuple(result for result in results if _scope(result) is None)
-    if unknown:
+    other = tuple(result for result in results if _scope(result) in {None, "other"})
+    if other:
+        notes = []
+        if any(_scope(result) == "other" for result in other):
+            notes.append("Dependency-reference checks are separate from content comparisons.")
+        if any(_scope(result) is None for result in other):
+            notes.append("Comparison scope unavailable.")
         views.append(
             Tier2ScopeView(
                 "other",
                 "Other recorded checks",
-                unknown,
+                other,
                 None,
                 None,
                 None,
                 None,
-                ("Comparison scope unavailable.",),
-                skips=_skip_views(unknown),
+                tuple(notes),
+                skips=_skip_views(other),
             )
         )
     return tuple(views)

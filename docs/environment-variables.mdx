@@ -33,10 +33,16 @@ These variables select and configure the provider used for LLM-backed checks and
 | `NVIDIA_API_KEY` | — | Credential for the `nv_build` provider (NVIDIA Build). |
 | `OPENAI_API_KEY` | — | Credential for the `openai` provider. |
 | `ANTHROPIC_API_KEY` | — | Credential for the `anthropic` provider. |
+| `SKILL_EVAL_LLM_EXTRA_HEADERS` | unset | JSON object of extra HTTP headers for host-side `openai-compatible` chat calls, for gateways that need a routing header (for example `{"x-opencode-session": "{uuid}"}`). Use ASCII values without surrounding whitespace. A `{uuid}` placeholder is replaced once per client with a random UUID. Other providers ignore it. Values are never printed. |
 | `OPENAI_BASE_URL` | `https://api.openai.com/v1` | Alternate OpenAI endpoint; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `ANTHROPIC_BASE_URL` | Anthropic SDK default | Absolute HTTP(S) Anthropic API root. Accepts an unversioned root or a legacy terminal `/v1`; `SKILL_EVAL_LLM_BASE_URL` wins when both are set. |
 | `AWS_REGION` | `us-west-2` | Region for the `bedrock` provider. |
 | `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, `AWS_SESSION_TOKEN`, `AWS_PROFILE`, ... | — | Standard AWS credential chain, used as-is by the `bedrock` provider. |
+
+The extra headers apply to chat calls made directly on the host through the
+shared LLM client. Harbor verifier judges, embedding requests, and in-container
+agents use separate provider configuration. The reusable CI templates omit
+`SKILL_EVAL_LLM_EXTRA_HEADERS` from the environment they pass to child commands.
 
 ### LLM retries and judge time budget
 
@@ -182,6 +188,29 @@ execution environments are covered in
 | `SKILLEVALUATOR_GKE_METADATA_PROBE_IMAGE` | `python:3.12-slim` | Trusted container image used by `skillevaluator-metadata-probe-init` and `skillevaluator-metadata-probe` in unprivileged `--env-mode gke` pods to verify that `169.254.169.254` and `169.254.169.252:988` are unreachable. Override when your GKE cluster restricts Docker Hub pulls and requires an internal Artifact Registry mirror. |
 | `SKILLEVALUATOR_GKE_AUTOPILOT` | auto-detected | Explicitly set `1`/`true` or `0`/`false` (or pass `--ek autopilot=<bool>`) to control GKE Autopilot ephemeral-storage adjustment (`10Gi` → `10176Mi` on non-accelerator `main` containers so adding the `64Mi` probe container stays within Autopilot's `10Gi` general-purpose pod ceiling) when node listing or `gcloud` inspection is unavailable. |
 | `SKILLEVALUATOR_VERTEX_ADC_JOB_TIMEOUT_SEC` | `3300` seconds | Maximum wall-clock timeout per Harbor subprocess invocation when using short-lived Google Application Default Credentials (ADC) with a Vertex AI OpenAPI endpoint, capped to the remaining token lifetime minus a 60-second safety margin. |
+
+### Output-pattern check limits
+
+These variables apply to runtime `output_matches` checks in the unreleased
+checkout. Set them in the host environment that runs `skillevaluator`; Tier 3
+forwards them through the generated Harbor task's verifier environment.
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `SKILL_EVAL_OUTPUT_PATTERN_TIMEOUT_SEC` | `1` second | Time allowed for one pattern's compilation and matching after its worker is ready, bounded by the remaining shared budget. |
+| `SKILL_EVAL_OUTPUT_PATTERN_BUDGET_SEC` | `5` seconds | Shared compilation and matching budget for all output patterns in one case. |
+
+Both settings accept positive finite seconds. Empty, non-numeric, non-finite,
+zero, or negative values use the default. Very large finite values are capped
+at the platform's supported wait limit. Raise both settings when a legitimate
+pattern needs more time than the shared budget permits.
+
+A timed-out pattern or a check reached after the shared budget is exhausted
+counts as failed and remains in the `behavior_check` denominator. Later literal
+checks continue. Invalid-pattern errors reported by a worker and worker startup
+failures remain not checked. Interpreter startup and input transfer have a separate 10-second
+allowance and do not consume the matching budget; these settings do not change
+the overall Harbor verifier timeout.
 
 ### Harbor process environment
 

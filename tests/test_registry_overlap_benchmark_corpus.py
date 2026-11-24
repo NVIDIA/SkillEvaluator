@@ -146,3 +146,32 @@ def test_output_extension_cannot_collide_with_provenance_sidecar(tmp_path, capsy
         )
     assert exc.value.code == 2
     assert "--output must use the .npy extension" in capsys.readouterr().err
+
+
+def test_output_sidecar_cannot_replace_pinned_tokenizer(tmp_path, capsys):
+    model = tmp_path / "model"
+    model.mkdir()
+    tokenizer = model / "tokenizer.json"
+    tokenizer.write_text("pinned tokenizer", encoding="utf-8")
+    with pytest.raises(SystemExit) as exc:
+        corpus.main(
+            ["--parquet-dir", str(tmp_path), "--model-dir", str(model), "--output", str(model / "tokenizer.npy")]
+        )
+    assert exc.value.code == 2
+    assert "overlaps a corpus input" in capsys.readouterr().err
+    assert tokenizer.read_text(encoding="utf-8") == "pinned tokenizer"
+
+
+def test_output_cannot_hardlink_to_a_source_shard(tmp_path, capsys):
+    shard = tmp_path / corpus.PARQUET_SHARDS[0]
+    shard.write_bytes(b"pinned input")
+    matrix = tmp_path / "data.npy"
+    try:
+        matrix.hardlink_to(shard)
+    except OSError:
+        pytest.skip("hard links unavailable")
+    with pytest.raises(SystemExit) as exc:
+        corpus.main(["--parquet-dir", str(tmp_path), "--model-dir", str(tmp_path), "--output", str(matrix)])
+    assert exc.value.code == 2
+    assert "overlaps a corpus input" in capsys.readouterr().err
+    assert shard.read_bytes() == b"pinned input"

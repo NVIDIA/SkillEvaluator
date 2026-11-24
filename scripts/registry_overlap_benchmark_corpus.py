@@ -209,6 +209,22 @@ def _sha256(path: Path) -> str:
         return hashlib.file_digest(file, "sha256").hexdigest()
 
 
+def _paths_alias(first: Path, second: Path) -> bool:
+    return first.resolve() == second.resolve() or (first.exists() and second.exists() and first.samefile(second))
+
+
+def _write_sidecar(path: Path, metadata: dict[str, object]) -> None:
+    descriptor, name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.")
+    temporary = Path(name)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8") as output:
+            json.dump(metadata, output, indent=2)
+            output.write("\n")
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--parquet-dir", required=True, type=Path)
@@ -226,17 +242,20 @@ def main(argv: list[str] | None = None) -> None:
     if args.output.suffix != ".npy":
         parser.error("--output must use the .npy extension")
     sidecar = args.output.with_suffix(".json")
-    if sidecar.resolve() == args.output.resolve() or (
-        sidecar.exists() and args.output.exists() and sidecar.samefile(args.output)
-    ):
+    if _paths_alias(args.output, sidecar):
         parser.error("The matrix and its JSON sidecar must be different files")
+    model_file = args.model_dir / MODEL_FILE
+    tokenizer = args.model_dir / "tokenizer.json"
+    inputs = [model_file, tokenizer, *(args.parquet_dir / shard for shard in PARQUET_SHARDS)]
+    if any(_paths_alias(output, source) for output in (args.output, sidecar) for source in inputs):
+        parser.error("A matrix or sidecar output overlaps a corpus input")
     if not (PARQUET_ROWS <= args.size <= 250_000 and MODEL_DIMENSION <= args.dimension <= 4096):
         parser.error("size must fit the pinned corpus and be at most 250000; dimension must be in [384, 4096]")
     if not (1 <= args.threads <= 8 and 1 <= args.batch_size <= 256 and args.seed >= 0):
         parser.error("threads must be in [1, 8], batch size in [1, 256], and seed nonnegative")
-    if _sha256(args.model_dir / MODEL_FILE) != MODEL_SHA256:
+    if _sha256(model_file) != MODEL_SHA256:
         raise ValueError("ONNX model does not match the pinned file")
-    if _sha256(args.model_dir / "tokenizer.json") != TOKENIZER_SHA256:
+    if _sha256(tokenizer) != TOKENIZER_SHA256:
         raise ValueError("Tokenizer does not match the pinned file")
     rows, counts, source_hashes = _load_rows(args.parquet_dir, allow_source_sample=args.allow_source_sample)
     if not rows:
@@ -271,7 +290,7 @@ def main(argv: list[str] | None = None) -> None:
         "matrix_sha256": _sha256(args.output),
         "human_labeled_overlap_queries": 0,
     }
-    sidecar.write_text(json.dumps(metadata, indent=2) + "\n", encoding="utf-8")
+    _write_sidecar(sidecar, metadata)
     print(json.dumps(metadata), flush=True)
 
 

@@ -250,7 +250,7 @@ To use Claude Code through the gateway or an Anthropic Messages endpoint, run `u
 
 <Tabs>
   <Tab title="Shared gateway" language="shared-claude-gateway">
-    Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key.
+    Run `unset ANTHROPIC_BASE_URL ANTHROPIC_API_KEY` so Claude Code uses the gateway URL and key. If the gateway does not serve the default Claude model, pass `--agent-model claude-code=MODEL` with a model ID that supports Anthropic Messages on that gateway.
   </Tab>
   <Tab title="Native Anthropic" language="native-claude-anthropic">
     Export your Anthropic key as `ANTHROPIC_API_KEY` and run `unset ANTHROPIC_BASE_URL`. Claude Code then uses Anthropic's endpoint and the native model default.

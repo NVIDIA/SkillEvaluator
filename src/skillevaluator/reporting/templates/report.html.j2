@@ -3146,6 +3146,29 @@
             </details>
             {% endif %}
 
+            {% if tier3_statistics %}
+            <details class="t3-details" id="tier3-run-statistics">
+                <summary>Run Statistics (advisory)</summary>
+                <div class="t3-details-body">
+                <p class="t3-section-hint">{{ tier3_statistics.note }}</p>
+                {% for table in tier3_statistics.tables %}
+                <p class="t3-section-hint"><strong>{{ table.title }}</strong></p>
+                <div class="table-scroll"><table class="summary-table">
+                    <thead><tr>{% for header in table.headers %}<th>{{ header }}</th>{% endfor %}</tr></thead>
+                    <tbody>
+                    {% for row in table.rows %}
+                    <tr><td>{{ row.agent }}</td>{% for cell in row.cells %}<td>{{ cell }}</td>{% endfor %}</tr>
+                    {% endfor %}
+                    </tbody>
+                </table></div>
+                {% for row in table.rows if row.note %}
+                <p class="t3-section-hint">{{ row.agent }}: {{ row.note }}</p>
+                {% endfor %}
+                {% endfor %}
+                </div>
+            </details>
+            {% endif %}
+
             {% if t3_agents %}
             <details class="t3-details" id="tier3-agent-resources">
                 <summary>Measured Agent Resources</summary>

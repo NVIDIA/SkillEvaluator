@@ -72,6 +72,11 @@ STATISTICS_BLOCKS = (
     "comparison_eligibility",
 )
 
+# The blocks an ordinary skill run (two plain arms) reports on each agent. The
+# collector writes them to statistics.json and the agent's results; the report
+# loader reads them back.
+RUN_STATISTICS_FIELDS = ("lift_uncertainty", "reliability")
+
 _SUCCEEDED = "succeeded"
 
 

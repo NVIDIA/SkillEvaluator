@@ -3817,7 +3817,7 @@ class SecurityValidator(ValidatorBase):
                     static_summary=static_summary,
                 )
             if hook_review is not None:
-                if verify_reviewed is not None:
+                if verify_reviewed is not None and not result.is_incomplete:
                     result = verify_reviewed(result, scan_root)
                 try:
                     unchanged = capture_hook_review_artifact(skill_path) == hook_review.artifact

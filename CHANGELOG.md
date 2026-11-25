@@ -8,6 +8,15 @@ All notable changes to SkillEvaluator are documented in this file.
 
 - `make lint` checks the whole repository, as CI does, instead of only `src` and `tests`, so a
   lint error in `scripts/` or `ci/` no longer passes the documented local gate and then fails CI.
+- Tier 2 deduplication verdict requests carry the documented output ceiling,
+  16,384 tokens or 32,768 for GPT-5 and GPT-6 reasoning models. Only Anthropic
+  requests sent it. NVIDIA Build, OpenAI, OpenAI-compatible and Bedrock requests
+  sent none, so the provider default set the limit. `doctor --tier 2
+  --verify-models` sends the same ceiling.
+- Bedrock `apac.` and `us-gov.` inference-profile IDs are recognized as the
+  model they name. Claude 4.7 and later on those profiles no longer receive a
+  `temperature` the provider rejects, and the Tier 3 Bedrock refusal fallback
+  keeps the request's geography prefix.
 
 ### Documentation
 

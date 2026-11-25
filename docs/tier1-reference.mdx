@@ -310,7 +310,7 @@ For `validate`, the default set is `schema`, `version`, `security`, `pii`, `lice
 
     Plugin component rules cover skill namespacing, Codex's plugin-skill cap and Agent Plugins hooks, Copilot CLI MCP server names, disabled plugins, and components a harness registers but doesn't deliver.
 
-    The "adds nothing" note (`…-PLUGIN-NO-COMPONENTS`) appears only when the folder holds nothing but a manifest that just describes the plugin (README, license and changelog files aside). Files or manifest keys this check doesn't model, and folders it can't read, are never reported as adding nothing. Components supplied from outside the folder, such as by a marketplace entry, are not read. A `.mcp.json` that names its servers at the top level, without the `mcpServers` wrapper, counts for Claude Code, which documents that shape; the other harnesses were not tested with it, so their rows get a note instead.
+    In source checkouts with this unreleased update, the "adds nothing" note (`…-PLUGIN-NO-COMPONENTS`) applies to folders that contain only descriptive JSON manifests and optional documentation such as a README or license. Native Hermes YAML manifest contents, unrecognized files or fields, and unreadable folders leave the bundle's contents uncertain. Components supplied from outside the folder, such as by a marketplace entry, are outside the check's scope. Claude Code's row counts servers declared at the top level of `.mcp.json`, a shape it documents. Other harnesses get an untested-format note. See [installation options](/skills/skillevaluator/installation-options) for the published release.
 
     `harness-check` takes the model setup some limits depend on: `--context-tokens`, `--custom-provider`, `--explicit-invocation` and `--headless`.
 

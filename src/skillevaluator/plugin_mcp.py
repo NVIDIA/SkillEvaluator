@@ -166,7 +166,11 @@ def _replaces(declaration: McpDeclaration, previous: McpDeclaration | None) -> b
     """
     if previous is None or declaration.source not in {"mcp_json", "path_ref"}:
         return True
-    config = declaration.config
+    return has_mcp_endpoint(declaration.config)
+
+
+def has_mcp_endpoint(config: Any) -> bool:
+    """Whether a server object supplies a non-empty command or URL string."""
     return isinstance(config, dict) and any(
         isinstance(config.get(key), str) and config[key] for key in ("command", "url")
     )

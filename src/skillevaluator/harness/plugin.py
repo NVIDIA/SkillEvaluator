@@ -19,6 +19,8 @@ from pathlib import Path
 from typing import Any
 
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
+from skillevaluator.plugin_mcp import collect_mcp_declarations, has_mcp_endpoint
+from skillevaluator.plugin_paths import PluginRootReader
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -106,22 +108,22 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
-def _flat_mcp_servers(root: Path) -> int:
+def _flat_mcp_servers(root: Path) -> int | None:
     """Servers a ``.mcp.json`` names at its top level, without the ``mcpServers`` wrapper.
 
-    Only entries that look like a server (an object with a ``command`` or a ``url``) count, so a
-    ``$schema`` line or another wrapper key is not mistaken for one.
+    Only server objects with a non-empty ``command`` or ``url`` string count. A missing,
+    unreadable or wrapped file has no flat count.
     """
     path = root / ".mcp.json"
     try:
         if not path.is_file():  # only a regular file is ever opened: a named pipe with no writer would block
-            return 0
+            return None
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
-        return 0
+        return None
     if not isinstance(data, dict) or "mcpServers" in data:
-        return 0
-    return sum(isinstance(entry, dict) and ("command" in entry or "url" in entry) for entry in data.values())
+        return None
+    return sum(has_mcp_endpoint(entry) for name, entry in data.items() if name != "$schema")
 
 
 def _is_doc(name: str) -> bool:
@@ -172,9 +174,11 @@ def plugin_facts(root: Path) -> dict[str, Any]:
 
     ``declares_components`` says a manifest has a key beyond the descriptive ones, or is not an object.
     ``mcp_flat`` counts servers a ``.mcp.json`` names without the ``mcpServers`` wrapper, and
+    ``mcp_claude`` includes any servers brought in by Claude Code's manifest when that flat file exists.
     ``other_files`` says the folder holds something besides manifests and documentation.
     """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
+    claude_manifest = None
     for fmt, rel in MANIFESTS.items():
         path = root / rel
         facts[f"fmt_{fmt}"] = path.is_file()
@@ -190,6 +194,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             facts["plugin_name"] = data["name"]
         if not isinstance(data, dict) or set(data) - set(METADATA_KEYS):
             facts["declares_components"] = True
+        if fmt == "claude" and isinstance(data, dict):
+            claude_manifest = data
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
                 AGENT_PLUGINS_SCHEMA
@@ -199,7 +205,20 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
-    facts["mcp_flat"] = _flat_mcp_servers(root)
+    flat_count = _flat_mcp_servers(root)
+    facts["mcp_flat"] = flat_count or 0
+    if flat_count is not None:
+        facts["mcp_claude"] = flat_count
+        if claude_manifest and claude_manifest.get("mcpServers"):
+            # Claude Code merges declared configurations with its default .mcp.json by server name.
+            mcp = collect_mcp_declarations(
+                PluginRootReader(root),
+                claude_manifest,
+                contained=True,
+                manifest_rel=MANIFESTS["claude"],
+                validate_servers=False,
+            )
+            facts["mcp_claude"] = sum(has_mcp_endpoint(declaration.config) for declaration in mcp.effective)
     facts["other_files"] = _has_other_files(root)
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts
@@ -226,8 +245,11 @@ def evaluate_plugin(
         prefix = str(first["id"]).split("-")[0]
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
-            if kind == "mcp" and section.get("mcp_flat"):  # this harness also reads the unwrapped .mcp.json shape
-                n += facts.get("mcp_flat", 0)
+            if kind == "mcp" and section.get("mcp_flat"):
+                n = facts.get("mcp_flat") or n
+                # An unwrapped .mcp.json with zero usable servers still takes precedence in Claude Code.
+                if profile["harness"] == "claude-code":
+                    n = facts.get("mcp_claude", n)
             effect = OUTCOME_EFFECT[outcome]
             if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
@@ -248,8 +270,11 @@ def evaluate_plugin(
                     "effect": "advisory",
                     "message": ".mcp.json names its servers at the top level, without the mcpServers wrapper. "
                     "Claude Code documents that shape; it was not tested on this harness.",
-                    "fix": "Use the mcpServers wrapper"
-                    + (", the shape this harness was tested with." if tested else "."),
+                    "fix": (
+                        "Use the mcpServers wrapper, the shape this harness was tested with."
+                        if tested
+                        else "Check the harness's plugin documentation and try the configuration on that harness."
+                    ),
                 }
             )
             worst = max(worst, _EFFECT_RANK["advisory"])
@@ -258,6 +283,7 @@ def evaluate_plugin(
         if (
             facts.get("any_manifest")
             and not facts.get("manifest_invalid")
+            and not facts.get("fmt_hermes_native")  # This check leaves the native YAML manifest contents unread.
             and not facts["declares_components"]
             and not facts.get("other_files")
             and not any(facts["components"].values())

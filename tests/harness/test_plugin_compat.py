@@ -321,6 +321,50 @@ def test_flat_mcp_count_skips_entries_that_are_not_servers(tmp_path: Path):
     assert not any(i.endswith("MCP-FLAT") for _, ids in _status(wrapped).values() for i in ids)
 
 
+@pytest.mark.parametrize(
+    ("declared", "name", "count"),
+    [(False, "another", 1), (True, "another", 2), (True, "demo", 1)],
+    ids=["other-format", "explicit-distinct-server", "explicit-override"],
+)
+def test_flat_mcp_count_respects_claude_config_sources(tmp_path: Path, declared: bool, name: str, count: int):
+    manifest = {"name": "demo", **({"mcpServers": "./mcp.json"} if declared else {})}
+    root = _bare_manifest(tmp_path / "p", data=manifest)
+    (root / ".mcp.json").write_text(json.dumps({"demo": {"url": "https://example.invalid/flat"}}))
+    (root / "mcp.json").write_text(json.dumps({"mcpServers": {name: {"url": "https://example.invalid/wrapped"}}}))
+    rows = _component_rows(root)
+    claude = next(f for f in rows["claude-code"] if f["id"] == "CC-PLUGIN-MCP")
+    assert claude["message"].startswith(f"{count} mcp:")
+    assert "CP-PLUGIN-MCP-NAMES" in {f["id"] for f in rows["copilot-cli"]}
+
+
+def test_flat_mcp_count_requires_a_nonempty_string_endpoint(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    path = root / ".mcp.json"
+    invalid = {"blank": {"command": ""}, "numeric": {"url": 42}, "null": {"command": None}}
+    path.write_text(json.dumps(invalid))
+    assert _component_rows(root)["claude-code"] == []
+    path.write_text(json.dumps({**invalid, "valid": {"command": "", "url": "https://example.invalid/mcp"}}))
+    claude = next(f for f in _component_rows(root)["claude-code"] if f["id"] == "CC-PLUGIN-MCP")
+    assert claude["message"].startswith("1 mcp:")
+
+
+def test_invalid_flat_mcp_does_not_count_a_different_formats_file(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    (root / ".mcp.json").write_text(json.dumps({"invalid": {"command": ""}}))
+    wrapped = {"mcpServers": {"demo": {"url": "https://example.invalid/mcp"}}}
+    (root / "mcp.json").write_text(json.dumps(wrapped))
+    rows = _component_rows(root)
+    assert "CC-PLUGIN-MCP" not in {f["id"] for f in rows["claude-code"]}
+    assert "CP-PLUGIN-MCP-NAMES" in {f["id"] for f in rows["copilot-cli"]}
+
+
+def test_flat_mcp_note_avoids_wrapper_advice_where_its_delivery_was_unverified(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p", "plugin.json", {"$schema": AGENT_V1, "name": "demo"})
+    (root / ".mcp.json").write_text(json.dumps({"demo": {"url": "https://example.invalid/mcp"}}))
+    note = next(f for f in _component_rows(root)["hermes"] if f["id"] == "HM-PLUGIN-MCP-FLAT")
+    assert "wrapper" not in note["fix"]
+
+
 def _codex_app(root: Path) -> None:
     _bare_manifest(root, ".codex-plugin/plugin.json", {"name": "demo", "apps": "./.app.json"})
     (root / ".app.json").write_text(json.dumps({"apps": {"demo": {"id": "connector_1"}}}))
@@ -527,10 +571,14 @@ def test_flat_mcp_count_survives_a_file_it_cannot_open(tmp_path: Path):
         (root / ".mcp.json").chmod(0o644)
 
 
-def test_plugin_yaml_alone_adds_nothing(tmp_path: Path):
-    bare = _manifest(tmp_path / "bare", "plugin.yaml", "name: demo\n")
+@pytest.mark.parametrize("manifest", ["name: demo\n", "name: demo\nprovides_hooks: [pre_llm_call]\n", "name: [\n"])
+def test_plugin_yaml_alone_does_not_claim_known_empty_contents(tmp_path: Path, manifest: str):
+    bare = _manifest(tmp_path / "bare", "plugin.yaml", manifest)
     (bare / "README.md").write_text("text\n")
-    assert _status(bare)["hermes"] == ("loads", ["HM-PLUGIN-NO-COMPONENTS"])
+    assert "HM-PLUGIN-NO-COMPONENTS" not in _status(bare)["hermes"][1]
+
+
+def test_native_hermes_files_do_not_trigger_known_empty_note(tmp_path: Path):
     native = tmp_path / "native"
     _hermes_native(native)
     assert _status(native)["hermes"] == ("loads", [])

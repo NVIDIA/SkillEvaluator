@@ -11,6 +11,7 @@ is over its limit, 2 when git could not compare the refs. CI does not pass it ye
 from __future__ import annotations
 
 import argparse
+import ast
 import json
 import os
 import re
@@ -36,15 +37,19 @@ FIX_ONLY = {"G1", "G2", "G5"}
 _TITLE = re.compile(r"(\w+)(\([^)]*\))?!?:")
 # One ``--numstat -z`` record. A rename has an empty path, then the old and the new path.
 _NUMSTAT = re.compile(r"(\d+|-)\t(\d+|-)\t(?:\0([^\0]*)\0)?([^\0]+)\0")
-_TEST_FILE = re.compile(r"tests/(.*/)?test_[^/]*\.py")
+_TEST_FILE = re.compile(r"tests/(?:[^/]+/)*(?:test_[^/]*|[^/]*_test)\.py")
 _TEST_DEF = re.compile(r"^([+-])\s*(?:async\s+)?def test_", re.MULTILINE)
 _FIXTURE = re.compile(r"tests/.*(?<!\.py)")
 
 
-def _git(repo: Path, *args: str) -> str:
+def _git_bytes(repo: Path, *args: str) -> bytes:
     # stderr is not captured, so a failing git command explains itself in the CI log.
     command = ["git", "-C", str(repo), *args]
-    return subprocess.run(command, check=True, stdout=subprocess.PIPE, encoding="utf-8", errors="replace").stdout
+    return subprocess.run(command, check=True, stdout=subprocess.PIPE).stdout
+
+
+def _git(repo: Path, *args: str) -> str:
+    return _git_bytes(repo, *args).decode("utf-8", errors="replace")
 
 
 def _baseline(repo: Path) -> dict:
@@ -57,25 +62,76 @@ def _name(path: str) -> str:
     return "`" + json.dumps(path)[1:-1].replace("`", "\\u0060") + "`"
 
 
+def _test_functions(repo: Path, blob: str) -> set[tuple[str, ...]]:
+    source = _git_bytes(repo, "cat-file", "blob", blob)
+    try:
+        tree = ast.parse(source)
+    except SyntaxError:
+        # A syntactically invalid module has no collectable test functions.
+        return set()
+
+    names: set[tuple[str, ...]] = set()
+
+    def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
+        if isinstance(node, ast.ClassDef):
+            scope = (*scope, node.name)
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            if node.name.startswith("test_"):
+                names.add((*scope, node.name))
+            return
+        for child in ast.iter_child_nodes(node):
+            visit(child, scope)
+
+    visit(tree, ())
+    return names
+
+
+def _new_tests(repo: Path, span: str) -> tuple[list[str], int]:
+    # Raw records give both blob IDs and pair test-module renames, while moves
+    # into tests/ are additions. Compare names within each paired module.
+    diff = _git(repo, "diff", "--raw", "--no-abbrev", "-z", "-M", span, "--", "tests/")
+    records = iter(diff.split("\0")[:-1])
+    modules, functions = [], 0
+    for header, before_path in zip(records, records, strict=True):
+        before_mode, mode, before_blob, blob, status = header.split()
+        path = next(records) if status.startswith("R") else before_path
+        if mode == "000000" or not _TEST_FILE.fullmatch(path):
+            continue
+        before_module = before_mode != ":000000" and _TEST_FILE.fullmatch(before_path)
+        if not before_module:
+            modules.append(_name(path))
+        if mode.startswith("100"):
+            previous = _test_functions(repo, before_blob) if before_module and before_mode.startswith(":100") else set()
+            functions += len(_test_functions(repo, blob) - previous)
+    return modules, functions
+
+
 def measure(repo: Path, base: str, head: str) -> dict:
     """Everything the report shows, read from the diff between the merge base of ``base`` and ``head``."""
     span = f"{base}...{head}"
-    rows, moved, new = {}, {}, []  # Lines per path, path at the base to path at the head, created paths.
+    rows, new = {}, []  # Lines per path, created paths.
     # Renames are paired inside one part only, so a file moved into src/ or tests/ counts as new there.
-    for part in (["src/"], ["tests/"], [":!src/", ":!tests/"]):
-        numstat = _git(repo, "diff", "--numstat", "-z", "-M", span, "--", *part)
-        for added, removed, old, path in _NUMSTAT.findall(numstat):
+    for part in ("src/", "tests/"):
+        numstat = _git(repo, "diff", "--numstat", "-z", "-M", span, "--", part)
+        for added, removed, _, path in _NUMSTAT.findall(numstat):
             rows[path] = (0, 0) if added == "-" else (int(added), int(removed))  # A binary file counts as 0.
-            moved[old or path] = path
-        new += _git(repo, "diff", "--name-only", "-z", "-M", "--diff-filter=A", span, "--", *part).split("\0")[:-1]
-    net = {path: added - removed for path, (added, removed) in rows.items()}
-    big = [moved.get(path, path) for path in _baseline(repo).get("files", {})]
+        new += _git(repo, "diff", "--name-only", "-z", "-M", "--diff-filter=A", span, "--", part).split("\0")[:-1]
+    # Baseline growth follows a rename anywhere in the tree.
+    baseline_files = _baseline(repo).get("files", {})
+    all_numstat = _git(repo, "diff", "--numstat", "-z", "-M", span, "--")
+    grown = {
+        _name(path): int(added) - int(removed)
+        for added, removed, old, path in _NUMSTAT.findall(all_numstat)
+        if (old or path) in baseline_files and added != "-" and int(added) > int(removed)
+    }
+    new_test_files, new_test_functions = _new_tests(repo, span)
     defs = _TEST_DEF.findall(_git(repo, "diff", "-U0", "-M", "--no-color", "--no-ext-diff", span, "--", "tests/*.py"))
     found: dict = {
-        "new_test_files": [_name(path) for path in new if _TEST_FILE.fullmatch(path)],
+        "new_test_files": new_test_files,
+        "new_test_functions": new_test_functions,
         "test_defs": (defs.count("+"), defs.count("-")),
         "new_src_files": [_name(path) for path in new if path.startswith("src/")],
-        "grown": {_name(path): net[path] for path in big if net.get(path, 0) > 0},
+        "grown": grown,
         "fixtures": {_name(path): rows[path][0] for path in new if _FIXTURE.fullmatch(path)},
     }
     for root in ("src/", "tests/"):
@@ -87,12 +143,12 @@ def measure(repo: Path, base: str, head: str) -> dict:
 def judge(found: dict, fix: bool) -> dict[str, list[str]]:
     """What is over its limit, per rule. The ``FIX_ONLY`` rules apply to ``fix`` titles only."""
     (src_added, src_removed), (tests_added, tests_removed) = found["src/"], found["tests/"]
-    growth, (defs_added, defs_removed) = tests_added - tests_removed, found["test_defs"]
+    growth = tests_added - tests_removed
     checks = [  # rule, what the number counts, number, limit
         ("G1", "net lines under src/", src_added - src_removed, FIX_SRC),
         ("G1", "net lines under tests/", growth, FIX_TESTS),
         ("G2", "new test files", len(found["new_test_files"]), 0),
-        ("G2", "new test functions", defs_added - defs_removed, FIX_TEST_FUNCTIONS),
+        ("G2", "new test functions", found["new_test_functions"], FIX_TEST_FUNCTIONS),
         ("G3", "baseline files that grew", len(found["grown"]), 0),
         ("G3", f"net test lines for {src_added} added source lines", growth, max(TEST_FLOOR, TEST_RATIO * src_added)),
         *(("G4", f"lines in new {path}", lines, FIXTURE_LINES) for path, lines in found["fixtures"].items()),
@@ -115,6 +171,7 @@ def render(found: dict, kind: str, over: dict[str, list[str]], excepted: bool) -
         "",
         *(f"- {what}: +{added} -{removed}, net {added - removed:+}" for what, (added, removed) in sizes.items()),
         f"- New test files: {', '.join(found['new_test_files']) or 'none'}",
+        f"- New test functions: {found['new_test_functions']}",
         f"- New files under `src/`: {', '.join(found['new_src_files']) or 'none'}",
         f"- Baseline files that grew: {grown or 'none'}",
         f"- Added test lines against added source lines: {found['tests/'][0]} / {found['src/'][0]}",

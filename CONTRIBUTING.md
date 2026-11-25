@@ -60,9 +60,9 @@ The **Size report** CI job reports these numbers on each pull request that is no
 docs-only. Not enforced yet; the `size-exception` label marks an agreed exception.
 
 - A `fix:` adds at most 150 net lines under `src/` and 400 under `tests/`, no
-  new file under `src/`, and at most 3 new test functions.
-- Extend an existing test module or `pytest.mark.parametrize` table instead of
-  adding a test file.
+  new file under `src/`, no new test module, and at most 3 new test functions.
+- For all changes, prefer extending an existing test module or
+  `pytest.mark.parametrize` table when it covers the same behavior.
 - Big files only shrink: a file listed in `config/size_baseline.json` does not grow.
 - Past 100 net new test lines, a change adds at most 3 per added source line.
 - No whole captured reports as fixtures: keep one base file and build variants

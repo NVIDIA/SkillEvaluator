@@ -28,7 +28,7 @@ from skillevaluator.cli import cli
 
 def main() -> None:
     out = HERE / "cli_surface.json"
-    out.write_text(layout(json.dumps(build_cli_surface(cli), sort_keys=True)), encoding="utf-8")
+    out.write_text(layout(json.dumps(build_cli_surface(cli), sort_keys=True)), encoding="utf-8", newline="\n")
     print(f"wrote {out}")
 
 

@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
     check = parser.parse_args(argv).check
     stale = 0
     for path in sorted(path for pattern in MANAGED for path in ROOT.glob(pattern)):
-        text = path.read_text(encoding="utf-8")
+        text = path.read_bytes().decode("utf-8")
         if (laid_out := layout(text)) != text:
             stale += 1
             print(("not in layout: " if check else "rewrote: ") + path.relative_to(ROOT).as_posix())

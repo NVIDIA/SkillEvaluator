@@ -387,7 +387,12 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         assert pending.returncode != 0
         assert "DevZone artifacts are not visible yet" in pending.stderr
         assert not git("ls-remote", "origin", "refs/tags/stable")
-    promoted = promote("v1.0.1", bootstrap_sha=first, mode=None if existing_github_only else "--manual")
+        manual_promoted = promote("v1.0.1", bootstrap_sha=first, mode="--manual")
+        assert manual_promoted.returncode == 0, manual_promoted.stderr
+        assert published_ref() == first
+        # Restore the unbootstrapped remote to test the Actions entry point too.
+        git("push", "origin", "--delete", "stable")
+    promoted = promote("v1.0.1", bootstrap_sha=first)
     if existing_github_only:
         assert promoted.returncode != 0
         assert "reviewed bootstrap commit must contain the GitLab stable include" in promoted.stderr

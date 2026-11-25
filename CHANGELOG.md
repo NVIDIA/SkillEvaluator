@@ -125,6 +125,10 @@ All notable changes to SkillEvaluator are documented in this file.
   also isolates recursive retained metadata during JSON export, while keeping
   healthy runs readable.
 
+- Report source links encode reserved characters, UTF-8 names, and retained
+  filename/ref bytes so refs and skill paths link to the intended GitHub and
+  GitLab locations. HTML labels remain readable while link targets stay encoded.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

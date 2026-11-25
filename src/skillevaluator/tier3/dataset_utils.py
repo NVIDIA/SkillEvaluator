@@ -11,6 +11,7 @@ and parsing logic.
 
 import json
 import logging
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, Literal
 
@@ -90,8 +91,12 @@ def load_dataset_entries(dataset_path: Path) -> list[dict[str, Any]]:
     return entries
 
 
-def load_dataset_entries_with_format(dataset_path: Path) -> tuple[list[dict[str, Any]], DatasetFormat]:
-    """Load normalized dataset entries and report the detected authoring format."""
+def load_dataset_entries_with_format(
+    dataset_path: Path,
+    *,
+    inspect_authored_entry: Callable[[dict[str, Any]], None] | None = None,
+) -> tuple[list[dict[str, Any]], DatasetFormat]:
+    """Load normalized entries and optionally inspect each entry as authored."""
     suffix = dataset_path.suffix.lower()
 
     if suffix == ".jsonl":
@@ -104,7 +109,7 @@ def load_dataset_entries_with_format(dataset_path: Path) -> tuple[list[dict[str,
         raise ValueError(f"Unsupported dataset format: {suffix}")
 
     dataset_format = detect_dataset_format(data)
-    return normalize_dataset_entries(data), dataset_format
+    return normalize_dataset_entries(data, inspect_authored_entry=inspect_authored_entry), dataset_format
 
 
 def detect_dataset_format(data: Any) -> DatasetFormat:
@@ -114,25 +119,23 @@ def detect_dataset_format(data: Any) -> DatasetFormat:
     return "legacy"
 
 
-def normalize_dataset_entries(data: Any) -> list[dict[str, Any]]:
+def normalize_dataset_entries(
+    data: Any, *, inspect_authored_entry: Callable[[dict[str, Any]], None] | None = None
+) -> list[dict[str, Any]]:
     """Normalize supported eval dataset shapes to runtime fields."""
     if isinstance(data, dict):
         if isinstance(data.get("evals"), list):
             skill_name = data.get("skill_name")
             if not isinstance(skill_name, str) or not skill_name.strip():
                 raise ValueError("agentskills dataset requires a non-empty top-level skill_name")
-            entries: list[dict[str, Any]] = []
-            for idx, entry in enumerate(data["evals"]):
-                if not isinstance(entry, dict):
-                    raise ValueError(f"agentskills dataset evals[{idx}] must be an object, got {type(entry).__name__}")
-                entries.append(_normalize_entry(entry, skill_name=skill_name, entry_index=idx))
-            return entries
-        if isinstance(data.get("cases"), list):
-            return _normalize_legacy_entries(data["cases"])
-        return [_normalize_entry(data)]
+            return _normalize_entries(
+                data["evals"], skill_name=skill_name, inspect_authored_entry=inspect_authored_entry
+            )
+        cases = data.get("cases")
+        data = cases if isinstance(cases, list) else [data]
 
     if isinstance(data, list):
-        return _normalize_legacy_entries(data)
+        return _normalize_entries(data, inspect_authored_entry=inspect_authored_entry)
 
     return []
 
@@ -140,12 +143,22 @@ def normalize_dataset_entries(data: Any) -> list[dict[str, Any]]:
 # ── private helpers ──────────────────────────────────────────────────────────
 
 
-def _normalize_legacy_entries(entries: list[Any]) -> list[dict[str, Any]]:
+def _normalize_entries(
+    entries: list[Any],
+    *,
+    inspect_authored_entry: Callable[[dict[str, Any]], None] | None,
+    skill_name: str | None = None,
+) -> list[dict[str, Any]]:
     normalized: list[dict[str, Any]] = []
     for index, entry in enumerate(entries):
         if not isinstance(entry, dict):
-            raise ValueError(f"legacy dataset entry {index} must be an object, got {type(entry).__name__}")
-        normalized.append(_normalize_entry(entry, entry_index=index))
+            location = (
+                f"agentskills dataset evals[{index}]" if skill_name is not None else f"legacy dataset entry {index}"
+            )
+            raise ValueError(f"{location} must be an object, got {type(entry).__name__}")
+        if inspect_authored_entry is not None:
+            inspect_authored_entry(entry)
+        normalized.append(_normalize_entry(entry, skill_name=skill_name, entry_index=index))
     return normalized
 
 

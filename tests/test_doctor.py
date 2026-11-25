@@ -17,6 +17,7 @@ from click.testing import CliRunner
 
 from skillevaluator import doctor as readiness
 from skillevaluator.cli import cli
+from skillevaluator.constants import CONTENT_DEDUP_LLM_MAX_TOKENS
 from skillevaluator.utils import tool_runner
 from skillevaluator.utils.tool_runner import ExternalTool, Tools
 
@@ -347,6 +348,8 @@ def test_tier2_live_probe_sends_one_bounded_request_per_model(provider_api, time
     assert _request_timeouts(provider_api.requests) == [bound, bound]
     chat = json.loads(provider_api.requests[1].content)
     assert chat["model"] == rows["LLM provider"][1].split(" / ", 1)[1]
+    # The probe uses the output ceiling of Tier 2 duplicate analysis.
+    assert chat["max_tokens"] == CONTENT_DEDUP_LLM_MAX_TOKENS
 
 
 def test_tier2_anthropic_chat_probe_is_bounded_by_the_timeout(provider_api, monkeypatch) -> None:

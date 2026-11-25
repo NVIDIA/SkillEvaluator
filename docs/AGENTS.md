@@ -33,6 +33,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `grader-validation.mdx` — independent-label qualification of the shipped verifier
 - `eval-datasets.mdx` — the `evals/` contract, dataset generation, run policy
 - `agents-and-sandboxes.mdx` — agents, environment backends, local mode, readiness
+- `mcp-servers.mdx` — MCP servers, Compose sidecars and where addresses resolve per backend
 - `custom-graders.mdx` — bring-your-own graders and native Harbor tasks
 - `reports.mdx` — report formats, scores, and the results-on-disk contract
 - `metrics-reference.mdx` — every metric's formula, range, units, evidence, and validation status
@@ -44,6 +45,7 @@ folder holds MDX pages published to <https://docs.nvidia.com/skills/skillevaluat
 - `gitlab-ci.mdx` — reusable skill checks and downloadable GitLab reports
 - `advanced-ci.mdx` — secondary opt-in prerequisites and all-tier reference
 - `ci-integration.mdx` — exit codes, GitHub Actions recipe, progressive adoption
+- `cookbook-authenticated-cli.mdx` — evaluate a CLI skill that needs a login
 - `cli-reference.mdx` — every command and flag
 - `environment-variables.mdx` — variable-by-variable inventory
 - `developer-guide.mdx` — contributor setup, tests, and docs workflow

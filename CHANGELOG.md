@@ -155,6 +155,11 @@ All notable changes to SkillEvaluator are documented in this file.
   Single-workflow JSON reports include reference warning messages. Markdown
   reports count these warnings in the summary.
 
+- Python content chunks preserve complete multiline function and class headers
+  without inline implementation bodies, including continued bodies and decorated
+  members. More definitions can clear the 80-character minimum, increasing
+  embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

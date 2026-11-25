@@ -93,7 +93,7 @@ pinned setup, apply these edits to its current workflow files in one PR.
    Remove the job's `image` input and any explicit `artifact-name`. The channel
    supplies the image and uses `skill-evaluator-tier1`. Keep your paths, scan
    policy, and `contents: read` permission. Add `id-token: write` for PR feedback.
-2. Choose one feedback workflow. For comments without Pages, follow
+2. For PR feedback, choose one workflow. For comments without Pages, follow
    [Set up stable PR comments](#set-up-stable-pr-comments).
    For hosted feedback, follow the [Pages setup](#enable-hosted-reports).
    In `publish-skill-reports.yml`, set the publisher job's `uses` to
@@ -120,7 +120,9 @@ reusable job level, so check any required status-check names on a new PR.
 ### Enable signed scan results
 
 Set up the [stable scan](#follow-the-latest-stable-release). Keep
-`id-token: write` on the scan job.
+`id-token: write` on the scan job. If you're switching from hosted reports,
+remove `report-base-url` from the scan job's `with` inputs to clear the old
+Pages link from the scan summary.
 
 ### Add the comment workflow
 

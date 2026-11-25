@@ -162,7 +162,9 @@ reports. No Pages settings, site history branch or report URL are needed.
 1. Keep `.github/workflows/skill-checks.yml` named **Skill checks**, with one
    reusable scan job and the default **skill-evaluator-tier1** artifact name.
    Enable `id-token: write` alongside `contents: read` for signed execution
-   receipts.
+   receipts. If switching from hosted reports, remove the scan job's
+   `report-base-url` input and retire `.github/workflows/publish-skill-reports.yml`
+   in the same setup PR to clear the old Pages link from the scan summary.
 2. Add a comment template as `.github/workflows/comment-skill-checks.yml`.
    - For `skill-checks-stable.yml@stable`, use the
      [stable comment template](templates/manual/comment-skill-checks-stable.yml) once
@@ -174,14 +176,12 @@ reports. No Pages settings, site history branch or report URL are needed.
 3. After all scan-file edits, run
    `git hash-object .github/workflows/skill-checks.yml` and set
    `trusted-caller-blobs` to that exact value. Review and refresh the blob after
-   every later scan-file edit. For shared wrappers, keep the
-   [same wrapper approvals and delegation](#calling-through-a-shared-workflow).
+   every later scan-file edit. For versioned scans through a shared wrapper,
+   keep the [same wrapper approvals and delegation](#calling-through-a-shared-workflow).
 4. Merge both files into the default branch and open a PR changing a skill.
    The comment workflow grants only `contents: read`, `actions: read` and
    `pull-requests: write`. Organization policy must allow these permissions and
-   the referenced actions. Choose this workflow or the hosted publisher for PR
-   feedback. If switching from hosted reports, remove the old
-   `.github/workflows/publish-skill-reports.yml` in the same setup PR.
+   the referenced actions. Use one workflow for PR feedback.
 
 The second workflow runs after **Skill checks** completes, including failed
 scans. Its manual trigger requires the completed `run-id` and `run-attempt`.

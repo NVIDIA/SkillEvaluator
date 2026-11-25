@@ -4,6 +4,17 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `harness-check` reports plugin component kinds that were never tested on a
+  harness as a note (`outcome: untested`) instead of a degraded status. This
+  affects `OW-PLUGIN-COMMANDS` for Claude-format bundles, the Codex and Copilot
+  CLI LSP findings, and Hermes component findings for native plugins. New rules
+  say what was tested: `CX-PLUGIN-COMMANDS`, `CP-PLUGIN-LSP`,
+  `HM-PLUGIN-COMMANDS`, `HM-PLUGIN-AGENTS`, `HM-PLUGIN-HOOKS`, `HM-PLUGIN-MCP`.
+  A profile passed with `--harness-profiles` that names a fact or outcome this
+  release doesn't know now stops with a clear error.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added

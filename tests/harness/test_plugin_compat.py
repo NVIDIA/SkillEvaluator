@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for plugin facts and per-harness plugin rules."""
 
+import copy
 import json
 import os
 import threading
@@ -41,6 +42,12 @@ def _status(root: Path) -> dict[str, tuple[str, list[str]]]:
         result = evaluate_plugin(profile, facts)
         out[result.harness] = (result.status, [f["id"] for f in result.findings])
     return out
+
+
+@pytest.fixture(autouse=True)
+def _empty_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(Path, "home", lambda: home)
 
 
 def test_every_profile_has_plugin_section():
@@ -84,7 +91,8 @@ def test_agent_v1_needs_schema_for_hermes(tmp_path: Path):
 def test_undelivered_components_degrade(tmp_path: Path):
     s = _status(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("skills", "commands", "mcp")))
     assert s["codex"][0] == "degraded" and "CX-PLUGIN-COMMANDS" in s["codex"][1]
-    assert s["openclaw"][0] == "degraded" and "OW-PLUGIN-MCP" in s["openclaw"][1]
+    # OpenClaw reads this bundle as Claude format, where commands were not verified: a note, not a degraded status.
+    assert s["openclaw"][0] == "loads" and {"OW-PLUGIN-COMMANDS", "OW-PLUGIN-MCP"} <= set(s["openclaw"][1])
     assert s["claude-code"][0] == "loads" and "CC-PLUGIN-MCP" in s["claude-code"][1]
 
 
@@ -257,3 +265,257 @@ def test_plugin_json_nested_past_the_parser_recursion_limit_is_an_invalid_manife
     (tmp_path / ".claude-plugin" / "plugin.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
 
     assert plugin_facts(tmp_path)["manifest_invalid"] is True
+
+
+BROKEN = '{"name": "demo", "version": '
+
+
+def _manifest(root: Path, rel: str, text: str) -> Path:
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(text, encoding="utf-8")
+    return root
+
+
+def _bundle(root: Path, manifests: tuple[str, ...], kinds: tuple[str, ...] = ()) -> Path:
+    """A bundle with one skill, the given manifests and one component of each kind in ``kinds``.
+
+    ``agent`` stands for a root plugin.json that carries the Agent Plugins schema.
+    """
+    _plugin(root, None, components=("skills", "commands") if "commands" in kinds else ("skills",))
+    for manifest in manifests:
+        path = root / ("plugin.json" if manifest == "agent" else manifest)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps({"$schema": AGENT_V1, "name": "demo"} if manifest == "agent" else {"name": "demo"}))
+    if "agents" in kinds:
+        (root / "agents").mkdir()
+        (root / "agents/helper.md").write_text("---\nname: helper\ndescription: Helps.\n---\nHelp\n")
+    if "hooks" in kinds:
+        (root / "hooks").mkdir()
+        (root / "hooks/hooks.json").write_text(json.dumps({"hooks": {"Stop": []}}))
+    if "mcp" in kinds:
+        (root / "mcp.json").write_text(json.dumps({"mcpServers": {"a": {"type": "stdio", "command": "x"}}}))
+    if "lsp" in kinds:
+        (root / ".lsp.json").write_text(json.dumps({"srv": {"command": "x"}}))
+    return root
+
+
+def _plugin_findings(root: Path, harness: str) -> tuple[str, dict[str, dict[str, str]]]:
+    profile = next(p for p in load_profiles() if p["harness"] == harness)
+    result = evaluate_plugin(profile, plugin_facts(root))
+    assert len({f["id"] for f in result.findings}) == len(result.findings)
+    return result.status, {f["id"]: f for f in result.findings}
+
+
+def test_component_tables_separate_tested_from_untested_kinds():
+    cells = {p["harness"]: p["plugin"]["components"] for p in load_profiles()}
+
+    def kinds(outcome: str) -> dict[str, list[str]]:
+        found = {h: sorted(k for k, v in table.items() if v == outcome) for h, table in cells.items()}
+        return {h: k for h, k in found.items() if k}
+
+    assert kinds("not_observed") == {"codex": ["agents", "commands"], "openclaw": ["agents", "hooks"]}
+    assert kinds("untested") == {
+        "codex": ["lsp"],
+        "copilot-cli": ["lsp"],
+        "hermes": ["agents", "commands", "hooks", "lsp", "mcp"],
+        "openclaw": ["commands"],
+    }
+
+
+def test_every_component_outcome_has_an_effect_and_a_message():
+    from skillevaluator.harness.plugin import OUTCOME_EFFECT, OUTCOME_TEXT
+
+    used = {v for p in load_profiles() for v in p["plugin"]["components"].values()}
+    assert used <= set(OUTCOME_EFFECT)
+    assert {o for o, effect in OUTCOME_EFFECT.items() if effect} == set(OUTCOME_TEXT)
+    assert OUTCOME_EFFECT["untested"] == "advisory"
+    assert "when tested" not in OUTCOME_TEXT["untested"]
+    assert "not registered" not in OUTCOME_TEXT["not_observed"]
+    # What one harness's documentation says belongs in that harness's profile, not in a shared outcome text.
+    assert not any("documentation" in text for text in OUTCOME_TEXT.values())
+
+
+def test_untested_component_kind_is_a_note_and_does_not_degrade(tmp_path: Path):
+    with_lsp = _bundle(tmp_path / "l", (".claude-plugin/plugin.json",), ("lsp",))
+    with_commands = _bundle(tmp_path / "c", (".claude-plugin/plugin.json",), ("commands",))
+    agent = _bundle(tmp_path / "a", ("agent",), ("lsp",))
+    native = _bundle(tmp_path / "n", ("plugin.yaml",), ("commands", "agents", "hooks", "mcp", "lsp"))
+    cases = [
+        (with_lsp, "codex", ["CX-PLUGIN-LSP"]),
+        (with_commands, "openclaw", ["OW-PLUGIN-COMMANDS"]),
+        (agent, "hermes", ["HM-PLUGIN-LSP"]),
+        (native, "hermes", [f"HM-PLUGIN-{kind}" for kind in ("COMMANDS", "AGENTS", "HOOKS", "MCP", "LSP")]),
+    ]
+    for root, harness, ids in cases:
+        status, findings = _plugin_findings(root, harness)
+        assert status == "loads", harness
+        for rule_id in ids:
+            finding = findings[rule_id]
+            assert finding["effect"] == "advisory" and finding["outcome"] == "untested", rule_id
+            assert "not tested on this harness" in finding["message"] and "when tested" not in finding["message"]
+            assert finding["fix"]
+
+
+def test_component_kinds_with_a_negative_test_still_degrade(tmp_path: Path):
+    claude = _bundle(tmp_path / "c", (".claude-plugin/plugin.json",), ("agents", "hooks"))
+    for harness, ids in (("codex", ["CX-PLUGIN-AGENTS"]), ("openclaw", ["OW-PLUGIN-AGENTS", "OW-PLUGIN-HOOKS"])):
+        status, findings = _plugin_findings(claude, harness)
+        assert status == "degraded", harness
+        for rule_id in ids:
+            finding = findings[rule_id]
+            assert finding["effect"] == "degraded" and finding["outcome"] == "not observed", rule_id
+            assert finding["message"].endswith("did not reach the model or run when tested.")
+
+
+def test_codex_commands_stay_degraded_and_say_what_was_tested(tmp_path: Path):
+    # The helper's command body uses $ARGUMENTS, the one command shape that was tested on Codex.
+    manifests = {"c": ".claude-plugin/plugin.json", "x": ".codex-plugin/plugin.json", "u": ".cursor-plugin/plugin.json"}
+    bundles = [_bundle(tmp_path / name, (manifest,), ("commands",)) for name, manifest in manifests.items()]
+    for root in [*bundles, _bundle(tmp_path / "a", ("agent",), ("commands",))]:
+        status, findings = _plugin_findings(root, "codex")
+        finding = findings["CX-PLUGIN-COMMANDS"]
+        assert status == "degraded", root.name
+        assert finding["effect"] == "degraded" and finding["outcome"] == "not observed"
+        assert finding["message"] == (
+            "Plugin commands did not reach the model when tested. "
+            "The tested command used $ARGUMENTS; commands without $ARGUMENTS were not tested."
+        )
+        assert finding["fix"] and finding["confidence"] == "medium"
+    refused = tmp_path / "refused"
+    _plugin(refused, "plugin.yaml", components=("commands",))
+    assert _status(refused)["codex"] == ("not_loaded", ["CX-PLUGIN-FORMAT"])
+
+
+def test_openclaw_commands_degrade_unless_the_bundle_is_read_as_claude_format(tmp_path: Path):
+    claude, codex, cursor = (f".{name}-plugin/plugin.json" for name in ("claude", "codex", "cursor"))
+    cases = {
+        "claude": ((claude,), "untested"),
+        "claude-agent": ((claude, "agent"), "untested"),
+        "plain-json": (("plugin.json",), "untested"),
+        "codex": ((codex,), "not observed"),
+        "cursor": ((cursor,), "not observed"),
+        "agent": (("agent",), "not observed"),
+        # .codex-plugin and .cursor-plugin win over .claude-plugin when OpenClaw picks the bundle format.
+        "claude-codex": ((claude, codex), "not observed"),
+        "claude-cursor": ((claude, cursor), "not observed"),
+    }
+    for name, (manifests, outcome) in cases.items():
+        status, findings = _plugin_findings(_bundle(tmp_path / name, manifests, ("commands",)), "openclaw")
+        finding = findings["OW-PLUGIN-COMMANDS"]
+        assert finding["outcome"] == outcome, name
+        if outcome == "untested":
+            assert status == "loads" and finding["effect"] == "advisory", name
+            assert finding["message"] == "1 commands: not tested on this harness."
+        else:
+            assert status == "degraded" and finding["effect"] == "degraded", name
+            assert "only for Claude-format bundles" in finding["message"] and finding["fix"]
+    refused = _manifest(
+        _plugin(tmp_path / "refused", None, components=("commands",)), ".codex-plugin/plugin.json", BROKEN
+    )
+    status, ids = _status(refused)["openclaw"]
+    assert status == "not_loaded" and "OW-PLUGIN-COMMANDS" not in ids
+
+
+def test_hermes_component_findings_are_scoped_to_portable_packages(tmp_path: Path):
+    # Hermes was tested with an Agent Plugins bundle (a portable package) only, so only that shape has a result.
+    package = _bundle(tmp_path / "a", ("agent",), ("commands", "agents", "hooks", "mcp"))
+    status, findings = _plugin_findings(package, "hermes")
+    assert status == "degraded"
+    for kind, confidence in (("COMMANDS", "high"), ("AGENTS", "medium"), ("HOOKS", "high")):
+        finding = findings[f"HM-PLUGIN-{kind}"]
+        assert finding["effect"] == "degraded" and finding["outcome"] == "not observed", kind
+        assert "portable package" in finding["message"] and finding["message"].endswith("when tested.")
+        assert finding["confidence"] == confidence, kind
+    mcp = findings["HM-PLUGIN-MCP"]
+    assert (mcp["effect"], mcp["outcome"], mcp["confidence"]) == ("advisory", "disputed", "medium")
+    assert mcp["message"] == (
+        "MCP servers of a portable package did not start when tested, "
+        "although Hermes documents stdio servers from a root mcp.json."
+    )
+    assert mcp["fix"]
+    only_mcp = _bundle(tmp_path / "m", ("agent",), ("mcp",))
+    assert _plugin_findings(only_mcp, "hermes")[0] == "loads"
+
+
+def test_copilot_lsp_note_says_the_file_is_not_a_documented_place(tmp_path: Path):
+    root = _bundle(tmp_path / "c", (".claude-plugin/plugin.json",), ("lsp",))
+    status, findings = _plugin_findings(root, "copilot-cli")
+    finding = findings["CP-PLUGIN-LSP"]
+    assert status == "loads"
+    assert (finding["effect"], finding["outcome"], finding["confidence"]) == ("advisory", "untested", "medium")
+    assert ".lsp.json" in finding["message"] and "when tested" not in finding["message"]
+    # The file stays where Claude Code reads it; Copilot's own config is added next to it.
+    assert finding["fix"].startswith("Keep .lsp.json") and "plugin reference" in finding["fix"]
+    refused = _bundle(tmp_path / "x", (".codex-plugin/plugin.json",), ("lsp",))
+    assert "CP-PLUGIN-LSP" not in _plugin_findings(refused, "copilot-cli")[1]
+
+
+def test_plugin_rule_confidence_labels():
+    labels = {r["id"]: r["confidence"] for p in load_profiles() for r in p["plugin"]["rules"]}
+    medium = {
+        "CX-PLUGIN-NAMESPACE",
+        "CX-PLUGIN-COMMANDS",
+        "CP-PLUGIN-MCP-NAMES",
+        "CP-PLUGIN-LSP",
+        "HM-PLUGIN-DISABLED",
+        "HM-PLUGIN-AGENTS",
+        "HM-PLUGIN-MCP",
+        "OW-PLUGIN-COMMANDS",
+    }
+    high = {
+        "CX-PLUGIN-FORMAT",
+        "CX-PLUGIN-SKILL-CAP",
+        "CX-PLUGIN-AGENT-HOOKS",
+        "CP-PLUGIN-FORMAT",
+        "CP-PLUGIN-AGENTV1",
+        "HM-PLUGIN-FORMAT",
+        "HM-PLUGIN-COMMANDS",
+        "HM-PLUGIN-HOOKS",
+        "OC-PLUGIN-FORMAT",
+    }
+    assert {rule_id: labels[rule_id] for rule_id in medium} == dict.fromkeys(medium, "medium")
+    assert {rule_id: labels[rule_id] for rule_id in high} == dict.fromkeys(high, "high")
+
+
+def test_unverified_component_note_reaches_the_panel_and_the_json(tmp_path: Path):
+    root = _bundle(tmp_path / "p", (".claude-plugin/plugin.json",), ("lsp",))
+    out = tmp_path / "h.json"
+    args = ["harness-check", str(root), "-v", "--harness", "codex", "--json", str(out)]
+    result = CliRunner().invoke(cli, args, env={"COLUMNS": "120"})
+    assert result.exit_code == 0, result.output
+    printed = " ".join(result.output.split())
+    assert "not tested on this harness" in printed and "when tested" not in printed
+    block = json.loads(out.read_text(encoding="utf-8"))["harness_compatibility"]
+    row = next(rows for key, rows in block.items() if key.endswith("(plugin)"))[0]
+    finding = next(f for f in row["findings"] if f["id"] == "CX-PLUGIN-LSP")
+    assert row["status"] == "loads"
+    assert (finding["effect"], finding["outcome"]) == ("advisory", "untested") and finding["fix"]
+
+
+def _profile_copy(harness: str = "claude-code") -> dict:
+    return copy.deepcopy(next(p for p in load_profiles() if p["harness"] == harness))
+
+
+def test_profile_that_names_an_unknown_fact_or_outcome_is_a_clear_error(tmp_path: Path):
+    facts = plugin_facts(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("skills", "mcp")))
+    newer_fact, newer_outcome = _profile_copy(), _profile_copy()
+    newer_fact["plugin"]["rules"].append(
+        {"id": "CC-PLUGIN-NEW", "when": "not_a_fact", "effect": "advisory", "message": "m"}
+    )
+    newer_outcome["plugin"]["components"]["mcp"] = "not_an_outcome"
+    with pytest.raises(ValueError, match="CC-PLUGIN-NEW reads the fact 'not_a_fact'"):
+        evaluate_plugin(newer_fact, facts)
+    with pytest.raises(ValueError, match="unknown plugin component outcome 'not_an_outcome'"):
+        evaluate_plugin(newer_outcome, facts)
+
+
+def test_harness_check_reports_a_profile_it_cannot_read_as_a_usage_error(tmp_path: Path):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("skills", "mcp"))
+    profiles = tmp_path / "profiles"
+    profiles.mkdir()
+    source = Path(evaluate_plugin.__code__.co_filename).parent / "profiles" / "claude-code.yaml"
+    text = source.read_text(encoding="utf-8").replace("mcp: deferred", "mcp: not_an_outcome")
+    (profiles / "claude-code.yaml").write_text(text, encoding="utf-8")
+    args = ["harness-check", str(root), "--harness", "claude-code", "--harness-profiles", str(profiles)]
+    result = CliRunner().invoke(cli, args)
+    assert result.exit_code == 2 and "unknown plugin component outcome" in result.output

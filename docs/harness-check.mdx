@@ -290,7 +290,7 @@ The rules cover everything between your folder and the model's context.
 | Placeholders | Whether `$ARGUMENTS` and `${CLAUDE_SKILL_DIR}` reach the model literally; substitution depends on the harness and invocation path. |
 | Invocation | `disable-model-invocation`, `allowed-tools` and Claude Code-only fields that other harnesses ignore. |
 | Gates | Hermes `platforms` and OpenClaw `metadata.openclaw.requires`, which hide the skill on hosts that don't match. |
-| Plugins | Which plugin formats each harness accepts, how plugin skills are named, and components a harness registers but doesn't deliver. |
+| Plugins | Which plugin formats each harness accepts, how plugin skills are named, and plugin components (commands, agents, hooks, MCP and LSP servers) that did not reach the model or run when tested. A component kind that was not tested on a harness gets a note instead. |
 
 The full rule list, harness by harness, is in
 [Tier 1: Validation](/skills/skillevaluator/tier1-reference#the-checks) under **harness**.
@@ -310,13 +310,23 @@ The full rule list, harness by harness, is in
 
 Each harness has a profile that ships with SkillEvaluator. The profiles come from
 repeated runs of each harness in which the request sent to the model was
-captured, so a rule describes what the harness did, not what its documentation says.
+captured, so most rules describe what the harness did. A few plugin rules follow the
+harness's own documentation where no run covers the case.
+
+Plugin components are covered less evenly than skills. A harness is marked
+degraded for a component kind, such as commands or hooks, only when a test on that
+harness showed the components did not reach the model or run. If the test covered
+only one bundle format or one kind of command, the finding says which. Where no
+test covers a kind on a harness, the plugin panel adds a note such as
+`not tested on this harness`. Not every bundle format was tested for every kind,
+so a finding can rest on a test with a different bundle format. Where a test and
+the harness documentation disagree, the note says so. A note doesn't change the status.
 
 Harnesses change between releases, so every profile records the release and date
 it was verified against, and `-v` shows them.
 
 - `--harness-version codex=0.170.0` adds a note when you run a release other than the verified one.
-- `--harness-profiles DIR` uses your own profile YAML files, so you can try newer profiles without waiting for a release.
+- `--harness-profiles DIR` uses your own profile YAML files, so you can try changed profiles without waiting for a release. A profile written for a newer release can name facts or outcomes this release doesn't know; the check then stops with an error that says which.
 
 ## Match your setup
 

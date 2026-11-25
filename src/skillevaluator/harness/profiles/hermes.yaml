@@ -37,5 +37,9 @@ notes:
 plugin:
   rules:
     - {id: HM-PLUGIN-FORMAT, when: "not (fmt_agent_v1 or fmt_hermes_native)", effect: not_loaded, outcome: rejected, message: "Hermes installs Agent Plugins v1 (plugin.json with the agent-plugins.org $schema) or native plugin.yaml plugins only.", fix: "Add an Agent Plugins v1 plugin.json.", confidence: high}
-    - {id: HM-PLUGIN-DISABLED, when: "fmt_agent_v1", effect: advisory, message: "Portable packages install disabled; nothing loads until `hermes plugins enable {plugin_name}`.", confidence: high}
-  components: {skills: listed, commands: not_observed, agents: not_observed, hooks: not_observed, mcp: not_observed, lsp: not_observed}
+    - {id: HM-PLUGIN-DISABLED, when: "fmt_agent_v1", effect: advisory, message: "Portable packages install disabled; nothing loads until `hermes plugins enable {plugin_name}`.", confidence: medium}
+    - {id: HM-PLUGIN-COMMANDS, when: "fmt_agent_v1 and components.commands > 0", effect: degraded, outcome: not observed, message: "Commands of a portable package were not registered: /<command> returned `Unknown command` when tested.", fix: "Provide them as skills.", confidence: high}
+    - {id: HM-PLUGIN-AGENTS, when: "fmt_agent_v1 and components.agents > 0", effect: degraded, outcome: not observed, message: "Agents of a portable package did not reach the model when tested.", confidence: medium}
+    - {id: HM-PLUGIN-HOOKS, when: "fmt_agent_v1 and components.hooks > 0", effect: degraded, outcome: not observed, message: "Hooks of a portable package did not run when tested.", confidence: high}
+    - {id: HM-PLUGIN-MCP, when: "fmt_agent_v1 and components.mcp > 0", effect: advisory, outcome: disputed, message: "MCP servers of a portable package did not start when tested, although Hermes documents stdio servers from a root mcp.json.", fix: "Keep them in a root mcp.json and try them on Hermes before you rely on them.", confidence: medium}
+  components: {skills: listed, commands: untested, agents: untested, hooks: untested, mcp: untested, lsp: untested}

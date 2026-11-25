@@ -181,6 +181,41 @@ def test_validate_bundle_manifest_runs_static_and_dedup_checks_and_reports_inven
     assert "sample-bundle" in next(output_dir.glob("*.html")).read_text()
 
 
+def test_quiet_bundle_check_progress_includes_optional_checks(monkeypatch, tmp_path):
+    from skillevaluator.validators.claude_plugin_validate import ClaudePluginValidateParity
+    from skillevaluator.validators.endpoint_resolution import EndpointChecker
+
+    manifest = tmp_path / ".claude-plugin" / "plugin.json"
+    manifest.parent.mkdir()
+    manifest.write_text('{"name": "sample-bundle"}', encoding="utf-8")
+    monkeypatch.setattr(EndpointChecker, "check", lambda _self, _targets: ({}, []))
+    monkeypatch.setattr(
+        ClaudePluginValidateParity,
+        "validate",
+        lambda _self, _root, **_kwargs: ValidationResult("Claude Plugin Validate"),
+    )
+
+    result = CliRunner().invoke(
+        cli_module.cli,
+        [
+            "validate",
+            str(tmp_path),
+            "--tiers",
+            "1",
+            "--checks",
+            "schema",
+            "--resolve-endpoints",
+            "--claude-validate",
+            "-r",
+            "cli",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    assert "Tier 1/checks: running - endpoint-resolution" in result.output
+    assert "Tier 1/checks: running - claude-validate" in result.output
+
+
 def test_default_tier3_runs_after_tier1_failure(monkeypatch, tmp_path):
     skill = tmp_path / "failing-skill"
     skill.mkdir()

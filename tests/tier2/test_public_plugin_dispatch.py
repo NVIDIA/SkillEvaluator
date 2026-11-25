@@ -259,6 +259,94 @@ def test_conflicting_plugin_catalog_aliases_are_refused_before_embedding(tmp_pat
 
 
 @pytest.mark.parametrize(
+    ("flag", "destination_kind"),
+    [
+        ("--save-catalog", "manifest"),
+        ("--save-cache", "manifest"),
+        ("--save-catalog", "new-file"),
+        ("--save-catalog", "linked-directory"),
+        ("--save-catalog", "linked-file"),
+        ("--save-catalog", "hardlink"),
+    ],
+)
+def test_similarity_never_saves_a_catalog_into_its_source(tmp_path, embedding, flag, destination_kind):
+    root = make_plugin(tmp_path / "bundle")
+    manifest = root / ".claude-plugin/plugin.json"
+    original = manifest.read_bytes()
+    destination = manifest
+    if destination_kind == "new-file":
+        destination = root / "catalog.json"
+    elif destination_kind == "hardlink":
+        destination = tmp_path / "alias"
+        try:
+            destination.hardlink_to(manifest)
+        except (OSError, NotImplementedError):
+            pytest.skip("Hard links unavailable")
+    elif destination_kind.startswith("linked"):
+        alias = tmp_path / "alias"
+        directory_link = destination_kind == "linked-directory"
+        try:
+            alias.symlink_to(root if directory_link else manifest, target_is_directory=directory_link)
+        except (OSError, NotImplementedError):
+            pytest.skip("Symbolic links unavailable")
+        destination = alias / "catalog.json" if directory_link else alias
+
+    output = tmp_path / "reports"
+    invocation = CliRunner().invoke(
+        cli, ["tier2", "similarity-check", str(manifest), flag, str(destination), "-r", "json", "-o", str(output)]
+    )
+
+    assert invocation.exit_code == 1, invocation.output
+    assert embedding.requests == []
+    payload = json.loads((output / "skillevaluator-similarity.json").read_text(encoding="utf-8"))
+    errors = payload["results"][0]["legacy"]["errors"]
+    assert any("Catalog output must be outside the scan target" in error for error in errors)
+    assert manifest.read_bytes() == original
+    assert not (root / "catalog.json").exists()
+
+
+def test_incomplete_collection_leaves_the_previous_catalog_untouched(tmp_path, embedding):
+    root = tmp_path / "collection"
+    make_plugin(root / "good", "good")
+    bad = make_plugin(root / "bad", "bad")
+    (bad / ".claude-plugin/plugin.json").write_text('{"name":', encoding="utf-8")
+    catalog = tmp_path / "catalog.json"
+    catalog.write_bytes(b"previous catalog")
+
+    results = commands.run_similarity_check(root, content_type="plugin", save_catalog=catalog)
+
+    assert results[0].is_incomplete
+    assert catalog.read_bytes() == b"previous catalog"
+    assert any("Catalog output was skipped" in warning for warning in results[0].warnings)
+
+
+def test_source_edit_during_embedding_refuses_catalog_publication(tmp_path, embedding):
+    root = make_plugin(tmp_path / "bundle", "before")
+    manifest = root / ".claude-plugin/plugin.json"
+    catalog = tmp_path / "catalog.json"
+    catalog.write_bytes(b"previous catalog")
+    original_embed = embedding.embed
+
+    def embed_then_edit(texts):
+        if not embedding.requests:
+            manifest.write_text('{"name":"after","description":"An edited bundle"}', encoding="utf-8")
+        return original_embed(texts)
+
+    embedding.embed = embed_then_edit
+    output = tmp_path / "reports"
+    invocation = CliRunner().invoke(
+        cli,
+        ["tier2", "similarity-check", str(root), "--save-catalog", str(catalog), "-r", "json", "-o", str(output)],
+    )
+
+    assert invocation.exit_code == 1, invocation.output
+    payload = json.loads((output / "skillevaluator-similarity.json").read_text(encoding="utf-8"))
+    assert payload["overall_status"] == "incomplete"
+    assert payload["results"][0]["incomplete_scans"] == ["plugin-catalog-source"]
+    assert catalog.read_bytes() == b"previous catalog"
+
+
+@pytest.mark.parametrize(
     ("command", "basename"),
     [
         ("similarity-check", "skillevaluator-similarity"),

@@ -3131,8 +3131,11 @@ def validate(
                 click.echo(f"Warning: {autopilot_error}", err=True)
 
     view.tier_start(0)
-    check_lineup = (
-        enabled_check_lineup(checks, content_type=resolved_type) if plugin_scan else enabled_check_lineup(checks)
+    check_lineup = enabled_check_lineup(
+        checks,
+        content_type=resolved_type,
+        resolve_endpoints=plugin_scan and (resolve_endpoints or bool(policy and policy.resolve_endpoints)),
+        claude_validate=claude_validate,
     )
     checks_done: list[str] = []
 

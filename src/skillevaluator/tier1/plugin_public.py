@@ -209,6 +209,7 @@ def run_public_plugin_validation(
             "version": public.VersionValidator(previous_version=previous_version),
         }
 
+    progress_checks = active | {"schema", "endpoint-resolution", "claude-validate"}
     notified = set()
     progress_total, progress_step, progress_started = 0, 0, 0.0
 
@@ -226,7 +227,7 @@ def run_public_plugin_validation(
                 f"[{progress_step}/{progress_total}] {canonical} ...", markup=False, highlight=False
             )
             return
-        if (canonical == "schema" or canonical in active) and canonical not in notified:
+        if canonical in progress_checks and canonical not in notified:
             notified.add(canonical)
             on_check(canonical)
 

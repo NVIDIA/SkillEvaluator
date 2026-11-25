@@ -59,6 +59,23 @@ def test_replay_command_reports_missing_snapshot_without_writing_files(tmp_path)
     assert not output_dir.exists()
 
 
+def test_replay_command_rejects_unrenderable_omission_counts_before_writing(tmp_path):
+    from skillevaluator.cli import cli
+
+    payload = api().project_plugin_runtime(sample()).payload()
+    section = next(section for section in payload["sections"] if not section["rows"])
+    section.update(total=2**53, omitted=2**53)
+    (tmp_path / "plugin_runtime_report.json").write_text(json.dumps(payload), encoding="utf-8")
+    output_dir = tmp_path / "reports"
+    result = CliRunner().invoke(
+        cli, ["tier3", "report-plugin", str(tmp_path), "-r", "json,html", "-o", str(output_dir)]
+    )
+
+    assert result.exit_code == 1
+    assert "Invalid runtime report omission counts" in result.output
+    assert not output_dir.exists()
+
+
 @pytest.mark.parametrize("kind", ["root_link", "file_link", "hardlink", "directory"])
 def test_replay_refuses_unsafe_selected_paths(tmp_path, kind):
     real = tmp_path / "real"

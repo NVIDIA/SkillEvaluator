@@ -31,6 +31,7 @@ from skillevaluator.constants import (
 from skillevaluator.models.result import ValidationResult
 from skillevaluator.publication_evidence import (
     TIER1_UNSCANNED_PATHS_KEY,
+    result_has_publication_evidence,
     stamp_publication_evidence,
     stamp_tier1_required_checks,
 )
@@ -292,17 +293,30 @@ def _schema_validator_for(content_type: str | None, policy: ValidationPolicy | N
     return SchemaValidator(policy=policy)
 
 
-def enabled_check_lineup(checks: str | None, *, content_type: str | None = None) -> list[str]:
+def enabled_check_lineup(
+    checks: str | None,
+    *,
+    content_type: str | None = None,
+    resolve_endpoints: bool = False,
+    claude_validate: bool = False,
+) -> list[str]:
     """Return the resolved check names for a run, in canonical pipeline order.
 
     Unrecognized names are kept (sorted, at the end) so the printed lineup
     matches what ``run_validation`` was actually asked to do.
-    The plugin manifest and component check always appears in the lineup.
+    Plugin lineups include the mandatory manifest check and opted-in stages.
     """
     enabled = _enabled_checks(checks)
+    order = (*DEFAULT_CHECKS, *OPTIONAL_CHECKS)
     if content_type == CONTENT_TYPE_PLUGIN:
         enabled.add("schema")
-    ordered = [check for check in (*DEFAULT_CHECKS, *OPTIONAL_CHECKS) if check in enabled]
+        if resolve_endpoints:
+            enabled.add("endpoint-resolution")
+            order += ("endpoint-resolution",)
+        if claude_validate:
+            enabled.add("claude-validate")
+            order += ("claude-validate",)
+    ordered = [check for check in order if check in enabled]
     return ordered + sorted(enabled - set(ordered))
 
 
@@ -725,7 +739,15 @@ def emit_reports(
         displayed_tiers=displayed_tiers,
         expected_skill_name=expected_skill_name,
     )
-    plugin_report_options = {"plugin_static": True} if content_label == "Plugin" else {}
+    # The static projection describes a single scanned bundle. Catalog-only
+    # runs report each comparison in the existing Tier 2 views.
+    has_static_plugin_evidence = content_label == "Plugin" and any(
+        result_has_publication_evidence(result, tier=1)
+        and isinstance(plugin := result.metadata.get("plugin"), dict)
+        and plugin
+        for result in results
+    )
+    plugin_report_options = {"plugin_static": True} if has_static_plugin_evidence else {}
     if "cli" in report_formats:
         # The CLI report previews failed Tier 3 source checks only when a file written below lists them all.
         CLIReporter(console=console, report_formats=report_formats, presentation_context=context).print_all(

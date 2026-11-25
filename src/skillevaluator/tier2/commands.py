@@ -20,7 +20,7 @@ if TYPE_CHECKING:
 
 
 def _guarded_result(title: str, target_path: Path, callback, *, check_id: str) -> list[ValidationResult]:
-    return guarded_results(title, target_path, lambda: [callback()], check_id=check_id)
+    return guarded_results(title, target_path, lambda _initial_target: [callback()], check_id=check_id)
 
 
 def run_similarity_check(
@@ -54,8 +54,9 @@ def run_similarity_check(
         return guarded_results(
             "Plugin Similarity Check",
             resolve_plugin_path(target),
-            lambda: plugin_similarity_results(
+            lambda initial_target: plugin_similarity_results(
                 target,
+                initial_target=initial_target,
                 threshold=threshold,
                 full_body=full_body,
                 model=model,

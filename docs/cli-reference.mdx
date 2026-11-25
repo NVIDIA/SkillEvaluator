@@ -322,7 +322,7 @@ Static checks; LLM-free by default. Tier 1 gates the exit code and always runs.
 | `--pii-waivers PATH` | none | Reviewed, expiring PII waivers applied by the `pii` check; forwarded to each skill of a catalog run. See [PII waivers](/skills/skillevaluator/tier1-reference#pii-waivers). |
 | `--repo-root DIRECTORY` | unset | Repository root used to resolve same-repository plugin component references. |
 | `--resolve-endpoints` | off | Opt into bounded DNS and redirect checks for declared plugin endpoints. |
-| `--claude-validate` | off | Request an advisory result from the installed Claude Code manifest validator. |
+| `--claude-validate` | off | Run the installed Claude Code manifest validator. Its findings are advisory by default. A crash, timeout, or unusable report leaves Tier 1 incomplete and blocks validation. A missing CLI is recorded as skipped. |
 
 ### Tier 2 · Deduplication
 
@@ -526,7 +526,7 @@ skillevaluator similarity-check ./skills
 | `--full-body` | off | Embed full file bodies instead of descriptions. Plugin catalogs use descriptions only. |
 | `--model TEXT` | provider default | Embedding model override. |
 | `--catalog FILE` | none | Compare one skill or bundle against a saved local catalog. |
-| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. |
+| `--save-catalog FILE` | none | Build and save a versioned local catalog from this collection. For bundle scans, choose a destination outside the scanned tree. |
 | `--llm` | off | Request advisory LLM verdicts for plugin catalog matches. |
 | `--llm-model TEXT` | provider default | Override the model used for advisory catalog verdicts. |
 | `--max-entries INTEGER` | `1024` | Maximum selected manifests for a fresh collection; range `1`–`5000`. Does not restrict loaded catalog queries. |

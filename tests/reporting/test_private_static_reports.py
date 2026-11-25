@@ -13,6 +13,7 @@ import pytest
 from rich.console import Console
 
 from skillevaluator.models.result import Finding, Severity, ValidationResult
+from skillevaluator.publication_evidence import stamp_publication_evidence
 from skillevaluator.reporting import (
     BenchmarkReporter,
     CLIReporter,
@@ -300,14 +301,34 @@ def test_public_static_cli_report_keeps_its_summary_and_prints_evidence():
 def test_emit_reports_adds_static_evidence_only_for_plugin_scans(tmp_path):
     from skillevaluator.tier1.commands import emit_reports
 
+    results = bundle()
+    stamp_publication_evidence([results[0]], tier=1, check_id="schema")
     emit_reports(
-        bundle(), report_formats=("json", "html"), output_dir=tmp_path, basename="plugin", content_label="Plugin"
+        results, report_formats=("json", "html"), output_dir=tmp_path, basename="plugin", content_label="Plugin"
     )
-    assert json.loads((tmp_path / "plugin.json").read_text())["plugin_static"]["name"] == "report-demo"
+    evidence = json.loads((tmp_path / "plugin.json").read_text())["plugin_static"]
+    assert evidence["name"] == "report-demo"
+    assert any(section["key"] == "catalog_skills" for section in evidence["sections"])
     assert 'id="plugin-static-evidence"' in (tmp_path / "plugin.html").read_text()
 
-    emit_reports(bundle(), report_formats=("json",), output_dir=tmp_path, basename="skill")
+    emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="skill")
     assert "plugin_static" not in json.loads((tmp_path / "skill.json").read_text())
+
+
+def test_emit_reports_preserves_all_catalog_targets_without_a_static_scan(tmp_path):
+    from skillevaluator.tier1.commands import emit_reports
+
+    results = []
+    for name in ("one", "two"):
+        catalog = bundle()[-1]
+        catalog.metadata["plugin_catalog_target"] = {"name": name, "path": name}
+        results.append(catalog)
+    stamp_publication_evidence(results, tier=2, check_id="similarity")
+
+    emit_reports(results, report_formats=("json",), output_dir=tmp_path, basename="catalog", content_label="Plugin")
+    report = json.loads((tmp_path / "catalog.json").read_text())
+    assert "plugin_static" not in report
+    assert [result["plugin_catalog_target"]["path"] for result in report["results"]] == ["one", "two"]
 
 
 def test_projection_reduction_happens_once_for_six_adapters(monkeypatch):

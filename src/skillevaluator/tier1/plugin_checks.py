@@ -495,6 +495,7 @@ def run_plugin_validation(
         results.append(
             ClaudePluginValidateParity().validate(
                 root,
+                manifest_path=inventory.selected_manifest.declared_path,
                 skillevaluator_verdict=skillevaluator_manifest_verdict([schema], VALIDATOR_NAME),
                 skillevaluator_fields=skillevaluator_manifest_fields([schema], VALIDATOR_NAME),
             )

@@ -778,6 +778,7 @@ completed run directly:
       - codex/
         - lift.json
         - pass_at_k_lift.json
+        - statistics.json
         - with-skill/
           - summary.json
           - trials/
@@ -824,6 +825,8 @@ completed run directly:
 - **`<agent>/lift.json`** and **`<agent>/pass_at_k_lift.json`** — per-metric
   deltas between the two arms; written only when both arms produced scores
   (a `--skip-baseline` or `--skip-with-skill` run has neither).
+- **`<agent>/statistics.json`** — advisory paired-case lift estimate and
+  interval, plus pass^k, when available.
 - **`<agent>/findings.json`** — bounded per-metric findings and improvement
   suggestions; written by `tier3 evaluate` only when the detailed view is
   shown (`--verbose` or when no per-case summary is shown), never by
@@ -1738,6 +1741,17 @@ These uncertainty fields describe the cases in one configured run. They do not
 make heterogeneous cases independent, correct dataset leakage, or promote a
 small p-value into proof that a skill generalizes. Keep the dataset, attempt
 policy, agent, model, and environment fixed when interpreting them.
+
+An ordinary skill run can report a paired-case lift estimate with a bootstrap
+interval and, with repeated attempts, pass^k beside pass@k. The paired-case
+estimate can differ from the scored Skill Lift when different cases contribute
+to different metrics. The Markdown (`-r markdown`) and HTML
+reports, the full terminal report (`validate --verbose` or `-r cli`) and
+`tier3 evaluate --verbose` show them in the **Lift Uncertainty (advisory)** and
+**Reliability (advisory)** tables. `tier3-benchmark.md` and `BENCHMARK.md` carry
+scored evidence only. See the definitions of the
+[paired-case lift interval](/skills/skillevaluator/metrics-reference#skill-lift)
+and [pass^k](/skills/skillevaluator/metrics-reference#reliability-across-attempts).
 
 ### Completed agents in an incomplete run
 

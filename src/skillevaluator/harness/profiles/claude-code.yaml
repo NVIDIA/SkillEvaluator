@@ -30,5 +30,7 @@ notes:
   - "New skills and edited bodies are picked up mid-session without restart."
 plugin:
   rules:
-    - {id: CC-PLUGIN-EMPTY, when: "not fmt_claude and not default_dirs", effect: not_loaded, outcome: not found, message: "No .claude-plugin/plugin.json and no skills/, commands/, agents/ or hooks/ folder: Claude Code finds nothing to load.", fix: "Add .claude-plugin/plugin.json or put components in the default folders.", confidence: high}
+    - {id: CC-PLUGIN-MANIFEST-INVALID, when: "unparsed_claude", effect: not_loaded, outcome: rejected, message: ".claude-plugin/plugin.json could not be read as JSON: Claude Code does not load the plugin, default folders included.", fix: "Make .claude-plugin/plugin.json valid JSON.", confidence: medium}
+    - {id: CC-PLUGIN-MANIFEST-NAME, when: "nameless_claude", effect: not_loaded, outcome: rejected, message: ".claude-plugin/plugin.json has no usable name: Claude Code does not load the plugin, default folders included.", fix: "Set name in .claude-plugin/plugin.json to a non-empty string; it is the only required key.", confidence: medium}
+    - {id: CC-PLUGIN-EMPTY, when: "not fmt_claude and not invalid_claude and not default_layout", effect: not_loaded, outcome: not found, message: "No .claude-plugin/plugin.json and none of skills/, commands/, agents/, hooks/, .mcp.json or .lsp.json: Claude Code finds nothing to load.", fix: "Add .claude-plugin/plugin.json or put components in the default places.", confidence: medium}
   components: {skills: delivered, commands: delivered, agents: delivered, hooks: runs, mcp: deferred, lsp: runs}

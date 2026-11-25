@@ -37,6 +37,9 @@ COMPONENTS = {
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
+# Root files that, with the folders above, make up the default Claude layout. Claude Code and OpenClaw
+# both document these places for a bundle that has no manifest they read.
+DEFAULT_FILES = (".mcp.json", ".lsp.json")
 DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
@@ -75,6 +78,14 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     return sizes
 
 
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, with a path that cannot be examined (no permission, name too long) read as absent."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
 def _json_keys(path: Path, key: str | None = None) -> int:
     if not path.is_file():
         return 0
@@ -86,13 +97,45 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+_UNPARSED = object()
+
+
+def _name(data: Any) -> str:
+    """The manifest's ``name`` when it is a non-empty string, else ``""``."""
+    name = data.get("name") if isinstance(data, dict) else None
+    return name if isinstance(name, str) else ""
+
+
+def _claude_lenient(path: Path) -> Any:
+    """A Claude manifest the strict read rejected, parsed the way Claude Code reads it, or ``_UNPARSED``.
+
+    Claude Code drops a byte order mark and does not stop at bytes that are not UTF-8, so only a
+    syntax error or a file that cannot be opened is a manifest it cannot read.
+    """
+    try:
+        return json.loads(path.read_bytes().decode("utf-8", "replace").removeprefix("\ufeff"))
+    except (OSError, ValueError, RecursionError):
+        return _UNPARSED
+
+
 def is_plugin_root(path: Path) -> bool:
     return any((path / rel).is_file() for rel in MANIFESTS.values())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:
-    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts."""
+    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts.
+
+    ``invalid_<fmt>`` says that this format's JSON manifest is there but could not be read or parsed as
+    strict UTF-8 JSON: a syntax error, a byte order mark, bytes that are not UTF-8, or a file that cannot be
+    opened. Such a manifest file also clears its own ``fmt_<fmt>``. ``unparsed_claude`` is narrower: the
+    Claude manifest also fails the more lenient read Claude Code does. ``nameless_claude`` says the Claude
+    manifest parses but gives no ``name`` that is a non-empty string (a manifest that is not an object counts).
+    ``default_dirs`` is any default component folder; ``default_layout`` also counts a root ``.mcp.json``
+    or ``.lsp.json``.
+    """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
+    facts.update({f"invalid_{fmt}": False for fmt, rel in MANIFESTS.items() if rel.endswith(".json")})
+    facts["nameless_claude"] = facts["unparsed_claude"] = False
     for fmt, rel in MANIFESTS.items():
         path = root / rel
         facts[f"fmt_{fmt}"] = path.is_file()
@@ -102,10 +145,17 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             data = json.loads(path.read_text(encoding="utf-8"))
         except (OSError, ValueError, UnicodeDecodeError, RecursionError):
             facts["manifest_invalid"] = True
+            facts[f"invalid_{fmt}"] = True
             facts[f"fmt_{fmt}"] = False
+            if fmt == "claude":
+                lenient = _claude_lenient(path)
+                facts["unparsed_claude"] = lenient is _UNPARSED
+                facts["nameless_claude"] = lenient is not _UNPARSED and not _name(lenient)
             continue
-        if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
-            facts["plugin_name"] = data["name"]
+        if name := _name(data):
+            facts["plugin_name"] = name
+        elif fmt == "claude":
+            facts["nameless_claude"] = True
         if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
             facts["declares_components"] = True
         if fmt == "root_json":
@@ -113,9 +163,11 @@ def plugin_facts(root: Path) -> dict[str, Any]:
                 AGENT_PLUGINS_SCHEMA
             )
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
+    facts["invalid_copilot"] = facts.pop("invalid_copilot_alt") or facts["invalid_copilot"]
     facts.setdefault("fmt_agent_v1", False)
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
+    facts["default_layout"] = facts["default_dirs"] or any(_is_file(root / f) for f in DEFAULT_FILES)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts

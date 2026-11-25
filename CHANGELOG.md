@@ -137,6 +137,13 @@ All notable changes to SkillEvaluator are documented in this file.
   tabs invalid. Dataset scalar errors retain their line and column without
   revealing the value.
 
+- Tier 3 budget accounting keeps incomplete token, cost, and judge-call evidence
+  unmeasured instead of accepting partial subtotals or malformed judge logs as
+  zero calls, stopping further admissions under the affected configured limit.
+  Only retained ATIF trajectory and verifier artifact locations contribute;
+  copied skill examples named trajectory.json or judge_attempts.json do not
+  consume or invalidate the attempt budget.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

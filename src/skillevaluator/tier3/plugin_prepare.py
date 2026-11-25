@@ -34,6 +34,7 @@ from skillevaluator.plugin_mcp import _server_launch_files
 from skillevaluator.plugin_paths import PluginRootReader
 from skillevaluator.publication_identity import publication_source_digest, publication_source_entry_is_excluded
 from skillevaluator.tier3 import plugin_native as native
+from skillevaluator.tier3.case_ids import MAX_CASE_ID_LENGTH, validate_case_id
 from skillevaluator.utils.path_security import canonicalize_trusted_root_alias
 from skillevaluator.utils.secure_fs import SecurePathError, SecureRoot
 
@@ -833,12 +834,20 @@ def _read_fixtures(files_dir: Path, owner: str, fixtures: dict[str, bytes | None
 
 
 def _safe_id(raw: str) -> str:
-    return re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._") or "plugin-eval-case"
+    candidate = re.sub(r"[^A-Za-z0-9_.-]+", "-", raw).strip("-._") or "plugin-eval-case"
+    candidate = candidate[:MAX_CASE_ID_LENGTH].rstrip(".")
+    try:
+        return validate_case_id(candidate)
+    except ValueError:
+        # Sanitization already bounds the alphabet and length; a Windows
+        # device name still needs a prefix before it can become a task folder.
+        return validate_case_id(f"case-{candidate}"[:MAX_CASE_ID_LENGTH].rstrip("."))
 
 
 def _unique_id(base: str, seen: set[str]) -> str:
     candidate, suffix = base, 2
-    while candidate in seen:
-        candidate, suffix = f"{base}-{suffix}", suffix + 1
-    seen.add(candidate)
+    while candidate.casefold() in seen:
+        ending = f"-{suffix}"
+        candidate, suffix = f"{base[: MAX_CASE_ID_LENGTH - len(ending)]}{ending}", suffix + 1
+    seen.add(candidate.casefold())
     return candidate

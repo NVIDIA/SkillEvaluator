@@ -148,6 +148,8 @@ All notable changes to SkillEvaluator are documented in this file.
   link checks the skill containing the link instead of the linked target, and
   paths outside the checkout no longer select unrelated skills.
 
+- Keep generated plugin evaluation case IDs within Harbor's portable path contract, including length limits, Windows device names, and case-insensitive collisions.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

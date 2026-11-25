@@ -301,14 +301,16 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         *,
         source_tree=None,
         bootstrap_sha="",
-        event="workflow_dispatch",
+        event=None,
         index_problem=None,
         expected_release=None,
         mode=None,
         approved_origin=True,
     ):
+        if event is None:
+            event = "" if mode else "workflow_dispatch"
         if expected_release is None:
-            expected_release = tag if event == "workflow_dispatch" else ""
+            expected_release = tag if mode or event == "workflow_dispatch" else ""
         version = tag.removeprefix("v")
         commit = git("rev-parse", f"refs/tags/{tag}^{{commit}}")
         archive = repo / "ci/bundles" / version / f"skillevaluator-ci-{version}.zip"
@@ -385,7 +387,7 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         assert pending.returncode != 0
         assert "DevZone artifacts are not visible yet" in pending.stderr
         assert not git("ls-remote", "origin", "refs/tags/stable")
-    promoted = promote("v1.0.1", bootstrap_sha=first)
+    promoted = promote("v1.0.1", bootstrap_sha=first, mode=None if existing_github_only else "--manual")
     if existing_github_only:
         assert promoted.returncode != 0
         assert "reviewed bootstrap commit must contain the GitLab stable include" in promoted.stderr

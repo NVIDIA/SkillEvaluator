@@ -84,6 +84,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
             workflow_name = workflow_dir.name
 
             if workflow_result.passed:
+                result.merge_advisories_with_prefix(workflow_result, workflow_name)
                 result.add_success(
                     check_name=workflow_name,
                     message="passed",
@@ -278,6 +279,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
             ref_name = ref_file.stem
 
             if ref_result.passed:
+                result.merge_advisories_with_prefix(ref_result, f"reference/{ref_name}")
                 result.add_success(
                     check_name=ref_name,
                     message="valid",
@@ -358,9 +360,7 @@ class WorkflowsSchemaValidator(ValidatorBase):
         elif "workflows" in folder_path.parts or "team-workflows" in folder_path.parts:
             result.add_message("Validating workflows within standard folder structure")
         else:
-            result.add_warning(
-                "Folder doesn't follow SkillEvaluator structure (missing workflows/ or team-workflows/)"
-            )
+            result.add_warning("Folder doesn't follow SkillEvaluator structure (missing workflows/ or team-workflows/)")
 
         return result
 

@@ -11,6 +11,7 @@ their order and every string and number keeps its spelling. Without arguments, r
 import argparse
 import json
 import re
+import stat
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -79,12 +80,23 @@ def main(argv: list[str] | None = None) -> int:
     check = parser.parse_args(argv).check
     stale = 0
     for path in sorted(path for pattern in MANAGED for path in ROOT.glob(pattern)):
-        text = path.read_bytes().decode("utf-8")
-        if (laid_out := layout(text)) != text:
-            stale += 1
-            print(("not in layout: " if check else "rewrote: ") + path.relative_to(ROOT).as_posix())
+        relative = path.relative_to(ROOT).as_posix()
+        try:
+            if path.resolve(strict=True) != path:
+                raise ValueError("symbolic links are not supported")
+            metadata = path.lstat()
+            if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+                raise ValueError("expected a regular file with exactly one hard link")
+            text = path.read_bytes().decode("utf-8")
+            laid_out = layout(text)
+            if laid_out == text:
+                continue
             if not check:
                 path.write_text(laid_out, encoding="utf-8", newline="\n")
+        except (OSError, RuntimeError, ValueError) as error:
+            raise SystemExit(f"{relative}: {error}") from error
+        stale += 1
+        print(("not in layout: " if check else "rewrote: ") + relative)
     return int(check and stale > 0)
 
 

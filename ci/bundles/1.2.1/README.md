@@ -16,7 +16,7 @@ Choose one feedback workflow. The workflow and image pins are already filled in.
 
 The standard scored Tier 1 comment is updated for eligible current-head, same-repository PRs, including failed scans with valid evidence. Full reports remain downloadable from the scan run. Manual retries require both the completed run ID and attempt number.
 
-[Full comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6/ci/README.md#pr-comments-without-hosted-reports).
+[Full comment setup](https://github.com/NVIDIA/SkillEvaluator/blob/fd6852ddc945c49d003a0898edef4933184d8fb3/ci/README.md#pr-comments-without-hosted-reports).
 
 ### One-time publisher setup
 
@@ -30,7 +30,7 @@ New eligible PR scans trigger publication automatically. After successful deploy
 
 Without the signing permission, ordinary scans and downloadable reports still run; hosting is skipped. Commit the setup and trigger a new scan; rerunning an old job keeps its original workflow.
 
-[Full publisher setup](https://github.com/NVIDIA/SkillEvaluator/blob/e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6/ci/README.md#optional-hosted-reports-and-pr-feedback).
+[Full publisher setup](https://github.com/NVIDIA/SkillEvaluator/blob/fd6852ddc945c49d003a0898edef4933184d8fb3/ci/README.md#optional-hosted-reports-and-pr-feedback).
 
 ## GitLab
 

@@ -1,16 +1,16 @@
 {
   "all_verified": true,
-  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:c7a63f850211f08ebe40df28033527788b4c53f527b3fff608612a2403b43779",
-  "source_revision": "e1bcdd00d4dcf43f0986ed6686f7e7f89573f3c6",
+  "image": "ghcr.io/nvidia/skillevaluator-tier1@sha256:459f7ab610d3c8a5afff5a3a602ae432fb5644e65a7e3c9a9ca9f89cff723399",
+  "source_revision": "fd6852ddc945c49d003a0898edef4933184d8fb3",
   "platform": {
     "os": "linux",
     "architecture": "amd64"
   },
   "public_manifest_matches_smoke_tested_image": true,
   "anonymous_pull_verified": true,
-  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/45672659524",
-  "public_manifest_digest": "sha256:c7a63f850211f08ebe40df28033527788b4c53f527b3fff608612a2403b43779",
-  "smoke_runtime_id": "sha256:d97b60e9abac9100d3bdc468905276954a56738cccca185d569f45355a662d99",
+  "official_build_run": "https://github.com/NVIDIA/SkillEvaluator/actions/runs/45676429796",
+  "public_manifest_digest": "sha256:459f7ab610d3c8a5afff5a3a602ae432fb5644e65a7e3c9a9ca9f89cff723399",
+  "smoke_runtime_id": "sha256:e272b34e813eb3c64960a5303b42626f05c69557fbb1e57a22f1a5b8f6e55328",
   "image_smoke_cases": [
     {
       "case": "all-pass",
@@ -22,9 +22,9 @@
       "failed": 0,
       "incomplete": 0,
       "summary_bytes": 405,
-      "summary_json_sha256": "9612afdc802cdf9807e78707cfb278cbc020cbba3d0f9b9f1e74a5e5df95ea89",
-      "base_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15",
-      "head_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15"
+      "summary_json_sha256": "839fc73455f44374cba5ba6d75c09faf0bca6fdc4dc995ea5cc347ba28a30b8c",
+      "base_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a",
+      "head_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a"
     },
     {
       "case": "invalid-name",
@@ -36,9 +36,9 @@
       "failed": 1,
       "incomplete": 0,
       "summary_bytes": 718,
-      "summary_json_sha256": "836a8cce71328dae66eb8abc73ff281490873b7893716f75755e1486fad633d1",
-      "base_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15",
-      "head_sha": "0066230ed356e0b2c54581ebe6ee6433f775419f"
+      "summary_json_sha256": "ab9db7e923099d7309fab568a0fa647e8ff996ae8ac69045730e9e6db44ed35a",
+      "base_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a",
+      "head_sha": "8fdd13389634e64b343a9e03868d74ada2fd3fad"
     },
     {
       "case": "changed-one",
@@ -50,9 +50,9 @@
       "failed": 0,
       "incomplete": 0,
       "summary_bytes": 405,
-      "summary_json_sha256": "797b65084544db3d3b5522fa31c552f186ed803e59a7b1fe9c39caa6cce7c992",
-      "base_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15",
-      "head_sha": "16805e619738d25ebba53f001d24521f5622f575"
+      "summary_json_sha256": "193663b0a161ee439ede9b927f90d03b1bd1496aabbbbb5abbf8366ae0c50f43",
+      "base_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a",
+      "head_sha": "5749b8bb62e1adeb6ca791b40ae79461c86d5f7f"
     },
     {
       "case": "no-change",
@@ -64,9 +64,9 @@
       "failed": 0,
       "incomplete": 0,
       "summary_bytes": 365,
-      "summary_json_sha256": "a459504fbd627bd4a85128879dcb3d73d08db5bb4b83fd13c93223d9ee3d2304",
-      "base_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15",
-      "head_sha": "35f01aa09e71347af8f177fd2d8a35b09a6c0059"
+      "summary_json_sha256": "0ea3a6fdbfaf11dc11d3d44be31631794e157524869c3b11903d4d15fa5a964d",
+      "base_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a",
+      "head_sha": "ce2dd3c2ac76900854376e8b12c2759cedac96e0"
     },
     {
       "case": "missing-llm-key",
@@ -78,10 +78,10 @@
       "failed": 0,
       "incomplete": 0,
       "summary_bytes": 464,
-      "summary_json_sha256": "89675df6af1c4e502bf77e2bc7e30a6ce591cd641bbdbb7d4d96fda688561f4a",
-      "base_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15",
-      "head_sha": "8dfbf2db4d5206dbff3f6b93e2629d27bc685f15"
+      "summary_json_sha256": "cf9e10fd3094684c790ec8be9ddeed9c68b447c8be97f07bf1bbe9902b4ed7d1",
+      "base_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a",
+      "head_sha": "e52a5526f7da244d4ecf52f521304e9f46a7681a"
     }
   ],
-  "runtime_observation_sha256": "72e6f79c86b3e57c8210c21ced01a59f70a8646156a0cd3934d80895db1fbc01"
+  "runtime_observation_sha256": "5121a5d344d56603c6fe585129babdc09b3ca0710764849d15aa6200ac320acf"
 }

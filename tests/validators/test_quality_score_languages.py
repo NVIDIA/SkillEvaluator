@@ -204,3 +204,122 @@ class TestLanguageNeutralWordLists:
 
         assert "No why section" in [finding.message for finding in result.findings]
         assert "No '## Purpose' section" not in [finding.message for finding in result.findings]
+
+
+@pytest.mark.parametrize(
+    ("path_name", "desc", "body", "example", "scripts_heading", "scripts_header"),
+    [
+        (
+            "russian-scripts",
+            "Используй для подготовки отчётов по сборке.",
+            RUSSIAN_BODY,
+            "Пример: отчёт содержит время сборки.",
+            "## Доступные скрипты",
+            "Скрипт",
+        ),
+        (
+            "chinese-scripts",
+            "当需要分析构建日志时使用此技能，用于查找多余的步骤。",
+            CHINESE_BODY,
+            "示例：报告包含构建时间。",
+            "## 可用脚本",
+            "脚本",
+        ),
+    ],
+)
+def test_localized_examples_script_documentation_and_instruction_options(
+    tmp_path, path_name, desc, body, example, scripts_heading, scripts_header
+):
+    body = body.replace("```bash\nprobe measure -- python app.py\n```", example)
+    body += f"\n{scripts_heading}\n\n| {scripts_header} | Purpose |\n| --- | --- |\n| audit.py | Report |\n"
+    body += "\nUse run_script for audit.py.\n"
+    skill = _write_localized_skill(tmp_path, name=path_name, description=desc, body=body)
+    (skill / "scripts").mkdir()
+    (skill / "scripts" / "audit.py").write_text("print('report')\n", encoding="utf-8")
+    result = _validate_with(skill, tmp_path, "efficiency: {action_verbs: {terms: [verify]}}\n")
+    messages = [finding.message for finding in result.findings]
+
+    assert result.metadata["quality_scores"]["metrics"]["has_instructions"] is True
+    assert result.metadata["quality_scores"]["metrics"]["has_examples"] is True
+    assert "No examples provided" not in messages
+    assert "No documented scripts in table format" not in messages
+    assert "Instructions lack clear action verbs" in messages
+
+
+@pytest.mark.parametrize(
+    ("description", "expected", "excluded"),
+    [
+        ("当前版本生成按阶段汇总的详细构建耗时报告。", "Description doesn't mention WHEN to use this skill", None),
+        ("当排查东西向网络流量丢包时，按租户生成连接追踪报告。", None, "Description contains vague words"),
+        ("Use when You  can map kernels for the build.", None, "Description uses first/second person"),
+    ],
+)
+def test_multilingual_trigger_and_description_boundaries(tmp_path, description, expected, excluded):
+    result = _validate_with(_write_issue_skill(tmp_path, description=description), tmp_path)
+    messages = {finding.message for finding in result.findings}
+    if expected:
+        assert expected in messages
+    if excluded:
+        assert excluded not in messages
+
+
+def test_instruction_rules_use_real_markdown_sections_and_keep_legacy_example_credit(tmp_path):
+    body = (
+        "```markdown\n## Instructions\n- verify\n```\n\n"
+        "##  Instructions ##\n\n- Read the summary carefully.\n\n"
+        "## Examples ##\n\nA worked report explains the build order.\n"
+    )
+    skill = _write_localized_skill(
+        tmp_path, name="marked-sections", description="Use when generating build reports.", body=body
+    )
+    result = _validate_with(skill, tmp_path, "efficiency: {action_verbs: {terms: [verify]}}\n")
+
+    assert result.metadata["quality_scores"]["metrics"]["has_instructions"] is True
+    assert "Instructions lack clear action verbs" in [finding.message for finding in result.findings]
+    assert "No examples provided" not in [finding.message for finding in result.findings]
+
+
+def test_empty_final_instructions_section_has_no_efficiency_deduction(tmp_path):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="empty-final-instructions",
+        description="Use when checking build reports.",
+        body="## Examples\n\nA worked report.\n\n## Instructions\n",
+    )
+    result = _validate_with(skill, tmp_path)
+    messages = [finding.message for finding in result.findings]
+
+    assert "Instructions lack clear action verbs" not in messages
+    assert "Instructions not in list format" not in messages
+
+
+def test_markdown_section_offsets_keep_unicode_line_separators_in_prose(tmp_path):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="unicode-sections",
+        description="Use when checking build reports.",
+        body=(
+            "Overview.\u2028Diagnostic notes.\u2029Report summary.\n\n"
+            "## Instructions\n\n- Run the probe.\n\n## Examples\n\nA worked report.\n"
+        ),
+    )
+    result = _validate_with(skill, tmp_path)
+    messages = [finding.message for finding in result.findings]
+
+    assert result.metadata["quality_scores"]["metrics"]["has_examples"] is True
+    assert "Instructions lack clear action verbs" not in messages
+    assert "Instructions not in list format" not in messages
+
+
+@pytest.mark.parametrize("examples", ["## Examples ##\n\nA worked report.", "## Examples\n\n## 範例\n\n報表範例。"])
+def test_plain_prose_examples_count_under_recognized_headings(tmp_path, examples):
+    skill = _write_localized_skill(
+        tmp_path,
+        name="prose-examples",
+        description="Use when writing build reports.",
+        body=examples,
+    )
+    result = _validate_with(skill, tmp_path)
+
+    assert result.metadata["quality_scores"]["metrics"]["has_examples"] is True
+    assert "No examples provided" not in [finding.message for finding in result.findings]

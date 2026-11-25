@@ -471,9 +471,9 @@ thresholds are defaults rather than fixed: the Reliability rules and the
 expected-heading list, the reserved-name words and resource-documentation terms
 (Correctness), the description length limits and the description word lists
 (Discoverability), and the token budget and instruction word lists (Efficiency).
-Every packaged word list and heading list is the union of English, Russian and
-Chinese terms, applied to every skill without language detection, so a skill
-written in one of those languages is not penalised for lacking English wording.
+Packaged prose and heading rules use English, Russian, and Chinese alternatives.
+The evaluator applies the same configured vocabulary to every skill without
+language detection.
 The token budget in force is reported as `metrics.recommended_max_tokens`; see
 [Tier 1 reference](/skills/skillevaluator/tier1-reference#the-checks).
 

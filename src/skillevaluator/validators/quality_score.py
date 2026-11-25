@@ -46,7 +46,7 @@ from skillevaluator.utils.structured_data import (
 )
 from skillevaluator.validators.base import ValidatorBase
 from skillevaluator.validators.frontmatter_parser import FRONTMATTER_PATTERN
-from skillevaluator.validators.markdown import markdown_link_targets
+from skillevaluator.validators.markdown import markdown_atx_sections, markdown_link_targets
 
 logger = get_logger(__name__)
 
@@ -176,7 +176,7 @@ def _mask_argument_hint(hint: str) -> str:
     return masked
 
 
-def _term_pattern(term: str) -> str:
+def _term_pattern(term: str, *, flexible_spacing: bool = True) -> str:
     """Regex for one word or phrase that does not match inside another word.
 
     Whitespace inside a multi-word term matches any run of whitespace, so wrapped text
@@ -186,7 +186,7 @@ def _term_pattern(term: str) -> str:
     inside ``报告错误信息`` while ``error`` still does not match inside ``处理error时``.
     """
     words = term.split()
-    body = r"\s+".join(map(re.escape, words))
+    body = r"\s+".join(map(re.escape, words)) if flexible_spacing else re.escape(term.strip())
     left = "" if _UNSPACED_SCRIPT_RE.match(words[0][0]) else r"(?<!\w)"
     right = "" if _UNSPACED_SCRIPT_RE.match(words[-1][-1]) else r"(?!\w)"
     return f"{left}{body}{right}"
@@ -197,26 +197,17 @@ def _contains_term(text: str, term: str) -> bool:
     return bool(term.strip()) and re.search(_term_pattern(term), text, re.IGNORECASE) is not None
 
 
-def _contains_any_term(text: str, terms: Iterable[str]) -> bool:
+def _contains_any_term(text: str, terms: Iterable[str], *, flexible_spacing: bool = True) -> bool:
     """Return whether the text contains any of the terms (whole word or phrase, any case)."""
-    patterns = [_term_pattern(term) for term in terms if term.strip()]
+    patterns = [_term_pattern(term, flexible_spacing=flexible_spacing) for term in terms if term.strip()]
     if not patterns:
         return False
     return re.search("|".join(patterns), text, re.IGNORECASE) is not None
 
 
-def _has_api_documentation(content: str) -> bool:
-    api_patterns = (
-        r"\bimport\s+[A-Za-z_][A-Za-z0-9_.]*",
-        r"\bfrom\s+[A-Za-z_][A-Za-z0-9_.]*\s+import\b",
-        r"\bapi\b",
-        r"\bmodules?\b",
-        r"\blibrar(?:y|ies)\b",
-        r"\bpackages?\b",
-        r"\bclasses?\b",
-        r"\bfunctions?\b",
-    )
-    return any(re.search(pattern, content, re.IGNORECASE) for pattern in api_patterns)
+def _has_api_documentation(content: str, terms: Iterable[str]) -> bool:
+    import_pattern = r"\b(?:import\s+[A-Za-z_][A-Za-z0-9_.]*|from\s+[A-Za-z_][A-Za-z0-9_.]*\s+import\b)"
+    return re.search(import_pattern, content, re.IGNORECASE) is not None or _contains_any_term(content, terms)
 
 
 def _normalized_quality_local_path(href: str) -> str | None:
@@ -455,10 +446,14 @@ class QualityScoreValidator(ValidatorBase):
         qs.skill_type = self.detect_skill_type(skill_path)
         logger.debug(f"Detected skill type for '{qs.skill_name}': {qs.skill_type}")
 
-        self._check_correctness(qs, content, skill_path, frontmatter_data)
+        instruction_headings = self.quality_config["efficiency"]["action_verbs"]["headings"]
+        example_headings = self.quality_config["correctness"]["examples"]["headings"]
+        sections = markdown_atx_sections(content, (*instruction_headings, *example_headings))
+        instructions = next((sections[heading] for heading in instruction_headings if heading in sections), None)
+        self._check_correctness(qs, content, skill_path, frontmatter_data, instructions, sections)
         self._check_discoverability(qs, content, frontmatter_data)
         self._check_reliability(qs, content, skill_path)
-        self._check_efficiency(qs, content, lines, skill_path, frontmatter_data)
+        self._check_efficiency(qs, content, lines, skill_path, frontmatter_data, instructions)
         self._check_spec_fields(qs, frontmatter_data)
 
         # Convert quality issues into SkillEvaluator Findings
@@ -522,6 +517,8 @@ class QualityScoreValidator(ValidatorBase):
         content: str,
         skill_path: Path,
         frontmatter: dict | None,
+        instructions: str | None,
+        sections: dict[str, str],
     ) -> None:
         dim = qs.correctness
 
@@ -530,17 +527,23 @@ class QualityScoreValidator(ValidatorBase):
 
         # Instructions — presence is enforced by SchemaValidator; quality only
         # tracks the flag for downstream heuristics (action verbs, list format).
-        qs.has_instructions = "## Instructions" in content or "## Usage" in content
+        qs.has_instructions = instructions is not None
 
         # Type-specific checks
         self._check_type_specific(dim, qs, content, skill_path)
 
         # Examples — presence of ## Examples heading is enforced by SchemaValidator
         # at MEDIUM. Quality checks for actual example *content* (code fences, etc.).
-        if "```" in content or "Example:" in content or "**Example:**" in content:
-            qs.has_examples = True
-        elif "## Examples" not in content:
-            dim.deduct(5, "info", "No examples provided", "Add example usage with code blocks")
+        examples = self.quality_config["correctness"]["examples"]
+        example_sections = [sections[heading] for heading in examples["headings"] if heading in sections]
+        qs.has_examples = (
+            "```" in content
+            or any(marker in content for marker in examples["markers"])
+            or any(section.strip() for section in example_sections)
+        )
+        legacy_heading = "## Examples" in examples["headings"] and "## Examples" in content
+        if examples["points"] and not qs.has_examples and not example_sections and not legacy_heading:
+            dim.deduct(examples["points"], "info", examples["message"], examples["suggestion"])
 
         # Windows-style paths
         if re.search(r"(?:scripts|references|assets)\\[\w\\]+", content):
@@ -659,13 +662,9 @@ class QualityScoreValidator(ValidatorBase):
                     "Create scripts/ or tools/ with at least one executable script",
                 )
 
-            if "## Available Scripts" not in content and "| Script |" not in content:
-                dim.deduct(
-                    10,
-                    "warning",
-                    "No documented scripts in table format",
-                    "Add '## Available Scripts' with table: | Script | Purpose | Arguments |",
-                )
+            docs = self.quality_config["correctness"]["script_docs"]
+            if docs["points"] and not any(marker in content for marker in (*docs["headings"], *docs["markers"])):
+                dim.deduct(docs["points"], "warning", docs["message"], docs["suggestion"])
             if "run_script" not in content and not self._runs_only_node_scripts(script_files):
                 dim.deduct(
                     10,
@@ -685,13 +684,9 @@ class QualityScoreValidator(ValidatorBase):
                         "Lib-based skill missing pyproject.toml",
                         "Add pyproject.toml with package metadata and dependencies",
                     )
-                if not _has_api_documentation(content):
-                    dim.deduct(
-                        10,
-                        "warning",
-                        "Lib-based skill lacks API/import documentation",
-                        "Document how to import and use the library",
-                    )
+                docs = self.quality_config["correctness"]["api_docs"]
+                if docs["points"] and not _has_api_documentation(content, docs["terms"]):
+                    dim.deduct(docs["points"], "warning", docs["message"], docs["suggestion"])
             else:
                 dim.deduct(
                     15,
@@ -764,7 +759,7 @@ class QualityScoreValidator(ValidatorBase):
             rules = self.quality_config["discoverability"]
             self._deduct_unless_any_term(dim, desc, rules["trigger_words"], "info")
             self._deduct_if_any_term(dim, desc, rules["vague_words"], "warning")
-            self._deduct_if_any_term(dim, desc, rules["person_phrases"], "warning")
+            self._deduct_if_any_term(dim, desc, rules["person_phrases"], "warning", flexible_spacing=False)
 
             # Broad description without negative triggers (M1)
             broad = rules["broad_description"]
@@ -772,7 +767,7 @@ class QualityScoreValidator(ValidatorBase):
                 broad["points"]
                 and len(desc) > broad["longer_than"]
                 and _contains_any_term(desc, broad["terms"])
-                and not _contains_any_term(desc, broad["negatives"])
+                and not _contains_any_term(desc, broad["negatives"], flexible_spacing=False)
             ):
                 dim.deduct(broad["points"], "info", broad["message"], broad["suggestion"])
 
@@ -830,9 +825,9 @@ class QualityScoreValidator(ValidatorBase):
                 dim.deduct(expected["points"], "info", expected["message"], expected["suggestion"])
 
     @staticmethod
-    def _deduct_if_any_term(dim, text: str, rule: TermsRule, severity: str) -> None:
+    def _deduct_if_any_term(dim, text: str, rule: TermsRule, severity: str, *, flexible_spacing: bool = True) -> None:
         """Deduct when the text contains one of the rule's terms; points 0 turns the rule off."""
-        if rule["points"] and _contains_any_term(text, rule["terms"]):
+        if rule["points"] and _contains_any_term(text, rule["terms"], flexible_spacing=flexible_spacing):
             dim.deduct(rule["points"], severity, rule["message"], rule["suggestion"])
 
     @staticmethod
@@ -868,6 +863,7 @@ class QualityScoreValidator(ValidatorBase):
         lines: list[str],
         skill_path: Path,
         _frontmatter: dict | None,
+        instructions: str | None,
     ) -> None:
         dim = qs.efficiency
 
@@ -904,17 +900,10 @@ class QualityScoreValidator(ValidatorBase):
             )
 
         # Instruction clarity
-        for heading in ("## Instructions", "## Usage"):
-            if heading not in content:
-                continue
-            parts = content.split(f"\n{heading}\n", 1)
-            section = parts[1].split("\n## ", 1)[0] if len(parts) > 1 else ""
-            break
-        else:
-            section = ""
-        if section:
-            self._deduct_unless_any_term(dim, section, self.quality_config["efficiency"]["action_verbs"], "warning")
-            if not ("- " in section or "1." in section or "* " in section):
+        action_verbs = self.quality_config["efficiency"]["action_verbs"]
+        if instructions and instructions.strip():
+            self._deduct_unless_any_term(dim, instructions, action_verbs, "warning")
+            if not ("- " in instructions or "1." in instructions or "* " in instructions):
                 dim.deduct(
                     5,
                     "info",
@@ -928,17 +917,24 @@ class QualityScoreValidator(ValidatorBase):
         # Reference file naming
         refs_dir = skill_path / "references"
         if refs_dir.exists():
-            vague = ["doc", "file", "data", "info", "misc", "temp"]
-            for ref in refs_dir.glob("*.md"):
-                stem = ref.stem.lower()
-                if stem.isdigit() or stem in vague or len(stem) < 4:
-                    dim.deduct(
-                        5,
-                        "info",
-                        f"Non-descriptive filename: {ref.name}",
-                        "Use descriptive names: 'form_validation_rules.md' not 'doc2.md'",
+            reference_names = self.quality_config["efficiency"]["reference_names"]
+            if reference_names["points"]:
+                vague = {term.casefold() for term in reference_names["terms"]}
+                for ref in refs_dir.glob("*.md"):
+                    stem = ref.stem.casefold()
+                    minimum = (
+                        reference_names["min_unspaced_chars"]
+                        if _UNSPACED_SCRIPT_RE.search(stem)
+                        else reference_names["min_chars"]
                     )
-                    break
+                    if stem.isdigit() or stem in vague or len(stem) < minimum:
+                        dim.deduct(
+                            reference_names["points"],
+                            "info",
+                            f"{reference_names['message']}: {ref.name}",
+                            reference_names["suggestion"],
+                        )
+                        break
 
             # Deeply nested references
             for ref in refs_dir.glob("*.md"):

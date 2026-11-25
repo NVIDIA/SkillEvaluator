@@ -225,6 +225,33 @@ def _walk_tokens(tokens: Iterable[Token]) -> Iterator[Token]:
             yield from _walk_tokens(token.children)
 
 
+def markdown_atx_sections(content: str, headings: Iterable[str]) -> dict[str, str]:
+    """Return the bodies of the first matching top-level ATX sections."""
+    frontmatter = FRONTMATTER_PATTERN.match(content)
+    if frontmatter:
+        content = frontmatter.group(2)
+    content = content.replace("\r\n", "\n").replace("\r", "\n")
+    lines = content.split("\n")
+    tokens = _MARKDOWN_PARSER.parse(content)
+    starts = [
+        (token, tokens[index + 1].content)
+        for index, token in enumerate(tokens)
+        if token.type == "heading_open" and token.level == 0 and token.map is not None
+    ]
+    candidates = set(headings)
+    sections: dict[str, str] = {}
+    for index, (token, label) in enumerate(starts):
+        name = f"{token.markup} {label}"
+        if name not in candidates or name in sections:
+            continue
+        stop = next(
+            (starts[later][0].map[0] for later in range(index + 1, len(starts)) if starts[later][0].tag <= token.tag),
+            len(lines),
+        )
+        sections[name] = "\n".join(lines[token.map[1] : stop])
+    return sections
+
+
 def markdown_link_targets(content: str, *, include_images: bool = False) -> list[str]:
     """Return parser-normalized Markdown destinations in document order."""
     frontmatter = FRONTMATTER_PATTERN.match(content)

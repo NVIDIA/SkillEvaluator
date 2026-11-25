@@ -95,6 +95,19 @@ class HeadingsRule(TypedDict):
     headings: list[str]
 
 
+class SectionTermsRule(TermsRule):
+    headings: list[str]
+
+
+class MarkedSectionRule(HeadingsRule):
+    markers: list[str]
+
+
+class ReferenceNameRule(TermsRule):
+    min_chars: int
+    min_unspaced_chars: int
+
+
 class BroadDescriptionRule(TypedDict):
     """Deduction when a description longer than longer_than chars has a term but no negative phrase."""
 
@@ -110,8 +123,9 @@ class EfficiencyConfig(TypedDict):
     """Efficiency rules; a rule with points 0 is skipped."""
 
     token_budget: TokenBudgetRule
-    action_verbs: TermsRule
+    action_verbs: SectionTermsRule
     buzzwords: TermsRule
+    reference_names: ReferenceNameRule
 
 
 class DescriptionTooShortRule(TypedDict):
@@ -159,6 +173,9 @@ class CorrectnessConfig(TypedDict):
     reserved_name: ReservedNameRule
     resource_docs: TermsRule
     lib_resource_docs: TermsRule
+    examples: MarkedSectionRule
+    script_docs: MarkedSectionRule
+    api_docs: TermsRule
 
 
 class QualityConfig(TypedDict):
@@ -294,8 +311,13 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSettings]] = {
     },
     "efficiency": {
         "token_budget": {"max_tokens": _validate_positive_int},
-        "action_verbs": _TERMS,
+        "action_verbs": {**_TERMS, "headings": _validate_headings},
         "buzzwords": _TERMS,
+        "reference_names": {
+            **_TERMS,
+            "min_chars": _validate_positive_int,
+            "min_unspaced_chars": _validate_positive_int,
+        },
     },
     "discoverability": {
         "description_too_short": {"min_chars": _validate_positive_int},
@@ -314,6 +336,9 @@ _RULE_SECTIONS: dict[str, dict[str, _RuleSettings]] = {
         "reserved_name": {"terms": _validate_reserved_terms},
         "resource_docs": _TERMS,
         "lib_resource_docs": _TERMS,
+        "examples": {**_MARKERS, "headings": _validate_headings},
+        "script_docs": {**_MARKERS, "headings": _validate_headings},
+        "api_docs": _TERMS,
     },
 }
 _TOP_LEVEL_KEYS = frozenset({"expected_headers", *_RULE_SECTIONS})

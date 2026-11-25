@@ -25,6 +25,8 @@ def test_packaged_default_quality_config_is_available() -> None:
                 "## Требования",
                 "## 前提条件",
                 "## 先决条件",
+                "## 前提條件",
+                "## 先決條件",
             ],
             "points": 5,
             "message": "No prerequisites/requirements documented",
@@ -46,6 +48,8 @@ def test_packaged_default_quality_config_is_available() -> None:
                 "## Решение проблем",
                 "## 故障排除",
                 "## 疑难解答",
+                "## 疑難解答",
+                "## 疑難排解",
             ],
             "points": 5,
             "message": "No troubleshooting section documented",
@@ -282,12 +286,15 @@ PACKAGED_ERROR_HANDLING = {
             "ошибка",
             "ошибки",
             "ошибок",
+            "ошибке",
+            "ошибкой",
             "ошибочно",
             "исключение",
             "невалидный",
             "сбой",
             "сбои",
             "не удалось",
+            "не удался",
             "валидация",
             "валидирует",
             "не найден",
@@ -298,6 +305,12 @@ PACKAGED_ERROR_HANDLING = {
             "无效",
             "验证",
             "校验",
+            "錯誤",
+            "異常",
+            "失敗",
+            "無效",
+            "驗證",
+            "校驗",
         ],
     },
     "scripts": {
@@ -920,7 +933,7 @@ def test_packaged_word_lists_start_with_the_former_hard_coded_english_terms(sect
 def test_packaged_broad_description_and_purpose_heading_match_former_hard_coded_values() -> None:
     discoverability = load_quality_config()["discoverability"]
 
-    assert discoverability["broad_description"]["negatives"] == [
+    assert discoverability["broad_description"]["negatives"][:5] == [
         "not for",
         "do not use",
         "instead use",
@@ -939,9 +952,9 @@ def test_packaged_lists_also_cover_russian_and_chinese() -> None:
     trigger_terms = config["discoverability"]["trigger_words"]["terms"]
     error_terms = config["error_handling"]["mentioned"]["terms"]
     vague_terms = config["discoverability"]["vague_words"]["terms"]
-    assert {"используй", "когда", "для", "помогает", "使用", "用于", "当", "帮助"} <= set(trigger_terms)
+    assert {"используй", "когда", "для", "помогает", "使用", "用于", "当需要", "帮助"} <= set(trigger_terms)
     assert {"ошибка", "не удалось", "сбой", "错误", "异常", "失败", "验证"} <= set(error_terms)
-    assert {"что-то", "разное", "一些", "东西"} <= set(vague_terms)
+    assert {"что-то", "разное", "一些", "各种"} <= set(vague_terms)
     accepted = {heading for rule in config["expected_headers"] for heading in (rule["heading"], *rule["alternatives"])}
     assert {
         "## Требования",
@@ -973,8 +986,15 @@ def test_packaged_config_round_trips_through_the_loader_with_every_rule_key(tmp_
         "broad_description",
         "purpose_heading",
     }
-    assert set(packaged["efficiency"]) == {"token_budget", "action_verbs", "buzzwords"}
-    assert set(packaged["correctness"]) == {"reserved_name", "resource_docs", "lib_resource_docs"}
+    assert set(packaged["efficiency"]) == {"token_budget", "action_verbs", "buzzwords", "reference_names"}
+    assert set(packaged["correctness"]) == {
+        "reserved_name",
+        "resource_docs",
+        "lib_resource_docs",
+        "examples",
+        "script_docs",
+        "api_docs",
+    }
 
 
 def test_custom_file_replaces_one_word_list_and_keeps_every_other_packaged_value(tmp_path: Path) -> None:

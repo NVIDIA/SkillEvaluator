@@ -12,15 +12,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Fixed
 
-- `quality-check` no longer deducts points from well-formed skills written in
-  Russian or Chinese for lacking English wording. The trigger-word,
-  vague-word, person-phrase, broad-description, action-verb, buzzword,
-  resource-documentation and `## Purpose` lists moved from `quality_score.py`
-  into `quality-default.yaml`, where `--quality-config` can replace any of
-  them, and the packaged lists, the error-handling terms and the expected
-  headings now cover English, Russian and Chinese. A term in a script without
-  spaces between words, such as Chinese, matches anywhere in the text;
-  English terms still match whole words only.
+- `quality-check` recognizes English, Russian, and Chinese vocabulary for
+  triggers, instructions, examples, error handling, expected headings, and
+  documentation for scripts, APIs, and resources. Set `--quality-config` to replace the packaged lists.
+  Chinese terms match in running text. English and Russian terms retain word
+  boundaries.
 - NeMo Gym now scores native multi-step tasks once using the task's `mean` or
   `final` strategy. The live case grid and finished report use the same verdict.
   A failed or ungraded step leaves the attempt unscored. With `final`, the last

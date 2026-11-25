@@ -172,6 +172,10 @@ All notable changes to SkillEvaluator are documented in this file.
   repeated whole-dataset scans for truncated Harbor names and per-case totals
   while preserving ambiguous-name handling and stop-on-pass precedence.
 
+- Keep file, check, and severity totals when validation results are merged with
+  member prefixes. Collection file totals include passing and failing members,
+  without double-counting schema findings.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

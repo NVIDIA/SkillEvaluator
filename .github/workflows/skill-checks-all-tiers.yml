@@ -24,7 +24,7 @@ permissions:
   actions: read
 jobs:
   skills:
-    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@bf44a24704833083c556feb0b433ab0d647c3826
+    uses: NVIDIA/SkillEvaluator/.github/workflows/evaluate-all-tiers.yml@fd6852ddc945c49d003a0898edef4933184d8fb3
     with:
       tiers: 1,2,3
       paths: skills
@@ -34,11 +34,12 @@ jobs:
       provider: nv_build
       embedding-provider: nv_build
       model: nvidia/nemotron-3.5-lightning-30b-a3b
-      embedding-model: ''
+      embedding-model: nvidia/nemotron-3.5-embed-1b
       agents: codex,claude-code
       runner: ubuntu-24.04
       tools-repository: NVIDIA/SkillEvaluator
-      tools-ref: ba7779ad617c6444c98b6241a75bce92067e9d56
+      tools-ref: fd6852ddc945c49d003a0898edef4933184d8fb3
+      tier2-image: ghcr.io/nvidia/skillevaluator-tier2@sha256:f191ef1c14a961f01d6ebbac8e3d5ea0fda3b967e604fd14e66bb9f31458a632
       image: ghcr.io/nvidia/skillevaluator-tier1@sha256:e96e3aaad89bf78c4f3f8c621e88005d18bd7c485b29c0d7945864700e5944e6
       n-attempts: 1
       n-concurrent: 1

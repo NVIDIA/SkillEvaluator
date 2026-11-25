@@ -1045,7 +1045,7 @@ def _skill_identity_names(skill_path: Path) -> tuple[str, ...]:
 
 
 def _dataset_field_type_errors(entry: Mapping[str, Any]) -> list[str]:
-    """Report dataset fields whose type runtime scoring would silently misread.
+    """Report invalid authored field types before runtime normalization.
 
     ``expected_skill`` decides whether a case is positive, so a number, list or
     whitespace-only value would be scored as a case it was never meant to be.
@@ -1066,8 +1066,7 @@ def _dataset_field_type_errors(entry: Mapping[str, Any]) -> list[str]:
 
     for field_name in ("assertions", "expected_behavior"):
         value = entry.get(field_name)
-        # The loader copies ``assertions`` to ``expected_behavior``: report the authored name once.
-        if value is None or (field_name == "expected_behavior" and value == entry.get("assertions")):
+        if value is None:
             continue
         if not isinstance(value, list):
             errors.append(f"{field_name} must be a list of strings, got {type(value).__name__}.")
@@ -1083,8 +1082,13 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult], *, skill_
     from .dataset_utils import load_dataset_entries_with_format
     from .eval_core.declarative_checks import validate_declarative_checks
 
+    authored_type_errors: list[list[str]] = []
+
+    def inspect_authored_entry(entry: dict[str, Any]) -> None:
+        authored_type_errors.append(_dataset_field_type_errors(entry))
+
     try:
-        entries, dataset_format = load_dataset_entries_with_format(path)
+        entries, dataset_format = load_dataset_entries_with_format(path, inspect_authored_entry=inspect_authored_entry)
     except Exception as e:
         results.append(CheckResult(str(path), "error", f"Cannot parse dataset: {e}"))
         return
@@ -1152,7 +1156,7 @@ def _validate_dataset_contents(path: Path, results: list[CheckResult], *, skill_
                     f"Missing recommended fields: {', '.join(sorted(missing_recommended))}",
                 )
             )
-        for error in _dataset_field_type_errors(entry):
+        for error in authored_type_errors[i]:
             results.append(CheckResult(f"entry {entry_id}", "error", error))
         for warning in _baseline_fairness_warnings(entry, skill_scripts=skill_scripts, skill_names=skill_names):
             results.append(CheckResult(f"entry {entry_id}", "warning", warning))

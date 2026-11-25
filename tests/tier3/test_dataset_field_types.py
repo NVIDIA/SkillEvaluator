@@ -78,6 +78,7 @@ def test_validate_rejects_a_whitespace_only_expected_skill(tmp_path: Path, shape
         (5, "must be a list of strings, got int."),
         ([3], "must contain only strings; found int."),
         ([["x"], 3, {"k": _LEAKED}], "must contain only strings; found dict, int, list."),
+        (["", "n/a", 0, False, None, {}, []], "must contain only strings; found NoneType, bool, dict, int, list."),
     ],
 )
 def test_validate_rejects_behaviors_that_are_not_a_list_of_strings(
@@ -109,12 +110,12 @@ def test_validate_accepts_omitted_null_empty_and_well_formed_fields(
     assert _errors(_write_skill(tmp_path, shape, **fields)) == []
 
 
-def test_validate_reports_both_names_when_both_behavior_fields_are_authored_differently(tmp_path: Path) -> None:
-    skill = _write_skill(tmp_path, "agentskills", assertions=[1], expected_behavior=[2.5])
+def test_validate_reports_both_behavior_fields_as_authored(tmp_path: Path) -> None:
+    skill = _write_skill(tmp_path, "agentskills", assertions=[0], expected_behavior=[False])
 
     assert _errors(skill) == [
         "assertions must contain only strings; found int.",
-        "expected_behavior must contain only strings; found float.",
+        "expected_behavior must contain only strings; found bool.",
     ]
 
 

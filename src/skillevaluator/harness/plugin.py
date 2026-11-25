@@ -4,8 +4,8 @@
 
 A profile's ``plugin`` section has ``rules`` (format acceptance, same expression
 language as skill rules) and ``components`` (what the pinned harness version did
-with each component kind in canary probes). Like the skill overlay, this is
-advisory and never changes Tier 1 results.
+with each component kind in canary probes, or that no valid probe covered it). Like
+the skill overlay, this is advisory and never changes Tier 1 results.
 """
 
 from __future__ import annotations
@@ -15,7 +15,9 @@ import stat
 from pathlib import Path
 from typing import Any
 
+from skillevaluator.constants import PLUGIN_CONFIG_MAX_BYTES
 from skillevaluator.harness.overlay import _EFFECT_RANK, HarnessResult, _fill, _Rule, version_finding
+from skillevaluator.utils.structured_data import StructuredDataLimitError, StructuredDataSyntaxError, load_bounded_yaml
 
 MANIFESTS = {
     "claude": ".claude-plugin/plugin.json",
@@ -39,21 +41,28 @@ COMPONENTS = {
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
 DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
+# Only a negative result from a valid probe degrades the plugin; ``untested`` is a note for a kind no
+# valid probe covered on that harness. Where a result holds for one bundle format or one shape of
+# component only, a profile rule whose id ends in the kind (HM-PLUGIN-MCP) replaces the generic finding
+# and says what was tested.
 OUTCOME_EFFECT = {
     "delivered": None,
     "listed": None,
     "runs": None,
     "deferred": "advisory",
     "trust_gated": "advisory",
+    "untested": "advisory",
     "registered": "degraded",
     "not_observed": "degraded",
 }
 OUTCOME_TEXT = {
     "trust_gated": "{n} {kind}: run only after the user trusts the plugin's current content (or with a per-run trust bypass).",
     "deferred": "{n} {kind}: registered; tool schemas reach the model only when it searches for or asks to use them.",
+    "untested": "{n} {kind}: not tested on this harness.",
     "registered": "{n} {kind}: started or registered, but nothing reached the model when tested.",
-    "not_observed": "{n} {kind}: not registered or delivered when tested.",
+    "not_observed": "{n} {kind}: did not reach the model or run when tested.",
 }
+OUTCOME_FIX = {"untested": "Try them on this harness before you rely on them."}
 
 
 def _skill_sizes(root: Path) -> dict[Path, int]:
@@ -86,6 +95,22 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+def _hermes_manifest_status(path: Path) -> str:
+    """Check the native manifest without treating local parser limits as a loader rejection."""
+    try:
+        with path.open("rb") as handle:
+            raw = handle.read(PLUGIN_CONFIG_MAX_BYTES + 1)
+        if len(raw) > PLUGIN_CONFIG_MAX_BYTES:
+            return "unchecked"
+        data = load_bounded_yaml(raw.decode("utf-8-sig"))
+    except (OSError, StructuredDataLimitError):
+        return "unchecked"
+    except (UnicodeDecodeError, StructuredDataSyntaxError):
+        return "invalid"
+    # Hermes treats an empty document as a mapping with default fields.
+    return "valid" if isinstance(data or {}, dict) else "invalid"
+
+
 def is_plugin_root(path: Path) -> bool:
     return any((path / rel).is_file() for rel in MANIFESTS.values())
 
@@ -114,6 +139,9 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             )
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
     facts.setdefault("fmt_agent_v1", False)
+    facts["hermes_manifest_status"] = (
+        _hermes_manifest_status(root / MANIFESTS["hermes_native"]) if facts["fmt_hermes_native"] else "absent"
+    )
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
@@ -124,12 +152,32 @@ def plugin_facts(root: Path) -> dict[str, Any]:
 def evaluate_plugin(
     profile: dict[str, Any], facts: dict[str, Any], config: dict[str, Any] | None = None
 ) -> HarnessResult:
-    """Apply a profile's plugin rules; components the harness does not deliver become findings."""
+    """Apply a profile's plugin rules, then add a finding for each component kind the harness does not
+    deliver or was not tested with.
+
+    Raises ``ValueError`` for an unknown component outcome or a missing fact read during rule evaluation.
+    """
     section = profile.get("plugin") or {}
+    components = section.get("components")
+    if components is None:
+        components = {}
+    elif not isinstance(components, dict):
+        raise ValueError(f"{profile['harness']} profile: plugin components must be a mapping")
+    for outcome in components.values():
+        if not isinstance(outcome, str) or outcome not in OUTCOME_EFFECT:
+            raise ValueError(f"{profile['harness']} profile: unknown plugin component outcome {outcome!r}")
     findings: list[dict[str, str]] = []
     worst = -1
     for rule in section.get("rules", []):
-        if not _Rule.evaluate(str(rule["when"]), {**facts, "always": True}):
+        try:
+            fires = _Rule.evaluate(str(rule["when"]), {**facts, "always": True})
+        except KeyError as exc:
+            raise ValueError(
+                f"{profile['harness']} profile: rule {rule['id']} reads the fact {exc}, which this version does not provide"
+            ) from exc
+        except (AttributeError, TypeError) as exc:
+            raise ValueError(f"{profile['harness']} profile: cannot evaluate rule {rule['id']}: {exc}") from exc
+        if not fires:
             continue
         finding = {"id": rule["id"], "effect": rule["effect"], "message": _fill(rule["message"], facts)}
         for key in ("fix", "versions", "outcome", "confidence"):
@@ -138,23 +186,24 @@ def evaluate_plugin(
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     if worst < 2:
-        for kind, outcome in (section.get("components") or {}).items():
+        first = (profile.get("rules") or section.get("rules") or [{"id": profile["harness"]}])[0]
+        prefix = str(first["id"]).split("-")[0]
+        for kind, outcome in components.items():
             n = facts["components"].get(kind, 0)
             effect = OUTCOME_EFFECT[outcome]
             if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
-            findings.append(
-                {
-                    "id": f"{prefix}-PLUGIN-{kind.upper()}",
-                    "effect": effect,
-                    "outcome": outcome.replace("_", " "),
-                    "message": OUTCOME_TEXT[outcome].format(n=n, kind=kind),
-                }
-            )
+            finding = {
+                "id": f"{prefix}-PLUGIN-{kind.upper()}",
+                "effect": effect,
+                "outcome": outcome.replace("_", " "),
+                "message": OUTCOME_TEXT[outcome].format(n=n, kind=kind),
+            }
+            if outcome in OUTCOME_FIX:
+                finding["fix"] = OUTCOME_FIX[outcome]
+            findings.append(finding)
             worst = max(worst, _EFFECT_RANK[effect])
         if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {
                     "id": f"{prefix}-PLUGIN-NO-COMPONENTS",

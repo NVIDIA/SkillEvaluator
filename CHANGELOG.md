@@ -116,6 +116,10 @@ All notable changes to SkillEvaluator are documented in this file.
   repeated scans of every previously collected location when many skills share
   a finding. Finding identities, severity, ordering, and counts are preserved.
 
+- JUnit report generation remembers the next case-name suffix for repeated
+  checks, avoiding quadratic name searches in large collection reports while
+  preserving existing names and collisions with explicitly numbered checks.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

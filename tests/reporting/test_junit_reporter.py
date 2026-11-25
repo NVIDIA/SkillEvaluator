@@ -788,3 +788,24 @@ def test_finding_case_names_do_not_depend_on_finding_order() -> None:
     assert names(list(reversed(findings))) == first
     added = names([("quality_correctness", "SKILL.md", 5), *findings])
     assert first <= added
+
+
+def test_repeated_case_names_skip_names_that_already_have_numeric_suffixes() -> None:
+    result = ValidationResult(validator_name="SCHEMA")
+    for name in ("check", "check-2", "check", "check-3", "check", "check-2", "check", "check-2-2", "check-2"):
+        result.add_success(name, "passed")
+
+    root = ET.fromstring(JUnitReporter().render(result))
+
+    assert [case.attrib["name"] for case in _cases(root)] == [
+        "check",
+        "check-2",
+        "check-3",
+        "check-3-2",
+        "check-4",
+        "check-2-2",
+        "check-5",
+        "check-2-2-2",
+        "check-2-3",
+    ]
+    _assert_counts_match(root)

@@ -160,6 +160,12 @@ All notable changes to SkillEvaluator are documented in this file.
   members. More definitions can clear the 80-character minimum, increasing
   embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
 
+- LLM finding verification requires non-negative JSON integer identities and
+  withholds repeated identities, including malformed conflicting rows, so ambiguous
+  replies cannot select a finding or replace its verdict. An overflowing identity
+  such as `"index": 1e400` no longer raises `OverflowError` and discards the
+  entire verdict reply; independent valid verdicts are retained.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

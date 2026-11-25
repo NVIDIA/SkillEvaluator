@@ -17,6 +17,7 @@ import os
 import re
 import subprocess
 import sys
+from collections import Counter
 from pathlib import Path
 
 BASELINE = "config/size_baseline.json"
@@ -62,22 +63,37 @@ def _name(path: str) -> str:
     return "`" + json.dumps(path)[1:-1].replace("`", "\\u0060") + "`"
 
 
-def _test_functions(repo: Path, blob: str) -> set[tuple[str, ...]]:
+def _unittest_bases(tree: ast.Module) -> set[str]:
+    """Names for unittest.TestCase that are imported directly by this module."""
+    bases = set()
+    for statement in tree.body:
+        if isinstance(statement, ast.Import):
+            bases.update(f"{alias.asname or alias.name}.TestCase" for alias in statement.names if alias.name == "unittest")
+        elif isinstance(statement, ast.ImportFrom) and statement.level == 0 and statement.module == "unittest":
+            bases.update(alias.asname or alias.name for alias in statement.names if alias.name == "TestCase")
+    return bases
+
+
+def _test_functions(repo: Path, blob: str) -> dict[tuple[str, ...], ast.FunctionDef | ast.AsyncFunctionDef]:
     source = _git_bytes(repo, "cat-file", "blob", blob)
     try:
         tree = ast.parse(source)
     except SyntaxError:
         # A syntactically invalid module has no collectable test functions.
-        return set()
+        return {}
 
-    names: set[tuple[str, ...]] = set()
+    unittest_bases = _unittest_bases(tree)
+    names: dict[tuple[str, ...], ast.FunctionDef | ast.AsyncFunctionDef] = {}
 
     def visit(node: ast.AST, scope: tuple[str, ...]) -> None:
         if isinstance(node, ast.ClassDef):
+            # Match pytest's Test* naming rule for plain classes.
+            if not node.name.startswith("Test") and not any(ast.unparse(base) in unittest_bases for base in node.bases):
+                return
             scope = (*scope, node.name)
         if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             if node.name.startswith("test_"):
-                names.add((*scope, node.name))
+                names[(*scope, node.name)] = node
             return
         for child in ast.iter_child_nodes(node):
             visit(child, scope)
@@ -91,19 +107,25 @@ def _new_tests(repo: Path, span: str) -> tuple[list[str], int]:
     # into tests/ are additions. Compare names within each paired module.
     diff = _git(repo, "diff", "--raw", "--no-abbrev", "-z", "-M", span, "--", "tests/")
     records = iter(diff.split("\0")[:-1])
-    modules, functions = [], 0
+    modules = []
+    added: Counter[tuple[tuple[str, ...], str]] = Counter()
+    removed: Counter[tuple[tuple[str, ...], str]] = Counter()
     for header, before_path in zip(records, records, strict=True):
         before_mode, mode, before_blob, blob, status = header.split()
         path = next(records) if status.startswith("R") else before_path
-        if mode == "000000" or not _TEST_FILE.fullmatch(path):
-            continue
         before_module = before_mode != ":000000" and _TEST_FILE.fullmatch(before_path)
+        after_module = mode != "000000" and _TEST_FILE.fullmatch(path)
+        if not before_module and not after_module:
+            continue
         if not before_module:
             modules.append(_name(path))
-        if mode.startswith("100"):
-            previous = _test_functions(repo, before_blob) if before_module and before_mode.startswith(":100") else set()
-            functions += len(_test_functions(repo, blob) - previous)
-    return modules, functions
+        previous = _test_functions(repo, before_blob) if before_module and before_mode.startswith(":100") else {}
+        current = _test_functions(repo, blob) if after_module and mode.startswith("100") else {}
+        added.update((name, ast.dump(current[name])) for name in current.keys() - previous.keys())
+        removed.update((name, ast.dump(previous[name])) for name in previous.keys() - current.keys())
+    # A removal can offset one otherwise-new definition with the same qualified
+    # name and AST in another module. A copy leaves no removal to offset it.
+    return modules, (added - removed).total()
 
 
 def measure(repo: Path, base: str, head: str) -> dict:

@@ -61,6 +61,8 @@ docs-only. Not enforced yet; the `size-exception` label marks an agreed exceptio
 
 - A `fix:` adds at most 150 net lines under `src/` and 400 under `tests/`, no
   new file under `src/`, no new test module, and at most 3 new test functions.
+  The function count estimates pytest discovery from Python definitions and
+  matches unchanged definitions with the same qualified name across test modules.
 - For all changes, prefer extending an existing test module or
   `pytest.mark.parametrize` table when it covers the same behavior.
 - Big files only shrink: a file listed in `config/size_baseline.json` does not grow.

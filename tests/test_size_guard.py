@@ -147,3 +147,52 @@ def test_cross_scope_rename_preserves_baseline_growth_and_source_budget(repo: Pa
     assert found["grown"] == {"`src/relocated.py`": 1}
     assert found["src/"] == (31, 0)
     assert found["new_src_files"] == ["`src/relocated.py`"]
+
+
+@pytest.mark.parametrize(
+    ("operation", "expected"),
+    [("move", 0), ("copy", 4), ("move and edit", 4), ("move and copy", 4)],
+)
+def test_count_test_moves_between_existing_modules(repo: Path, operation: str, expected: int) -> None:
+    donor = "tests/test_big.py"
+    receiver = "tests/receiver_test.py"
+    second_receiver = "tests/test_other.py"
+    moved = "".join(TEST.replace("test_a", f"test_{name}") for name in ("one", "two", "three", "four"))
+    _commit(repo, {donor: TEST + moved, receiver: TEST, second_receiver: TEST})
+    _git(repo, "update-ref", "refs/remotes/origin/main", "HEAD")
+
+    incoming = moved.replace("pass", "assert True") if operation == "move and edit" else moved
+    changes = {receiver: TEST + incoming}
+    if operation != "copy":
+        changes[donor] = TEST
+    if operation == "move and copy":
+        changes[second_receiver] = TEST + moved
+    _commit(repo, changes)
+
+    found = size_guard.measure(repo, "origin/main", "HEAD")
+    assert found["new_test_files"] == []
+    assert found["new_test_functions"] == expected
+    assert bool(size_guard.judge(found, fix=True)["G2"]) == (expected > 3)
+
+
+def test_count_definitions_in_test_classes_and_unittest_cases(repo: Path) -> None:
+    _commit(
+        repo,
+        {
+            "tests/test_big.py": (
+                "from unittest import TestCase as Case\n\n"
+                "class Helper:\n"
+                "    def test_helper(self):\n        pass\n"
+                "    class TestNestedHelper:\n"
+                "        def test_nested(self):\n            pass\n"
+                "class TestChecks:\n"
+                "    def test_check(self):\n        pass\n"
+                "class LegacyCase(Case):\n"
+                "    def test_legacy(self):\n        pass\n"
+                + TEST
+            ),
+        },
+    )
+    found = size_guard.measure(repo, "origin/main", "HEAD")
+    assert found["test_defs"] == (4, 0)
+    assert found["new_test_functions"] == 2

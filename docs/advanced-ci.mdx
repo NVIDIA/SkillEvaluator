@@ -69,5 +69,10 @@ reported by [Release Tier 2 image](https://github.com/NVIDIA/SkillEvaluator/acti
 after the public image verification step succeeds. Leave the image input empty
 to install from the locked tools revision during the job.
 
+For NVIDIA Build embeddings, set `embedding-model` on GitHub or
+`SKILL_EVAL_EMBEDDING_MODEL` on GitLab to `nvidia/nemotron-3.5-embed-1b`. The
+hosted endpoint for `nvidia/nemotron-3-embed-1b` has been retired.
+[NVIDIA API reference](https://build.nvidia.com/nvidia/nemotron-3_5-embed-1b/apireference)
+
 The GitHub image uses its bundled system CA store and the runner's HTTP proxy
 settings. Use the native runtime if your provider needs a custom host CA bundle.

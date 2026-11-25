@@ -4,6 +4,11 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- Pin the supported NVIDIA Build embedding model in SkillEvaluator's Tier 2 CI
+  and document the setting for GitHub and GitLab callers.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added

@@ -166,6 +166,16 @@ All notable changes to SkillEvaluator are documented in this file.
   members. More definitions can clear the 80-character minimum, increasing
   embedding work and reaching the 1,024-chunk limit sooner in Python-heavy skills.
 
+- LLM finding verification requires non-negative JSON integer identities and
+  withholds repeated identities, including malformed conflicting rows, so ambiguous
+  replies cannot select a finding or replace its verdict. An overflowing identity
+  such as `"index": 1e400` no longer raises `OverflowError` and discards the
+  entire verdict reply; independent valid verdicts are retained.
+
+- Tier 3 token reports reuse per-agent case-name and attempt indexes, avoiding
+  repeated whole-dataset scans for truncated Harbor names and per-case totals
+  while preserving ambiguous-name handling and stop-on-pass precedence.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights
@@ -644,6 +654,11 @@ notes below describe the new policy and backend configuration behavior.
   and citation or footnote markers such as `[1]` or `[^1]` after the terminator
   still end it. `--file` on a directory or an unreadable path prints `Error:`
   on stderr and exits 1 instead of a traceback.
+- The bundled api-caller skill resolves OpenAPI 3 operation, path-item and
+  document `servers` URLs (including relative URLs against the final spec URL
+  after redirects), builds Swagger 2.0 base URLs from `schemes`, `host` and
+  `basePath`, substitutes server variable defaults, and reports missing path
+  parameters as an input error instead of requesting a placeholder path.
 - Restore a temporary-cleanup exemption for a narrow, NUL-delimited
   find-to-xargs pipeline under a literal temporary root: these pipelines now
   score Security `1.0` instead of a destructive-command finding. Unknown

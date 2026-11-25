@@ -519,6 +519,14 @@ def test_invalid_profile_outcome_is_reported_even_if_plugin_is_not_loaded(tmp_pa
         evaluate_plugin(profile, facts)
 
 
+def test_profile_component_map_must_be_a_mapping(tmp_path: Path):
+    facts = plugin_facts(_plugin(tmp_path / "p", ".codex-plugin/plugin.json", components=()))
+    profile = _profile_copy()
+    profile["plugin"]["components"] = ["delivered"]
+    with pytest.raises(ValueError, match="plugin components must be a mapping"):
+        evaluate_plugin(profile, facts)
+
+
 def test_plugin_only_profile_can_report_an_untested_component(tmp_path: Path):
     facts = plugin_facts(_plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=("mcp",)))
     profile = _profile_copy()

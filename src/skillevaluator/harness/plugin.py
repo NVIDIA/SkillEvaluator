@@ -137,7 +137,11 @@ def evaluate_plugin(
     Raises ``ValueError`` for an unknown component outcome or a missing fact read during rule evaluation.
     """
     section = profile.get("plugin") or {}
-    components = section.get("components") or {}
+    components = section.get("components")
+    if components is None:
+        components = {}
+    elif not isinstance(components, dict):
+        raise ValueError(f"{profile['harness']} profile: plugin components must be a mapping")
     for outcome in components.values():
         if not isinstance(outcome, str) or outcome not in OUTCOME_EFFECT:
             raise ValueError(f"{profile['harness']} profile: unknown plugin component outcome {outcome!r}")

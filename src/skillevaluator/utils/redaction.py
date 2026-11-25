@@ -178,7 +178,13 @@ _REDACTIONS = (
     # ``hf_hub_download`` or ``npm_config_registry`` and words such as ``pypi-simple``
     # intact, and the bodies are open-ended so a longer token is masked whole.
     (
-        re.compile(r"(?<![A-Za-z0-9_-])hf_(?:(?:oauth|jwt)_[A-Za-z0-9._~-]{16,}|[A-Za-z0-9]{34,})"),
+        re.compile(
+            r"(?<![A-Za-z0-9_-])hf_(?:"
+            # OAuth and JWT prefixes also appear in lowercase snake_case settings.
+            # Exempt only a complete identifier so longer token bodies are still masked.
+            r"(?:oauth|jwt)_(?![a-z]++(?:_[a-z]++)++(?![A-Za-z0-9._~-]))[A-Za-z0-9._~-]{16,}"
+            r"|[A-Za-z0-9]{34,})"
+        ),
         "huggingface-token-<redacted>",
     ),
     (re.compile(r"(?<![A-Za-z0-9_-])npm_[A-Za-z0-9]{36,}"), "npm-token-<redacted>"),

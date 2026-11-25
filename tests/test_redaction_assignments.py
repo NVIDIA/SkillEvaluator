@@ -202,6 +202,8 @@ _PYPI_TOKEN = "pypi-" + "Ij4_-" * 17
         pytest.param(_HF_TOKEN, "huggingface-token-<redacted>", id="hf"),
         pytest.param(_HF_OAUTH_TOKEN, "huggingface-token-<redacted>", id="hf-oauth"),
         pytest.param(_HF_JWT_TOKEN, "huggingface-token-<redacted>", id="hf-jwt"),
+        pytest.param("hf_oauth_" + "ab" * 12, "huggingface-token-<redacted>", id="hf-oauth-lowercase"),
+        pytest.param("hf_jwt_" + "ab_cd." * 4, "huggingface-token-<redacted>", id="hf-jwt-lowercase-segments"),
         pytest.param(_NPM_TOKEN, "npm-token-<redacted>", id="npm"),
         pytest.param(_PYPI_TOKEN, "pypi-token-<redacted>", id="pypi"),
         pytest.param(_HF_TOKEN + "Zz9" * 10, "huggingface-token-<redacted>", id="hf-longer-than-minimum"),
@@ -221,6 +223,8 @@ def test_bare_registry_tokens_are_masked(token: str, marker: str) -> None:
     "text",
     [
         pytest.param("hf_hub_download(repo_id='x')", id="hf-function-name"),
+        pytest.param("hf_oauth_expiration_minutes", id="hf-spaces-front-matter-key"),
+        pytest.param("hf_jwt_verification_disabled", id="hf-jwt-identifier"),
         pytest.param("npm_config_registry=https://registry.example/", id="npm-config-variable"),
         pytest.param("pip install pypi-simple", id="pypi-word"),
         pytest.param("hf_" + "a" * 33, id="hf-body-one-short"),

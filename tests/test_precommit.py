@@ -361,7 +361,156 @@ def test_skill_root_ignores_manifest_above_cwd(tmp_path: Path) -> None:
     assert run_precommit("schema", ["scripts/a.py"], cwd=repo) == (0, [])
 
 
-def test_precommit_cli_exit_codes(tmp_path: Path) -> None:
+@pytest.mark.parametrize("relative", [False, True], ids=["absolute", "parent-relative"])
+def test_skill_root_does_not_map_a_skill_outside_cwd(tmp_path: Path, relative: bool) -> None:
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    outside = _write_skill(tmp_path / "repo-other", "outside")
+    path = Path("../repo-other/outside/SKILL.md") if relative else outside / "SKILL.md"
+
+    assert skill_root_for(path, cwd=repo) is None
+    assert run_precommit("schema", [path], cwd=repo) == (0, [])
+
+
+@pytest.mark.parametrize("relative", ["skills/demo/SKILL.md", "skills/demo", "skills/demo/deleted/sub/file.py", "."])
+def test_case_only_checkout_alias_keeps_schema_checks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    alias = repo.with_name("caseprobe")
+    if not alias.exists() or not alias.samefile(repo):
+        pytest.skip("filesystem does not support case-only directory aliases")
+
+    broken = "---\nname: demo\n---\n\n# Missing description\n"
+    (repo / "SKILL.md").write_text(broken, encoding="utf-8")
+    skill = _write_skill(repo / "skills", "demo", body=broken)
+    expected = repo.resolve() if relative == "." else skill.resolve()
+    path = alias / relative
+    monkeypatch.chdir(repo)
+
+    assert skill_root_for(path, cwd=repo) == expected
+    assert collect_skill_roots([path, expected / "SKILL.md"], cwd=repo) == [expected]
+    result = CliRunner().invoke(cli, ["precommit-run", "schema", str(path)])
+    assert result.exit_code == 1, result.output
+    assert "FAIL" in result.output
+    assert "description" in result.output
+
+
+@pytest.mark.parametrize("relative", ["skills/demo/SKILL.md", "skills/demo/deleted/sub/file.py"])
+def test_checkout_alias_reanchors_existing_and_deleted_paths_on_case_sensitive_filesystems(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, relative: str
+) -> None:
+    repo = tmp_path / "repo"
+    skill = _write_skill(repo / "skills", "demo")
+    fixture = _write_skill(repo / "evals", "fixture")
+    alias = tmp_path / "alias"
+    try:
+        alias.symlink_to(repo, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+    original_resolve = Path.resolve
+
+    def preserve_alias(path: Path, strict: bool = False) -> Path:
+        if path.is_relative_to(alias):
+            return path.absolute()
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", preserve_alias)
+
+    assert skill_root_for(alias / relative, cwd=repo) == skill
+    assert skill_root_for(alias / fixture.relative_to(repo) / "SKILL.md", cwd=repo) is None
+
+
+def test_case_only_checkout_alias_keeps_exclusions_and_root_boundary(tmp_path: Path) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    alias = repo.with_name("caseprobe")
+    if not alias.exists() or not alias.samefile(repo):
+        pytest.skip("filesystem does not support case-only directory aliases")
+
+    (tmp_path / "SKILL.md").write_text(_VALID_SKILL_MD.format(name="outside", title="Outside"), encoding="utf-8")
+    fixture = _write_skill(repo / "evals", "fixture")
+    assert skill_root_for(alias / fixture.relative_to(repo) / "SKILL.md", cwd=repo) is None
+    assert skill_root_for(alias / "deleted.py", cwd=repo) is None
+
+
+def test_differently_cased_checkout_is_not_an_alias_on_case_sensitive_filesystems(tmp_path: Path) -> None:
+    repo = tmp_path / "CaseProbe"
+    repo.mkdir()
+    sibling = repo.with_name("caseprobe")
+    if sibling.exists():
+        pytest.skip("filesystem treats the two directory spellings as aliases")
+    outside = _write_skill(sibling, "outside")
+
+    assert skill_root_for(outside / "SKILL.md", cwd=repo) is None
+    assert run_precommit("schema", [outside / "SKILL.md"], cwd=repo) == (0, [])
+
+
+def test_changed_directory_link_maps_to_its_own_skill(tmp_path: Path) -> None:
+    repo = tmp_path / "repo"
+    inside = _write_skill(repo, "inside")
+    outside = _write_skill(tmp_path, "outside")
+    link = inside / "linked-skill"
+    try:
+        link.symlink_to(outside, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    assert collect_skill_roots([link], cwd=repo) == [inside.resolve()]
+
+
+@pytest.mark.parametrize("indirect", [False, True], ids=["self-loop", "two-link-loop"])
+def test_paths_below_symlink_loops_do_not_abort_collection(tmp_path: Path, indirect: bool) -> None:
+    repo = tmp_path / "repo"
+    kept = _write_skill(repo, "kept")
+    loop = repo / "loop"
+    try:
+        loop.symlink_to("other" if indirect else "loop", target_is_directory=True)
+        if indirect:
+            (repo / "other").symlink_to("loop", target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    assert skill_root_for(loop / "changed.py", cwd=repo) is None
+    assert collect_skill_roots([loop / "changed.py", kept / "SKILL.md"], cwd=repo) == [kept.resolve()]
+
+
+@pytest.mark.parametrize("root_manifest", [False, True])
+def test_external_alias_cannot_select_its_lexical_ancestor(tmp_path: Path, root_manifest: bool) -> None:
+    repo = _write_skill(tmp_path, "repo") if root_manifest else tmp_path / "repo"
+    target = repo / "docs"
+    target.mkdir(parents=True)
+    (target / "changed.py").write_text("print(0)\n", encoding="utf-8")
+    outside = _write_skill(tmp_path, "outside")
+    alias = outside / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    expected = repo.resolve() if root_manifest else None
+    assert skill_root_for(alias / "changed.py", cwd=repo) == expected
+
+
+@pytest.mark.parametrize("excluded", [False, True])
+def test_internal_alias_keeps_target_exclusion_rules(tmp_path: Path, excluded: bool) -> None:
+    repo = tmp_path / "repo"
+    target_parent = repo / "evals" if excluded else repo
+    target = _write_skill(target_parent, "target")
+    (target / "changed.py").write_text("print(0)\n", encoding="utf-8")
+    alias = repo / "alias"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable")
+
+    expected = [] if excluded else [target.resolve()]
+    assert collect_skill_roots([alias / "changed.py", target / "changed.py"], cwd=repo) == expected
+
+
+def test_precommit_cli_exit_codes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.chdir(tmp_path)
     skill = _write_skill(tmp_path, "cli-skill")
     runner = CliRunner()
 

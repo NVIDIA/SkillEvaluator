@@ -144,6 +144,10 @@ All notable changes to SkillEvaluator are documented in this file.
   copied skill examples named trajectory.json or judge_attempts.json do not
   consume or invalidate the attempt budget.
 
+- Pre-commit skill mapping stays inside its repository root. A changed directory
+  link checks the skill containing the link instead of the linked target, and
+  paths outside the checkout no longer select unrelated skills.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

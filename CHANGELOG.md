@@ -129,6 +129,14 @@ All notable changes to SkillEvaluator are documented in this file.
   filename/ref bytes so refs and skill paths link to the intended GitHub and
   GitLab locations. HTML labels remain readable while link targets stay encoded.
 
+- Invalid YAML scalar values and Unicode escapes retain their actual source
+  location in diagnostics. Frontmatter keeps the existing bounded-loader
+  complexity checks, and duplicate-key inspection handles scanner range errors.
+  Unconstructible scalars still fail manifest scoping closed, keep evals config
+  and dataset values out of error messages, and do not make valid block-scalar
+  tabs invalid. Dataset scalar errors retain their line and column without
+  revealing the value.
+
 ## 1.2.0 - 2026-11-23
 
 ### Highlights

@@ -69,6 +69,14 @@ def test_stable_workflows_pair_the_release_with_delegated_provenance(bundle):
     assert job["with"]["trusted-caller-blobs"] == "${{ inputs.trusted-caller-blobs }}"
     assert "trusted-evaluator-shas" not in job["with"]
 
+    comments = yaml.load(files["comment-skill-checks-stable.yml"], Loader=yaml.BaseLoader)
+    job = comments["jobs"]["comment"]
+    assert job["permissions"] == {"contents": "read", "actions": "read", "pull-requests": "write"}
+    assert job["uses"] == f"NVIDIA/SkillEvaluator/.github/workflows/comment-skill-checks.yml@{PUBLISHER_REF}"
+    assert job["with"]["tools-ref"] == PUBLISHER_REF
+    assert job["with"]["trusted-wrapper-workflows"] == job["with"]["delegated-evaluator-wrapper"] == STABLE_SCAN
+    assert set(comments["on"]["workflow_call"]["inputs"]) == {"run-id", "run-attempt", "trusted-caller-blobs"}
+
 
 @pytest.mark.parametrize(
     ("filename", "key", "value", "match"),
@@ -197,7 +205,7 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     workflows.mkdir(parents=True)
     (repo / "ci/gitlab").mkdir(parents=True)
     (repo / "ci/gitlab/skill-evaluation.yml").write_text("skill-evaluation: {}\n", encoding="utf-8")
-    for name in ("evaluate-skills.yml", "publish-skill-reports.yml"):
+    for name in ("evaluate-skills.yml", "publish-skill-reports.yml", "comment-skill-checks.yml"):
         (workflows / name).write_text("name: Released workflow\n", encoding="utf-8")
     (repo / "ci/Dockerfile.tier1").write_text("FROM scratch\n", encoding="utf-8")
     git("add", ".")
@@ -237,9 +245,14 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     gitlab_include = repo / "ci/gitlab/stable-tier1.yml"
     gitlab_template = repo / "ci/templates/stable/stable-tier1.yml"
 
-    def prepare_release(release_bundle, *, include_gitlab=True):
+    comments_workflow = workflows / "comment-skill-checks-stable.yml"
+    comments_template = repo / "ci/templates/stable" / comments_workflow.name
+
+    def prepare_release(release_bundle, *, include_gitlab=True, include_comments=True):
         if not gitlab_template.is_file():
             shutil.copyfile(ROOT / "ci/templates/stable/stable-tier1.yml", gitlab_template)
+        if not comments_template.is_file():
+            shutil.copyfile(ROOT / "ci/templates/stable" / comments_template.name, comments_template)
         subprocess.run(
             [sys.executable, "ci/stable_channel.py", str(release_bundle)],
             cwd=repo,
@@ -248,6 +261,9 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
         if not include_gitlab:
             gitlab_template.unlink()
             gitlab_include.unlink()
+        if not include_comments:
+            comments_template.unlink()
+            comments_workflow.unlink()
         git("add", ".")
         git("commit", "-m", f"Prepare stable workflows for {release_bundle.name}")
         return git("rev-parse", "HEAD")
@@ -371,7 +387,7 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
             capture_output=True,
         )
 
-    first = prepare_release(initial, include_gitlab=not existing_github_only)
+    first = prepare_release(initial, include_gitlab=not existing_github_only, include_comments=False)
     next_bundle = prepare_bundle("1.0.2", first)
     second = prepare_release(next_bundle)
     git("push", "origin", "main", "v1.0.1")
@@ -443,6 +459,7 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     assert "Verified SkillEvaluator 1.0.2 wheel and source distribution on PyPI and DevZone" in promoted.stdout
     assert published_ref() == second
     assert "# SkillEvaluator release: v1.0.2" in git("show", f"{second}:ci/gitlab/stable-tier1.yml")
+    assert "# SkillEvaluator release: v1.0.2" in git("show", f"{second}:.github/workflows/{comments_workflow.name}")
     assert "already serves v1.0.2" in promote("v1.0.2").stdout
     missing_package = promote("v1.0.2", mode="--verify-only", index_problem="missing-sdist")
     assert missing_package.returncode != 0 and published_ref() == second
@@ -473,4 +490,22 @@ def test_promotion_bootstraps_or_preserves_an_existing_release(tmp_path, bundle,
     dropped = promote("v1.0.4")
     assert dropped.returncode != 0
     assert "The next stable release must retain the GitLab stable include" in dropped.stderr
+    assert published_ref() == second
+
+    prepare_release(prepare_bundle("1.0.5", second))
+    git("rm", str(comments_template))
+    git("commit", "-m", "Incomplete stable comments configuration")
+    git("tag", "v1.0.5")
+    git("push", "origin", "main", "v1.0.5")
+    incomplete = promote("v1.0.5")
+    assert incomplete.returncode != 0
+    assert "The stable comments template and generated workflow are both required" in incomplete.stderr
+    assert published_ref() == second
+
+    prepare_release(prepare_bundle("1.0.6", second), include_comments=False)
+    git("tag", "v1.0.6")
+    git("push", "origin", "main", "v1.0.6")
+    dropped = promote("v1.0.6")
+    assert dropped.returncode != 0
+    assert "The next stable release must retain the comments-only workflow" in dropped.stderr
     assert published_ref() == second

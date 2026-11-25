@@ -6,6 +6,8 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ### Added
 
+- GitHub stable channel setups can opt into the standard skill check PR comment
+  without GitHub Pages or version pins in the caller workflow.
 - The local-mode run preflight and `doctor --env-mode local` check the
   installed Claude Code and Codex CLI against the selected models and stop
   before any trial when one is too old. Use `--agent-model AGENT=MODEL` to

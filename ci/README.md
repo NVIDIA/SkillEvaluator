@@ -159,19 +159,18 @@ hosted publisher. The comment shows counts, status, quality score and grade, and
 the first action for each affected skill. The workflow run links to downloadable
 reports. No Pages settings, site history branch or report URL are needed.
 
-The [1.2.1 bundle](bundles/1.2.1/README.md) includes the comments-only workflow;
-the archived 0.9.0 bundle does not. Default `skillevaluator ci init` feedback
-still configures hosted publication. Use the versioned comments-only file;
-do not add its filename to an older release pin.
-
 1. Keep `.github/workflows/skill-checks.yml` named **Skill checks**, with one
    reusable scan job and the default **skill-evaluator-tier1** artifact name.
    Enable `id-token: write` alongside `contents: read` for signed execution
-   receipts. Keep the reviewed evaluator workflow and image pins.
-2. Copy [`comment-skill-checks.yml`](bundles/1.2.1/comment-skill-checks.yml) into
-   `.github/workflows/`. Pin its `uses:` and `tools-ref` to the reviewed comment
-   workflow revision. Set `trusted-evaluator-shas` to the approved scanner
-   revision; this may differ from the comment tools revision.
+   receipts.
+2. Add a comment template as `.github/workflows/comment-skill-checks.yml`.
+   - For `skill-checks-stable.yml@stable`, use the
+     [stable comment template](templates/comment-skill-checks-stable.yml) once
+     the channel includes `comment-skill-checks-stable.yml`.
+   - For a versioned scan, use the
+     [1.2.1 comment template](bundles/1.2.1/comment-skill-checks.yml).
+     Set its `uses:` and `tools-ref` to the reviewed comment revision and
+     `trusted-evaluator-shas` to the approved scanner revision.
 3. After all scan-file edits, run
    `git hash-object .github/workflows/skill-checks.yml` and set
    `trusted-caller-blobs` to that exact value. Review and refresh the blob after

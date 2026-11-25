@@ -20,7 +20,7 @@ from skillevaluator.harness.overlay import (
     model_config,
     skill_facts,
 )
-from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts
+from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts, plugin_root_for
 
 __all__ = [
     "HARNESS_STATUSES",
@@ -35,5 +35,6 @@ __all__ = [
     "load_profiles",
     "model_config",
     "plugin_facts",
+    "plugin_root_for",
     "skill_facts",
 ]

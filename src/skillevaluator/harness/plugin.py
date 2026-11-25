@@ -29,8 +29,8 @@ MANIFESTS = {
 AGENT_PLUGINS_SCHEMA = "https://agent-plugins.org/schemas/"
 COMPONENTS = {
     "skills": lambda r: len(_skill_sizes(r)),
-    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if (r / "commands").is_dir() else 0,
-    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if (r / "agents").is_dir() else 0,
+    "commands": lambda r: len(list((r / "commands").rglob("*.md"))) if _is_dir(r / "commands") else 0,
+    "agents": lambda r: len(list((r / "agents").rglob("*.md"))) if _is_dir(r / "agents") else 0,
     "hooks": lambda r: _json_keys(r / "hooks" / "hooks.json", "hooks") or _json_keys(r / "hooks.json", "hooks"),
     "mcp": lambda r: _json_keys(r / ".mcp.json", "mcpServers") or _json_keys(r / "mcp.json", "mcpServers"),
     "lsp": lambda r: _json_keys(r / ".lsp.json"),
@@ -63,7 +63,7 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     regular file is ever opened: opening a named pipe with no writer would block forever.
     """
     sizes: dict[Path, int] = {}
-    for path in (root / "skills").rglob("SKILL.md") if (root / "skills").is_dir() else []:
+    for path in (root / "skills").rglob("SKILL.md") if _is_dir(root / "skills") else []:
         try:
             info = path.stat()
             if not stat.S_ISREG(info.st_mode):
@@ -75,8 +75,24 @@ def _skill_sizes(root: Path) -> dict[Path, int]:
     return sizes
 
 
+def _is_file(path: Path) -> bool:
+    """``path.is_file()``, with a path that cannot be examined (no permission, name too long) read as absent."""
+    try:
+        return path.is_file()
+    except OSError:
+        return False
+
+
+def _is_dir(path: Path) -> bool:
+    """``path.is_dir()``, with a path that cannot be examined read as absent."""
+    try:
+        return path.is_dir()
+    except OSError:
+        return False
+
+
 def _json_keys(path: Path, key: str | None = None) -> int:
-    if not path.is_file():
+    if not _is_file(path):
         return 0
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
@@ -86,8 +102,40 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+def _manifest_folder_owner(folder: Path) -> Path | None:
+    """The plugin folder that a manifest folder belongs to, going by its name alone.
+
+    That is the parent of ``.claude-plugin/``, ``.codex-plugin/``, ``.cursor-plugin/`` or ``.plugin/``,
+    and two levels up from ``.github/plugin/``. Any other folder gives ``None``.
+    """
+    for rel in MANIFESTS.values():
+        parts = Path(rel).parent.parts
+        if parts and folder.parts[-len(parts) :] == parts:
+            return folder.parents[len(parts) - 1]
+    return None
+
+
 def is_plugin_root(path: Path) -> bool:
-    return any((path / rel).is_file() for rel in MANIFESTS.values())
+    """Whether ``path`` holds a plugin manifest of its own.
+
+    The ``plugin.json`` inside a manifest folder is the manifest of the plugin above that folder,
+    so it does not make the manifest folder a plugin.
+    """
+    in_manifest_folder = _manifest_folder_owner(path) is not None
+    return any(_is_file(path / rel) for fmt, rel in MANIFESTS.items() if fmt != "root_json" or not in_manifest_folder)
+
+
+def plugin_root_for(target: Path) -> Path:
+    """The folder to check for ``target``: a file stands for its folder, a manifest folder for its plugin.
+
+    So ``<plugin>/.claude-plugin/plugin.json``, ``<plugin>/.github/plugin`` and the like give ``<plugin>``,
+    the same as naming the plugin folder. A manifest folder is told by its name in the path as given.
+    """
+    folder = target.parent if _is_file(target) else target
+    owner = _manifest_folder_owner(folder)
+    if owner is not None and is_plugin_root(owner) and not is_plugin_root(folder):
+        return owner
+    return folder
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:
@@ -95,8 +143,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     for fmt, rel in MANIFESTS.items():
         path = root / rel
-        facts[f"fmt_{fmt}"] = path.is_file()
-        if not path.is_file() or path.suffix != ".json":
+        facts[f"fmt_{fmt}"] = _is_file(path)
+        if not facts[f"fmt_{fmt}"] or path.suffix != ".json":
             continue
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
@@ -115,7 +163,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["fmt_copilot"] = facts["fmt_copilot"] or facts.pop("fmt_copilot_alt")
     facts.setdefault("fmt_agent_v1", False)
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
-    facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
+    facts["default_dirs"] = any(_is_dir(root / d) for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts

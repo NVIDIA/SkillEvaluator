@@ -441,7 +441,7 @@ skillevaluator lint-scripts ./my-skill
 
 ## harness-check
 
-Show whether each agent harness loads, degrades or drops a skill. This is the Tier 1 `harness` check on its own, and it is static and keyless: no agent or model runs. `TARGET_PATH` is a skill folder, a folder of skills, or a plugin folder, which also gets a plugin panel. See [Harness Check](/skills/skillevaluator/harness-check) for a walkthrough with example output, and [Tier 1: Validation](/skills/skillevaluator/tier1-validation) for every rule.
+Show whether each agent harness loads, degrades or drops a skill. This is the Tier 1 `harness` check on its own, and it is static and keyless: no agent or model runs. `TARGET_PATH` is a skill folder, a folder of skills, or a plugin folder, which also gets a plugin panel. A plugin's manifest file or manifest folder (for example `.claude-plugin/plugin.json` or `.github/plugin/`) is checked as the plugin folder it belongs to. See [Harness Check](/skills/skillevaluator/harness-check) for a walkthrough with example output, and [Tier 1: Validation](/skills/skillevaluator/tier1-validation) for every rule.
 
 ```bash title="Check one skill against two harnesses"
 skillevaluator harness-check ./my-skill --harness codex,claude-code

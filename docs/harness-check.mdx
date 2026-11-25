@@ -72,7 +72,8 @@ Read it from the top:
   A harness with nothing to report gets no line.
 - **The bottom corner** is the tally, here 4 of 6 not loaded.
 - **The line under the panel** appears when the same problem also fails a Tier 1
-  schema check, and points you to `validate --tiers 1`.
+  schema check, and points you to `validate --tiers 1`. It is about a skill: on a
+  plugin folder you get it for the plugin's skills, not for the plugin panel.
 
 Each harness gets one of three verdicts:
 
@@ -195,8 +196,9 @@ These are the findings you are most likely to meet:
 <Tabs>
   <Tab title="On its own">
     Use `harness-check` when this is the only answer you want. It takes a skill
-    folder, a folder of skills, or a plugin folder. Its findings never change the
-    exit code.
+    folder, a folder of skills, or a plugin folder. A plugin's manifest file or
+    manifest folder, such as `.claude-plugin/plugin.json`, is checked as the
+    plugin folder it belongs to. Its findings never change the exit code.
 
     ```bash
     skillevaluator harness-check ./my-skill

@@ -3420,7 +3420,8 @@ def harness_check(
 ) -> None:
     """Show whether each agent harness loads, degrades or drops a skill (advisory; exits 0)."""
     from skillevaluator.harness.overlay import profile_names
-    from skillevaluator.harness.report import run_harness_check
+    from skillevaluator.harness.plugin import plugin_root_for
+    from skillevaluator.harness.report import plugin_key, run_harness_check
     from skillevaluator.reporting.console_ui import make_view_console
 
     try:
@@ -3447,7 +3448,10 @@ def harness_check(
         raise click.ClickException(f"No skills found in {target_path}")
     from skillevaluator.validators.schema import SchemaValidator
 
+    plugin_entry = plugin_key(plugin_root_for(target_path))  # the plugin's own rows: a label, not a skill folder
     for skill in block:
+        if skill == plugin_entry:
+            continue
         schema = SchemaValidator().validate(Path(skill))
         if not schema.passed and schema.errors:
             click.echo(

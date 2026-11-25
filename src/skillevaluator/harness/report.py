@@ -18,7 +18,7 @@ from rich.table import Table
 from rich.text import Text
 
 from skillevaluator.harness.overlay import evaluate_profile, facts_for, load_profiles
-from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts
+from skillevaluator.harness.plugin import evaluate_plugin, is_plugin_root, plugin_facts, plugin_root_for
 from skillevaluator.reporting.console_ui import AMBER, BRIGHT, FAINT, GREEN, MUTED, RED, SPIN, TEXT, WIDTH
 from skillevaluator.validators.harness import HARNESS_METADATA_KEY, HarnessValidator
 
@@ -241,6 +241,11 @@ def write_json_block(json_report: Path, block: Block) -> None:
         json_report.write_text(json.dumps(data, indent=2), encoding="utf-8")
 
 
+def plugin_key(root: Path) -> str:
+    """Block key of a plugin's own rows. It is a label, not a path: no folder has this name under the plugin."""
+    return f"{root} (plugin)"
+
+
 def run_harness_check(
     target: Path,
     harness: str,
@@ -251,7 +256,8 @@ def run_harness_check(
     config: dict[str, Any] | None = None,
 ) -> Block:
     """Evaluate each skill harness by harness, updating a live panel as each finishes."""
-    target = target.parent if target.is_file() else target
+    # A plugin's manifest file or manifest folder is checked as the plugin folder it belongs to.
+    target = plugin_root_for(target)
     profiles = load_profiles(harness, profiles_dir)
     finder = HarnessValidator()
     skills = [target] if finder._is_skill_directory(target) else finder._find_all_skills(target)
@@ -269,7 +275,7 @@ def run_harness_check(
             )
         )
         console.print()
-        block[f"{target} (plugin)"] = rows
+        block[plugin_key(target)] = rows
     all_facts = facts_for(skills, profiles)
     for skill in skills:
         rows: list[dict[str, Any]] = [{"harness": p["harness"], "status": "pending"} for p in profiles]

@@ -4,6 +4,14 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `harness-check` checks a plugin's manifest file or manifest folder (for
+  example `.claude-plugin/plugin.json`) as the plugin folder it belongs to. In
+  `--json` output the plugin entry for such a target is now keyed by the plugin
+  folder. A plugin run no longer prints a false "Tier 1 schema also fails ...
+  No skills found" line for the plugin entry.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added

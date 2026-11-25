@@ -4,6 +4,13 @@ All notable changes to SkillEvaluator are documented in this file.
 
 ## Unreleased
 
+### Fixed
+
+- `harness-check` shows the plugin "adds nothing" note
+  (`…-PLUGIN-NO-COMPONENTS`) only for a folder that holds nothing but a
+  descriptive manifest. A `.mcp.json` without the `mcpServers` wrapper counts
+  for Claude Code; other harnesses get the new note `…-PLUGIN-MCP-FLAT`.
+
 ## 1.2.1 - 2026-11-24
 
 ### Added

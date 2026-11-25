@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Tests for plugin facts and per-harness plugin rules."""
 
+import copy
 import json
 import os
 import threading
@@ -41,6 +42,12 @@ def _status(root: Path) -> dict[str, tuple[str, list[str]]]:
         result = evaluate_plugin(profile, facts)
         out[result.harness] = (result.status, [f["id"] for f in result.findings])
     return out
+
+
+@pytest.fixture(autouse=True)
+def _empty_home(tmp_path_factory: pytest.TempPathFactory, monkeypatch: pytest.MonkeyPatch) -> None:
+    home = tmp_path_factory.mktemp("home")
+    monkeypatch.setattr(Path, "home", lambda: home)
 
 
 def test_every_profile_has_plugin_section():
@@ -257,3 +264,295 @@ def test_plugin_json_nested_past_the_parser_recursion_limit_is_an_invalid_manife
     (tmp_path / ".claude-plugin" / "plugin.json").write_text("[" * 200_000 + "]" * 200_000, encoding="utf-8")
 
     assert plugin_facts(tmp_path)["manifest_invalid"] is True
+
+
+def _manifest(root: Path, rel: str, text: str) -> Path:
+    (root / rel).parent.mkdir(parents=True, exist_ok=True)
+    (root / rel).write_text(text, encoding="utf-8")
+    return root
+
+
+def _component_rows(root: Path) -> dict[str, list[dict]]:
+    facts = plugin_facts(root)
+    return {p["harness"]: evaluate_plugin(p, facts).findings for p in load_profiles()}
+
+
+def _bare_manifest(root: Path, manifest: str = ".claude-plugin/plugin.json", data: dict | None = None) -> Path:
+    return _plugin(root, manifest, data or {"name": "demo", "version": "0.1.0"}, components=())
+
+
+def test_flat_mcp_json_is_counted_for_claude_code(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    (root / ".mcp.json").write_text(json.dumps({"github": {"type": "http", "url": "https://example.com/mcp"}}))
+    facts = plugin_facts(root)
+    assert facts["mcp_flat"] == 1
+    assert facts["components"]["mcp"] == 0  # the wrapped-shape count, the shape every harness was tested with
+    claude = {f["id"]: f for f in _component_rows(root)["claude-code"]}
+    assert claude["CC-PLUGIN-MCP"]["message"].startswith("1 ")
+    assert "CC-PLUGIN-MCP-FLAT" not in claude and "CC-PLUGIN-NO-COMPONENTS" not in claude
+
+
+def test_flat_mcp_json_is_reported_untested_elsewhere_and_drives_no_other_rule(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    agent = _bare_manifest(tmp_path / "a", "plugin.json", {"$schema": AGENT_V1, "name": "demo", "version": "1"})
+    for bundle in (root, agent):
+        (bundle / ".mcp.json").write_text(json.dumps({"db": {"command": "node", "args": ["server.js"]}}))
+    rows = {**_component_rows(root), "hermes": _component_rows(agent)["hermes"]}
+    for harness, prefix in (("codex", "CX"), ("copilot-cli", "CP"), ("openclaw", "OW"), ("hermes", "HM")):
+        found = {f["id"]: f for f in rows[harness]}
+        note = found[f"{prefix}-PLUGIN-MCP-FLAT"]
+        assert note["effect"] == "advisory" and "not tested" in note["message"], harness
+        # The fix names the wrapped shape as tested only where it was: on Hermes the wrapped servers did not start.
+        assert note["fix"].endswith("the shape this harness was tested with.") is (harness != "hermes"), harness
+        # The servers are not counted as delivered, registered or named for a harness that was never tested with them.
+        assert not {f"{prefix}-PLUGIN-MCP", "CP-PLUGIN-MCP-NAMES"} & set(found), harness
+    assert not any(f["id"].endswith("NO-COMPONENTS") for findings in rows.values() for f in findings)
+
+
+def test_flat_mcp_count_skips_entries_that_are_not_servers(tmp_path: Path):
+    flat = _bare_manifest(tmp_path / "flat")
+    (flat / ".mcp.json").write_text(
+        json.dumps({"$schema": "https://example.com/s.json", "servers": {"a": {}}, "db": {"command": "node"}})
+    )
+    wrapped = _plugin(tmp_path / "wrapped", ".claude-plugin/plugin.json", components=("mcp",))
+    assert plugin_facts(flat)["mcp_flat"] == 1
+    assert plugin_facts(wrapped)["mcp_flat"] == 0 and plugin_facts(wrapped)["components"]["mcp"] == 2
+    assert "CP-PLUGIN-MCP-NAMES" in _status(wrapped)["copilot-cli"][1]
+    assert not any(i.endswith("MCP-FLAT") for _, ids in _status(wrapped).values() for i in ids)
+
+
+def _codex_app(root: Path) -> None:
+    _bare_manifest(root, ".codex-plugin/plugin.json", {"name": "demo", "apps": "./.app.json"})
+    (root / ".app.json").write_text(json.dumps({"apps": {"demo": {"id": "connector_1"}}}))
+
+
+def _app_file_only(root: Path) -> None:
+    _bare_manifest(root, ".codex-plugin/plugin.json")
+    (root / ".app.json").write_text(json.dumps({"apps": {"demo": {"id": "connector_1"}}}))
+
+
+def _hook_modules(root: Path) -> None:
+    _bare_manifest(root)
+    (root / "hooks").mkdir()
+    (root / "hooks/hooks.json").write_text(json.dumps({"modules": ["./register.tsx"]}))
+
+
+def _output_style(root: Path) -> None:
+    _bare_manifest(root)
+    (root / "output-styles").mkdir()
+    (root / "output-styles/terse.md").write_text("---\nname: terse\ndescription: Short answers\n---\nBe brief.\n")
+
+
+def _settings(root: Path) -> None:
+    _bare_manifest(root)
+    (root / "settings.json").write_text(json.dumps({"agent": "reviewer"}))
+
+
+def _root_skill(root: Path) -> None:
+    _bare_manifest(root)
+    (root / "SKILL.md").write_text("---\nname: demo\ndescription: Use when testing.\n---\nBody\n")
+
+
+def _extensions_key(root: Path) -> None:
+    data = {"$schema": AGENT_V1, "name": "demo", "version": "1", "extensions": {"com.example": {"agents": "./x"}}}
+    _bare_manifest(root, "plugin.json", data)
+
+
+def _dependencies_key(root: Path) -> None:
+    _bare_manifest(root, data={"name": "demo", "dependencies": ["other-plugin"]})
+
+
+def _hermes_native(root: Path) -> None:
+    root.mkdir(parents=True)
+    (root / "plugin.yaml").write_text("name: demo\nversion: 0.1.0\nprovides_hooks:\n  - pre_llm_call\n")
+    (root / "__init__.py").write_text("def register(ctx):\n    pass\n")
+
+
+def _marketplace_entry(root: Path) -> None:
+    _bare_manifest(root)
+    (root / ".claude-plugin/marketplace.json").write_text(json.dumps({"name": "m", "plugins": []}))
+
+
+def _linked_skill_folder(root: Path) -> None:
+    _bare_manifest(root)
+    shared = root.parent / "shared" / "demo"
+    shared.mkdir(parents=True)
+    (shared / "SKILL.md").write_text("---\nname: demo\ndescription: Use when testing.\n---\nBody\n")
+    (root / "skills").mkdir()
+    (root / "skills/demo").symlink_to(shared, target_is_directory=True)
+
+
+def _second_manifest_unreadable(root: Path) -> None:
+    _bare_manifest(root, ".codex-plugin/plugin.json")
+    (root / ".claude-plugin").mkdir()
+    (root / ".claude-plugin/plugin.json").write_text("{not json")
+
+
+@pytest.mark.parametrize(
+    "build",
+    [
+        _codex_app,
+        _app_file_only,
+        _hook_modules,
+        _output_style,
+        _settings,
+        _root_skill,
+        _extensions_key,
+        _dependencies_key,
+        _hermes_native,
+        _marketplace_entry,
+        _linked_skill_folder,
+        _second_manifest_unreadable,
+    ],
+)
+def test_adds_nothing_note_stays_silent_when_the_plugin_ships_something_this_check_does_not_model(
+    tmp_path: Path, build
+):
+    root = tmp_path / "p"
+    build(root)
+    rows = _component_rows(root)
+    assert any(not any(f["effect"] == "not_loaded" for f in findings) for findings in rows.values())
+    assert not any(f["id"].endswith("NO-COMPONENTS") for findings in rows.values() for f in findings)
+
+
+def test_adds_nothing_note_fires_for_a_manifest_with_only_documentation_beside_it(tmp_path: Path):
+    root = _bare_manifest(
+        tmp_path / "p", data={"name": "demo", "version": "0.1.0", "description": "d", "author": {"name": "a"}}
+    )
+    for name in ("README.md", "LICENSE", "Licence.txt", "NOTICE", "CHANGELOG.rst", ".gitignore"):
+        (root / name).write_text("text\n")
+    (root / "skills").mkdir()
+    (root / ".git").mkdir()
+    (root / ".git/HEAD").write_text("ref: refs/heads/main\n")
+    loading = {h: f for h, f in _component_rows(root).items() if not any(x["effect"] == "not_loaded" for x in f)}
+    assert {"claude-code", "copilot-cli", "openclaw"} <= set(loading)
+    for harness, findings in loading.items():
+        note = next(f for f in findings if f["id"].endswith("-PLUGIN-NO-COMPONENTS"))
+        assert note["effect"] == "advisory", harness
+        assert "on its own the plugin adds nothing" in note["message"]
+        # The row's status says whether the harness installs the bundle; the note only speaks about content.
+        assert "installs" not in note["message"]
+        # The fix says what this check leaves unread; it does not say what a harness does with a marketplace entry.
+        assert "not read by this check" in note["fix"]
+
+
+@pytest.mark.parametrize(
+    "name", ["readme_loader.py", "notice.sh", "license-check.js", "changelog.json", "license-check"]
+)
+def test_only_plain_documentation_names_are_set_aside(tmp_path: Path, name: str):
+    root = _bare_manifest(tmp_path / "p")
+    (root / name).write_text("text\n")
+    assert plugin_facts(root)["other_files"] is True
+    assert not any(f["id"].endswith("NO-COMPONENTS") for findings in _component_rows(root).values() for f in findings)
+
+
+@pytest.mark.skipif(not hasattr(os, "mkfifo"), reason="needs named pipes")
+@pytest.mark.parametrize("linked", [False, True])
+def test_named_pipe_mcp_json_is_skipped_without_blocking(tmp_path: Path, linked: bool):
+    root = _bare_manifest(tmp_path / "p")
+    fifo = tmp_path / "pipe" if linked else root / ".mcp.json"
+    os.mkfifo(fifo)
+    if linked:
+        (root / ".mcp.json").symlink_to(fifo)
+    out: dict = {}
+    worker = threading.Thread(target=lambda: out.update(plugin_facts(root)), daemon=True)
+    worker.start()
+    worker.join(5)
+    if worker.is_alive():  # still blocked in open(); unblock it so the thread can end
+        os.close(os.open(fifo, os.O_WRONLY | os.O_NONBLOCK))
+        worker.join(5)
+        pytest.fail("plugin_facts blocked on a named-pipe .mcp.json")
+    assert out["mcp_flat"] == 0 and out["components"]["mcp"] == 0
+    assert out["other_files"] is True  # something is there, so the folder is not called empty
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "geteuid") or os.geteuid() == 0, reason="needs permission bits that bind the current user"
+)
+@pytest.mark.parametrize("mode", [0o444, 0o000], ids=["listable_not_searchable", "not_listable"])
+def test_adds_nothing_note_stays_silent_about_a_subfolder_it_cannot_read(tmp_path: Path, mode: int):
+    root = _bare_manifest(tmp_path / "p")
+    (root / "data").mkdir()
+    (root / "data/hook.sh").write_text("echo hi\n")
+    (root / "data").chmod(mode)
+    try:
+        rows = _component_rows(root)
+    finally:
+        (root / "data").chmod(0o755)
+    assert not any(f["effect"] == "not_loaded" for f in rows["claude-code"])
+    assert not any(f["id"].endswith("NO-COMPONENTS") for findings in rows.values() for f in findings)
+
+
+@pytest.mark.skipif(
+    not hasattr(os, "pathconf") or not {os.open, os.unlink} <= os.supports_dir_fd,
+    reason="needs a path length limit and directory descriptors",
+)
+def test_adds_nothing_note_stays_silent_about_a_file_whose_path_is_too_long_to_examine(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    deep = root / "data"
+    while len(str(deep)) < os.pathconf(root, "PC_PATH_MAX") - 150:
+        deep = deep / ("d" * 40)
+    deep.mkdir(parents=True)
+    name = "x" * 200 + ".bin"  # the folder's own path fits, the file's does not
+    folder = os.open(deep, os.O_RDONLY)
+    try:
+        os.close(os.open(name, os.O_WRONLY | os.O_CREAT, 0o644, dir_fd=folder))
+        rows = _component_rows(root)
+    finally:
+        os.unlink(name, dir_fd=folder)
+        os.close(folder)
+    assert not any(f["effect"] == "not_loaded" for f in rows["claude-code"])
+    assert not any(f["id"].endswith("NO-COMPONENTS") for findings in rows.values() for f in findings)
+
+
+@pytest.mark.parametrize(
+    "content",
+    [b"[]", b"5", b'{"db": {"command": "node"}', b"\xff\xfe{}", b"[" * 200_000 + b"]" * 200_000],
+    ids=["array", "number", "truncated", "not-utf-8", "nested-too-deep"],
+)
+def test_flat_mcp_count_survives_a_file_it_cannot_use(tmp_path: Path, content: bytes):
+    root = _bare_manifest(tmp_path / "p")
+    (root / ".mcp.json").write_bytes(content)
+    assert plugin_facts(root)["mcp_flat"] == 0
+
+
+@pytest.mark.skipif(os.name == "nt" or (hasattr(os, "geteuid") and os.geteuid() == 0), reason="needs file permissions")
+def test_flat_mcp_count_survives_a_file_it_cannot_open(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    (root / ".mcp.json").write_text(json.dumps({"db": {"command": "node"}}))
+    (root / ".mcp.json").chmod(0)
+    try:
+        assert plugin_facts(root)["mcp_flat"] == 0
+    finally:
+        (root / ".mcp.json").chmod(0o644)
+
+
+def test_plugin_yaml_alone_adds_nothing(tmp_path: Path):
+    bare = _manifest(tmp_path / "bare", "plugin.yaml", "name: demo\n")
+    (bare / "README.md").write_text("text\n")
+    assert _status(bare)["hermes"] == ("loads", ["HM-PLUGIN-NO-COMPONENTS"])
+    native = tmp_path / "native"
+    _hermes_native(native)
+    assert _status(native)["hermes"] == ("loads", [])
+
+
+def test_finder_file_inside_the_manifest_folder_does_not_hide_an_empty_plugin(tmp_path: Path):
+    root = _bare_manifest(tmp_path / "p")
+    (root / ".claude-plugin/.DS_Store").write_bytes(b"\x00")
+    assert _status(root)["claude-code"] == ("loads", ["CC-PLUGIN-NO-COMPONENTS"])
+
+
+def _profile_copy(harness: str = "claude-code") -> dict:
+    return copy.deepcopy(next(p for p in load_profiles() if p["harness"] == harness))
+
+
+def test_profile_without_skill_rules_still_names_its_plugin_findings(tmp_path: Path):
+    profile = _profile_copy("codex")
+    profile["rules"] = []
+    flat = _bare_manifest(tmp_path / "flat")
+    (flat / ".mcp.json").write_text(json.dumps({"db": {"command": "node"}}))
+    ids = [f["id"] for f in evaluate_plugin(profile, plugin_facts(flat)).findings]
+    assert "CX-PLUGIN-MCP-FLAT" in ids
+    del profile["rules"], profile["plugin"]["rules"]
+    ids = [f["id"] for f in evaluate_plugin(profile, plugin_facts(_bare_manifest(tmp_path / "bare"))).findings]
+    assert ids == ["codex-PLUGIN-NO-COMPONENTS"]

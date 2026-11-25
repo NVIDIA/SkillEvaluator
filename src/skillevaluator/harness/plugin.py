@@ -4,13 +4,16 @@
 
 A profile's ``plugin`` section has ``rules`` (format acceptance, same expression
 language as skill rules) and ``components`` (what the pinned harness version did
-with each component kind in canary probes). Like the skill overlay, this is
-advisory and never changes Tier 1 results.
+with each component kind in canary probes). It may
+also set ``mcp_flat`` when the harness reads a ``.mcp.json`` that names its servers without
+the ``mcpServers`` wrapper. Like the skill overlay, this is advisory and never changes Tier 1 results.
 """
 
 from __future__ import annotations
 
+import errno
 import json
+import os
 import stat
 from pathlib import Path
 from typing import Any
@@ -37,7 +40,24 @@ COMPONENTS = {
 }
 # Folders a harness can pick up without any manifest (Claude Code inline plugins).
 DEFAULT_DIRS = ("skills", "commands", "agents", "hooks")
-DECLARED_COMPONENT_KEYS = ("skills", "commands", "agents", "hooks", "mcpServers", "lspServers")
+# Manifest keys that only describe the plugin. Any other key may declare or configure something a harness loads.
+METADATA_KEYS = (
+    "$schema",
+    "name",
+    "displayName",
+    "version",
+    "description",
+    "keywords",
+    "license",
+    "author",
+    "homepage",
+    "repository",
+)
+# Top-level documentation and housekeeping entries, which add nothing to a plugin. A documentation file
+# has exactly one of these names and no extension or a plain-text one; any other name may be code.
+DOC_NAMES = ("readme", "license", "licence", "notice", "changelog")
+DOC_SUFFIXES = ("", ".md", ".txt", ".rst")
+HOUSEKEEPING = (".git", ".gitignore", ".gitattributes", ".DS_Store")
 # What a component outcome means for the plugin's status. Outcomes come from canary probes.
 OUTCOME_EFFECT = {
     "delivered": None,
@@ -86,12 +106,74 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
+def _flat_mcp_servers(root: Path) -> int:
+    """Servers a ``.mcp.json`` names at its top level, without the ``mcpServers`` wrapper.
+
+    Only entries that look like a server (an object with a ``command`` or a ``url``) count, so a
+    ``$schema`` line or another wrapper key is not mistaken for one.
+    """
+    path = root / ".mcp.json"
+    try:
+        if not path.is_file():  # only a regular file is ever opened: a named pipe with no writer would block
+            return 0
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, UnicodeDecodeError, RecursionError):
+        return 0
+    if not isinstance(data, dict) or "mcpServers" in data:
+        return 0
+    return sum(isinstance(entry, dict) and ("command" in entry or "url" in entry) for entry in data.values())
+
+
+def _is_doc(name: str) -> bool:
+    lowered = Path(name.lower())
+    return lowered.stem in DOC_NAMES and lowered.suffix in DOC_SUFFIXES
+
+
+def _present(path: Path, link: bool = False) -> bool:
+    """Whether something is there (with ``link``: whether it is a link).
+
+    A dangling or looping link is not there. An entry that cannot be examined counts as there, so a
+    folder is never called empty because of something this check could not look at.
+    """
+    try:
+        info = path.lstat() if link else path.stat()
+    except OSError as exc:
+        return exc.errno not in (errno.ENOENT, errno.ENOTDIR, errno.ELOOP)
+    return stat.S_ISLNK(info.st_mode) if link else True
+
+
+def _has_other_files(root: Path) -> bool:
+    """Whether the folder holds anything besides its manifests, plain documentation and housekeeping files.
+
+    Any other file may be a component this check does not model, or one in a place or a shape it does
+    not read, so only a folder without any can be called empty. Broken links do not count. No file is
+    opened, and a subfolder that cannot be listed counts as holding something.
+    """
+    manifests = {root / rel for rel in MANIFESTS.values()}
+    unlisted: list[OSError] = []
+    for folder, dirnames, filenames in os.walk(root, onerror=unlisted.append):
+        here = Path(folder)
+        filenames = [name for name in filenames if name not in HOUSEKEEPING]
+        if here == root:
+            dirnames[:] = [name for name in dirnames if name not in HOUSEKEEPING]
+            filenames = [name for name in filenames if not _is_doc(name)]
+        linked_folders = [name for name in dirnames if _present(here / name, link=True)]
+        if any((here / name) not in manifests and _present(here / name) for name in filenames + linked_folders):
+            return True
+    return bool(unlisted)
+
+
 def is_plugin_root(path: Path) -> bool:
     return any((path / rel).is_file() for rel in MANIFESTS.values())
 
 
 def plugin_facts(root: Path) -> dict[str, Any]:
-    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts."""
+    """Facts about a plugin folder: manifest formats, manifest validity, name and component counts.
+
+    ``declares_components`` says a manifest has a key beyond the descriptive ones, or is not an object.
+    ``mcp_flat`` counts servers a ``.mcp.json`` names without the ``mcpServers`` wrapper, and
+    ``other_files`` says the folder holds something besides manifests and documentation.
+    """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
     for fmt, rel in MANIFESTS.items():
         path = root / rel
@@ -106,7 +188,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
             continue
         if isinstance(data, dict) and isinstance(data.get("name"), str) and data["name"]:
             facts["plugin_name"] = data["name"]
-        if isinstance(data, dict) and any(data.get(key) for key in DECLARED_COMPONENT_KEYS):
+        if not isinstance(data, dict) or set(data) - set(METADATA_KEYS):
             facts["declares_components"] = True
         if fmt == "root_json":
             facts["fmt_agent_v1"] = isinstance(data, dict) and str(data.get("$schema", "")).startswith(
@@ -117,6 +199,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
+    facts["mcp_flat"] = _flat_mcp_servers(root)
+    facts["other_files"] = _has_other_files(root)
     facts["max_skill_bytes"] = max(_skill_sizes(root).values(), default=0)
     return facts
 
@@ -138,12 +222,15 @@ def evaluate_plugin(
         findings.append(finding)
         worst = max(worst, _EFFECT_RANK[rule["effect"]])
     if worst < 2:
+        first = (profile.get("rules") or section.get("rules") or [{"id": profile["harness"]}])[0]
+        prefix = str(first["id"]).split("-")[0]
         for kind, outcome in (section.get("components") or {}).items():
             n = facts["components"].get(kind, 0)
+            if kind == "mcp" and section.get("mcp_flat"):  # this harness also reads the unwrapped .mcp.json shape
+                n += facts.get("mcp_flat", 0)
             effect = OUTCOME_EFFECT[outcome]
             if not n or effect is None or any(f["id"].endswith(f"-{kind.upper()}") for f in findings):
                 continue
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
             findings.append(
                 {
                     "id": f"{prefix}-PLUGIN-{kind.upper()}",
@@ -153,15 +240,36 @@ def evaluate_plugin(
                 }
             )
             worst = max(worst, _EFFECT_RANK[effect])
-        if facts.get("any_manifest") and not facts["declares_components"] and not any(facts["components"].values()):
-            prefix = str(profile["rules"][0]["id"]).split("-")[0]
+        if facts.get("mcp_flat") and not section.get("mcp_flat"):
+            tested = (section.get("components") or {}).get("mcp") in ("delivered", "deferred")
+            findings.append(
+                {
+                    "id": f"{prefix}-PLUGIN-MCP-FLAT",
+                    "effect": "advisory",
+                    "message": ".mcp.json names its servers at the top level, without the mcpServers wrapper. "
+                    "Claude Code documents that shape; it was not tested on this harness.",
+                    "fix": "Use the mcpServers wrapper"
+                    + (", the shape this harness was tested with." if tested else "."),
+                }
+            )
+            worst = max(worst, _EFFECT_RANK["advisory"])
+        # Only a folder that holds nothing but a descriptive manifest is called empty: anything else may be
+        # a component this check does not model. Components supplied from outside the folder are not read.
+        if (
+            facts.get("any_manifest")
+            and not facts.get("manifest_invalid")
+            and not facts["declares_components"]
+            and not facts.get("other_files")
+            and not any(facts["components"].values())
+        ):
             findings.append(
                 {
                     "id": f"{prefix}-PLUGIN-NO-COMPONENTS",
                     "effect": "advisory",
-                    "message": "No skills, commands, agents, hooks, MCP or LSP servers in the default places, "
-                    "so the plugin installs but adds nothing.",
-                    "fix": "Add components in the default folders, or check that the manifest points to them.",
+                    "message": "The folder holds nothing but the manifest (README, license and changelog files "
+                    "aside), and the manifest only describes the plugin: on its own the plugin adds nothing.",
+                    "fix": "Add components, for example a skill at skills/<name>/SKILL.md. Components supplied "
+                    "from outside the folder, such as by a marketplace entry, are not read by this check.",
                 }
             )
             worst = max(worst, _EFFECT_RANK["advisory"])

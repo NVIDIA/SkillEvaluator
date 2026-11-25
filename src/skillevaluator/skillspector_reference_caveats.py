@@ -48,6 +48,41 @@ _WORK_FIELDS = ("planned_work", "completed", "partial", "skipped", "failed", "un
 _STATUS_FIELDS = frozenset({"analyzer_id", "status", "reason_code", "message", *_WORK_FIELDS})
 
 
+def reference_completeness_fields_supported(
+    completeness: Mapping, scanner_version: tuple[int, int, int] | None
+) -> bool:
+    """Recognize the reference contract, including disabled dependency inspection.
+
+    SkillSpector 2.13.5 added this block even when dependency inspection was
+    not requested. It adds no missing work in that state. Enabled, malformed,
+    or unfamiliar dependency evidence remains outside the reference exception.
+    """
+    fields = set(completeness)
+    if fields == REFERENCE_COMPLETENESS_FIELDS:
+        return True
+    if (
+        scanner_version is None
+        or not (2, 13, 5) <= scanner_version < (3, 0, 0)
+        or fields != REFERENCE_COMPLETENESS_FIELDS | {"dependency_inspection"}
+    ):
+        return False
+    inspection = completeness.get("dependency_inspection")
+    return (
+        isinstance(inspection, dict)
+        and inspection
+        == {
+            "enabled": False,
+            "status": "not_requested",
+            "mode": "static_local",
+            "locked_entries": 0,
+            "inspected_artifacts": 0,
+            "artifacts": [],
+        }
+        and inspection["enabled"] is False
+        and all(type(inspection[key]) is int for key in ("locked_entries", "inspected_artifacts"))
+    )
+
+
 def reference_caveat_metadata(
     data: Mapping,
     *,
@@ -66,7 +101,7 @@ def reference_caveat_metadata(
     completeness = data.get("analysis_completeness")
     if (
         not isinstance(completeness, dict)
-        or set(completeness) != REFERENCE_COMPLETENESS_FIELDS
+        or not reference_completeness_fields_supported(completeness, scanner_version)
         or data.get("execution_successful") is not True
         or completeness.get("execution_successful") is not True
         or completeness.get("status") != "partial"

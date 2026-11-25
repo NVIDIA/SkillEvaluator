@@ -98,10 +98,20 @@ def _detect_from_nested_structure(path: Path) -> str | None:
 def detect_content_type(path: Path) -> str:
     """Auto-detect whether path contains a skill, rules, workflows, or plugin.
 
-    Detection order: file type -> directory manifests -> path patterns -> nested structure.
-    A plugin manifest (agent_plugin.yaml/.yml) at the root wins over a nested
-    skills tree.
+    A supported plugin manifest takes precedence over skills in its directory.
     """
+    from skillevaluator.plugin_manifest import PluginManifestPathError, locate_plugin_manifest, manifest_root_for
+
+    try:
+        manifest = locate_plugin_manifest(path, require_agent_plugins_opt_in=True)
+    except PluginManifestPathError as exc:
+        # Send an unsafe declaration to the same checks as a readable one.
+        if manifest_root_for(path) is not None or exc.relative_path != ".":
+            return CONTENT_TYPE_PLUGIN
+    else:
+        if manifest is not None or (path.is_symlink() and manifest_root_for(path) is not None):
+            return CONTENT_TYPE_PLUGIN
+
     if path.is_file() and (detected := _detect_from_file(path)):
         return detected
     if path.is_dir() and (detected := _detect_from_directory(path)):
@@ -140,9 +150,8 @@ def resolve_workflows_path(workflows_path: Path) -> Path:
 
 def resolve_plugin_path(path: Path) -> Path:
     """Convert a plugin manifest file path to its plugin root directory."""
-    if path.is_file():
-        if path.name in PLUGIN_MANIFEST_FILES:
-            return path.parent
-        if _is_contained_plugin_manifest(path):
-            return path.parent.parent
+    from skillevaluator.plugin_manifest import manifest_root_for
+
+    if (path.is_symlink() or not path.is_dir()) and (root := manifest_root_for(path)) is not None:
+        return root
     return path

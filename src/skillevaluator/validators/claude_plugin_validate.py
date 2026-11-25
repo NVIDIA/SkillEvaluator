@@ -398,10 +398,14 @@ class ClaudePluginValidateParity:
         self,
         root: Path,
         *,
+        manifest_path: Path | None = None,
         skillevaluator_verdict: str | None = None,
         skillevaluator_fields: Mapping[str, Any] | None = None,
     ) -> ValidationResult:
         """Run Claude Code's validator once and compare it with SkillEvaluator.
+
+        *manifest_path* selects a declaration for applicability. Claude Code
+        runs on the containing plugin directory, *root*.
 
         ``skillevaluator_fields`` comes from :func:`skillevaluator_manifest_fields`:
         the manifest fields with a blocking SkillEvaluator finding (``blocking``),
@@ -415,7 +419,7 @@ class ClaudePluginValidateParity:
             "skillevaluator_verdict": skillevaluator_verdict or "unknown",
         }
         result.metadata["plugin"] = {"validator_parity": parity}
-        applicability = claude_plugin_applicability(Path(root))
+        applicability = claude_plugin_applicability(Path(manifest_path or root))
         if applicability is not None and applicability[0] == "error":
             parity.update(status="error", reason=applicability[1])
             result.add_warning(f"claude plugin validate did not run: {applicability[1]}")
@@ -647,13 +651,17 @@ class ClaudePluginValidateParity:
 
 
 def skillevaluator_manifest_verdict(results: list[ValidationResult], schema_validator_name: str) -> str | None:
-    """SkillEvaluator's own verdict from the plugin schema result: ``passed``, ``failed``, or ``None``."""
+    """Get SkillEvaluator's verdict from blocking findings applicable to Claude Code."""
     for result in results:
         if result.validator_name != schema_validator_name:
             continue
         if isinstance(result.metadata, dict) and result.metadata.get("security_failure"):
             return "failed"
-        blocking = any(finding.severity.is_error() for finding in result.findings)
+        blocking = any(
+            finding.severity.is_error()
+            and finding.metadata.get("manifest_type") in (None, PLUGIN_CONTAINED_MANIFEST_TYPE)
+            for finding in result.findings
+        )
         return "failed" if blocking else "passed"
     return None
 

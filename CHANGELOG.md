@@ -40,6 +40,7 @@ All notable changes to SkillEvaluator are documented in this file.
 - `harness-check` reports a Claude Code plugin as `not_loaded`
   (`CC-PLUGIN-MCP-MANIFEST`) when Claude Code rejects its `mcpServers`
   manifest declaration. Empty lists and maps preserve default MCP discovery.
+  The default count uses usable endpoints from `.mcp.json` in either layout.
 
 ### Documentation
 

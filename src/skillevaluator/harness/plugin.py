@@ -110,22 +110,22 @@ def _json_keys(path: Path, key: str | None = None) -> int:
     return len(section) if isinstance(section, (dict, list)) else 1
 
 
-def _flat_mcp_servers(root: Path) -> int | None:
-    """Servers a ``.mcp.json`` names at its top level, without the ``mcpServers`` wrapper.
-
-    Only server objects with a non-empty ``command`` or ``url`` string count. A missing,
-    unreadable or wrapped file has no flat count.
-    """
+def _default_mcp_counts(root: Path) -> tuple[int, int]:
+    """Count usable endpoints in the flat layout and in either layout of Claude's default file."""
     path = root / ".mcp.json"
     try:
         if not path.is_file():  # only a regular file is ever opened: a named pipe with no writer would block
-            return None
+            return 0, 0
         data = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, ValueError, UnicodeDecodeError, RecursionError):
-        return None
-    if not isinstance(data, dict) or "mcpServers" in data:
-        return None
-    return len(flat_mcp_endpoints(data))
+        return 0, 0
+    if not isinstance(data, dict):
+        return 0, 0
+    if "mcpServers" in data:
+        servers = data["mcpServers"]
+        return 0, sum(has_mcp_endpoint(config) for config in servers.values()) if isinstance(servers, dict) else 0
+    count = len(flat_mcp_endpoints(data))
+    return count, count
 
 
 def _is_doc(name: str) -> bool:
@@ -176,7 +176,7 @@ def plugin_facts(root: Path) -> dict[str, Any]:
 
     ``declares_components`` says a manifest has a key beyond the descriptive ones, or is not an object.
     ``mcp_flat`` counts servers a ``.mcp.json`` names without the ``mcpServers`` wrapper, and
-    ``mcp_claude`` counts merged servers when the manifest declares MCP or the default file is flat.
+    ``mcp_claude`` counts usable default servers and any effective declarations from the Claude manifest.
     ``other_files`` says the folder holds something besides manifests and documentation.
     """
     facts: dict[str, Any] = {"plugin_name": root.name, "manifest_invalid": False, "declares_components": False}
@@ -207,11 +207,8 @@ def plugin_facts(root: Path) -> dict[str, Any]:
     facts["any_manifest"] = any(v for k, v in facts.items() if k.startswith("fmt_"))
     facts["default_dirs"] = any((root / d).is_dir() for d in DEFAULT_DIRS)
     facts["components"] = {kind: count(root) for kind, count in COMPONENTS.items()}
-    flat_count = _flat_mcp_servers(root)
-    facts["mcp_flat"] = flat_count or 0
+    facts["mcp_flat"], facts["mcp_claude"] = _default_mcp_counts(root)
     facts["mcp_claude_manifest_invalid"] = False
-    if flat_count is not None:
-        facts["mcp_claude"] = flat_count
     # Empty collections contribute no servers and leave default discovery unchanged.
     if claude_manifest and claude_manifest.get("mcpServers", {}) not in ({}, []):
         # Claude Code merges declared configurations with its default .mcp.json by server name.
@@ -262,7 +259,7 @@ def evaluate_plugin(
             n = facts["components"].get(kind, 0)
             if kind == "mcp" and section.get("mcp_flat"):
                 n = facts.get("mcp_flat") or n
-                # An unwrapped .mcp.json with zero usable servers still takes precedence in Claude Code.
+                # Keep an explicit zero when Claude's own sources have no usable servers.
                 if profile["harness"] == "claude-code":
                     n = facts.get("mcp_claude", n)
             effect = OUTCOME_EFFECT[outcome]

@@ -382,6 +382,28 @@ def test_claude_empty_mcp_declaration_keeps_bundled_default(tmp_path: Path, decl
     assert finding["message"].startswith("1 mcp:")
 
 
+@pytest.mark.parametrize("manifest_mcp", [{}, {"mcpServers": []}, {"mcpServers": {}}], ids=["absent", "list", "map"])
+@pytest.mark.parametrize(
+    ("default_servers", "expected"),
+    [(None, 0), ({"blank": {"command": ""}}, 0), ({"blank": {"command": ""}, "usable": {"command": "demo"}}, 1)],
+    ids=["no-default", "blank-only", "mixed"],
+)
+def test_claude_reports_usable_servers_from_its_default_file_only(
+    tmp_path: Path, manifest_mcp, default_servers, expected
+):
+    root = _bare_manifest(tmp_path / "p", data={"name": "demo", **manifest_mcp})
+    (root / "mcp.json").write_text(json.dumps({"mcpServers": {"other": {"command": "demo"}}}))
+    if default_servers is not None:
+        (root / ".mcp.json").write_text(json.dumps({"mcpServers": default_servers}))
+
+    rows = _component_rows(root)
+    findings = [f for f in rows["claude-code"] if f["id"] == "CC-PLUGIN-MCP"]
+    assert len(findings) == (1 if expected else 0)
+    if findings:
+        assert findings[0]["message"].startswith(f"{expected} mcp:")
+    assert "CP-PLUGIN-MCP-NAMES" in {f["id"] for f in rows["copilot-cli"]}
+
+
 @pytest.mark.parametrize("filename", [".mcp.json", "servers.json"])
 def test_claude_mcp_manifest_can_explicitly_name_a_flat_config_file(tmp_path: Path, filename: str):
     manifest = {

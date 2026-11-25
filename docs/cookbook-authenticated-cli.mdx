@@ -160,7 +160,7 @@ dataset coverage. It does not prove that the login works; the first trial does.
 ## Run with the skill only
 
 ```bash
-skillevaluator tier3 evaluate ./svc-cli -a claude-code,codex --skip-baseline \
+skillevaluator tier3 evaluate ./svc-cli --skip-baseline \
   --harbor-keep-jobs --progress plain
 ```
 
@@ -173,8 +173,9 @@ skillevaluator tier3 evaluate ./svc-cli -a claude-code,codex --skip-baseline \
   [`harbor-view`](/skills/skillevaluator/reports#harbor-view).
 - `--progress plain` prints append-only lines, which suit a log file or CI.
 
-This recipe uses the default Docker backend, so Docker must be running. Agent
-and provider credentials are set as in
+The CLI selects the default agent for your configured provider, such as Codex
+for OpenAI or OpenCode for NVIDIA Build. Start Docker and set up provider
+credentials as described in
 [Run a live evaluation](/skills/skillevaluator/tier3-live-evaluation).
 
 ## When a run fails

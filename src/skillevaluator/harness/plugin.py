@@ -131,8 +131,10 @@ def plugin_root_for(target: Path, *, resolve_path: bool = False) -> Path:
 
     So ``<plugin>/.claude-plugin/plugin.json``, ``<plugin>/.github/plugin`` and the like give ``<plugin>``,
     the same as naming the plugin folder. A manifest folder is told by its name in the path as given.
-    CLI callers can resolve the result to an absolute path after identifying the manifest's owner.
+    CLI callers can resolve the result after identifying the owner from the absolute lexical path.
     """
+    if resolve_path:
+        target = target.absolute()
     is_file = _is_file(target)
     folder = target.parent if is_file else target
     location = _manifest_folder_location(folder)

@@ -449,3 +449,16 @@ def test_folder_that_cannot_be_examined_does_not_stop_the_check(tmp_path: Path, 
     finally:
         (root / ".github").chmod(0o755)
     assert result.exit_code == 0 and "Plugin compatibility" in result.output, result.output
+
+
+def test_relative_manifest_from_its_folder_uses_the_plugin_row(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    root = _plugin(tmp_path / "p", ".claude-plugin/plugin.json", components=())
+    direct_report = tmp_path / "direct.json"
+    relative_report = tmp_path / "relative.json"
+    direct = CliRunner().invoke(cli, ["harness-check", str(root), "--json", str(direct_report)])
+    assert direct.exit_code == 0, direct.output
+    monkeypatch.chdir(root / ".claude-plugin")
+    relative = CliRunner().invoke(cli, ["harness-check", "plugin.json", "--json", str(relative_report)])
+    assert relative.exit_code == 0, relative.output
+    assert "Tier 1 schema also fails" not in relative.output
+    assert relative_report.read_bytes() == direct_report.read_bytes()
